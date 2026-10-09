@@ -3904,6 +3904,38 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(screen.queryByText('Saved for this stop')).toBeNull();
   });
 
+  test('embedded: no dialog, no portal; the part renders in place and still prepares', async () => {
+    const onPrepared = vi.fn();
+    const { container } = render(<div id="host"><FastCompleteLawnSheet service={SERVICE} request={makeRequest()} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={onPrepared} /></div>);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(container.querySelector('#host .tech-visit-embedded-part')).not.toBeNull();
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+  });
+
+  test('embedded: a write in flight (Analyze) reports busy through the part guard; the reads do not', async () => {
+    const { PartBusyContext } = await import('./FastCompleteParts');
+    const reports = [];
+    let release;
+    const request = makeRequest();
+    const slow = vi.fn(async (path, options) => {
+      if (path.endsWith('/lawn-assessment/assess')) await new Promise((resolve) => { release = resolve; });
+      return request(path, options);
+    });
+    render(<PartBusyContext.Provider value={(source, busy) => reports.push([source, busy])}><FastCompleteLawnSheet service={SERVICE} request={slow} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={vi.fn()} /></PartBusyContext.Provider>);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    expect(reports.some(([source, busy]) => source === 'writes' && busy)).toBe(false);
+    await addPhoto();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await waitFor(() => expect(reports.some(([source, busy]) => source === 'writes' && busy)).toBe(true));
+    release();
+    await screen.findByLabelText('Density score');
+    await waitFor(() => expect(reports.filter(([source]) => source === 'writes').at(-1)[1]).toBe(false));
+  });
+
   test('a refused hand-over shows its message and leaves the sheet editable', async () => {
     const onPrepared = vi.fn(async () => { throw new Error('Could not save this on the device'); });
     await openSheet({ props: { operatorId: 'op-1', onPrepared } });

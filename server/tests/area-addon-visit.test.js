@@ -372,6 +372,16 @@ describe('adopting an existing appointment never squeezes the add-on visit into 
     expect([refreshed.discount_id, refreshed.discount_name, refreshed.discount_type, refreshed.discount_amount, refreshed.discount_dollars]).toEqual([null, null, null, null, null]);
   });
 
+  // Codex round 30: the booked visit IS an add-on, and the estimate was revised to add a host service.
+  test('an add-on appointment is not adopted when the estimate now sells a host service: a new time is needed', async () => {
+    const { estimate } = oneTimeEstimate(THREE.slice(0, 1), { withPest: true });
+    const profile = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const trx = fakeTrx({ catalog: catalogFor(KEYS) });
+    await expect(rows.writeAdoptedAreaAddOns(trx, { scheduledServiceId: 'visit-1', estimate, ownServiceKey: KEYS[0], adoptedRow: { estimated_duration_minutes: profile.durationMinutes + 60 } }))
+      .rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_VISIT_NEEDS_NEW_SLOT', message: 'The existing appointment no longer matches what this estimate sells. Book a new time for this estimate.' });
+    expect(trx.state.addons).toEqual([]);
+  });
+
   // Codex round 23: the estimate was revised to REMOVE an add-on the booked visit carries.
   test('a carried add-on row the estimate no longer sells is removed; a row of another service is kept', async () => {
     const { estimate } = oneTimeEstimate(THREE.slice(0, 2));

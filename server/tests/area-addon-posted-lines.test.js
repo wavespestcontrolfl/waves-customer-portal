@@ -210,6 +210,17 @@ describe('Update Details: what the edit adds', () => {
       await expect(edit(carried, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }] })).resolves.toEqual({ keys: [WEB], added: [] });
       await expect(edit(carried, { updates: {}, rowLines: [] })).resolves.toEqual({ keys: [], added: [] });
     });
+    // Codex round 30: the visit's OWN service.
+    test('the visit\'s own service moved to an add-on must carry the estimate\'s price; a kept own add-on keeps its stored price', async () => {
+      const only = estimateSelling([{ key: 'web_sweep' }]);
+      await expect(edit({ visit: visit(), estimate: only }, { updates: { service_key_snapshot: WEB, primary_line_price: only.prices[WEB] }, rowKeys: null })).resolves.toEqual({ keys: [WEB], added: [WEB] });
+      await expect(edit({ visit: visit(), estimate: only }, { updates: { service_key_snapshot: WEB, primary_line_price: 5 }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_CHANGED' });
+      await expect(edit({ visit: visit(), estimate: only }, { updates: { service_key_snapshot: WEB }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_CHANGED' });
+      const own = visit({ service_key_snapshot: WEB, primary_line_price: only.prices[WEB] });
+      await expect(edit({ visit: own, estimate: only }, { updates: { primary_line_price: 1 }, rowLines: [] })).rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_LOCKED' });
+      await expect(edit({ visit: own, estimate: only }, { updates: { primary_line_price: String(only.prices[WEB]) }, rowLines: [] })).resolves.toEqual({ keys: [WEB], added: [] });
+    });
+
     test('the same add-on twice after the edit is refused', async () => {
       await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: both.prices, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: WEB, price: both.prices[WEB] }] }))
         .rejects.toMatchObject({ code: 'AREA_ADDON_DUPLICATE' });

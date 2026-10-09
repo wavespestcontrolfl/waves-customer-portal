@@ -312,6 +312,14 @@ async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownSe
   const needed = Number(profile.durationMinutes) || 0;
   const booked = bookedVisitMinutes(adoptedRow);
   if (!(booked >= needed)) throw needsNewSlotError(needed, booked);
+  // The appointment IS an add-on, and the estimate now sells a host service that a fresh booking would make the visit's own
+  // service (primaryProfileService): adopting would leave the visit in the add-on lane with the host treatment on no row.
+  // Adoption never changes a visit's own service, so a new time must be booked.
+  const primary = primaryProfileService(profile);
+  if (isAreaAddOnCatalogKey(ownServiceKey) && primary && primary.catalogServiceKey !== ownServiceKey) {
+    throw Object.assign(new Error('The existing appointment no longer matches what this estimate sells. Book a new time for this estimate.'),
+      { status: 409, statusCode: 409, code: 'AREA_ADDON_VISIT_NEEDS_NEW_SLOT', isOperational: true });
+  }
   const written = await writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, refreshExisting: true });
   // The accept stamped the accepted one-time total on the visit. A primary-line price left from the original booking would
   // be billed beside the add-on rows instead of that total: clear it, so the primary line is the total less the rows (the
@@ -467,12 +475,20 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
     : null;
   const addedSet = new Set(added);
   // What the edit ADDS is sold by the estimate, at the estimate's price; the same add-on never rides the visit twice.
-  const addedLines = [...(addedSet.has(ownKey) ? [{ key: ownKey }] : []), ...rowsAfter.filter((line) => addedSet.has(line.key))];
+  // The visit's OWN service moved to an add-on is judged at the primary gross price the save writes (`primary_line_price`);
+  // with none written the stale price of the old service would stay, so that is refused too (price null).
+  const ownPrice = updates.primary_line_price !== undefined ? updates.primary_line_price : null;
+  const addedLines = [...(addedSet.has(ownKey) ? [{ key: ownKey, price: ownPrice }] : []), ...rowsAfter.filter((line) => addedSet.has(line.key))];
   const repeatedKept = finalKeys.find((key, index) => finalKeys.indexOf(key) !== index);
   if (repeatedKept) assertPostedAreaAddOnsSold(estimate, finalKeys.filter((key) => key === repeatedKept).map((key) => ({ key })), { wholeVisit: false });
   if (addedLines.length) assertPostedAreaAddOnsSold(estimate, addedLines, { wholeVisit: false });
   // A row the visit already carries keeps its price: an add-on is never repriced by hand.
   await assertKeptAddOnRowPrices(trx, visitId, rowsAfter.filter((line) => !addedSet.has(line.key) && line.price != null));
+  // ... and so does the visit's own add-on, when the save writes a primary price and one is stored.
+  if (isAreaAddOnCatalogKey(ownKey) && !addedSet.has(ownKey) && updates.primary_line_price != null && visit.primary_line_price != null
+    && !samePrice(updates.primary_line_price, visit.primary_line_price)) {
+    throw postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(ownKey)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
+  }
   // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
   if (estimate) assertCostCarrierKept(estimate, finalKeys.map((key) => ({ key })), soldAreaAddOnPrices(estimate));
   return { keys: finalKeys, added };
