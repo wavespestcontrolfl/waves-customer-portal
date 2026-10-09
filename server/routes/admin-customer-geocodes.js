@@ -116,8 +116,9 @@ router.post('/:customerId/resolve', async (req, res, next) => {
   if (body.error) return res.status(400).json({ error: body.error });
   try {
     const detail = await resolveCustomerGeocodeReview(id.value, body.value, req.technicianId);
-    if (body.value.action === 'verify_pin' && pinParkedCheckLive()) {
+    if (body.value.action === 'verify_pin') {
       // The pin is saved. Close the suggestion it came from (applied) or any other open one (superseded).
+      // Not gated: after a rollback an ordinary verify still settles a suggestion that was left open.
       await pinSuggestions.closeAfterVerify(id.value, {
         suggestionId: body.value.pin_suggestion_id || null, actorId: req.technicianId,
       });

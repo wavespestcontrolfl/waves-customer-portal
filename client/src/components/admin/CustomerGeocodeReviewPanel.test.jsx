@@ -1209,4 +1209,50 @@ describe("CustomerGeocodeReviewPanel pin suggestion", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("could not be dismissed");
     expect(screen.getByTestId("pin-suggestion")).toBeInTheDocument();
   });
+
+  it("disables both suggestion buttons while a dismiss is in flight", async () => {
+    const pending = deferred();
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => (options.method === "POST" ? pending.promise : response(withSuggestion()))));
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    const dismiss = await screen.findByRole("button", { name: "Dismiss" });
+    fireEvent.click(dismiss);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Use the truck's spot" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: /Dismiss/ })).toBeDisabled();
+    // A click on the disabled "Use" control opens nothing.
+    fireEvent.click(screen.getByRole("button", { name: "Use the truck's spot" }));
+    expect(screen.queryByLabelText("Latitude")).not.toBeInTheDocument();
+    pending.resolve(await response({ enabled: true, dismissed: true }));
+  });
+
+  it("clears the filled form when the authoritative reload no longer has the suggestion", async () => {
+    let gone = false;
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ enabled: true, dismissed: true });
+      const body = withSuggestion();
+      if (gone) delete body.pin_suggestion;
+      return response(body);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<CustomerGeocodeReviewPanel customerId="customer-1" refreshToken={1} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use the truck's spot" }));
+    expect(screen.getByLabelText("Evidence")).toHaveValue(suggestion.evidence);
+
+    gone = true; // dismissed or settled elsewhere; the panel reloads
+    view.rerender(<CustomerGeocodeReviewPanel customerId="customer-1" refreshToken={2} />);
+    await waitFor(() => expect(screen.queryByLabelText("Evidence")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("pin-suggestion")).not.toBeInTheDocument();
+    expect(await screen.findByText(/no longer open/)).toBeInTheDocument();
+    // Reopening the form by hand starts from the saved pin, not the truck's spot.
+    fireEvent.click(await screen.findByRole("button", { name: "Review location" }));
+    expect(screen.getByLabelText("Latitude")).toHaveValue("27.49");
+    expect(screen.getByLabelText("Evidence")).toHaveValue("");
+  });
+
+  it("keeps the filled form while the same suggestion is still there after a reload", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => response(withSuggestion())));
+    const view = render(<CustomerGeocodeReviewPanel customerId="customer-1" refreshToken={1} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use the truck's spot" }));
+    view.rerender(<CustomerGeocodeReviewPanel customerId="customer-1" refreshToken={2} />);
+    await waitFor(() => expect(screen.getByLabelText("Evidence")).toHaveValue(suggestion.evidence));
+  });
 });

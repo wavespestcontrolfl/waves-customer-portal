@@ -2035,9 +2035,9 @@ function initScheduledJobs() {
   // DAILY 06:35 — pin check after a visit (GATE_PIN_PARKED_CHECK, dark): compares the map pin of each
   // customer whose visit was completed in the last 2 ET days with where the technician's truck parked,
   // and SUGGESTS the parked point to staff. It never changes a pin and never contacts a customer.
-  // Gate read per tick, so a flip needs no restart; runExclusive records the job health.
+  // Gate read per run, so a flip needs no restart. With the gate off the run only retires any suggestions
+  // still open (a clean rollback), so the tick is not skipped here. runExclusive records the job health.
   cron.schedule('35 6 * * *', async () => {
-    if (!require('../config/feature-gates').pinParkedCheckLive()) return;
     try {
       await runExclusive('pin-parked-check', async () => {
         const result = await require('./pin-parked-check').runPinParkedCheck();

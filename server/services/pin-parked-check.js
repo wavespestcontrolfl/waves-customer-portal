@@ -53,6 +53,7 @@ const HOME_LOOKBACK_DAYS = 30;
 const HOME_MIN_DAYS = 3;
 const FENCE_TYPES = ['business', 'personal', 'supplier'];
 const PENDING_BELL_LIMIT = 50;
+const RETIRE_LIMIT = 500;
 
 const usablePin = (lat, lng) => {
   const a = lat == null || lat === '' ? NaN : Number(lat);
@@ -212,21 +213,24 @@ function judgeVisit({ visit, stops, radius, context }) {
   if (!destination) return { flag: false, reason: 'no_pin_or_other_property' };
   const customerPin = usablePin(visit.customer_latitude, visit.customer_longitude);
   const pins = [destination, customerPin].filter(Boolean);
-  const measured = stops.map((stop) => ({ stop, metres: nearestPinDistance(pins, stop) }));
-  if (measured.some((m) => m.metres <= radius)) return { flag: false, reason: 'stop_at_pin' };
-  if (!measured.length) return { flag: false, reason: 'no_stops' };
+  // "A stop at the pin" is generous: a stop near the visit's own stamp OR the saved pin means the pin works.
+  if (stops.some((stop) => nearestPinDistance(pins, stop) <= radius)) return { flag: false, reason: 'stop_at_pin' };
+  if (!stops.length) return { flag: false, reason: 'no_stops' };
+  // Everything that picks or limits the suggested stop is measured from the saved pin: the pin the suggestion would replace.
+  if (!customerPin) return { flag: false, reason: 'no_saved_pin' };
+  const measured = stops.map((stop) => ({ stop, metres: nearestPinDistance([customerPin], stop) }));
   const closest = measured.reduce((a, b) => (b.metres < a.metres ? b : a));
   if (closest.metres > MAX_STOP_DISTANCE_M) return { flag: false, reason: 'stop_too_far' };
   if (closest.stop.minutes < REPORT_MIN_STOP_MINUTES) return { flag: false, reason: 'stop_too_short' };
   const excluded = excludedStopReason(closest.stop, { radius, ...context });
   if (excluded) return { flag: false, reason: excluded };
-  const pin = customerPin || destination;
+  const pin = customerPin;
   return {
     flag: true,
     pin,
     destination,
     parked: { lat: closest.stop.lat, lng: closest.stop.lng },
-    distanceM: Math.round(distanceMeters(pin.lat, pin.lng, closest.stop.lat, closest.stop.lng)),
+    distanceM: Math.round(closest.metres),
     stopMinutes: Math.round(closest.stop.minutes),
     stopStartedAt: new Date(closest.stop.startMs),
   };
@@ -424,6 +428,21 @@ const neighbourPins = (visit, visits) => visits
   ])
   .filter(Boolean);
 
+/** Gate off: every open suggestion becomes superseded and its bell closes. Bounded; the rest goes at the next run. */
+async function retireAllOpen(conn) {
+  try {
+    const open = await conn('customer_pin_suggestions').where({ status: 'open' }).orderBy('created_at').limit(RETIRE_LIMIT).select('id');
+    let retired = 0;
+    for (const { id } of open) {
+      if (await store.closeSuggestion(id, 'superseded', { reason: 'gate_off', resolution: 'Closed: the pin check was switched off', conn })) retired += 1;
+    }
+    return retired;
+  } catch (err) {
+    logger.warn(`${LOG} could not retire open suggestions`, { error: err.code || err.name });
+    return 0;
+  }
+}
+
 const tallyKey = (tally, key) => { tally[key] = (tally[key] || 0) + 1; };
 
 /**
@@ -431,6 +450,16 @@ const tallyKey = (tally, key) => { tally[key] = (tally[key] || 0) + 1; };
  * (visitDays, capped at MAX_LOOKBACK_DAYS back). A vehicle whose stops cannot be read maps to null; a vehicle
  * none of whose visits can be judged is not read at all.
  */
+/** A vehicle with its home base. A home-base lookup that fails makes the vehicle unknown, like an unreadable stop query. */
+async function withHomeBase(conn, imei, stops, now) {
+  try {
+    return { stops, home: await loadHomeBase(conn, imei, now) };
+  } catch (err) {
+    logger.warn(`${LOG} could not read the home base`, { error: err.code || err.name });
+    return null;
+  }
+}
+
 async function loadVehicles(conn, visits, window) {
   const vehicles = new Map();
   for (const imei of new Set(visits.map((visit) => visit.bouncie_imei))) {
@@ -438,7 +467,7 @@ async function loadVehicles(conn, visits, window) {
       .map((visit) => requiredDays(visit, window.now)).filter((r) => !r.tooOld).flatMap((r) => r.days).sort();
     if (!needed.length) { vehicles.set(imei, { stops: [], home: null }); continue; }
     const stops = await stopsFor(conn, imei, { ...window, fromMs: etDayBounds(needed[0]).startMs });
-    vehicles.set(imei, stops ? { stops, home: await loadHomeBase(conn, imei, window.now).catch(() => null) } : null);
+    vehicles.set(imei, stops ? await withHomeBase(conn, imei, stops, window.now) : null);
   }
   return vehicles;
 }
@@ -492,9 +521,10 @@ async function applyDecision(conn, customerId, decision, openByCustomer, tally) 
  * @returns {Promise<{skipped?:string, visits?:number, created?:number, closed?:number, notified?:number}>}
  */
 async function runPinParkedCheck({ now = new Date(), conn = db } = {}) {
-  if (!pinParkedCheckLive()) return { skipped: 'gated' };
-  // The suggestion is applied through verify_pin, which needs address review on. Without it a bell would have no action.
-  if (!reviewEnabled()) return { skipped: 'review_disabled' };
+  // Rollback is clean: with the gate off (or address review off, so a suggestion could not be applied) the run
+  // retires whatever is still open, once, in a bounded pass, and does nothing else.
+  if (!pinParkedCheckLive()) return { skipped: 'gated', retired: await retireAllOpen(conn) };
+  if (!reviewEnabled()) return { skipped: 'review_disabled', retired: await retireAllOpen(conn) };
   const radius = (await loadArrivalConfig()).radiusMeters;
   const days = [etDateString(addETDays(now, -1)), etDateString(now)];
   const window = { fromMs: etDayBounds(days[0]).startMs, toMs: etDayBounds(days[1]).endMs, radius, now };
@@ -524,7 +554,7 @@ module.exports = {
   runPinParkedCheck,
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
-    alertDetail, settledReason, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    alertDetail, settledReason, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

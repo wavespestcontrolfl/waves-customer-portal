@@ -105,6 +105,23 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     await tripData(`trip-in-${randomUUID()}`, [[new Date(arrive - 1200000).toISOString(), away], [new Date(arrive).toISOString(), spot]], received);
     await tripData(`trip-out-${randomUUID()}`, [[new Date(leave).toISOString(), spot], [new Date(leave + 600000).toISOString(), away]], received);
   }
+  // One open suggestion with its (real) bell row, made by a real run.
+  async function openSuggestionWithBell(spot = north(540)) {
+    seq += 1;
+    const imei = `TESTIMEIB${seq}`; // its own vehicle, so several suggestions can coexist in one test
+    const techId = await technician(imei);
+    const customerId = await customer();
+    await completedVisit(customerId, techId);
+    await truckStopsAt(spot, 30, { imei });
+    await run();
+    const [row] = await open(customerId);
+    const [bell] = await mockPg('notifications').insert({
+      recipient_type: 'admin', category: 'customer', title: 'Customers — check the map pin for Fixture', body: 'Truck parked 540 m from the pin.',
+      metadata: JSON.stringify({ dedupeKey: `pin-suggestion:${row.id}` }),
+    }).returning('*');
+    return { customerId, techId, row, bell };
+  }
+  const bellNow = (id) => mockPg('notifications').where({ id }).first();
   const open = (customerId) => mockPg('customer_pin_suggestions').where({ customer_id: customerId, status: 'open' });
   const all = (customerId) => mockPg('customer_pin_suggestions').where({ customer_id: customerId }).orderBy('created_at');
   const run = () => runPinParkedCheck({ now: NOW, conn: mockPg });
@@ -297,10 +314,12 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     expect((await run()).visits).toBe(0);
   });
 
-  test('address review off: the run stops before any read (a suggestion could not be applied)', async () => {
+  test('address review off: the run reads no visits (a suggestion could not be applied) and retires what is open', async () => {
+    const { customerId } = await openSuggestionWithBell();
     delete process.env.GATE_GEOCODE_REVIEW;
     try {
-      expect(await run()).toEqual({ skipped: 'review_disabled' });
+      expect(await run()).toEqual({ skipped: 'review_disabled', retired: 1 });
+      expect(await open(customerId)).toHaveLength(0);
     } finally {
       process.env.GATE_GEOCODE_REVIEW = 'true';
     }
@@ -704,21 +723,133 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     });
   });
 
-  describe('closing from the review screen (real SQL, real notification close)', () => {
-    async function suggestionWithBell() {
+  describe('finding 1: the candidate stop and the distance limits are measured from the saved pin', () => {
+    test('a stop that is closer to the visit stamp than the saved pin is not chosen by the stamp distance', async () => {
       const techId = await technician();
-      const customerId = await customer();
-      await completedVisit(customerId, techId);
-      await truckStopsAt(north(540), 30);
-      await run();
+      const customerId = await customer(PIN);
+      const stamp = north(1400); // an old stamp, far from the saved pin
+      await completedVisit(customerId, techId, { lat: stamp.lat, lng: stamp.lng });
+      // 1700 m from the saved pin (past the 1500 m cap) but only 300 m from the stamp.
+      await truckStopsAt(north(1700), 30);
+      const result = await run();
+      expect(result).toMatchObject({ created: 0, stop_too_far: 1 });
+      expect(await all(customerId)).toHaveLength(0);
+    });
+
+    test('the stored distance and the chosen stop both come from the saved pin', async () => {
+      const techId = await technician();
+      const customerId = await customer(PIN);
+      const stamp = north(700);
+      await completedVisit(customerId, techId, { lat: stamp.lat, lng: stamp.lng });
+      await truckStopsAt(north(900), 30); // 900 m from the saved pin, 200 m from the stamp
+      await truckStopsAt(north(500), 30, { at: '2026-10-08T17:20:00Z' }); // 500 m from the saved pin: the closest to it
+      expect(await run()).toMatchObject({ created: 1 });
       const [row] = await open(customerId);
-      const [bell] = await mockPg('notifications').insert({
-        recipient_type: 'admin', category: 'customer', title: 'Customers — check the map pin for Fixture', body: 'Truck parked 540 m from the pin.',
-        metadata: JSON.stringify({ dedupeKey: `pin-suggestion:${row.id}` }),
-      }).returning('*');
-      return { customerId, row, bell };
-    }
-    const bellNow = (id) => mockPg('notifications').where({ id }).first();
+      expect(row.distance_m).toBe(500);
+      expect(Number(row.parked_lat)).toBeCloseTo(north(500).lat, 5);
+    });
+
+    test('a stop within the radius of the visit stamp still means the pin works', async () => {
+      const techId = await technician();
+      const customerId = await customer(PIN);
+      const stamp = north(900);
+      await completedVisit(customerId, techId, { lat: stamp.lat, lng: stamp.lng });
+      await truckStopsAt(north(950), 30);
+      expect((await run()).created).toBe(0);
+    });
+  });
+
+  describe('finding 2: a rollback leaves nothing open', () => {
+    test('with the gate off the daily run supersedes every open suggestion, closes the bells and reads nothing else', async () => {
+      const first = await openSuggestionWithBell();
+      const second = await openSuggestionWithBell();
+      delete process.env.GATE_PIN_PARKED_CHECK;
+      try {
+        expect(await run()).toEqual({ skipped: 'gated', retired: 2 });
+      } finally { process.env.GATE_PIN_PARKED_CHECK = 'true'; }
+      for (const made of [first, second]) {
+        expect(await open(made.customerId)).toHaveLength(0);
+        expect((await all(made.customerId))[0]).toMatchObject({ status: 'superseded' });
+        expect((await bellNow(made.bell.id)).done_at).not.toBeNull();
+      }
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(2); // only the two original rings, none since
+    });
+
+    test('the sweep is bounded and a second run finishes the rest', async () => {
+      for (let i = 0; i < 3; i += 1) {
+        await mockPg('customer_pin_suggestions').insert({
+          customer_id: await customer(), visit_date: '2026-10-08', pin_lat: 1, pin_lng: 1, parked_lat: 1, parked_lng: 1, distance_m: 1, stop_minutes: 1,
+        });
+      }
+      delete process.env.GATE_PIN_PARKED_CHECK;
+      try {
+        expect((await run()).retired).toBe(3);
+        expect((await run()).retired).toBe(0);
+      } finally { process.env.GATE_PIN_PARKED_CHECK = 'true'; }
+    });
+  });
+
+  describe('findings 3 and 4: a customer merge', () => {
+    const handlerOf = () => require('../services/customer-dedupe')._test.UNIQUE_COLLISION_HANDLERS.customer_pin_suggestions;
+
+    test('the handler is registered', () => {
+      expect(typeof handlerOf()).toBe('function');
+    });
+
+    test('two open suggestions: the winner keeps its open row, the loser is superseded with its bell closed, history moves', async () => {
+      const winner = await openSuggestionWithBell();
+      const loser = await openSuggestionWithBell();
+      await expect(mockPg.transaction((t) => t('customer_pin_suggestions').where({ id: loser.row.id }).update({ customer_id: winner.customerId })))
+        .rejects.toMatchObject({ code: '23505' }); // the collision that used to abort the merge
+      const moved = await handlerOf()(mockPg, 'customer_pin_suggestions', 'customer_id', winner.customerId, loser.customerId);
+      expect(moved).toBe(1);
+      const rows = await all(winner.customerId);
+      expect(rows.map((r) => r.status).sort()).toEqual(['open', 'superseded']);
+      expect((await open(winner.customerId))[0].id).toBe(winner.row.id);
+      expect(await all(loser.customerId)).toHaveLength(0);
+      expect((await bellNow(loser.bell.id)).done_at).not.toBeNull();
+      expect((await bellNow(winner.bell.id)).done_at).toBeNull();
+    });
+
+    test('only the loser has an open suggestion: it is retired, not repointed to the survivor, and its bell closes', async () => {
+      const winner = await customer();
+      const loser = await openSuggestionWithBell();
+      expect(await require('../services/customer-pin-suggestions').retireOnMerge(mockPg, loser.customerId)).toBe(1);
+      expect(await open(loser.customerId)).toHaveLength(0);
+      expect(await open(winner)).toHaveLength(0);
+      expect((await bellNow(loser.bell.id)).done_at).not.toBeNull();
+      expect((await all(loser.customerId))[0].status).toBe('superseded');
+      // the next run raises it again for the survivor if it is still warranted: here the survivor owns the visit
+      expect(await require('../services/customer-pin-suggestions').retireOnMerge(mockPg, loser.customerId)).toBe(0); // idempotent
+    });
+
+    test('executeMerge retires the loser suggestion before its sweep', () => {
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../services/customer-dedupe.js'), 'utf8');
+      expect(source).toMatch(/await retirePinSuggestionsBeforeSweep\(trx, loser\.id\);\s*const fks = await customerFkColumns\(trx\);/);
+    });
+  });
+
+  describe('finding 5: a home-base lookup that fails makes the vehicle unknown', () => {
+    test('no suggestion and nothing closed, instead of judging without the home base', async () => {
+      const { customerId, row } = await openSuggestionWithBell();
+      // The mileage_log read (the home base) fails for this run; everything else is the real connection.
+      const failing = new Proxy(mockPg, {
+        get: (target, key) => {
+          if (key === 'raw') return (sql, ...rest) => (/FROM mileage_log/.test(sql) ? Promise.reject(new Error('mileage_log unreadable')) : target.raw(sql, ...rest));
+          const value = target[key];
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+        apply: (target, _this, args) => target(...args),
+      });
+      const result = await runPinParkedCheck({ now: NOW, conn: failing });
+      expect(result).toMatchObject({ created: 0, stops_unreadable: 1 });
+      expect((await mockPg('customer_pin_suggestions').where({ id: row.id }).first()).status).toBe('open');
+      void customerId;
+    });
+  });
+
+  describe('closing from the review screen (real SQL, real notification close)', () => {
+    const suggestionWithBell = openSuggestionWithBell;
 
     test('verify_pin from the suggestion: applied, bell done, and the actor is recorded', async () => {
       const { customerId, row, bell } = await suggestionWithBell();

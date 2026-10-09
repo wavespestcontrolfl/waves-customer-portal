@@ -158,8 +158,8 @@ function PinSuggestion({ suggestion, disabled, busy, onUse, onDismiss }) {
         {" "}{suggestion.distance_m} m from the saved pin, and never stopped within arrival range of it.
       </div>
       <div className="flex flex-wrap gap-2 mt-2">
-        <Button variant="secondary" disabled={disabled} onClick={onUse}>Use the truck&apos;s spot</Button>
-        <Button variant="secondary" disabled={disabled} loading={busy} onClick={onDismiss}>Dismiss</Button>
+        <Button variant="secondary" disabled={disabled || busy} onClick={onUse}>Use the truck&apos;s spot</Button>
+        <Button variant="secondary" disabled={disabled || busy} loading={busy} onClick={onDismiss}>Dismiss</Button>
       </div>
     </div>
   );
@@ -210,6 +210,14 @@ function ReviewRecord({ record, active, draftActive, actionsDisabled, saving, er
   );
 }
 
+// The pin check's suggestion that filled the open form is gone from the authoritative reload (dismissed or
+// settled elsewhere): the prefilled entries describe nothing any more.
+function prefillIsStale(records, activeId, held) {
+  if (!held || !activeId) return false;
+  const record = records.find((row) => row.customer.id === activeId);
+  return record?.pin_suggestion?.id !== held.id;
+}
+
 function loadedReviewRecords(payload, customerId, previousRecords, editingId) {
   const records = customerId && payload?.customer ? [payload] : payload?.records || [];
   return {
@@ -240,9 +248,11 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
   const scopeRef = useRef(0);
   const recordsRef = useRef(state.records);
   const activeIdRef = useRef(activeId);
+  const prefillRef = useRef(null);
   const retryInFlightRef = useRef(false);
   recordsRef.current = state.records;
   activeIdRef.current = activeId;
+  prefillRef.current = prefill;
 
   // Lets a caller embedding this panel inside a larger navigation shell
   // (Customer 360's profile/workspace) guard its own tab switches, back
@@ -307,6 +317,15 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
     // not the stale ones from before this fetch.
     recordsRef.current = records;
     setLoadError("");
+    if (prefillIsStale(records, activeIdRef.current, prefillRef.current)) {
+      prefillRef.current = null;
+      setPrefill(null);
+      activeIdRef.current = null;
+      setActiveId(null);
+      setConflictId(null);
+      setError("That pin suggestion is no longer open, so the entries filled from it were cleared.");
+      return true;
+    }
     // editingId is captured when the request starts; if the admin canceled
     // the draft before this response arrived, activeIdRef no longer matches
     // it and there is no open form left to acknowledge a conflict on — treat
@@ -524,8 +543,9 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
   };
   // Opens the verify form filled with the pin check's suggestion. Nothing is saved until staff confirm and press Verify pin.
   const useTruckSpot = (record) => {
-    if (!record.pin_suggestion) return;
+    if (!record.pin_suggestion || dismissingId) return;
     activeIdRef.current = record.customer.id;
+    prefillRef.current = record.pin_suggestion;
     setActiveId(record.customer.id);
     setPrefill(record.pin_suggestion);
     setError("");

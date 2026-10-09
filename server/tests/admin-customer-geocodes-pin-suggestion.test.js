@@ -84,9 +84,14 @@ describe('gate off', () => {
     expect(suggestions.openForCustomer).not.toHaveBeenCalled();
   });
 
-  test('a verify_pin does not touch suggestions', async () => {
-    expect((await post(`/api/admin/customer-geocodes/${CUSTOMER_ID}/resolve`, verifyBody({ pin_suggestion_id: SUGGESTION_ID }))).status).toBe(200);
-    expect(suggestions.closeAfterVerify).not.toHaveBeenCalled();
+  test('an ordinary verify_pin still closes a suggestion left open by a rollback', async () => {
+    expect((await post(`/api/admin/customer-geocodes/${CUSTOMER_ID}/resolve`, verifyBody())).status).toBe(200);
+    expect(suggestions.closeAfterVerify).toHaveBeenCalledWith(CUSTOMER_ID, { suggestionId: null, actorId: 'actor-1' });
+  });
+
+  test('a verify_pin that names a suggestion also closes it as applied with the gate off', async () => {
+    await post(`/api/admin/customer-geocodes/${CUSTOMER_ID}/resolve`, verifyBody({ pin_suggestion_id: SUGGESTION_ID }));
+    expect(suggestions.closeAfterVerify).toHaveBeenCalledWith(CUSTOMER_ID, { suggestionId: SUGGESTION_ID, actorId: 'actor-1' });
   });
 
   test('dismiss answers 404 with no service call, even for an admin', async () => {

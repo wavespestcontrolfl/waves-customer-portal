@@ -105,6 +105,21 @@ async function closeSuggestion(id, status, { actorId = null, reason, resolution,
   });
 }
 
+/**
+ * A customer merge: the loser's open suggestion is retired (superseded, its bell closed) rather than moved to the
+ * survivor, whose pin and visits are what the next daily run judges. Run inside the merge transaction, before the
+ * rows are repointed, so two open suggestions can never meet on the one-open-per-customer index. Returns the count.
+ */
+async function retireOnMerge(trx, loserId) {
+  await lockCustomer(trx, loserId);
+  const rows = await trx('customer_pin_suggestions').where({ customer_id: loserId, status: 'open' })
+    .update({ status: 'superseded', resolved_at: trx.fn.now(), updated_at: trx.fn.now() }).returning('id');
+  for (const { id } of rows) {
+    await closeBell(id, 'merged', 'Closed: the customer was merged into another account', trx);
+  }
+  return rows.length;
+}
+
 /** Closes the customer's open suggestion (if any) as superseded. */
 async function supersedeOpen(customerId, reason, conn = db) {
   const open = await openForCustomer(customerId, conn);
@@ -147,6 +162,6 @@ async function closeAfterVerify(customerId, { suggestionId = null, actorId = nul
 }
 
 module.exports = {
-  alertKey, lockCustomer, evidenceText, publicShape, openForCustomer, visibleSuggestion, closeSuggestion, supersedeOpen, dismiss,
+  alertKey, lockCustomer, evidenceText, publicShape, openForCustomer, visibleSuggestion, closeSuggestion, supersedeOpen, retireOnMerge, dismiss,
   closeAfterVerify, closeBell, same7, dayText, SOURCE, COLUMNS,
 };

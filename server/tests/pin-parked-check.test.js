@@ -70,6 +70,21 @@ describe('flag rules', () => {
     expect(judge([stop(1499, 10)]).flag).toBe(true);
   });
 
+  test('the candidate and both distance limits come from the saved pin, the stamp only settles "stop at pin"', () => {
+    // stamp 1400 m north, saved pin at BASE; a stop 1700 m north is 300 m from the stamp but beyond the cap from the saved pin
+    const stamped = { service_lat: at(1400).lat, service_lng: at(1400).lng };
+    expect(judge([stop(1700, 30)], stamped)).toEqual({ flag: false, reason: 'stop_too_far' });
+    expect(judge([stop(1450, 30)], stamped).reason).toBe('stop_at_pin'); // within 175 m of the stamp
+    const verdict = judge([stop(900, 30), stop(500, 30)], { service_lat: at(700).lat, service_lng: at(700).lng });
+    expect(verdict.distanceM).toBe(500);
+  });
+
+  test('no saved pin: a stop at the visit stamp still settles it, anything else creates nothing', () => {
+    const noSaved = { customer_latitude: null, customer_longitude: null };
+    expect(judge([stop(100, 30)], noSaved).reason).toBe('stop_at_pin');
+    expect(judge([stop(540, 30)], noSaved)).toEqual({ flag: false, reason: 'no_saved_pin' });
+  });
+
   test('judges the CLOSEST stop: a short stop nearer than a long one is the answer', () => {
     expect(judge([stop(600, 45), stop(300, 7)])).toEqual({ flag: false, reason: 'stop_too_short' });
   });
@@ -300,32 +315,46 @@ describe('settled suggestions', () => {
 describe('gate and wiring', () => {
   const read = (file) => fs.readFileSync(path.join(__dirname, file), 'utf8');
 
-  test('gate off: the run returns before any query', async () => {
-    delete process.env.GATE_PIN_PARKED_CHECK;
-    const db = require('../models/db');
-    expect(await runPinParkedCheck({ now: new Date('2026-10-09T12:00:00Z') })).toEqual({ skipped: 'gated' });
-    expect(db).not.toHaveBeenCalled();
-    expect(db.raw).not.toHaveBeenCalled();
-  });
+  // A stand-in for knex that answers the one open-suggestions read and records every table it was asked about.
+  function fakeConn(openRows = []) {
+    const tables = [];
+    const conn = (table) => {
+      tables.push(table);
+      const b = { where: () => b, orderBy: () => b, limit: () => b, select: async () => openRows };
+      return b;
+    };
+    conn.tables = tables;
+    return conn;
+  }
 
-  test('address review off: the run stops before any query', async () => {
-    process.env.GATE_PIN_PARKED_CHECK = 'true';
-    delete process.env.GATE_GEOCODE_REVIEW;
+  test.each([
+    ['gate off', () => { delete process.env.GATE_PIN_PARKED_CHECK; process.env.GATE_GEOCODE_REVIEW = 'true'; }, 'gated'],
+    ['address review off', () => { process.env.GATE_PIN_PARKED_CHECK = 'true'; delete process.env.GATE_GEOCODE_REVIEW; }, 'review_disabled'],
+  ])('%s: the run only retires open suggestions and reads nothing else', async (_name, setup, skipped) => {
+    setup();
     try {
-      const db = require('../models/db');
-      expect(await runPinParkedCheck({ now: new Date('2026-10-09T12:00:00Z') })).toEqual({ skipped: 'review_disabled' });
-      expect(db).not.toHaveBeenCalled();
+      const conn = fakeConn([]);
+      expect(await runPinParkedCheck({ now: new Date('2026-10-09T12:00:00Z'), conn })).toEqual({ skipped, retired: 0 });
+      expect(conn.tables).toEqual(['customer_pin_suggestions']); // one bounded read, no visits, no Bouncie log, no geocoder
     } finally {
       delete process.env.GATE_PIN_PARKED_CHECK;
+      delete process.env.GATE_GEOCODE_REVIEW;
     }
   });
 
-  test('the gate is strict, read at call time, and the cron checks it each tick', () => {
+  test('a failed retire sweep never throws out of the run', async () => {
+    delete process.env.GATE_PIN_PARKED_CHECK;
+    const conn = () => { throw new Error('db down'); };
+    expect(await runPinParkedCheck({ conn })).toEqual({ skipped: 'gated', retired: 0 });
+  });
+
+  test('the gate is strict, read at call time, and the cron ticks even with the gate off', () => {
     const gates = read('../config/feature-gates.js');
     expect(gates).toMatch(/function pinParkedCheckLive\(\) \{\s*return process\.env\.GATE_PIN_PARKED_CHECK === 'true';\s*\}/);
     expect(gates).toContain('module.exports.pinParkedCheckLive = pinParkedCheckLive;');
     const scheduler = read('../services/scheduler.js');
-    expect(scheduler).toMatch(/if \(!require\('\.\.\/config\/feature-gates'\)\.pinParkedCheckLive\(\)\) return;\s*try \{\s*await runExclusive\('pin-parked-check'/);
+    // The tick is NOT skipped when the gate is off: the run retires leftover suggestions (clean rollback).
+    expect(scheduler).toMatch(/cron\.schedule\('35 6 \* \* \*', async \(\) => \{\s*try \{\s*await runExclusive\('pin-parked-check'/);
   });
 
   test('the job never calls the geocoder or writes a pin', () => {
