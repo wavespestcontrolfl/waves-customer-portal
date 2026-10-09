@@ -434,7 +434,9 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
  * voice turn streams, is aborted by barge-in as a matter of course, and must
  * not wait on the ledger, so the voice relay records each round it finished
  * here instead. Fire-and-forget like recordCall: never throws, never awaited.
- * With `errorCode` the round is recorded as a failed call with its usage.
+ * With `errorCode` the round is recorded as a failed call: with its usage
+ * when the provider finished and billed a response the caller could not use,
+ * with none (`message` null) when the request itself failed.
  *
  * `provider` is the provider that served the round. The OpenAI relay client
  * maps its usage to the Anthropic shape (input_tokens excludes cached reads);
@@ -443,6 +445,12 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
  */
 function recordStreamedMessage({ provider, requestedModel, message, latencyMs = null, laneId, errorCode = null }) {
   try {
+    // A round that resolved can still be a failed one, exactly as ledgerCall
+    // files it: the model declined, the answer was cut off, or it said nothing.
+    const code = errorCode
+      || (message?.stop_reason === 'refusal' ? `${provider}_refusal` : null)
+      || (message?.stop_reason === 'max_tokens' ? `${provider}_incomplete` : null)
+      || (endedWithoutText(message) ? 'empty_text' : null);
     const usage = extractUsage('anthropic', message);
     if (provider === 'openai') {
       if (usage.input_tokens != null) usage.input_tokens += usage.cached_input_tokens || 0;
@@ -454,9 +462,8 @@ function recordStreamedMessage({ provider, requestedModel, message, latencyMs = 
       provider,
       requestedModel,
       servedModel: message?.model,
-      // errorCode: a round the provider finished and billed but the caller could not use
-      ok: !errorCode,
-      errorCode,
+      ok: !code,
+      errorCode: code,
       usage,
       latencyMs,
       providerRef: message?.id,

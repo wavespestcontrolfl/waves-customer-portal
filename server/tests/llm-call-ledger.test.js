@@ -361,6 +361,26 @@ describe('llm call ledger', () => {
       expect(callRows()[0]).toMatchObject({ ok: true, provider: 'openai', input_tokens: 900, cached_input_tokens: 600, cache_write_tokens: null, output_tokens: 70, reasoning_tokens: 32 });
     });
 
+    it('a round that resolved but declined, was cut off, or said nothing is a failed call, as ledgerCall files it', async () => {
+      const { metrics } = load();
+      const round = (over) => ({ id: 'm', model: 'served', content: [{ type: 'text', text: 'partial' }], usage: { input_tokens: 10, output_tokens: 5 }, ...over });
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: round({ stop_reason: 'refusal' }), laneId: 'voice_relay' });
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'm', message: round({ stop_reason: 'max_tokens' }), laneId: 'voice_relay' });
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: round({ stop_reason: 'end_turn', content: [] }), laneId: 'voice_relay' });
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: round({ stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't', name: 'x', input: {} }] }), laneId: 'voice_relay' });
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code])).toEqual([
+        [false, 'anthropic_refusal'], [false, 'openai_incomplete'], [false, 'empty_text'], [true, null],
+      ]);
+    });
+
+    it('a request that failed outright is a failed call with no usage', async () => {
+      const { metrics } = load();
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message: null, latencyMs: 30000, laneId: 'voice_relay', errorCode: 'openai_timeout' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'openai_timeout', error_class: 'timeout', input_tokens: null, output_tokens: null });
+    });
+
     it('a round the provider billed but the caller could not use is a failed call with its usage', async () => {
       const { metrics } = load();
       const billed = { id: 'resp_3', model: 'gpt-served', usage: { input_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 256, reasoning_tokens: 256 } };

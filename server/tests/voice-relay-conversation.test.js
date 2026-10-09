@@ -638,7 +638,7 @@ describe('RelayConversation — explicit end after capture', () => {
 
   // Cost ledger: each model round that finishes is recorded once, with the
   // provider and model that served it; a round that throws records nothing.
-  test('the cost ledger gets each round the provider finished: usable, billed-but-unusable; not a plain failure, not an eval session', async () => {
+  test('the cost ledger gets each model round: usable, billed-but-unusable, failed outright; not a barge-in abort, not an eval session', async () => {
     const recordStreamedMessage = jest.fn();
     const build = (finalMessage, opts = {}) => {
       let Convo;
@@ -659,9 +659,16 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(recordStreamedMessage).toHaveBeenCalledTimes(1);
     expect(recordStreamedMessage).toHaveBeenCalledWith({ provider: ok._provider, requestedModel: ok.model, message, latencyMs: expect.any(Number), laneId: 'voice_relay', errorCode: null });
 
+    // the provider failed outright (rate limit): a failed call, no usage, the adapters' own reason
     recordStreamedMessage.mockClear();
-    const failed = build(async () => { throw new Error('boom'); });
+    const failed = build(async () => { throw Object.assign(new Error('rate limited'), { status: 429 }); });
     await failed._runLoop('hi').catch(() => {});
+    expect(recordStreamedMessage).toHaveBeenCalledWith(expect.objectContaining({ message: null, errorCode: `${failed._provider}_429`, laneId: 'voice_relay' }));
+
+    // barge-in: the caller talked over the reply. Not a failure; nothing is filed.
+    recordStreamedMessage.mockClear();
+    const bargedIn = build(async () => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }); });
+    await bargedIn._runLoop('hi').catch(() => {});
     expect(recordStreamedMessage).not.toHaveBeenCalled();
 
     // the provider finished and billed the response, but it held nothing usable

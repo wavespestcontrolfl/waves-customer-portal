@@ -135,6 +135,8 @@ const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVo
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
 const { anthropicMaxTokens } = require('../llm/anthropic-wire');
 const { recordStreamedMessage } = require('../llm-dispatch-metrics');
+// The adapters' own failure reason (`<provider>_<status>`, `<provider>_timeout`).
+const { providerErrorReason } = require('../llm/call');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -3420,6 +3422,24 @@ class RelayConversation {
     recordStreamedMessage({ provider: this._provider, requestedModel: this.model, message, latencyMs: Math.round(now() - modelStartAt), laneId: 'voice_relay', errorCode });
   }
 
+  /**
+   * A model round that rejected, on the cost ledger, so the lane's failure
+   * rate is real (an OpenAI outage followed by a Claude retry is one failure
+   * and one success, not a success only):
+   *   - a response the provider finished and billed but the relay could not
+   *     use (relay-openai-client attaches it): failed, with its usage, under
+   *     the client's own code;
+   *   - the relay's own stream timeout: `<provider>_timeout`;
+   *   - any other provider error (429, 5xx, network): the adapters' reason.
+   * A barge-in abort is the caller talking, not a failure: nothing is filed.
+   */
+  _ledgerFailedRound(err, timedOut, modelStartAt) {
+    if (err?.billedRound) return this._ledgerRound(err.billedRound, modelStartAt, err.billedRound.errorCode);
+    if (timedOut) return this._ledgerRound(null, modelStartAt, `${this._provider}_timeout`);
+    if (err?.name === 'AbortError') return undefined;
+    return this._ledgerRound(null, modelStartAt, providerErrorReason(this._provider, err));
+  }
+
   async _modelAttempt(stat) {
     const client = clientFor(this._provider);
     this._controller = new AbortController();
@@ -3486,10 +3506,7 @@ class RelayConversation {
       this._ledgerRound(msg, modelStartAt);
       return { msg, streamState };
     } catch (err) {
-      // A response OpenAI finished and billed but the relay could not use
-      // (relay-openai-client attaches what was billed) is a failed round on
-      // the ledger, not a missing one, under the client's own failure code.
-      if (err?.billedRound) this._ledgerRound(err.billedRound, modelStartAt, err.billedRound.errorCode);
+      this._ledgerFailedRound(err, timedOut, modelStartAt);
       return { err, streamState, timedOut };
     } finally {
       clearTimeout(streamTimer);
