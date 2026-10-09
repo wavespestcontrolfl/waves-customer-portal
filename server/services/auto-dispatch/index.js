@@ -432,11 +432,10 @@ async function loadGuardContext(guardMode, services, nowDate) {
 // no arrival window and no due date has no instant to freeze on (the freeze
 // reads an uncomposable instant as frozen, fail closed), so it is skipped as
 // before — but labelled for what it is, not as a 73-hour cutoff weeks away. A
-// combined-allocation member can still take its arrival from the group's stamp,
-// so it keeps the cutoff label.
+// combined-allocation stamp does not change this: reservation_arrival_start
+// returns NULL for a row with no window_start before it reads the stamp.
 function frozenSkipReason(service) {
-  const noWindow = !service.window_start && !service.recurring_dispatch_due_date
-    && !(service.reservation_service_mix && service.reservation_service_mix.allocatedServiceIds);
+  const noWindow = !service.window_start && !service.recurring_dispatch_due_date;
   return noWindow
     ? { code: 'NO_ARRIVAL_WINDOW', description: 'Visit has no arrival window and no due date; auto-dispatch cannot place it' }
     : { code: 'WITHIN_73H', description: '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)' };

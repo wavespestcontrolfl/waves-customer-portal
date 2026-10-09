@@ -172,10 +172,17 @@ describe('reminder sync failure after a committed move', () => {
       expect.objectContaining({
         bell: true,
         link: '/admin/dispatch?tab=schedule&date=2026-08-11',
-        dedupeKey: 'auto-dispatch-reminder-sync:s1:2026-08-11',
+        dedupeKey: 'auto-dispatch-reminder-sync:s1:2026-08-11:08:00',
         metadata: expect.objectContaining({ scheduledServiceId: 's1' }),
       }),
     );
+  });
+
+  test('a later failed move to another time on the same date is a new notice (Codex #6208 r1)', async () => {
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+    movableQueue();
+    await applyAutoDispatchMove(SERVICE, { ...BEST, start_time: '13:00', end_time: '15:00' }, 'run1', {});
+    expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-reminder-sync:s1:2026-08-11:13:00');
   });
 
   test('a failed notice never fails the committed move', async () => {

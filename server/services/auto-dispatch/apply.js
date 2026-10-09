@@ -470,12 +470,21 @@ async function flagReminderSyncFailed(service, best) {
       who: 'person',
     }, {
       bell: true,
-      dedupeKey: `auto-dispatch-reminder-sync:${service.id}:${best.date}`,
+      // One notice per failed slot: a later move of the visit to another time
+      // on the same date is a new failure, not the one staff already closed.
+      dedupeKey: `auto-dispatch-reminder-sync:${service.id}:${best.date}:${best.start_time || 'none'}`,
       metadata: { scheduledServiceId: service.id, customerId: service.customer_id, newDate: best.date },
     });
   } catch (err) {
     logger.warn(`[auto-dispatch] reminder-sync notice failed for ${service && service.id}: ${err.message}`);
   }
+}
+
+// handleReschedule catches its own errors and returns null, as it does for a
+// visit with no reminder row. Tell the two apart by the row itself.
+async function flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best) {
+  if (reminderRecord) return;
+  if (await reminderOffNewSlot(AppointmentReminders, service, best)) await flagReminderSyncFailed(service, best);
 }
 
 // After a sync that returned nothing: whether a reminder row exists for the
@@ -669,11 +678,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
         .where({ id: reminderRecord.id })
         .update({ confirmation_sent: false, confirmation_sent_at: null });
     }
-    // handleReschedule catches its own errors and returns null, as it does
-    // for a visit with no reminder row. Tell the two apart by the row itself.
-    if (!reminderRecord && await reminderOffNewSlot(AppointmentReminders, service, best)) {
-      await flagReminderSyncFailed(service, best);
-    }
+    await flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best);
   } catch (remErr) {
     logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
     await flagReminderSyncFailed(service, best);

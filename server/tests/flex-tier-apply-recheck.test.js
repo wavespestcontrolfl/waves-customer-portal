@@ -303,6 +303,30 @@ test('a windowless visit with no due date is skipped as NO_ARRIVAL_WINDOW, not W
   expect(skipped[0].reason_description).toMatch(/no arrival window and no due date/);
 });
 
+// reservation_arrival_start returns NULL for a row with no window_start before
+// it reads the allocation stamp, so a stale stamp is no arrival (Codex #6208 r1).
+test('a windowless visit with a leftover combined-allocation stamp is still NO_ARRIVAL_WINDOW', async () => {
+  reminderResults = [[]];
+  db.mockImplementation((table) => {
+    if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
+    if (table === 'scheduled_services') {
+      return buildChain([{
+        ...svc(), window_start: null, window_end: null, recurring_dispatch_due_date: null,
+        reservation_service_mix: { allocatedServiceIds: ['gone-1', 'gone-2'] },
+      }]);
+    }
+    return buildChain([]);
+  });
+  // What the SQL function returns for a row with no window_start.
+  db.raw = jest.fn(async () => ({ rows: [{ window_start: null }] }));
+  try {
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+  } finally {
+    delete db.raw;
+  }
+  expect(decisions('skipped').map((d) => d.reason_code)).toEqual(['NO_ARRIVAL_WINDOW']);
+});
+
 // The band around a far-away durable anchor no longer reaches the visit's
 // date, so flexTierMoveWindow collapses to the one day. Only the label
 // changes: the same-day re-time search still runs and still moves a visit.
