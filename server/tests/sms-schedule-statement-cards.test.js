@@ -71,6 +71,19 @@ describe('scheduleStatementOnly (drafter): which replies the signature may back'
     expect(scheduleStatementOnly({ ...ok, parsed: { intended_actions: [{ type: 'send_payment_link' }] } })).toBe(false);
     expect(scheduleStatementOnly({ ...ok, openTimesSnapshot: { quotedWindows: [] }, parsed: { intended_actions: [] } })).toBe(false);
     expect(scheduleStatementOnly({ schedulingIntent: false, openTimesSnapshot: null, parsed: { intended_actions: [] } })).toBe(false);
+    // Codex r4: an action the parser discarded, or a reply that leans on the portal fact, gets no card
+    expect(scheduleStatementOnly({ ...ok, parsed: { intended_actions: [], actions_discarded: true } })).toBe(false);
+    expect(scheduleStatementOnly({ ...ok, parsed: { reply: 'You can cancel in the customer portal under Plan.', intended_actions: [{ type: 'escalate', note: 'cancel_request' }] } })).toBe(false);
+    expect(scheduleStatementOnly({ ...ok, parsed: { reply: 'You are on for Tuesday 9-11.', intended_actions: [{ type: 'none' }] } })).toBe(true);
+  });
+
+  test('parseShadowResponse records a discarded action', () => {
+    const { parseShadowResponse } = load();
+    const parse = (actions) => parseShadowResponse(JSON.stringify({ reply: 'ok', intended_actions: actions }));
+    expect(parse([{ type: 'none' }]).actions_discarded).toBe(false);
+    const dropped = parse([{ type: 'cancel_service' }, { type: 'escalate' }]);
+    expect(dropped.intended_actions).toEqual([{ type: 'escalate', note: undefined }]);
+    expect(dropped.actions_discarded).toBe(true);
   });
 
   test('draftScheduleFacts: both gates and a customer are needed; a failed read is null (no card)', async () => {

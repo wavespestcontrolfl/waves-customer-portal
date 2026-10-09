@@ -144,6 +144,7 @@ describe('sms shadow drafter — response parsing', () => {
     expect(parsed).toEqual({
       reply: 'Hello Dale! You are on the schedule.',
       intended_actions: [],
+      actions_discarded: false,
       auto_send_safe: true,
       missing_info: null,
       offered_times: [],

@@ -5002,6 +5002,12 @@ const SCHEDULE_STATEMENT_ACTIONS = new Set(['none', 'escalate']);
 function scheduleStatementOnly({ schedulingIntent, openTimesSnapshot, parsed }) {
   if (!schedulingIntent || openTimesSnapshot) return false;
   if (Array.isArray(parsed?.offered_times) && parsed.offered_times.length) return false;
+  // an action the parser dropped is an action nobody would see on the card (Codex #6232 r4)
+  if (parsed?.actions_discarded) return false;
+  // The card's rechecks cover the schedule only, so the reply may not lean on the one per-draft
+  // fact with no send-time recheck of its own, PORTAL SELF-CANCEL (Codex #6232 r4): a reply
+  // that mentions the portal keeps today's path (no card).
+  if (/\bportal\b/i.test(String(parsed?.reply || ''))) return false;
   const actions = Array.isArray(parsed?.intended_actions) ? parsed.intended_actions : [];
   return actions.every((a) => a && SCHEDULE_STATEMENT_ACTIONS.has(a.type));
 }
@@ -6172,6 +6178,9 @@ function parseShadowResponse(text) {
   return {
     reply: parsed.reply.trim(),
     intended_actions: intendedActions,
+    // true when the model named an action this parser dropped (an unknown type): the reply may
+    // still talk about it, so a path that trusts "no action beyond a hand-off" must refuse.
+    actions_discarded: Array.isArray(parsed.intended_actions) ? parsed.intended_actions.length !== intendedActions.length : parsed.intended_actions != null,
     auto_send_safe: autoSendSafe,
     missing_info: typeof parsed.missing_info === 'string' ? parsed.missing_info.slice(0, 500) : null,
     offered_times: offeredTimes,
