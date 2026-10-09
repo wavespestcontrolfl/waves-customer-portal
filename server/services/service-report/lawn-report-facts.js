@@ -514,7 +514,9 @@ async function loadAssessmentAndRun(record, knex) {
   if (!assessment) return { assessment: null, run: null };
   const run = await knex('lawn_assessment_runs')
     .where({ assessment_id: assessment.id, customer_id: assessment.customer_id })
-    .first('assessment_id', 'customer_id', 'reviewed_findings', 'added_details', 'reviewed_at');
+    // `severities` and `scores_raw` ride along: the technician-find verification reads the run's per-finding levels
+    // (lawn-treatment-guide.js signalsFromAssessment), and without them a fungus or caterpillar card could never verify.
+    .first('assessment_id', 'customer_id', 'reviewed_findings', 'added_details', 'reviewed_at', 'severities', 'scores_raw');
   return { assessment, run: run || null };
 }
 
