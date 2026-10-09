@@ -1140,8 +1140,10 @@ function guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap = 
   return [...cards.filter((card) => card.kind !== 'chinch'), chinch];
 }
 
-// The sod record this sheet showed. The server freezes the report's New sod card only while it still matches.
-const sodEcho = (newSod) => (newSod?.sodLaidOn ? { sod: { laidOn: newSod.sodLaidOn, covers: newSod.covers } } : {});
+// The sod record this sheet showed, and the planned classes it held. The server freezes the report's New sod card only while it still matches.
+const sodEcho = (newSod) => (newSod?.sodLaidOn
+  ? { sod: { laidOn: newSod.sodLaidOn, covers: newSod.covers, held: (newSod.plannedHeld || []).map((entry) => entry.kind) } }
+  : {});
 
 function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as

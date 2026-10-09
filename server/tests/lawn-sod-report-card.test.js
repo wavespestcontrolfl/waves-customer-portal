@@ -51,7 +51,7 @@ function fakeTrx({ updated = 1, updateError = null, catalog = [] } = {}) {
 }
 
 // The sod record the sheet showed, as the sheet echoes it (lawnFast.sod).
-const SEEN = { laidOn: '2026-10-03', covers: 'whole' };
+const SEEN = { laidOn: '2026-10-03', covers: 'whole', held: ['fertilizer', 'weedKiller'] };
 
 const newSod = (extra = {}) => ({
   v: 1, day: 5, sodLaidOn: '2026-10-03', covers: 'whole', swap: null,
@@ -128,7 +128,7 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
       swap: { resolved: true, forProductId: PRODUCT_BAG, productId: PRODUCT_SWAP, name: SWAP_NAME },
     });
     buildLawnFastContext.mockResolvedValue(contextOf(sod, '2026-10-20'));
-    const lawnFast = { sod: { laidOn: '2026-08-01', covers: 'whole' } };
+    const lawnFast = { sod: { laidOn: '2026-08-01', covers: 'whole', held: ['preEmergent'] } };
     const applied = await run(fakeTrx().trx, { lawnFast, appliedProducts: [{ product_id: PRODUCT_SWAP.toUpperCase() }] });
     expect(applied.out).toMatchObject({ held: [{ kind: 'preEmergent', until: '2027-10-01', rootedCheck: false }], swap: { name: SWAP_NAME } });
     // The swap bag was not spread: no swap sentence.
@@ -144,7 +144,7 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
     const whole = await run(fakeTrx().trx, { appliedProducts: [{ product_id: PRODUCT_BAG }] });
     expect(whole.out.held.map((entry) => entry.kind)).toEqual(['weedKiller']);
     buildLawnFastContext.mockResolvedValue(contextOf(newSod({ covers: 'part', area: 'Back left corner' })));
-    const part = await run(fakeTrx().trx, { lawnFast: { sod: { laidOn: '2026-10-03', covers: 'part' } }, appliedProducts: [{ product_id: PRODUCT_BAG }] });
+    const part = await run(fakeTrx().trx, { lawnFast: { sod: { ...SEEN, covers: 'part' } }, appliedProducts: [{ product_id: PRODUCT_BAG }] });
     expect(part.out).toMatchObject({ covers: 'part' });
     // The office's free-text area name is never frozen for the customer.
     expect(part.out).not.toHaveProperty('area');
@@ -161,7 +161,8 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
 
   test('the sheet echoes the sod record it showed: no echo, or a record that changed since, freezes no card', async () => {
     buildLawnFastContext.mockResolvedValue(contextOf(newSod()));
-    for (const lawnFast of [{}, { sod: { laidOn: '2026-09-30', covers: 'whole' } }, { sod: { laidOn: '2026-10-03', covers: 'part' } }]) {
+    // The last one: the sheet held the weed killer too, and another visit confirmed the sod rooted since.
+    for (const lawnFast of [{}, { sod: { ...SEEN, laidOn: '2026-09-30' } }, { sod: { ...SEEN, covers: 'part' } }, { sod: { ...SEEN, held: ['fertilizer'] } }, { sod: { laidOn: SEEN.laidOn, covers: SEEN.covers } }]) {
       const { trx, writes } = fakeTrx();
       expect((await run(trx, { lawnFast })).out).toBeNull();
       expect(writes).toEqual([]);

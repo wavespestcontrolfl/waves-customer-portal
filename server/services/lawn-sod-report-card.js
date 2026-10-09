@@ -98,11 +98,6 @@ function cardOf(frozenBlock) {
   };
 }
 
-/** The frozen block off a record's structured notes, or null. */
-function frozenNewSod(structuredNotes) {
-  return validFrozen(parseJsonObject(structuredNotes)[FREEZE_KEY]);
-}
-
 /** The report payload key: only a lawn report, while the gate is live, from a valid frozen block. Absent = byte-identical payload. */
 function lawnNewSodPayload({ serviceLine, structuredNotes } = {}) {
   if (serviceLine !== 'lawn' || !featureGates.lawnNewSodReportCardLive()) return {};
@@ -114,31 +109,34 @@ function lawnNewSodPayload({ serviceLine, structuredNotes } = {}) {
 
 // What the visit held, from the sod-aware context rebuilt on `knex`, or null when nothing planned was held. Throws when
 // the sod record could not be read (the caller's savepoint rolls back).
+// What a sheet showed of the sod record, as one comparable value: the laid day, the coverage and the planned classes it held.
+const sodShownKey = ({ laidOn, covers, held } = {}) => JSON.stringify([laidOn, covers, held]);
+
 async function decideFrozen(knex, { svc, lawnFast, appliedProducts, allowGrouped }) {
   const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex, sodAware: true, allowGrouped });
-  const sod = ctx && ctx.ok && ctx.eligible ? ctx.newSod : null;
+  const sod = ctx?.ok && ctx.eligible ? ctx.newSod : null;
   if (!sod) return null;
   if (sod.unavailable || !Array.isArray(sod.plannedHeld)) throw new Error('new sod record unavailable');
-  // The card states what the technician's sheet held. The sheet echoes the sod record it showed (lawnFast.sod); a
-  // record that changed since (date or coverage), or a sheet that sent no echo, freezes no card.
-  const seen = lawnFast && lawnFast.sod;
-  if (!seen || typeof seen !== 'object' || seen.laidOn !== sod.sodLaidOn || seen.covers !== sod.covers) return null;
-  const applied = new Set((Array.isArray(appliedProducts) ? appliedProducts : []).map((row) => lowerId(row && row.product_id)).filter(Boolean));
-  const part = sod.covers === 'part';
-  // A whole-lawn class the technician applied anyway (the planned product, or another product of the same class from
-  // the sheet's search) was not held.
-  const appliedKinds = part ? new Set() : await require('./lawn-sod-sheet').appliedClassKinds(knex, appliedProducts);
+  // The card states what the technician's sheet held. The sheet echoes what it showed (lawnFast.sod); when the record
+  // or a hold decision changed since (date, coverage, the rooted check), or the sheet sent no echo, no card is frozen.
+  const now = { laidOn: sod.sodLaidOn, covers: sod.covers, held: sod.plannedHeld.map((entry) => entry.kind) };
+  if (sodShownKey(lawnFast.sod || {}) !== sodShownKey(now)) return null;
+  const applied = new Set(appliedProducts.map((row) => lowerId(row.product_id)).filter(Boolean));
+  // Whole lawn: a held class the technician applied anyway (the planned product, or another product of that class from
+  // the sheet's search) was not held, and a held line is not expected on the visit. Part of the lawn: every held line
+  // still runs on the rest of the lawn.
+  const whole = sod.covers === 'part'
+    ? { kinds: new Set(), ids: new Set(), heldIds: new Set() }
+    : { kinds: await require('./lawn-sod-sheet').appliedClassKinds(knex, appliedProducts), ids: applied, heldIds: new Set(sod.plannedHeld.flatMap((entry) => entry.productIds)) };
   const held = sod.plannedHeld
-    .filter((entry) => part || !(appliedKinds.has(entry.kind) || entry.productIds.some((id) => applied.has(id))))
+    .filter((entry) => !whole.kinds.has(entry.kind) && !entry.productIds.some((id) => whole.ids.has(id)))
     .map(({ kind, until, rootedCheck }) => ({ kind, until, rootedCheck }));
   if (!held.length) return null;
-  // Whether every other planned product went down (a held whole-lawn line is not expected; a part-of-lawn line still
-  // runs on the rest of the lawn). The card says "everything else ran as normal" only then.
-  const heldIds = new Set(part ? [] : sod.plannedHeld.flatMap((entry) => entry.productIds));
-  const planItems = Array.isArray(ctx.plannedProducts && ctx.plannedProducts.items) ? ctx.plannedProducts.items : null;
-  const planRan = !!planItems && planItems.map((item) => lowerId(item && item.productId))
-    .filter((id) => id && !heldIds.has(id)).every((id) => applied.has(id));
-  const swapped = sod.swap && sod.swap.resolved === true && applied.has(lowerId(sod.swap.productId));
+  // Whether every other planned product went down; the card says "everything else ran as normal" only then. A plan
+  // that could not be read, or a line without a product id, counts as not confirmed.
+  const planRan = (ctx.plannedProducts?.items || [{}]).map((item) => lowerId(item.productId))
+    .every((id) => whole.heldIds.has(id) || applied.has(id));
+  const swapped = sod.swap?.resolved === true && applied.has(lowerId(sod.swap.productId));
   return {
     v: 1,
     visitDay: ctx.visitDate,
@@ -177,4 +175,4 @@ async function freezeNewSodCard(trx, { svc, record, lawnFast, isIncompleteVisit,
   }
 }
 
-module.exports = { FREEZE_KEY, COPY, cardOf, frozenNewSod, lawnNewSodPayload, freezeNewSodCard };
+module.exports = { FREEZE_KEY, COPY, cardOf, lawnNewSodPayload, freezeNewSodCard };
