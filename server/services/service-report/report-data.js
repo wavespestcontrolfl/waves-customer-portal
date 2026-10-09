@@ -23,6 +23,7 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
+const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
@@ -5755,6 +5756,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
         if (banner) reportV2.banner = banner;
       }
+      // GATE_LAWN_REPORT_POLISH: the longer-cycles line, from the decision frozen at completion (lawn-longer-cycles.js).
+      attachLongerCycles(reportV2, reportFacts.frozenLongerCycles('lawn', service.structured_notes));
       // GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time. The stored light of
       // visits is read at most once per render (memoized) and ONLY for a caller that
       // opted in (opts.lawnLighting, the /data render); /ask and the PDF builder read

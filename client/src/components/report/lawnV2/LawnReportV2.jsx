@@ -921,6 +921,9 @@ const BANNER_HOLD_STATES = ['hold', 'hold_then_water_in'];
 // Where the customer adds sprinkler details (the portal's property tab): the
 // water block's "Add your watering schedule" link and the banner's invitation.
 const IRRIGATION_SETUP_HREF = '/?tab=property';
+// GATE_LAWN_REPORT_POLISH: the water card's button lands on the Irrigation section of that tab (the portal gives the
+// section id="irrigation" and scrolls to it). Used only while the payload carries water.scheduleKind (the gate is live).
+export const IRRIGATION_SECTION_HREF = '/?tab=property#irrigation';
 export function LawnWateringBanner({ banner, style = null, setupHref = IRRIGATION_SETUP_HREF }) {
   const print = usePrint();
   const printing = usePrintRequested();
@@ -1096,6 +1099,16 @@ function WaterBasisNote({ water }) {
 // The call to action under the card when the irrigation figure is missing: the weekly inches when a schedule is on
 // file (B), the watering schedule when nothing is (C). Keyed off the same effective irrOnFile as the row above, so a
 // card showing inches never claims the schedule is missing (codex P2 r4).
+// The body for state B follows what the customer gave us: watering days alone are not "minutes" (owner 2026-10-09).
+function scheduleCtaBody(water) {
+  return water.scheduleParts === 'days_only' ? POLISH_COPY.ctaBodyDaysOnly : POLISH_COPY.ctaBodyMinutes;
+}
+
+// The button's target: the Irrigation section while the gate is live (the payload carries scheduleKind), else as before.
+function scheduleCtaHref(water, href) {
+  return water.scheduleKind && href === IRRIGATION_SETUP_HREF ? IRRIGATION_SECTION_HREF : href;
+}
+
 function WaterScheduleCta({ water, irrOnFile, href }) {
   if (irrOnFile || !href) return null;
   const inches = water.scheduleKind === 'runtime_only';
@@ -1104,12 +1117,12 @@ function WaterScheduleCta({ water, irrOnFile, href }) {
       <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{inches ? POLISH_COPY.ctaTitle : 'Get a water reading built for your lawn'}</div>
       <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
         {inches
-          ? POLISH_COPY.ctaBody
+          ? scheduleCtaBody(water)
           : 'We’re estimating right now because we don’t have your watering schedule yet. Add it once and every report is tailored to exactly what your lawn gets.'}
       </div>
       <a
         data-glass-accent=""
-        href={href}
+        href={scheduleCtaHref(water, href)}
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 7,
           background: COLORS.glassNavy, color: '#fff', textDecoration: 'none',
@@ -1121,6 +1134,13 @@ function WaterScheduleCta({ water, irrOnFile, href }) {
       </a>
     </div>
   );
+}
+
+// GATE_LAWN_REPORT_POLISH: the longer-cycles advice, one fixed sentence, once, only when the server sets
+// water.longerCycles (3 or more watering days on file, no banner / weekly plan / after-visit watering note, no new sod).
+function LongerCyclesLine({ water }) {
+  if (water.longerCycles !== true) return null;
+  return <div data-testid="lawn-water-longer-cycles" style={{ marginTop: 12, fontSize: 14, color: BODY, lineHeight: 1.5 }}>{POLISH_COPY.longerCyclesLine}</div>;
 }
 
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
@@ -1304,6 +1324,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
       {/* Keyed off the same effective irrOnFile as the row above — a card
           showing `Irrigation 1.25"` must not also claim "we don't have your
           watering schedule yet" (codex P2 r4). */}
+      <LongerCyclesLine water={water} />
       <WaterScheduleCta water={water} irrOnFile={irrOnFile} href={irrigationHref} />
     </Card>
   );

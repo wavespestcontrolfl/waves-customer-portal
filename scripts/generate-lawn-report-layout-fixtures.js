@@ -18,6 +18,8 @@
  *
  *   mixed     rotor + spray + drip heads, 45 min, Mondays, no weekly inches: the third state ("45 min, Mondays")
  *   single    one rotor head type (plus drip), 45 min, Mondays: a derived figure with its basis line
+ *   fourday   spray heads only, 15 min on four days, one spray product, no banner: a derived figure and the longer-cycles line
+ *   nothing   no irrigation entries at all: today's card ("Not on file"), the button moved to the Irrigation section
  *   (both visits carry a granule watered in, a spray and a surfactant, so the product cards show the label lines)
  *
  * Each is written twice: `<name>-off.json` (the payload with the layout gate off) and
@@ -52,6 +54,7 @@ const facts = require('../server/services/service-report/lawn-report-facts');
 const { buildLawnWaterContext } = require('../server/services/service-report/report-data');
 const { mapWater } = require('../server/services/service-report/lawn-report-v2');
 const { lawnPolishPayload } = require('../server/services/service-report/lawn-report-polish');
+const { waterAdviceBlock, attachLongerCycles } = require('../server/services/service-report/lawn-longer-cycles');
 
 const COMPLETED_AT = '2026-10-09T14:56:39.602Z';
 const VISIT_DAY = '2026-10-09';
@@ -252,13 +255,22 @@ function realWater(prefs, polish) {
   return water;
 }
 
-function polishVisit(base, { heads, polish }) {
+// The scenarios: the customer's portal entries and the products on the visit.
+const SPRAY_ONLY = [CATALOG[1]];
+const entries = (extra) => ({ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system: true, ...extra });
+const POLISH_SPECS = {
+  mixed: { catalog: CATALOG, prefs: entries({ irrigation_system_type: ['rotor', 'spray', 'drip'] }) },
+  single: { catalog: CATALOG, prefs: entries({ irrigation_system_type: ['rotor', 'drip'] }) },
+  fourday: { catalog: SPRAY_ONLY, prefs: entries({ irrigation_run_minutes: 15, watering_days: ['Mon', 'Tue', 'Thu', 'Fri'], irrigation_system_type: ['spray'] }) },
+  nothing: { catalog: CATALOG, prefs: null },
+};
+
+function polishVisit(base, { catalog, prefs, polish }) {
   const data = clone(base);
   setVisitDate(data);
   setPlan(data);
-  const prefs = { irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: heads, irrigation_system: true };
-  setTreatment(data, CATALOG.map((item) => ({ name: item.name, activeIngredient: '', kind: 'fertilizer', focus: item.category, whatItDoes: '', targets: [], area: '4,800 sq ft' })));
-  data.applications = CATALOG.map((item) => {
+  setTreatment(data, catalog.map((item) => ({ name: item.name, activeIngredient: '', kind: 'fertilizer', focus: item.category, whatItDoes: '', targets: [], area: '4,800 sq ft' })));
+  data.applications = catalog.map((item) => {
     const app = clone(base.applications[0]);
     return {
       ...app,
@@ -270,27 +282,33 @@ function polishVisit(base, { heads, polish }) {
   });
   data.reportV2.mowing = null;
   data.reportV2.water = realWater(prefs, polish);
-  attachBanner(data, CATALOG.map((item) => ({ name: item.name, rule: item.rule })), {
-    runtime: { runMinutes: 45, wateringDays: ['Mon'], headTypes: heads, explicitInchesPerWeek: null },
+  attachBanner(data, catalog.map((item) => ({ name: item.name, rule: item.rule })), {
+    runtime: prefs ? { runMinutes: prefs.irrigation_run_minutes, wateringDays: prefs.watering_days, headTypes: prefs.irrigation_system_type, explicitInchesPerWeek: null } : null,
   });
-  // The facts block the lawn write gate freezes at completion (the label-lines part only while the gate is live), then
-  // the same read-back the report build does: the re-entry condition and the one-line precaution of each card.
-  const block = facts.buildReportFacts({ rows: CATALOG.map(factRow), run: null, assessment: null, techFindings: [], withTies: false, withLabelLines: polish, now: NOW });
+  // The facts block the lawn write gate freezes at completion (the label-lines and longer-cycles parts only while the
+  // gate is live), then the same read-back the report build does: the re-entry condition, the one-line precaution of
+  // each card, and the longer-cycles line (render-time conditions included).
+  const prefsRow = prefs ? { ...prefs, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null } : null;
+  const block = facts.buildReportFacts({
+    rows: catalog.map(factRow), run: null, assessment: null, techFindings: [], withTies: false, withLabelLines: polish,
+    waterAdvice: polish ? waterAdviceBlock(prefsRow, VISIT_DAY) : null, now: NOW,
+  });
   const notes = { [facts.FREEZE_KEY]: block };
   const drops = facts.frozenLabelDropsFor('lawn', JSON.stringify(notes));
   data.applications.forEach((app) => { app.product.precaution_summary = facts.precautionForCard(drops, { id: app.id }, app.product.precaution_summary); });
+  attachLongerCycles(data.reportV2, facts.frozenLongerCycles('lawn', JSON.stringify(notes)));
   const reentry = buildReentryContextFromRecord({
-    applications: [{ appliedAt: COMPLETED_AT, application_method: 'granular_broadcast' }],
+    applications: [{ appliedAt: COMPLETED_AT, application_method: catalog[0].method }],
     structured_notes: JSON.stringify(notes),
     timezone: 'America/New_York',
   }, NOW);
   return finish(data, { reentry });
 }
 
-function writePolish(name, base, heads) {
+function writePolish(name, base) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const polish of [false, true]) {
-    const data = polishVisit(base, { heads, polish });
+    const data = polishVisit(base, { ...POLISH_SPECS[name], polish });
     process.env.GATE_LAWN_REPORT_LAYOUT = 'true';
     if (polish) process.env.GATE_LAWN_REPORT_POLISH = 'true';
     const out = {
@@ -309,8 +327,7 @@ function main() {
   write('spot', spot(base));
   write('granular', granular(base));
   write('clean', clean(base));
-  writePolish('mixed', base, ['rotor', 'spray', 'drip']);
-  writePolish('single', base, ['rotor', 'drip']);
+  Object.keys(POLISH_SPECS).forEach((name) => writePolish(name, base));
   process.stdout.write(`Wrote fixtures to ${path.relative(ROOT, OUT_DIR)}\n`);
   process.exit(0);
 }

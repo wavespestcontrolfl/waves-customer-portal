@@ -5,10 +5,14 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
+import { pageCarriesInstruction } from '../components/report/lawnV2/lawnLayoutRules';
 import mixedBase from './__fixtures__/lawn-layout/mixed-base.json';
 import mixedPolish from './__fixtures__/lawn-layout/mixed-polish.json';
 import singleBase from './__fixtures__/lawn-layout/single-base.json';
 import singlePolish from './__fixtures__/lawn-layout/single-polish.json';
+import fourdayBase from './__fixtures__/lawn-layout/fourday-base.json';
+import fourdayPolish from './__fixtures__/lawn-layout/fourday-polish.json';
+import nothingPolish from './__fixtures__/lawn-layout/nothing-polish.json';
 import granularOff from './__fixtures__/lawn-layout/granular-off.json';
 import granularOn from './__fixtures__/lawn-layout/granular-on.json';
 
@@ -69,7 +73,7 @@ describe('the Water card, three states, on the real page', () => {
     expect(text(container)).not.toContain('Not on file');
     expect(text(container)).not.toContain('Add your watering schedule');
     expect(text(container)).toContain('Weekly inches not on file');
-    expect(text(container)).toContain('Add your weekly inches →');
+    expect(text(container)).toContain('Add your weekly inches in your portal →');
     // the banner and the card now say the same thing about the same schedule
     expect(text(container)).toContain('Run spray zones about 30 minutes and rotor zones about 80 minutes.');
     expect(screen.getByTestId('lawn-watering-banner')).toBeInTheDocument();
@@ -182,5 +186,51 @@ describe('the status card keep-off line', () => {
     const hero = container.querySelector('#service-status').textContent;
     expect(hero).toContain('Ready to walk on');
     expect(hero).toContain(KEEP_OFF);
+  });
+});
+
+describe('the Water card buttons and the longer-cycles line, on the real page', () => {
+  const LINE = 'Short runs on several days wet only the top of the soil. Put the same water into fewer, longer runs on your allowed watering days and it reaches the roots.';
+  const cta = (container) => container.querySelector('.lawn-water-cta a');
+
+  it('state B: the approved body and button, aimed at the Irrigation section', async () => {
+    const { container } = renderReport(clone(mixedPolish));
+    await waitForReport();
+    expect(text(container)).toContain('We have your sprinkler schedule on file but we can’t turn the minutes into inches on our own.');
+    expect(cta(container)).toHaveAttribute('href', '/?tab=property#irrigation');
+  });
+
+  it('state C: today\'s words, the button aimed at the Irrigation section', async () => {
+    const { container } = renderReport(clone(nothingPolish));
+    await waitForReport();
+    expect(text(container)).toContain('we don’t have your watering schedule yet');
+    expect(cta(container)).toHaveTextContent('Add your watering schedule →');
+    expect(cta(container)).toHaveAttribute('href', '/?tab=property#irrigation');
+  });
+
+  it('15 min on four days, spray only: the line prints once, on the Water card only', async () => {
+    const { container } = renderReport(clone(fourdayPolish));
+    await waitForReport();
+    expect(text(container).split(LINE)).toHaveLength(2);
+    const water = [...container.querySelectorAll('section')].find((el) => el.textContent.includes('Water This Week'));
+    expect(water).toHaveTextContent(LINE);
+    expect(screen.getByTestId('lawn-water-longer-cycles').closest('section')).toBe(water);
+    // it is advice about the standing schedule, not a step after the visit: the layout's "nothing to do" decision is the
+    // same with and without the line
+    const plain = clone(fourdayPolish);
+    delete plain.reportV2.water.longerCycles;
+    expect(pageCarriesInstruction(fourdayPolish, Date.now())).toBe(pageCarriesInstruction(plain, Date.now()));
+  });
+
+  it('gate off: no line, and the card is the old one', async () => {
+    const { container } = renderReport(clone(fourdayBase));
+    await waitForReport();
+    expect(text(container)).not.toContain(LINE);
+  });
+
+  it('a visit with a water-in banner or a one-day schedule carries no line', async () => {
+    const { container } = renderReport(clone(mixedPolish));
+    await waitForReport();
+    expect(text(container)).not.toContain(LINE);
   });
 });

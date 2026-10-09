@@ -159,9 +159,7 @@
       "rootCause": "The dry-looking areas are most likely uneven sprinkler coverage plus mowing a notch too short — not the whole lawn needing more water.",
       "seasonalNote": "It’s peak heat-and-pest season for your St. Augustine lawn in Southwest Florida — some edge stress and faster drying are normal this time of year, and we’re watching for it.",
       "todaysFocus": [
-        "Fertilizer",
-        "Fungicide",
-        "Surfactant"
+        "Fungicide"
       ],
       "watching": [
         "A thinning strip along the driveway edge",
@@ -174,7 +172,7 @@
         "label": "Friday, October 23",
         "source": "scheduled"
       },
-      "treatmentSummary": "Today we applied LESCO Dimension 0.21% 18-0-10 and Gravex 20 EW and LESCO 90/10 Nonionic Surfactant."
+      "treatmentSummary": "Today we applied Gravex 20 EW."
     },
     "diagnosis": [
       {
@@ -255,33 +253,21 @@
     ],
     "water": {
       "rainInches": 1.2,
-      "irrigationInches": null,
-      "totalInches": 1.2,
+      "irrigationInches": 1.5,
+      "totalInches": 2.7,
       "targetInches": 1,
-      "status": "unknown",
-      "confidence": "low",
-      "explanation": "We have your sprinkler schedule on file (45 min, Mondays), but not your weekly inches, so we can’t weigh this week’s water against about 1\"/wk.",
+      "status": "high",
+      "confidence": "high",
+      "explanation": "Your weekly water (rain + irrigation) is running above about 1\"/wk. Easing back on irrigation should help reduce fungus, mushrooms, and weed pressure.",
       "source": "irrigation_advice",
       "rainProvider": "open_meteo",
-      "scheduleOnFile": false,
+      "scheduleOnFile": true,
       "scheduleUnconfirmed": false,
-      "weekPlan": null,
-      "scheduleKind": "runtime_only",
-      "scheduleText": "45 min, Mondays",
-      "scheduleParts": "minutes_and_days"
+      "weekPlan": null
     },
     "mowing": null,
     "treatment": {
       "products": [
-        {
-          "name": "LESCO Dimension 0.21% 18-0-10",
-          "activeIngredient": "",
-          "kind": "fertilizer",
-          "focus": "Fertilizer",
-          "whatItDoes": "",
-          "targets": [],
-          "area": "4,800 sq ft"
-        },
         {
           "name": "Gravex 20 EW",
           "activeIngredient": "",
@@ -290,25 +276,12 @@
           "whatItDoes": "",
           "targets": [],
           "area": "4,800 sq ft"
-        },
-        {
-          "name": "LESCO 90/10 Nonionic Surfactant",
-          "activeIngredient": "",
-          "kind": "fertilizer",
-          "focus": "Surfactant",
-          "whatItDoes": "",
-          "targets": [],
-          "area": "4,800 sq ft"
         }
       ],
       "focus": [
-        "Fertilizer",
-        "Fungicide",
-        "Surfactant"
+        "Fungicide"
       ],
       "kinds": [
-        "fertilizer",
-        "fertilizer",
         "fertilizer"
       ]
     },
@@ -358,17 +331,11 @@
     ],
     "progressionNote": null,
     "aftercare": {
-      "watering": "Water in today’s treatment by Sat 10 AM. Run spray zones about 30 minutes and rotor zones about 80 minutes. Run it even if it is not your usual day.",
-      "reentry": "Stay off treated areas until the product has been watered in and the turf is dry.",
-      "waterInRequired": true,
-      "wateringHold": false,
-      "creditableWaterIn": true,
-      "needsReview": false,
-      "neutral": false,
-      "evidenceSource": "product_instruction",
-      "ruleSource": "label",
-      "holdUntil": null,
-      "waterInBy": "2026-10-10T14:00:00.000Z"
+      "watering": "No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.",
+      "reentry": "Stay off treated areas until the application has dried.",
+      "waterInRequired": false,
+      "neutral": true,
+      "ruleSource": "label"
     },
     "smsSummary": "Your St. Augustine lawn report is ready: stable — watching thin areas. Raise the mower one setting and check sprinkler coverage by the driveway.",
     "trends": {
@@ -448,63 +415,25 @@
       ]
     },
     "banner": {
-      "state": "water_in",
+      "state": "none",
       "lines": [
-        "Water in today’s treatment by Sat 10 AM.",
-        "Run spray zones about 30 minutes and rotor zones about 80 minutes.",
-        "Run it even if it is not your usual day."
+        "No watering change from today’s treatment."
       ],
       "holdUntil": null,
-      "waterInBy": "2026-10-10T14:00:00.000Z",
-      "expiresAt": "2026-10-10T14:00:00.000Z",
+      "waterInBy": null,
+      "expiresAt": null,
       "ruleSource": "label"
     },
     "lead": {
       "headline": "Stable — watching thin areas",
       "why": null,
-      "applied": "Today we applied LESCO Dimension 0.21% 18-0-10 and Gravex 20 EW, with a surfactant added so the treatment coats the foliage evenly.",
+      "applied": "Today we applied Gravex 20 EW.",
       "yourPart": [],
       "next": "We'll re-check the thinning strip along the driveway on your next visit to confirm the chinch bug treatment held before summer peaks.",
       "whatToExpect": "This is a protective treatment, so nothing changes visibly. It helps protect the turf through wet, humid stretches. By your next visit, success is no new outbreak through the wet stretch."
     }
   },
   "applications": [
-    {
-      "id": "polish-row-granule",
-      "product": {
-        "catalogId": "20ed4820-22ce-4aa0-a18b-c8f81744dc38",
-        "name": "LESCO Dimension 0.21% 18-0-10",
-        "epa_reg": "N/A",
-        "active_ingredient": "Potassium chelate",
-        "category": "Fertilizer",
-        "product_type": null,
-        "manufacturer": null,
-        "public_summary": null,
-        "service_report_summary": null,
-        "precaution_summary": "Granules on sidewalks or driveways are swept back into the turf. Water in with about ½ inch within 24 hours.",
-        "reentry_summary": "Stay off treated areas until the product has been watered in and the turf is dry.",
-        "irrigation_notes": null,
-        "label_verified_at": null,
-        "label_version": null,
-        "facts_approved": true
-      },
-      "method": "granular_broadcast",
-      "methodLabel": "Broadcast spray",
-      "zone_ids": [
-        "default-zone-1",
-        "default-zone-2",
-        "default-zone-3"
-      ],
-      "rate": "3.000",
-      "rateUnit": "fl_oz",
-      "totalAmount": "45.000",
-      "amountUnit": "fl_oz",
-      "applicationArea": null,
-      "areaValue": "4500.00",
-      "areaUnit": "sqft",
-      "targets": [],
-      "appliedAt": "2026-10-09T14:56:39.602Z"
-    },
     {
       "id": "polish-row-spray",
       "product": {
@@ -517,43 +446,7 @@
         "manufacturer": null,
         "public_summary": null,
         "service_report_summary": null,
-        "precaution_summary": null,
-        "reentry_summary": "Stay off treated areas until the application has dried.",
-        "irrigation_notes": null,
-        "label_verified_at": null,
-        "label_version": null,
-        "facts_approved": true
-      },
-      "method": "broadcast_spray",
-      "methodLabel": "Broadcast spray",
-      "zone_ids": [
-        "default-zone-1",
-        "default-zone-2",
-        "default-zone-3"
-      ],
-      "rate": "3.000",
-      "rateUnit": "fl_oz",
-      "totalAmount": "45.000",
-      "amountUnit": "fl_oz",
-      "applicationArea": null,
-      "areaValue": "4500.00",
-      "areaUnit": "sqft",
-      "targets": [],
-      "appliedAt": "2026-10-09T14:56:39.602Z"
-    },
-    {
-      "id": "polish-row-surfactant",
-      "product": {
-        "catalogId": "20ed4820-22ce-4aa0-a18b-c8f81744dc38",
-        "name": "LESCO 90/10 Nonionic Surfactant",
-        "epa_reg": "N/A",
-        "active_ingredient": "Potassium chelate",
-        "category": "Surfactant",
-        "product_type": null,
-        "manufacturer": null,
-        "public_summary": null,
-        "service_report_summary": null,
-        "precaution_summary": "Used only as part of a spray mix — the precautions of the products it is mixed with apply.",
+        "precaution_summary": "Per the product label: keep people and pets off treated areas until sprays have dried.",
         "reentry_summary": "Stay off treated areas until the application has dried.",
         "irrigation_notes": null,
         "label_verified_at": null,
@@ -1484,13 +1377,13 @@
       "displayTimezone": "America/New_York",
       "targets": [],
       "condition": {
-        "rule": "watered_in_and_dry",
-        "text": "Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing.",
+        "rule": "dry",
+        "text": "Ready to walk on once the application has dried — your technician confirms timing.",
         "pets": "Keep people and pets off the lawn until then.",
-        "statusLabel": "After watering in"
+        "statusLabel": "Once dry"
       },
       "petAdvisory": "Keep people and pets off the lawn until then.",
-      "customerSummary": "Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing."
+      "customerSummary": "Ready to walk on once the application has dried — your technician confirms timing."
     }
   },
   "planSummary": {
@@ -1515,6 +1408,5 @@
       "maxInches": 4,
       "grassLabel": "St. Augustine"
     }
-  },
-  "lawnPolish": true
+  }
 }

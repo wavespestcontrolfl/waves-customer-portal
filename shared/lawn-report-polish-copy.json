@@ -1,7 +1,9 @@
 {
-  "_note": "Fixed customer sentences for the lawn report polish (GATE_LAWN_REPORT_POLISH): the Water card's third state (a sprinkler schedule on file, no weekly inches). Read by the web report (LawnReportV2.jsx WaterScheduleCta, irrigationConfidenceLabel) and screened by server/tests/lawn-report-polish.test.js with the same customer-copy rules every report sentence passes. The schedule row (\"45 min, Mondays\"), the basis line of a derived figure and the Ask Waves explanation are built by server/services/service-report/lawn-report-polish.js from the customer's own entries.",
+  "_note": "Fixed customer sentences for the lawn report polish (GATE_LAWN_REPORT_POLISH), owner-approved 2026-10-09. The Water card's third state (a sprinkler schedule on file, no weekly inches): confidenceLabel, ctaTitle, ctaBody* (the minutes variant when run minutes are on file, the days-only variant when only watering days are), ctaButton. longerCyclesLine: the one advice sentence on the Water This Week card (3 or more watering days on file; see server/services/service-report/lawn-longer-cycles.js). Read by the web report (LawnReportV2.jsx) and screened by server/tests/lawn-report-polish.test.js with the same customer-copy rules every report sentence passes. The schedule row (\"45 min, Mondays\"), the basis line of a derived figure and the Ask Waves explanation are built by server/services/service-report/lawn-report-polish.js from the customer's own entries.",
   "confidenceLabel": "Weekly inches not on file",
   "ctaTitle": "Tell us your weekly inches",
-  "ctaBody": "We can’t turn your sprinkler minutes into weekly inches yet. If you know how many inches a week your system puts down, add it once and this card shows your full weekly water.",
-  "ctaButton": "Add your weekly inches →"
+  "ctaBodyMinutes": "We have your sprinkler schedule on file but we can’t turn the minutes into inches on our own. Add your weekly inches once under Irrigation in My Property and this card shows your rain and sprinkler water together.",
+  "ctaBodyDaysOnly": "We have your watering days on file but we can’t turn them into inches on our own. Add your weekly inches once under Irrigation in My Property and this card shows your rain and sprinkler water together.",
+  "ctaButton": "Add your weekly inches in your portal →",
+  "longerCyclesLine": "Short runs on several days wet only the top of the soil. Put the same water into fewer, longer runs on your allowed watering days and it reaches the roots."
 }

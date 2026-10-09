@@ -105,17 +105,17 @@ describe('the label-line half needs the facts gate; the Water card half does not
     if (factsOn) process.env[FACTS] = 'true'; else delete process.env[FACTS];
   };
 
-  test('truth table: lawnReportLabelLinesLive() = polish AND facts, strict true', () => {
+  test('truth table: lawnReportPolishFreezeLive() = polish AND facts, strict true', () => {
     const rows = [[false, false, false], [true, false, false], [false, true, false], [true, true, true]];
-    rows.forEach(([p, f, want]) => { set(p, f); expect(featureGates.lawnReportLabelLinesLive()).toBe(want); });
+    rows.forEach(([p, f, want]) => { set(p, f); expect(featureGates.lawnReportPolishFreezeLive()).toBe(want); });
     process.env[GATE] = '1'; process.env[FACTS] = 'true';
-    expect(featureGates.lawnReportLabelLinesLive()).toBe(false);
+    expect(featureGates.lawnReportPolishFreezeLive()).toBe(false);
   });
 
   test('polish alone (facts dark): the Water card and status key still work', () => {
     set(true, false);
     expect(featureGates.lawnReportPolishLive()).toBe(true);
-    expect(featureGates.lawnReportLabelLinesLive()).toBe(false);
+    expect(featureGates.lawnReportPolishFreezeLive()).toBe(false);
     const water = mapWater(buildLawnWaterContext({ propertyPrefs: { irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['rotor', 'spray'], irrigation_system: true }, serviceDate: '2026-10-09', completionRainfall7dInches: 1.2 }));
     expect(water.scheduleKind).toBe('runtime_only');
     expect(polish.lawnPolishPayload({ serviceLine: 'lawn', reportV2: {} })).toEqual({ lawnPolish: true });
@@ -307,6 +307,125 @@ describe('state B says which parts of the schedule are on file', () => {
   });
 });
 
+describe('the longer-cycles line: the completion-time decision', () => {
+  const longer = require('../services/service-report/lawn-longer-cycles');
+  const days = (n) => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].slice(0, n);
+  const prefs = (extra) => ({ irrigation_system: true, watering_days: days(3), sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null, ...extra });
+  const decide = (extra, visit = '2026-10-08') => longer.longerCyclesDecision(prefs(extra), visit);
+
+  test.each([[0, false], [1, false], [2, false], [3, true], [4, true], [7, true]])('%i watering days on file: %s', (n, want) => {
+    expect(decide({ watering_days: days(n) })).toBe(want);
+  });
+
+  test('days unknown, a toggle that switched irrigation off, and no prefs row: no line', () => {
+    expect(decide({ watering_days: null })).toBe(false);
+    expect(decide({ watering_days: 'not a list' })).toBe(false);
+    expect(decide({ irrigation_system: false })).toBe(false);
+    expect(longer.longerCyclesDecision(null, '2026-10-08')).toBe(false);
+  });
+
+  test('the same day listed twice counts once', () => {
+    expect(decide({ watering_days: ['Mon', 'Mon', 'Tue'] })).toBe(false);
+  });
+
+  test('new sod: a prefs row without the sod columns, a fresh record, an unrooted one, a part record and an unreadable one all say no', () => {
+    const noColumns = { irrigation_system: true, watering_days: days(3) };
+    expect(longer.longerCyclesDecision(noColumns, '2026-10-08')).toBe(false);
+    expect(decide({ sod_laid_on: '2026-09-28', sod_covers: 'whole' })).toBe(false); // day 11
+    expect(decide({ sod_laid_on: '2026-08-01', sod_covers: 'whole' })).toBe(false); // past day 30, no rooted check yet
+    expect(decide({ sod_laid_on: '2026-08-01', sod_covers: 'part', sod_area: 'front strip' })).toBe(false);
+    expect(decide({ sod_laid_on: 'not a date' })).toBe(false);
+    expect(decide({ sod_laid_on: '2026-10-20' })).toBe(false); // the visit is before the sod went down
+  });
+
+  test('new sod that is rooted (past day 30 and confirmed) and no sod record: the line may print', () => {
+    expect(decide({ sod_laid_on: '2026-08-01', sod_covers: 'whole', sod_rooted_on: '2026-09-10' })).toBe(true);
+    expect(decide({ sod_laid_on: '2026-09-20', sod_covers: 'whole', sod_rooted_on: '2026-09-30' })).toBe(false); // still inside day 30
+    expect(decide({ sod_laid_on: null })).toBe(true);
+  });
+
+  test('the frozen block is { v: 1, longerCycles }', () => {
+    expect(longer.waterAdviceBlock(prefs(), '2026-10-08')).toEqual({ v: 1, longerCycles: true });
+    expect(longer.waterAdviceBlock(prefs({ watering_days: days(1) }), '2026-10-08')).toEqual({ v: 1, longerCycles: false });
+  });
+});
+
+describe('the longer-cycles line: the render-time conditions', () => {
+  const longer = require('../services/service-report/lawn-longer-cycles');
+  const clear = () => ({ water: { scheduleOnFile: true }, aftercare: { neutral: true, watering: 'No special watering is needed.' } });
+  const field = (frozen, mutate) => { const v2 = clear(); if (mutate) mutate(v2); return longer.longerCyclesField(frozen, v2); };
+
+  test('frozen true and nothing else on the visit: it prints', () => {
+    expect(field(true)).toEqual({ longerCycles: true });
+  });
+
+  test('a banner that asks for nothing ("No watering change", or a mow hold alone) does not stop the line', () => {
+    expect(field(true, (v2) => { v2.banner = { state: 'none', lines: ['No watering change from today\u2019s treatment.'], expiresAt: null }; })).toEqual({ longerCycles: true });
+    expect(field(true, (v2) => { v2.banner = { state: null, lines: [], mowHold: { until: '2026-10-10' } }; })).toEqual({ longerCycles: true });
+  });
+
+  test('not frozen true: never', () => {
+    [false, null, undefined, 'true', 1].forEach((frozen) => expect(field(frozen)).toEqual({}));
+  });
+
+  test.each([
+    ['a water-in banner', (v2) => { v2.banner = { state: 'water_in', lines: ['Water in today.'] }; }],
+    ['a hold banner', (v2) => { v2.banner = { state: 'hold', lines: ['Hold watering.'] }; }],
+    ['a hold-then-water-in banner, even one whose clock has run out', (v2) => { v2.banner = { state: 'hold_then_water_in', lines: ['x'], expiresAt: '2020-01-01T00:00:00Z' }; }],
+    ['the weekly watering plan on the card', (v2) => { v2.water.weekPlan = { title: 'This week: about 30 minutes per zone' }; }],
+    ['an after-visit watering note', (v2) => { v2.aftercare = { neutral: false, watering: 'Water in today\u2019s application.' }; }],
+    ['a withheld schedule after a move', (v2) => { v2.water.scheduleUnconfirmed = true; }],
+  ])('%s: never', (_label, mutate) => {
+    expect(field(true, mutate)).toEqual({});
+  });
+
+  test('no water card: nothing (and no throw)', () => {
+    expect(longer.longerCyclesField(true, { aftercare: null })).toEqual({});
+    expect(longer.longerCyclesField(true, null)).toEqual({});
+  });
+
+  test('the sentence is fixed text, passes the customer-copy rules, and names no weekday, count, minutes or restriction number', () => {
+    expect(customerCopyViolations(COPY.longerCyclesLine)).toEqual([]);
+    expect(COPY.longerCyclesLine).not.toMatch(/\d|monday|tuesday|wednesday|thursday|friday|saturday|sunday|minute|\bsafe\b|\bwill\b|within|guarantee/i);
+    // it asks for FEWER runs on the ALLOWED days, so it agrees with any watering-restriction policy
+    expect(COPY.longerCyclesLine).toMatch(/fewer, longer runs on your allowed watering days/);
+  });
+});
+
+describe('the longer-cycles line on the real report builder (in-memory reader)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    require('../services/llm/call').dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+  });
+  const withFacts = (waterAdvice) => ({
+    ...lawnService(),
+    structured_notes: JSON.stringify({ lawnReportFacts: { v: 1, frozenAt: '2026-10-08T18:41:00Z', productUse: {}, ...(waterAdvice ? { waterAdvice } : {}) } }),
+  });
+  const water = async (service) => (await buildReportV1Data(service, 'tok-polish', makeKnex(fixtures()), {})).reportV2.water;
+
+  test('a record frozen with longerCycles true prints it, whatever the gates say (the gate controls only the freeze)', async () => {
+    gateOff();
+    expect((await water(withFacts({ v: 1, longerCycles: true }))).longerCycles).toBe(true);
+    gateOn();
+    expect((await water(withFacts({ v: 1, longerCycles: true }))).longerCycles).toBe(true);
+  });
+
+  test('a record frozen false, with no waterAdvice, with no block at all, or with a hand-edited block: no key', async () => {
+    for (const service of [withFacts({ v: 1, longerCycles: false }), withFacts(null), lawnService(), withFacts({ v: 2, longerCycles: true }), withFacts({ v: 1, longerCycles: 'true' })]) {
+      expect(await water(service)).not.toHaveProperty('longerCycles');
+    }
+  });
+
+  test('gate off and no block: the water card is exactly what it was (no new key)', async () => {
+    gateOff();
+    const card = await water(lawnService());
+    ['longerCycles', 'scheduleKind', 'scheduleParts'].forEach((key) => expect(card).not.toHaveProperty(key));
+  });
+});
+
 describe('Ask Waves reads the third state', () => {
   const askFacts = (water) => buildReportAskFacts({ data: { serviceLine: 'lawn', applications: [], reportV2: { water } } }).lawn_report.water_this_week;
 
@@ -326,7 +445,7 @@ describe('Ask Waves reads the third state', () => {
 
 describe('the fixed customer sentences', () => {
   const sentences = [
-    COPY.confidenceLabel, COPY.ctaTitle, COPY.ctaBody, COPY.ctaButton,
+    COPY.confidenceLabel, COPY.ctaTitle, COPY.ctaBodyMinutes, COPY.ctaBodyDaysOnly, COPY.ctaButton, COPY.longerCyclesLine,
     '45 min, Mondays', '45 min, Mondays and Thursdays', '45 min', 'Mondays',
     'About 0.28" a week from 45 minutes per zone, 1 day a week on rotor heads — typical head rates.',
   ];

@@ -260,15 +260,12 @@
       "targetInches": 1,
       "status": "unknown",
       "confidence": "low",
-      "explanation": "We have your sprinkler schedule on file (45 min, Mondays), but not your weekly inches, so we can’t weigh this week’s water against about 1\"/wk.",
+      "explanation": "We don’t have your irrigation schedule on file yet. The seasonal target for your lawn is about 1\"/wk.",
       "source": "irrigation_advice",
       "rainProvider": "open_meteo",
       "scheduleOnFile": false,
       "scheduleUnconfirmed": false,
-      "weekPlan": null,
-      "scheduleKind": "runtime_only",
-      "scheduleText": "45 min, Mondays",
-      "scheduleParts": "minutes_and_days"
+      "weekPlan": null
     },
     "mowing": null,
     "treatment": {
@@ -358,7 +355,7 @@
     ],
     "progressionNote": null,
     "aftercare": {
-      "watering": "Water in today’s treatment by Sat 10 AM. Run spray zones about 30 minutes and rotor zones about 80 minutes. Run it even if it is not your usual day.",
+      "watering": "Water in today’s treatment by Sat 10 AM. Run spray heads about 30 minutes a zone and rotors about 80 minutes. Run it even if it is not your usual day.",
       "reentry": "Stay off treated areas until the product has been watered in and the turf is dry.",
       "waterInRequired": true,
       "wateringHold": false,
@@ -451,7 +448,7 @@
       "state": "water_in",
       "lines": [
         "Water in today’s treatment by Sat 10 AM.",
-        "Run spray zones about 30 minutes and rotor zones about 80 minutes.",
+        "Run spray heads about 30 minutes a zone and rotors about 80 minutes.",
         "Run it even if it is not your usual day."
       ],
       "holdUntil": null,
@@ -481,7 +478,7 @@
         "manufacturer": null,
         "public_summary": null,
         "service_report_summary": null,
-        "precaution_summary": "Granules on sidewalks or driveways are swept back into the turf. Water in with about ½ inch within 24 hours.",
+        "precaution_summary": "Granules on sidewalks or driveways are swept back into the turf. Water in with about ½ inch within 24 hours. People and pets can use the lawn once it has been watered in and the turf is dry.",
         "reentry_summary": "Stay off treated areas until the product has been watered in and the turf is dry.",
         "irrigation_notes": null,
         "label_verified_at": null,
@@ -517,7 +514,7 @@
         "manufacturer": null,
         "public_summary": null,
         "service_report_summary": null,
-        "precaution_summary": null,
+        "precaution_summary": "Per the product label: keep people and pets off treated areas until sprays have dried.",
         "reentry_summary": "Stay off treated areas until the application has dried.",
         "irrigation_notes": null,
         "label_verified_at": null,
@@ -1515,6 +1512,5 @@
       "maxInches": 4,
       "grassLabel": "St. Augustine"
     }
-  },
-  "lawnPolish": true
+  }
 }

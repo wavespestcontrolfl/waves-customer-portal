@@ -7659,10 +7659,27 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 // =========================================================================
 // MY PROPERTY TAB — access codes, pets, scheduling, irrigation, HOA
 // =========================================================================
-function PropertySection({ title, icon = 'document', summary, defaultOpen, children, aside }) {
+// Arriving at /?tab=property#<id> (the lawn report's "Add your weekly inches" button points at #irrigation) brings that
+// section into view. The sections mount only after the tab's data has loaded, so the first scroll happens on mount;
+// the cards above load a little later (the weekly plan), so one more scroll follows only if the section moved away.
+function useScrollToHashSection(id) {
+  useEffect(() => {
+    if (!id || typeof window === 'undefined' || window.location.hash !== `#${id}`) return undefined;
+    const scroll = () => document.getElementById(id)?.scrollIntoView?.({ behavior: 'auto', block: 'start' });
+    scroll();
+    const timer = setTimeout(() => {
+      const top = document.getElementById(id)?.getBoundingClientRect?.().top;
+      if (Number.isFinite(top) && Math.abs(top) > 120) scroll();
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [id]);
+}
+
+function PropertySection({ id, title, icon = 'document', summary, defaultOpen, children, aside }) {
   const [open, setOpen] = useState(defaultOpen !== false);
+  useScrollToHashSection(id);
   return (
-    <section data-glass="card" style={{
+    <section id={id} data-glass="card" style={{
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
@@ -8868,7 +8885,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         </div>
       </PropertySection>
 
-      <PropertySection title="Irrigation" icon="droplet" summary={irrigationSummary}>
+      <PropertySection id="irrigation" title="Irrigation" icon="droplet" summary={irrigationSummary}>
         {/* Irrigation is on by default (owner ruling 2026-08-27) — no toggle;
             the fields are always available. The server stamps
             irrigation_system=true on any irrigation write. */}

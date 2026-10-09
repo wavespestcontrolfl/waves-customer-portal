@@ -241,6 +241,54 @@ describe('GATE_LAWN_REPORT_POLISH: the one-label-line decision rides the same fr
     expect(state.notes.lawnReportFacts).toBeUndefined();
   });
 
+  describe('the longer-cycles decision rides the same freeze', () => {
+    const PREFS = (extra) => ({ customer_id: 'c-1', irrigation_system: true, watering_days: ['Mon', 'Wed', 'Fri', 'Sat'], sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null, ...extra });
+    async function complete(prefsRows) {
+      loadServiceRecordForPdf.mockResolvedValue({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', service_date: '2026-10-08', structured_notes: '{}' });
+      const { knex, state } = store({ service_products: [sprayRow], products_catalog: SPRAY_CATALOG, lawn_assessments: [], lawn_assessment_runs: [], lawn_protocol_products: [], property_preferences: prefsRows });
+      await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+      return state.notes.lawnReportFacts;
+    }
+    const withPolish = async (prefsRows) => {
+      live();
+      process.env.GATE_LAWN_REPORT_POLISH = 'true';
+      try { return await complete(prefsRows); } finally { delete process.env.GATE_LAWN_REPORT_POLISH; }
+    };
+
+    test('4 watering days and no new sod: frozen true, and the render helper reads it', async () => {
+      const block = await withPolish([PREFS()]);
+      expect(block.waterAdvice).toEqual({ v: 1, longerCycles: true });
+      expect(facts.frozenLongerCycles('lawn', JSON.stringify({ lawnReportFacts: block }))).toBe(true);
+      expect(facts.frozenLongerCycles('pest', JSON.stringify({ lawnReportFacts: block }))).toBe(false);
+    });
+
+    test('2 watering days, a new-sod record, no prefs row: frozen false', async () => {
+      expect((await withPolish([PREFS({ watering_days: ['Mon', 'Thu'] })])).waterAdvice).toEqual({ v: 1, longerCycles: false });
+      expect((await withPolish([PREFS({ sod_laid_on: '2026-09-28', sod_covers: 'whole' })])).waterAdvice).toEqual({ v: 1, longerCycles: false });
+      expect((await withPolish([])).waterAdvice).toEqual({ v: 1, longerCycles: false });
+    });
+
+    test('polish gate dark: no waterAdvice key, so a record renders exactly as before', async () => {
+      live();
+      const block = await complete([PREFS()]);
+      expect(block).not.toHaveProperty('waterAdvice');
+      expect(facts.frozenLongerCycles('lawn', JSON.stringify({ lawnReportFacts: block }))).toBe(false);
+    });
+
+    test('a hand-edited block prints nothing it was not built from', () => {
+      const notes = (waterAdvice) => JSON.stringify({ lawnReportFacts: { v: 1, frozenAt: 'x', productUse: {}, waterAdvice } });
+      expect(facts.frozenLongerCycles('lawn', notes({ v: 1, longerCycles: true }))).toBe(true);
+      [{ v: 2, longerCycles: true }, { v: 1, longerCycles: 'true' }, { v: 1 }, 'yes', null].forEach((bad) => expect(facts.frozenLongerCycles('lawn', notes(bad))).toBe(false));
+    });
+
+    test('the PDF key moves only for a record that prints the line', async () => {
+      const yes = await withPolish([PREFS()]);
+      const no = await withPolish([PREFS({ watering_days: ['Mon'] })]);
+      const stamp = (block) => facts.frozenReportFactsStamp(JSON.stringify({ lawnReportFacts: block }));
+      expect(stamp(yes)).not.toBe(stamp(no));
+    });
+  });
+
   test('gate off: no labelLines key, so a record renders exactly as before', async () => {
     live();
     const block = await completeSpray();
