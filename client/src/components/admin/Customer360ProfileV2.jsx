@@ -7037,19 +7037,23 @@ function accessPrefsRejectedMap(rejected) {
 // anything coupled to them — keep their old baseline.
 function accessPrefsAdvanceBaseline(baseline, draft, dirtyKeys, failed) {
   const failedKeys = accessPrefsDirtyKeys({}, failed);
-  // The server saves the sod record whole or not at all, and names one field.
-  const sodFailed = failedKeys.some((k) => ACCESS_PREFS_SOD_KEYS.includes(k));
-  // An accepted sod write rebases all three: a clear sends the date alone, and
-  // the server clears Covers and Where with it.
-  const sodSaved = !sodFailed && dirtyKeys.some((k) => ACCESS_PREFS_SOD_KEYS.includes(k));
-  const saved = [
-    ...dirtyKeys.filter((k) => !failedKeys.includes(k) && !ACCESS_PREFS_SOD_KEYS.includes(k)),
-    ...(sodSaved ? ACCESS_PREFS_SOD_KEYS : []),
-  ];
+  const saved = dirtyKeys.filter((k) => !failedKeys.includes(k) && !ACCESS_PREFS_SOD_KEYS.includes(k));
   return {
     ...baseline,
     ...Object.fromEntries(saved.map((k) => [k, draft[k]])),
   };
+}
+
+// The sod record as the server stored it after an accepted sod write, or null.
+// The server saves the record whole or not at all and names one rejected field;
+// it also clears Covers and Where with the date. So the form takes all three
+// from the response, never from what was typed.
+function accessPrefsSavedSod(dirtyKeys, failed, preferences) {
+  const touched = dirtyKeys.some((k) => ACCESS_PREFS_SOD_KEYS.includes(k));
+  const rejected = ACCESS_PREFS_SOD_KEYS.some((k) => k in failed);
+  if (!touched || rejected || !preferences) return null;
+  const row = accessPrefsDraftFromRow(preferences);
+  return Object.fromEntries(ACCESS_PREFS_SOD_KEYS.map((k) => [k, row[k]]));
 }
 
 // The hold lines for the saved record (computed on the server): loading, a failed
@@ -7768,7 +7772,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
       `/admin/customers/${customerId}/property-preferences`,
       { method: "PUT", body: JSON.stringify(body) },
     );
-    return accessPrefsRejectedMap(response?.rejected);
+    return { failed: accessPrefsRejectedMap(response?.rejected), preferences: response?.preferences };
   };
 
   const handleSave = async () => {
@@ -7786,17 +7790,22 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
     setSaving(true);
     setErr("");
     let failed;
+    let savedSod;
     try {
-      failed = await submit(dirtyKeys);
+      const result = await submit(dirtyKeys);
+      failed = result.failed;
+      savedSod = accessPrefsSavedSod(dirtyKeys, failed, result.preferences);
     } catch (e) {
       setSaving(false);
       setFieldErrors(accessPrefsRejectedMap(e?.body?.rejected));
       setErr(e.message || "Failed to save property preferences");
       return;
     }
-    initialDraftRef.current = accessPrefsAdvanceBaseline(
-      initialDraftRef.current, draft, dirtyKeys, failed,
-    );
+    initialDraftRef.current = {
+      ...accessPrefsAdvanceBaseline(initialDraftRef.current, draft, dirtyKeys, failed),
+      ...savedSod,
+    };
+    if (savedSod) setDraft((prev) => (prev ? { ...prev, ...savedSod } : prev));
     setFieldErrors(failed);
     const failedCount = Object.keys(failed).length;
     // Refresh before closing: if the reload fails the editor stays open

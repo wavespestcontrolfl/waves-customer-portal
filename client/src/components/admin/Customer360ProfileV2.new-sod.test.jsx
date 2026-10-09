@@ -298,6 +298,39 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
       // Covers and Where were cleared by the first save: they are not sent again.
       expect(putCalls(fetchMock)[1]).toEqual({ accessNotes: 'short' });
     });
+
+    it('a typed-out date with another field rejected: the form takes Covers from the server answer', async () => {
+      const prefs = saved({ sod_covers: 'part', sod_area: 'front yard', access_notes: 'old' });
+      const message = 'Access notes are too long.';
+      let puts = 0;
+      const fetchMock = stubFetch({
+        prefs,
+        onPut: () => {
+          puts += 1;
+          return puts === 1
+            ? response({ success: true, saved: true, rejected: [{ field: 'accessNotes', message }], preferences: BASE_PREFS })
+            : response({ success: true, saved: true, preferences: BASE_PREFS });
+        },
+      });
+      await openEditor();
+
+      const notes = () => screen.getByText('Access Notes').closest('label').querySelector('textarea');
+      fireEvent.change(notes(), { target: { value: 'too long' } });
+      fireEvent.change(dateInput(), { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+      await screen.findAllByText(message);
+
+      // The server cleared Covers and Where with the date: the form shows that.
+      await waitFor(() => expect(screen.getByLabelText('Whole lawn')).toBeChecked());
+      expect(screen.queryByText('Where')).not.toBeInTheDocument();
+
+      fireEvent.change(notes(), { target: { value: 'short' } });
+      fireEvent.change(dateInput(), { target: { value: '2026-10-02' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
+      expect(putCalls(fetchMock)[1]).toEqual({ accessNotes: 'short', sodLaidOn: '2026-10-02', confirmedAsOf: MOVED_AT });
+    });
   });
 
   it('there is no Clear sod record action when no record exists', async () => {
