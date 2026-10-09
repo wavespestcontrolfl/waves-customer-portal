@@ -623,7 +623,9 @@ async function flagMissingGeo(service) {
       doneWhen: 'visit_has_map_pin',
       who: 'person',
     }, {
-      bell: false,
+      // bell: true — under GATE_ADMIN_BELL_POLICY a bell:false notice inserts
+      // no row at all. One notice per visit (dedupeKey), so it rings once.
+      bell: true,
       dedupeKey: `auto-dispatch-missing-geo:${service.id}`,
       metadata: { scheduledServiceId: service.id, customerId: service.customer_id },
     });

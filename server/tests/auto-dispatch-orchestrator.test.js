@@ -216,7 +216,7 @@ test('a visit still without a map point after the geocode retry raises one admin
   expect(notifications.notifyAdmin).toHaveBeenCalledWith(
     'schedule_conflict', 'Schedule — fix the address pin on a visit', expect.stringContaining('Aug 4'),
     expect.objectContaining({
-      bell: false,
+      bell: true,
       link: '/admin/dispatch?tab=schedule&date=2026-08-04',
       dedupeKey: 'auto-dispatch-missing-geo:s1',
       metadata: expect.objectContaining({ scheduledServiceId: 's1', customerId: 'c1' }),
