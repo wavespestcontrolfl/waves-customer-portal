@@ -147,7 +147,7 @@ function assessmentLabel(shorts) {
 const CADENCES = [
   ['Bi-Monthly', /\bbi[-\s]?monthly\b|\bevery\s+(?:other|two|2)\s+months?\b/i],
   ['Every 6 Weeks', /\bevery\s+(?:6|six)\s+weeks?\b/i],
-  ['Monthly', /\bmonthly\b|\bevery\s+month\b|\bper\s+month\b/i],
+  ['Monthly', /(?<!\bbi[-\s]?)\bmonthly\b|\bevery\s+month\b|\bper\s+month\b/i],
   ['Quarterly', /\bquarterly\b|\bevery\s+quarter\b|\bper\s+quarter\b/i],
   ['Semiannual', /\bsemi[-\s]?annual(?:ly)?\b|\btwice\s+a\s+year\b/i],
 ];

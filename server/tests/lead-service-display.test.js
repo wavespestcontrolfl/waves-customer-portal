@@ -15,7 +15,7 @@ const catalogNames = catalogNameIndex([
   'WDO Inspection Service', 'Bee / Wasp Nest Removal Service', 'Flea Control Service',
   'Termite Inspection Service', 'Termite Monitoring Service', 'Rodent Trapping Service',
   'Quarterly Rodent Bait Station Service', 'Waves Assessment', 'Semiannual Pest Control Service',
-  'Every 6 Weeks Lawn Care Service', 'Lawn + Tree & Shrub Service',
+  'Every 6 Weeks Lawn Care Service', 'Bi-Monthly Pest Control Service', 'Lawn + Tree & Shrub Service',
 ]);
 const name = (text) => leadServiceDisplay(text, { catalogNames });
 
@@ -96,6 +96,7 @@ describe('leadServiceDisplay', () => {
   test.each([
     ['Monthly pest control for ants', 'Monthly Pest Control Service'],
     ['Bi-monthly lawn care', 'Monthly Lawn Care Service'], // no bi-monthly row in this catalog
+    ['Bi-monthly pest control for ants', 'Bi-Monthly Pest Control Service'],
     ['Quarterly Pest Control Service + monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
     ['Pest control twice a year', 'Semiannual Pest Control Service'],
     ['Lawn care every six weeks', 'Every 6 Weeks Lawn Care Service'],
