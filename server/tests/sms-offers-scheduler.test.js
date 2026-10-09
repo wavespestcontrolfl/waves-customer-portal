@@ -47,10 +47,11 @@ const PICKER_DAYS = [
   { date: '2026-10-03', slots: [{ startTime24: '08:00' }] },
 ];
 
-function upcomingEntry(type, date, id) {
+function upcomingEntry(type, date, id, seriesKey = null) {
   const entry = { type, date, window: null, status: 'confirmed', tech: null, isToday: false };
-  // Same shape context-aggregator builds: the id is NON-ENUMERABLE.
+  // Same shape context-aggregator builds: the id and the series link are NON-ENUMERABLE.
   if (id) Object.defineProperty(entry, 'scheduledServiceId', { value: id, enumerable: false });
+  Object.defineProperty(entry, 'seriesKey', { value: seriesKey, enumerable: false });
   return entry;
 }
 
@@ -199,11 +200,16 @@ describe('gate off — a recurring series stays ambiguous (Codex #6172 r1 P1)', 
   test('several upcoming visits of one service: no next-of-series identity, no prompt line, nothing offered by either path', async () => {
     const drafter = freshDrafter();
     const context = baseContext([
-      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-oct'),
-      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-jan'),
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-oct', 'series-1'),
+      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-jan', 'series-1'),
     ]);
     expect(await drafter.serviceIdentityFor('can we move my appointment?', context)).toEqual({ serviceType: null, certain: false, reason: 'ambiguous_upcoming' });
     expect(mockIdentity.prompts.join('\n')).not.toContain('it is about the NEXT one');
+    // gate off: dates read exactly as before (no year), and the identity is the pre-change cohort
+    expect(mockIdentity.prompts.join('\n')).not.toMatch(/, 20\d\d\)/);
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    expect(drafter.currentPromptVersion()).toBe(drafter.REAL_ANSWERS_PROMPT_VERSION);
+    expect(drafter.REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers7_m');
     const client = makeClient(plainReply());
     const r = await drafter.generateGroundedDraft(argsFor(client, context));
     expect(oldFinder).not.toHaveBeenCalled();
@@ -289,18 +295,22 @@ describe('gate on — an upcoming visit is offered through the reschedule link p
 
   // 10-08 audit: every recurring customer has several upcoming visits of ONE service, so an
   // unnamed "can we move my appointment?" read as ambiguous and got no OPEN TIMES.
-  test('a recurring series (several upcoming visits of one service), unnamed text: the NEXT visit is the one offered times', async () => {
+  test('a recurring series (upcoming visits linked as ONE series), unnamed text: the NEXT visit is the one offered times', async () => {
     const drafter = freshDrafter();
-    // listed out of order on purpose: the earliest DATE wins, not the first row
+    // listed out of order on purpose, and the series crosses New Year: the earliest DATE wins
     const context = baseContext([
-      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-jan'),
-      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-oct'),
-      upcomingEntry('Quarterly Pest', '2027-04-02', 'id-apr'),
+      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-jan', 'series-1'),
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-oct', 'series-1'),
+      upcomingEntry('Quarterly Pest', '2027-04-02', 'id-apr', 'series-1'),
     ]);
     const identity = await drafter.serviceIdentityFor('can we move my appointment?', context);
     expect(identity).toEqual({ serviceType: 'Quarterly Pest', certain: true, reason: 'next_of_series', scheduledServiceId: 'id-oct' });
-    // the identity prompt tells the model the same rule, and only when there are several visits
-    expect(mockIdentity.prompts.join('\n')).toContain('it is about the NEXT one: answer "visit" with the id of the earliest scheduled date');
+    const prompt = mockIdentity.prompts.join('\n');
+    // the model is told which id is next (V2 = October), never asked to compute "earliest"
+    expect(prompt).toContain('it is about the NEXT one: answer "visit" with "V2".');
+    // every date carries its year, so October 2026 cannot read as later than January (Codex r2 P1)
+    expect(prompt).toMatch(/V1: Quarterly Pest \(scheduled [^)]*Jan 2, 2027\)/);
+    expect(prompt).toMatch(/V2: Quarterly Pest \(scheduled [^)]*Oct 2, 2026\)/);
 
     const client = makeClient(plainReply());
     await drafter.generateGroundedDraft(argsFor(client, context));
@@ -308,18 +318,49 @@ describe('gate on — an upcoming visit is offered through the reschedule link p
     expect(oldFinder).not.toHaveBeenCalled();
   });
 
-  test('a single upcoming visit: the identity prompt carries no next-of-series line', async () => {
+  test('two visits of the same service that are NOT one series (one-time jobs) stay ambiguous: nothing offered (Codex r2 P1)', async () => {
     const drafter = freshDrafter();
-    await drafter.serviceIdentityFor('move it', baseContext([upcomingEntry('Quarterly Pest', '2026-10-02', VISIT_ID)]));
+    for (const keys of [[null, null], ['series-1', 'series-2'], ['series-1', null]]) {
+      mockIdentity.prompts = [];
+      const context = baseContext([
+        upcomingEntry('Quarterly Pest', '2026-10-02', 'id-a', keys[0]),
+        upcomingEntry('Quarterly Pest', '2026-11-02', 'id-b', keys[1]),
+      ]);
+      expect(await drafter.serviceIdentityFor('can we move my appointment?', context)).toEqual({ serviceType: null, certain: false, reason: 'ambiguous_upcoming' });
+      expect(mockIdentity.prompts.join('\n')).not.toContain('it is about the NEXT one');
+    }
+    const client = makeClient(plainReply());
+    await drafter.generateGroundedDraft(argsFor(client, baseContext([
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-a'),
+      upcomingEntry('Quarterly Pest', '2026-11-02', 'id-b'),
+    ])));
+    expect(picker.loadById).not.toHaveBeenCalled();
+    expect(oldFinder).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the effective prompt version is the next-of-series cohort, with or without category tags (Codex r2 P1)', () => {
+    const drafter = freshDrafter();
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers8_m');
+    expect(drafter.NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers8_m');
+    process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
+    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers8_m+c');
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+  });
+
+  test('a single upcoming visit: the identity prompt carries no next-of-series line and no year', async () => {
+    const drafter = freshDrafter();
+    await drafter.serviceIdentityFor('move it', baseContext([upcomingEntry('Quarterly Pest', '2026-10-02', VISIT_ID, 'series-1')]));
     expect(mockIdentity.prompts.join('\n')).not.toContain('it is about the NEXT one');
+    expect(mockIdentity.prompts.join('\n')).not.toMatch(/, 20\d\d\)/);
   });
 
   test('a series whose two earliest visits share a date stays ambiguous: nothing offered', async () => {
     const drafter = freshDrafter();
     const context = baseContext([
-      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-a'),
-      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-b'),
-      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-c'),
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-a', 'series-1'),
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-b', 'series-1'),
+      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-c', 'series-1'),
     ]);
     expect(await drafter.serviceIdentityFor('can we move it?', context)).toEqual({ serviceType: null, certain: false, reason: 'ambiguous_upcoming' });
     const client = makeClient(plainReply());

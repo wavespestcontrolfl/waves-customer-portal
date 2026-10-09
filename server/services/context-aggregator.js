@@ -164,6 +164,16 @@ function withScheduledServiceId(entry, id) {
   return entry;
 }
 
+// The recurring series a visit belongs to, by the schedule's own link (the
+// same rule admin-schedule uses: a series job has a parent id or is the
+// recurring parent itself; its key is the parent row's id). null for a
+// one-time job. Non-enumerable for the same reason as the row id above.
+function withSeriesKey(entry, row) {
+  const key = row && (row.recurring_parent_id || row.is_recurring) ? String(row.recurring_parent_id || row.id) : null;
+  Object.defineProperty(entry, 'seriesKey', { value: key, enumerable: false });
+  return entry;
+}
+
 function lawnStressDamage(row = {}) {
   if (row.stress_damage != null) return row.stress_damage;
   return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
@@ -901,6 +911,8 @@ function upcomingServicesBase(customer) {
   return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
 }
 const UPCOMING_SERVICE_COLUMNS = [
+  // series link for the texting AI's next-of-series identity (withSeriesKey)
+  'ss.recurring_parent_id', 'ss.is_recurring',
   'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name',
   // LIVE ETA inputs (GATE_SMS_REAL_ANSWERS) — technician_id + the
   // tech's Bouncie IMEI to resolve a fresh GPS position, the visit's
@@ -1549,7 +1561,7 @@ class ContextAggregator {
         notes: customerSafeVisitNotes(s),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
-      upcomingServices: upcomingServices.map((s, i) => withScheduledServiceId({
+      upcomingServices: upcomingServices.map((s, i) => withSeriesKey(withScheduledServiceId({
         type: s.service_type,
         date: s.scheduled_date,
         window: this.deriveWindow(s),
@@ -1565,7 +1577,7 @@ class ContextAggregator {
         tech: s.technician_name || null,
         isToday: this.calendarDay(s.scheduled_date) === etDateString(),
         liveEta: liveEtas[i] || null,
-      }, s.id)),
+      }, s.id), s)),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
         unavailable: billingUnavailable,

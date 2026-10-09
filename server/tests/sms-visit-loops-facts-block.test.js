@@ -379,7 +379,7 @@ describe('visitLoopStatus', () => {
 
 describe('identity + sealed-eval marker', () => {
   test('the identity carries the cumulative set (compact key m: cflvp + the MISSED VISIT scope line) and fits the column with all four tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers8_m');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers7_m');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
