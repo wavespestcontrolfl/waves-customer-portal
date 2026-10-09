@@ -651,13 +651,13 @@ const GLASS_SERVICE_INCLUSIONS = {
     'Standing-water and breeding-pressure checks every visit — we cut the problem at its source',
     'Weather-aware timing so treatments work instead of washing away',
     'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
-    'No contract — cancel online anytime, no fee',
+    'No contract, no cancellation fee — cancel online anytime',
   ],
   tree_shrub: [
     'Ornamentals inspected at every visit — insect, mite, and disease pressure caught before it costs you a plant',
     'Seasonal plant-health treatments matched to what’s actually planted',
     'Observations carried forward — your landscape’s health history in one place',
-    'No contract — cancel online anytime, no fee',
+    'No contract, no cancellation fee — cancel online anytime',
   ],
   termite_bait: [
     'Bait stations on duty around your home’s perimeter — termites work around the clock, so do the stations',

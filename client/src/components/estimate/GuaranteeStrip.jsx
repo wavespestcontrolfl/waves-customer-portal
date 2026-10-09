@@ -12,7 +12,7 @@ export default function GuaranteeStrip({ licenseNumber }) {
     ? `FL License #${normalizeFdacsLicense(licenseNumber)}`
     : WAVES_FL_LICENSE_LINE;
   const items = [
-    { label: 'Cancel online anytime', detail: 'no contract, no fee' },
+    { label: 'Cancel online anytime', detail: 'no cancellation fee' },
     { label: 'Satisfaction guaranteed', detail: 'we come back free' },
     { label: 'Licensed & insured', detail: licenseDetail },
   ];

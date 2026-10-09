@@ -213,7 +213,7 @@ describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring est
     'No long-term contract — cancel anytime',
     'Cancel online anytime',
     'Cancel online in three steps',
-    'No contract — cancel online anytime, no fee',
+    'No contract, no cancellation fee — cancel online anytime',
     'No contracts and no lock-in',
     'No long-term commitment',
     'Stop after any visit, without a cancellation fee',
