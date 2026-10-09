@@ -21,6 +21,7 @@ const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_o
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
+const finalPassMigration = require('../models/migrations/20261009150000_lawn_v13_final_pass');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 // Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
@@ -311,7 +312,9 @@ describe('staged migration 20261005120000', () => {
       const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => (spec.name === matrixMigration.ADVION ? { ...spec, name: granuleMigration.GRANULE } : spec));
       const after = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
       const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : s[0]))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
-      const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name)];
+      // 20261009150000 (v13 final pass) inserts the December weed rows into November (Blindside is compared below).
+      const finalPass = windowKey === finalPassMigration.WINDOWS.NOV ? finalPassMigration.WEED_NAMES.filter((n) => n !== BLINDSIDE) : [];
+      const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name), ...finalPass];
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
@@ -559,13 +562,15 @@ describe('migration 20261005140000: rollback order, EPA numbers, Blindside rows'
     // The staged windows list Blindside beside every Celsius line; the recipe lists it for January, March and December only
     // (owner 2026-10-08: November through March, February Celsius alone), and 20261008130000 retires the other staged rows.
     const recipeMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith(BLINDSIDE)));
-    const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')));
-    expect(recipeMonths).toEqual([1, 3, 12]);
+    // 20261009150000 gives November the December weed lines and a Blindside row of its own (tested in lawn-v13-final-pass.db.test.js), so the
+    // staged chain before it still has none in November.
+    const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')) && m !== 11);
+    expect(recipeMonths).toEqual([1, 3, 11, 12]);
     const protocol = v13Protocols(db)[0];
     const monthsWithBlindside = db.lawn_protocol_windows.filter((w) => w.lawn_protocol_id === protocol.id && db.lawn_protocol_products.some((r) => r.lawn_protocol_window_id === w.id && r.product_name === BLINDSIDE)).map((w) => w.month).sort((a, b) => a - b);
     expect(monthsWithBlindside).toEqual(celsiusMonths);
     const retiredMonths = decemberMigration.RETIRE.filter(([, names]) => names.includes(BLINDSIDE)).map(([key]) => migration.WINDOWS.find((w) => w[1] === key)[0]).sort((a, b) => a - b);
-    expect(monthsWithBlindside.filter((m) => !retiredMonths.includes(m))).toEqual(recipeMonths);
+    expect(monthsWithBlindside.filter((m) => !retiredMonths.includes(m))).toEqual(recipeMonths.filter((m) => m !== 11));
     // Idempotent.
     const count = db.lawn_protocol_products.length;
     await round2.up(knex);

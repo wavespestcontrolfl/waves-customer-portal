@@ -6295,8 +6295,20 @@ function hasPreSlabTermiteContext(text) {
   return explicitPreSlab || ((soilOrTermiticideTreatment || termiteTreatment) && (constructionCue || concreteTiming)) || newConstructionTermite;
 }
 
+// The business's own name is not a service request: "confirmed the 4:30
+// appointment with Waves Pest Control" names no service, yet "pest control"
+// inside the name resolved General Pest Control and a confirmation callback
+// booked a pest visit (call 1185737f, 2026-06-19).
+// Not the generic catalog row's exact name, "Waves Pest Control Appointment
+// Service": it keeps resolving as it always has (the replay showed stripping
+// it re-labels existing-customer scheduling calls). Prose such as "a Waves
+// Pest Control appointment for 4:30" is still stripped.
+// Only the retired brand spelling "... & Lawn Care" is taken with the name;
+// "Waves Pest Control and lawn care was requested" keeps its lawn request.
+const OWN_BUSINESS_NAME_RE = /\bwaves\s+pest\s+control(?!\s+appointment\s+service\b)(?:\s*&\s*lawn\s*care\b)?/g;
+
 function canonicalWavesService(value) {
-  const text = String(value || '').toLowerCase();
+  const text = String(value || '').toLowerCase().replace(OWN_BUSINESS_NAME_RE, ' ').trim();
   if (!text) return null;
   if (hasPreSlabTermiteContext(text)) return 'Pre-Slab Termidor';
   if (/\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/.test(text)) return 'Termite Wood Treatment';
