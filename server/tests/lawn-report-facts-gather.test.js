@@ -115,10 +115,32 @@ describe('gatherAndFreezeReportFacts', () => {
     expect(facts.frozenReportFactsStamp(stored)).toMatch(/^:rf=/);
   });
 
-  test('a spot row whose area is only the fallback (no recorded-area marker on the record) freezes plain "Spot treatment"', async () => {
+  test('the lawn Fast Complete sheet (marker present) with no recorded area for the row: plain "Spot treatment"', async () => {
     const { knex, state } = fakeKnex(tables([productRow(1, 1, 'spot_treatment', { area_value: 5000, area_unit: 'sqft' })]));
-    await facts.gatherAndFreezeReportFacts({ record: record(), knex });
+    await facts.gatherAndFreezeReportFacts({ record: record({ lawnSpotAreaRecorded: { v: 1, productIds: [] } }), knex });
     expect(facts.frozenProductUseTexts(JSON.stringify(state.notes))).toEqual({ 'sp-1': 'Spot treatment' });
+  });
+
+  test('another surface (no marker): no spot text is frozen, so the recorded application area renders as today', async () => {
+    const { knex, state } = fakeKnex(tables([
+      productRow(1, 1, 'spot_treatment', { area_value: 5000, area_unit: 'sqft', application_area: 'Front lawn' }),
+      productRow(3, 2, 'spot_treatment', { area_value: 400, area_unit: 'sqft' }),
+    ]));
+    await facts.gatherAndFreezeReportFacts({ record: record(), knex });
+    expect(state.notes.lawnReportFacts.productUse).toEqual({});
+    expect(facts.frozenProductUseTexts(JSON.stringify(state.notes))).toEqual({});
+    // The block still carries the re-entry rule: only the spot text is surface-specific.
+    expect(state.notes.lawnReportFacts.reentry.rule).toBe('dry');
+  });
+
+  test('the lawn Fast Complete sheet: a row with an explicit recorded location keeps it (no spot text); the others are described', async () => {
+    const { knex, state } = fakeKnex(tables([
+      productRow(1, 1, 'spot_treatment', { area_value: 250, area_unit: 'sqft', application_area: 'Front lawn' }),
+      productRow(3, 2, 'spot_treatment', { area_value: 400, area_unit: 'sqft', application_area: 'Front yard, Back yard, Side yards' }),
+      productRow(4, 3, 'spot_treatment', { area_value: 5000, area_unit: 'sqft' }),
+    ]));
+    await facts.gatherAndFreezeReportFacts({ record: record({ lawnSpotAreaRecorded: { v: 1, productIds: [UUID(3)] } }), knex });
+    expect(facts.frozenProductUseTexts(JSON.stringify(state.notes))).toEqual({ 'sp-2': 'Spot treatment, about 400 sq ft', 'sp-3': 'Spot treatment' });
   });
 
   test('a spray-only visit is dry; a product with no usable fact marks the visit default', async () => {

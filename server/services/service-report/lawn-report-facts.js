@@ -195,11 +195,31 @@ function spotSqft(row, recorded) {
   return Number.isFinite(value) && value > 0 && (unit === 'sqft' || unit === 'sq_ft') ? value : null;
 }
 
-// Only a spot treatment row is described; every whole-lawn row keeps its card text.
-function productUseEntries(rows, recorded = new Set()) {
+// The default areas the lawn Fast Complete sheet attaches to every PLAN product (client/src/lib/lawn-completion.js
+// LAWN_DEFAULT_AREAS): not a recorded location, so a row carrying exactly these is ambiguous, like its areaValue.
+const DEFAULT_PLAN_AREAS = Object.freeze(['front yard', 'back yard', 'side yards']);
+
+// Whether a row carries a location somebody RECORDED (a place typed or picked), beyond the sheet's default plan areas.
+function hasRecordedLocation(row) {
+  const parts = String((row && (row.application_area || row.area)) || '').split(',').map((part) => part.trim().toLowerCase()).filter(Boolean);
+  if (!parts.length) return false;
+  return !(parts.length === DEFAULT_PLAN_AREAS.length && DEFAULT_PLAN_AREAS.every((area) => parts.includes(area)));
+}
+
+/**
+ * The spot rows the card describes by an override. Only a completion from the lawn Fast Complete sheet (the surface
+ * that sends the marker contract: `recorded` is a Set, possibly empty) has the ambiguity this fixes, where a row's
+ * areaValue may be a planned or whole-lawn fallback. Every other surface (the re-service sheet, the full form) records
+ * the location itself, so its rows get no entry and the recorded application area renders as it always did. Within the
+ * quick sheet, a row that carries an explicit recorded location (beyond the default plan areas) is left alone too: the
+ * place the technician named is more precise than the extent, so it keeps rendering. Every other spot row is described:
+ * "Spot treatment, about N sq ft" when its area was recorded as the spot's extent, else plain "Spot treatment".
+ */
+function productUseEntries(rows, recorded = null) {
   const out = {};
+  if (!(recorded instanceof Set)) return out;
   for (const row of Array.isArray(rows) ? rows : []) {
-    if (methodOf(row) !== 'spot_treatment' || !row.id) continue;
+    if (methodOf(row) !== 'spot_treatment' || !row.id || hasRecordedLocation(row)) continue;
     out[String(row.id)] = { sqft: spotSqft(row, recorded) };
   }
   return out;
@@ -207,14 +227,16 @@ function productUseEntries(rows, recorded = new Set()) {
 
 /**
  * The completion record of which products' spot area the technician recorded (GATE_LAWN_REPORT_FACTS):
- * `{ lawnSpotAreaRecorded: { v: 1, productIds } }` to spread into structured_notes, or `{}`. Built from the
- * `spotAreas` block of the submit's `lawnFast` echo, checked here: only while the gate is live, only version 1,
- * uuid product ids, each once, bounded. Read by nobody but the facts freeze.
+ * `{ lawnSpotAreaRecorded: { v: 1, productIds } }` to spread into structured_notes, or `{}`. Written only for a
+ * completion that carries the `lawnFast` echo (the lawn Fast Complete sheet; productIds may be empty, and the block
+ * itself says "this surface"), from its `spotAreas` block, checked here: only while the gate is live, uuid product ids,
+ * each once, bounded. Read by nobody but the facts freeze.
  */
 function spotAreaFreeze(lawnFast) {
   if (!require('../../config/feature-gates').lawnReportFactsLive()) return {};
-  const block = lawnFast && typeof lawnFast === 'object' ? lawnFast.spotAreas : null;
-  if (!isPlain(block) || block.v !== 1 || !Array.isArray(block.productIds)) return {};
+  // The echo exists only on a lawn Fast Complete sheet completion: its presence is the surface marker.
+  if (!isPlain(lawnFast)) return {};
+  const block = isPlain(lawnFast.spotAreas) && lawnFast.spotAreas.v === 1 && Array.isArray(lawnFast.spotAreas.productIds) ? lawnFast.spotAreas : { productIds: [] };
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const productIds = [...new Set(block.productIds.filter((id) => typeof id === 'string' && uuid.test(id)).map((id) => id.toLowerCase()))].slice(0, 50);
   return { lawnSpotAreaRecorded: { v: 1, productIds } };
@@ -222,7 +244,9 @@ function spotAreaFreeze(lawnFast) {
 
 function recordedSpotAreas(structuredNotes) {
   const block = parseJsonObject(structuredNotes).lawnSpotAreaRecorded;
-  return new Set(isPlain(block) && block.v === 1 && Array.isArray(block.productIds) ? block.productIds.map((id) => String(id).toLowerCase()) : []);
+  // null = no marker: not a lawn Fast Complete sheet completion (see productUseEntries).
+  if (!(isPlain(block) && block.v === 1 && Array.isArray(block.productIds))) return null;
+  return new Set(block.productIds.map((id) => String(id).toLowerCase()));
 }
 
 function cleanProductUse(raw) {
@@ -409,7 +433,7 @@ function cleanTies(raw) {
 // ── The frozen block: build, read, key ──────────────────────────────────────
 
 // `withTies` is false while the tie part is not live (feature-gates.js lawnReportTiesLive): no tie is read or stored.
-function buildReportFacts({ rows, run, assessment, techFindings, withTies = true, recordedSpotAreas: recorded = new Set(), now = new Date() }) {
+function buildReportFacts({ rows, run, assessment, techFindings, withTies = true, recordedSpotAreas: recorded = null, now = new Date() }) {
   const reentry = visitReentry(rows);
   return {
     v: FREEZE_VERSION,
@@ -501,6 +525,41 @@ function frozenReportFactsStamp(structuredNotes) {
 function reentryCondition(reentry) {
   if (!reentry || !RULES.includes(reentry.rule)) return null;
   return { rule: reentry.rule, text: REENTRY_TEXT[reentry.rule], pets: REENTRY_PETS, statusLabel: REENTRY_STATUS[reentry.rule] };
+}
+
+// ── Small readers for the report build (kept here so the big builders carry no new decisions) ──
+
+/** The frozen re-entry condition sentence for a render of this record, or null (a record with no real rule). */
+function frozenReentryText(record) {
+  const condition = reentryCondition(frozenReentryForRecord(record));
+  return condition ? condition.text : null;
+}
+
+/** { [service_products.id]: card text } for a LAWN record; {} for any other line. */
+function frozenUseTextsFor(serviceLine, structuredNotes) {
+  return serviceLine === 'lawn' ? frozenProductUseTexts(structuredNotes) : {};
+}
+
+/** { areaUse } for one product row that has a frozen spot text, else {} (a spread, so the caller decides nothing). */
+function areaUseFields(texts, product) {
+  const text = product && product.id ? texts[String(product.id)] : null;
+  return text ? { areaUse: text } : {};
+}
+
+/**
+ * The PDF cache-key component for a record's frozen decision (':rf=...' or ''). Read from the SAME service row the
+ * render loads when it carries structured_notes, from the record only for a partial lookup row; an unreadable record
+ * stamps a one-off value (re-render, never a stale hit).
+ */
+async function reportFactsKeyStamp(service, knex) {
+  try {
+    const notes = hasOwn(service, 'structured_notes')
+      ? service.structured_notes
+      : (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes;
+    return frozenReportFactsStamp(notes);
+  } catch {
+    return `:rf=err${crypto.randomBytes(4).toString('hex')}`;
+  }
 }
 
 // ── Freeze ──────────────────────────────────────────────────────────────────
@@ -611,12 +670,17 @@ module.exports = {
   visitReentry,
   productUseEntries,
   spotAreaFreeze,
+  hasRecordedLocation,
   productUseText,
   buildTies,
   buildReportFacts,
   readFrozenReportFacts,
   frozenReentryRule,
   frozenReentryForRecord,
+  frozenReentryText,
+  frozenUseTextsFor,
+  areaUseFields,
+  reportFactsKeyStamp,
   frozenProductUseTexts,
   frozenTies,
   hasFrozenTieBlock,
@@ -626,5 +690,5 @@ module.exports = {
   freezeReportFacts,
   gatherAndFreezeReportFacts,
   cleanTies,
-  _test: { methodOf, rowProductKind, verifiedTechFindings, labelIsPlainUntilDry, labelIsPlainUntilWateredInAndDry, roundedSqft, photoFindingsByKind, productKinds },
+  _test: { methodOf, recordedSpotAreas, rowProductKind, verifiedTechFindings, labelIsPlainUntilDry, labelIsPlainUntilWateredInAndDry, roundedSqft, photoFindingsByKind, productKinds },
 };

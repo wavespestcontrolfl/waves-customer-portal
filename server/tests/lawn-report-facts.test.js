@@ -384,10 +384,36 @@ describe('a spot product says where it was used', () => {
   test('a spot row sized by a typed amount (its areaValue is the planned / whole-lawn fallback) is NOT stated as an area', () => {
     const fallback = row('p-typed', 'spot_treatment', { category: 'herbicide', areaValue: 5000, areaUnit: 'sqft' });
     expect(facts.productUseEntries([fallback], RECORDED)).toEqual({ 'p-typed': { sqft: null } });
-    expect(facts.productUseEntries([fallback])).toEqual({ 'p-typed': { sqft: null } });
     expect(facts.productUseText(facts.productUseEntries([fallback], RECORDED)['p-typed'])).toBe('Spot treatment');
     // Recorded for one row only: the other spot row stays plain.
     expect(facts.productUseEntries([SPOT_HERBICIDE, fallback], new Set(['pid-p-spot']))).toEqual({ 'p-spot': { sqft: 250 }, 'p-typed': { sqft: null } });
+    // The lawn Fast Complete sheet with NO recorded area at all (an empty marker): every spot row is plain.
+    expect(facts.productUseEntries([SPOT_HERBICIDE, fallback], new Set())).toEqual({ 'p-spot': { sqft: null }, 'p-typed': { sqft: null } });
+  });
+
+  describe('per surface: only the lawn Fast Complete sheet\'s completion gets the plain override', () => {
+    const withPlace = (id, applicationArea) => ({ ...row(id, 'spot_treatment', { category: 'herbicide', areaValue: 400, areaUnit: 'sqft' }), application_area: applicationArea });
+
+    test('another surface (the re-service sheet, the full form): no marker, so NO entry; the recorded application area renders as today', () => {
+      const rows = [withPlace('front', 'Front lawn'), withPlace('typed', null), SPOT_HERBICIDE];
+      expect(facts.productUseEntries(rows, null)).toEqual({});
+      expect(facts.productUseEntries(rows)).toEqual({});
+      expect(facts.productUseEntries(rows, undefined)).toEqual({});
+    });
+
+    test('the quick sheet: a row with an explicit recorded location keeps it (no entry); the others get the override', () => {
+      const out = facts.productUseEntries([withPlace('front', 'Front lawn'), withPlace('typed', null), withPlace('planned', 'Front yard, Back yard, Side yards')], new Set(['pid-planned']));
+      expect(out).toEqual({ typed: { sqft: null }, planned: { sqft: 400 } });
+    });
+
+    test('hasRecordedLocation: a place beyond the sheet\'s default plan areas counts; the defaults, empty and null do not', () => {
+      for (const area of ['Front lawn', 'Back yard', 'Front yard, Back yard', 'Front yard, Back yard, Side yards, Pool deck']) expect(facts.hasRecordedLocation({ application_area: area })).toBe(true);
+      for (const area of ['Front yard, Back yard, Side yards', 'side yards, FRONT YARD, back yard', '', '  ', null, undefined]) expect(facts.hasRecordedLocation({ application_area: area })).toBe(false);
+    });
+
+    test('recordedSpotAreas reads the marker: null without it, a Set (possibly empty) with it', () => {
+      expect(facts._test.recordedSpotAreas ? facts._test.recordedSpotAreas('{}') : null).toBeNull();
+    });
   });
 
   describe('spotAreaFreeze: the completion record of which rows had a recorded spot area', () => {
@@ -405,11 +431,16 @@ describe('a spot product says where it was used', () => {
       expect(facts.spotAreaFreeze({ spotAreas: { v: 1, productIds: many } }).lawnSpotAreaRecorded.productIds).toHaveLength(50);
     });
 
-    test('gate on: no block, a wrong version or a malformed block write nothing', () => {
+    test('gate on: a lawn Fast Complete sheet echo with no (or a malformed) spotAreas block still writes the surface marker, with no products', () => {
       process.env.GATE_LAWN_REPORT_FACTS = 'true';
-      for (const bad of [undefined, null, { visitType: 'recurring' }, { spotAreas: { v: 2, productIds: [U1] } }, { spotAreas: [U1] }, { spotAreas: { v: 1, productIds: 'x' } }]) {
-        expect(facts.spotAreaFreeze(bad)).toEqual({});
+      for (const echo of [{ visitType: 'recurring' }, { spotAreas: { v: 2, productIds: [U1] } }, { spotAreas: [U1] }, { spotAreas: { v: 1, productIds: 'x' } }]) {
+        expect(facts.spotAreaFreeze(echo)).toEqual({ lawnSpotAreaRecorded: { v: 1, productIds: [] } });
       }
+    });
+
+    test('gate on: any other surface sends no lawnFast echo at all, so nothing is written (no marker)', () => {
+      process.env.GATE_LAWN_REPORT_FACTS = 'true';
+      for (const none of [undefined, null, 'x', ['a']]) expect(facts.spotAreaFreeze(none)).toEqual({});
     });
   });
 
@@ -425,7 +456,7 @@ describe('a spot product says where it was used', () => {
       row('n', 'spot_treatment', { areaValue: -5, areaUnit: 'sqft' }),
       row('l', 'spot_treatment', { areaValue: 40, areaUnit: 'linear_ft' }),
       row('t', 'spot_treatment', { areaValue: 'abc', areaUnit: 'sqft' }),
-    ]);
+    ], new Set(['pid-z', 'pid-n', 'pid-l', 'pid-t']));
     expect(Object.values(entries)).toEqual([{ sqft: null }, { sqft: null }, { sqft: null }, { sqft: null }]);
   });
 

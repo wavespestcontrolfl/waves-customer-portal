@@ -116,6 +116,17 @@ function withReportFacts(record, freeze) {
   return freeze ? { ...record, structured_notes: { ...parseJsonObject(record.structured_notes), [reportFacts.FREEZE_KEY]: freeze } } : record;
 }
 
+// The facts freeze, run inside the synthesis (live gate only): returns the record with the block in its in-memory notes
+// and the block itself (null when the gate is off or the freeze made nothing new).
+async function freezeFactsInto(record, knex) {
+  if (!featureGates.lawnReportFactsLive()) return { record, freeze: null };
+  const freeze = await reportFacts.gatherAndFreezeReportFacts({ record, knex, withTies: featureGates.lawnReportTiesLive() });
+  return { record: withReportFacts(record, freeze), freeze };
+}
+
+// The result fields for a block this run froze (none when it froze nothing).
+const factsResult = (freeze) => (freeze ? { reportFactsFreeze: freeze } : {});
+
 const isLawnService = (service) => (service.service_line || (/(lawn)/i.test(String(service.service_type || '')) ? 'lawn' : null)) === 'lawn';
 
 /**
@@ -169,10 +180,7 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     // GATE_LAWN_REPORT_FACTS: the re-entry condition, the spot-product text and the finding-to-product ties are
     // decided and frozen NOW, before the first report build, so that build (and the v6 copy it freezes) already
     // reads them. The gate controls only this freeze; a render never reads it. Gate off: no read, no write.
-    if (featureGates.lawnReportFactsLive()) {
-      reportFactsFreeze = await reportFacts.gatherAndFreezeReportFacts({ record, knex, withTies: featureGates.lawnReportTiesLive() });
-      record = withReportFacts(record, reportFactsFreeze);
-    }
+    ({ record, freeze: reportFactsFreeze } = await freezeFactsInto(record, knex));
     const token = await ensureReportToken(service.id, knex);
     const instructionOut = {};
     const coverageOut = {};
@@ -302,7 +310,7 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     return withVisitSummary({
       smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,
       ...(techParagraphFreeze ? { techParagraphFreeze } : {}),
-      ...(reportFactsFreeze ? { reportFactsFreeze } : {}),
+      ...factsResult(reportFactsFreeze),
     }, visitSummaryFreeze);
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);

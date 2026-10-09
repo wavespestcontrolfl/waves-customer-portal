@@ -265,7 +265,7 @@ describe('the facts are frozen BEFORE anything can render or queue a render for 
   });
 
   test('the completion path freezes them before the report token is minted and before the PDF render is queued', () => {
-    const freeze = at('.freezeReportFactsOnly({ service: record');
+    const freeze = at('earlyReportFactsFreeze = await freezeLawnFactsEarly(');
     const mint = at('reportToken = await ensureReportToken(record.id)');
     const enqueue = at('await enqueuePdfRenderJob({');
     const synthesis = at('finalizeLawnReportSynthesis({ service: record');
@@ -277,7 +277,7 @@ describe('the facts are frozen BEFORE anything can render or queue a render for 
   });
 
   test('nothing else in the completion file mints a token or queues a render ahead of the freeze', () => {
-    const freeze = at('.freezeReportFactsOnly({ service: record');
+    const freeze = at('earlyReportFactsFreeze = await freezeLawnFactsEarly(');
     const before = source.slice(0, freeze);
     expect(before).not.toMatch(/await enqueuePdfRenderJob\(/);
     expect(before).not.toMatch(/await ensureReportToken\(/);
@@ -285,13 +285,15 @@ describe('the facts are frozen BEFORE anything can render or queue a render for 
   });
 
   test('the freeze runs under the same conditions as the synthesis gate (auto-send, report v1, not a backfill)', () => {
-    const freeze = at('earlyReportFactsFreeze = await');
-    const guard = source.slice(source.lastIndexOf('if (', freeze), freeze);
+    const helper = at('async function freezeLawnFactsEarly(');
+    const guard = source.slice(helper, helper + 400);
     expect(guard).toContain("serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion");
+    expect(at('earlyReportFactsFreeze = await freezeLawnFactsEarly(')).toBeGreaterThan(0);
   });
 
   test('its freeze is folded into the in-memory notes beside the gate\'s, so a later whole-object write keeps the key', () => {
-    expect(source).toContain('if (earlyReportFactsFreeze) recordStructuredNotes.lawnReportFacts = earlyReportFactsFreeze;');
+    expect(source).toContain('foldReportFactsFreeze(recordStructuredNotes, earlyReportFactsFreeze, gate);');
+    expect(source).toContain('if (early) notes.lawnReportFacts = early;');
   });
 });
 
@@ -300,7 +302,7 @@ describe('the completion path folds the freeze back in', () => {
     const fs = require('fs');
     const path = require('path');
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
-    expect(source).toContain('if (gate.reportFactsFreeze) recordStructuredNotes.lawnReportFacts = gate.reportFactsFreeze;');
+    expect(source).toContain('foldReportFactsFreeze(recordStructuredNotes, earlyReportFactsFreeze, gate);');
   });
 
   test('the report build hands the frozen tied families to the v6 copy (so its first freeze is curative where a tie exists)', () => {
