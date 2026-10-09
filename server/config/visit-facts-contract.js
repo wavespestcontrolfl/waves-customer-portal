@@ -1442,7 +1442,7 @@ const VISIT_FACTS_CONTRACT = {
   cockroach: {
     label: 'Cockroach (typed cockroach form: control + German roach packages)',
     typedForm: 'cockroach',
-    catalogKeys: ['cockroach_control', 'german_roach', 'german_roach_initial'],
+    catalogKeys: ['cockroach_control', 'german_roach', 'german_roach_initial', 'vehicle_german_roach'],
     voiceFill: true,
     facts: [
       ...typedFormFacts('cockroach', {

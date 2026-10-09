@@ -797,7 +797,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_artavia', 'Artavia 2 SC (Azoxy)', 'pesticide', 'fungicide'],
   ['v13_velista', 'Velista', 'pesticide', 'fungicide'],
   ['v13_headway', 'Headway Fungicide', 'pesticide', 'fungicide'],
-  ['v13_advion_fire_ant', 'Advion Fire Ant Bait', 'pesticide', 'insecticide bait'],
+  ['v13_fire_ant_granule', 'Topchoice Granular Insecticide', 'pesticide', 'insecticide granule'],
   ['v13_gravex', 'Gravex 20 EW', 'pesticide', 'fungicide'],
   ['v13_celsius', 'Celsius WG', 'pesticide', 'post-emergent herbicide'],
   ['v13_certainty', 'Certainty Turf Herbicide', 'pesticide', 'post-emergent herbicide'],

@@ -27,8 +27,13 @@ const GEOCODE_TIMEOUT_MS = 1200;
 const MAX_SAMPLE_AGE_MS = 10 * 60 * 1000;
 const SAMPLE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 const EN_ROUTE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
-
+const NOT_MARKED_ACTION = 'gps_arrival.not_marked';
+const NOT_MARKED_MEMO_MAX = 2000;
 let configCache = null;
+// visit:reason keys already written (or found written) by this process, so a
+// parked truck costs no query per sample. The audit_log lookup behind it is
+// the durable half: it survives restarts and a second instance.
+const notMarkedRecorded = new Set();
 
 function finiteNumber(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -263,6 +268,7 @@ async function loadCurrentService(currentJobId) {
   if (!currentJobId) return null;
   return db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .leftJoin('service_visits as sv', 's.visit_id', 'sv.id')
     .where('s.id', currentJobId)
     .first(
       's.id',
@@ -274,6 +280,11 @@ async function loadCurrentService(currentJobId) {
       's.completed_at',
       's.arrived_at',
       's.en_route_at',
+      's.scheduled_date',
+      's.visit_id',
+      'sv.en_route_at as visit_en_route_at',
+      // The earliest en-route time among the stop's current members.
+      db.raw('(select min(m.en_route_at) from scheduled_services m where m.visit_id = s.visit_id) as group_en_route_at'),
       's.lat as service_lat',
       's.lng as service_lng',
       's.service_address_line1 as service_address_line1',
@@ -295,23 +306,267 @@ function isEnRouteService(service) {
   return service.track_state === 'en_route' || service.status === 'en_route';
 }
 
-async function auditArrival({ service, techStatus, destination, distance, point, decision, result, error }) {
-  await recordAuditEvent({
-    actor_type: 'system:gps-arrival',
-    action: result?.ok ? 'gps_arrival.mark_on_property' : 'gps_arrival.mark_on_property_failed',
-    resource_type: 'scheduled_service',
-    resource_id: service.id,
-    metadata: {
-      tech_id: techStatus.tech_id || null,
+function sampleAgeSeconds(point, now = Date.now()) {
+  const pointMs = timestampMs(point?.reported_at);
+  return pointMs == null ? null : Math.round((now - pointMs) / 1000);
+}
+
+function auditAction({ notMarked, result }) {
+  if (notMarked) return NOT_MARKED_ACTION;
+  return result?.ok ? 'gps_arrival.mark_on_property' : 'gps_arrival.mark_on_property_failed';
+}
+
+// Which attempt of the visit a not_marked row belongs to. A rescheduled or
+// restarted visit reuses its row, so the schedule day + en_route_at tell the
+// attempts apart. NULL-safe: a missing part reads 'none', never NULL.
+function attemptDay(value) {
+  const day = String(value instanceof Date ? value.toISOString() : value || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none';
+}
+
+function attemptKey(service) {
+  const dayPart = attemptDay(service?.scheduled_date);
+  // A grouped stop is ONE physical visit: its members carry slightly different
+  // en_route_at values, so the attempt is the EARLIEST current member time
+  // (the same value whichever member is the current job, and renewed when the
+  // members are rewound and restarted). The stop's own stamp can lag behind a
+  // restart, so it is only the fallback.
+  const enRouteMs = timestampMs(service?.visit_id
+    ? (service.group_en_route_at || service.visit_en_route_at)
+    : service?.en_route_at);
+  if (service?.visit_id) return `${dayPart}|visit:${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
+  return `${dayPart}|${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
+}
+
+// What a not_marked row is deduplicated on: the grouped stop when the row
+// belongs to one (any member can be the tech's current job), else the row.
+function stopKey(service) {
+  return service?.visit_id ? `visit:${service.visit_id}` : `service:${service?.id}`;
+}
+
+function auditMetadata({ service, techStatus, destination, distance, point, decision, result, error, notMarked }) {
+  if (notMarked) {
+    return {
+      reason: notMarked.reason,
+      stop: stopKey(service),
+      attempt: attemptKey(service),
+      detail: notMarked.detail || null,
+      tech_id: techStatus?.tech_id || null,
       destination_source: destination.source,
-      distance_meters: distance == null ? null : Math.round(distance),
+      distance_m: Math.round(distance),
       speed_mph: finiteNumber(point?.speed_mph),
       ignition: point?.ignition ?? null,
-      decision_reason: decision.reason,
-      mark_on_property_result: result || null,
-      error: error ? error.message : null,
-    },
+      sample_age_s: sampleAgeSeconds(point),
+    };
+  }
+  return {
+    tech_id: techStatus.tech_id || null,
+    destination_source: destination.source,
+    distance_meters: distance == null ? null : Math.round(distance),
+    speed_mph: finiteNumber(point?.speed_mph),
+    ignition: point?.ignition ?? null,
+    decision_reason: decision.reason,
+    mark_on_property_result: result || null,
+    error: error ? error.message : null,
+  };
+}
+
+// The one audit writer for this detector. Three row kinds: an arrival marked
+// (gps_arrival.mark_on_property), a mark that failed (..._failed), and, with
+// `notMarked` ({ reason, detail }), gps_arrival.not_marked: the truck was
+// inside the arrival radius and no arrival was marked. `trx` + `critical`
+// (recordAuditEvent's own options) make a write join a transaction and report
+// its failure instead of swallowing it.
+async function auditArrival({ trx = null, critical = false, ...args }) {
+  const { service } = args;
+  await recordAuditEvent({
+    actor_type: 'system:gps-arrival',
+    action: auditAction(args),
+    resource_type: 'scheduled_service',
+    resource_id: service.id,
+    metadata: auditMetadata(args),
+    trx,
+    critical,
   });
+}
+
+// At most one not_marked row per visit attempt + reason, across restarts and
+// instances. The existence check and the insert run in ONE transaction that
+// holds an advisory lock on (visit, reason, attempt), so two instances cannot
+// both insert. A rescheduled or restarted visit is a new attempt and records
+// again. The in-memory key is taken before the first await (two samples racing
+// in one process cannot both pass) and spares a parked truck any query after
+// the first sample; it is RELEASED when the lookup or the write fails, so a
+// later sample can record the row.
+const sameInstant = (a, b) => timestampMs(a) === timestampMs(b);
+const sameDay = (a, b) => attemptDay(a) === attemptDay(b);
+
+// Under the row lock: is this still the miss the caller observed? The row
+// must be open with no arrival, be the SAME appointment attempt (a reschedule
+// resets the row and leaves it open), and, for a grouped stop, no member may
+// have arrived (the primary flips before the fan-out reaches its siblings).
+async function stillTheObservedMiss(trx, snapshot, fresh) {
+  if (!fresh || !isOpenWithoutArrival(fresh)) return false;
+  if (!sameDay(fresh.scheduled_date, snapshot.scheduled_date) || !sameInstant(fresh.en_route_at, snapshot.en_route_at)) return false;
+  if ((fresh.visit_id || null) !== (snapshot.visit_id || null)) return false;
+  if (!fresh.visit_id) return true;
+  // Every member is share-locked, so a fan-out cannot flip a sibling between
+  // this check and the insert. NOWAIT: a member a lifecycle write holds makes
+  // this diagnostic give up (a later sample retries) instead of waiting, so it
+  // can never be part of a lock cycle with the fan-out.
+  const members = await trx('scheduled_services')
+    .where({ visit_id: fresh.visit_id })
+    .orderBy('id')
+    .forShare()
+    .noWait()
+    .select('id', 'arrived_at', 'track_state', 'status', 'en_route_at');
+  if (members.some((m) => m.arrived_at || m.track_state === 'on_property' || m.status === 'on_site')) return false;
+  // The grouped attempt is the earliest member en_route_at: it must still be
+  // the one the caller keyed this row on (a sibling restarted since = a new
+  // attempt, which a later sample records under its own key).
+  const times = members.map((m) => timestampMs(m.en_route_at)).filter((ms) => ms != null);
+  const lockedGroupMs = times.length ? Math.min(...times) : null;
+  return lockedGroupMs === timestampMs(snapshot.group_en_route_at);
+}
+
+async function writeNotMarkedOnce(serviceId, reason, row) {
+  const attempt = attemptKey(row.service);
+  const stop = stopKey(row.service);
+  const key = `${stop}:${reason}:${attempt}`;
+  if (notMarkedRecorded.has(key)) return;
+  if (notMarkedRecorded.size >= NOT_MARKED_MEMO_MAX) notMarkedRecorded.clear();
+  notMarkedRecorded.add(key);
+  try {
+    await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['gps_arrival_not_marked', key],
+      );
+      // Serialized with the insert: another signal (manual, geofence, a
+      // concurrent sample) can have marked the arrival since the caller's
+      // snapshot. The persisted row decides, for every path.
+      // FOR SHARE NOWAIT: a lifecycle write (manual, geofence, another sample)
+      // that starts later waits for this insert, so the state read and the row
+      // stay one decision; one already in flight makes this diagnostic give
+      // up (the claim is released and a later sample retries). It never waits
+      // on a lifecycle lock, so it cannot join a lock cycle.
+      const fresh = await trx('scheduled_services').where({ id: serviceId }).forShare().noWait()
+        .first('arrived_at', 'completed_at', 'cancelled_at', 'track_state', 'status', 'scheduled_date', 'en_route_at', 'visit_id');
+      if (!(await stillTheObservedMiss(trx, row.service, fresh))) return;
+      const existing = await trx('audit_log')
+        .where({ resource_type: 'scheduled_service', action: NOT_MARKED_ACTION })
+        .whereRaw("metadata->>'stop' = ? AND metadata->>'reason' = ? AND metadata->>'attempt' = ?", [stop, reason, attempt])
+        .first('id');
+      if (!existing) await auditArrival({ ...row, trx, critical: true });
+    });
+  } catch (err) {
+    notMarkedRecorded.delete(key);
+    throw err;
+  }
+}
+
+// Diagnostics only; the caller's result never changes. Records ONLY when the
+// sample is inside the arrival radius of the visit (a far-away sample is
+// normal driving). The destination is the STORED one (visit, then customer
+// coordinates): a refusal never triggers a geocode (an outbound call plus a
+// customer row write); with none stored, nothing is recorded. Never throws.
+async function recordNotMarked({ service, techStatus, point, config, reason, detail = null, destination = null, distance = null }) {
+  try {
+    // The one guard every path shares: a visit that already arrived (by
+    // timestamp or by lifecycle state) or is closed is never a miss.
+    if (!isOpenWithoutArrival(service)) return;
+    const dest = destination || extractDestination(service);
+    const dist = distance ?? (dest ? distanceMeters(point?.lat, point?.lng, dest.lat, dest.lng) : null);
+    if (dist == null || dist > config.radiusMeters) return;
+    await writeNotMarkedOnce(service.id, reason, {
+      service, techStatus, destination: dest, distance: dist, point, notMarked: { reason, detail },
+    });
+  } catch (err) {
+    logger.warn(`[gps-arrival] not-marked diagnostic failed for ${service?.id}: ${err.message}`);
+  }
+}
+
+// A sample that tech_status did not accept as its current position (older than
+// what tech_status already holds). The visit is looked up only to find out
+// whether the truck was inside the radius of an en-route job.
+async function recordSupersededSample({ techStatus, point, config }) {
+  try {
+    const service = await loadCurrentService(techStatus.current_job_id);
+    if (!service || !isEnRouteService(service)) return;
+    await recordNotMarked({ service, techStatus, point, config, reason: 'stale_location_sample' });
+  } catch (err) {
+    logger.warn(`[gps-arrival] superseded-sample diagnostic failed: ${err.message}`);
+  }
+}
+
+function serviceRejection({ service, techStatus, point }) {
+  if (service.technician_id && techStatus.tech_id && service.technician_id !== techStatus.tech_id) {
+    return 'technician_mismatch';
+  }
+  if (!isEnRouteService(service)) return 'service_not_en_route';
+  const timing = validateSampleTiming({ techStatus, point, service });
+  return timing.ok ? null : timing.reason;
+}
+
+// An open visit with no arrival yet. A visit that already arrived (by its
+// lifecycle state, whether or not arrived_at is stamped) or closed, and keeps
+// pinging from its own driveway, is not a missed arrival.
+function isOpenWithoutArrival(service) {
+  return !service.arrived_at && !service.completed_at && !service.cancelled_at
+    && !['on_property', 'complete', 'cancelled'].includes(service.track_state)
+    && !['on_site', 'completed', 'cancelled', 'skipped', 'no_show'].includes(service.status);
+}
+
+// Re-read after a thrown mark. An unreadable row records nothing: a miss
+// that cannot be confirmed is not written as one.
+async function stillOpenWithoutArrival(serviceId) {
+  try {
+    const fresh = await loadCurrentService(serviceId);
+    return Boolean(fresh) && isOpenWithoutArrival(fresh);
+  } catch (err) {
+    logger.warn(`[gps-arrival] arrival re-read failed for ${serviceId}: ${err.message}`);
+    return false;
+  }
+}
+
+async function markAndAudit({ service, techStatus, destination, distance, point, decision, config }) {
+  let result = null;
+  try {
+    // techStatus.tech_id is the tech reporting this GPS sample; the caller
+    // already rejected a tech/assignment mismatch, so it's the one arriving.
+    result = await trackTransitions.markOnProperty(service.id, { actingTechId: techStatus.tech_id });
+    await auditArrival({ service, techStatus, destination, distance, point, decision, result });
+    // A grouped stop can land the primary on property and still answer
+    // visit_fanout_incomplete (ok false): the arrival happened, so it is not a
+    // miss. Judge by the returned state, not result.ok alone.
+    // Any other returned failure is judged by the persisted row too: a
+    // concurrent request can have arrived and completed the visit meanwhile.
+    if (!result?.ok && result?.state !== 'on_property' && await stillOpenWithoutArrival(service.id)) {
+      await recordNotMarked({
+        service, techStatus, point, config, destination, distance,
+        reason: 'mark_on_property_failed', detail: result?.reason || null,
+      });
+    }
+    return {
+      ok: result?.ok === true,
+      reason: result?.ok ? 'marked_on_property' : 'mark_on_property_failed',
+      state: result?.state || null,
+      distanceMeters: distance,
+      result,
+    };
+  } catch (err) {
+    logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
+    await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err });
+    // markOnProperty can commit the flip and then throw in its post-flip work,
+    // so the throw alone does not prove a miss: judge by the persisted row.
+    if (await stillOpenWithoutArrival(service.id)) {
+      await recordNotMarked({
+        service, techStatus, point, config, destination, distance,
+        reason: 'mark_on_property_failed', detail: err.message,
+      });
+    }
+    return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance };
+  }
 }
 
 async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = null } = {}) {
@@ -341,6 +596,7 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
     return { ok: false, reason: 'missing_tech_location' };
   }
   if (!isAcceptedCurrentSample({ techLat, techLng, point })) {
+    await recordSupersededSample({ techStatus, point, config });
     return { ok: false, reason: 'stale_location_sample' };
   }
 
@@ -353,15 +609,12 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
   }
 
   if (!service) return { ok: false, reason: 'service_not_found' };
-  if (service.technician_id && techStatus.tech_id && service.technician_id !== techStatus.tech_id) {
-    return { ok: false, reason: 'technician_mismatch' };
-  }
-  if (!isEnRouteService(service)) {
-    return { ok: false, reason: 'service_not_en_route' };
-  }
-  const sampleTiming = validateSampleTiming({ techStatus, point, service });
-  if (!sampleTiming.ok) {
-    return { ok: false, reason: sampleTiming.reason };
+  const rejection = serviceRejection({ service, techStatus, point });
+  if (rejection) {
+    if (isOpenWithoutArrival(service)) {
+      await recordNotMarked({ service, techStatus, point, config, reason: rejection });
+    }
+    return { ok: false, reason: rejection };
   }
 
   const destination = await resolveDestination(service);
@@ -378,6 +631,7 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
   });
 
   if (!decision.arrived) {
+    await recordNotMarked({ service, techStatus, point, config, destination, distance, reason: decision.reason });
     return {
       ok: false,
       reason: decision.reason,
@@ -385,28 +639,12 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
     };
   }
 
-  let result = null;
-  try {
-    // techStatus.tech_id is the tech reporting this GPS sample; the guard above
-    // already rejects a tech/assignment mismatch, so it's the one arriving.
-    result = await trackTransitions.markOnProperty(service.id, { actingTechId: techStatus.tech_id });
-    await auditArrival({ service, techStatus, destination, distance, point, decision, result });
-    return {
-      ok: result?.ok === true,
-      reason: result?.ok ? 'marked_on_property' : 'mark_on_property_failed',
-      state: result?.state || null,
-      distanceMeters: distance,
-      result,
-    };
-  } catch (err) {
-    logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
-    await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err });
-    return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance };
-  }
+  return markAndAudit({ service, techStatus, destination, distance, point, decision, config });
 }
 
 function resetConfigCache() {
   configCache = null;
+  notMarkedRecorded.clear();
 }
 
 module.exports = {

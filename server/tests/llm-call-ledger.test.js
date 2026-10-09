@@ -125,6 +125,9 @@ describe('llm call ledger', () => {
       expect(metrics.extractUsage('anthropic', { usage: 'nope' })).toEqual(empty);
       expect(metrics.extractUsage('gemini', { usageMetadata: { promptTokenCount: 'x' } })).toEqual(empty);
       expect(metrics.extractUsage('unknown', { usage: { input_tokens: 1 } })).toEqual(empty);
+      // the total wins when the API gives both; neither = unknown, not zero
+      expect(metrics.extractUsage('anthropic', { usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 25, cache_creation: { ephemeral_5m_input_tokens: 99 } } }).cache_write_tokens).toBe(25);
+      expect(metrics.extractUsage('anthropic', { usage: { input_tokens: 1, output_tokens: 1 } }).cache_write_tokens).toBeNull();
     });
   });
 
@@ -701,6 +704,15 @@ describe('llm call ledger', () => {
   });
 
   describe('recordSessionUsage', () => {
+    it('reads the model and the cache writes where a live session reports them (agent.model.id, cache_creation per TTL)', async () => {
+      // the shape GET /v1/sessions/<id> returned on 2026-10-08: no top-level model, no cache_creation_input_tokens
+      global.fetch = fetchJson({ id: 'sess_live', status: 'idle', agent: { name: 'waves-content-writer', model: { id: 'claude-opus-4-8', effort: { type: 'xhigh' }, speed: 'standard' } },
+        usage: { input_tokens: 6, output_tokens: 43397, cache_read_input_tokens: 64858, cache_creation: { ephemeral_5m_input_tokens: 54141, ephemeral_1h_input_tokens: 100 }, list_cost: { amount: '150', currency: 'USD' } } });
+      const { metrics } = load();
+      await metrics.recordSessionUsage({ laneId: 'agent_content', sessionId: 'sess_live', model: null, startedAt: Date.now() - 1000 });
+      expect(ledgerRows()[0]).toMatchObject({ row_kind: 'session', lane_id: 'agent_content', served_model: 'claude-opus-4-8', input_tokens: 6, output_tokens: 43397, cached_input_tokens: 64858, cache_write_tokens: 54241 });
+    });
+
     it('writes one session row from the session usage block and never throws', async () => {
       global.fetch = fetchJson({ id: 'sess_1', status: 'idle', model: 'served-agent-model', usage: { input_tokens: 5000, output_tokens: 700, cache_read_input_tokens: 4000 } });
       const { metrics } = load();
