@@ -49,8 +49,12 @@ function installServiceLookup(service, { existingAudit } = {}) {
   // "has any member arrived" lookup, which finds none by default.
   query.locked = {
     where: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
     forShare: jest.fn().mockReturnThis(),
-    first: jest.fn().mockImplementation(async (...cols) => (cols.length === 1 && cols[0] === 'id' ? undefined : service)),
+    noWait: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue(service),
+    // the grouped-stop member read: only this member, still open, by default
+    select: jest.fn().mockResolvedValue([{ id: service?.id, arrived_at: null, track_state: service?.track_state, status: service?.status }]),
   };
   const audit = auditQueryMock(existingAudit);
   db.mockImplementation((table) => {
@@ -669,8 +673,11 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
   test('a grouped stop whose other member already arrived is not a miss', async () => {
     const service = baseService({ visit_id: 'visit-3', group_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08' });
     const query = installServiceLookup(service);
-    // row re-read: still open; member lookup: a sibling is on property
-    query.locked.first.mockImplementation(async (...cols) => (cols.length === 1 && cols[0] === 'id' ? { id: 'svc-sibling' } : service));
+    // row re-read: still open; member read: a sibling is on property
+    query.locked.select.mockResolvedValue([
+      { id: 'svc-1', arrived_at: null, track_state: 'en_route', status: 'en_route' },
+      { id: 'svc-sibling', arrived_at: new Date().toISOString(), track_state: 'on_property', status: 'on_site' },
+    ]);
 
     await detector.maybeMarkArrivedFromGps({
       techStatus: baseTechStatus(), point: basePoint({ speed_mph: 32, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG,
@@ -678,6 +685,21 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     expect(notMarkedWrites()).toHaveLength(0);
     expect(query.locked.where).toHaveBeenCalledWith({ visit_id: 'visit-3' });
+    expect(query.locked.noWait).toHaveBeenCalled();
+  });
+
+  test('a member locked by a lifecycle write makes the diagnostic give up and release its claim', async () => {
+    const service = baseService({ visit_id: 'visit-4', group_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08' });
+    const fast = { techStatus: baseTechStatus(), point: basePoint({ speed_mph: 32, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG };
+    const query = installServiceLookup(service);
+    query.locked.select.mockRejectedValueOnce(new Error('could not obtain lock on row'));
+
+    await detector.maybeMarkArrivedFromGps(fast);
+    expect(notMarkedWrites()).toHaveLength(0);
+
+    // the next sample can record it: the in-memory claim was released
+    await detector.maybeMarkArrivedFromGps(fast);
+    expect(notMarkedWrites()).toHaveLength(1);
   });
 
   test('a grouped stop with no member en-route time falls back to the stop-level stamp', async () => {

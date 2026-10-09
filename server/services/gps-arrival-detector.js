@@ -410,11 +410,17 @@ async function stillTheObservedMiss(trx, snapshot, fresh) {
   if (!sameDay(fresh.scheduled_date, snapshot.scheduled_date) || !sameInstant(fresh.en_route_at, snapshot.en_route_at)) return false;
   if ((fresh.visit_id || null) !== (snapshot.visit_id || null)) return false;
   if (!fresh.visit_id) return true;
-  const arrivedMember = await trx('scheduled_services')
+  // Every member is share-locked, so a fan-out cannot flip a sibling between
+  // this check and the insert. NOWAIT: a member a lifecycle write holds makes
+  // this diagnostic give up (a later sample retries) instead of waiting, so it
+  // can never be part of a lock cycle with the fan-out.
+  const members = await trx('scheduled_services')
     .where({ visit_id: fresh.visit_id })
-    .where((b) => b.whereNotNull('arrived_at').orWhere({ track_state: 'on_property' }).orWhere({ status: 'on_site' }))
-    .first('id');
-  return !arrivedMember;
+    .orderBy('id')
+    .forShare()
+    .noWait()
+    .select('id', 'arrived_at', 'track_state', 'status');
+  return !members.some((m) => m.arrived_at || m.track_state === 'on_property' || m.status === 'on_site');
 }
 
 async function writeNotMarkedOnce(serviceId, reason, row) {
@@ -433,11 +439,12 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
       // Serialized with the insert: another signal (manual, geofence, a
       // concurrent sample) can have marked the arrival since the caller's
       // snapshot. The persisted row decides, for every path.
-      // FOR SHARE: a lifecycle write (manual, geofence, another sample) waits
-      // for this insert, so the state read and the row stay one decision.
-      // Lock order is advisory then row; lifecycle writers never take this
-      // advisory lock, so there is no cycle.
-      const fresh = await trx('scheduled_services').where({ id: serviceId }).forShare()
+      // FOR SHARE NOWAIT: a lifecycle write (manual, geofence, another sample)
+      // that starts later waits for this insert, so the state read and the row
+      // stay one decision; one already in flight makes this diagnostic give
+      // up (the claim is released and a later sample retries). It never waits
+      // on a lifecycle lock, so it cannot join a lock cycle.
+      const fresh = await trx('scheduled_services').where({ id: serviceId }).forShare().noWait()
         .first('arrived_at', 'completed_at', 'cancelled_at', 'track_state', 'status', 'scheduled_date', 'en_route_at', 'visit_id');
       if (!(await stillTheObservedMiss(trx, row.service, fresh))) return;
       const existing = await trx('audit_log')
