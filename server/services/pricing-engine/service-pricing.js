@@ -2284,20 +2284,23 @@ function priceLawnCare(property, options = {}) {
       : { ...options, ...(Number.isFinite(Number(options.lawnMaterialCostPerK)) ? {} : { annualMaterialBudget: tierAnnualBudget }) };
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPrice;
-    const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
+    let costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
     let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
     // Cost-plus mode: list = cost / (1 - listMargin) in whole dollars per
-    // application, never below the market table or the per-visit minimum.
-    // The cost floor above is subsumed (list margin > collected-margin floor).
+    // application, never below the market table, the per-visit minimum or
+    // the collected-margin floor (a listMargin set under the floor margin
+    // must not list a line below the price its discounts stop at).
     let costPlusListAnnual = null;
     let costPlusListSetPrice = false;
     let minimumPerVisitSetPrice = false;
     if (costPlusKnobs) {
       costPlusListAnnual = Math.ceil(roundMoney(costFloorDetails.annualCost / (1 - costPlusKnobs.listMargin)) / tc.freq) * tc.freq;
       const minimumPerVisitAnnual = costPlusKnobs.minimumPerVisit * tc.freq;
-      ann = Math.max(marketAnnual, costPlusListAnnual, minimumPerVisitAnnual);
+      const collectedFloorAnnual = Math.ceil(costFloorAnnual / tc.freq) * tc.freq;
+      ann = Math.max(marketAnnual, costPlusListAnnual, minimumPerVisitAnnual, collectedFloorAnnual);
       costPlusListSetPrice = ann > marketAnnual && ann === costPlusListAnnual;
-      minimumPerVisitSetPrice = ann > marketAnnual && !costPlusListSetPrice;
+      minimumPerVisitSetPrice = ann > marketAnnual && !costPlusListSetPrice && ann === minimumPerVisitAnnual;
+      costFloorApplied = ann > marketAnnual && !costPlusListSetPrice && !minimumPerVisitSetPrice;
     }
     const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
     if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;

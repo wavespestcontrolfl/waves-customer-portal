@@ -674,3 +674,36 @@ describe('db-bridge rebases the knobs every sync', () => {
     expect(LAWN_PRICING_V2.costPlusList).toEqual(constants.LAWN_COST_PLUS_LIST_DEFAULTS);
   });
 });
+
+describe('the list price never sits under the collected-margin floor', () => {
+  let liveCostPlus;
+  beforeEach(() => { liveCostPlus = JSON.parse(JSON.stringify(LAWN_PRICING_V2.costPlusList)); });
+  afterEach(() => { LAWN_PRICING_V2.costPlusList = liveCostPlus; });
+
+  test('a listMargin set under the floor margin lists at the floor, not the market table', () => {
+    LAWN_PRICING_V2.costPlusList.listMargin = 0.10;
+    const nine = byVisits(price(4500, ON))[9];
+    expect(nine.minimumCollectedAnnualPrice).toBe(584.71);
+    expect(nine.annual).toBe(585);
+    expect(nine.pricingSource).toBe('COST_FLOOR');
+    expect(nine.costFloorApplied).toBe(true);
+  });
+});
+
+describe('a saved cost-plus quote reports against its own margin floor', () => {
+  let liveFloor;
+  beforeEach(() => { liveFloor = LAWN_PRICING_V2.targetCollectedMarginFloor; });
+  afterEach(() => { LAWN_PRICING_V2.targetCollectedMarginFloor = liveFloor; });
+
+  test('a later margin-floor edit does not flag the replayed line', () => {
+    process.env[GATE] = 'true';
+    const input = estimateInput({ lawn: lawnService() });
+    const saved = generateEstimate(input);
+    expect(lawnLine(saved).belowMarginFloor).toBe(false);
+    LAWN_PRICING_V2.targetCollectedMarginFloor = 0.5;
+    const replayed = lawnLine(generateEstimate({ ...input, ...savedFloorReplaySignals({ result: saved }) }));
+    expect(replayed.annual).toBe(693);
+    expect(replayed.belowMarginFloor).toBe(false);
+    expect(lawnLine(generateEstimate(input)).belowMarginFloor).toBe(false);
+  });
+});

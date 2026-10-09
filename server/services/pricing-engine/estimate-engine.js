@@ -47,7 +47,9 @@ function guardedLineCost(item) {
 // carries the target from its stamped cost basis, so a later config edit does
 // not change what a saved quote reports; every other line reads the live value.
 function lawnMarginTarget(item) {
-  const stamped = item.listMargin != null ? item.costFloorDetails?.targetCollectedMarginFloor : undefined;
+  // priceLawnCare puts listMargin and costFloorDetails on the selected tier row.
+  const row = item.selected || item;
+  const stamped = row.listMargin != null ? row.costFloorDetails?.targetCollectedMarginFloor : undefined;
   return stamped ?? LAWN_PRICING_V2.targetCollectedMarginFloor;
 }
 
