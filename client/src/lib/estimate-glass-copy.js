@@ -84,7 +84,7 @@ export function useCommercialGlassActive() {
 export const GLASS_COPY = {
   ctaMain: 'Approve my plan and schedule',
   ctaBook: 'Book my first visit',
-  ctaMicro: 'No long-term contract · Unlimited free callbacks · Money-back guarantee',
+  ctaMicro: 'Cancel online anytime · Unlimited free callbacks · Money-back guarantee',
   askTitle: 'Still deciding? Ask anything — instant answers',
   askExcerpt: 'Ask about pricing, treatments, scheduling, pets, kids, or what happens after approval — straight answers in seconds.',
   schedExcerpt: 'Our soonest openings — and if we’re already on your street that day, snag it and skip the line.',
@@ -235,7 +235,7 @@ const GLASS_PACKS = {
     // issue; it cannot replay the applications a lower tier didn't buy.
     // Mixed pest+lawn bundles demote to the neutral line via the existing
     // distinct-micros rule in glassCtaMicroForKeys.
-    ctaMicro: 'No long-term contract · Free between-visit service calls · Money-back guarantee',
+    ctaMicro: 'Cancel online anytime · Free between-visit service calls · Money-back guarantee',
     aiTitle: 'Your price was built from your lawn — not somebody else’s',
     aiBody: 'We reviewed your lawn size, turf type, and current condition before pricing this program — your lawn, your price, nothing generic.',
     askChips: [
@@ -617,7 +617,7 @@ export function glassPestInclusions(visitsPerYear, includeSetupBullet = false) {
     'Interior treatment included — no awkward upsell, no surprise charge',
     'If pests come back, so do we — unlimited free callbacks, 100% guaranteed',
     'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
-    'No long-term contract — stay because it works, not because you’re trapped',
+    'No contract, no cancellation fee — cancel online in three steps, no phone call',
   ];
   if (includeSetupBullet) {
     bullets.push('$99 setup disappears with annual billing — waived instantly');
@@ -651,13 +651,13 @@ const GLASS_SERVICE_INCLUSIONS = {
     'Standing-water and breeding-pressure checks every visit — we cut the problem at its source',
     'Weather-aware timing so treatments work instead of washing away',
     'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
-    'No long-term contract — cancel anytime',
+    'No contract — cancel online anytime, no fee',
   ],
   tree_shrub: [
     'Ornamentals inspected at every visit — insect, mite, and disease pressure caught before it costs you a plant',
     'Seasonal plant-health treatments matched to what’s actually planted',
     'Observations carried forward — your landscape’s health history in one place',
-    'No long-term contract — cancel anytime',
+    'No contract — cancel online anytime, no fee',
   ],
   termite_bait: [
     'Bait stations on duty around your home’s perimeter — termites work around the clock, so do the stations',

@@ -1,5 +1,5 @@
 /**
- * Footer strip — cancel anytime, satisfaction guarantee, license number.
+ * Footer strip — cancel online anytime, satisfaction guarantee, license number.
  * License falls back to the Waves FDACS number when no server-provided
  * estimate license is present.
  */
@@ -12,7 +12,7 @@ export default function GuaranteeStrip({ licenseNumber }) {
     ? `FL License #${normalizeFdacsLicense(licenseNumber)}`
     : WAVES_FL_LICENSE_LINE;
   const items = [
-    { label: 'Cancel anytime', detail: 'no long-term contract' },
+    { label: 'Cancel online anytime', detail: 'no contract, no fee' },
     { label: 'Satisfaction guaranteed', detail: 'we come back free' },
     { label: 'Licensed & insured', detail: licenseDetail },
   ];
