@@ -236,6 +236,10 @@ describe('B. every add-on other than the visit\'s own becomes a structured row',
     expect(rows.primaryProfileService({ services: [fireAnt, sweep, lawn] })).toBe(lawn);
     // The sweep is then an add-on row, not dropped.
     expect(rows.secondaryAreaAddOns({ services: [sweep, lawn] }, null)).toEqual([sweep]);
+    // The booking label follows the same row as the catalog stamp: a lawn job with a sweep is not "Pest Control".
+    const { canonicalServiceTypeForProfile } = require('../services/slot-reservation')._internals;
+    expect(canonicalServiceTypeForProfile({ services: [sweep, lawn] }, 'Estimate service', { serviceMode: 'one_time' })).toBe('Lawn Care');
+    expect(canonicalServiceTypeForProfile({ services: [fireAnt, sweep] }, 'Estimate service', { serviceMode: 'one_time' })).toBe('Pest Control');
     // Add-ons only: pest control first, else the first, as before.
     expect(rows.primaryProfileService({ services: [fireAnt, sweep] })).toBe(sweep);
     expect(rows.primaryProfileService({ services: [fireAnt, addOnRow('area_addon_bed_pre_emergent')] })).toBe(fireAnt);

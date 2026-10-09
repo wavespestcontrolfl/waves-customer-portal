@@ -315,8 +315,9 @@ function treeShrubServiceTypeFromVisits(visitsPerYear) {
 }
 
 function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimate service', opts = {}) {
-  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
-  const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  // The SAME row the catalog stamp picks (catalogLinkForProfile): the label
+  // and the catalog identity of one appointment never name different services.
+  const primary = primaryProfileService(serviceProfile);
   const key = primary?.service || serviceKeyForLabel(fallback);
   // A one-time accept is a single visit with no cadence. The one-time service
   // profile carries an empty `services` array, so visitsPerYear is unknown and
