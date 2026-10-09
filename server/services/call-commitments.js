@@ -368,11 +368,13 @@ const DATED_WALL_RE = /^(\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})(?::\d{2})?)(?:\.\d+)?(-
 // clock must occur once that day: 2:30 on the spring-forward night does not
 // exist and 1:30 on the fall-back night happens twice. No guessed deadline
 // (codex #6215 r3 P2; the rule admin-leads applies to an office-typed callback).
-function oneETWallClock(iso, hhmm) {
-  const at = new Date(iso);
-  const p = etParts(at);
+function readsBackAs(iso, hhmm) {
+  const p = etParts(new Date(iso));
   const pad = (n) => String(n).padStart(2, '0');
-  return `${pad(p.hour)}:${pad(p.minute)}` === hhmm && etWallClockOccurrences(at) === 1;
+  return `${pad(p.hour)}:${pad(p.minute)}` === hhmm;
+}
+function oneETWallClock(iso, hhmm) {
+  return readsBackAs(iso, hhmm) && etWallClockOccurrences(new Date(iso)) === 1;
 }
 function callbackDueAt(value, callStartedAt) {
   if (value == null || value === '') return null;
@@ -391,7 +393,8 @@ function callbackDueAt(value, callStartedAt) {
     // A written Eastern offset already says WHICH 1:30 on the fall-back night:
     // the instant stands (isoOrNull keeps a valid offset as written). Only an
     // offset-free clock can be missing or repeated (codex #6215 r5 P2).
-    return dated[3] || oneETWallClock(due, dated[2]) ? due : null;
+    // A clock that does not exist stays invalid with any offset (r6 P2).
+    return (dated[3] ? readsBackAs(due, dated[2]) : oneETWallClock(due, dated[2])) ? due : null;
   }
   const start = callStartedAt ? new Date(callStartedAt) : null;
   if (!start || Number.isNaN(start.getTime())) return null;

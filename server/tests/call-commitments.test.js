@@ -255,6 +255,9 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
       expect(cbFor('2026-03-08T02:30', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null, due_basis: null });
       expect(cbFor('2026-11-01T01:30', null, '2026-10-30T09:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
       expect(cbFor('2026-11-01T09:30', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T09:30:00-05:00').toISOString());
+      // An offset does not make a missing clock real (r6 P2).
+      expect(cbFor('2026-03-08T02:30:00-05:00', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null });
+      expect(cbFor('2026-03-08T02:30:00-04:00', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null });
       // A written offset names which 1:30 it is: the instant stands (r5 P2).
       expect(cbFor('2026-11-01T01:30:00-04:00', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T01:30:00-04:00').toISOString());
       expect(cbFor('2026-11-01T01:30:00-05:00', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T01:30:00-05:00').toISOString());
