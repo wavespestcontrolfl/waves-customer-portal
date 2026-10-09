@@ -1480,9 +1480,13 @@ function useSodHolds({ ctx, request, base, releasePlanned }) {
   const [sodFresh, setSodFresh] = useState(undefined);
   // True from the tick until the holds are read again: the sheet does not complete on the rows of the old holds.
   const [sodBusy, setSodBusy] = useState(false);
+  const [sodStale, setSodStale] = useState(false);
   const saveSodRooted = useCallback(async (sodLaidOn) => {
     await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
     // The weed lines un-hold on this re-read: the server's own words, not a guess here.
+    // The tick is saved from here: until a re-read succeeds the rows on the sheet are the old holds' rows, and the sheet does
+    // not complete on them (a line the tick released would be recorded as skipped). Ticking again reads again.
+    setSodStale(true);
     let data;
     try {
       data = await request(`${base}/lawn-fast/context?${SOD_AWARE}`);
@@ -1492,6 +1496,7 @@ function useSodHolds({ ctx, request, base, releasePlanned }) {
     const fresh = newSodOf(data);
     // A re-read that could not check the sod record says nothing: the holds stay as they were (no line is released).
     if (fresh?.unavailable) throw new Error(SOD_REREAD_MESSAGE);
+    setSodStale(false);
     setSodFresh(fresh);
     // A planned default the hold kept off the sheet comes back; an add-on is a plain "Add" again on its own.
     releasePlanned(releasedPlanned(uniquePlanned(ctx.planned), ctx.newSod, fresh));
@@ -1500,7 +1505,7 @@ function useSodHolds({ ctx, request, base, releasePlanned }) {
     setSodBusy(true);
     try { await saveSodRooted(sodLaidOn); } finally { setSodBusy(false); }
   }, [saveSodRooted]);
-  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, confirmSodRooted, sodBusy };
+  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale ? SOD_REREAD_MESSAGE : '' };
 }
 
 function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
@@ -1513,7 +1518,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads them again (`undefined` = the context's own).
-  const { newSod, confirmSodRooted, sodBusy } = useSodHolds({ ctx, request, base, releasePlanned: products.releasePlanned });
+  const { newSod, confirmSodRooted, sodWait } = useSodHolds({ ctx, request, base, releasePlanned: products.releasePlanned });
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
@@ -1634,7 +1639,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
 
   const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
   // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
-  const missingReason = sodBusy ? SOD_BUSY_MESSAGE : missingRequirement({ noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = sodWait || missingRequirement({ noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;

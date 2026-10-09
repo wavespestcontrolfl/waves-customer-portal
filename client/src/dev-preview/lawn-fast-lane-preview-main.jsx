@@ -46,6 +46,7 @@ const IDS = {
   primo: 'bbbbbbbb-0000-4000-8000-000000000003',
   prodiamine: 'bbbbbbbb-0000-4000-8000-000000000004',
   dismiss: 'bbbbbbbb-0000-4000-8000-000000000005',
+  bag: 'bbbbbbbb-0000-4000-8000-000000000006',
 };
 const CATALOG = [
   { id: IDS.celsius, name: 'Celsius WG', category: 'herbicide', formulation: 'WG', inventory_on_hand: '120.0000', inventory_unit: 'oz' },
@@ -53,6 +54,8 @@ const CATALOG = [
   { id: IDS.primo, name: 'Primo Maxx', category: 'pgr', formulation: 'SC', inventory_on_hand: '90.0000', inventory_unit: 'fl_oz' },
   { id: IDS.prodiamine, name: 'Prodiamine 65 WDG', category: 'pre-emergent', formulation: 'WDG', inventory_on_hand: '200.0000', inventory_unit: 'oz' },
   { id: IDS.dismiss, name: 'Dismiss NXT', category: 'herbicide', formulation: 'SC', inventory_on_hand: '60.0000', inventory_unit: 'fl_oz' },
+  // The sod states' fertilizer: the server holds a granular product as fertilizer only when it carries nitrogen (Headway G is never held).
+  { id: IDS.bag, name: 'LESCO 24-0-11 75% PolyPlus OPTI', category: 'fertilizer', formulation: 'granular', analysis_n: 24, inventory_on_hand: '500.0000', inventory_unit: 'lb' },
   // Tagged rows: the lawn sheet lists the lawn-tagged insecticide and not the roach bait.
   { id: '77777777-7777-4777-8777-000000000001', name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.46, default_unit: 'oz/1000sf', inventory_on_hand: '40.0000', inventory_unit: 'oz' },
   { id: '77777777-7777-4777-8777-000000000003', name: 'Artavia 2 SC (Azoxy)', category: 'fungicide', formulation: 'SC', service_lines: ['lawn'], inventory_on_hand: '64.0000', inventory_unit: 'fl_oz' },
@@ -68,6 +71,12 @@ const PLANNED = [
   { productId: IDS.headway, name: 'Headway G', applicationMethod: 'granular_broadcast', amount: 17.3, amountUnit: 'lb', treatedSqft: LAWN_SQFT, areaUnit: 'sqft', ratePer1000: 3, rateUnit: 'lb' },
   { productId: IDS.primo, name: 'Primo Maxx', applicationMethod: 'broadcast_spray', amount: 1.4, amountUnit: 'fl_oz', treatedSqft: LAWN_SQFT, areaUnit: 'sqft', ratePer1000: 0.25, rateUnit: 'fl_oz' },
 ];
+// The planned lines of the sod states: the plan with the fertilizer bag the holds act on.
+const SOD_BAG = { productId: IDS.bag, name: 'LESCO 24-0-11 75% PolyPlus OPTI', applicationMethod: 'granular_broadcast', amount: 14.4, amountUnit: 'lb', treatedSqft: LAWN_SQFT, areaUnit: 'sqft', ratePer1000: 2.5, rateUnit: 'lb' };
+const plannedItems = () => {
+  if (STATE === 'empty-products') return [];
+  return STATE === 'sod' || STATE === 'sod-rooted' ? [...PLANNED, SOD_BAG] : PLANNED;
+};
 const VISIT = {
   id: 'svc-preview',
   customerId: 'cust-preview',
@@ -130,7 +139,7 @@ const newSodFor = () => {
       heldLine: 'Held: fertilizer, weed killer, pre-emergent, Tetrino, Dylox, Gravex.', largePatch: 'Watch for large patch.',
       swap: null, noWholeLawn: null, rooted: null,
       lines: {
-        [IDS.headway]: { held: true, kinds: ['fertilizer'], reason: 'Held: new sod. Fertilizer starts Oct 31, 2026.' },
+        [IDS.bag]: { held: true, kinds: ['fertilizer'], reason: 'Held: new sod. Fertilizer starts Oct 31, 2026.' },
         [IDS.celsius]: { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer starts Oct 31, 2026, once the sod has been mowed twice and does not lift.' },
       },
     };
@@ -156,7 +165,7 @@ const context = () => ({
   service: VISIT,
   visitDate: '2026-10-05',
   turfHeightCapture: false,
-  plannedProducts: { source: 'plan', items: STATE === 'empty-products' ? [] : PLANNED },
+  plannedProducts: { source: 'plan', items: plannedItems() },
   plannedProductsUnavailable: null,
   methods: [
     { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },

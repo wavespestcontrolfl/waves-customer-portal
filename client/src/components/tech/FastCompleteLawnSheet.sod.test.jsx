@@ -404,6 +404,25 @@ describe('the rooted tick', () => {
     await screen.findByText('Saved. The sheet could not reload the holds. Tap the box again.');
     expect(within(banner()).getByRole('checkbox').checked).toBe(false);
   });
+  // Codex round 2 on #6240: a saved tick whose re-read failed leaves the old holds' rows on the sheet.
+  test('after a saved tick whose re-read failed, Complete stays off until a tick reads the holds again', async () => {
+    const HELD_BAG = { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer waits until the sod has been mowed twice and does not lift.' };
+    await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(AFTER));
+    await confirmAssessment();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    failContextAfter = contextReads;
+    fireEvent.click(within(banner()).getByRole('checkbox'));
+    await waitFor(() => expect(screen.getAllByText('Saved. The sheet could not reload the holds. Tap the box again.').length).toBeGreaterThan(0));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(completeButton());
+    expect(completeCalls()).toHaveLength(0);
+    failContextAfter = Infinity;
+    fireEvent.click(within(banner()).getByRole('checkbox'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls().length).toBe(1));
+    expect(completeCalls()[0].body.products.map((p) => p.productId)).toEqual([P_NUTRA, P_BAG24]);
+  });
 });
 
 describe('the October bag swap and the all-held message', () => {
