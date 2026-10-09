@@ -70,6 +70,13 @@ describeDb('places and trouble areas through PostgreSQL', () => {
     await product(ARENA, { category: 'insecticide', default_rate_per_1000: 0.147 });
     await product(CELSIUS, { default_rate_per_1000: 0.085 });
     await product('Plain Spot Fungicide', { category: 'fungicide' });
+    await product('Certainty Turf Herbicide');
+    await product('Blindside Herbicide');
+    // Products whose cap is a stored product_limits row (a fungicide, a caterpillar product and a wetting agent): one a year.
+    for (const [name, category] of [['Stored Cap Fungicide', 'fungicide'], ['Stored Cap Caterpillar Insecticide', 'insecticide'], ['Stored Cap Wetting Agent', 'adjuvant']]) {
+      const row = await product(name, { category });
+      await knex('product_limits').insert({ product_id: row.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 1, limit_unit: 'applications', severity: 'hard_block', description: `${name}: one a year.` });
+    }
     limits = require('../services/application-limits');
     areas = require('../services/lawn-trouble-areas');
     world = await fixture(knex);
@@ -226,6 +233,25 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'roof' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
       // A whole-lawn row is not judged by place.
       expect(await areas.preflightPlaces({ knex, svc, products: [row({ applicationMethod: 'broadcast_spray' })] })).toBeNull();
+    });
+
+    // One row per way a spot treatment reaches the sheet: the product is at its yearly count at the FRONT, so /complete refuses
+    // the front and accepts the back (the sheet tests prove the tech can reach the back in the counted taps).
+    test.each([
+      ['Weed spots lead (Celsius WG)', CELSIUS, 2],
+      ['Weed spots member (Certainty)', 'Certainty Turf Herbicide', 2],
+      ['Weed spots replacement (Blindside)', 'Blindside Herbicide', 2],
+      ['chinch (Arena 50 WDG)', ARENA, 2],
+      ['fungus card (a stored cap)', 'Stored Cap Fungicide', 1],
+      ['caterpillar card (a stored cap)', 'Stored Cap Caterpillar Insecticide', 1],
+      ['dry-spot card (a stored cap)', 'Stored Cap Wetting Agent', 1],
+      ['a search-added spot row (a stored cap)', 'Stored Cap Fungicide', 1],
+    ])('%s: /complete refuses the front and accepts the back', async (_label, name, rows) => {
+      for (let i = 0; i < rows; i += 1) await applied(name, { place: 'front', daysAgo: 100 - i * 60, rate: 0.147 });
+      const svc = await svcOf();
+      const row = (areaPlace) => ({ productId: catalog[name].id, name, applicationMethod: 'spot_treatment', areaPlace });
+      expect(await areas.preflightPlaces({ knex, svc, products: [row('front')] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+      expect(await areas.preflightPlaces({ knex, svc, products: [row('back')] })).toBeNull();
     });
 
     test('the closeout audit judges a recorded spot application at its place, not the lawn', async () => {

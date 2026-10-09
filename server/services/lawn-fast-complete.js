@@ -917,7 +917,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const [offers, chinch] = await Promise.all([
-    guide.addOnOffers({ candidates: loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows, svc, knex }),
+    guide.addOnOffers({ candidates: loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows, svc, knex, places: limitPlaces() }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: limitPlaces() }) : null,
   ]);
   // A read that throws fails the request (the sheet then follows the context's decisions); only a

@@ -370,6 +370,96 @@ describe('unreadableProductIds: what the fresh read could not read (not forbidde
   });
 });
 
+// GATE_LAWN_TROUBLE_AREAS: the other guided picks and the weeds and chinch cards, judged per place.
+describe('per-place offers: a product is held back only when NO place permits it', () => {
+  const PLACES = ['front', 'back', 'left_side', 'right_side'];
+  const CAP = [{ type: 'annual_max_apps', message: 'Artavia: 2/2 — LIMIT REACHED.' }];
+  const candidate = (id, name, extra = {}) => ({ raw: { product: { id, name }, ...extra }, item: { productId: id, name } });
+  const ROWS = new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } }], [P_ACE, { role: 'insecticide_spot', gates: { trigger: 'caterpillars' } }]]);
+  const both = () => [candidate(P_ART, 'Artavia'), candidate(P_ACE, 'Acelepryn')];
+  const run = (candidates = both()) => addOnOffers({ candidates, rows: ROWS, svc, knex: {}, places: PLACES });
+  // Capped lawn-wide, and at the places named only.
+  const cappedAt = (id, ...places) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+    capped: new Map(!options?.place || places.includes(options.place) ? [[id, CAP]] : []), warnings: [], blocks: [],
+  }));
+
+  test('capped lawn-wide and at the front, open at the back: still offered, not blocked, not unreadable', async () => {
+    cappedAt(P_ART, 'front');
+    const offers = await run();
+    expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' } });
+    expect(offers.blocked).toEqual([]);
+    expect(offers.unreadable).toEqual([]);
+    // Only the capped pick is read again, once per place, with the place as the sixth argument.
+    const calls = engine.v13VisitLimits.mock.calls;
+    expect(calls).toHaveLength(5);
+    expect(calls.slice(1).map((c) => [c[2].map((l) => l.product.id), c[5]])).toEqual(PLACES.map((place) => [[P_ART], { place }]));
+  });
+
+  test('capped at every place: blocked, with no offer', async () => {
+    cappedAt(P_ART, ...PLACES);
+    const offers = await run();
+    expect(offers.fungus).toBeNull();
+    expect(offers.blocked).toEqual([P_ART]);
+    expect(offers.caterpillars).toEqual({ item: { productId: P_ACE, name: 'Acelepryn' } });
+  });
+
+  test('a place whose read throws permits nothing (fail closed): the pick stays blocked when no other place is open', async () => {
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      if (options?.place) throw new Error('db down');
+      return { capped: new Map([[P_ART, CAP]]), warnings: [], blocks: [] };
+    });
+    const offers = await run();
+    expect(offers.fungus).toBeNull();
+    expect(offers.blocked).toEqual([P_ART]);
+  });
+
+  test('nothing capped: one read, as before; a city hold is blocked at every place', async () => {
+    const offers = await run();
+    expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);
+    expect(offers.blocked).toEqual([]);
+    const held = await run([candidate(P_ART, 'Artavia', { unavailable: { kind: 'city_hold' } })]);
+    expect(held.fungus).toBeNull();
+    expect(held.blocked).toEqual([P_ART]);
+  });
+
+  test('no places asked: the lawn-wide answer, five arguments', async () => {
+    cappedAt(P_ART, 'front');
+    const offers = await addOnOffers({ candidates: both(), rows: ROWS, svc, knex: {} });
+    expect(offers.fungus).toBeNull();
+    expect(offers.blocked).toEqual([P_ART]);
+    expect(engine.v13VisitLimits.mock.calls.every((c) => c.length === 5)).toBe(true);
+  });
+
+  test('weedOffer carries what each place takes; a place whose set the sheet cannot build is left out', () => {
+    const items = [{ productId: 'a', name: 'Lead' }, { productId: 'b', name: 'Blind' }];
+    const mix = { mode: 'lead', productIds: ['a'], note: null, byPlace: {
+      front: { mode: 'replacement', productIds: ['b'], note: 'Use Blind.' },
+      back: { mode: 'lead', productIds: ['a'], note: null },
+      left_side: { mode: 'none', productIds: [], note: 'Limit.' },
+      right_side: { mode: 'lead', productIds: ['a', 'missing'], note: null },
+    } };
+    const offer = weedOffer(mix, items);
+    expect(Object.keys(offer.byPlace)).toEqual(['front', 'back']);
+    expect(offer.byPlace.front).toMatchObject({ productIds: ['b'], names: ['Blind'], note: 'Use Blind.' });
+    expect(weedOffer({ mode: 'lead', productIds: ['a'] }, items)).not.toHaveProperty('byPlace');
+  });
+
+  test('the weeds card and the chinch card carry a set per place; other cards and the lawn-wide form carry none', () => {
+    const weeds = { productIds: ['a'], names: ['Lead'], items: [{ productId: 'a', name: 'Lead' }], note: null, byPlace: { back: { productIds: ['a'], names: ['Lead'], items: [{ productId: 'a', name: 'Lead' }], note: null } } };
+    const chinchItem = { productId: P_ARENA, name: 'Arena' };
+    const talak = { productId: P_TALAK, name: 'Talak' };
+    const offers = { chinch: { item: talak, note: 'n', byPlace: { front: { item: talak, note: 'n' }, back: { item: chinchItem, note: null }, left_side: { item: null, note: 'none' } } } };
+    const cards = buildCards({ signals: { weedCoverage: 40, insect: 'severe' }, month: 7, offers, weeds });
+    expect(cards.find((c) => c.kind === 'weeds').byPlace).toEqual(weeds.byPlace);
+    expect(cards.find((c) => c.kind === 'chinch').byPlace).toEqual({
+      front: { productIds: [P_TALAK], names: ['Talak'], items: [talak], note: 'n' },
+      back: { productIds: [P_ARENA], names: ['Arena'], items: [chinchItem], note: null },
+    });
+    const plain = buildCards({ signals: { weedCoverage: 40, insect: 'severe' }, month: 7, offers: { chinch: { item: talak, note: null } }, weeds: { ...weeds, byPlace: undefined } });
+    for (const card of plain) expect(card).not.toHaveProperty('byPlace');
+  });
+});
+
 describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
   const STRUCTURED = { id: 'protocol-1', version: 'v13' };
   const staged = (productId, name, trigger, month, extra = {}) => ({

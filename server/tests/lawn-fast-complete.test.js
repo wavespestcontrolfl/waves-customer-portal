@@ -817,6 +817,55 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       });
     });
 
+    describe('places (GATE_LAWN_TROUBLE_AREAS): a product is held back only when no place permits it', () => {
+      // Capped lawn-wide and at the places named; open elsewhere.
+      const cappedAt = (id, ...places) => v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+        capped: new Map(items.filter((i) => i.product.id === id && (!options?.place || places.includes(options.place))).map((i) => [id, YEARLY])), warnings: [], blocks: [],
+      }));
+      const fungusTables = () => tablesFor({ lawn_assessment_runs: run({ fungal_activity: { level: 'severe' } }) });
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+      test('gate off: a fungicide capped at the front is blocked lawn-wide, as before', async () => {
+        live();
+        cappedAt(P_ART, 'front');
+        const result = await guide(fungusTables());
+        expect(result.blockedProductIds).toContain(P_ART);
+        expect(result.cards.map((card) => card.kind)).not.toContain('fungus');
+      });
+
+      test('gate on: capped at the front only, the fungus card is offered and the pick is not blocked', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        cappedAt(P_ART, 'front');
+        const result = await guide(fungusTables());
+        expect(result.blockedProductIds).not.toContain(P_ART);
+        expect(result.cards.find((card) => card.kind === 'fungus')).toMatchObject({ productIds: [P_ART] });
+      });
+
+      test('gate on: capped at every place, it is blocked and has no card', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        cappedAt(P_ART, 'front', 'back', 'left_side', 'right_side');
+        const result = await guide(fungusTables());
+        expect(result.blockedProductIds).toContain(P_ART);
+        expect(result.cards.map((card) => card.kind)).not.toContain('fungus');
+      });
+
+      test('gate on: the lead capped at the front only gives the weeds card a set per place (the front takes the replacement)', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        buildPlanForService.mockResolvedValue(plan([
+          ...addOns(), row(uuid(44), 'Test Blind Herbicide', { trigger: 'celsius_annual_cap_reached' }),
+        ]));
+        cappedAt(P_LEAD, 'front');
+        const result = await guide(tablesFor({ lawn_assessments: assessmentRow({ weed_suppression: 50 }) }));
+        const weeds = result.cards.find((card) => card.kind === 'weeds');
+        expect(weeds.byPlace.front.productIds).toEqual([uuid(44)]);
+        expect(weeds.byPlace.back.productIds).toEqual([P_LEAD, P_CERT]);
+        expect(weeds.productIds).toEqual([P_LEAD, P_CERT]);
+      });
+    });
+
     test('the fresh chinch decision rides the answer: the product, then the fallback, then nothing', async () => {
       live();
       const tables = tablesFor();

@@ -399,6 +399,10 @@ const effectiveWeedMix = (guide, ctx) => (guide && guide.weedMix !== undefined ?
 // 'answered' (`guide` = { assessmentId, cards, weedMix, chinch }) or 'failed' (the read failed or
 // the answer was malformed: the sheet then follows the context's decisions, as without a guide).
 const GUIDE_KINDS = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'];
+// GATE_LAWN_TROUBLE_AREAS: a weeds or chinch card can carry a decision per place (`byPlace`: { [placeId]: { productIds, items, note } }),
+// and then owns every product any place takes.
+const cardPlaceEntries = (card) => (card.byPlace && typeof card.byPlace === 'object' ? Object.entries(card.byPlace).filter(([, entry]) => Array.isArray(entry?.items) && entry.items.length) : []);
+const cardAllIds = (card) => [...card.productIds, ...cardPlaceEntries(card).flatMap(([, entry]) => entry.items.map((item) => item.productId))];
 const guideCardOk = (card) => !!card && GUIDE_KINDS.includes(card.kind) && typeof card.title === 'string' && Array.isArray(card.productIds) && Array.isArray(card.items);
 function useTreatmentGuide({ base, request, enabled, assessmentId }) {
   const [state, setState] = useState({ for: null, status: 'idle', guide: null });
@@ -440,7 +444,7 @@ const lowerIds = (ids) => (ids || []).filter(Boolean).map((id) => String(id).toL
 // decided"); a held product (take-all, no trouble area on file) has no dismiss and stays out.
 function cardOwnedIds(guide, checks) {
   return lowerIds((guide?.cards || []).filter((card) => checks[card.kind] !== 'none')
-    .flatMap((card) => [...card.productIds, ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
+    .flatMap((card) => [...cardAllIds(card), ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
 }
 
 // What the guide governs for this visit, and what the LATEST decision does with it. ONE invariant:
@@ -474,8 +478,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
     .filter((decision) => decision && ['lead', 'replacement'].includes(decision.mode)).flatMap((decision) => decision.productIds || []));
   const blocked = lowerIds(answered ? guide.blockedProductIds : []);
   const held = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
-  const cardIds = lowerIds(cards.flatMap((card) => [...card.productIds, ...card.items.map((item) => item.productId)]));
-  const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => card.productIds));
+  const cardIds = lowerIds(cards.flatMap((card) => [...cardAllIds(card), ...card.items.map((item) => item.productId)]));
+  const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => cardAllIds(card)));
   const weedGroup = lowerIds(weedMix?.groupProductIds);
   // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
   const unreadable = settled ? [
@@ -1520,7 +1524,7 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
         </React.Fragment>
       ))}
       {areas && <KnownTroubleAreas known={areas.known} unavailable={areas.knownUnavailable} locked={locked} clear={onClearArea} />}
-      <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} areas={areas} onWeedPlace={onWeedPlace} />
       {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
       <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} areas={areas} onWeedPlace={onWeedPlace} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
@@ -1720,14 +1724,27 @@ const guideCardsOf = (guide) => (guide ? guide.cards : null);
 const gateNotesOf = (items) => [...new Set(items.flatMap((item) => item.gateNotes || []))];
 
 // Every product a card offers is on the sheet (a half-added weed mix is not: its tap finishes it).
-const cardOnSheet = (card, on) => card.productIds.length > 0 && card.productIds.every((id) => on.has(String(id).toLowerCase()));
+// What each place takes, said by place, only when the places differ from one another ("Front: Blind Herbicide", "Back: Lead WG, ...").
+function placeSets(card, areas) {
+  const entries = cardPlaceEntries(card);
+  const sets = entries.map(([id, entry]) => [id, entry.items.map((item) => item.name).join(', ')]);
+  if (!areas || new Set(sets.map(([, names]) => names)).size < 2) return [];
+  return sets.map(([id, names]) => `${areas.places.find((place) => place.id === id)?.label || id}: ${names}`);
+}
+
+const cardOnSheet = (card, on) => {
+  const everyOn = (ids) => ids.length > 0 && ids.every((id) => on.has(String(id).toLowerCase()));
+  const places = cardPlaceEntries(card);
+  // With places, a card is taken once ANY place's own set is on the sheet.
+  return places.length ? places.some(([, entry]) => everyOn(entry.items.map((item) => item.productId))) : everyOn(card.productIds);
+};
 
 // "Suggested from this lawn" (GATE_LAWN_TREATMENT_GUIDE): one card per photo finding. The server
 // decided every word and every product; this renders them and performs the taps. A card with a
 // check asks the tech to do it first: "Found at the edge. Add it" opens the product as a spot row (the
 // same path as a single add-on tap) and "Nothing found" dismisses the card. The weed card is the
 // Weed spots entry's own tap. Nothing is added by itself.
-function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }) {
+function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd, areas = null, onWeedPlace }) {
   const titleId = useId();
   const cards = guideCardsOf(guide);
   if (!cards) return null;
@@ -1739,6 +1756,23 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }
   const add = (card) => {
     card.items.forEach((item) => onAdd(catalogProductFor(item, catalog), { planned: item, guided: card.kind, source: 'guide_card', ...(card.kind === 'weeds' ? { weedGroup: true } : {}) }));
     if (card.check) onCheck(card.kind, 'found');
+  };
+  // GATE_LAWN_TROUBLE_AREAS: a card with a decision per place adds a place's own set with one tap on the place (the weeds card as
+  // the Weed spots entry, the chinch card as the chinch entry), so a place that needs the replacement or the second product is
+  // never out of reach. The weeds card names the place on the entry's shared control; the chinch card on the row.
+  const addAt = (card, placeId) => {
+    card.byPlace[placeId].items.forEach((item) => onAdd(catalogProductFor(item, catalog), {
+      planned: item, guided: card.kind, source: 'guide_card', ...(card.kind === 'weeds' ? { weedGroup: true } : { place: placeId }),
+    }));
+    if (card.kind === 'weeds') onWeedPlace?.(placeId);
+    if (card.check) onCheck(card.kind, 'found');
+  };
+  const placeChoices = (card) => {
+    if (!areas) return [];
+    const known = knownPlacesOfType(areas, card.kind === 'weeds' ? 'weeds' : 'chinch');
+    return cardPlaceEntries(card)
+      .map(([id]) => ({ id, label: areas.places.find((place) => place.id === id)?.label || id, known: known.has(id) }))
+      .sort((a, b) => Number(b.known) - Number(a.known));
   };
   return (
     <div className="tech-protocol-addons tech-guide" role="group" aria-labelledby={titleId}>
@@ -1757,9 +1791,13 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }
             {card.detail && <p className="tech-visit-muted">{card.detail}</p>}
             {gateNotesOf(card.items).map((gateNote) => <p key={gateNote} className="tech-visit-muted">{gateNote}</p>)}
             {card.note && <p className="tech-visit-muted" role="status">{card.note}</p>}
+            {placeSets(card, areas).map((line) => <p key={line} className="tech-visit-muted">{line}</p>)}
             {/* A check-only card (take-all, no trouble area on file) has no product to add. */}
             <div className="tech-guide-actions">
-              {card.actionLabel && (
+              {card.actionLabel && !onSheet && placeChoices(card).length > 0 && (
+                <PlaceAddButtons choices={placeChoices(card)} locked={locked} ariaPrefix={card.actionLabel} onPick={(placeId) => addAt(card, placeId)} />
+              )}
+              {card.actionLabel && (onSheet || placeChoices(card).length === 0) && (
                 <Button
                   type="button"
                   variant="secondary"

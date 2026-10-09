@@ -565,3 +565,101 @@ describe('Chinch bugs found: the entry is one tap per place', () => {
     expect(pressed(where)).toEqual(['Left side']);
   });
 });
+
+// ── reachability: place A is capped, place B is open ────────────────────────────────────────────────────────
+// For every guided or standing way a spot treatment gets onto the sheet, with the front closed for the product (or the
+// front needing a different product) and the back open, the tech reaches the back treatment in the counted taps, the front
+// cannot be chosen for a closed product, and the completion carries the back. (/complete accepting the back and refusing the
+// front is proven against Postgres in lawn-trouble-areas.db.test.js, one row per product kind.)
+describe('reachability: the front is capped, the back is open', () => {
+  const P_CATER = 'dddddddd-0000-4000-8000-000000000001';
+  const P_DISP = 'dddddddd-0000-4000-8000-000000000002';
+  const CAT2 = [
+    ...CAT,
+    { id: P_CATER, name: 'Cater Insecticide', category: 'insecticide', formulation: 'SC', default_rate_per_1000: 0.07, default_unit: 'fl_oz' },
+    { id: P_DISP, name: 'Disp Wetting Agent', category: 'adjuvant', formulation: 'SL', default_rate_per_1000: 1, default_unit: 'fl_oz' },
+  ];
+  const ALL_ADDONS = [...ADD_ONS, addOn(P_CATER, 'Cater Insecticide', { line: 'Cater Insecticide — caterpillars' }), addOn(P_DISP, 'Disp Wetting Agent')];
+  const ARENA_ITEM = { productId: P_ARENA, name: 'Arena 50 WDG', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: 0.147, rateUnit: 'oz', gateNotes: [] };
+  const BIF_ITEM = { productId: P_BIF, name: 'Atticus Talak 7.9 F', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: null, rateUnit: null, gateNotes: [] };
+  const CHINCH = {
+    item: BIF_ITEM, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: [P_ARENA, P_BIF], unreadableIds: [],
+    byPlace: { front: { item: BIF_ITEM, note: null, unreadableIds: [] }, back: { item: ARENA_ITEM, note: null, unreadableIds: [] } },
+  };
+  const card = (kind, extra = {}) => ({ kind, title: kind, finding: `Finding for ${kind}.`, check: null, detail: null, note: null, productIds: [], items: [], actionLabel: 'Add it', dismissLabel: null, ...extra });
+  const setOf = (items) => ({ productIds: items.map((i) => i.productId), names: items.map((i) => i.name), items, note: null });
+  const LEAD_ITEMS = [ADD_ONS[0], ADD_ONS[1], ADD_ONS[2]];
+  const WEEDS_CARD = () => card('weeds', {
+    title: 'Weed spots', productIds: LEAD_ITEMS.map((i) => i.productId), items: LEAD_ITEMS, actionLabel: 'Add weed spots',
+    byPlace: { front: setOf([ADD_ONS[3]]), back: setOf(LEAD_ITEMS) },
+  });
+  const CHINCH_CARD = () => card('chinch', {
+    title: 'Insects: check for chinch bugs', productIds: [P_BIF], items: [BIF_ITEM], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
+    byPlace: { front: setOf([BIF_ITEM]), back: setOf([ARENA_ITEM]) },
+  });
+  const SINGLE = (kind, item, label) => card(kind, { title: kind, productIds: [item.productId], items: [item], actionLabel: label, dismissLabel: 'Nothing found' });
+  const closedFront = (...ids) => areasBlock({ blocked: Object.fromEntries(ids.map((id) => [id, { front: 'Closed up front — LIMIT REACHED.' }])) });
+  const guided = (cards, extra = {}) => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards, ...(extra.weedMix ? { weedMix: extra.weedMix } : {}), ...(extra.chinch ? { chinch: extra.chinch } : {}) };
+    return placeContext({ treatmentGuide: true, addOns: ALL_ADDONS, ...extra, troubleAreas: extra.troubleAreas || areasBlock() });
+  };
+  let taps;
+  const tap = (el) => { taps += 1; fireEvent.click(el); };
+  const group = (name) => screen.getByRole('group', { name });
+  const inSuggested = () => within(group('Suggested from this lawn'));
+
+  // [label, context, reach(), rows reached, expected taps, chip check (a closed place is off), the row that carries the place chips]
+  const CASES = [
+    ['Weed spots entry', () => placeContext({ addOns: ALL_ADDONS, weedMix: MIX({ front: BLIND_SET, back: LEAD_SET, left_side: LEAD_SET, right_side: LEAD_SET }) }),
+      () => tap(within(addons()).getByRole('button', { name: 'Add weed spots: Back' })), ['Lead WG', 'Cert Herbicide', 'Tank Surfactant'], 1, null],
+    ['weeds card', () => guided([WEEDS_CARD()], { weedMix: MIX({ front: BLIND_SET, back: LEAD_SET }), troubleAreas: areasBlock() }),
+      () => tap(inSuggested().getByRole('button', { name: 'Add weed spots: Back' })), ['Lead WG', 'Cert Herbicide', 'Tank Surfactant'], 1, null],
+    ['chinch entry', () => guided([], { chinch: CHINCH }),
+      () => tap(within(addons()).getByRole('button', { name: 'Add chinch bug treatment: Back' })), ['Arena 50 WDG'], 1, null],
+    ['chinch card', () => guided([CHINCH_CARD()], { chinch: CHINCH }),
+      () => tap(inSuggested().getByRole('button', { name: 'Found at the edge. Add it: Back' })), ['Arena 50 WDG'], 1, null],
+    ['fungus card', () => guided([SINGLE('fungus', ADD_ONS[4], 'I checked. Add it')], { troubleAreas: closedFront(P_FUNG) }),
+      () => { tap(inSuggested().getByRole('button', { name: 'I checked. Add it' })); tap(chipOf(placeGroup('Spot Fungicide'), 'Back')); }, ['Spot Fungicide'], 2, 'Spot Fungicide'],
+    ['caterpillar card', () => guided([SINGLE('caterpillars', ALL_ADDONS[5], 'Found them. Add it')], { troubleAreas: closedFront(P_CATER) }),
+      () => { tap(inSuggested().getByRole('button', { name: 'Found them. Add it' })); tap(chipOf(placeGroup('Cater Insecticide'), 'Back')); }, ['Cater Insecticide'], 2, 'Cater Insecticide'],
+    ['dry-spot card', () => guided([SINGLE('dry_spots', ALL_ADDONS[6], 'Add Disp Wetting Agent')], { troubleAreas: closedFront(P_DISP) }),
+      () => { tap(inSuggested().getByRole('button', { name: 'Add Disp Wetting Agent' })); tap(chipOf(placeGroup('Disp Wetting Agent'), 'Back')); }, ['Disp Wetting Agent'], 2, 'Disp Wetting Agent'],
+    ['search-added spot row', () => placeContext({ addOns: [], troubleAreas: closedFront(P_FUNG) }),
+      // A search-added fungicide starts on its category's default method; the tech sets Spot treatment, then the place.
+      async () => {
+        fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Spot Fungicide' } });
+        tap(await screen.findByRole('button', { name: /Spot Fungicide/ }));
+        const method = within(placeGroup('Spot Fungicide')).getByRole('combobox', { name: /^Method for / });
+        taps += 1;
+        fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === 'Spot treatment').value } });
+        tap(chipOf(placeGroup('Spot Fungicide'), 'Back'));
+      }, ['Spot Fungicide'], 3, 'Spot Fungicide'],
+  ];
+
+  test.each(CASES)('%s', async (_label, build, reach, rowNames, expectedTaps, chipRow) => {
+    taps = 0;
+    await openSheet({ request: makeRequest({ ctx: build() }), props: { catalog: CAT2 } });
+    await analyze();
+    if (_label.includes('card')) await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    await reach();
+    // The back treatment is on the sheet, in the counted taps, on the back.
+    expect(taps).toBe(expectedTaps);
+    for (const name of rowNames) expect(screen.getByRole('group', { name })).toBeTruthy();
+    const chinch = _label.includes('chinch');
+    const where = chinch ? within(group('Arena 50 WDG')).getByRole('group', { name: 'Place for Arena 50 WDG' }) : group(chipRow ? `Place for ${chipRow}` : 'Weed spots place');
+    expect(pressed(where)).toEqual(['Back']);
+    // A product the front is closed for cannot be put on the front.
+    if (chipRow) expect(chipOf(where, 'Front').disabled).toBe(true);
+    // The completion carries the back, and nothing at the front.
+    typeAreaFor(rowNames);
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    const body = completeCalls()[0].body.products;
+    expect(body.map((p) => p.areaPlace)).toEqual(rowNames.map(() => 'back'));
+  });
+
+  function typeAreaFor(rowNames) {
+    const weed = rowNames.includes('Lead WG');
+    typeArea(weed ? group('Weed spots') : placeGroup(rowNames[0]), weed ? '500' : '100');
+  }
+});

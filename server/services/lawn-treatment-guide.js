@@ -136,15 +136,16 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * fungicide in program order is the suggestion; a product that is at a limit, whose limit could not
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
-async function addOnOffers({ candidates, rows, svc, knex }) {
+async function addOnOffers({ candidates, rows, svc, knex, places = null }) {
   const chosen = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
   // `blocked`: the picks a limit or a city hold that was READ forbids. `unreadable`: the picks whose
   // limit read failed (nothing is offered for them, and they are not forbidden). A pick that merely
   // has no finding is neither.
   const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [] };
   if (!chosen.length) return offers;
-  const capped = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
-  if (!capped) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
+  const wide = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
+  if (!wide) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
+  const capped = places?.length ? await openSomewhere({ chosen, wide, rows, svc, knex, places }) : wide;
   for (const [kind, candidate] of chosen) {
     const id = idOf(candidate.raw.product.id);
     offers[kind] = offerFor(kind, candidate, { capped, rows });
@@ -152,6 +153,24 @@ async function addOnOffers({ candidates, rows, svc, knex }) {
     else if (isUnreadable(candidate, capped)) offers.unreadable.push(id);
   }
   return offers;
+}
+
+// GATE_LAWN_TROUBLE_AREAS: the limit answer with the picks that SOME place still permits taken out of it. The yearly limits are
+// judged per place for a spot treatment, so a pick closed lawn-wide (or at one place) but open at another is still offered (the
+// row's place chips then close only the forbidden places, with the limit's words). A pick stays blocked or unreadable only when
+// NO place permits it, with the lawn-wide answer's own entry; a place whose read fails permits nothing (fail closed). A place can
+// only be more open than the lawn, so only the picks capped lawn-wide are read again, once per place. A city hold is no limit
+// and is judged by isBlocked as before.
+async function openSomewhere({ chosen, wide, rows, svc, knex, places }) {
+  const closed = chosen.filter(([, c]) => limitBlocks(c, wide).length > 0 && !heldByCity(c.raw));
+  if (!closed.length) return wide;
+  const open = new Set();
+  for (const place of places) {
+    const here = await readCaps({ products: closed.map(([, c]) => c.raw.product), rows, svc, knex, place });
+    if (!here) continue;
+    for (const [, c] of closed) if (!(here.get(idOf(c.raw.product.id)) || []).length) open.add(idOf(c.raw.product.id));
+  }
+  return new Map([...wide].filter(([id]) => !open.has(id)));
 }
 
 // The one add-on each kind may suggest: the FIRST fungicide in program order, the others by trigger.
@@ -235,7 +254,16 @@ function weedOffer(weedMix, items) {
   if (!weedMix || !['lead', 'replacement'].includes(weedMix.mode) || !Array.isArray(weedMix.productIds) || !weedMix.productIds.length) return null;
   const found = weedMix.productIds.map((id) => (items || []).find((item) => idOf(item.productId).toLowerCase() === idOf(id).toLowerCase()));
   if (!found.every(Boolean)) return null;
-  return { productIds: weedMix.productIds.map(idOf), names: found.map((item) => item.name), items: found, note: weedMix.note || null };
+  const offer = { productIds: weedMix.productIds.map(idOf), names: found.map((item) => item.name), items: found, note: weedMix.note || null };
+  if (!weedMix.byPlace) return offer;
+  // GATE_LAWN_TROUBLE_AREAS: what each place takes (the card then adds a place's own mix with one tap on the place).
+  const byPlace = {};
+  for (const [place, decision] of Object.entries(weedMix.byPlace)) {
+    if (!['lead', 'replacement'].includes(decision?.mode) || !Array.isArray(decision.productIds) || !decision.productIds.length) continue;
+    const here = decision.productIds.map((id) => (items || []).find((item) => idOf(item.productId).toLowerCase() === idOf(id).toLowerCase()));
+    if (here.every(Boolean)) byPlace[place] = { productIds: decision.productIds.map(idOf), names: here.map((item) => item.name), items: here, note: decision.note || null };
+  }
+  return { ...offer, byPlace };
 }
 
 // ── chinch bugs ─────────────────────────────────────────────────────────────
@@ -391,6 +419,7 @@ function weedsCard({ s, weeds }) {
     // The fresh offer's own add-ons: the tap adds exactly these, not the context's older weed mix.
     items: weeds.items,
     actionLabel: 'Add weed spots',
+    ...(weeds.byPlace ? { byPlace: weeds.byPlace } : {}),
   });
 }
 
@@ -422,7 +451,13 @@ function chinchCard({ s, month, offers }) {
     items: [item],
     actionLabel: 'Found at the edge. Add it',
     dismissLabel: 'Nothing found',
+    // GATE_LAWN_TROUBLE_AREAS: the product each place takes (Arena where it is open, the bifenthrin product where it is capped).
+    ...(offers.chinch.byPlace ? { byPlace: chinchCardPlaces(offers.chinch.byPlace) } : {}),
   });
+}
+
+function chinchCardPlaces(byPlace) {
+  return Object.fromEntries(Object.entries(byPlace).filter(([, d]) => d?.item).map(([place, d]) => [place, { productIds: [d.item.productId], names: [d.item.name], items: [d.item], note: d.note || null }]));
 }
 
 function caterpillarsCard({ s, offers }) {
