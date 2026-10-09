@@ -1161,6 +1161,76 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  describe('last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling 2026-10-09) — a new hold mirrors the offer filter', () => {
+    const ENV_KEY = 'GATE_CUSTOMER_LAST_START_16';
+    let previous;
+    beforeEach(() => { previous = process.env[ENV_KEY]; });
+    afterEach(() => {
+      if (previous === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = previous;
+    });
+
+    function profile() {
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        serviceMode: 'one_time', serviceLabel: 'Pest Control', durationMinutes: 60, services: [],
+      });
+    }
+    const reserve1700 = () => slotReservation.reserveSlot({
+      estimateId: 'estimate-456',
+      slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '17:00', techId: 'tech-1', durationMinutes: 60 }),
+      serviceMode: 'one_time',
+    });
+
+    test('gate on: a 17:00 slot signed before the flip is refused; the estimate\'s other holds are not dropped', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        profile();
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+        const liveHoldsBuilder = makeLiveHoldsBuilder([{
+          id: 'held-other', scheduled_date: '2027-05-21', window_start: '10:00:00', technician_id: 'tech-1',
+          estimated_duration_minutes: 60, reservation_expires_at: '2027-05-20T13:05:00.000Z',
+        }]);
+        const scheduledBuilders = [liveHoldsBuilder];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+
+        await expect(reserve1700()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot starts after the last customer start' });
+        // Only the live-holds read ran: no delete, probe or insert.
+        expect(scheduledBuilders).toHaveLength(0);
+        expect(trx.mock.calls.filter(([table]) => table === 'scheduled_services')).toHaveLength(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('gate on: a re-POST for a 17:00 hold the customer already has returns that hold (Codex #6220 r1)', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        profile();
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+        const liveHoldsBuilder = makeLiveHoldsBuilder([{
+          id: 'held-1', scheduled_date: '2027-05-20', window_start: '17:00:00', technician_id: 'tech-1',
+          estimated_duration_minutes: 60, reservation_expires_at: '2027-05-20T13:05:00.000Z',
+        }]);
+        const refreshBuilder = {
+          where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(),
+          returning: jest.fn().mockResolvedValue([{ id: 'held-1', reservation_expires_at: '2027-05-20T13:30:00.000Z' }]),
+        };
+        const scheduledBuilders = [liveHoldsBuilder, makeGlobalProbeBuilder([]), refreshBuilder];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+
+        await expect(reserve1700()).resolves.toEqual({ scheduledServiceId: 'held-1', expiresAt: '2027-05-20T13:30:00.000Z' });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
   describe('lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) — commit-side mirror of the offer filter', () => {
     const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
     let previous;

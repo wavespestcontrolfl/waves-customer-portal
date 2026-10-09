@@ -102,6 +102,7 @@ import {
   SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
   useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
+import { pestSheetTipIds } from '../../lib/tech-tips';
 
 // Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
 export { isSendableRateUnit };
@@ -694,6 +695,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   }, []);
   const tips = useTipLibrary({ base: `/admin/dispatch/${service?.id}`, request });
   const tipsAvailable = !!tips;
+  // What the tech tapped or said lifts the advice for it; never a pick.
+  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { pests: [...form.pests], note: form.note }), [tips, form.pests, form.note]);
 
   const chooseMethod = useCallback((next) => {
     setField('method', next);
@@ -822,6 +825,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               tipId={form.tipId}
               customTip={form.customTip}
               locked={formLocked}
+              priorityTipIds={liftedTipIds}
+              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />
@@ -1987,6 +1992,8 @@ function VisitStep({
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
   const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  // The pests the note names lift the advice for them; never a pick.
+  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { note: form.note }), [tips, form.note]);
   // Each dictated chunk joins what is already in the box (stable for the mic).
   const appendNote = useCallback(
     (text) => setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text })),
@@ -2070,6 +2077,8 @@ function VisitStep({
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
+              priorityTipIds={liftedTipIds}
+              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />

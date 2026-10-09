@@ -164,7 +164,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
-import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
@@ -15017,7 +15017,7 @@ export function CompletionPanel({
   // changes, so this never loops).
   useEffect(() => {
     if (techTips?.available !== true) return;
-    const known = new Set((techTips.groups || []).flatMap((g) => (g.tips || []).map((t) => t.id)));
+    const known = pickableTipIds(techTips);
     setSelectedTipIds((prev) => {
       const kept = prev.filter((id) => known.has(id));
       return kept.length === prev.length ? prev : kept;
@@ -25362,12 +25362,15 @@ function TechTipPicker({
     if (String(customTip || "").trim()) setShowCustom(true);
   }, [customTip]);
   const listId = useMemo(() => `tech-tips-${Math.random().toString(36).slice(2, 8)}`, []);
-  const groups = library?.groups || [];
+  const groups = useMemo(() => rotatedTipGroups(library), [library]);
   const allTips = useMemo(
     () => groups.flatMap((g) => (g.tips || []).map((t) => ({ ...t, groupLabel: g.label }))),
     [groups],
   );
-  const tipById = useMemo(() => new Map(allTips.map((t) => [t.id, t])), [allTips]);
+  // A search reads the whole library (`more`: the tips this visit's list
+  // leaves out, owner 2026-10-09); the open list stays the visit's own.
+  const searchTips = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
+  const tipById = useMemo(() => new Map(searchTips.map((t) => [t.id, t])), [searchTips]);
   // The custom line takes a slot like a library pick (the server caps the
   // frozen set the same way), so the count and the cap include it.
   const customCount = String(customTip || "").trim() ? 1 : 0;
@@ -25378,7 +25381,7 @@ function TechTipPicker({
   // would drop over cap.
   const customLocked = !customCount && selectedIds.length >= TECH_TIP_MAX;
   const q = query.trim().toLowerCase();
-  const ranked = q ? rankTechTips(allTips, q) : null;
+  const ranked = q ? rankTechTips(searchTips, q) : null;
   const lastSent = library?.lastSent || {};
   const conditions = library?.conditions || {};
   const inactive = disabled || loading || !!error;

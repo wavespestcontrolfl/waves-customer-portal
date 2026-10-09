@@ -45,7 +45,7 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const {
-  overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
+  overlapsLunch, pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
@@ -1403,6 +1403,19 @@ async function reserveSlot({
           expiresAt: refreshedExpiresAt instanceof Date ? refreshedExpiresAt.toISOString() : refreshedExpiresAt,
         });
         return { scheduledServiceId: refreshed?.id || sameSlotHold.id, expiresAt: refreshedExpiresAt };
+      }
+      // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+      // 2026-10-09): a NEW hold on a 17:00 offer signed before the gate
+      // flipped is refused, like the offer side. Checked only here, after
+      // the same-slot lookup above: a hold the customer already has on that
+      // time is honored (the page re-POSTs /reserve to recover it, and
+      // acceptance commits it). Refused before the estimate's other holds
+      // are dropped. No-op while unset.
+      if (pastCustomerLastStart(slotStartMinutes)) {
+        const err = new Error('slot starts after the last customer start');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
       }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
