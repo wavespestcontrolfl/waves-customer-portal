@@ -2,6 +2,7 @@
 // migration fills the typed column of the label's system with the bare code. No database.
 const v13 = require('../config/lawn-protocol-v13.json');
 const migration = require('../models/migrations/20261009176000_lawn_v13_three_chemical_groups');
+const liquid = require('../models/migrations/20261009177000_lawn_v13_dylox_liquid_irac_group');
 const { productGroups } = require('../services/waveguard-approval-engine');
 
 const PYTHIUM = 'The app warns on the second Artavia application for Pythium; the label allows two in a row, and nothing else in the program controls Pythium, so do not make a third: fix the watering or drainage.';
@@ -38,5 +39,14 @@ describe('the three chemical groups', () => {
       expect(productGroups({ name: group.name, [group.column]: group.value })).toEqual([[group.column.replace('_group', ''), group.value]]);
       expect(productGroups({ name: group.name, [group.column]: null })).toEqual([]);
     }
+  });
+
+  // Codex round 1 on #6238: the repeat check compares the same typed column on both products.
+  test('both Dylox products carry the group in the same typed column, with the same code', () => {
+    const granular = migration.GROUPS.find((g) => g.name.startsWith('Dylox 6.2 G'));
+    expect([liquid.GROUP.name, liquid.GROUP.column, liquid.GROUP.value]).toEqual(['Dylox 420 SL T&O Insecticide', granular.column, granular.value]);
+    const liquidRow = productGroups({ name: liquid.GROUP.name, moa_group: 'Group 1B', [liquid.GROUP.column]: liquid.GROUP.value });
+    const granularRow = productGroups({ name: granular.name, [granular.column]: granular.value });
+    expect(liquidRow).toEqual(expect.arrayContaining(granularRow));
   });
 });

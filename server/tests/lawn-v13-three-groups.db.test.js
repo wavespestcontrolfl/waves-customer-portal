@@ -7,6 +7,7 @@
 // (a value equal to the one written may be an administrator's) and removes only its own audit row.
 const { createLawnHistoryDb } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261009176000_lawn_v13_three_chemical_groups');
+const liquid = require('../models/migrations/20261009177000_lawn_v13_dylox_liquid_irac_group');
 
 const GRAVEX = 'Gravex 20 EW';
 const DYLOX = 'Dylox 6.2 G Granular Insecticide';
@@ -134,5 +135,34 @@ describeDb('v13 three chemical groups migration through PostgreSQL', () => {
     expect(await read(DYLOX, 'irac_group')).toBe('1B');
     expect(await knex('products_catalog').where({ id: ids.dimension }).first('hrac_group')).toEqual({ hrac_group: '3' });
     expect(await knex('products_catalog').where({ name: GRAVEX })).toHaveLength(0);
+  });
+
+  // Migration 20261009177000 (Codex round 1 on #6238): the liquid Dylox gets the same typed group as the granular one.
+  describe('the liquid Dylox group (20261009177000)', () => {
+    const liquidAudit = () => knex('lawn_protocol_audit_log').where({ action: liquid.ACTION });
+
+    test('irac_group 1B is filled where empty, moa_group stays; a second up changes nothing; down keeps the value', async () => {
+      await reset();
+      await migration.up(knex);
+      await liquid.up(knex);
+      expect(await knex('products_catalog').where({ name: SL }).first('irac_group', 'moa_group')).toEqual({ irac_group: '1B', moa_group: 'Group 1B' });
+      expect(await read(SL, 'irac_group')).toBe(await read(DYLOX, 'irac_group'));
+      expect(await liquidAudit()).toHaveLength(1);
+      const state = await snapshot();
+      await liquid.up(knex);
+      expect(await snapshot()).toBe(state);
+      await liquid.down(knex);
+      expect(await read(SL, 'irac_group')).toBe('1B');
+      expect(await liquidAudit()).toHaveLength(0);
+      expect(await ours()).toHaveLength(1);
+    });
+
+    test('a value somebody wrote stays and no audit row is made', async () => {
+      await reset();
+      await knex('products_catalog').where({ name: SL }).update({ irac_group: '1A' });
+      await liquid.up(knex);
+      expect(await read(SL, 'irac_group')).toBe('1A');
+      expect(await liquidAudit()).toHaveLength(0);
+    });
   });
 });
