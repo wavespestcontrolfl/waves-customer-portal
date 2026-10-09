@@ -1019,23 +1019,6 @@ describe('replay extraction gets the call facts production gives the extractor',
     expect(noId.priorCall).toBeNull();
   });
 
-  test('an override set after the stored extraction falls back to the customer linked just before it (codex #6214 r3 P1)', async () => {
-    // link A->B, reprocess (stored pass saw B), then B->C: the prompt customer is B.
-    const b = { ...customer('2026-01-05T12:00:00Z'), id: 'cust-b', first_name: 'Bea' };
-    const relinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-c', previous_customer_id: 'cust-b', at: '2026-09-13T10:00:00Z' } } };
-    const crp = { ...fakeCRP(null, customer('2026-01-05T12:00:00Z')), resolveKnownCallerCustomer: jest.fn() };
-    const db = fakeDb({ customers: b });
-    const facts = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db, callStart, storedExtractedAt: '2026-09-12T10:05:00Z' });
-    expect(facts.knownCaller).toEqual(CRP._test.summarizeKnownCaller(b));
-    expect(db).toHaveBeenCalledWith('customers');
-    expect(crp.resolveKnownCallerCustomer).not.toHaveBeenCalled();
-    expect(crp._test.findCustomerForCallContact).not.toHaveBeenCalled();
-    // No previous customer: the stored pass had no known caller.
-    const first = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-c', previous_customer_id: null, at: '2026-09-13T10:00:00Z' } } };
-    const none = await productionCallFacts({ call: first, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, b), db: fakeDb({ customers: b }), callStart, storedExtractedAt: '2026-09-12T10:05:00Z' });
-    expect(none.knownCaller).toBeNull();
-  });
-
   test('an outbound call is labeled outbound', async () => {
     const outbound = { ...call, direction: 'outbound-api' };
     const facts = await productionCallFacts({ call: outbound, contactPhone: '+19415550100', bookableServices: null, CRP: fakeCRP(), db: DB, callStart });
@@ -1051,17 +1034,29 @@ describe('replay extraction gets the call facts production gives the extractor',
     expect(crp._test.findCustomerForCallContact).toHaveBeenCalledWith('+19415550100', {}, { db: DB });
   });
 
-  test('an operator link or unlink made after the stored extraction does not change the prompt customer (codex #6214 r1 P1)', async () => {
+  test('a link or unlink made after the stored extraction is unresolved: no known caller, and the run says so', async () => {
     const before = customer('2026-01-05T12:00:00Z');
     const stored = '2026-09-10T14:06:00Z';
-    // Unlinked later: the stored pass saw the customer the call was linked to (previous_customer_id).
-    const unlinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: null, previous_customer_id: 'cust-1', at: '2026-09-12T10:00:00Z' } } };
-    const seen = await productionCallFacts({ call: unlinked, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(), db: fakeDb({ customers: before }), callStart, storedExtractedAt: stored });
-    expect(seen.knownCaller).toEqual(CRP._test.summarizeKnownCaller(before));
-    // Linked later to an old customer, nobody linked before: the stored pass saw nobody.
-    const relinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-old', previous_customer_id: null, at: '2026-09-12T10:00:00Z' } } };
-    const none = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, before), db: fakeDb({ customers: { ...before, id: 'cust-old' } }), callStart, storedExtractedAt: stored });
-    expect(none.knownCaller).toBeNull();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // One relink, two relinks (A->B, B->C leaves previous = B, not the A the pass saw), an unlink.
+      for (const override of [
+        { customer_id: 'cust-old', previous_customer_id: null, at: '2026-09-12T10:00:00Z' },
+        { customer_id: 'cust-c', previous_customer_id: 'cust-b', at: '2026-09-13T10:00:00Z' },
+        { customer_id: null, previous_customer_id: 'cust-1', at: '2026-09-12T10:00:00Z' },
+      ]) {
+        const changed = { ...call, metadata: { ...call.metadata, customer_link_override: override } };
+        const crp = { ...fakeCRP(null, before), resolveKnownCallerCustomer: jest.fn(async () => before) };
+        const db = fakeDb({ customers: before });
+        const facts = await productionCallFacts({ call: changed, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db, callStart, storedExtractedAt: stored });
+        expect(facts.knownCaller).toBeNull();
+        expect(crp.resolveKnownCallerCustomer).not.toHaveBeenCalled();
+        expect(crp._test.findCustomerForCallContact).not.toHaveBeenCalled();
+        expect(db).not.toHaveBeenCalledWith('customers');
+      }
+      expect(warn).toHaveBeenCalledTimes(3);
+      expect(warn.mock.calls[0][0]).toMatch(/call c1: the customer link changed after the stored extraction/);
+    } finally { warn.mockRestore(); }
   });
 
   test('an override the stored extraction was made AFTER (a reprocess) is the prompt customer (codex #6214 r2 P1)', async () => {
@@ -1080,17 +1075,18 @@ describe('replay extraction gets the call facts production gives the extractor',
     expect(none.knownCaller).toBeNull();
   });
 
-  test('an override set after the stored extraction, or with no usable time, never reaches the prompt', async () => {
+  test('an override with no usable time on either side is unresolved too', async () => {
     const prev = customer('2026-01-05T12:00:00Z');
-    for (const [at, storedExtractedAt] of [['2026-09-12T10:00:00Z', '2026-09-10T14:06:00Z'], ['2026-09-12T10:00:00Z', null], [undefined, '2026-09-12T10:05:00Z'], ['not a date', '2026-09-12T10:05:00Z']]) {
-      const relinked = { ...call, metadata: JSON.stringify({ ...call.metadata, customer_link_override: { customer_id: 'cust-old', previous_customer_id: 'cust-1', at } }) };
-      const crp = { ...fakeCRP(), resolveKnownCallerCustomer: jest.fn(async () => ({ ...prev, id: 'cust-old' })) };
-      const facts = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: fakeDb({ customers: prev }), callStart, storedExtractedAt });
-      expect(crp.resolveKnownCallerCustomer).not.toHaveBeenCalled();
-      // The override's own customer is never used; the one linked before it is.
-      expect(facts.knownCaller?.id ?? 'cust-1').toBe('cust-1');
-      if (storedExtractedAt) expect(facts.knownCaller.id).toBe('cust-1');
-    }
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      for (const [at, storedExtractedAt] of [['2026-09-12T10:00:00Z', null], [undefined, '2026-09-12T10:05:00Z'], ['not a date', '2026-09-12T10:05:00Z']]) {
+        const relinked = { ...call, metadata: JSON.stringify({ ...call.metadata, customer_link_override: { customer_id: 'cust-old', previous_customer_id: 'cust-1', at } }) };
+        const crp = { ...fakeCRP(null, prev), resolveKnownCallerCustomer: jest.fn(async () => prev) };
+        const facts = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: fakeDb({ customers: prev }), callStart, storedExtractedAt });
+        expect(crp.resolveKnownCallerCustomer).not.toHaveBeenCalled();
+        expect(facts.knownCaller).toBeNull();
+      }
+    } finally { warn.mockRestore(); }
   });
 
   test('a customer created after the call but before the stored reprocess is the known caller (pre-push audit P1)', async () => {

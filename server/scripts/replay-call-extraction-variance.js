@@ -1342,10 +1342,11 @@ function overrideReachedStoredExtraction(call, storedExtractedAt) {
 // The prompt's customer for the stored extraction:
 //   - no override: the phone lookup (what Step 2 runs);
 //   - an override the stored extraction came AFTER: the override's customer;
-//   - an override set after the stored extraction: the customer the call was linked
-//     to just before it (`previous_customer_id`, which the admin route records).
-//     That covers link A->B, reprocess, then unlink or link B->C: the stored pass
-//     saw B (codex #6214 r3 P1). No previous customer means no known caller.
+//   - an override set after the stored extraction: UNRESOLVED. The override keeps
+//     only the latest change (`previous_customer_id` is the link just before it, and
+//     after two relinks that is not the customer the stored pass saw), and there is
+//     no link history or prompt snapshot to rebuild from. No known caller is passed
+//     and the run says so, rather than guess (codex #6214 r3 P1 + pre-push audit).
 // The created-before-extraction cutoff below still applies to whichever row this is.
 async function promptCustomerForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }) {
   let metadata = call?.metadata || {};
@@ -1354,8 +1355,8 @@ async function promptCustomerForStoredExtraction({ call, contactPhone, CRP, db, 
   const hasOverride = !!override && typeof override === 'object' && 'customer_id' in override;
   if (!hasOverride) return CRP._test.findCustomerForCallContact(contactPhone, {}, { db });
   if (overrideReachedStoredExtraction(call, storedExtractedAt)) return CRP.resolveKnownCallerCustomer(call, contactPhone, { db });
-  if (!override.previous_customer_id) return null;
-  return db('customers').where({ id: override.previous_customer_id }).whereNull('deleted_at').first();
+  console.warn(`[replay] call ${call?.id}: the customer link changed after the stored extraction; that pass's known caller cannot be rebuilt, none is passed`);
+  return null;
 }
 
 // The prior call's extraction must have existed when the stored pass ran (codex
