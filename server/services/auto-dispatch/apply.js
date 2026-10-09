@@ -269,11 +269,16 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
 // cannot see either. Re-read the conflict here, on the move transaction, with
 // the reader the evaluation used; gone means refuse, and the next run scores
 // the visit on the normal bar (Codex #6207 r1 P2). A read failure refuses too.
-async function assertSourceConflictHolds(trx, service, sourceConflict, refuse) {
-  if (!sourceConflict) return;
+// Read ONCE per move, before the first row is written: the unit mover runs
+// this guard for each member in turn, and after the first member has left,
+// the rest of the unit no longer shows the conflict it is moving away from
+// (pre-push P1). `check.held` carries the first answer to the later members.
+async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, check) {
+  if (!sourceConflict || check.held) return;
   const { _internals: { readCurrentConflict } } = require('./candidate-slots');
   const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
   if (!still) throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
+  check.held = true;
 }
 
 function makeMoveGuard({ service, best, config = {} }) {
@@ -281,6 +286,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
     { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
   );
+  const sourceCheck = { held: false };
   return async ({
     trx, technicianId, service: movingRow, destination,
   }) => {
@@ -289,7 +295,7 @@ function makeMoveGuard({ service, best, config = {} }) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
-    await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse);
+    await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
     // A person may have placed this visit since pass 1 (even back onto the

@@ -421,6 +421,15 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       read.mockResolvedValueOnce(null);
       await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE }))
         .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      // A grouped move runs the guard for each member in turn. The conflict
+      // is read once, before the first member moves: afterwards the rest of
+      // the unit no longer overlaps, and must still be allowed to follow.
+      read.mockClear();
+      read.mockResolvedValueOnce(sourceConflict).mockResolvedValue(null);
+      const unitGuard = makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } });
+      await unitGuard({ trx, technicianId: 't1', service: SERVICE });
+      await unitGuard({ trx, technicianId: 't1', service: { ...SERVICE, id: 's1-sibling' } });
+      expect(read).toHaveBeenCalledTimes(1);
       // A move that cleared the normal bar reads nothing.
       read.mockClear();
       await makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1', service: SERVICE });
