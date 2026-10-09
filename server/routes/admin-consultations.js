@@ -117,6 +117,28 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
   }
 });
 
+// GET /api/admin/consultations/:scheduledServiceId/estimate
+// The estimate that belongs to this assessment, read-only, for the Fast
+// Complete sheet (GATE_ASSESSMENT_FAST_COMPLETE): { estimate: { state, ... } }
+// (services/assessment-estimate-summary.js). Same ownership rule as the
+// outcome read. No estimate token is returned, and the route does not exist
+// while the gate is off.
+router.get('/:scheduledServiceId/estimate', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').assessmentFastCompleteLive()) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const { scheduledServiceId } = req.params;
+    if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
+    const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'customer_id', 'source_estimate_id');
+    if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+    const estimate = await require('../services/assessment-estimate-summary').assessmentEstimateSummary(visit);
+    res.json({ estimate });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/admin/consultations/stats?from=YYYY-MM-DD&to=YYYY-MM-DD
 router.get('/stats', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {

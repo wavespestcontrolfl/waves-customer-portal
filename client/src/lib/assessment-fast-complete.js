@@ -26,6 +26,9 @@
 // incomplete and no-show outcomes, which the sheet does not record.
 import { canRecordConsultationOutcome } from './consultationVisit';
 import { completesOnOwnRecord } from './pest-fast-complete';
+import { CADENCE_OPTIONS } from '../components/ConsultationOutcomeSheet';
+import { fmtMoney } from './money';
+import { formatETDate } from './timezone';
 
 export function isAssessmentFastCompleteEligible(service) {
   // An assessment whose outcome the server accepts: canRecordConsultationOutcome
@@ -40,4 +43,55 @@ export function isAssessmentFastCompleteEligible(service) {
     // The server refuses any grouped visit that is not a dissolved one, which
     // the row cannot tell apart (the lawn re-service sheet's rule).
     && !(service.visitCloseoutPacket || service.visitId || service.visit_id);
+}
+
+// The estimate line on the sheet (owner 2026-10-09: the estimate sets the price,
+// the sheet only shows it). `summary` is the answer of
+// GET /admin/consultations/:id/estimate (services/assessment-estimate-summary.js).
+// Returns null where the sheet shows nothing: still loading, unreadable, or
+// more than one live estimate (no canonical pick, so no guess). Never builds a
+// number: the figures are the estimate's own stored totals.
+const cadenceLabel = (value) => CADENCE_OPTIONS.find((option) => option.value === value)?.label || '';
+
+// "$59.00 / month", "$708.00 / year", plus a one-time part; null with no total.
+export function estimateAmountLabel(estimate) {
+  const parts = [];
+  const monthly = Number(estimate?.monthlyTotal);
+  const annual = Number(estimate?.annualTotal);
+  const onetime = Number(estimate?.onetimeTotal);
+  if (monthly > 0) parts.push(`${fmtMoney(monthly)} ${cadenceLabel('month')}`);
+  else if (annual > 0) parts.push(`${fmtMoney(annual)} ${cadenceLabel('year')}`);
+  if (onetime > 0) parts.push(`${fmtMoney(onetime)} one-time`);
+  return parts.length ? parts.join(' + ') : null;
+}
+
+const STATUS_WORDS = {
+  draft: 'Not sent yet',
+  scheduled: 'Scheduled to send',
+  sending: 'Sending',
+  send_failed: 'Send failed',
+  accepted: 'Accepted',
+};
+
+export function estimateStatusLabel(estimate) {
+  if (estimate?.status === 'accepted') return STATUS_WORDS.accepted;
+  if (estimate?.sentAt) return `Sent ${formatETDate(estimate.sentAt, { month: 'short', day: 'numeric' })}`;
+  return STATUS_WORDS[estimate?.status] || String(estimate?.status || '').replace(/_/g, ' ');
+}
+
+export function estimateLineOf(summary) {
+  if (!summary) return null;
+  if (summary.state === 'found' && summary.estimate) {
+    const { estimate } = summary;
+    return {
+      kind: 'found',
+      estimateId: estimate.id,
+      text: `Estimate: ${[estimateAmountLabel(estimate) || 'no total yet', estimateStatusLabel(estimate)].filter(Boolean).join(' · ')}`,
+    };
+  }
+  if (summary.state === 'none') return { kind: 'none', text: 'No estimate yet' };
+  if (summary.state === 'retired') {
+    return { kind: 'none', text: `No current estimate · the last one was ${String(summary.status || 'closed').replace(/_/g, ' ')}` };
+  }
+  return null;
 }

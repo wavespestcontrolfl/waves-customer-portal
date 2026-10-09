@@ -33,7 +33,7 @@ const SERVICE = {
 
 const notFound = () => Object.assign(new Error('No outcome recorded for that visit'), { status: 404 });
 
-function makeRequest({ row = null, loadError = null, completeError = null } = {}) {
+function makeRequest({ row = null, loadError = null, completeError = null, estimate = undefined, estimateError = null } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options = {}) => {
     calls.push({ path, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
@@ -45,6 +45,10 @@ function makeRequest({ row = null, loadError = null, completeError = null } = {}
       }
       // The sheet never writes here: the read rides the completion.
       throw new Error('unexpected outcome write');
+    }
+    if (path === '/admin/consultations/svc-a/estimate') {
+      if (estimateError) throw estimateError;
+      return estimate === undefined ? {} : { estimate };
     }
     if (path === '/tech/services/svc-a/photos') return { photos: [] };
     if (path === '/admin/dispatch/svc-a/complete') {
@@ -228,6 +232,161 @@ describe('FastCompleteAssessmentSheet', () => {
     await waitFor(() => expect(posts(request, '/complete')).toHaveLength(2));
     // Same body, same idempotency key.
     expect(posts(request, '/complete')[1].body).toEqual(posts(request, '/complete')[0].body);
+  });
+});
+
+const SENT_ESTIMATE = {
+  state: 'found',
+  estimate: {
+    id: 'est-1', slug: 'EST-2026-0001', status: 'sent', sentAt: '2026-10-03T14:00:00.000Z',
+    createdAt: '2026-10-02T14:00:00.000Z', monthlyTotal: 59, annualTotal: 708, onetimeTotal: 0,
+  },
+};
+
+describe('the call-back date', () => {
+  const dateField = () => screen.getByLabelText('Call back on');
+
+  test('is optional: left blank, the complete body carries followUpAt null and Complete is not blocked', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    expect(screen.getByText(/Leave blank for the default: warm in 3 days, cold in 30\./)).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBeNull();
+  });
+
+  test('a picked date rides the same consultationOutcome as 9 AM that day, in the one write', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cold' }));
+    fireEvent.change(dateField(), { target: { value: '2026-10-20' } });
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(request.calls.filter((call) => call.method === 'POST').map((call) => call.path)).toEqual(['/admin/dispatch/svc-a/complete']);
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBe('2026-10-20T09:00');
+  });
+
+  test('a lost outcome has no call-back date, and none is sent even after one was picked', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Not buying.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.change(dateField(), { target: { value: '2026-10-20' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Lost' }));
+    expect(screen.queryByLabelText('Call back on')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'DIY' }));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBeNull();
+  });
+
+  test('a clearing of a picked date sends null, so the server default applies', async () => {
+    const request = await openSheet();
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.change(dateField(), { target: { value: '2026-10-20' } });
+    fireEvent.change(dateField(), { target: { value: '' } });
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBeNull();
+  });
+
+  test('a saved date is shown and, untouched, rides unchanged; a changed outcome does not carry it', async () => {
+    const row = { outcome: 'warm', interests: [], follow_up_at: '2026-11-01T13:00:00.000Z' };
+    const request = makeRequest({ row });
+    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
+    await screen.findByRole('button', { name: 'Warm' });
+    expect(dateField().value).toBe('2026-11-01');
+    fireEvent.change(note(), { target: { value: 'Second look.' } });
+    // Switching the outcome drops the saved date from view, as it drops it from the write.
+    fireEvent.click(screen.getByRole('button', { name: 'Cold' }));
+    expect(dateField().value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    expect(dateField().value).toBe('2026-11-01');
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome.followUpAt).toBe('2026-11-01T13:00:00.000Z');
+  });
+});
+
+describe('the estimate line', () => {
+  const links = () => screen.getAllByRole('link');
+
+  test('shows the estimate\'s own total, status and a staff link; nothing to type', async () => {
+    const request = makeRequest({ estimate: SENT_ESTIMATE });
+    await openSheet(request);
+    expect(await screen.findByText('Estimate: $59.00 / month · Sent Oct 3')).toBeTruthy();
+    const link = screen.getByRole('link', { name: 'Open estimate' });
+    expect(link.getAttribute('href')).toBe('/admin/estimates?estimateId=est-1');
+    expect(link.getAttribute('target')).toBe('_blank');
+    // Never the customer's token link.
+    expect(links().map((a) => a.getAttribute('href')).join(' ')).not.toMatch(/token|\/estimate\//);
+    // No price input anywhere on the sheet.
+    expect(screen.queryByPlaceholderText('$')).toBeNull();
+    expect(screen.queryByLabelText(/price|amount|quote/i)).toBeNull();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
+    expect(request.calls.filter((call) => call.path.endsWith('/estimate'))).toEqual([{ path: '/admin/consultations/svc-a/estimate', method: 'GET', body: null }]);
+  });
+
+  test('a draft says it is not sent; an annual and one-time total read as the estimate states them', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, status: 'draft', sentAt: null, monthlyTotal: 0, annualTotal: 708, onetimeTotal: 150 } } }));
+    expect(await screen.findByText('Estimate: $708.00 / year + $150.00 one-time · Not sent yet')).toBeTruthy();
+  });
+
+  test('"No estimate yet" with a link that starts one for this customer', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'none' } }));
+    expect(await screen.findByText('No estimate yet')).toBeTruthy();
+    const href = screen.getByRole('link', { name: 'Create estimate' }).getAttribute('href');
+    expect(href).toContain('/admin/estimates?');
+    expect(href).toContain('customerId=cust-1');
+  });
+
+  test('a retired (declined, expired or archived) estimate shows no amount and no open link', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'retired', status: 'declined' } }));
+    expect(await screen.findByText('No current estimate · the last one was declined')).toBeTruthy();
+    expect(screen.queryByText(/\$/)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Open estimate' })).toBeNull();
+  });
+
+  test.each([
+    ['more than one live estimate', { state: 'ambiguous' }],
+    ['an unreadable estimate', { state: 'unavailable' }],
+  ])('shows nothing for %s', async (_label, estimate) => {
+    const request = makeRequest({ estimate });
+    await openSheet(request);
+    await waitFor(() => expect(request.calls.some((call) => call.path.endsWith('/estimate'))).toBe(true));
+    expect(screen.queryByText(/estimate/i)).toBeNull();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('a failed estimate read does not block the sheet or the completion', async () => {
+    const request = makeRequest({ estimateError: Object.assign(new Error('boom'), { status: 500 }) });
+    await openSheet(request);
+    fireEvent.change(note(), { target: { value: 'Walked it.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(screen.queryByText(/No estimate yet/)).toBeNull();
+  });
+
+  test('the estimate figure never reaches the write: the saved quote rides through, an estimate total is not copied in', async () => {
+    const row = { outcome: 'warm', interests: [], quoted_amount: '129.5', quoted_cadence: 'quarter', quote_notes: 'Side yard' };
+    const request = makeRequest({ row, estimate: SENT_ESTIMATE });
+    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
+    await screen.findByText('Estimate: $59.00 / month · Sent Oct 3');
+    fireEvent.change(note(), { target: { value: 'Second look.' } });
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    const outcome = posts(request, '/complete')[0].body.consultationOutcome;
+    expect(outcome).toMatchObject({ quotedAmount: '129.5', quotedCadence: 'quarter', quoteNotes: 'Side yard' });
+    expect(Object.values(outcome).filter((v) => v === 59 || v === '59' || v === '59.00')).toEqual([]);
+  });
+
+  test('a won consultation still shows the estimate line', async () => {
+    const request = makeRequest({ row: { outcome: 'won', won_at: '2026-10-08T15:00:00.000Z', interests: [] }, estimate: SENT_ESTIMATE });
+    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
+    expect(await screen.findByText('Estimate: $59.00 / month · Sent Oct 3')).toBeTruthy();
   });
 });
 

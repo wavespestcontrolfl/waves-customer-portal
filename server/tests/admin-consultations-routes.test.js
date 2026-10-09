@@ -32,6 +32,11 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 
+const mockEstimateSummary = jest.fn();
+jest.mock('../services/assessment-estimate-summary', () => ({
+  assessmentEstimateSummary: (...args) => mockEstimateSummary(...args),
+}));
+
 const mockRecordOutcome = jest.fn();
 const mockConsultationStats = jest.fn();
 jest.mock('../services/consultation-outcomes', () => ({
@@ -267,5 +272,40 @@ describe('GET /stats — admin only', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(message);
     expect(mockConsultationStats).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /:scheduledServiceId/estimate (Fast Complete estimate line)', () => {
+  const ID = '11111111-1111-4111-8111-111111111111';
+  const savedGate = process.env.GATE_ASSESSMENT_FAST_COMPLETE;
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_ASSESSMENT_FAST_COMPLETE;
+    else process.env.GATE_ASSESSMENT_FAST_COMPLETE = savedGate;
+  });
+
+  test('does not exist while GATE_ASSESSMENT_FAST_COMPLETE is off', async () => {
+    delete process.env.GATE_ASSESSMENT_FAST_COMPLETE;
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(404);
+    expect(mockEstimateSummary).not.toHaveBeenCalled();
+  });
+
+  test('returns the summary for a technician on their own visit', async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockCurrentRole = 'technician';
+    mockEstimateSummary.mockResolvedValue({ state: 'found', estimate: { id: 'est-1' } });
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ estimate: { state: 'found', estimate: { id: 'est-1' } } });
+    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID }));
+  });
+
+  test("a technician cannot read another technician's visit estimate (403, summary never read)", async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockCurrentRole = 'technician';
+    mockVisitRow = { id: ID, technician_id: 'someone-else', status: 'confirmed', scheduled_date: TODAY_ET };
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(403);
+    expect(mockEstimateSummary).not.toHaveBeenCalled();
   });
 });
