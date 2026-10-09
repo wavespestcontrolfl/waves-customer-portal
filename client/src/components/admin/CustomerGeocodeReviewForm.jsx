@@ -43,14 +43,16 @@ function addressText(customer) {
   ].filter(Boolean).join(", ");
 }
 
-function initialDraft(record) {
+// `prefill` is the pin check's suggestion (GATE_PIN_PARKED_CHECK): the truck's spot, source "site_visit" and the
+// evidence wording. The confirmation box stays unticked: a person still confirms.
+function initialDraft(record, prefill = null) {
   const customer = record?.customer || {};
   return {
     ...Object.fromEntries(ADDRESS_FIELDS.map((key) => [key, String(customer[key] || "")])),
-    latitude: customer.latitude ?? "",
-    longitude: customer.longitude ?? "",
-    source: "customer_confirmation",
-    evidence: "",
+    latitude: prefill ? Number(prefill.latitude).toFixed(7) : customer.latitude ?? "",
+    longitude: prefill ? Number(prefill.longitude).toFixed(7) : customer.longitude ?? "",
+    source: prefill ? prefill.source : "customer_confirmation",
+    evidence: prefill ? prefill.evidence : "",
     confirmed: false,
   };
 }
@@ -97,8 +99,9 @@ export default function CustomerGeocodeReviewForm({
   onAcknowledgeConflict,
   onResolve,
   onCancel,
+  prefill = null,
 }) {
-  const [draft, setDraft] = useState(() => initialDraft(record));
+  const [draft, setDraft] = useState(() => initialDraft(record, prefill));
   const set = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
   const latitude = coordinate(draft.latitude, -90, 90);
   const longitude = coordinate(draft.longitude, -180, 180);
@@ -124,6 +127,7 @@ export default function CustomerGeocodeReviewForm({
     source: draft.source,
     evidence: draft.evidence.trim(),
     confirmed: true,
+    ...(prefill?.id ? { pin_suggestion_id: prefill.id } : {}),
   });
 
   return (
