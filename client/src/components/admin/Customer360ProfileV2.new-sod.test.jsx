@@ -395,6 +395,50 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(screen.queryByText(/Fertilizer is not held/)).not.toBeInTheDocument();
   });
 
+  describe('last pre-emergent by Waves (the server builds both strings)', () => {
+    const LINE = 'Last pre-emergent by Waves: Dimension 2EW, Aug 1, 2026 (61 days before the sod date).';
+    const WARNING = 'Its label delays seeding or sprigging 12 weeks (Dimension 2EW: 3 months) after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.';
+
+    it('prints the line and the warning in the edit form, with no saved sod record needed', async () => {
+      stubFetch({ newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: WARNING } }, onPut: () => response({}) });
+      await openEditor();
+      expect(await screen.findByText(LINE)).toBeInTheDocument();
+      expect(screen.getByTestId('sod-pre-emergent-warning')).toHaveTextContent(WARNING);
+    });
+
+    it('prints only the line when the server sends no warning', async () => {
+      stubFetch({ newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: null } }, onPut: () => response({}) });
+      await openEditor();
+      expect(await screen.findByText(LINE)).toBeInTheDocument();
+      expect(screen.queryByTestId('sod-pre-emergent-warning')).not.toBeInTheDocument();
+    });
+
+    it('prints nothing when the server found none', async () => {
+      stubFetch({ newSod: { holdLines: [], lastPreEmergent: null }, onPut: () => response({}) });
+      await openEditor();
+      await waitFor(() => expect(screen.queryByTestId('sod-loading')).not.toBeInTheDocument());
+      expect(screen.queryByTestId('sod-last-pre-emergent')).not.toBeInTheDocument();
+    });
+
+    it('is hidden once a sod field is edited: it was judged against the saved sod date', async () => {
+      stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' }, newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: WARNING } }, onPut: () => response({}) });
+      await openEditor();
+      expect(await screen.findByText(LINE)).toBeInTheDocument();
+      fireEvent.change(dateInput(), { target: { value: '2026-10-02' } });
+      expect(screen.queryByText(LINE)).not.toBeInTheDocument();
+      expect(screen.queryByTestId('sod-pre-emergent-warning')).not.toBeInTheDocument();
+    });
+
+    it('shows on the read view beside the saved sod record', async () => {
+      stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' }, newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: WARNING } }, onPut: () => response({}) });
+      render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+      await screen.findAllByText('Avery Customer');
+      fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+      expect(await screen.findByText(LINE)).toBeInTheDocument();
+      expect(screen.getByTestId('sod-pre-emergent-warning')).toBeInTheDocument();
+    });
+  });
+
   it('the read view shows the saved record and its hold lines', async () => {
     stubFetch({
       prefs: { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'back lawn' },

@@ -15,6 +15,7 @@ const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
 const { validateSodLaidOn, resolveSodRecord, NEW_SOD_COLUMNS, SOD_AREA_MAX } = require('../services/lawn-sod-holds');
 const { buildNewSodSummary } = require('../services/lawn-sod-form-summary');
+const { lastPreEmergentBlock } = require('../services/lawn-last-pre-emergent');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
@@ -5020,6 +5021,9 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
 // GET /api/admin/customers/:id/new-sod — the read-only hold lines beside the
 // new-sod fields in Customer 360 (office only; no write, no message to anyone):
 //   holdLines  the plain hold lines for the saved sod record ([] when none)
+//   lastPreEmergent  { line, warning } for the last pre-emergent Waves put on this home's lawn
+//              (warning is null unless it was under 91 days before the sod date, or before today
+//              when no sod date is saved), or null when there is none or it cannot be proven
 // The form's render stamp for confirmedAsOf is the irrigation_home_changed_at
 // that GET /:id already returns on `preferences`.
 router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {
@@ -5028,7 +5032,9 @@ router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const prefsRow = await db('property_preferences').where({ customer_id: customerId }).first();
-    res.json({ newSod: buildNewSodSummary({ prefsRow: prefsRow || null, todayEt: etDateString() }) });
+    const todayEt = etDateString();
+    const lastPreEmergent = await lastPreEmergentBlock({ knex: db, customerId, sodLaidOn: prefsRow?.sod_laid_on ?? null, todayEt });
+    res.json({ newSod: { ...buildNewSodSummary({ prefsRow: prefsRow || null, todayEt }), lastPreEmergent } });
   } catch (err) { next(err); }
 });
 

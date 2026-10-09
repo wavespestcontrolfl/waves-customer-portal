@@ -7089,6 +7089,7 @@ function AccessPrefsSodReadBlock({ p, sodInfo }) {
       <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
       <AccessPrefRow label="Covers" value={covers} />
       <AccessPrefsSodLines sodInfo={sodInfo} />
+      <AccessPrefsLastPreEmergent info={sodInfo?.lastPreEmergent} />
     </>
   );
 }
@@ -7251,6 +7252,22 @@ function AccessPrefsSodHoldLines({ lines }) {
   );
 }
 
+// The last pre-emergent Waves put on this home's lawn, and the warning when it is too recent for sod (both strings
+// come from GET /new-sod). Nothing shows while the answer is loading, stale, failed or empty.
+function AccessPrefsLastPreEmergent({ info }) {
+  if (!info?.line) return null;
+  return (
+    <div className="mt-1 space-y-1" data-testid="sod-last-pre-emergent">
+      <div className="text-ui-label text-ink-secondary">{info.line}</div>
+      {info.warning && (
+        <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label" data-testid="sod-pre-emergent-warning">
+          {info.warning}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod, sodUnchanged }) {
   const clearRecord = () =>
     setDraft((prev) => ({ ...prev, sodLaidOn: "", sodCovers: "", sodArea: "" }));
@@ -7293,6 +7310,8 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
           Save to see the hold dates for this change.
         </div>
       )}
+      {/* Judged against the saved sod date (today when none is saved), so it is hidden while a sod field is being edited. */}
+      {sodUnchanged && <AccessPrefsLastPreEmergent info={sodInfo?.lastPreEmergent} />}
     </div>
   );
 }

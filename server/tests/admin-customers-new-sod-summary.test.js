@@ -14,7 +14,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(async () => false), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 
-const mockState = { customer: { id: 'cust-1' }, prefsRow: null };
+const mockState = { customer: { id: 'cust-1' }, prefsRow: null, lastPreEmergent: null };
+const mockLastPreEmergentBlock = jest.fn(async () => mockState.lastPreEmergent);
+jest.mock('../services/lawn-last-pre-emergent', () => ({ lastPreEmergentBlock: (...args) => mockLastPreEmergentBlock(...args) }));
 
 jest.mock('../models/db', () => {
   const chain = (resolve) => {
@@ -52,6 +54,8 @@ async function getNewSod() {
 beforeEach(() => {
   mockState.customer = { id: 'cust-1' };
   mockState.prefsRow = null;
+  mockState.lastPreEmergent = null;
+  mockLastPreEmergentBlock.mockClear();
 });
 
 describe('GET /api/admin/customers/:id/new-sod', () => {
@@ -62,7 +66,18 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
 
   it('a customer with no sod record gets no hold lines and nothing else', async () => {
     const { body } = await getNewSod();
-    expect(body.newSod).toEqual({ holdLines: [], record: { sod_laid_on: null, sod_covers: null, sod_area: null } });
+    expect(body.newSod).toEqual({ holdLines: [], record: { sod_laid_on: null, sod_covers: null, sod_area: null }, lastPreEmergent: null });
+  });
+
+  it('adds the last pre-emergent block the service built, judged against the saved sod date (or null with no record)', async () => {
+    mockState.lastPreEmergent = { line: 'Last pre-emergent by Waves: Example Product, Aug 1, 2026 (61 days ago).', warning: 'Example warning.' };
+    let { body } = await getNewSod();
+    expect(body.newSod.lastPreEmergent).toEqual(mockState.lastPreEmergent);
+    expect(mockLastPreEmergentBlock).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', sodLaidOn: null, todayEt: etDateString() }));
+
+    mockState.prefsRow = { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null, sod_rooted_on: null };
+    ({ body } = await getNewSod());
+    expect(mockLastPreEmergentBlock).toHaveBeenLastCalledWith(expect.objectContaining({ sodLaidOn: '2026-10-01' }));
   });
 
   it('whole-lawn record: three hold lines with dates, from the server', async () => {
