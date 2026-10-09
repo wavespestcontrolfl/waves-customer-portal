@@ -44,6 +44,8 @@
 // visit row, so a visit moved or retyped since the schedule loaded is refused
 // (visit_identity_changed) and the tech reopens it.
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
+import { isPathAdminOnly } from '../../config/adminNavigation';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
@@ -113,23 +115,40 @@ export function useAssessmentEstimate(serviceId, request) {
   return summary;
 }
 
-// Read-only. No input: the estimate sets the price. The links open in a new tab
-// so the note being typed is not lost.
+// Whether this login can reach the staff Estimates page: the admin shell's own
+// deep-link rule (AdminLayoutV2: the SERVER-returned role it hands down through
+// its Outlet context, and isPathAdminOnly). A technician is redirected off
+// /admin/estimates and its APIs require admin, so a link there would only
+// bounce. An unknown role gets no link.
+const ESTIMATES_PATH = '/admin/estimates';
+export function useCanOpenEstimates() {
+  const role = useOutletContext()?.user?.role;
+  return role === 'admin' || (Boolean(role) && !isPathAdminOnly(ESTIMATES_PATH));
+}
+
+// Read-only. No input: the estimate sets the price. Everyone who can use the
+// sheet sees the line; the links show only for a login that can open them, in
+// a new tab so the note being typed is not lost.
 function EstimateLine({ summary, service }) {
+  const canOpen = useCanOpenEstimates();
   const line = estimateLineOf(summary);
   if (!line) return null;
-  const createHref = customerEstimateHref({
-    id: service?.routedCustomerId,
-    name: service?.customerName,
-    address: service?.address,
-    phone: service?.customerPhone,
-  });
+  const href = line.kind === 'found'
+    ? adminEstimateHref(line.estimateId)
+    : customerEstimateHref({
+      id: service?.routedCustomerId,
+      name: service?.customerName,
+      address: service?.address,
+      phone: service?.customerPhone,
+    });
   return (
     <section className="tech-visit-card" aria-label="Estimate">
       <p className="tech-visit-muted" role="status">{line.text}</p>
-      <a href={line.kind === 'found' ? adminEstimateHref(line.estimateId) : createHref} target="_blank" rel="noopener noreferrer">
-        {line.kind === 'found' ? 'Open estimate' : 'Create estimate'}
-      </a>
+      {canOpen && (
+        <a href={href} target="_blank" rel="noopener noreferrer">
+          {line.kind === 'found' ? 'Open estimate' : 'Create estimate'}
+        </a>
+      )}
     </section>
   );
 }

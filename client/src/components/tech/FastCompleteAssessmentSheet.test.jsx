@@ -8,9 +8,16 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import FastCompleteAssessmentSheet, { assessmentCompletionBody, assessmentVisitIdentity } from './FastCompleteAssessmentSheet';
 
+// The admin shell hands the server-returned role down through its Outlet context.
+let mockRole = 'admin';
+vi.mock('react-router-dom', async () => ({
+  ...(await vi.importActual('react-router-dom')),
+  useOutletContext: () => (mockRole ? { user: { role: mockRole } } : undefined),
+}));
+
 vi.setConfig({ testTimeout: 30000 });
 
-beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
+beforeEach(() => { mockRole = 'admin'; vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -381,6 +388,20 @@ describe('the estimate line', () => {
     const outcome = posts(request, '/complete')[0].body.consultationOutcome;
     expect(outcome).toMatchObject({ quotedAmount: '129.5', quotedCadence: 'quarter', quoteNotes: 'Side yard' });
     expect(Object.values(outcome).filter((v) => v === 59 || v === '59' || v === '59.00')).toEqual([]);
+  });
+
+  test.each([['technician'], [null]])('role %s: the estimate line shows, with no Open estimate link', async (role) => {
+    mockRole = role;
+    await openSheet(makeRequest({ estimate: SENT_ESTIMATE }));
+    expect(await screen.findByText('Estimate: $59.00 / month · Sent Oct 3')).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('a technician with no estimate sees "No estimate yet" and no Create estimate link', async () => {
+    mockRole = 'technician';
+    await openSheet(makeRequest({ estimate: { state: 'none' } }));
+    expect(await screen.findByText('No estimate yet')).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
   });
 
   test('a won consultation still shows the estimate line', async () => {
