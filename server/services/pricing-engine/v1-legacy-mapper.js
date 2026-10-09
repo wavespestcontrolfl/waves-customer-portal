@@ -1598,12 +1598,25 @@ function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAutho
 // beats reading a shape the engine would reject anyway. `pricingAuthority` is the
 // row's `pricing_authority` (a SERVER reprice makes `result` the authority even
 // when it prices nothing).
+function proposalCarriesAreaAddOn(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => building?.lineItems || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  // `priceUnit: 'application'` is the marker a proposal line built from an add-on row keeps (estimate-proposal normalizeLineItem).
+  return lines.some((line) => typeof line?.addOnKey === 'string' || line?.service === 'area_addon' || line?.priceUnit === AREA_ADDON_PRICE_UNIT);
+}
+
 function estimateDataCarriesAreaAddOns(estimateDataRaw, { pricingAuthority = null } = {}) {
   let d = estimateDataRaw;
   if (typeof d === 'string') {
     try { d = JSON.parse(d); } catch (_) { return false; }
   }
   if (!d || typeof d !== 'object') return false;
+  // An enabled authored proposal (itemized: the Bermuda detector's own test above) is the customer's quote. Engine inputs and
+  // rows retained from the estimate it was built from are not: only a proposal line that explicitly carries an add-on counts
+  // (no authoring path sets one today), so a clean proposal is neither gated nor limit-checked for an add-on it does not sell.
+  if (proposalIsAuthoritative(d) && proposalIsItemized(d.proposal)) return proposalCarriesAreaAddOn(d.proposal);
   const listed = (value) => value !== undefined && value !== null
     && !(Array.isArray(value) && value.length === 0);
   const inputShapes = [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options];

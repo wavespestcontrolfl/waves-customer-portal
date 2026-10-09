@@ -429,6 +429,8 @@ const isSoldAddOnRow = (row) => typeof row.addOnKey === 'string'
   && row.quoteRequired !== true && row.requiresCustomQuote !== true
   && SOLD_AMOUNT_FIELDS.some((field) => Number(row[field]) > 0);
 function soldAddOnKeys(estimateData, options = {}) {
+  // An authored proposal that sells no add-on sells none, whatever engine rows it retains (the persisted detector's rule).
+  if (!require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estimateData, options)) return [];
   return [...new Set(storedAreaAddOnRows(estimateData, options).filter(isSoldAddOnRow).map((row) => row.addOnKey))];
 }
 

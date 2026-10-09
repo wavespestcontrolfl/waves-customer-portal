@@ -204,6 +204,13 @@ describe('Update Details: what the edit adds', () => {
       await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: 1 }] }))
         .rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_PRICE_LOCKED', message });
     });
+    // Codex round 32: a cleared Price field posts null; the row would be saved unpriced.
+    test('a kept add-on row with a blank price is refused; keys alone (no price posted) are not judged', async () => {
+      await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: null }] }))
+        .rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_LOCKED' });
+      await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowKeys: [WEB] })).resolves.toEqual({ keys: [WEB], added: [] });
+    });
+
     test('removing the add-on that carries the visit cost while another sold add-on stays is refused; removing the other one is allowed', async () => {
       const carried = { visit: visit(), rowKeys: [WEB, BED], rowPrices: both.prices, estimate: both };
       await expect(edit(carried, { updates: {}, rowLines: [{ key: BED, price: both.prices[BED] }] })).rejects.toMatchObject({ code: 'AREA_ADDON_CARRIER_REQUIRED' });

@@ -509,7 +509,7 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
     if (lines.length) assertPostedAreaAddOnsSold(estimate, lines, { wholeVisit: false });
   }
   // What the visit already carries keeps its price: an add-on is never repriced by hand (the rows, then the visit's own).
-  await assertKeptAddOnRowPrices(trx, visitId, plan.rowsAfter.filter((line) => !plan.added.includes(line.key) && line.price != null));
+  await assertKeptAddOnRowPrices(trx, visitId, plan.rowsAfter.filter((line) => !plan.added.includes(line.key) && line.price !== undefined));
   if (keptOwnAddOnRepriced(plan, visit, updates)) throw priceLocked(plan.ownKey);
   // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
   if (estimate) assertCostCarrierKept(estimate, plan.finalKeys.map((key) => ({ key })), soldAreaAddOnPrices(estimate));

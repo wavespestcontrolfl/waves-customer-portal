@@ -148,3 +148,29 @@ describe('each gate boundary asks the inputs-inclusive detector (the Bermuda dat
     for (const [file, pattern] of Object.entries(sites)) expect([file, pattern.test(read(file))]).toEqual([file, true]);
   });
 });
+
+// Codex round 32: an enabled, itemized authored proposal is the customer's quote; retained engine inputs and rows are not.
+describe('an authored proposal decides whether the estimate carries an add-on', () => {
+  const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+  const limits = require('../services/area-addon-limits');
+  const retained = {
+    engineRequest: { options: { areaAddOns: [{ key: 'web_sweep' }] } },
+    result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 89 }] } },
+  };
+  const proposal = (lineItems, enabled = true) => ({ enabled, buildings: [{ lineItems }] });
+
+  test('a clean authored proposal carries none: not gated, nothing sold to recheck', () => {
+    const clean = { ...retained, proposal: proposal([{ description: 'Quarterly pest control', unitPrice: 120, frequency: 'quarterly' }]) };
+    expect(mapper.estimateDataCarriesAreaAddOns(clean)).toBe(false);
+    expect(limits.soldAddOnKeys(clean)).toEqual([]);
+  });
+
+  test('a proposal line that keeps the add-on marker still carries it; a disabled or empty proposal reads the retained estimate', () => {
+    for (const line of [{ description: 'Web Sweep', unitPrice: 89, frequency: 'one_time', priceUnit: 'application' }, { description: 'Web Sweep', addOnKey: 'web_sweep' }]) {
+      expect(mapper.estimateDataCarriesAreaAddOns({ ...retained, proposal: proposal([line]) })).toBe(true);
+    }
+    expect(mapper.estimateDataCarriesAreaAddOns({ ...retained, proposal: proposal([{ description: 'x' }], false) })).toBe(true);
+    expect(mapper.estimateDataCarriesAreaAddOns({ ...retained, proposal: { enabled: true, buildings: [] } })).toBe(true);
+    expect(limits.soldAddOnKeys(retained)).toEqual(['web_sweep']);
+  });
+});
