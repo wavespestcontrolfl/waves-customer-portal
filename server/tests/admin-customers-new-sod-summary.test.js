@@ -20,7 +20,7 @@ const mockState = { customer: { id: 'cust-1' }, prefsRow: null, productRows: [],
 jest.mock('../models/db', () => {
   const chain = (resolve) => {
     const q = {};
-    for (const m of ['where', 'whereNull', 'whereRaw', 'join', 'leftJoin', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereRaw', 'join', 'leftJoin', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
     q.first = jest.fn(async () => resolve());
     q.select = jest.fn(async () => resolve());
     return q;
@@ -147,6 +147,8 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     await getNewSod();
     const q = mockState.historyQuery;
     expect(q.limit).not.toHaveBeenCalled();
+    // An incomplete visit records applied products too.
+    expect(q.whereIn).toHaveBeenCalledWith('sr.status', ['completed', 'incomplete']);
     expect(q.whereRaw).toHaveBeenCalledTimes(1);
     // A visit stamped with another address is left out; one with no stamp is kept.
     expect(q.whereRaw.mock.calls[0][0]).toMatch(/^NOT COALESCE\(.*ss\.service_address_line1.*c\.address_line1.*, false\)$/s);

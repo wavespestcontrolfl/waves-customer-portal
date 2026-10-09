@@ -7124,6 +7124,17 @@ function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
             value={p.sod_covers === "part" ? `Part of lawn${p.sod_area ? `: ${p.sod_area}` : ""}` : "Whole lawn"}
           />
           <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />
+          {/* The saved record's warning stays on the read view: a fast Save can close the form before the form's own check returns. */}
+          {sodInfo?.preEmergentWarning && (
+            <div role="alert" className="text-ui-label text-alert-fg" data-testid="sod-read-warning">
+              {sodInfo.preEmergentWarning}
+            </div>
+          )}
+          {sodInfo?.lastPreEmergentUnreadable && (
+            <div className="text-ui-label text-ink-secondary">
+              Pre-emergent history could not be read. Check the service history.
+            </div>
+          )}
         </>
       )}
 
@@ -7713,7 +7724,8 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
     const query = typedSodDate === null ? "" : `?sodLaidOn=${encodeURIComponent(typedSodDate)}`;
     adminFetch(`/admin/customers/${customerId}/new-sod${query}`)
       .then((data) => { if (mine === sodSeq.current) setSodInfo(data?.newSod || null); })
-      .catch(() => { if (mine === sodSeq.current) setSodInfo(null); });
+      // A failed read is stated, never shown as "none on record" or as no warning.
+      .catch(() => { if (mine === sodSeq.current) setSodInfo({ holdLines: [], lastPreEmergent: null, lastPreEmergentUnreadable: true, preEmergentWarning: null }); });
     return () => { sodSeq.current += 1; };
   }, [
     customerId, isAdmin, editing, typedSodDate,

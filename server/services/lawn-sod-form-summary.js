@@ -52,7 +52,8 @@ function daysBetween(fromYmd, toYmd) {
 }
 
 /**
- * The newest completed pre-emergent application at the customer's current home.
+ * The newest pre-emergent application at the customer's current home (completed or incomplete visits: both
+ * record what was applied).
  * Uses the same product test as the lawn watering rule (isPreEmergent), on the
  * product name plus what the catalog says about it.
  * @returns {Promise<{ date: string, product: string }|{ unreadable: true }|null>} null when none;
@@ -67,7 +68,8 @@ async function lastWavesPreEmergent(knex, customerId) {
       .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
       .leftJoin('products_catalog as pc', 'sp.product_name', 'pc.name')
       .where('sr.customer_id', customerId)
-      .where('sr.status', 'completed')
+      // An incomplete visit still records the products that were applied before it stopped.
+      .whereIn('sr.status', ['completed', 'incomplete'])
       .where('sr.service_date', '>=', etDateString(addETDays(new Date(), -HISTORY_DAYS_READ)))
       // This home only: a visit stamped with another address (a former home, or a second property) is not this
       // lawn's history. A visit with no stamp is kept: nothing proves it was elsewhere.

@@ -73,12 +73,13 @@ const NEW_SOD = {
 };
 
 // A fetch stub: the customer detail, the new-sod lines, and a PUT handler.
-function stubFetch({ prefs = {}, newSod = NEW_SOD, onPut } = {}) {
+function stubFetch({ prefs = {}, newSod = NEW_SOD, newSodFails = false, onPut } = {}) {
   const fetchMock = vi.fn((url, options) => {
     const path = String(url);
     if (path.endsWith('/admin/payers')) return response({ payers: [] });
     if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
     if (path.includes('/admin/customers/customer-a/new-sod')) {
+      if (newSodFails) return Promise.reject(new Error('network'));
       return response({ newSod: typeof newSod === 'function' ? newSod(path) : newSod });
     }
     if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
@@ -246,6 +247,31 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(await screen.findByText('New sod')).toBeInTheDocument();
     expect(screen.getByText('Part of lawn: back lawn')).toBeInTheDocument();
     expect(await screen.findByText('Pre-emergent is held until Oct 1, 2027.')).toBeInTheDocument();
+  });
+
+  it('the read view keeps the saved record\'s 12-week warning, so a fast save cannot hide it', async () => {
+    const warning = 'Pre-emergent was applied less than 12 weeks before this sod. Tell the customer.';
+    stubFetch({
+      prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null },
+      newSod: { ...NEW_SOD, preEmergentWarning: warning },
+      onPut: () => response({}),
+    });
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    expect(await screen.findByTestId('sod-read-warning')).toHaveTextContent(warning);
+  });
+
+  it('a failed sod read is stated on the read view, never shown as no warning', async () => {
+    stubFetch({
+      prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null },
+      newSodFails: true,
+      onPut: () => response({}),
+    });
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    expect(await screen.findByText('Pre-emergent history could not be read. Check the service history.')).toBeInTheDocument();
   });
 
   it('says so when Waves has no pre-emergent on record, and shows the server warning for the typed date', async () => {
