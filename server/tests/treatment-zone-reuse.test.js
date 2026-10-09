@@ -50,6 +50,7 @@ const ZONE = {
   center_lat: 27.49, center_lng: -82.57, zoom: 20, address: '1 Example Ln',
   snapshot_s3_key: 'service-photos/treatment-zones/svc-0/snap.png', mask_s3_key: null, capture_mode: 'perimeter',
   source_service_id: 'svc-0', source_customer_id: 'cust-1', source_property_id: 'prop-1',
+  source_service_catalog_id: 'cat-1', source_service_type: 'Quarterly Pest Control',
   source_status: 'completed', source_date: '2026-07-01', updated_at: '2026-07-02T10:00:00.000Z',
 };
 
@@ -59,7 +60,7 @@ const ZONE = {
 const PINNED = { lat: 27.485, lng: -82.565, address_line1: '1 Example Ln', city: 'Sampletown', state: 'FL', zip: '34200' };
 const UNPINNED = { ...PINNED, lat: null, lng: null };
 // The source's rows as the locked recheck reads them.
-const SOURCE_VISIT = { status: 'completed', customer_id: 'cust-1' };
+const SOURCE_VISIT = { status: 'completed', customer_id: 'cust-1', scheduled_date: '2026-07-01', service_id: 'cat-1', service_type: 'Quarterly Pest Control' };
 const SOURCE_ZONE = { id: 'zone-0', scheduled_service_id: 'svc-0', updated_at: '2026-07-02T10:00:00.000Z' };
 
 // A table-aware fake: the candidates query resolves to `candidates`, the
@@ -69,7 +70,7 @@ const SOURCE_ZONE = { id: 'zone-0', scheduled_service_id: 'svc-0', updated_at: '
 function makeKnex({
   candidates = [ZONE], own = null, record = { id: 'rec-0', structured_notes: null },
   locations = [PINNED], lock = { property_id: 'prop-1', status: 'confirmed' },
-  sourceVisit = SOURCE_VISIT, sourceZone = SOURCE_ZONE,
+  sourceVisit = SOURCE_VISIT, sourceZone = SOURCE_ZONE, lockedRecord = undefined,
 } = {}) {
   const state = { inserted: null, wheres: [], columns: [], locationReads: 0, locks: [] };
   const knex = jest.fn((table) => {
@@ -102,7 +103,8 @@ function makeKnex({
           return Promise.resolve(JSON.stringify(c._where).includes('svc-0') ? sourceVisit : lock);
         }
         if (table === 'treatment_zone_maps' && c._lock) return Promise.resolve(sourceZone);
-        if (table === 'service_records') return Promise.resolve(record);
+        // The write's own look at the source's record asks for its id alone.
+        if (table === 'service_records') return Promise.resolve(columns.length === 1 && columns[0] === 'id' && lockedRecord !== undefined ? lockedRecord : record);
         return Promise.resolve(own);
       },
       insert: (record) => {
@@ -492,6 +494,12 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
       ['the source visit is gone', { sourceVisit: null }],
       ['the source visit is no longer completed', { sourceVisit: { ...SOURCE_VISIT, status: 'scheduled' } }],
       ['the source visit is another customer\'s', { sourceVisit: { ...SOURCE_VISIT, customer_id: 'cust-2' } }],
+      // Codex P1 r9 on #6175: every field the source was chosen on.
+      ['the source visit moved to another day', { sourceVisit: { ...SOURCE_VISIT, scheduled_date: '2026-10-05' } }],
+      ['the source visit\'s record is another one now', { lockedRecord: { id: 'rec-9' } }],
+      ['the source visit\'s record is gone', { lockedRecord: null }],
+      ['the source visit became another service', { sourceVisit: { ...SOURCE_VISIT, service_id: 'cat-9' } }],
+      ['the source visit was renamed to another service', { sourceVisit: { ...SOURCE_VISIT, service_type: 'WDO Inspection' } }],
     ])('is refused with no_reusable_trace when %s', async (_label, over) => {
       const knex = makeKnex({ lock: locked(), ...over });
       await expect(run(knex)).rejects.toMatchObject({ code: 'no_reusable_trace', statusCode: 409 });

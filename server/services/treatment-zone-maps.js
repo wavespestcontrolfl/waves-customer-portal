@@ -152,11 +152,25 @@ function noReusableTraceError() {
 async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, source }) {
   const here = await readVisitLocationRow(conn, scheduledServiceId);
   if (!here || visitLocationKey(here) !== locationKey) throw propertyChangedError();
-  const sourceVisit = await conn('scheduled_services').where({ id: source.serviceId }).forUpdate().first('status', 'customer_id');
+  const sourceVisit = await conn('scheduled_services').where({ id: source.serviceId }).forUpdate()
+    .first('status', 'customer_id', 'scheduled_date', 'service_id', 'service_type');
   const zone = await conn('treatment_zone_maps').where({ id: source.zoneId }).forUpdate().first('id', 'scheduled_service_id', 'updated_at');
   const sameInstant = (a, b) => Number.isFinite(new Date(a).getTime()) && new Date(a).getTime() === new Date(b).getTime();
+  // Every field the source was chosen and approved on (Codex P1 r9 on #6175):
+  // the office can move a completed visit to another day or make it another
+  // service while the picture is copied, and it would no longer be an earlier
+  // visit of a service that shows a trace. Its frozen record must also still
+  // be the one the render verdict read.
+  const record = sourceVisit && zone
+    ? await conn('service_records').where({ scheduled_service_id: source.serviceId }).orderBy('created_at', 'desc').first('id')
+    : null;
+  const sameText = (a, b) => String(a ?? '') === String(b ?? '');
   if (!sourceVisit || !zone
     || sourceVisit.status !== 'completed'
+    || dateOnlyOrNull(sourceVisit.scheduled_date) !== source.scheduledDate
+    || !sameText(sourceVisit.service_id, source.serviceCatalogId)
+    || !sameText(sourceVisit.service_type, source.serviceType)
+    || !record || !sameText(record.id, source.recordId)
     || String(sourceVisit.customer_id ?? '') !== String(source.customerId ?? '')
     || String(zone.id) !== String(source.zoneId)
     || String(zone.scheduled_service_id) !== String(source.serviceId)
@@ -632,8 +646,18 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     // another service the report hides the map for is never copied onto a
     // visit that would show it (Codex P1 on #6175).
     if (await traceCaptureBlockPayload(sourceVisitOf(row), knex, { captureMode: row.capture_mode })) continue;
-    if (!(await sourceTraceWasShown(row, knex))) continue;
-    return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date), locationKey: here.key };
+    const sourceRecordId = await sourceTraceWasShown(row, knex);
+    if (!sourceRecordId) continue;
+    return {
+      zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date), locationKey: here.key,
+      // What the source was chosen on, for the write to find unchanged.
+      sourceFacts: {
+        scheduledDate: dateOnlyOrNull(row.source_date),
+        serviceCatalogId: row.source_service_catalog_id ?? null,
+        serviceType: row.source_service_type ?? null,
+        recordId: sourceRecordId,
+      },
+    };
   }
   return null;
 }
@@ -650,15 +674,16 @@ async function sourceTraceWasShown(row, knex) {
       .where({ scheduled_service_id: row.source_service_id })
       .orderBy('created_at', 'desc')
       .first();
-    if (!record) return false;
+    if (!record) return null;
     const { resolveTraceRenderVerdict } = require('./service-report/trace-eligibility');
     const verdict = await resolveTraceRenderVerdict(record, knex);
-    if (!verdict || verdict.suppressed) return false;
+    if (!verdict || verdict.suppressed) return null;
     const notes = typeof record.structured_notes === 'string' ? JSON.parse(record.structured_notes || '{}') : record.structured_notes;
-    return traceJudgedAllows(notes, row);
+    // The record the verdict read, so the write can tell it is still the one.
+    return traceJudgedAllows(notes, row) ? record.id : null;
   } catch (err) {
     logger.warn(`[treatment-zone] source trace verdict failed service=${row.source_service_id}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -782,7 +807,7 @@ async function copyLastTreatmentZone({ visit, actor = null, technicianId = null,
     ...(actor ? { lockedScope: { actor, visit } } : {}),
     reuseGuard: {
       locationKey,
-      source: { zoneId: zone.id, serviceId: sourceServiceId, customerId: visit.customer_id, updatedAt: zone.updated_at },
+      source: { zoneId: zone.id, serviceId: sourceServiceId, customerId: visit.customer_id, updatedAt: zone.updated_at, ...found.sourceFacts },
     },
     knex,
   });
