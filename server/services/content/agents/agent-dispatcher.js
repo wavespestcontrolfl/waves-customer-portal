@@ -215,7 +215,9 @@ class AgentDispatcher {
     // Call ledger (never throws): one session row per created session, on
     // every exit from here on — including editorial-registration failures.
     // Upserted by session id, so calling it twice is safe.
-    const recordSession = (failure = null) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure });
+    // `abandoned`: the run is a success (the draft was captured) but the
+    // stream was left before the session said it ended, so it may still run.
+    const recordSession = (failure = null, abandoned = false) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure, abandoned });
 
     // The agent's own end — the recorder's usage GET after it (up to its
     // 15 s timeout) is observability time, not agent time.
@@ -261,8 +263,9 @@ class AgentDispatcher {
     }
 
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
+    let abandoned = false;
     try {
-      await this._streamAndExecute(sessionId, sessionTimeoutMs);
+      abandoned = Boolean((await this._streamAndExecute(sessionId, sessionTimeoutMs))?.abandoned);
       agentEndedAt = Date.now();
     } catch (err) {
       agentEndedAt = Date.now();
@@ -286,7 +289,7 @@ class AgentDispatcher {
     const draft = getDraft(sessionId);
     // `missing_draft` classifies as incomplete — the agent answered but not
     // in the shape it was told to.
-    await recordSession(draft ? null : 'missing_draft');
+    await recordSession(draft ? null : 'missing_draft', abandoned);
     // Captured BEFORE clearDraft — clearing drops the session's checked-route
     // set alongside the draft.
     const checkedExistingRoutes = getCheckedRoutes(sessionId);
@@ -403,7 +406,7 @@ class AgentDispatcher {
       // wind-down that was cut off, not the work.
       if (getDraft(sessionId)) {
         logger.warn(`[agent-dispatcher] session ${sessionId} stream closed after the draft, before its terminal event`);
-        return;
+        return { abandoned: true };
       }
       throw Object.assign(new Error(`session ${sessionId} stream ended without a terminal event`), { code: 'session_stream_eof' });
     } catch (err) {
@@ -412,6 +415,7 @@ class AgentDispatcher {
       // carries the timing.
       if (err.code !== 'session_timeout' || !getDraft(sessionId)) throw err;
       logger.warn(`[agent-dispatcher] session ${sessionId} delivered its draft; the wind-down ran past the deadline`);
+      return { abandoned: true };
     }
   }
 }

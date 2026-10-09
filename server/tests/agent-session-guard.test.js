@@ -79,6 +79,12 @@ describe('stopAbandonedSession', () => {
     await expect(stop({ settleMs: 5 })).resolves.toBe(true);
   });
 
+  it('stops a session a successful run left before its terminal event', async () => {
+    global.fetch = platform();
+    await expect(stop({ failure: null, abandoned: true })).resolves.toBe(true);
+    expect(global.fetch.mock.calls[0][1].method).toBe('POST');
+  });
+
   it('reads a thrown Error as a failure too', async () => {
     global.fetch = platform();
     await expect(stop({ failure: Object.assign(new Error('x'), { code: 'session_stream_eof' }) })).resolves.toBe(true);

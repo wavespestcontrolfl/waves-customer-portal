@@ -113,7 +113,8 @@ describe('agent dispatcher — a captured draft leaves on the terminal event', (
   it('an early EOF after the draft is the wind-down cut off — resolves, not session_stream_eof', async () => {
     global.fetch = fetchFor([TOOL_USE]);
     const dispatcher = loadWithSink();
-    await expect(dispatcher._streamAndExecute('sess-draft-eof', 5_000)).resolves.toBeUndefined();
+    // a success, flagged so the session ledger exit tells the session to stop
+    await expect(dispatcher._streamAndExecute('sess-draft-eof', 5_000)).resolves.toEqual({ abandoned: true });
     expect(drafts.get('sess-draft-eof')).toEqual({ body: 'x' });
   });
 
@@ -127,7 +128,8 @@ describe('agent dispatcher — a captured draft leaves on the terminal event', (
     // all see t=1s; the check before the next read sees the deadline passed
     Date.now = () => (calls++ < 3 ? 1_000 : 1_000 + 10_000);
     try {
-      await expect(dispatcher._streamAndExecute('sess-draft-slow', 5_000)).resolves.toBeUndefined();
+      // a success, flagged so the session ledger exit tells the session to stop
+      await expect(dispatcher._streamAndExecute('sess-draft-slow', 5_000)).resolves.toEqual({ abandoned: true });
     } finally { Date.now = realNow; }
     expect(drafts.get('sess-draft-slow')).toEqual({ body: 'x' });
   });

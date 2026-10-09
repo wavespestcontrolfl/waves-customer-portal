@@ -97,8 +97,10 @@ async function waitUntilStopped(sessionId, settleMs, pollMs) {
 // Not for the customer assistant: its session lives across turns, its
 // recorder runs fire-and-forget, and a late interrupt from a failed turn
 // could stop the customer's next turn.
-async function stopAbandonedSession({ laneId, sessionId, failure, settleMs = SETTLE_MS, pollMs = POLL_MS } = {}) {
-  const code = failureCodeOf(failure);
+// `abandoned` covers a run that succeeded but left the stream before the
+// session said it ended (the blog dispatcher after a captured draft).
+async function stopAbandonedSession({ laneId, sessionId, failure, abandoned = false, settleMs = SETTLE_MS, pollMs = POLL_MS } = {}) {
+  const code = failureCodeOf(failure) || (abandoned ? 'abandoned' : null);
   // budget_exhausted: the platform already paused the session.
   if (!agentSessionGuardLive() || !sessionId || !code || code === 'budget_exhausted' || laneId === 'agent_assistant') return false;
   try {
