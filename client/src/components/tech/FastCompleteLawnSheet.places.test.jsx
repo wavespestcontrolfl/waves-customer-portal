@@ -716,3 +716,36 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
     expect(await screen.findByRole('button', { name: /Cert Herbicide/ })).toBeTruthy();
   });
 });
+
+// ── a ladder or group product that stays on the sheet as a planned row ───────────────────────────────────────────
+describe('a planned Arena or Celsius row is judged by the per-place decision', () => {
+  const ARENA_ITEM = { productId: P_ARENA, name: 'Arena 50 WDG', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: 0.147, rateUnit: 'oz', gateNotes: [] };
+  const BIF_ITEM = { productId: P_BIF, name: 'Atticus Talak 7.9 F', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: null, rateUnit: null, gateNotes: [] };
+  const CHINCH = {
+    item: BIF_ITEM, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: [P_ARENA, P_BIF], blockedIds: [], unreadableIds: [],
+    byPlace: {
+      front: { item: BIF_ITEM, note: 'Arena yearly limit reached; Atticus is used in its place.', unreadableIds: [], blockedIds: [P_ARENA] },
+      back: { item: ARENA_ITEM, note: null, unreadableIds: [], blockedIds: [] },
+    },
+  };
+
+  test('Arena planned (no entry tag): the front is off, the back is open; Talak planned: both open', async () => {
+    await open(placeContext({ treatmentGuide: true, chinch: CHINCH, planned: [ARENA_ITEM, BIF_ITEM], addOns: [] }));
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: CHINCH };
+    const arena = within(placeGroup('Arena 50 WDG')).getByRole('group', { name: 'Place for Arena 50 WDG' });
+    expect(chipOf(arena, 'Front').disabled).toBe(true);
+    expect(chipOf(arena, 'Back').disabled).toBe(false);
+    const talak = within(placeGroup('Atticus Talak 7.9 F')).getByRole('group', { name: 'Place for Atticus Talak 7.9 F' });
+    expect(chipOf(talak, 'Front').disabled).toBe(false);
+    expect(chipOf(talak, 'Back').disabled).toBe(false);
+  });
+
+  test('Lead WG planned on its own: the place that takes the replacement is off, the lead\'s place is open', async () => {
+    const mix = MIX({ front: BLIND_SET, back: LEAD_SET });
+    await open(placeContext({ weedMix: mix, planned: [addOn(P_LEAD, 'Lead WG')], addOns: ADD_ONS }));
+    const lead = within(placeGroup('Lead WG')).getByRole('group', { name: 'Place for Lead WG' });
+    expect(chipOf(lead, 'Front').disabled).toBe(true);
+    expect(chipOf(lead, 'Back').disabled).toBe(false);
+  });
+});
+

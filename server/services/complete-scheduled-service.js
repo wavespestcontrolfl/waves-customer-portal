@@ -82,8 +82,6 @@ const { buildCompletionAdvisory, approvedReportProductFacts, withApplicationHold
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
-// GATE_LAWN_TROUBLE_AREAS, read at call time (lawn-trouble-areas.js).
-const lawnTroubleAreasLive = () => require('../config/feature-gates').lawnTroubleAreasLive();
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
@@ -7960,13 +7958,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
-            // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went (lawn-trouble-areas.js), beside the product record and,
-            // through the ledger writer, on the application ledger. Only a spot row, only a closed-list place; the key is not
-            // written at all otherwise, so a gate-off insert is the same statement as before.
-            if (lawnTroubleAreasLive() && serviceProductCols.treated_place) {
-              const place = require('../services/lawn-trouble-areas').storedPlace(applicationMethod, typeof p.areaPlace === 'string' ? p.areaPlace.trim() : null);
-              if (place) serviceProductInsert.treated_place = place;
-            }
+            // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went, beside the product record (nothing is added while the gate is off).
+            Object.assign(serviceProductInsert, require('../services/lawn-trouble-areas').placeFields({ cols: serviceProductCols, applicationMethod, input: p }));
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
             insertedServiceProducts.push(serviceProduct);
 
@@ -8010,20 +8003,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
-          // GATE_LAWN_TROUBLE_AREAS: the lawn's trouble-area store, from the spot rows that carry a place. Secondary to the
-          // completion: a failed write is logged and the visit still saves (savepointScope keeps the transaction usable).
-          if (lawnTroubleAreasLive() && insertedServiceProducts.some((sp) => sp.treated_place)) {
-            const areas = require('../services/lawn-trouble-areas');
-            try {
-              await savepointScope(trx, (k) => areas.recordFromCompletion(k, {
-                svc,
-                record,
-                rows: areas.areaRowsOf({ requestRows: products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById }),
-              }));
-            } catch (err) {
-              logger.warn(`[dispatch] trouble-area store write failed (non-blocking) for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-            }
-          }
+          // GATE_LAWN_TROUBLE_AREAS: the lawn's trouble-area store, from the spot rows that carry a place (secondary; never fails the visit).
+          await require('../services/lawn-trouble-areas').recordStore(trx, { svc, record, products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById });
         }
 
         // Ledger row: legacy = completed WaveGuard visits with a structured

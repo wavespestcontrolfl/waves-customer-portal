@@ -4718,8 +4718,12 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
     if (!require('../config/feature-gates').lawnTroubleAreasLive()) return res.status(404).json({ enabled: false });
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
-    const visit = await db('scheduled_services').where({ id: serviceId }).first('id', 'property_id', 'status');
-    if (!visit) return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    // The same eligibility the sheet's context applies: only a visit the lawn sheet can complete (a lawn visit with no re-service,
+    // assessment, project, companion or grouped-stop lane, and not closed) may clear a lawn's trouble area.
+    const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, db, { withVisitType: false });
+    if (!eligibility.ok) return res.status(recapStatusForReason(eligibility.reason)).json({ error: eligibility.reason, code: eligibility.reason });
+    if (eligibility.reason) return res.status(409).json({ error: 'This visit cannot be completed on the quick sheet.', code: 'lawn_fast_not_eligible', reason: eligibility.reason });
+    const visit = eligibility.svc;
     const cleared = await require('../services/lawn-trouble-areas').clearArea(db, {
       areaId: req.params.areaId,
       propertyId: visit.property_id,

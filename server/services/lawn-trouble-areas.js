@@ -103,7 +103,7 @@ async function loadActive(knex, propertyId) {
  * Writes the store from a completion's spot rows. `rows` are `{ place, type, source }` (already validated:
  * a closed-list place and type), one entry per treated spot. The first writer wins per (property, place,
  * type) (first seen, source, first record); a later treatment moves last seen, last treated and the last
- * record and reactivates a cleared area. Idempotent, so a durable-completion resume or a retry writes no
+ * record and reactivates a cleared area (only when the treatment day is not before the day it was cleared: a backdated completion keeps it cleared). Idempotent, so a durable-completion resume or a retry writes no
  * second row. Runs inside the completion's transaction through `trx`; returns the number of areas written.
  */
 async function recordFromCompletion(trx, { svc, record, rows }) {
@@ -122,9 +122,12 @@ async function recordFromCompletion(trx, { svc, record, rows }) {
          (customer_id, property_id, place, type, status, source, first_seen_on, last_seen_on, last_treated_on, first_service_record_id, last_service_record_id)
        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
        ON CONFLICT (property_id, place, type) DO UPDATE SET
-         status = 'active',
-         cleared_at = NULL,
-         cleared_by_technician_id = NULL,
+         status = CASE WHEN lawn_trouble_areas.status = 'cleared' AND EXCLUDED.last_treated_on < (lawn_trouble_areas.cleared_at AT TIME ZONE 'America/New_York')::date
+                       THEN 'cleared' ELSE 'active' END,
+         cleared_at = CASE WHEN lawn_trouble_areas.status = 'cleared' AND EXCLUDED.last_treated_on < (lawn_trouble_areas.cleared_at AT TIME ZONE 'America/New_York')::date
+                           THEN lawn_trouble_areas.cleared_at END,
+         cleared_by_technician_id = CASE WHEN lawn_trouble_areas.status = 'cleared' AND EXCLUDED.last_treated_on < (lawn_trouble_areas.cleared_at AT TIME ZONE 'America/New_York')::date
+                                         THEN lawn_trouble_areas.cleared_by_technician_id END,
          last_seen_on = GREATEST(lawn_trouble_areas.last_seen_on, EXCLUDED.last_seen_on),
          last_service_record_id = CASE
            WHEN lawn_trouble_areas.last_treated_on IS NULL OR EXCLUDED.last_treated_on >= lawn_trouble_areas.last_treated_on
@@ -179,6 +182,34 @@ function areaRowsOf({ requestRows, inserted, catalog }) {
 // The place a completion stores for a product row: only a spot row, only a closed-list place.
 const storedPlace = (applicationMethod, value) => (applicationMethod === 'spot_treatment' && isPlace(value) ? value : null);
 
+/**
+ * The place column of a product record being inserted: `{ treated_place }` for a spot row that carries a closed-list place while the
+ * gate is live and the column exists, else `{}` (the insert is then the same statement as before the gate). `cols` is the table's
+ * columnInfo, `input` the /complete product row.
+ */
+function placeFields({ cols, applicationMethod, input }) {
+  const place = live() && cols?.treated_place ? storedPlace(applicationMethod, typeof input?.areaPlace === 'string' ? input.areaPlace.trim() : null) : null;
+  return place ? { treated_place: place } : {};
+}
+
+// The place column of a ledger row from its product record: `{ treated_place }` when the record carries one, else `{}`.
+const ledgerPlace = (serviceProduct) => (serviceProduct?.treated_place ? { treated_place: serviceProduct.treated_place } : {});
+
+/**
+ * The completion's store write (inside its transaction, after the ledger): the spot rows that carry a place become trouble areas.
+ * Secondary to the completion: nothing happens while the gate is off or no row carries a place, and a failed write is logged and never
+ * fails the visit (savepointScope keeps the transaction usable).
+ */
+async function recordStore(trx, { svc, record, products, inserted, catalog }) {
+  if (!live() || !inserted.some((sp) => sp.treated_place)) return;
+  const { savepointScope } = require('../utils/savepoint-read');
+  try {
+    await savepointScope(trx, (k) => module.exports.recordFromCompletion(k, { svc, record, rows: areaRowsOf({ requestRows: products, inserted, catalog }) }));
+  } catch (err) {
+    logger.warn(`[dispatch] trouble-area store write failed (non-blocking) for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+  }
+}
+
 // ── the limits, per place ───────────────────────────────────────────────────
 
 /**
@@ -225,7 +256,7 @@ function blockedMap({ wide, byPlace }) {
  * lawn's known areas and the products a limit closes at a place.
  *   { troubleAreas: { v: 1, places, known, knownUnavailable, blocked } }
  */
-async function buildContextBlock({ knex, svc, products, rows, readFailures }) {
+async function buildContextBlock({ knex, svc, seed = null, readFailures, products = seed?.products || [], rows = seed?.rows || new Map() }) {
   if (!live()) return {};
   let known = [];
   let knownUnavailable = false;
@@ -363,6 +394,9 @@ module.exports = {
   clearArea,
   areaRowsOf,
   storedPlace,
+  placeFields,
+  ledgerPlace,
+  recordStore,
   cappedByPlace,
   blockedMap,
   buildContextBlock,

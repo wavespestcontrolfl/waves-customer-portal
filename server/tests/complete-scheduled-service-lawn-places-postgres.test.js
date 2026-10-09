@@ -250,6 +250,31 @@ postgres('closeout: the place of a spot treatment', () => {
     }
   });
 
+  // The customer's service-detail route returns product rows: exactly the columns the table had before the place column, whatever
+  // the gate says (the place is a technician and office fact).
+  test.each([['on', true], ['off', false]])('GET /api/services/:id never returns treated_place (gate %s)', async (_label, gateOn) => {
+    const f = await seedLawnVisit();
+    try {
+      const out = await complete(f, { products: [spot(f, { areaPlace: 'back' })] });
+      expect(out.status).toBe(200);
+      gates(gateOn);
+      process.env.GATE_LAWN_V13 = 'true';
+      const record = await recordOf(f);
+      expect(await mockPg('service_products').where({ service_record_id: record.id }).first()).toHaveProperty('treated_place');
+      const router = require('../routes/services');
+      const layer = router.stack.find((l) => l.route && l.route.path === '/:id' && l.route.methods.get);
+      const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+      const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+      await handler({ params: { id: record.id }, query: {}, customerId: f.customerId }, res, (err) => { throw err; });
+      expect(res.statusCode).toBe(200);
+      expect(res.body.products).toHaveLength(1);
+      expect(res.body.products[0]).not.toHaveProperty('treated_place');
+      // Byte-identical to before the column: the table's other columns, no more and no fewer.
+      const columns = Object.keys(await mockPg('service_products').columnInfo()).filter((c) => c !== 'treated_place').sort();
+      expect(Object.keys(res.body.products[0]).sort()).toEqual(columns);
+    } finally { await cleanup(f); }
+  });
+
   test('gate off: the place is not stored anywhere, no area is written, and the lawn-wide flag is raised as before', async () => {
     const f = await seedLawnVisit();
     try {

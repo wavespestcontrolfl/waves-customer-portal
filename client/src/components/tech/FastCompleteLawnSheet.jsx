@@ -248,6 +248,7 @@ const chinchByPlace = (chinch) => {
     item: decision?.item?.productId ? decision.item : null,
     note: decision?.note || null,
     unreadableIds: Array.isArray(decision?.unreadableIds) ? decision.unreadableIds : [],
+    ...(Array.isArray(decision?.blockedIds) ? { blockedIds: decision.blockedIds } : {}),
   }]));
 };
 const chinchShape = (chinch) => {
@@ -619,7 +620,7 @@ function plannedRate(planned) {
 // null; and the plan's notes for the product (a watering hold, a distance), which the row shows.
 const guideRowFields = (planned, guided) => ({ guided: guided || null, gateNotes: planned?.gateNotes || [] });
 
-function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false, source = null, place = '' }) {
+function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false }) {
   const rawMethod = planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
@@ -640,7 +641,6 @@ function productRow(product, { planned = null, added = false, weedGroup = false,
     weedGroup,
     ...guideRowFields(planned, guided),
     // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
-    ...(source || place ? { troubleSource: source, pickedPlace: place } : {}),
     method,
     dimension: seeded.dimension,
     totalAmount: seeded.amount,
@@ -918,7 +918,8 @@ function useProductRows(ctx, catalog) {
   const addProduct = useCallback((product, { planned = null, weedGroup = false, guided, source = null, place = '' } = {}) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { added: true, planned, weedGroup, guided, spotRules, source, place }),
+      // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
+      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, pickedPlace: place },
     ]));
   }, [spotRules]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
@@ -1556,11 +1557,11 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
             lawnSqft={lawnSqft}
             locked={locked}
             note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : takeAllRowNote(gov, row.productId)}
-            areas={areas}
-            onPlace={(place) => updateRow(row.productId, { pickedPlace: place })}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
-          />
+          >
+            {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(place) => updateRow(row.productId, { pickedPlace: place })} /> : null}
+          </ProductEditor>
           {row === areaHost && <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea} />}
           {row === areaHost && row.placeRule && areas && <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlace} />}
         </React.Fragment>
@@ -1716,44 +1717,32 @@ const CONFIRM_FIRST = 'Confirm the assessment first.';
 // opens the rows it names (each seeded from its own plan item, as a single add-on is) and
 // they share one area. With nothing to add (the yearly limit is reached) it is a line only.
 function WeedSpotsEntry({ weedMix, items, places = null, labels = {}, onPlace, on, locked, waiting = false, onAdd }) {
-  // With places (GATE_LAWN_TROUBLE_AREAS) the entry is one tap per place: it adds what that place takes and names the place.
-  // Any of the group on the sheet closes the entry; the place of the rows is then changed on their place control.
-  const anyOn = !!places && (weedMix.groupProductIds || []).some((id) => on.has(String(id).toLowerCase()));
-  const allOn = items.length > 0 && items.every((item) => on.has(String(item.productId).toLowerCase()));
+  // What a tap adds: with places (GATE_LAWN_TROUBLE_AREAS) one set per place, each tap naming its place; else the one set.
+  const options = places || (items.length ? [{ id: '', items }] : []);
+  const onSheet = (ids) => ids.some((id) => on.has(String(id).toLowerCase()));
+  // With places any of the group on the sheet closes the entry (the rows' place is then changed on their place control).
+  const done = places ? onSheet(weedMix.groupProductIds || []) : items.length > 0 && items.every((item) => onSheet([item.productId]));
   const names = items.map((item) => item.product.name).join(', ');
   // What differs by place (a place at its limit, a place that takes the replacement) is said by place.
-  const placeNotes = places ? Object.entries(weedMix.byPlace || {}).filter(([, d]) => d.note && d.note !== weedMix.note).map(([id, d]) => `${labels[id] || id}: ${d.note}`) : [];
+  const byPlace = places ? Object.entries(weedMix.byPlace || {}).filter(([, d]) => d.note && d.note !== weedMix.note) : [];
+  const line = [done ? 'On the sheet' : names, weedMix.note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  const add = (option) => {
+    option.items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds', ...(places ? { source: 'tech_tap' } : {}) }));
+    if (places) onPlace(option.id);
+  };
   return (
     <div className="tech-protocol-addon">
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">Weed spots</span>
-        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : [(places ? anyOn : allOn) ? 'On the sheet' : names, weedMix.note, ...placeNotes].filter(Boolean).join(' · ')}</span>
+        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : line.filter(Boolean).join(' · ')}</span>
       </span>
-      {places && items.length > 0 && !waiting && (anyOn
-        ? <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label="Weed spots are on the sheet" disabled>✓</Button>
+      {options.length > 0 && !waiting && (places && !done
+        ? <PlaceAddButtons choices={places} locked={locked} ariaPrefix="Add weed spots" onPick={(placeId) => add(places.find((choice) => choice.id === placeId))} />
         : (
-          <PlaceAddButtons
-            choices={places}
-            locked={locked}
-            ariaPrefix="Add weed spots"
-            onPick={(placeId) => {
-              places.find((choice) => choice.id === placeId).items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds', source: 'tech_tap' }));
-              onPlace(placeId);
-            }}
-          />
+          <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={done ? 'Weed spots are on the sheet' : 'Add weed spots'} disabled={locked || done} onClick={() => add(options[0])}>
+            {done ? '✓' : 'Add'}
+          </Button>
         ))}
-      {!places && items.length > 0 && !waiting && (
-        <Button
-          type="button"
-          variant="secondary"
-          className="tech-visit-action tech-protocol-addon-add"
-          aria-label={allOn ? 'Weed spots are on the sheet' : 'Add weed spots'}
-          disabled={locked || allOn}
-          onClick={() => items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds' }))}
-        >
-          {allOn ? '✓' : 'Add'}
-        </Button>
-      )}
     </div>
   );
 }
@@ -1871,47 +1860,33 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd, 
 // Any chinch bugs the tech finds are treated in any month without asking the office; the photo
 // card is seasonal, this tap is not. The server picked the product (Arena, else the bifenthrin
 // product at the Arena yearly limit) and says why; with nothing to add it is a line only.
+// The button's states: not on the sheet (Add), on the sheet (✓). A state is a row of this table, so a new state is a new row.
+const CHINCH_BUTTON = {
+  add: { aria: 'Add chinch bug treatment', text: 'Add', disabled: false },
+  done: { aria: 'Chinch bug treatment is on the sheet', text: '✓', disabled: true },
+};
+
 function ChinchFoundEntry({ chinch, catalog, places = null, labels = {}, on, locked, waiting = false, onAdd }) {
   const { item, note } = chinch;
-  // With places (GATE_LAWN_TROUBLE_AREAS) one tap per place adds the product that place takes and names the place.
-  const placeItems = places ? places.map((choice) => choice.item) : [];
-  const onSheet = places
-    ? Object.values(chinch.byPlace || {}).some((decision) => decision.item && on.has(String(decision.item.productId).toLowerCase()))
-    : !!item && on.has(String(item.productId).toLowerCase());
-  const placeNames = [...new Set(placeItems.map((placed) => placed.name))];
-  const placeNotes = places ? Object.entries(chinch.byPlace || {}).filter(([, d]) => d.note && d.note !== note).map(([id, d]) => `${labels[id] || id}: ${d.note}`) : [];
+  // What a tap can add: with places (GATE_LAWN_TROUBLE_AREAS) one product per place, each tap naming its place; else the one product.
+  const options = places || (item ? [{ id: '', item }] : []);
+  const offered = [item, ...Object.values(chinch.byPlace || {}).map((decision) => decision.item)];
+  const onSheet = offered.some((product) => product && on.has(String(product.productId).toLowerCase()));
+  const button = CHINCH_BUTTON[onSheet ? 'done' : 'add'];
+  const names = [...new Set(options.map((option) => option.item.name))];
+  // What differs by place (a place at its limit, a place that takes the second product) is said by place.
+  const byPlace = Object.entries(chinch.byPlace || {}).filter(([, d]) => d.note && d.note !== note);
+  const line = [names.length ? `${names.join(' or ')}, spot treatment` : null, ...(item?.gateNotes || []), note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  const add = (option) => onAdd(catalogProductFor(option.item, catalog), { planned: option.item, guided: 'chinch', ...(places ? { source: 'tech_tap', place: option.id } : {}) });
   return (
     <div className="tech-protocol-addon">
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">Chinch bugs found at the edge of damage</span>
-        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : places ? [placeNames.length ? `${placeNames.join(' or ')}, spot treatment` : null, ...(item?.gateNotes || []), note, ...placeNotes].filter(Boolean).join(' · ') : [item && `${item.name}, spot treatment`, ...(item?.gateNotes || []), note].filter(Boolean).join(' · ')}</span>
+        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : line.filter(Boolean).join(' · ')}</span>
       </span>
-      {places && !onSheet && !waiting && (
-        <PlaceAddButtons
-          choices={places}
-          locked={locked}
-          ariaPrefix="Add chinch bug treatment"
-          onPick={(placeId) => {
-            const picked = places.find((choice) => choice.id === placeId);
-            onAdd(catalogProductFor(picked.item, catalog), { planned: picked.item, guided: 'chinch', source: 'tech_tap', place: placeId });
-          }}
-        />
-      )}
-      {places && onSheet && !waiting && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label="Chinch bug treatment is on the sheet" disabled>✓</Button>
-      )}
-      {!places && item && !waiting && (
-        <Button
-          type="button"
-          variant="secondary"
-          className="tech-visit-action tech-protocol-addon-add"
-          aria-label={onSheet ? 'Chinch bug treatment is on the sheet' : 'Add chinch bug treatment'}
-          disabled={locked || onSheet}
-          onClick={() => onAdd(catalogProductFor(item, catalog), { planned: item, guided: 'chinch' })}
-        >
-          {onSheet ? '✓' : 'Add'}
-        </Button>
-      )}
+      {options.length > 0 && !waiting && (places && !onSheet
+        ? <PlaceAddButtons choices={places} locked={locked} ariaPrefix="Add chinch bug treatment" onPick={(placeId) => add(places.find((choice) => choice.id === placeId))} />
+        : <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={button.aria} disabled={locked || button.disabled} onClick={() => add(options[0])}>{button.text}</Button>)}
     </div>
   );
 }
@@ -1945,7 +1920,7 @@ function SpotAreaControl({ title = null, value, locked, onChange }) {
 
 // A product: its name, how it goes down (the method chips, and the area it will
 // submit when the method needs one), the amount, and Remove.
-function ProductEditor({ row, methods, lawnSqft, locked, note = null, areas = null, onPlace, onChange, onRemove }) {
+function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, onRemove, children = null }) {
   const nameId = useId();
   // The area this row will submit, named for what it is: "whole lawn" only when it
   // is the whole-lawn figure; a planned product's own smaller (or unchecked) area
@@ -1963,8 +1938,8 @@ function ProductEditor({ row, methods, lawnSqft, locked, note = null, areas = nu
       {/* Spot rules: a weed-mix row reads the entry's shared area; any other spot row asks for its own. */}
       {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value })} />}
       {row.spotRule && row.spotArea > 0 && <p className="tech-visit-muted">{`Spot area, ${row.spotArea.toLocaleString('en-US')} sq ft`}</p>}
-      {/* GATE_LAWN_TROUBLE_AREAS: where the spot went (a weed-mix row reads the entry's shared place). */}
-      {row.placeRule && !row.weedGroup && areas && <PlaceControl areas={areas} row={row} locked={locked} onChange={onPlace} />}
+      {/* GATE_LAWN_TROUBLE_AREAS: where the spot went (the caller's place control; a weed-mix row reads the entry's shared place). */}
+      {children}
       {note && <p className="tech-visit-muted" role="status">{note}</p>}
       {(row.gateNotes || []).map((gateNote) => <p key={gateNote} className="tech-visit-muted" role="status">{gateNote}</p>)}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />

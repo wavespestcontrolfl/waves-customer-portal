@@ -843,7 +843,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     ...(featureGates.lawnSpotRulesLive() ? { spotRules: true } : {}),
     // GATE_LAWN_TROUBLE_AREAS: the closed list of places, the lawn's known trouble areas and the products a limit closes
     // at a place (lawn-trouble-areas.js). The key exists only while the gate is live, so gate off is byte-identical.
-    ...await require('./lawn-trouble-areas').buildContextBlock({ knex, svc, products: troubleSeed?.products || [], rows: troubleSeed?.rows || new Map(), readFailures }),
+    ...await require('./lawn-trouble-areas').buildContextBlock({ knex, svc, seed: troubleSeed, readFailures }),
     // GATE_LAWN_TREATMENT_GUIDE: the sheet reads the "Suggested from this lawn" cards once the
     // assessment is confirmed (the treatment-guide route). Only a visit with a plan has any, and
     // the key exists only while the gate is live, so gate off is byte-identical.

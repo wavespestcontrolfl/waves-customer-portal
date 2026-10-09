@@ -35,10 +35,13 @@ jest.mock('../services/lawn-fast-complete', () => ({
   isUuid: (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value)),
   buildLawnFastContext: jest.fn(),
   buildLawnFastWateringPreview: jest.fn(),
+  resolveLawnFastEligibility: jest.fn(),
 }));
+jest.mock('../services/lawn-trouble-areas', () => ({ clearArea: jest.fn() }));
 
 const router = require('../routes/admin-dispatch');
-const { buildLawnFastContext, buildLawnFastWateringPreview } = require('../services/lawn-fast-complete');
+const { buildLawnFastContext, buildLawnFastWateringPreview, resolveLawnFastEligibility } = require('../services/lawn-fast-complete');
+const { clearArea } = require('../services/lawn-trouble-areas');
 
 function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -241,5 +244,81 @@ describe('lawn-fast path id (named :lawnFastServiceId so router.param(\'serviceI
       expect(router.stack.indexOf(routeLayer(method, routePath))).toBeGreaterThan(authIdx);
     }
     expect(router.stack.some((l) => !l.route && l.regexp && String(l.regexp).includes('lawn-fast'))).toBe(false);
+  });
+});
+
+// POST lawn-fast/trouble-areas/:areaId/clear (GATE_LAWN_TROUBLE_AREAS, dark): the sheet's own gate and ownership, then the same
+// eligibility the context applies, before anything is written.
+describe('POST lawn-fast/trouble-areas/:areaId/clear', () => {
+  const CLEAR = '/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear';
+  const AREA = '00000000-0000-4000-8000-0000000000aa';
+  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'];
+  const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
+  const callClear = (actor) => invoke('post', CLEAR, { params: { ...params, areaId: AREA }, actor });
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    mockDbCurrent = dbWithOwner('tech-1');
+    resolveLawnFastEligibility.mockReset().mockResolvedValue({ ok: true, reason: null, svc: { id: VISIT, property_id: 'prop-1' } });
+    clearArea.mockReset().mockResolvedValue({ id: AREA, place: 'back', type: 'fungus' });
+  });
+  afterEach(() => {
+    for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+    mockDbCurrent = null;
+  });
+
+  test('is registered after the router-level auth', () => {
+    const authIdx = router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate');
+    expect(router.stack.indexOf(routeLayer('post', CLEAR))).toBeGreaterThan(authIdx);
+  });
+
+  test.each(['GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'])('without %s: 404 {enabled:false}, nothing read or written', async (name) => {
+    delete process.env[name];
+    const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ enabled: false });
+    expect(resolveLawnFastEligibility).not.toHaveBeenCalled();
+    expect(clearArea).not.toHaveBeenCalled();
+  });
+
+  test("a technician cannot clear on another technician's visit", async () => {
+    mockDbCurrent = dbWithOwner('tech-2');
+    const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+    expect(res.statusCode).toBe(403);
+    expect(clearArea).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a pest visit', 'not_lawn'],
+    ['a lawn re-service', 'lawn_re_service'],
+    ['a Waves Assessment visit', 'assessment_visit'],
+    ['a project-backed visit', 'project_backed'],
+    ['a visit with companion sections', 'has_companions'],
+    ['a grouped stop', 'grouped_visit'],
+    ['a closed visit', 'terminal_status'],
+    ['Tree & Shrub', 'tree_shrub'],
+  ])('%s is refused with the sheet\'s own reason, and nothing is cleared', async (_label, reason) => {
+    resolveLawnFastEligibility.mockResolvedValue({ ok: true, reason, svc: { id: VISIT, property_id: 'prop-1' } });
+    const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toMatchObject({ code: 'lawn_fast_not_eligible', reason });
+    expect(clearArea).not.toHaveBeenCalled();
+  });
+
+  test('a visit that cannot be found is a 404', async () => {
+    resolveLawnFastEligibility.mockResolvedValue({ ok: false, reason: 'not_found' });
+    const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+    expect(res.statusCode).toBe(404);
+    expect(clearArea).not.toHaveBeenCalled();
+  });
+
+  test('an eligible visit clears an active area of its own property; an area of another lawn is a 404', async () => {
+    const ok = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.body).toEqual({ enabled: true, cleared: { id: AREA, place: 'back', type: 'fungus' } });
+    expect(clearArea).toHaveBeenCalledWith(expect.anything(), { areaId: AREA, propertyId: 'prop-1', technicianId: 'tech-1' });
+    clearArea.mockResolvedValue(null);
+    const other = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+    expect(other.statusCode).toBe(404);
+    expect(other.body.code).toBe('trouble_area_not_found');
   });
 });

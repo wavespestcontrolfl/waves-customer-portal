@@ -113,3 +113,32 @@ describe('a place whose limit read failed', () => {
     expect(withPlace(row({ productId: 'c1', guided: 'chinch' }), { areas, chosen: 'back', chinch })).toMatchObject({ placeUnreadable: false });
   });
 });
+
+describe('rows that stay on the sheet without the tag of the entry that opened them (a planned row, a Search-added row)', () => {
+  const areas = troubleAreasOf(data({ blocked: { c1: { front: 'wrongly listed' } } }));
+  const chinch = { rungIds: ['C1', 'C2'], byPlace: {
+    front: { item: { productId: 'C2' }, note: 'Arena is at its limit up front.', unreadableIds: [], blockedIds: ['C1'] },
+    back: { item: { productId: 'C1' }, note: null, unreadableIds: [], blockedIds: [] },
+  } };
+  test('a chinch rung is judged by the ladder\'s decision at each place, not by the generic closed list: Arena is closed where the ladder blocked it, the second rung is open', () => {
+    expect(placeProblems(row({ productId: 'c1' }), { areas, chinch })).toEqual({ front: 'Arena is at its limit up front.', back: null });
+    expect(placeProblems(row({ productId: 'C2' }), { areas, chinch })).toEqual({ front: null, back: null });
+  });
+
+  test('without the blocked ids (an older answer) the place offers its one product', () => {
+    const old = { rungIds: ['C1', 'C2'], byPlace: { front: { item: { productId: 'C2' }, note: 'n', unreadableIds: [] }, back: { item: { productId: 'C1' }, note: null, unreadableIds: [] } } };
+    expect(placeProblems(row({ productId: 'C1' }), { areas, chinch: old })).toEqual({ front: 'n', back: null });
+  });
+
+  test('a weed-group product on its own is judged by the weed decision at each place; the surfactant closes no place', () => {
+    const weedMix = { groupProductIds: ['W1', 'W2', 'S1'], noAreaProductIds: ['S1'], byPlace: {
+      front: { mode: 'replacement', productIds: ['W2'], note: 'Use the replacement up front.' },
+      back: { mode: 'lead', productIds: ['W1', 'S1'], note: null },
+    } };
+    expect(placeProblems(row({ productId: 'w1' }), { areas, weedMix })).toEqual({ front: 'Use the replacement up front.', back: null });
+    expect(placeProblems(row({ productId: 'W2' }), { areas, weedMix })).toEqual({ front: null, back: 'The weed products on the sheet do not fit this place.' });
+    expect(placeProblems(row({ productId: 'S1' }), { areas, weedMix })).toEqual({ front: null, back: null });
+    // Two untagged members are each judged alone: no shared set.
+    expect(placeProblems(row({ productId: 'W1' }), { areas, weedMix, weedRows: [row({ productId: 'W1', weedGroup: true })] }).front).toBe('Use the replacement up front.');
+  });
+});

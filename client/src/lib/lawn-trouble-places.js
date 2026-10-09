@@ -52,9 +52,21 @@ export function placeProblems(row, { areas, weedMix = null, chinch = null, weedR
   return out;
 }
 
+const lowerIds = (list) => (Array.isArray(list) ? list : []).map((id) => String(id).toLowerCase());
+// A product belongs to the weed group or the chinch ladder by what the server says it stands for, never by how its row was added:
+// a planned row or a Search-added row of Arena or Celsius is judged by the same per-place decision as the entry's row.
+const inWeedGroup = (row, weedMix) => !!row.weedGroup || lowerIds(weedMix?.groupProductIds).includes(String(row.productId).toLowerCase());
+const inChinchLadder = (row, chinch) => row.guided === 'chinch' || lowerIds(chinch?.rungIds).includes(String(row.productId).toLowerCase());
+// A tank-mix member with no capped rate (the surfactant) closes no place.
+const uncapped = (row, weedMix) => lowerIds(weedMix?.noAreaProductIds).includes(String(row.productId).toLowerCase());
+
 function problemAt(placeId, row, { areas, weedMix, chinch, weedRows }) {
-  if (row.weedGroup && weedMix?.byPlace) return weedProblem(weedMix.byPlace[placeId], weedRows);
-  if (row.guided === 'chinch' && chinch?.byPlace) return chinchProblem(chinch.byPlace[placeId], row);
+  if (weedMix?.byPlace && inWeedGroup(row, weedMix)) {
+    if (uncapped(row, weedMix)) return null;
+    // The rows of the entry share one set; a group product that is on the sheet on its own is judged on its own.
+    return weedProblem(weedMix.byPlace[placeId], row.weedGroup ? weedRows.filter((other) => !uncapped(other, weedMix)) : [row]);
+  }
+  if (chinch?.byPlace && inChinchLadder(row, chinch)) return chinchProblem(chinch.byPlace[placeId], row);
   const closed = areas.blocked?.[String(row.productId).toLowerCase()] || areas.blocked?.[row.productId];
   return closed?.[placeId] ? reasonText(closed[placeId], 'A yearly limit is reached at this place.') : null;
 }
@@ -72,6 +84,9 @@ function chinchProblem(decision, row) {
   if (!decision) return null;
   if (decision.item && sameId(decision.item.productId, row.productId)) return null;
   if ((decision.unreadableIds || []).some((id) => sameId(id, row.productId))) return null;
+  // With the rungs a place's limits closed (blockedIds), only those are closed there: a rung the place does not offer but does
+  // not close is open, as /complete reads it. Without them (an older answer) the place offers its one product.
+  if (Array.isArray(decision.blockedIds)) return decision.blockedIds.some((id) => sameId(id, row.productId)) ? reasonText(decision.note, 'This chinch product is not available at this place.') : null;
   return reasonText(decision.note, 'This chinch product is not available at this place.');
 }
 
@@ -79,8 +94,8 @@ function chinchProblem(decision, row) {
 // closeout). Only the decisions that say so are asked: the weed mix at a place that is 'unavailable', the chinch ladder at a place
 // that lists the product as unreadable.
 function unreadableAt(placeId, row, { weedMix, chinch }) {
-  if (row.weedGroup && weedMix?.byPlace) return weedMix.byPlace[placeId]?.mode === 'unavailable';
-  if (row.guided === 'chinch' && chinch?.byPlace) return (chinch.byPlace[placeId]?.unreadableIds || []).some((id) => sameId(id, row.productId));
+  if (weedMix?.byPlace && inWeedGroup(row, weedMix)) return weedMix.byPlace[placeId]?.mode === 'unavailable';
+  if (chinch?.byPlace && inChinchLadder(row, chinch)) return (chinch.byPlace[placeId]?.unreadableIds || []).some((id) => sameId(id, row.productId));
   return false;
 }
 

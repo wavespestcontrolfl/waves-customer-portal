@@ -390,9 +390,41 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       const cleared = (await rowsOf().where({ place: 'right_side' }))[0];
       expect(cleared).toMatchObject({ status: 'cleared' });
       expect(cleared.cleared_at).toBeTruthy();
-      await write([{ place: 'right_side', type: 'chinch', source: 'tech_tap' }], await recordOn(-1));
+      await write([{ place: 'right_side', type: 'chinch', source: 'tech_tap' }], await recordOn(0));
       const back = (await rowsOf().where({ place: 'right_side' }))[0];
       expect(back).toMatchObject({ status: 'active', cleared_at: null, cleared_by_technician_id: null });
+    });
+
+    test('a backdated treatment keeps a later clear; a treatment after the clear brings the area back', async () => {
+      await write([{ place: 'back', type: 'fungus', source: 'tech_tap' }], await recordOn(-20));
+      const [area] = await rowsOf();
+      expect(await areas.clearArea(knex, { areaId: area.id, propertyId: world.property.id, technicianId: randomUUID() })).toBeTruthy();
+      // Cleared nine days ago.
+      await knex('lawn_trouble_areas').where({ id: area.id }).update({ cleared_at: `${dayAgo(9)}T15:00:00Z` });
+      // A visit from twelve days ago, completed late: before the clear, so the area stays cleared; the dates still merge.
+      const old = await recordOn(-12);
+      await write([{ place: 'back', type: 'fungus', source: 'tech_tap' }], old);
+      let [row] = await rowsOf();
+      expect(row).toMatchObject({ status: 'cleared' });
+      expect(row.cleared_at).toBeTruthy();
+      expect(row.cleared_by_technician_id).toBeTruthy();
+      expect(etDateString(row.last_treated_on)).toBe(dayAgo(12));
+      expect(row.last_service_record_id).toBe(old.record.id);
+      expect(await areas.loadActive(knex, world.property.id)).toEqual([]);
+      // A visit from three days ago is after the clear: active again, the clear's marks gone.
+      await write([{ place: 'back', type: 'fungus', source: 'tech_tap' }], await recordOn(-3));
+      [row] = await rowsOf();
+      expect(row).toMatchObject({ status: 'active', cleared_at: null, cleared_by_technician_id: null });
+      expect(etDateString(row.last_treated_on)).toBe(dayAgo(3));
+      expect((await areas.loadActive(knex, world.property.id)).map((a) => a.place)).toEqual(['back']);
+    });
+
+    test('a treatment on the very day of the clear brings it back (the tech cleared it, then treated it again)', async () => {
+      await write([{ place: 'front', type: 'weeds', source: 'tech_tap' }], await recordOn(-5));
+      const [area] = await rowsOf();
+      await areas.clearArea(knex, { areaId: area.id, propertyId: world.property.id });
+      await write([{ place: 'front', type: 'weeds', source: 'tech_tap' }], await recordOn(0));
+      expect((await rowsOf())[0]).toMatchObject({ status: 'active', cleared_at: null });
     });
 
     test('the context block lists the closed places, the known areas and what a limit closes; gate off sends nothing', async () => {
