@@ -353,3 +353,24 @@ describe('call extraction replay scheduled eval', () => {
     ]);
   });
 });
+
+// The deploy-kill retry asks this before re-running a killed replay.
+describe('verdictNotifiedSince', () => {
+  const { verdictNotifiedSince } = require('../services/eval/call-extraction-replay');
+  const connWith = (found) => {
+    const calls = [];
+    const q = { where: (...a) => { calls.push(a); return q; }, whereRaw: (...a) => { calls.push(a); return q; }, first: async () => found };
+    return { conn: () => q, calls };
+  };
+  const since = new Date('2026-10-05T07:40:00Z');
+
+  test('true when this eval raised its notification at or after the killed run started', async () => {
+    const { conn, calls } = connWith({ id: 'n1' });
+    expect(await verdictNotifiedSince(since, { conn })).toBe(true);
+    expect(calls).toEqual([[{ recipient_type: 'admin' }], ["metadata->>'evalKey' = ?", ['call-extraction-eval']], ['created_at', '>=', since]]);
+  });
+
+  test('false when it raised nothing: the killed run is retried', async () => {
+    expect(await verdictNotifiedSince(since, { conn: connWith(undefined).conn })).toBe(false);
+  });
+});

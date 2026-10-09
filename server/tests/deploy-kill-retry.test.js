@@ -187,7 +187,7 @@ describe('the call extraction replay is registered for the deploy retry', () => 
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
   test('the cron tick and the retry share one entry point', () => {
     expect(src).toMatch(/cron\.schedule\('40 3 \* \* 1', runCallReplayEvalTick,/);
-    expect(src).toMatch(/registerDeployKillRetry\('call-extraction-replay-eval', runCallReplayEvalTick\)/);
+    expect(src).toMatch(/registerDeployKillRetry\('call-extraction-replay-eval', runCallReplayEvalTick, \{\s*shouldRetry: async \(row\) => !\(await require\('\.\/eval\/call-extraction-replay'\)\.verdictNotifiedSince\(row\.last_started_at\)\),/);
     // the entry point keeps the job's own gate and its own job lock
     const body = src.slice(src.indexOf('const runCallReplayEvalTick = async () => {'), src.indexOf("cron.schedule('40 3 * * 1', runCallReplayEvalTick"));
     expect(body).toMatch(/isEnabled\('callReplayEval'\)/);

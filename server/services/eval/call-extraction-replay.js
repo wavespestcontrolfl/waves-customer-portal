@@ -14,6 +14,7 @@ const logger = require('../logger');
 const { deliverOpsDigest } = require('../ops-digest');
 const { retireIfClean } = require('../ops-digest-fall-off');
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'call-extraction-eval', 'reviewed-calls.json');
+const EVAL_KEY = 'call-extraction-eval';
 const MANUAL_RERUN = 'node server/scripts/run-call-extraction-replay-eval.js --json';
 
 function compactSummary(summary = {}) {
@@ -200,7 +201,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
-        evalKey: 'call-extraction-eval', // the fall-off retires this bell with the digest
+        evalKey: EVAL_KEY, // the fall-off retires this bell with the digest
         fixturePath,
         summary: compactSummary(finalRun?.summary),
         failures: lines,
@@ -234,7 +235,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
-        evalKey: 'call-extraction-eval',
+        evalKey: EVAL_KEY,
         fixturePath,
         error: attempt.error || null,
       }),
@@ -322,7 +323,25 @@ async function runCallExtractionReplayEval(opts = {}) {
   return result;
 }
 
+/**
+ * True when this eval already raised its admin notification at or after
+ * `since`. The deploy-kill retry asks before re-running a killed run: a run
+ * that died AFTER it reported (a failure or an inconclusive result) must not
+ * report the same thing twice. That notification is not deduplicated on
+ * insert, so the check is made here. A run that died before reporting, or
+ * that had passed (a pass raises nothing), is retried.
+ */
+async function verdictNotifiedSince(since, { conn = require('../../models/db') } = {}) {
+  const row = await conn('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'evalKey' = ?", [EVAL_KEY])
+    .where('created_at', '>=', since)
+    .first('id');
+  return Boolean(row);
+}
+
 module.exports = {
+  verdictNotifiedSince,
   runCallExtractionReplayEval,
   goldAccuracyLine,
   // The retry-once / notify plumbing, reused by the voice relay eval
