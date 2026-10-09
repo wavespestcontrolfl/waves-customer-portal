@@ -615,7 +615,8 @@ class AutonomousRunner {
       selfLintOptions,
     };
     const dispatchOnce = () => (viaTerminal
-      ? terminalWriter.fetchTerminalDraft(opp.id)
+      // Only a draft written from the brief this row waits on is usable.
+      ? terminalWriter.waitingBriefId(opp.id).then((expectedBriefId) => terminalWriter.fetchTerminalDraft(opp.id, { expectedBriefId }))
       : dispatcher.runWithBrief(brief, dispatchOptions)
     ).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
@@ -672,9 +673,17 @@ class AutonomousRunner {
     // once: a gate retry must get a draft written against the retry brief.
     // No confirmed delete = the draft is not used; the claim is released and
     // the next attempt reads the same file and deletes again.
-    if (viaTerminal && dispatchResult.ok && !(await terminalWriter.retireTerminalDraft(opp.id))) {
-      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
-      return finalize(run, t0, { outcome: 'failed', failure_message: 'terminal_draft_retire_failed' });
+    if (viaTerminal && dispatchResult.ok) {
+      const retired = await terminalWriter.retireTerminalDraft(opp.id, { revision: dispatchResult.revision });
+      // The draft is judged against the brief it was written from, not the
+      // one this attempt just composed.
+      const writtenFrom = retired ? await this._loadReviewedBrief({ brief_id: dispatchResult.brief_id }) : null;
+      if (!writtenFrom || String(writtenFrom.id) !== String(dispatchResult.brief_id)) {
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+        return finalize(run, t0, { outcome: 'failed', failure_message: retired ? 'terminal_draft_brief_missing' : 'terminal_draft_retire_failed' });
+      }
+      brief = writtenFrom;
+      run.brief_id = writtenFrom.id;
     }
 
     if (!dispatchResult.ok) {
@@ -1974,15 +1983,18 @@ class AutonomousRunner {
     // Terminal writer: one admin item for the rows that now wait for a draft.
     // Its own failure must not fail the batch (the 1pm pass raises it again).
     const terminalWriter = require('./terminal-writer');
+    let terminalItemRaised = false;
     if (terminalWriter.terminalWriterLive()) {
-      await terminalWriter.raiseTerminalDue().catch((err) => {
+      terminalItemRaised = await terminalWriter.raiseTerminalDue().then((r) => r.due > 0).catch((err) => {
         logger.warn(`[autonomous-runner] terminal writer item failed: ${err.message}`);
+        return false;
       });
     }
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
     });
-    await this._sendBlogDroughtSms(runs, { haltBeforeBlog }).catch((err) => {
+    // Spread only when set, so the call is unchanged with the gate off.
+    await this._sendBlogDroughtSms(runs, { haltBeforeBlog, ...(terminalItemRaised ? { terminalItemRaised } : {}) }).catch((err) => {
       logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
     });
     return {
@@ -2054,7 +2066,7 @@ class AutonomousRunner {
    * silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false. Routed as
    * internal_alert so OWNER_SMS_DISABLED still silences everything.
    */
-  async _sendBlogDroughtSms(runs, { haltBeforeBlog = null } = {}) {
+  async _sendBlogDroughtSms(runs, { haltBeforeBlog = null, terminalItemRaised = false } = {}) {
     if (!envBool('AUTONOMOUS_BLOG_DROUGHT_ALERT', true)) return;
     const real = (runs || []).filter(Boolean);
     // "Started" = published directly, or parked awaiting its PR merge
@@ -2063,9 +2075,10 @@ class AutonomousRunner {
       && (r.outcome === 'completed_published'
         || (r.outcome === 'completed_pending_review' && r.skip_reason === 'astro_pr_pending_merge')));
     if (blogStarted) return;
-    // A blog that waits for its terminal draft is not a drought: the content
-    // admin item already names it, and "no blog today" would be a false alarm.
-    if (real.some((r) => r.action_type === 'new_supporting_blog' && r.outcome === require('./terminal-writer').AWAITING_OUTCOME)) return;
+    // A blog that waits for its terminal draft is not a drought, but only
+    // when the content admin item that names it was really raised: without
+    // it this alert is the one signal left.
+    if (terminalItemRaised && real.some((r) => r.action_type === 'new_supporting_blog' && r.outcome === require('./terminal-writer').AWAITING_OUTCOME)) return;
 
     // Day-dedupe (Codex r2+r3): the 1pm catch-up re-triggers this alert when
     // the morning batch died before ITS send, so without a persisted marker

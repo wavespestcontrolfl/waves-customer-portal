@@ -8,7 +8,8 @@
 //
 // The list has `due` (no usable draft yet; each row names the branch and the
 // file its draft must use), `written` (a draft is on its branch; the next run
-// takes it) and `gate`. With the gate OFF the agent is the writer and nothing
+// takes it), `waitingForRetryBrief` (a draft failed a check; the next run
+// writes the retry brief) and `gate`. With the gate OFF the agent is the writer and nothing
 // reads a terminal draft: `due` is empty.
 //
 // The writing pack is the brief the runner composed for that row, the system
@@ -30,7 +31,7 @@ const server = (...p) => path.join(__dirname, '..', '..', 'server', ...p);
 const db = require(server('models', 'db'));
 const tw = require(server('services', 'content', 'terminal-writer'));
 
-const LIST_FIELDS = ['opportunity_id', 'brief_id', 'action_type', 'query', 'page_url', 'service', 'city', 'score', 'skip_reason', 'reviewer_notes', 'branch', 'draft_path'];
+const LIST_FIELDS = ['opportunity_id', 'brief_id', 'action_type', 'query', 'page_url', 'service', 'city', 'score', 'problem', 'branch', 'draft_path'];
 const slim = (rows) => rows.map((r) => Object.fromEntries(LIST_FIELDS.filter((f) => r[f] != null).map((f) => [f, r[f]])));
 
 // The agent config the dispatcher would have used for this brief: its system
@@ -57,9 +58,10 @@ async function writingPack(opportunityId) {
     opportunity_id: opportunityId,
     branch: row.branch,
     draft_path: row.draft_path,
-    last_problem: row.skip_reason === tw.INVALID ? row.reviewer_notes : null,
+    last_problem: row.problem || null,
     draft_shape: {
-      note: 'One JSON object. opportunity_id is required and must equal this row. The other fields are the emit_draft input below.',
+      note: 'One JSON object. opportunity_id and brief_id are required and must equal this pack (brief_id = brief.id). The other fields are the emit_draft input below.',
+      brief_id: row.brief_id,
       emit_draft_input: config?.tools?.find((t) => t.name === 'emit_draft')?.input_schema || null,
     },
     writer_system_prompt: config?.system || null,
@@ -75,8 +77,8 @@ async function writingPack(opportunityId) {
       return;
     }
     const live = tw.terminalWriterLive();
-    const { due, written } = live ? await tw.awaitingTerminalDrafts() : { due: [], written: [] };
-    console.log(JSON.stringify({ gate: live ? 'on' : 'off', due: slim(due), written: slim(written) }, null, 2));
+    const { due, written, rebrief } = live ? await tw.awaitingTerminalDrafts() : { due: [], written: [], rebrief: [] };
+    console.log(JSON.stringify({ gate: live ? 'on' : 'off', due: slim(due), written: slim(written), waitingForRetryBrief: slim(rebrief) }, null, 2));
   } catch (err) {
     console.error(`content-terminal-due failed: ${err.message}`);
     process.exitCode = 1;

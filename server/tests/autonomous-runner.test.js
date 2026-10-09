@@ -5283,7 +5283,9 @@ describe('citability backfill retry feedback — every gate\'s one redraft hears
 describe('terminal writer: the draft step asks the terminal instead of an agent (GATE_CONTENT_WRITER_TERMINAL)', () => {
   const claimedAt = new Date('2026-10-09T13:00:00Z');
   const draft = { frontmatter: { title: 'Ant Control in Venice' }, body: 'Body text. '.repeat(40) };
-  function setup({ fetched, retired = true, brief = { id: 'brief_tw', action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' } }) {
+  // brief_tw = the brief this attempt composes; brief_handed = the stored brief the terminal wrote from.
+  const handed = { id: 'brief_handed', action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' };
+  function setup({ fetched, retired = true, stored = handed, brief = { id: 'brief_tw', action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' } }) {
     const queue = {
       claimNext: jest.fn().mockResolvedValue({ id: 'opp_tw', action_type: brief.action_type, claimed_at: claimedAt }),
       defer: jest.fn().mockResolvedValue(true), release: jest.fn().mockResolvedValue(true),
@@ -5295,10 +5297,12 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     const terminalWriter = {
       ...real,
       writesInTerminal: (b) => b.page_type !== 'metadata',
+      waitingBriefId: jest.fn().mockResolvedValue('brief_handed'),
       fetchTerminalDraft: jest.fn().mockResolvedValue(fetched),
       retireTerminalDraft: jest.fn().mockResolvedValue(retired),
     };
     jest.doMock('../services/content/terminal-writer', () => terminalWriter);
+    jest.spyOn(runner, '_loadReviewedBrief').mockResolvedValue(stored);
     return { queue, dispatcher, runner, terminalWriter };
   }
 
@@ -5318,8 +5322,8 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('a draft: its branch is deleted and the same draft goes on to the gates', async () => {
-    const { dispatcher, runner, terminalWriter } = setup({ fetched: { ok: true, draft, duration_ms: 5, agent_id: 'terminal-writer', session_id: null } });
+  test('a draft: its branch is deleted at the commit that was read, and the draft goes on to the gates with the brief it was written from', async () => {
+    const { dispatcher, runner, terminalWriter } = setup({ fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read', duration_ms: 5, agent_id: 'terminal-writer', session_id: null } });
     jest.doMock('../services/content/editorial-evidence', () => ({
       prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('editorial'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED', findings: [] })),
       reviewError: jest.fn(),
@@ -5327,16 +5331,24 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     const onward = jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'reached_the_gates' });
     await expect(runner.runNext()).resolves.toEqual({ outcome: 'reached_the_gates' });
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
-    expect(terminalWriter.fetchTerminalDraft).toHaveBeenCalledWith('opp_tw');
-    expect(terminalWriter.retireTerminalDraft).toHaveBeenCalledWith('opp_tw');
+    expect(terminalWriter.fetchTerminalDraft).toHaveBeenCalledWith('opp_tw', { expectedBriefId: 'brief_handed' });
+    expect(terminalWriter.retireTerminalDraft).toHaveBeenCalledWith('opp_tw', { revision: 'sha_read' });
+    expect(runner._loadReviewedBrief).toHaveBeenCalledWith({ brief_id: 'brief_handed' });
+    expect(onward.mock.calls[0][2].brief_id).toBe('brief_handed');
     expect(onward.mock.calls[0][2].draft_payload).toEqual(draft);
     expect(onward.mock.calls[0][2].agent_id).toBe('terminal-writer');
   });
 
   test('a draft whose branch could not be deleted is not used: the claim is released for another attempt', async () => {
-    const { queue, runner } = setup({ fetched: { ok: true, draft }, retired: false });
+    const { queue, runner } = setup({ fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read' }, retired: false });
     const result = await runner.runNext();
     expect(result).toMatchObject({ outcome: 'failed', failure_message: 'terminal_draft_retire_failed' });
+    expect(queue.release).toHaveBeenCalledWith('opp_tw', { claimToken: claimedAt });
+  });
+
+  test('a draft whose brief is no longer stored is not used', async () => {
+    const { queue, runner } = setup({ fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read' }, stored: null });
+    expect(await runner.runNext()).toMatchObject({ outcome: 'failed', failure_message: 'terminal_draft_brief_missing' });
     expect(queue.release).toHaveBeenCalledWith('opp_tw', { claimToken: claimedAt });
   });
 
