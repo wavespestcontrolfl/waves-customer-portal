@@ -45,10 +45,12 @@ function auditQueryMock(existingAudit) {
 function installServiceLookup(service, { existingAudit } = {}) {
   const query = serviceQueryMock(service);
   // the in-transaction FOR SHARE re-read of the lifecycle fields
+  // `first` answers the row re-read, then (grouped stops only) the
+  // "has any member arrived" lookup, which finds none by default.
   query.locked = {
     where: jest.fn().mockReturnThis(),
     forShare: jest.fn().mockReturnThis(),
-    first: jest.fn().mockResolvedValue(service),
+    first: jest.fn().mockImplementation(async (...cols) => (cols.length === 1 && cols[0] === 'id' ? undefined : service)),
   };
   const audit = auditQueryMock(existingAudit);
   db.mockImplementation((table) => {
@@ -650,6 +652,32 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(notMarkedWrites()).toHaveLength(0);
     expect(query.locked.forShare).toHaveBeenCalled();
     expect(query.locked.where).toHaveBeenCalledWith({ id: 'svc-1' });
+  });
+
+  test('a reschedule that lands before the locked re-read is a different attempt: nothing is written', async () => {
+    const service = baseService({ scheduled_date: '2026-10-08' });
+    const query = installServiceLookup(service);
+    query.locked.first.mockResolvedValue({ ...service, scheduled_date: '2026-10-15', en_route_at: null, track_state: 'scheduled', status: 'confirmed' });
+
+    await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(), point: basePoint({ speed_mph: 32, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a grouped stop whose other member already arrived is not a miss', async () => {
+    const service = baseService({ visit_id: 'visit-3', group_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08' });
+    const query = installServiceLookup(service);
+    // row re-read: still open; member lookup: a sibling is on property
+    query.locked.first.mockImplementation(async (...cols) => (cols.length === 1 && cols[0] === 'id' ? { id: 'svc-sibling' } : service));
+
+    await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(), point: basePoint({ speed_mph: 32, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(notMarkedWrites()).toHaveLength(0);
+    expect(query.locked.where).toHaveBeenCalledWith({ visit_id: 'visit-3' });
   });
 
   test('a grouped stop with no member en-route time falls back to the stop-level stamp', async () => {

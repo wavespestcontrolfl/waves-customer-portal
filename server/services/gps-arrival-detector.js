@@ -319,11 +319,13 @@ function auditAction({ notMarked, result }) {
 // Which attempt of the visit a not_marked row belongs to. A rescheduled or
 // restarted visit reuses its row, so the schedule day + en_route_at tell the
 // attempts apart. NULL-safe: a missing part reads 'none', never NULL.
+function attemptDay(value) {
+  const day = String(value instanceof Date ? value.toISOString() : value || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none';
+}
+
 function attemptKey(service) {
-  const day = String(
-    service?.scheduled_date instanceof Date ? service.scheduled_date.toISOString() : service?.scheduled_date || ''
-  ).slice(0, 10);
-  const dayPart = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none';
+  const dayPart = attemptDay(service?.scheduled_date);
   // A grouped stop is ONE physical visit: its members carry slightly different
   // en_route_at values, so the attempt is the EARLIEST current member time
   // (the same value whichever member is the current job, and renewed when the
@@ -396,6 +398,25 @@ async function auditArrival({ trx = null, critical = false, ...args }) {
 // in one process cannot both pass) and spares a parked truck any query after
 // the first sample; it is RELEASED when the lookup or the write fails, so a
 // later sample can record the row.
+const sameInstant = (a, b) => timestampMs(a) === timestampMs(b);
+const sameDay = (a, b) => attemptDay(a) === attemptDay(b);
+
+// Under the row lock: is this still the miss the caller observed? The row
+// must be open with no arrival, be the SAME appointment attempt (a reschedule
+// resets the row and leaves it open), and, for a grouped stop, no member may
+// have arrived (the primary flips before the fan-out reaches its siblings).
+async function stillTheObservedMiss(trx, snapshot, fresh) {
+  if (!fresh || !isOpenWithoutArrival(fresh)) return false;
+  if (!sameDay(fresh.scheduled_date, snapshot.scheduled_date) || !sameInstant(fresh.en_route_at, snapshot.en_route_at)) return false;
+  if ((fresh.visit_id || null) !== (snapshot.visit_id || null)) return false;
+  if (!fresh.visit_id) return true;
+  const arrivedMember = await trx('scheduled_services')
+    .where({ visit_id: fresh.visit_id })
+    .where((b) => b.whereNotNull('arrived_at').orWhere({ track_state: 'on_property' }).orWhere({ status: 'on_site' }))
+    .first('id');
+  return !arrivedMember;
+}
+
 async function writeNotMarkedOnce(serviceId, reason, row) {
   const attempt = attemptKey(row.service);
   const stop = stopKey(row.service);
@@ -417,8 +438,8 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
       // Lock order is advisory then row; lifecycle writers never take this
       // advisory lock, so there is no cycle.
       const fresh = await trx('scheduled_services').where({ id: serviceId }).forShare()
-        .first('arrived_at', 'completed_at', 'cancelled_at', 'track_state', 'status');
-      if (!fresh || !isOpenWithoutArrival(fresh)) return;
+        .first('arrived_at', 'completed_at', 'cancelled_at', 'track_state', 'status', 'scheduled_date', 'en_route_at', 'visit_id');
+      if (!(await stillTheObservedMiss(trx, row.service, fresh))) return;
       const existing = await trx('audit_log')
         .where({ resource_type: 'scheduled_service', action: NOT_MARKED_ACTION })
         .whereRaw("metadata->>'stop' = ? AND metadata->>'reason' = ? AND metadata->>'attempt' = ?", [stop, reason, attempt])
