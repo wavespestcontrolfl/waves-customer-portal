@@ -453,7 +453,7 @@
       "kind": "Insects · foliar spray or soil drench",
       "targetTitle": "Pest targets",
       "targets": "Listed soft and armored scales, whiteflies, mealybugs, lace bugs, and other ornamental insects. Aphids and certain thrips: suppression only.",
-      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height, not by tank (see Label rates). Bark applications have separate instructions.",
+      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height (see Label rates). Mix the dose in at least 1 quart of water per foot of plant height and pour it at the base, on moist soil. With less water, irrigate 1/2 inch right after. Keep the soil moist for 7 days. Bark applications have separate instructions.",
       "rates": [
         [
           "7.25–16 fl oz / 100 gal",
@@ -466,9 +466,10 @@
       ],
       "limits": [
         "No application while bees forage or plants flower; wait until all petals have fallen.",
-        "No more than three foliar applications per growing season.",
+        "No more than three applications per growing season, sprays and drenches together.",
         "Rate a sago as a shrub by height. Never by trunk diameter: that is 3 to 5 times the dose.",
         "Single plants only. Never drench a hedge with Zylam.",
+        "Drench only on moist soil: not dry, saturated or frozen.",
         "Yearly limit: 78.9 fl oz per acre, which is 1.81 fl oz per 1,000 sq ft of bed area, sprays and drenches together.",
         "Follow Group 4A rotation restrictions and keep others out until dry."
       ],

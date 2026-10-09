@@ -415,17 +415,31 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
  * property: the T&S protocol asks for a scale / sooty mold / mite check at every
  * visit of such an account. "Live" is the ownership lifecycle the pricing AI
  * uses (loadLiveRecurringObligationRows: active customer, recurring, non-terminal,
- * no callback or one-time source) and "mosquito" is its ownership family. A row
- * stamped with another property does not count; a row with no property link, or a
- * visit with none, falls back to the customer level (a notice too many, never one
- * too few). Any failure answers false and logs.
+ * no callback or one-time source) and "mosquito" is its ownership family.
+ * Mosquito counts as a live row's own service or as a plan add-on line on one
+ * (service-library ADDON_LINE_IS_PLAN_SQL: not a one_time line), this visit's
+ * own add-on lines included. A row stamped with another property does not
+ * count; a row with no property link, or a visit with none, falls back to the
+ * customer level (a notice too many, never one too few). Any failure answers
+ * false and logs.
  */
 async function loadJointMosquitoAccount(svc, knex, serviceId) {
   try {
-    const rows = await loadLiveRecurringObligationRows(knex, svc.customer_id);
-    return rows.some((row) => String(row.id) !== String(svc.id)
-      && (!svc.property_id || !row.property_id || String(row.property_id) === String(svc.property_id))
-      && ownershipKeysForRow(row).includes('mosquito'));
+    const here = (await loadLiveRecurringObligationRows(knex, svc.customer_id))
+      .filter((row) => !svc.property_id || !row.property_id || String(row.property_id) === String(svc.property_id));
+    const isMosquito = (row) => ownershipKeysForRow(row).includes('mosquito');
+    if (here.some((row) => String(row.id) !== String(svc.id) && isMosquito(row))) return true;
+    if (!here.length) return false;
+    const addons = await knex('scheduled_service_addons as addon')
+      .leftJoin('services as addon_service', 'addon_service.id', 'addon.service_id')
+      .whereIn('addon.scheduled_service_id', here.map((row) => row.id))
+      .whereRaw("(addon.recurring_pattern IS NULL OR addon.recurring_pattern <> 'one_time')")
+      .select('addon.service_name as addon_name', 'addon.service_key_snapshot', 'addon_service.service_key', 'addon_service.name as catalog_name');
+    return addons.some((line) => isMosquito({
+      service_key: line.service_key_snapshot || line.service_key,
+      service_name: line.catalog_name || line.addon_name,
+      service_type: line.addon_name,
+    }));
   } catch (err) {
     // No driver message: it can echo SQL and bound values.
     logger.warn(`[ts-fast-context] mosquito account check unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);

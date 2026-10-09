@@ -668,6 +668,45 @@ describe('the fast-context jointMosquitoAccount flag', () => {
     }
   });
 
+  // Mosquito sold as a plan add-on line on another live recurring visit (Codex r1 #6200).
+  describe('mosquito as an add-on line', () => {
+    const ADDONS = 'scheduled_service_addons as addon';
+    const withAddons = (addons) => fakeKnex({ scheduled_services: visit(), products_catalog: catalog, [ADDONS]: addons });
+    const pest = () => row({ service_type: 'Pest Control' });
+
+    test('a plan add-on line on a live row at this property is true, by key snapshot, catalog or line name', async () => {
+      for (const line of [
+        { addon_name: 'Add-on', service_key_snapshot: 'mosquito_monthly' },
+        { addon_name: 'Add-on', service_key: 'mosquito_monthly', catalog_name: 'Mosquito Control' },
+        { addon_name: 'Mosquito Barrier Treatment' },
+      ]) {
+        loadLiveRecurringObligationRows.mockResolvedValue([pest()]);
+        const knex = withAddons([line]);
+        expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(true);
+        const calls = knex.calls.filter(([table]) => table === ADDONS);
+        expect(calls).toContainEqual([ADDONS, 'whereIn', 'addon.scheduled_service_id', ['ss-9']]);
+        // One-time add-on lines are not part of the plan.
+        expect(calls.find(([, method]) => method === 'whereRaw')[2]).toMatch(/recurring_pattern IS NULL OR addon\.recurring_pattern <> 'one_time'/);
+      }
+    });
+
+    test('no mosquito add-on, or a live row at another property, is false', async () => {
+      loadLiveRecurringObligationRows.mockResolvedValue([pest()]);
+      expect((await buildTreeShrubFastContext('visit-1', withAddons([{ addon_name: 'Rodent Bait Stations' }]))).jointMosquitoAccount).toBe(false);
+      loadLiveRecurringObligationRows.mockResolvedValue([row({ service_type: 'Pest Control', property_id: 'prop-2' })]);
+      const knex = withAddons([{ addon_name: 'Mosquito Barrier Treatment' }]);
+      expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(false);
+      expect(knex.calls.some(([table]) => table === ADDONS)).toBe(false);
+    });
+
+    test('an add-on read failure is false and logged', async () => {
+      loadLiveRecurringObligationRows.mockResolvedValue([pest()]);
+      const ctx = await buildTreeShrubFastContext('visit-1', withAddons(Object.assign(new Error('boom'), { code: '42P01' })));
+      expect(ctx).toMatchObject({ ok: true, eligible: true, jointMosquitoAccount: false });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('mosquito account check unavailable'));
+    });
+  });
+
   test('a lookup failure is false, logged without the driver message, and the sheet still loads', async () => {
     loadLiveRecurringObligationRows.mockRejectedValue(Object.assign(new Error('select * from secret'), { code: 'ECONNRESET' }));
     const ctx = await build();

@@ -652,6 +652,8 @@ describe('joint mosquito account notice', () => {
   test('the server flag shows one notice near the top', async () => {
     await openSheet(makeRequest({ context: { ...CONTEXT, jointMosquitoAccount: true } }));
     expect(screen.getAllByText(NOTICE)).toHaveLength(1);
+    // A reminder, not an alert: the neutral style, never the red warning one (Codex r1 #6200).
+    expect(screen.getByText(NOTICE).className).toBe('tech-visit-muted');
   });
 
   test.each([false, undefined, 'true'])('flag %s shows nothing', async (flag) => {

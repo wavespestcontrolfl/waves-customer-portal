@@ -616,7 +616,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
           {ctx.jointMosquitoAccount && (
-            <p className="tech-visit-warning" role="status"><WarningIcon /> {JOINT_MOSQUITO_NOTICE}</p>
+            <p className="tech-visit-muted" role="status">{JOINT_MOSQUITO_NOTICE}</p>
           )}
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
           <PhotosSection photos={photos} lastPhotos={ctx.lastVisitPhotos} previewCurrent={previewCurrent} locked={locked || dictationPending} />

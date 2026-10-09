@@ -61,8 +61,14 @@ test('Zylam carries the soil-drench dose by plant height, kept out of the per-ga
   expect(zylam.limits).toEqual(expect.arrayContaining([
     'Rate a sago as a shrub by height. Never by trunk diameter: that is 3 to 5 times the dose.',
     'Single plants only. Never drench a hedge with Zylam.',
+    'Drench only on moist soil: not dry, saturated or frozen.',
+    // The label's three-application cap covers every method (Codex r1 #6200).
+    'No more than three applications per growing season, sprays and drenches together.',
     'Yearly limit: 78.9 fl oz per acre, which is 1.81 fl oz per 1,000 sq ft of bed area, sprays and drenches together.',
   ]));
+  // The label's drench carrier: 1 quart of mix per foot, or 1/2 inch of irrigation; moist soil for 7 days.
+  expect(zylam.apply).toMatch(/at least 1 quart of water per foot of plant height/);
+  expect(zylam.apply).toMatch(/irrigate 1\/2 inch right after\. Keep the soil moist for 7 days\./);
   // The tank calculator keeps the foliar per-gallon range only.
   expect(zylam.mix).toEqual([0.0725, 0.16]);
   expect(zylam.mixes).toBeUndefined();
