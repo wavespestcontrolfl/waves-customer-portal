@@ -638,6 +638,10 @@ async function readStoredImage(key) {
 // The pictures are read BEFORE the save: a picture that cannot be copied
 // fails the request instead of saving a zone with a missing picture.
 async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null, expectedPropertyId, openVisitOnly = false, knex = db }) {
+  // A visit that gained a trace since the offer was read (another device) is
+  // told so by name, so the sheet reads that trace: the lookup below answers
+  // nothing for it and would read as "no trace to reuse" (pre-push P1).
+  if (await knex('treatment_zone_maps').where({ scheduled_service_id: visit.id }).first('id')) throw traceExistsError();
   const found = await findReusableTreatmentZone(visit, { knex });
   if (!found) {
     throw Object.assign(operationalError('There is no earlier trace for this property to reuse.', 409), { code: 'no_reusable_trace' });

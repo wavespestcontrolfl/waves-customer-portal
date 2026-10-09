@@ -393,6 +393,13 @@ describe('reuseLastTreatmentZone', () => {
     expect(mockS3Send).not.toHaveBeenCalled();
   });
 
+  test('a visit that already has a trace when the copy starts answers trace_exists, not "nothing to reuse"', async () => {
+    const knex = makeKnex({ own: { id: 'zone-own' } });
+    await expect(reuseLastTreatmentZone({ visit: VISIT, knex })).rejects.toMatchObject({ code: 'trace_exists' });
+    expect(knex.state.inserted).toBeNull();
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
   test('a picture that cannot be read fails the request and saves nothing', async () => {
     mockS3Send.mockRejectedValue(new Error('NoSuchKey'));
     const knex = makeKnex();
@@ -420,14 +427,14 @@ describe('reuseLastTreatmentZone', () => {
   });
 
   test('a visit that gained its own trace meanwhile is not overwritten', async () => {
-    // The lookup read saw no trace; the locked write finds one.
+    // The two reads before the copy saw no trace; the locked write finds one.
     let reads = 0;
     const base = makeKnex();
     const knex = jest.fn((table) => {
       const c = base(table);
       if (table === 'treatment_zone_maps') {
         const first = c.first;
-        c.first = (...a) => { reads += 1; return reads === 1 ? first(...a) : Promise.resolve({ id: 'zone-own' }); };
+        c.first = (...a) => { reads += 1; return reads <= 2 ? first(...a) : Promise.resolve({ id: 'zone-own' }); };
       }
       return c;
     });
