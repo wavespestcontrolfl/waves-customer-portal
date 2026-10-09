@@ -829,8 +829,8 @@ customer-confirmed, is dispatch-locked or excluded, or has a sendable
 reminder); the projection fails. `byDate` has no entry for the visit's own
 date (a time-only move does not shift the plan). `POST .../find-slots` and
 the commit route's `SLOT_TAKEN` refresh carry the same key for the days they
-return, and the client adds those dates to the ones it holds; a date with no
-entry shows no line. Confirm pin: the commit body carries
+return, and the client replaces the dates it holds with that answer (no key =
+no date named); a date with no entry shows no line. Confirm pin: the commit body carries
 `disclosed_next_visit_date` (the date the line named for the picked slot, or
 null when it named none). While the gate is on, a series commit projects the
 date again on the mover's locked transaction, before its first write

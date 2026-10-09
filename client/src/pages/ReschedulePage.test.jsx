@@ -730,6 +730,29 @@ describe('ReschedulePage collective anchoring', () => {
     expect(JSON.parse(post[1].body).disclosed_next_visit_date).toBeNull();
   });
 
+  it('a slot-taken refresh that names no next-visit date clears the line', async () => {
+    const payload = reschedulablePayload({ isRecurring: true, collectiveAnchor: true });
+    const pickedDate = payload.availability.days[0].date;
+    stubFetch({
+      get: jsonResponse({ ...payload, nextVisit: { currentDate: '2026-10-10', byDate: { [pickedDate]: '2026-10-17' } } }),
+      post: jsonResponse({
+        error: 'That time is no longer open. Here are the latest available times.',
+        code: 'SLOT_TAKEN',
+        availability: payload.availability,
+      }, 409),
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    expect(await screen.findByTestId('next-visit-note')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+    await waitFor(() => expect(screen.queryByTestId('next-visit-note')).not.toBeInTheDocument());
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Confirm/ })).toBeInTheDocument());
+    expect(screen.queryByTestId('next-visit-note')).not.toBeInTheDocument();
+  });
+
   it('the commit POST discloses the collective scope the page rendered under (codex P1)', async () => {
     const fetchMock = stubFetch({
       get: jsonResponse(reschedulablePayload({ isRecurring: true, collectiveAnchor: true })),

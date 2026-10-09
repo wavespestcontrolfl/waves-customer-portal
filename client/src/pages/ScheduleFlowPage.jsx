@@ -468,16 +468,11 @@ function nextVisitShiftFor(data, slotDate) {
   return from && to && from !== to ? { from, to } : null;
 }
 
-// A search or a slot-taken refresh can offer a day the first load did not:
-// keep the dates already named and add the new ones.
-function withNextVisit(prev, body) {
-  if (!body?.nextVisit) return {};
-  return {
-    nextVisit: {
-      currentDate: body.nextVisit.currentDate,
-      byDate: { ...(prev?.nextVisit?.byDate || {}), ...(body.nextVisit.byDate || {}) },
-    },
-  };
+// A search or a slot-taken refresh replaces the day list, and its response
+// is the server's current answer for those days: take its dates whole, and
+// name none when it sends none (the next visit stopped being movable).
+function withNextVisit(body) {
+  return { nextVisit: body?.nextVisit || null };
 }
 
 function shortDateLabel(dateStr) {
@@ -1789,7 +1784,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (body.availability) {
       // The pick survives when the results still offer it (see the
       // availability effect above); otherwise that effect clears it.
-      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(prev, body) } : prev));
+      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body) } : prev));
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -1887,7 +1882,7 @@ export default function ScheduleFlowPage({ flow }) {
           if (body.lead) mergeData({ lead: body.lead });
         }
         if (body.availability) {
-          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(prev, body) } : prev));
+          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body) } : prev));
         } else if (flow === 'inspection') {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper
