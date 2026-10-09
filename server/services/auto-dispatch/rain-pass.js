@@ -117,29 +117,46 @@ async function loadStops(db, from, to) {
   return groupStops(rows.map((row) => ({ ...row, point: points.get(String(row.id)) || null })), addOns);
 }
 
-// Where each visit's work happens, for the forecast: the point stamped on the
-// visit, else its linked property's own point, else the customer's primary
-// home when the visit's stamped address does not diverge from it (the guard
-// every route read uses, scheduling/day-stops.js guardedCoordSelects). Kept
-// apart from the rows' own lat / lng, which the route model reads as stamped.
+// Where each visit's work happens, for the forecast, with the ZIP that goes
+// with it:
+//   1. the point stamped on the visit;
+//   2. else its linked property's own point, only while the property's
+//      address still matches the visit's stamped address (the stamp is what
+//      was agreed for this visit; a property can be edited or merged later);
+//   3. else, for a visit with NO property link, the customer's primary home
+//      under the divergence guard every route read uses
+//      (scheduling/day-stops.js guardedCoordSelects). A visit linked to a
+//      property never takes the primary home: it may be another house.
+// Kept apart from the rows' own lat / lng, which the route model reads as stamped.
 async function loadPoints(db, ids) {
   const { guardedCoordSelects } = require('../scheduling/day-stops');
+  const { stampedDivergesSql } = require('../stamped-address');
+  const propertyMatches = `NOT ${stampedDivergesSql('scheduled_services', 'customer_properties')}`;
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .leftJoin('customer_properties', 'scheduled_services.property_id', 'customer_properties.id')
     .whereIn('scheduled_services.id', ids)
-    .select('scheduled_services.id', 'scheduled_services.lat as stamped_lat', 'scheduled_services.lng as stamped_lng',
-      'customer_properties.latitude as property_lat', 'customer_properties.longitude as property_lng',
+    .select('scheduled_services.id', 'scheduled_services.property_id',
+      'scheduled_services.lat as stamped_lat', 'scheduled_services.lng as stamped_lng',
+      'scheduled_services.service_address_zip as stamped_zip', 'customer_properties.zip as property_zip', 'customers.zip as customer_zip',
+      db.raw(`CASE WHEN ${propertyMatches} THEN customer_properties.latitude END as property_lat`),
+      db.raw(`CASE WHEN ${propertyMatches} THEN customer_properties.longitude END as property_lng`),
       ...guardedCoordSelects(db));
-  const pair = (lat, lng) => (lat != null && lng != null ? { lat: Number(lat), lng: Number(lng) } : null);
-  return new Map(rows.map((row) => [String(row.id),
-    pair(row.stamped_lat, row.stamped_lng) || pair(row.property_lat, row.property_lng) || pair(row.lat, row.lng)]));
+  return new Map(rows.map((row) => [String(row.id), pickPoint(row)]));
 }
 
-// A point inside the service area, or null.
+function pickPoint(row) {
+  const pair = (lat, lng, zip) => (lat != null && lng != null ? { lat: Number(lat), lng: Number(lng), zip: row.stamped_zip || zip || null } : null);
+  return pair(row.stamped_lat, row.stamped_lng, row.property_zip || row.customer_zip)
+    || pair(row.property_lat, row.property_lng, row.property_zip)
+    || (row.property_id == null ? pair(row.lat, row.lng, row.customer_zip) : null);
+}
+
+// A point inside the service area, or null. The full check: a point in the
+// excluded inland part of the box counts only with a ZIP the area serves.
 function areaPoint(point) {
   if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return null;
-  return require('../service-area').isInServiceAreaCoarseBox(point.lat, point.lng) ? point : null;
+  return require('../service-area').isInServiceAreaBox(point.lat, point.lng, { zip: point.zip }) ? point : null;
 }
 
 // The day's rows as PHYSICAL stops, by the route model's own rule
@@ -406,4 +423,4 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
   }
 }
 
-module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, VISIT_COLUMNS } };
+module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };

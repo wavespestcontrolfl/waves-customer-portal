@@ -275,6 +275,26 @@ describe('auto-dispatch rain pass', () => {
     expect(_test.VISIT_COLUMNS).toEqual(expect.arrayContaining(['visit_id', 'route_order', 'created_at', 'is_recurring', 'is_callback', 'service_address_line1', 'lat', 'lng']));
   });
 
+  test('the forecast point: the visit stamp, then a matching property, and the primary home only with no property link', () => {
+    const home = { lat: '27.40', lng: '-82.40', customer_zip: '34201' };
+    // The query hands over property_lat only while the property address matches the visit stamp.
+    expect(_test.pickPoint({ ...home, stamped_lat: '27.50', stamped_lng: '-82.50', stamped_zip: '34208', property_id: 'p1', property_lat: '27.60', property_lng: '-82.60' }))
+      .toEqual({ lat: 27.5, lng: -82.5, zip: '34208' });
+    expect(_test.pickPoint({ ...home, property_id: 'p1', property_lat: '27.60', property_lng: '-82.60', property_zip: '34221' }))
+      .toEqual({ lat: 27.6, lng: -82.6, zip: '34221' });
+    // Linked to a property with no usable point: never the customer's primary home.
+    expect(_test.pickPoint({ ...home, property_id: 'p1', property_lat: null, property_lng: null })).toBeNull();
+    expect(_test.pickPoint({ ...home, property_id: null })).toEqual({ lat: 27.4, lng: -82.4, zip: '34201' });
+  });
+
+  test('a point in the excluded inland part of the area box needs a ZIP the area serves', async () => {
+    const { DESOTO_EXCLUSION: box } = require('../services/service-area');
+    const inland = { lat: (box.latMin + box.latMax) / 2, lng: (box.lngMin + box.lngMax) / 2 };
+    const verdict = async (zip) => (await planRainPass({ now: NOW, db: {}, deps: deps([stop({ point: { ...inland, zip } })]) }))[0];
+    expect(await verdict('34266')).toMatchObject({ wet: false, reason: 'no_point' });
+    expect(await verdict(null)).toMatchObject({ wet: false, reason: 'no_point' });
+  });
+
   test('a date column value (a Date at UTC midnight) keeps its calendar date', async () => {
     const d = deps([stop({ scheduled_date: new Date(`${D1}T00:00:00Z`) })]);
     const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
