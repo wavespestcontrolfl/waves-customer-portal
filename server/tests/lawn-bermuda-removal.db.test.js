@@ -626,6 +626,17 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: ok.visit.id })).toBeNull();
     });
 
+    test('the 42 days span the new year: a late-December spray holds an early-January Recognition spray on any visit (codex r48 P1)', async () => {
+      setGates();
+      const january = await lawn({ date: '2027-01-10' });
+      await spray(january.customerId, january.property.id, '2026-12-20');
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: january.visit.id })))
+        .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached', message: expect.stringMatching(/only 21 days since last app \(min 42\)/) });
+      const february = await lawn({ date: '2027-02-05' });
+      await spray(february.customerId, february.property.id, '2026-12-20');
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: february.visit.id }))).resolves.toBeUndefined();
+    });
+
     test('another property\'s sprays and this visit\'s own earlier rows do not count; a retry of the visit is not judged against itself', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20', bermuda: true });
