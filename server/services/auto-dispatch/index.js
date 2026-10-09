@@ -696,14 +696,29 @@ async function evaluateServiceForRun(service, run) {
 
 // Pass-2 order: due deadlines first (the earliest unplaced due date before
 // its placement window closes), then visits in conflict (an overlap or a
-// closed day: they cannot stay where they are), then descending route gain.
+// closed day: they cannot stay where they are; cheapest fix first), then
+// descending route gain.
 function byDueThenImprovement(a, b) {
   const aDue = !a.service.window_start ? toDateStr(a.service.recurring_dispatch_due_date) : null;
   const bDue = !b.service.window_start ? toDateStr(b.service.recurring_dispatch_due_date) : null;
   return Number(!!bDue) - Number(!!aDue)
     || (aDue && bDue ? aDue.localeCompare(bDue) : 0)
     || Number(inConflict(b)) - Number(inConflict(a))
+    || cheaperConflictFix(a, b)
     || b.result.improvement - a.result.improvement;
+}
+
+// Of two visits in conflict, the one with the cheaper fix goes first: a
+// same-day re-time before a day move, then the least added drive. When the
+// two overlap each other, the first to move clears the conflict for both
+// (the second re-evaluates live and stays), so the cheaper fix is the one
+// applied (replay 2026-10-09: load order moved a visit to another day when
+// its partner had a free hour the same day).
+function cheaperConflictFix(a, b) {
+  if (!inConflict(a) || !inConflict(b)) return 0;
+  const m = (pm) => (pm.result.audit && pm.result.audit.routeMetrics) || {};
+  return Number(!!m(a).day_move) - Number(!!m(b).day_move)
+    || (Number(m(b).drive_saving_minutes) || 0) - (Number(m(a).drive_saving_minutes) || 0);
 }
 
 function inConflict(pm) {

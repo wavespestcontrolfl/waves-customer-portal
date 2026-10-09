@@ -817,6 +817,22 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     }
   });
 
+  test('pass 2: of two visits in conflict, a same-day fix goes before a day move', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      servicesResult = [svc({ id: 'daymove' }), svc({ id: 'sameday' })];
+      const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+      candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+        current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [service.id === 'sameday' ? SAME_DAY : CAND_BIG],
+      }));
+      await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(apply.applyAutoDispatchMove.mock.calls.map((c) => c[0].id)).toEqual(['sameday', 'daymove']);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
   test('pass 2 applies a visit in conflict before a larger ordinary gain', async () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
