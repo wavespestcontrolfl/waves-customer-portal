@@ -64,7 +64,7 @@ function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
   trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
   promises = { available: false, promises: [] }, blog = { available: false, posts: [] }, photoChange = () => ({}),
-  context = {},
+  context = {}, last = { available: false }, reuse = () => ({ treatmentZone: { linear_ft: 220, capture_mode: 'perimeter' } }),
 } = {}) {
   const calls = [];
   const completes = [...complete];
@@ -77,6 +77,11 @@ function makeRequest({
     if (path.split('?')[0].endsWith('/blog-posts')) return typeof blog === 'function' ? blog(path) : blog;
     if (/\/photos\/[^/]+$/.test(path)) return photoChange(path, options);
     if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : { photos };
+    if (path.endsWith('/treatment-zone/last')) {
+      if (last instanceof Error) throw last;
+      return last;
+    }
+    if (path.endsWith('/treatment-zone/reuse')) return reuse(path, options);
     if (path.split('?')[0].endsWith('/treatment-zone')) return typeof trace === 'function' ? trace(path, options) : trace;
     if (path === '/admin/schedule/generate-report') {
       if (report instanceof Error) throw report;
@@ -886,6 +891,188 @@ describe('complete and send', () => {
     expect(body.products.map((product) => [product.applicationMethod, product.areaValue, product.areaUnit])).toEqual([
       ['perimeter_spray', 182, 'linear_ft'], ['perimeter_spray', 182, 'linear_ft'], ['perimeter_spray', 182, 'linear_ft'],
     ]);
+  });
+
+  describe('Same as last visit (GATE_TRACE_REUSE)', () => {
+    const LAST = { available: true, linearFt: 220, capturedOn: '2026-07-01', captureMode: 'perimeter' };
+    // A trace the reuse route "saves": the next read of the visit's trace has it.
+    function reusableRequest(over = {}) {
+      let zone = null;
+      const request = makeRequest({
+        facts: { ...FACTS, spray: 'perimeter' },
+        last: LAST,
+        trace: () => ({ enabled: true, treatmentZone: zone }),
+        reuse: () => { zone = { linear_ft: 220, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' }; return { treatmentZone: zone }; },
+        ...over,
+      });
+      return request;
+    }
+
+    // The app runs under React.StrictMode, whose mount is setup, cleanup, setup:
+    // the read's answer must still land (pre-push P1).
+    test('the button shows under React.StrictMode', async () => {
+      const request = reusableRequest();
+      render(<React.StrictMode><FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} /></React.StrictMode>);
+      await screen.findByText(/Taurus SC 4 fl oz/);
+      await generate();
+      expect(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' })).toBeTruthy();
+    });
+
+    test('one tap copies the last trace with the tracer\'s fence fields, the hold clears and the send goes', async () => {
+      const request = reusableRequest();
+      await openSheet(request);
+      await generate();
+      expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+      // Nothing is applied by the read: the visit still has no trace.
+      expect(request.calls.filter((call) => call.path.endsWith('/treatment-zone/reuse'))).toHaveLength(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      expect(request.calls.filter((call) => call.path.endsWith('/treatment-zone/reuse')).map((call) => [call.path, call.options.method, call.body]))
+        .toEqual([['/tech/services/svc-1/treatment-zone/reuse', 'POST', { expectedPropertyId: 'prop-1', openVisitOnly: true }]]);
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+      await screen.findByTestId('fast-complete-sent');
+      const [body] = request.bodies('/complete');
+      expect(body.products.map((product) => [product.applicationMethod, product.areaValue, product.areaUnit])[0]).toEqual(['perimeter_spray', 220, 'linear_ft']);
+      expect(body.traceSeen).toBe('2026-10-02T05:00:00.000Z');
+    });
+
+    test('the last trace is asked for once, and the hand-trace button stays beside it', async () => {
+      const request = reusableRequest();
+      await openSheet(request);
+      await generate();
+      await screen.findByRole('button', { name: 'Same as last visit · 220 ft' });
+      expect(screen.getByRole('button', { name: 'Trace where we sprayed' })).toBeTruthy();
+      expect(request.calls.filter((call) => call.path.endsWith('/treatment-zone/last'))).toHaveLength(1);
+    });
+
+    test.each([
+      ['the read says none is available', { last: { available: false } }],
+      ['the read failed', { last: new Error('offline') }],
+      ['the gate is off (an answer without the field)', { last: {} }],
+    ])('no button when %s, and the sheet is not held by it', async (_label, over) => {
+      const request = reusableRequest(over);
+      await openSheet(request);
+      await generate();
+      await waitFor(() => expect(request.calls.some((call) => call.path.endsWith('/treatment-zone/last'))).toBe(true));
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+      expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Trace where we sprayed' }).disabled).toBe(false);
+    });
+
+    test('a visit that already has its own trace never shows it (and never asks)', async () => {
+      const request = makeRequest({
+        facts: { ...FACTS, spray: 'perimeter' },
+        last: LAST,
+        trace: { enabled: true, treatmentZone: { linear_ft: 150, capture_mode: 'perimeter' } },
+      });
+      await openSheet(request);
+      await generate();
+      expect(screen.getByText('Perimeter traced · 150 ft')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+      expect(request.calls.filter((call) => call.path.endsWith('/treatment-zone/last'))).toHaveLength(0);
+    });
+
+    test('no button when the note sprays no perimeter (no trace step)', async () => {
+      await openSheet(reusableRequest({ facts: FACTS }));
+      await generate();
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+    });
+
+    test('a visit that cannot be traced here shows no button', async () => {
+      await openSheet(reusableRequest(), { ...SERVICE, traceEligible: false });
+      await generate();
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+    });
+
+    test('a refused copy shows the server\'s message and leaves Trace usable', async () => {
+      const refused = Object.assign(new Error('This visit moved to another property. Close it and reopen it from the schedule.'), { status: 409, code: 'visit_property_changed' });
+      const request = reusableRequest({ reuse: () => { throw refused; } });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('This visit moved to another property. Close it and reopen it from the schedule.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+      const trace = screen.getByRole('button', { name: 'Trace where we sprayed' });
+      expect(trace.disabled).toBe(false);
+      fireEvent.click(trace);
+      expect(await screen.findByRole('dialog', { name: 'Tracer' })).toBeTruthy();
+    });
+
+    // Codex P3 r4 on #6175: a failed copy's message goes once the visit has a trace by another path.
+    test('a refused copy\'s message goes when a hand trace is saved', async () => {
+      const refused = Object.assign(new Error('There is no earlier trace for this property to reuse.'), { status: 409, code: 'no_reusable_trace' });
+      const request = reusableRequest({ reuse: () => { throw refused; } });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('There is no earlier trace for this property to reuse.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Save trace' }));
+      expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
+      expect(screen.queryByText('There is no earlier trace for this property to reuse.')).toBeNull();
+    });
+
+    test('while the copy saves, the button shows loading and the hand trace waits', async () => {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const request = reusableRequest({ reuse: async () => { await gate; return { treatmentZone: { linear_ft: 220 } }; } });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Trace where we sprayed' }).disabled).toBe(true));
+      release();
+      // The answer is the saved trace: it shows at once.
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Trace again' }).disabled).toBe(false);
+    });
+
+    // Codex P2 on #6175: the POST's own answer is applied, so the hold clears
+    // and the button goes even when no later read of the trace succeeds.
+    test('the copy\'s answer is applied without another read of the trace', async () => {
+      let reads = 0;
+      const request = reusableRequest({
+        trace: () => { reads += 1; return { enabled: true, treatmentZone: null }; },
+        reuse: () => ({ treatmentZone: { linear_ft: 220, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' } }),
+      });
+      await openSheet(request);
+      await generate();
+      const before = reads;
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      expect(reads).toBe(before);
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+    });
+
+    // Codex P2 r3 on #6175: another device traced the visit after the offer was read.
+    test('a copy refused because the visit already has a trace reads that trace, with no error left on the sheet', async () => {
+      let zone = null;
+      const request = reusableRequest({
+        trace: () => ({ enabled: true, treatmentZone: zone }),
+        reuse: () => {
+          zone = { linear_ft: 305, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' };
+          throw Object.assign(new Error('This visit already has a trace. Remove it first to use the last visit’s.'), { status: 409, code: 'trace_exists' });
+        },
+      });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('Perimeter traced · 305 ft')).toBeTruthy();
+      expect(screen.queryByText(/already has a trace/)).toBeNull();
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+    });
+
+    test('a reused trace can still be removed or traced again by hand', async () => {
+      const request = reusableRequest();
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Trace again' })).toBeTruthy();
+    });
   });
 
   test('a spot visit has no trace step, and a trace already saved holds the send (the report would show a sprayed perimeter)', async () => {

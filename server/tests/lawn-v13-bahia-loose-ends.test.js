@@ -43,6 +43,7 @@ describe('estimate AI context protocol-product linkage', () => {
         join(...args) { calls.push([table, 'join', ...args]); return query; },
         where(arg) { calls.push([table, 'where', arg]); return query; },
         whereNotIn(column, sub) { calls.push([table, 'whereNotIn', column, sub?.__table]); return query; },
+        whereRaw(sql) { calls.push([table, 'whereRaw', sql]); return query; },
         limit() { return Promise.resolve(rows); },
       };
       query.__table = table;
