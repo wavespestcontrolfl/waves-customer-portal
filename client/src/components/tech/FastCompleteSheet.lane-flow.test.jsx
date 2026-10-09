@@ -115,7 +115,8 @@ const recordCard = () => screen.getByRole('region', { name: 'Bed bug record hear
 // A field's row on the card: its label, its value, the words heard.
 const fieldRow = (label) => within(recordCard()).getByText(label).closest('.tech-lane-row');
 
-// Owner 2026-10-05: the "Swept eaves and webs" box is a plain pest visit's.
+// Owner 2026-10-08: no short sheet has a "Swept eaves and webs" box; a plain pest
+// visit's sweep is read from its note, and a lane visit records none.
 describe('the swept eaves and webs box on a lane visit', () => {
   test('is not on the visit step', async () => {
     const request = makeRequest();
