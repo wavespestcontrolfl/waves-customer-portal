@@ -37,6 +37,10 @@
  * sources agreeing is one suggestion; different surnames are all listed in the
  * full text and none is picked.
  *
+ * The notification closes itself: the relevance sweep (admin-alert-relevance.js)
+ * retires it once the customer has a last name or is gone, and puts it back if
+ * the name is blanked within 14 days. This module never closes it.
+ *
  * Inert unless GATE_CALL_LAST_NAME_LOOKUP is on (callLastNameLookupLive).
  * Fire-and-forget: the call pipeline never waits on it and a failure here
  * never touches call processing. Logs carry ids and outcome codes only —
@@ -88,7 +92,11 @@ function callContactPhoneKey(call) {
   return phoneIdentityKey(resolveCallContactPhone(call, parseJson(call.ai_extraction)?.phone || null) || '');
 }
 
-const SUGGESTION_KEY = (customerId) => `call-last-name-suggestion:${customerId}`;
+// The relevance sweep (admin-alert-relevance.js, class call_last_name_suggestion)
+// retires the notification once this prefix's customer has a last name or is
+// gone, so it imports the prefix from here.
+const SUGGESTION_KEY_PREFIX = 'call-last-name-suggestion:';
+const SUGGESTION_KEY = (customerId) => `${SUGGESTION_KEY_PREFIX}${customerId}`;
 
 // One suggestion per customer, ever (the notification's dedupe key). When it
 // stands, a reprocess or a later call must not pay for the lookups again.
@@ -320,6 +328,8 @@ async function postSuggestion({ customer, callLogId }, answers) {
     severity: 'needs-you',
     link,
     subject: { type: 'customer', id: String(customer.id) },
+    // Closes itself: the relevance sweep retires it once the last name is saved
+    // (or the customer is gone) and puts it back if the name is blanked again.
     doneWhen: 'last_name_saved',
     who: 'person',
   }, {
@@ -377,5 +387,6 @@ function enqueueCallLastNameLookup({ callLogId, customerId } = {}) {
 module.exports = {
   runCallLastNameLookup,
   enqueueCallLastNameLookup,
+  SUGGESTION_KEY_PREFIX,
   _private: { callContactPhoneKey, cleanSurname, groupBySurname, whyFor },
 };
