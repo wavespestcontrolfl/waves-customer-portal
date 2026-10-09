@@ -5618,12 +5618,19 @@ router.patch('/:id', async (req, res, next) => {
     // the row still holds the status we validated against, so a customer
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
+    // The row must still be in the archive state this handler read: an edit
+    // that waited behind an archive (staff, or the draft-retire sweep) must
+    // not land on the now-hidden row and report success.
+    updateQuery = estimate.archived_at ? updateQuery.whereNotNull('archived_at') : updateQuery.whereNull('archived_at');
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
     const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
     if (changesDeliveryOptions) {
       updateQuery = updateQuery.whereNot({ status: 'sending' }).whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
-      updates.updated_at = db.fn.now();
     }
+    // Every staff edit stamps updated_at (priority and disposition too): the
+    // draft-retire sweep reads it to keep a draft someone touched after a
+    // newer estimate was delivered.
+    if (Object.keys(updates).length) updates.updated_at = db.fn.now();
     // Turning invoice mode OFF is predicated on the stored proposal STILL
     // having no structured payment term at write time — the pre-read guard
     // above can race a concurrent proposal PUT that saves one (the PUT's
