@@ -1943,7 +1943,7 @@ const HARD_COUNT_LIMIT_LABELS = {
 };
 // What the office notification calls each kind of finding: the hard count limits, plus an area add-on row
 // recorded above the add-on's governed rate (area-addon-governed-rate.js).
-const FINDING_LIMIT_LABELS = { ...HARD_COUNT_LIMIT_LABELS, [areaAddOnGovernedRate.LIMIT_TYPE]: 'governed add-on rate' };
+const FINDING_LIMIT_LABELS = { ...HARD_COUNT_LIMIT_LABELS, [areaAddOnGovernedRate.LIMIT_TYPE]: 'governed add-on rate', [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: 'governed add-on product' };
 const MAX_RAW_SUBMITTED_PRODUCTS = 200;
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -2062,6 +2062,7 @@ async function recordedProductLimitFindings({ svc, record, database = db } = {})
 // a retry or a resume rings once). Never throws and never blocks the closeout.
 const limitFigure = (finding) => {
   if (finding.limitType === areaAddOnGovernedRate.LIMIT_TYPE) return `${finding.current} per 1,000 sq ft, governed rate ${finding.max}`;
+  if (finding.limitType === areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE) return `the add-on uses ${finding.max}`;
   if (finding.limitType === 'min_interval_days') return `only ${finding.current} days from another application, minimum ${finding.max}`;
   if (finding.limitType === 'annual_max_rate') return `${finding.current}% of the yearly label amount used`;
   return `${finding.current} of ${finding.max} already used`;
@@ -2069,6 +2070,22 @@ const limitFigure = (finding) => {
 
 // One bell per record, finding code, product AND limit type (a product over both its yearly count and
 // its minimum interval rings for each).
+// The one sentence of an admin notification for each kind of finding (name = the short product name).
+const FINDING_WHY = {
+  [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: (name, f) => `${name} was recorded for an add-on that uses ${require('../services/ops-digest').truncateAtWord(f.max, 24)}.`,
+  [areaAddOnGovernedRate.LIMIT_TYPE]: (name, f) => `${name} was recorded at ${f.current} per 1,000 sq ft, above the governed rate ${f.max}.`,
+  min_interval_days: (name, f) => `${name}: only ${f.current} days since another application, minimum ${f.max}.`,
+  annual_max_rate: (name, f) => `${name} is over its yearly amount limit: ${f.current}% used.`,
+  annual_max_apps: (name, f) => `${name} is over its yearly limit: ${f.current} of ${f.max} already used.`,
+};
+// The long form (the "Show full text" detail) of the same.
+const FINDING_DETAIL = {
+  [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: (fullName, f, svc) => `${fullName} was recorded for an area add-on on a ${svc.service_type || 'lawn'} visit, but the add-on uses ${f.max}. Review it and report it if needed.`,
+};
+for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
+  FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
+}
+
 const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}:${finding.limitType || 'all'}`;
 
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
@@ -2080,16 +2097,10 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
       const fullText = over
-        ? `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[finding.limitType]} (${limitFigure(finding)}). Review it and report it if needed.`
+        ? (FINDING_DETAIL[finding.limitType] || FINDING_DETAIL.annual_max_apps)(fullName, finding, svc)
         : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
       const why = !over ? 'A lawn visit was recorded, but its product limits could not be checked.'
-        : finding.limitType === areaAddOnGovernedRate.LIMIT_TYPE
-          ? `${name} was recorded at ${finding.current} per 1,000 sq ft, above the governed rate ${finding.max}.`
-          : finding.limitType === 'min_interval_days'
-            ? `${name}: only ${finding.current} days since another application, minimum ${finding.max}.`
-            : finding.limitType === 'annual_max_rate'
-              ? `${name} is over its yearly amount limit: ${finding.current}% used.`
-              : `${name} is over its yearly limit: ${finding.current} of ${finding.max} already used.`;
+        : (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding);
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
@@ -7898,8 +7909,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const { isValidRateUnit } = require('../services/inventory-units');
           for (const p of products) {
             if (!p.productId) continue;
-            if (seenProductIds.has(p.productId)) continue;
-            seenProductIds.add(p.productId);
+            // One row per product AND add-on: a host row and an add-on row of the same product are two applications.
+            const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);
+            if (seenProductIds.has(rowIdentity)) continue;
+            seenProductIds.add(rowIdentity);
             if (p.rateUnit && !isValidRateUnit(p.rateUnit)) {
               const err = new Error(`Invalid product unit for ${p.name || p.productId}`);
               err.isOperational = true; err.statusCode = 400;

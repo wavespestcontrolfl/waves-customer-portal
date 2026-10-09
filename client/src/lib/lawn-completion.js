@@ -125,7 +125,7 @@ export function withdrawLawnPlanSuggestions(rows, { planUnverified = false } = {
 export function reconcileLawnPlanSelections(current, defaults, removedIds = []) {
   const byId = new Map(defaults.map(row => [String(row.productId), row]));
   const removed = new Set(removedIds.map(String));
-  const rows = current.flatMap((row) => {
+  const reconcileRow = (row) => {
     const fresh = byId.get(String(row.productId));
     byId.delete(String(row.productId));
     if (!row.lawnPlanDefaults) return [row];
@@ -172,7 +172,9 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
     if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
     if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
     return [next];
-  });
+  };
+  // An area add-on's row is never a plan default and must not consume the host's default of the same product.
+  const rows = current.flatMap((row) => (row.areaAddOnKey ? [row] : reconcileRow(row)));
   for (const [id, row] of byId) if (!removed.has(id)) rows.push(row);
   return rows;
 }

@@ -58,8 +58,8 @@ async function productIdsByKey(database, keys) {
   const catalog = products.map((p) => ({ ...p, aliases: byProduct.get(p.id) || [] }));
   const out = new Map();
   for (const key of keys) {
-    const hint = configOf(key).limitProduct;
-    const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
+    const hint = configOf(key)?.limitProduct;
+    const product = hint ? matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog) : null;
     if (product) out.set(key, product.id);
   }
   return out;
@@ -406,6 +406,7 @@ module.exports = {
   assertAreaAddOnLimitsOpen,
   areaAddOnLimitRefusal,
   attachLimitUse,
+  productIdsByKey,
   limitSubject,
   phoneKey,
   addressKey,

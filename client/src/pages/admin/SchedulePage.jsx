@@ -83,6 +83,7 @@ import {
   amountInUnit,
   markTankEntry,
   tankPropagates,
+  productRowId,
   followTank,
   clearTankOnUnitChange,
   joinTankOnUnitChange,
@@ -14128,7 +14129,7 @@ export function CompletionPanel({
       if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
       const defaults = lawnPlanSelections(lawnCompletionDefaults.items, buildSelectedProduct, products, { areas: areasServiced, governed: true });
       const activeDefaults = lawnDefaultsSeedSuppressed
-        ? defaults.filter(row => selectedProducts.some(product => String(product.productId) === String(row.productId))) : defaults;
+        ? defaults.filter(row => selectedProducts.some(product => !product.areaAddOnKey && String(product.productId) === String(row.productId))) : defaults;
       const rows = reconcileLawnPlanSelections(selectedProducts, activeDefaults, lawnRemovedDefaultIds);
       lawnDefaultMixSeededRef.current = true;
       lawnDefaultMixSnapshotRef.current = JSON.stringify(defaults);
@@ -17180,7 +17181,7 @@ export function CompletionPanel({
     if (
       activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
-        || selectedProducts.find((p) => p.productId === action.product.id))
+        || selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id))
     ) {
       return;
     }
@@ -17202,7 +17203,7 @@ export function CompletionPanel({
     }
     if (
       action.product?.id &&
-      !selectedProducts.find((p) => p.productId === action.product.id)
+      !selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id)
     ) {
       addProduct(action.product);
     }
@@ -17222,7 +17223,7 @@ export function CompletionPanel({
     // The duplicate check runs FIRST (codex r81): re-clicking an
     // already-selected product's search result changes nothing and must
     // not clear a valid untouched report.
-    if (selectedProducts.find((p) => p.productId === product.id)) return;
+    if (selectedProducts.find((p) => !p.areaAddOnKey && p.productId === product.id)) return;
     // Products feed the generation grounding (and T&S derives its treatments
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
@@ -17475,16 +17476,19 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     lawnDefaultMixSeededRef.current = true;
     const row = buildSelectedProduct({ ...product, areaAddOnKey: addOn.key });
-    setSelectedProducts((prev) => [...prev.filter((p) => p.productId !== row.productId), row]);
+    setSelectedProducts((prev) => [...prev.filter((p) => productRowId(p) !== productRowId(row)), row]);
   }
-  function removeProduct(productId) {
+  // `rowId` is productRowId(row): the product and, for an add-on's row, the add-on, so the host's row of a
+  // product and the add-on's row of the same product are removed and edited separately.
+  function removeProduct(rowId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
+    const productId = selectedProducts.find((p) => productRowId(p) === rowId)?.productId ?? rowId;
     // A governed row restored while the plan request failed is still a plan
     // default: its removal must survive a successful retry (pre-push audit).
-    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
+    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => productRowId(p) === rowId && p.lawnPlanDefaults);
     if (governed) {
-      const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+      const removedName = selectedProducts.find((p) => productRowId(p) === rowId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
       if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
       setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
     }
@@ -17493,16 +17497,16 @@ export function CompletionPanel({
     // the list going empty, or a later open re-seeds what the tech took
     // off. Only THIS function (the tech's own tap) records one; the
     // non-performed-outcome clearing effect deliberately does not.
-    const removedRow = selectedProducts.find((p) => p.productId === productId);
+    const removedRow = selectedProducts.find((p) => productRowId(p) === rowId);
     if (removedRow?.protocolDefaultProduct || removedRow?.pestDefaultMixProduct) {
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
-      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
+      promoteTankOwner(prev.filter((p) => productRowId(p) !== rowId)),
     );
   }
-  function updateProduct(productId, field, value) {
+  function updateProduct(rowId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
@@ -17511,13 +17515,13 @@ export function CompletionPanel({
       // live in lib/product-rate-prefill. Only the owner's corrections travel,
       // so a row given its own gallons detaches alone.
       const tankOwner = tankOwnerRow(prev);
-      const propagateTank = tankPropagates(prev, productId, field);
+      const propagateTank = tankPropagates(prev, rowId, field);
       // An owner that leaves per-gallon frees the slot the same way removing
       // it does, and the rows still on its mix keep the tank: without an heir
       // the next gallons edit — a detached row's included — would propagate
       // over them (pre-push audit P1). Idempotent while an owner remains.
       return promoteTankOwner(prev.map((p) => {
-        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
+        if (productRowId(p) !== rowId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
         // Leaving a per-gallon rate retires the tank with it, on every lane —
         // a pest perimeter or tree/shrub row never reaches the rate-unit
@@ -18595,7 +18599,7 @@ export function CompletionPanel({
       // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
       // server's unlisted-skip audit (Codex #4113 P2).
       const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
-        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
+        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => !row.areaAddOnKey && String(row.productId) === String(id))).flatMap((id) => {
             const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
             const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
             const productName = item?.product?.name || catalogProduct?.name || lawnRemovedDefaultNamesRef.current[String(id)];
@@ -19121,7 +19125,7 @@ export function CompletionPanel({
     return (
       (!!noteText && inSelection) ||
       (action?.product?.id &&
-        selectedProducts.some((p) => p.productId === action.product.id))
+        selectedProducts.some((p) => !p.areaAddOnKey && p.productId === action.product.id))
     );
   }
   // Lawn closeouts are product-backed-only: no generic pest fallback chips
@@ -21142,7 +21146,7 @@ export function CompletionPanel({
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
                     const selected = !!selectedProducts.find(
-                      (sp) => sp.productId === p.id,
+                      (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                     );
                     return (
                       <Chip
@@ -21213,7 +21217,7 @@ export function CompletionPanel({
                 >
                   {selectedProducts.map((sp) => (
                     <div
-                      key={sp.productId}
+                      key={productRowId(sp)}
                       style={{
                         background: M.card,
                         border: `0.5px solid ${M.hairline}`,
@@ -21246,7 +21250,7 @@ export function CompletionPanel({
                         placeholder="Rate"
                         value={sp.rate}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "rate", e.target.value)
+                          updateProduct(productRowId(sp), "rate", e.target.value)
                         }
                         style={{
                           ...mInput,
@@ -21259,7 +21263,7 @@ export function CompletionPanel({
                         value={sp.rateUnit}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "rateUnit",
                             e.target.value,
                           )
@@ -21296,7 +21300,7 @@ export function CompletionPanel({
                             placeholder="Gal"
                             value={sp.carrierGallons ?? ""}
                             onChange={(e) =>
-                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                              updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                             }
                             style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
                           />{" "}
@@ -21311,7 +21315,7 @@ export function CompletionPanel({
                         value={sp.totalAmount || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "totalAmount",
                             e.target.value,
                           )
@@ -21327,7 +21331,7 @@ export function CompletionPanel({
                         value={sp.amountUnit ?? sp.rateUnit ?? ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "amountUnit",
                             e.target.value,
                           )
@@ -21385,7 +21389,7 @@ export function CompletionPanel({
                                 selected={selectedAreas.includes(area)}
                                 onClick={() =>
                                   updateProduct(
-                                    sp.productId,
+                                    productRowId(sp),
                                     "applicationArea",
                                     toggleProductAreaValue(
                                       sp.applicationArea,
@@ -21405,7 +21409,7 @@ export function CompletionPanel({
                         value={productApplicationMethod(sp, typeFor(sp))}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "applicationMethod",
                             e.target.value,
                           )
@@ -21446,7 +21450,7 @@ export function CompletionPanel({
                             value={sp.areaValue || ""}
                             onChange={(e) =>
                               updateProduct(
-                                sp.productId,
+                                productRowId(sp),
                                 "areaValue",
                                 e.target.value,
                               )
@@ -21462,7 +21466,7 @@ export function CompletionPanel({
                       })()}
                       <button
                         type="button"
-                        onClick={() => removeProduct(sp.productId)}
+                        onClick={() => removeProduct(productRowId(sp))}
                         aria-label="Remove product"
                         style={{
                           width: 36,
@@ -21496,12 +21500,12 @@ export function CompletionPanel({
                         });
                         return (
                         <ProductTargetsPicker
-                          idSuffix={sp.productId}
+                          idSuffix={productRowId(sp)}
                           targets={sp.targets}
                           suggestions={picker.suggestions}
                           noun={picker.noun}
                           onChange={(next) =>
-                            updateProduct(sp.productId, "targets", next)
+                            updateProduct(productRowId(sp), "targets", next)
                           }
                           theme={{
                             labelColor: M.ink3,
@@ -23621,7 +23625,7 @@ export function CompletionPanel({
             >
               {(products || []).slice(0, 5).map((p) => {
                 const isSelected = selectedProducts.find(
-                  (sp) => sp.productId === p.id,
+                  (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                 );
                 return (
                   <button
@@ -23699,7 +23703,7 @@ export function CompletionPanel({
             >
               {selectedProducts.map((sp) => (
                 <div
-                  key={sp.productId}
+                  key={productRowId(sp)}
                   style={{
                     background: D.card,
                     border: `1px solid ${D.border}`,
@@ -23731,14 +23735,14 @@ export function CompletionPanel({
                     placeholder="Rate"
                     value={sp.rate}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rate", e.target.value)
+                      updateProduct(productRowId(sp), "rate", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.rateUnit}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rateUnit", e.target.value)
+                      updateProduct(productRowId(sp), "rateUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23767,7 +23771,7 @@ export function CompletionPanel({
                         placeholder="Gal"
                         value={sp.carrierGallons ?? ""}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                          updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                         }
                         style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                       />{" "}
@@ -23781,14 +23785,14 @@ export function CompletionPanel({
                     placeholder="Total"
                     value={sp.totalAmount || ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "totalAmount", e.target.value)
+                      updateProduct(productRowId(sp), "totalAmount", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.amountUnit ?? sp.rateUnit ?? ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "amountUnit", e.target.value)
+                      updateProduct(productRowId(sp), "amountUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23840,7 +23844,7 @@ export function CompletionPanel({
                               type="button"
                               onClick={() =>
                                 updateProduct(
-                                  sp.productId,
+                                  productRowId(sp),
                                   "applicationArea",
                                   toggleProductAreaValue(
                                     sp.applicationArea,
@@ -23873,7 +23877,7 @@ export function CompletionPanel({
                     value={productApplicationMethod(sp, typeFor(sp))}
                     onChange={(e) =>
                       updateProduct(
-                        sp.productId,
+                        productRowId(sp),
                         "applicationMethod",
                         e.target.value,
                       )
@@ -23913,7 +23917,7 @@ export function CompletionPanel({
                         value={sp.areaValue || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "areaValue",
                             e.target.value,
                           )
@@ -23925,7 +23929,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label="Remove product"
-                    onClick={() => removeProduct(sp.productId)}
+                    onClick={() => removeProduct(productRowId(sp))}
                     style={{
                       background: "none",
                       border: "none",
@@ -23953,12 +23957,12 @@ export function CompletionPanel({
                     });
                     return (
                     <ProductTargetsPicker
-                      idSuffix={sp.productId}
+                      idSuffix={productRowId(sp)}
                       targets={sp.targets}
                       suggestions={picker.suggestions}
                       noun={picker.noun}
                       onChange={(next) =>
-                        updateProduct(sp.productId, "targets", next)
+                        updateProduct(productRowId(sp), "targets", next)
                       }
                       theme={{
                         labelColor: D.muted,

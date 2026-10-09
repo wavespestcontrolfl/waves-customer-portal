@@ -116,6 +116,93 @@ describe("the add-on's product on a host visit", () => {
   });
 });
 
+// Codex round 9 P1 on #6135: a Tree & Shrub visit with Snapshot AND a Bed Pre-Emergent add-on (also Snapshot) made one
+// product-id keyed list: the add-on's row replaced the host's, and closeout stayed pending on an untagged host row.
+describe("a host row and an add-on row of the SAME product are two rows", () => {
+  const snapshot = { id: "prod-snapshot", name: "Snapshot 2.5TG", category: "herbicide", application_method: "granular_broadcast", rate_unit: "lb", default_rate_per_1000: 3.45 };
+  // The Tree & Shrub sheet has its own typed lane; the product list under test is the shared one every other host uses.
+  const tsHost = pestHost;
+  const bedAddOn = { ...bed, governed: { ratePer1000: 3.45, rateUnit: "lb", productName: "Snapshot 2.5TG", withheld: null } };
+  async function mountTs(service = { ...tsHost, ...attached([bedAddOn]) }) {
+    await act(async () => { render(<CompletionPanel service={service} products={[snapshot, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+  }
+  const addHostSnapshot = async () => {
+    fireEvent.change(screen.getByPlaceholderText("Search products..."), { target: { value: "Snapshot" } });
+    // (the add-on's own picker lists Snapshot too: the search result is the one that is not an <option>)
+    fireEvent.click((await screen.findAllByText("Snapshot 2.5TG")).find((el) => el.tagName !== "OPTION"));
+  };
+  const addAddOnSnapshot = () => fireEvent.change(screen.getByLabelText("Product used for Bed Pre-Emergent Weed Control"), { target: { value: snapshot.id } });
+
+  it("the add-on's Snapshot after the host's keeps BOTH rows", async () => {
+    await mountTs();
+    await addHostSnapshot();
+    expect(screen.getAllByLabelText("Remove product")).toHaveLength(1);
+    addAddOnSnapshot();
+    expect(await within(blockText()).findByText(/^Recorded: Snapshot 2\.5TG\./)).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Remove product")).toHaveLength(2);
+  });
+
+  it("the host's Snapshot after the add-on's keeps BOTH rows (the picker is not blocked by the tagged row)", async () => {
+    await mountTs();
+    addAddOnSnapshot();
+    expect(await within(blockText()).findByText(/^Recorded: Snapshot 2\.5TG\./)).toBeInTheDocument();
+    await addHostSnapshot();
+    expect(screen.getAllByLabelText("Remove product")).toHaveLength(2);
+  });
+
+  it("removing the host's row leaves the add-on's (and the add-on stays recorded), and removing the add-on's leaves the host's", async () => {
+    await mountTs();
+    await addHostSnapshot();
+    addAddOnSnapshot();
+    await within(blockText()).findByText(/^Recorded: Snapshot 2\.5TG\./);
+    fireEvent.click(screen.getAllByLabelText("Remove product")[0]);
+    expect(screen.getAllByLabelText("Remove product")).toHaveLength(1);
+    expect(within(blockText()).getByText(/^Recorded: Snapshot 2\.5TG\./)).toBeInTheDocument();
+    cleanup();
+    await mountTs();
+    await addHostSnapshot();
+    addAddOnSnapshot();
+    await within(blockText()).findByText(/^Recorded: Snapshot 2\.5TG\./);
+    fireEvent.click(screen.getAllByLabelText("Remove product")[1]);
+    expect(screen.getAllByLabelText("Remove product")).toHaveLength(1);
+    expect(within(blockText()).queryByText(/^Recorded:/)).not.toBeInTheDocument();
+    expect(within(blockText()).getByLabelText("Product used for Bed Pre-Emergent Weed Control")).toBeInTheDocument();
+  });
+
+  it("the completion body sends both rows: the host's untagged, the add-on's tagged (one row each, never merged)", () => {
+    expect(pageSource).toContain("areaAddOnKey: p.areaAddOnKey,");
+    expect(pageSource).toContain("setSelectedProducts((prev) => [...prev.filter((p) => productRowId(p) !== productRowId(row)), row]);");
+    expect(pageSource).toContain("if (selectedProducts.find((p) => !p.areaAddOnKey && p.productId === product.id)) return;");
+    expect(pageSource).not.toMatch(/updateProduct\(\s*sp\.productId/);
+    expect(pageSource).not.toMatch(/removeProduct\(sp\.productId/);
+  });
+});
+
+// Codex round 9 P1 on #6135: an add-on row must use the governed product for that add-on. The picker offers only it; the
+// server flags any other product recorded for the add-on (area-addon-governed-rate.test.js).
+describe("the add-on's product picker offers only the governed product", () => {
+  const arena = { id: "prod-arena", name: "Arena 50 WDG", category: "insecticide", application_method: "broadcast_spray", rate_unit: "oz", default_rate_per_1000: 0.29 };
+  const spot = (governed) => ({ key: "area_addon_lawn_insect_spot", name: "Lawn Insect Spot Treatment", areaSqFt: 1800, tierSqFt: 2000, areaLabel: "treated lawn", grassType: "st_augustine", governed });
+  const arenaRate = { ratePer1000: 0.147, rateUnit: "oz", productName: "Arena 50 WDG", withheld: null };
+  const optionsOf = (label) => within(screen.getByLabelText(label)).getAllByRole("option").map((option) => option.textContent);
+
+  it("with the governed product known, it is the only choice (a rate the server holds back does not change that)", async () => {
+    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot(arenaRate)]) }} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Arena 50 WDG"]);
+    cleanup();
+    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot({ ...arenaRate, withheld: "The label rate is not verified yet." })]) }} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Arena 50 WDG"]);
+  });
+
+  it("with no governed product known, or none of it in the catalog, every product is offered (the server still flags a wrong one)", async () => {
+    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot(undefined)]) }} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Arena 50 WDG", "Topchoice"]);
+    cleanup();
+    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot(arenaRate)]) }} products={[topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Topchoice"]);
+  });
+});
+
 describe("the row type and label helpers", () => {
   it("an add-on visit is lawn-family for a chemical add-on and the host's own for the sweep", () => {
     expect(areaAddOnRowServiceType(addOnAsPrimary, "Fire Ant Yard Treatment", null)).toBe("Lawn Care");
@@ -184,14 +271,12 @@ describe("the add-on's row starts at the GOVERNED rate, never the catalog defaul
     expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
   });
 
-  it("a feed that carried no governed rate, or another product for the add-on, starts with no rate", async () => {
+  it("a feed that carried no governed rate starts with no rate", async () => {
     await mountWith({ ...lawnHost, ...attached([spot(undefined)]) });
     fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: arena.id } });
     expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
     cleanup();
-    await mountWith({ ...lawnHost, ...attached([spot(arenaRate)]) });
-    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: topchoice.id } });
-    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
+    // (With the governed product known, the picker offers no other product at all - see the next suite.)
   });
 
   it("the add-on that IS the visit: its product from the ordinary picker prefills the governed rate too", async () => {

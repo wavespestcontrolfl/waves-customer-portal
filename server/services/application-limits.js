@@ -509,7 +509,7 @@ class ApplicationLimitChecker {
     for (const limit of limits) {
       const max = Number(limit.limit_value);
       let violation;
-      if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max);
+      if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max, await this.ownApplicationsBeyondFirst(database, customerId, productId, opts));
       else if (limit.match_type === V13_AMOUNT) violation = await this.auditAmount(database, customerId, product, day, limit, opts);
       else violation = await this.auditInterval(others, product, day, max);
       if (violation) violations.push({ ...violation, limitId: limit.id, description: limit.description });
@@ -517,11 +517,24 @@ class ApplicationLimitChecker {
     return violations;
   }
 
-  async auditAnnualCount(others, product, day, max) {
+  // The other applications of the product on the visit being audited, beyond the first: a visit that recorded the product twice
+  // (a Tree & Shrub host row and an area add-on row of the same product) made two applications, and the audit judges the
+  // visit's FIRST as the one the others are compared with. 0 for a visit with one row, and when no visit is named.
+  async ownApplicationsBeyondFirst(database, customerId, productId, opts = {}) {
+    if (!opts.excludeScheduledServiceId) return 0;
+    const row = await database('property_application_history')
+      .where({ customer_id: customerId, product_id: productId }).whereNull('retracted_at')
+      .whereIn('service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
+      .count('* as n').first();
+    return Math.max(0, Number(row && row.n) - 1) || 0;
+  }
+
+  async auditAnnualCount(others, product, day, max, ownBeyondFirst = 0) {
     const year = day.slice(0, 4);
     const rows = await others().where('application_date', '>=', `${year}-01-01`).where('application_date', '<=', `${year}-12-31`).select('id');
-    if (rows.length < max) return null;
-    return { type: 'annual_max_apps', message: `${product.name}: ${rows.length}/${max} other applications in ${year} — LIMIT REACHED.`, current: rows.length, max };
+    const used = rows.length + ownBeyondFirst;
+    if (used < max) return null;
+    return { type: 'annual_max_apps', message: `${product.name}: ${used}/${max} other applications in ${year} — LIMIT REACHED.`, current: used, max };
   }
 
   // The yearly amount: every other application of the product in the calendar year of the date (before and

@@ -27,6 +27,8 @@ const { rateUnitsMatch } = require('./waveguard-approval-engine');
 
 const AREA_ADDON_KEY_PREFIX = 'area_addon_';
 const LIMIT_TYPE = 'area_addon_governed_rate';
+// A tagged row recorded with a product other than the one the add-on is governed to.
+const WRONG_PRODUCT_LIMIT_TYPE = 'area_addon_wrong_product';
 const GRASS_NAMES = { st_augustine: 'St. Augustine' };
 
 const lower = (value) => String(value || '').trim().toLowerCase();
@@ -112,9 +114,14 @@ async function areaAddOnFeed(knex, byVisit, serviceRows = []) {
   return own;
 }
 
+// The identity of a submitted application row: the product AND the add-on it claims (none = the visit's own
+// service). A host row and an add-on row of the SAME product (Snapshot on a Tree & Shrub visit and the Bed
+// Pre-Emergent add-on) are two rows, two applications, never one.
+const productRowKey = (product) => `${product?.productId}|${typeof product?.areaAddOnKey === 'string' ? product.areaAddOnKey : ''}`;
+
 /**
- * Which add-on each submitted application row belongs to, as a Map of product id to catalog key. A tag is
- * accepted only when that add-on is actually on the visit (the visit's own service or a
+ * Which add-on each submitted application row belongs to, as a Map of row identity (productRowKey) to catalog
+ * key. A tag is accepted only when that add-on is actually on the visit (the visit's own service or a
  * scheduled_service_addons row) and is a chemical add-on; anything else is dropped, so a client cannot
  * name an add-on the visit does not carry. On a visit whose own service is a chemical add-on, an untagged
  * row is that add-on's. Never throws: a failed read tags nothing.
@@ -134,7 +141,7 @@ async function resolveApplicationAddOnTags(knex, svc, products) {
       if (!p || !p.productId) continue;
       const claimed = typeof p.areaAddOnKey === 'string' ? p.areaAddOnKey : null;
       const tag = claimed && onVisit.has(claimed) ? claimed : ownChemical;
-      if (tag) tags.set(String(p.productId), tag);
+      if (tag) tags.set(productRowKey(p), tag);
     }
   } catch (err) {
     logger.warn(`[area-addon-governed-rate] add-on tags not resolved for ${svc?.id}: ${err.message}`);
@@ -143,22 +150,41 @@ async function resolveApplicationAddOnTags(knex, svc, products) {
 }
 
 // The service_products columns an application row gets for its add-on tag: {} when it has none or the
-// column is not migrated yet.
+// column is not migrated yet. The completion saves a row once per identity: productId plus the resolved tag.
+function productRowIdentity(tags, product) {
+  return `${product?.productId}|${tags.get(productRowKey(product)) || ''}`;
+}
 function addOnProductColumns(serviceProductCols, tags, product) {
-  const tag = tags.get(String(product.productId));
+  const tag = tags.get(productRowKey(product));
   return serviceProductCols.area_addon_key && tag ? { area_addon_key: tag } : {};
 }
 
-// One finding for each tagged row recorded above the governed rate. Only a row of the governed product, in
-// the governed unit, can be compared: any other product or unit has no governed rate to hold it to.
-function rateFindings(rows) {
+// One finding for each tagged row that breaks its add-on's governing: recorded above the governed rate, or
+// recorded with a product other than the governed one. A row is compared with the rate only when it is the governed
+// product in the governed unit: any other unit has no governed rate to hold it to.
+function rateFindings(rows, expectedProductIds = new Map()) {
   const findings = [];
   for (const row of rows) {
     const governed = governedRateFor(row.area_addon_key);
+    if (!governed) continue;
     const rate = Number(row.application_rate);
-    const over = governed && lower(row.product_name) === lower(governed.productName)
-      && rateUnitsMatch(row.rate_unit, governed.rateUnit) && rate > governed.ratePer1000 + 1e-9;
-    if (!over) continue;
+    // The governed product is the catalog row the job card's matcher resolves from the protocol's hint (the same row the
+    // yearly-limit reader uses); only when no row resolves is the hint compared with the recorded name.
+    const expectedId = expectedProductIds.get(row.area_addon_key);
+    const sameProduct = expectedId ? String(row.product_id) === String(expectedId) : lower(row.product_name) === lower(governed.productName);
+    if (!sameProduct) {
+      findings.push({
+        code: 'application_limit_exceeded',
+        productId: row.product_id || null,
+        productName: row.product_name,
+        limitType: WRONG_PRODUCT_LIMIT_TYPE,
+        current: row.product_name,
+        max: governed.productName,
+        message: `Recorded. The office will review: ${row.product_name} was recorded for an add-on that uses ${governed.productName}.`,
+      });
+      continue;
+    }
+    if (!(rateUnitsMatch(row.rate_unit, governed.rateUnit) && rate > governed.ratePer1000 + 1e-9)) continue;
     findings.push({
       code: 'application_limit_exceeded',
       productId: row.product_id || null,
@@ -185,7 +211,15 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
     if (!cols.area_addon_key) return advisory;
     const rows = await database('service_products').where({ service_record_id: record.id }).whereNotNull('area_addon_key')
       .select('product_id', 'product_name', 'application_rate', 'rate_unit', 'area_addon_key');
-    const findings = rateFindings(rows);
+    const addOnKeys = [...new Set(rows.map((row) => row.area_addon_key))];
+    const expected = new Map();
+    try {
+      const byShortKey = await require('./area-addon-limits').productIdsByKey(database, addOnKeys.map((key) => key.slice(AREA_ADDON_KEY_PREFIX.length)));
+      for (const key of addOnKeys) if (byShortKey.has(key.slice(AREA_ADDON_KEY_PREFIX.length))) expected.set(key, byShortKey.get(key.slice(AREA_ADDON_KEY_PREFIX.length)));
+    } catch (err) {
+      logger.warn(`[area-addon-governed-rate] governed product lookup failed for record ${record.id}: ${err.message}`);
+    }
+    const findings = rateFindings(rows, expected);
     if (!findings.length) return advisory;
     await notify({ svc, record, findings });
     return { advisory: true, blocks: [...(advisory?.blocks || []), ...findings.map((f) => ({ code: f.code, message: f.message, productId: f.productId }))] };
@@ -197,6 +231,9 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
 
 module.exports = {
   LIMIT_TYPE,
+  WRONG_PRODUCT_LIMIT_TYPE,
+  productRowKey,
+  productRowIdentity,
   isGoverned,
   governedRateFor,
   feedRate,

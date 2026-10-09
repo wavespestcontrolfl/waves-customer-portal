@@ -19,6 +19,11 @@ export default function AreaAddOnFields({ service, selectedProducts, products, o
         const sold = soldAreaText(addOn);
         const recorded = (selectedProducts || []).filter((row) => row.areaAddOnKey === addOn.key);
         const chemical = isChemicalAreaAddOnKey(addOn.key);
+        // The add-on is governed to ONE product (the protocol's); the picker offers only it. The server flags any other
+        // product recorded for the add-on. With no governed product known (or none in the catalog) every product is offered.
+        const governedName = String(addOn.governed?.productName || "").trim().toLowerCase();
+        const governedChoices = governedName ? choices.filter((row) => String(row.name || "").trim().toLowerCase() === governedName) : [];
+        const offered = governedChoices.length ? governedChoices : choices;
         return (
           <div key={addOn.key} style={{ border: `1px solid ${colors.border}`, borderRadius: 12, padding: 12, display: "grid", gap: 8, fontSize: 14, color: colors.text }}>
             <div style={{ fontWeight: 600 }}>{addOn.name}</div>
@@ -44,7 +49,7 @@ export default function AreaAddOnFields({ service, selectedProducts, products, o
                   style={selectStyle}
                 >
                   <option value="">Choose a product</option>
-                  {choices.map((row) => <option key={row.id} value={row.id}>{row.display_name || row.name}</option>)}
+                  {offered.map((row) => <option key={row.id} value={row.id}>{row.display_name || row.name}</option>)}
                 </select>
               </>
             )}

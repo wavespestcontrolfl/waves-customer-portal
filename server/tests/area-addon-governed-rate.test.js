@@ -103,7 +103,7 @@ describe('which add-on each application row belongs to', () => {
       { productId: 'p-junk', areaAddOnKey: { $ne: 1 } },
       { productId: 'p-plain' },
     ]);
-    expect([...tags]).toEqual([['p-arena', ARENA]]);
+    expect([...tags]).toEqual([[`p-arena|${ARENA}`, ARENA]]);
   });
 
   test('on a visit whose own service is a chemical add-on, an untagged row is that add-on\'s and a forged tag falls back to it', async () => {
@@ -111,13 +111,13 @@ describe('which add-on each application row belongs to', () => {
     const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: ARENA }, [
       { productId: 'p-own' }, { productId: 'p-attached', areaAddOnKey: SNAP }, { productId: 'p-forged', areaAddOnKey: 'area_addon_fire_ant_yard' },
     ]);
-    expect(Object.fromEntries(tags)).toEqual({ 'p-own': ARENA, 'p-attached': SNAP, 'p-forged': ARENA });
+    expect(Object.fromEntries(tags)).toEqual({ 'p-own|': ARENA, [`p-attached|${SNAP}`]: SNAP, 'p-forged|area_addon_fire_ant_yard': ARENA });
   });
 
   test('the own add-on is also read from the sold scope when the snapshot is missing', async () => {
     rows.areaAddOnKeysByVisit.mockResolvedValue(new Map());
     const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, area_addon_scope: { catalogServiceKey: ACEL } }, [{ productId: 'p' }]);
-    expect(Object.fromEntries(tags)).toEqual({ p: ACEL });
+    expect(Object.fromEntries(tags)).toEqual({ 'p|': ACEL });
   });
 
   test('an ordinary completion (no add-on claimed, not an add-on visit) runs no query at all', async () => {
@@ -134,10 +134,36 @@ describe('which add-on each application row belongs to', () => {
   });
 
   test('the column is written only when it exists and the row has a tag', () => {
-    const tags = new Map([['p', ARENA]]);
-    expect(governed.addOnProductColumns({ area_addon_key: {} }, tags, { productId: 'p' })).toEqual({ area_addon_key: ARENA });
-    expect(governed.addOnProductColumns({}, tags, { productId: 'p' })).toEqual({});
+    const tags = new Map([[`p|${ARENA}`, ARENA]]);
+    expect(governed.addOnProductColumns({ area_addon_key: {} }, tags, { productId: 'p', areaAddOnKey: ARENA })).toEqual({ area_addon_key: ARENA });
+    expect(governed.addOnProductColumns({}, tags, { productId: 'p', areaAddOnKey: ARENA })).toEqual({});
     expect(governed.addOnProductColumns({ area_addon_key: {} }, tags, { productId: 'other' })).toEqual({});
+    // The host's row of the SAME product is another row: no tag.
+    expect(governed.addOnProductColumns({ area_addon_key: {} }, tags, { productId: 'p' })).toEqual({});
+  });
+
+  test('a host row and an add-on row of the SAME product are two rows with two identities (Snapshot on a Tree & Shrub visit plus the bed add-on)', async () => {
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map([[VISIT, [SNAP]]]));
+    const submitted = [{ productId: 'p-snap' }, { productId: 'p-snap', areaAddOnKey: SNAP }];
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: 'ts_standard_6x' }, submitted);
+    expect(Object.fromEntries(tags)).toEqual({ [`p-snap|${SNAP}`]: SNAP });
+    const identities = submitted.map((p) => governed.productRowIdentity(tags, p));
+    expect(identities).toEqual(['p-snap|', `p-snap|${SNAP}`]);
+    expect(new Set(identities).size).toBe(2);
+    // Two untagged rows of one product, or two rows tagged for the same add-on, are the same row.
+    const same = [{ productId: 'p-snap' }, { productId: 'p-snap' }].map((p) => governed.productRowIdentity(tags, p));
+    expect(new Set(same).size).toBe(1);
+    // On a visit whose own service is the add-on, an untagged row and a row tagged with that same add-on are one row.
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map());
+    const ownTags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: SNAP }, [{ productId: 'p-snap' }, { productId: 'p-snap', areaAddOnKey: SNAP }]);
+    expect(new Set([{ productId: 'p-snap' }, { productId: 'p-snap', areaAddOnKey: SNAP }].map((p) => governed.productRowIdentity(ownTags, p))).size).toBe(1);
+  });
+
+  test('the completion saves one row per identity, not per product', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).toContain('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);');
+    expect(src).toContain('if (seenProductIds.has(rowIdentity)) continue;');
+    expect(src).not.toContain('seenProductIds.has(p.productId)');
   });
 });
 
@@ -157,10 +183,23 @@ describe('a row recorded above the governed rate is flagged, never blocked', () 
     expect(governed.rateFindings([row({ application_rate: 0.147 }), row({ application_rate: 0.1 }), row({ application_rate: null })])).toEqual([]);
   });
 
-  test('only the governed product in the governed unit can be compared: another product or unit is not judged', () => {
-    expect(governed.rateFindings([row({ product_name: 'Some other product' }), row({ rate_unit: 'lb' }), row({ rate_unit: null })])).toEqual([]);
+  test('only the governed product in the governed unit is compared with the rate: another unit is not judged', () => {
+    expect(governed.rateFindings([row({ rate_unit: 'lb' }), row({ rate_unit: null })])).toEqual([]);
     // An untagged row, or a tag with no governed rate (the sweep), is not an add-on row at all.
     expect(governed.rateFindings([row({ area_addon_key: SWEEP }), row({ area_addon_key: 'pest_general_quarterly' })])).toEqual([]);
+  });
+
+  test('a tagged row recorded with a product other than the governed one is flagged (the add-on is governed to ONE product)', () => {
+    const findings = governed.rateFindings([row({ product_name: 'Some other product', product_id: 'p-other' })]);
+    expect(findings).toEqual([expect.objectContaining({
+      code: 'application_limit_exceeded', limitType: 'area_addon_wrong_product', productName: 'Some other product', current: 'Some other product', max: 'Arena 50 WDG',
+      message: 'Recorded. The office will review: Some other product was recorded for an add-on that uses Arena 50 WDG.',
+    })]);
+    // A catalog row the matcher resolved from the protocol's hint is the governed product, whatever its name says.
+    expect(governed.rateFindings([row({ product_name: 'Arena 50 WDG Insecticide', product_id: 'p-arena', application_rate: 0.147 })], new Map([[ARENA, 'p-arena']]))).toEqual([]);
+    expect(governed.rateFindings([row({ product_id: 'p-other', application_rate: 0.147 })], new Map([[ARENA, 'p-arena']]))).toHaveLength(1);
+    // The wrong product is not ALSO compared with the rate.
+    expect(governed.rateFindings([row({ product_name: 'Some other product', application_rate: 5 })])).toHaveLength(1);
   });
 
   test('the completion check merges the finding into the limit advisory, tells the office once, and never throws', async () => {

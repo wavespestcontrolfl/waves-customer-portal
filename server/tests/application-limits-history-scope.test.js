@@ -115,3 +115,32 @@ describe('checkLimits: the product history honors the treated property and the p
     expect(clear.allowed).toBe(true);
   });
 });
+
+// A visit that recorded the same product twice (a Tree & Shrub host row and an area add-on row of that product) made two
+// applications of it (Codex round 9 on #6135): the yearly count judges the visit's first against the others, and each
+// further row of the visit adds to what is used.
+describe('auditAnnualCount counts a visit\'s second row of the product as another application', () => {
+  const others = (n) => () => chain({ rows: Array.from({ length: n }, (_, i) => ({ id: i })) });
+  const product = { name: 'Arena 50 WDG' };
+
+  test('one row on the visit: unchanged (others at the cap block, below it do not)', async () => {
+    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, 0)).toBeNull();
+    expect(await applicationLimits.auditAnnualCount(others(2), product, '2026-10-09', 2, 0)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2 });
+  });
+
+  test('two rows on the visit with one other application: used 2 of 2, reached', async () => {
+    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, 1)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2, message: expect.stringContaining('2/2') });
+    expect(await applicationLimits.auditAnnualCount(others(0), product, '2026-10-09', 2, 1)).toBeNull();
+  });
+
+  test('the visit\'s extra rows are counted from its own ledger rows, minus the first; no visit named, nothing extra', async () => {
+    const database = jest.fn(() => chain({ first: { n: '2' } }));
+    expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(1);
+    expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', {})).toBe(0);
+    expect(database).toHaveBeenCalledTimes(2);
+    const one = jest.fn(() => chain({ first: { n: '1' } }));
+    expect(await applicationLimits.ownApplicationsBeyondFirst(one, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(0);
+    const none = jest.fn(() => chain({ first: undefined }));
+    expect(await applicationLimits.ownApplicationsBeyondFirst(none, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(0);
+  });
+});
