@@ -40,6 +40,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
       }),
       leftJoin: () => ({
         where: () => ({
+          whereRaw() { return this; },
           select: () => Promise.resolve([]),
         }),
       }),
@@ -89,7 +90,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     const trx = (table) => ({
       whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completions.push(row);
@@ -198,7 +199,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
       }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completions.push(row);
@@ -296,7 +297,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     const trx = (table) => ({
       whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve({ id: 'row-1' }), del: () => Promise.resolve(0) }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([protocolRow]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([protocolRow]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completionOut = row;
@@ -383,7 +384,7 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
       whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog')
         ? ids.filter((id) => (catalogIds || ids).includes(id)).map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
-      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      leftJoin: () => ({ where: () => ({ whereRaw() { return this; }, select: () => Promise.resolve([]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
           completions.push(row);

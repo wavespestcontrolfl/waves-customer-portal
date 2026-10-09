@@ -176,7 +176,7 @@ function resolveAttribution(plan, allLawn) {
 // the transaction aborted, and the completion upsert that follows would
 // fail with 25P02 and roll back the closeout — or its whole packet
 // (Codex #4113 P2). Outside a transaction failSoftRead is a plain read.
-async function loadProtocolRows(trx, { structured, window, attributed }) {
+async function loadProtocolRows(trx, { structured, window, attributed, bermudaStep = false }) {
   if (!attributed) return { protocolRow: null, windowRow: null, protocolProducts: [] };
   const protocolRow = await failSoftRead(trx, (k) => k('lawn_protocols')
     .where({ protocol_key: structured.protocolKey, version: structured.version })
@@ -187,10 +187,16 @@ async function loadProtocolRows(trx, { structured, window, attributed }) {
       .first('id'), null)
     : null;
   const protocolProducts = windowRow?.id
-    ? await failSoftRead(trx, (k) => k('lawn_protocol_products as lpp')
-      .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
-      .where({ lawn_protocol_window_id: windowRow.id })
-      .select('lpp.*', 'pc.name as catalog_product_name'), [])
+    ? await failSoftRead(trx, (k) => {
+      const query = k('lawn_protocol_products as lpp')
+        .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
+        .where({ lawn_protocol_window_id: windowRow.id });
+      // The bermuda removal rows are planned work only on a visit whose plan carries the step.
+      // On any other visit (gate off, an unflagged lawn) Recognition or Fusilade II recorded by
+      // hand is off-protocol, so the rows are left out of the attribution.
+      const rows = bermudaStep ? query : require('./lawn-bermuda-removal').withoutBermudaRemovalRows(query, 'lpp');
+      return rows.select('lpp.*', 'pc.name as catalog_product_name');
+    }, [])
     : [];
   return { protocolRow, windowRow, protocolProducts };
 }
@@ -499,7 +505,7 @@ async function recordLawnProtocolCompletion(trx, {
   const attribution = resolveAttribution(plan, allLawn);
   if (!attribution) return null;
 
-  const rows = await loadProtocolRows(trx, attribution);
+  const rows = await loadProtocolRows(trx, { ...attribution, bermudaStep: plan?.bermudaRemoval?.active === true });
   const equipment = resolveEquipment({ plan, equipmentSystemId, calibrationId, calibrationCleared });
   // A plan whose protocol attribution is withheld contributes no
   // substitution labels either: an applied product that happens to be the
