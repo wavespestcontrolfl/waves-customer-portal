@@ -28,8 +28,8 @@ const productRow = (n, id, method, extra = {}) => ({
   id: `sp-${id}`, service_record_id: 'sr-1', product_id: UUID(n), product_name: `Catalog ${n}`, application_method: method, created_at: `2026-10-08T15:0${id}:00Z`, ...extra,
 });
 
-function fakeKnex(tables, { failTable = null, record = {} } = {}) {
-  const state = { notes: { ...(record.notes || {}) }, writes: 0 };
+function fakeKnex(tables, { failTable = null, record = {}, failUpdates = 0 } = {}) {
+  const state = { notes: { ...(record.notes || {}) }, writes: 0, updateAttempts: 0 };
   const knex = (table) => {
     if (failTable === String(table).split(' as ')[0]) {
       const dead = { where: () => dead, orderBy: () => dead, whereIn: () => dead, select: () => dead, first: () => Promise.reject(new Error('down')), catch: (fn) => Promise.resolve(fn(new Error('down'))), then: (r, j) => Promise.reject(new Error('down')).then(r, j) };
@@ -49,6 +49,8 @@ function fakeKnex(tables, { failTable = null, record = {} } = {}) {
     q.select = () => q;
     q.first = () => Promise.resolve(table === 'service_records' ? { structured_notes: JSON.stringify(state.notes) } : (rows[0] || null));
     q.update = async ({ structured_notes: raw }) => {
+      state.updateAttempts += 1;
+      if (state.updateAttempts <= failUpdates) throw new Error('write failed');
       if (state.notes.lawnReportFacts) return 0;
       Object.assign(state.notes, JSON.parse(raw.bindings[0]));
       state.writes += 1;
@@ -236,12 +238,51 @@ describe('gatherAndFreezeReportFacts', () => {
       }
     });
 
-    test('a failed write of the marker too: nothing is recorded, and nothing throws', async () => {
-      const { knex } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failTable: 'products_catalog' });
-      const realRaw = knex.raw;
-      knex.raw = () => { throw new Error('write failed'); };
-      expect(await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true })).toBeNull();
-      knex.raw = realRaw;
+    test('the FIRST WRITE fails (freezeReportFacts answers null): that is a failed attempt, so the marker is attempted', async () => {
+      const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failUpdates: 1 });
+      const out = await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true });
+      expect(state.updateAttempts).toBe(2);
+      expect(out).toMatchObject({ v: 1, failed: true });
+      expect(state.notes.lawnReportFacts).toMatchObject({ failed: true });
+      expect(state.notes.lawnReportFacts).not.toHaveProperty('ties');
+      expect(state.notes.lawnReportFacts).not.toHaveProperty('reentry');
+    });
+
+    test('the marker write fails TOO: nothing is on the record, nothing throws, and the answer is the unresolved sentinel (never a block)', async () => {
+      const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failUpdates: 2 });
+      const out = await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true });
+      expect(state.updateAttempts).toBe(2);
+      expect(out).toBe(facts.UNRESOLVED_FREEZE);
+      expect(facts.isUnresolvedFreeze(out)).toBe(true);
+      expect(state.notes.lawnReportFacts).toBeUndefined();
+      expect(facts.frozenBlockOf(out)).toBeNull();
+      expect(facts.frozenBlockOf(null)).toBeNull();
+      expect(facts.frozenBlockOf({ v: 1 })).toEqual({ v: 1 });
+    });
+
+    test('while the freeze is unresolved the PDF pre-render gets no token; otherwise the token passes through', () => {
+      expect(facts.pdfPreRenderToken('tok', facts.UNRESOLVED_FREEZE)).toBeNull();
+      for (const early of [null, undefined, { v: 1 }, { v: 1, failed: true }]) expect(facts.pdfPreRenderToken('tok', early)).toBe('tok');
+    });
+
+    test('...then, once the v6 copy has frozen without a block, the later call freezes NO ties (first write and marker both failed earlier)', async () => {
+      const first = fakeKnex(tables([productRow(1, 1, 'broadcast_spray'), productRow(4, 2, 'spot_treatment')]), { failUpdates: 2 });
+      const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
+      expect(await facts.gatherAndFreezeReportFacts({ record: record(notes), knex: first.knex, withTies: true })).toBe(facts.UNRESOLVED_FREEZE);
+      // A render (the PDF worker, a view) now freezes the v6 copy with no block on the record.
+      const withCopy = { ...notes, lawnCopyV6: { 'as-1': { v: 1, fields: {} } } };
+      const later = fakeKnex(tables([productRow(1, 1, 'broadcast_spray'), productRow(4, 2, 'spot_treatment')]));
+      const out = await facts.gatherAndFreezeReportFacts({ record: record(withCopy), knex: later.knex, withTies: true });
+      expect(out).toMatchObject({ v: 1, reentry: { rule: 'dry' } });
+      expect(later.state.notes.lawnReportFacts).not.toHaveProperty('ties');
+      expect(later.state.notes.lawnReportFacts).not.toHaveProperty('failed');
+    });
+
+    test('...and with no copy yet, the later call may simply succeed with its ties (copy then freezes with them)', async () => {
+      const later = fakeKnex(tables([productRow(1, 1, 'broadcast_spray'), productRow(4, 2, 'spot_treatment')]));
+      const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
+      const out = await facts.gatherAndFreezeReportFacts({ record: record(notes), knex: later.knex, withTies: true });
+      expect(out.ties.items).toContainEqual({ source: 'technician', kind: 'chinch', product: 'insecticide' });
     });
   });
 

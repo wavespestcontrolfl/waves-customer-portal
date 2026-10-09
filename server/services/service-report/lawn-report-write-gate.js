@@ -120,7 +120,7 @@ function withReportFacts(record, freeze) {
 // and the block itself (null when the gate is off or the freeze made nothing new).
 async function freezeFactsInto(record, knex) {
   if (!featureGates.lawnReportFactsLive()) return { record, freeze: null };
-  const freeze = await reportFacts.gatherAndFreezeReportFacts({ record, knex, withTies: featureGates.lawnReportTiesLive() });
+  const freeze = reportFacts.frozenBlockOf(await reportFacts.gatherAndFreezeReportFacts({ record, knex, withTies: featureGates.lawnReportTiesLive() }));
   return { record: withReportFacts(record, freeze), freeze };
 }
 

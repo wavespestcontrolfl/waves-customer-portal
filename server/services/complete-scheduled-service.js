@@ -93,6 +93,7 @@ const {
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
+const { pdfPreRenderToken } = require('../services/service-report/lawn-report-facts');
 const { stripPhotoSummaryForRecovery, restorePhotoSummaryAfterRecovery, expectedImageHashesFor } = require('../services/service-report/photo-summary-recovery');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
@@ -2455,7 +2456,8 @@ async function freezeLawnFactsEarly({ serviceReportV1Delivery, typedDeliveryMode
 
 // Folds the facts block (frozen early, or by the gate) into the in-memory notes the later whole-object writes spread.
 function foldReportFactsFreeze(notes, early, gate) {
-  if (early) notes.lawnReportFacts = early;
+  const block = require('../services/service-report/lawn-report-facts').frozenBlockOf(early);
+  if (block) notes.lawnReportFacts = block;
   if (gate && gate.reportFactsFreeze) notes.lawnReportFacts = gate.reportFactsFreeze;
 }
 
@@ -11217,7 +11219,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // JWT, and the public report routes 404 suppressed reports for
     // non-staff. Staff review the shadow via the HTML report; the PDF only
     // feeds customer sends, which are suppressed anyway.
-    if (serviceReportV1Delivery && reportToken && typedDeliveryMode === 'auto_send'
+    // (While the lawn facts freeze is unresolved, nothing renders yet: the later synthesis, then the send, build the PDF.)
+    if (serviceReportV1Delivery && pdfPreRenderToken(reportToken, earlyReportFactsFreeze) && typedDeliveryMode === 'auto_send'
       && !(lawnPdfCorrectionNeeded && !lawnPdfCorrectionMarked)) {
       await enqueuePdfRenderJob({
         serviceRecordId: record.id,

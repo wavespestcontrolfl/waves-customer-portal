@@ -284,6 +284,22 @@ describe('the facts are frozen BEFORE anything can render or queue a render for 
     expect(before).not.toMatch(/buildReportV1Data\(/);
   });
 
+  test('the PDF pre-render waits while the early freeze is unresolved (nothing renders before the facts are decided)', () => {
+    expect(source).toContain('pdfPreRenderToken(reportToken, earlyReportFactsFreeze)');
+    const enqueue = at('await enqueuePdfRenderJob({');
+    const guard = source.slice(source.lastIndexOf('if (', enqueue), enqueue);
+    expect(guard).toContain('pdfPreRenderToken(reportToken, earlyReportFactsFreeze)');
+  });
+
+  test('the write gate never stores or folds the unresolved sentinel: the build sees the record as it was', async () => {
+    process.env.GATE_LAWN_REPORT_FACTS = 'true';
+    reportFacts.gatherAndFreezeReportFacts.mockResolvedValue(reportFacts.UNRESOLVED_FREEZE);
+    const { knex } = fakeKnex();
+    const out = await run(knex);
+    expect(out).not.toHaveProperty('reportFactsFreeze');
+    expect(buildReportV1Data.mock.calls[0][0].structured_notes).toBe('{"existing":"kept"}');
+  });
+
   test('the freeze runs under the same conditions as the synthesis gate (auto-send, report v1, not a backfill)', () => {
     const helper = at('async function freezeLawnFactsEarly(');
     const guard = source.slice(helper, helper + 400);
@@ -293,7 +309,7 @@ describe('the facts are frozen BEFORE anything can render or queue a render for 
 
   test('its freeze is folded into the in-memory notes beside the gate\'s, so a later whole-object write keeps the key', () => {
     expect(source).toContain('foldReportFactsFreeze(recordStructuredNotes, earlyReportFactsFreeze, gate);');
-    expect(source).toContain('if (early) notes.lawnReportFacts = early;');
+    expect(source).toContain('if (block) notes.lawnReportFacts = block;');
   });
 });
 

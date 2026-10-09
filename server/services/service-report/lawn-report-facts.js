@@ -639,11 +639,34 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now 
     // A read that fails here THROWS (verifiedTechFindings): a find that could not be checked is not a find we may leave out.
     const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
     const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
-    return await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
+    const frozen = await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
+    // freezeReportFacts swallows a write error and answers null: that is a failed attempt like any other, so the marker is
+    // attempted (below) before anything is allowed to render.
+    if (!frozen) throw new Error('the facts block could not be written');
+    return frozen;
   } catch (err) {
     logger.warn(`[lawn-report-facts] gather failed for service_record ${record.id}: ${err.message}`);
-    return await recordFailedFreeze({ record, knex, now });
+    return (await recordFailedFreeze({ record, knex, now })) || UNRESOLVED_FREEZE;
   }
+}
+
+/**
+ * The answer when an attempt failed AND the marker could not be written either: nothing is on the record. It is a
+ * sentinel, never a block: callers must not store it or fold it into notes, and the completion path holds the PDF
+ * pre-render while it stands (see pdfPreRenderToken). The write gate's own later call still runs; it freezes no tie
+ * once the v6 copy or the Visit Summary exists (tiesAllowed above), and before them it may simply succeed.
+ */
+const UNRESOLVED_FREEZE = Object.freeze({ unresolved: true });
+const isUnresolvedFreeze = (value) => value === UNRESOLVED_FREEZE;
+
+/** The report token the PDF pre-render may use: none while the facts freeze is unresolved (nothing may render yet). */
+function pdfPreRenderToken(reportToken, earlyFreeze) {
+  return isUnresolvedFreeze(earlyFreeze) ? null : reportToken;
+}
+
+/** The block a caller may store or fold: the frozen block, never the unresolved sentinel or null. */
+function frozenBlockOf(value) {
+  return value && !isUnresolvedFreeze(value) ? value : null;
 }
 
 /**
@@ -651,7 +674,7 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now 
  * re-entry rule (so the report keeps today's default clock, never anything weaker), no spot text (the zone text, as
  * today), no ties. It is a frozen block like any other, so the v6 copy, the Visit Summary, the PDF key and every later
  * attempt (the write gate's own call, a resumed completion) agree with it, and nothing can freeze different facts after
- * copy has frozen. Never throws; null only if even the marker could not be written.
+ * copy has frozen. Never throws; null only if even the marker could not be written (the caller then answers UNRESOLVED_FREEZE).
  */
 async function recordFailedFreeze({ record, knex, now = new Date() }) {
   return freezeReportFacts({ knex, serviceRecordId: record.id, facts: { v: FREEZE_VERSION, frozenAt: now.toISOString(), failed: true, productUse: {} } });
@@ -689,6 +712,10 @@ module.exports = {
   reentryCondition,
   freezeReportFacts,
   gatherAndFreezeReportFacts,
+  UNRESOLVED_FREEZE,
+  isUnresolvedFreeze,
+  pdfPreRenderToken,
+  frozenBlockOf,
   cleanTies,
   _test: { methodOf, recordedSpotAreas, rowProductKind, verifiedTechFindings, labelIsPlainUntilDry, labelIsPlainUntilWateredInAndDry, roundedSqft, photoFindingsByKind, productKinds },
 };
