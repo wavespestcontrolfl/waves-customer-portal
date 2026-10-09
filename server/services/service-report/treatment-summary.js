@@ -27,7 +27,7 @@ function isSupportProduct(p = {}) {
     .test(`${p.name || ''} ${p.activeIngredient || ''} ${p.kind || ''}`);
 }
 
-function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
+function buildTreatmentSummary(treatment, { noTiming = false, categoryOnly = false } = {}) {
   const products = (treatment && Array.isArray(treatment.products)) ? treatment.products : [];
   if (!products.length) return null;
   const support = products.filter(isSupportProduct);
@@ -87,10 +87,19 @@ function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
     const method = sharedMethod ? null : methodOf(p);
     return `${activeName(p)}${method ? ` (${method})` : ''}`;
   });
-  const list = (names.length === 1
+  let list = (names.length === 1
     ? names[0]
     : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
     + (sharedMethod ? ` (all applied as a ${sharedMethod})` : '');
+  if (categoryOnly) {
+    // GATE_LAWN_REPORT_COPY_FIXES (owner 2026-10-08): no active ingredient or product name in a
+    // sentence, only the category words from the Visit Summary phrase table; names stay on the
+    // product cards. A method is said only when every product shares it.
+    const phrases = require('./lawn-visit-summary').appliedCategoryPhrases(main);
+    const everyMethod = methodOf(main[0]) && main.every((p) => methodOf(p) === methodOf(main[0])) ? methodOf(main[0]) : null;
+    const joined = phrases.length <= 1 ? phrases.join('') : `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}`;
+    list = joined + (everyMethod ? (main.length > 1 ? ` (all applied as a ${everyMethod})` : ` (${everyMethod})`) : '');
+  }
   const targets = [...new Set(
     main.flatMap((p) => (Array.isArray(p.targets) ? p.targets : []).map((t) => String(t || '').trim().toLowerCase()).filter(Boolean)),
   )].slice(0, 3);

@@ -18,7 +18,7 @@ const { buildTreatmentSummary } = require('./treatment-summary');
 const featureGates = require('../../config/feature-gates');
 const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
-const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
+const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow, seasonalColorLineAllowed } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
@@ -185,7 +185,29 @@ const SNAP_STATUS = { low: 'low', high: 'high', balanced: 'balanced', unknown: '
 
 // Prefer the area-calibrated water-intake snapshot (Phase 2) when it has a real
 // reading; otherwise fall back to the live irrigation-advice water context.
-function mapWater(waterContext, waterSnapshot = null) {
+// GATE_LAWN_REPORT_COPY_FIXES: ONE fixed sentence under the water target that names where the
+// figure came from, from this closed table, only from inputs the figure actually used. The figure
+// is the reference evapotranspiration of the week ENDING ON the visit date (observed, not a
+// forecast) x the grass's crop factor x a seasonal factor for the visit month; when that week's
+// weather was missing it is the grass x season lookup. The grass is named only when the tables
+// list it (an unlisted grass is priced as St. Augustine). A target read from the area snapshot
+// also carries the area's own demand factor, and the snapshot does not record which of the two it
+// came from, so it gets no line. The number itself never changes.
+const WATER_TARGET_NOTES = Object.freeze({
+  weather_grass: 'Based on the weather in your area during the week before this visit, your grass type and the time of year.',
+  weather: 'Based on the weather in your area during the week before this visit and the time of year.',
+  season_grass: 'Based on the usual weekly water need for your grass type at this time of year.',
+  season: 'Based on the usual weekly water need for a lawn at this time of year.',
+});
+function waterTargetNote(advice, waterContext) {
+  const basis = advice && advice.targetBasis;
+  if (basis !== 'evapotranspiration' && basis !== 'seasonal') return null;
+  const grass = waterContext && waterContext.targetGrassKnown === true;
+  const key = `${basis === 'evapotranspiration' ? 'weather' : 'season'}${grass ? '_grass' : ''}`;
+  return WATER_TARGET_NOTES[key] || null;
+}
+
+function mapWater(waterContext, waterSnapshot = null, { copyFixes = false } = {}) {
   const grassLabel = 'lawn';
   // Property-level rainfall (Open-Meteo at the client's exact lat/lng, behind
   // waterContext.rainfallInches7d) is authoritative — it's more precise than the
@@ -254,6 +276,9 @@ function mapWater(waterContext, waterSnapshot = null) {
     // This week's legal-first watering plan (GATE_IRRIGATION_WEEK_PLAN):
     // { title, detail } or null — rendered as its own callout on the card.
     weekPlan: waterContext.weekPlan || null,
+    ...(copyFixes && target != null && waterTargetNote(advice, waterContext)
+      ? { targetNote: waterTargetNote(advice, waterContext) }
+      : {}),
   };
 }
 
@@ -310,7 +335,22 @@ function seriesFrom(trend, field, mapVal = (v) => num(v)) {
     .filter((p) => p.value !== null));
 }
 
-function buildTrends(lawnAssessment, mowingHeight, waterGapHistory = [], mowingTrendFallback = null) {
+// GATE_LAWN_REPORT_COPY_FIXES: a chart whose newest point is more than this many days before the
+// visit date is not shown (a July and August Water Gap on an October report).
+const STALE_CHART_DAYS = 45;
+const dayKey = (v) => {
+  if (!v) return null;
+  const d = v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+};
+function newestPointIsStale(points, visitDate) {
+  const visit = dayKey(visitDate);
+  const newest = points.map(dayKey).filter(Boolean).sort().pop();
+  if (!visit || !newest) return false; // no date to judge by: leave the chart alone
+  return (dateOnlyToNoonUtc(visit) - dateOnlyToNoonUtc(newest)) / 86400000 > STALE_CHART_DAYS;
+}
+
+function buildTrends(lawnAssessment, mowingHeight, waterGapHistory = [], mowingTrendFallback = null, { staleVisitDate = null, staleOut = null } = {}) {
   const trend = Array.isArray(lawnAssessment?.trend) ? lawnAssessment.trend : [];
   const out = {};
   const add = (key, series) => { if (series.length >= 2) out[key] = series; };
@@ -325,7 +365,10 @@ function buildTrends(lawnAssessment, mowingHeight, waterGapHistory = [], mowingT
   const gap = dedupeTrend((Array.isArray(waterGapHistory) ? waterGapHistory : [])
     .map((r) => ({ label: monthLabel(r.serviceDate), value: num(r.waterGapInches) }))
     .filter((p) => p.value !== null));
-  if (gap.length >= 2) out.waterGap = gap;
+  const gapDates = (Array.isArray(waterGapHistory) ? waterGapHistory : []).filter((r) => num(r.waterGapInches) !== null).map((r) => r.serviceDate);
+  const gapStale = gap.length >= 2 && !!staleVisitDate && newestPointIsStale(gapDates, staleVisitDate);
+  if (gapStale && staleOut) staleOut.dropped = true;
+  if (gap.length >= 2 && !gapStale) out.waterGap = gap;
   // Mowing height-of-cut vs the ideal band. Prefer the current reading's own
   // trend; a visit with no gauge reading still shows the history via the
   // fallback context (same {trend, band} shape, also capped at this visit).
@@ -337,7 +380,10 @@ function buildTrends(lawnAssessment, mowingHeight, waterGapHistory = [], mowingT
     .sort((a, b) => new Date(a.measuredAt) - new Date(b.measuredAt))
     .map((r) => ({ label: monthLabel(r.measuredAt), value: num(r.heightIn) }))
     .filter((p) => p.value !== null));
-  if (mow.length >= 2) {
+  const mowDates = mowTrend.filter((r) => num(r.heightIn) !== null).map((r) => r.measuredAt);
+  const mowStale = mow.length >= 2 && !!staleVisitDate && newestPointIsStale(mowDates, staleVisitDate);
+  if (mowStale && staleOut) staleOut.dropped = true;
+  if (mow.length >= 2 && !mowStale) {
     out.mowing = mow;
     out.mowingBand = [num(mowCtx.band?.min), num(mowCtx.band?.max)];
   }
@@ -365,9 +411,12 @@ const SEASON_NOTE = {
   shoulder: (g) => `Your ${g} is in a transitional stretch — growth and color can be uneven as temperatures shift, which we factor into today’s read.`,
   dormant: (g) => `${g[0].toUpperCase()}${g.slice(1)} naturally slows and can look duller in the cooler months — lighter color now is seasonal, not a problem.`,
 };
-function buildSeasonalNote(lawnAssessment, grassLabel) {
+function buildSeasonalNote(lawnAssessment, grassLabel, colorLineAllowed = true) {
   const season = (lawnAssessment.scores && lawnAssessment.scores.season)
     || (Array.isArray(lawnAssessment.trend) && lawnAssessment.trend[0] && lawnAssessment.trend[0].season) || null;
+  // GATE_LAWN_REPORT_COPY_FIXES: the cool-season notes talk about color and growth easing off,
+  // so they print only where the seasonal color line rule allows it.
+  if ((season === 'shoulder' || season === 'dormant') && !colorLineAllowed) return null;
   const fn = season && SEASON_NOTE[season];
   return fn ? fn(grassLabel) : null;
 }
@@ -558,11 +607,14 @@ const ISSUE_TOPIC = {
  */
 function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6 } = {}) {
   if (!lawnAssessment) return null;
+  // GATE_LAWN_REPORT_COPY_FIXES, read defensively like the other gates here (a partial
+  // feature-gates mock means off). One read per build so every fix agrees.
+  const copyFixes = typeof featureGates.lawnReportCopyFixesLive === 'function' && featureGates.lawnReportCopyFixesLive();
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
   const advice = lawnAssessment.waterContext?.irrigationAdvice || {};
 
-  const water = mapWater(lawnAssessment.waterContext, waterSnapshot);
+  const water = mapWater(lawnAssessment.waterContext, waterSnapshot, { copyFixes });
   // Unify the water status the diagnosis + insights reason about with the water
   // card mapWater just produced. Priority must match mapWater EXACTLY or the card
   // and the Water/Coverage diagnosis can contradict each other:
@@ -589,6 +641,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     overwateringSignal: overwatering,
     waterStatus: effectiveWaterStatus,
     grassLabel,
+    ...(copyFixes ? { copyFixes: true } : {}),
   });
 
   // ── Season-aware dormancy guard ────────────────────────────────────────────
@@ -600,6 +653,21 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // boundaries on non-UTC hosts).
   const assessDate = lawnAssessment.assessmentDate ? dateOnlyToNoonUtc(lawnAssessment.assessmentDate) : null;
   const assessMonth = assessDate ? (assessDate.getUTCMonth() + 1) : null;
+  // GATE_LAWN_REPORT_COPY_FIXES: the seasonal color lines print only in the cool season AND when
+  // the overall score did not rise against the prior visit (the latest earlier trend row with a
+  // score) and, for a line that compares against a base visit, against that base too.
+  const colorLineScores = copyFixes ? (() => {
+    const current = num(scores.overallScore);
+    const visitDay = dayKey(lawnAssessment.assessmentDate);
+    const earlier = visitDay
+      ? (Array.isArray(lawnAssessment.trend) ? lawnAssessment.trend : []).filter((r) => dayKey(r.date) && dayKey(r.date) < visitDay && num(r.overallScore) !== null)
+      : [];
+    const priorScore = earlier.length ? num(earlier[earlier.length - 1].overallScore) : null;
+    return {
+      currentOnly: seasonalColorLineAllowed({ month: assessMonth, currentScore: current, priorScore }),
+      allowed: (baseScore) => seasonalColorLineAllowed({ month: assessMonth, currentScore: current, priorScore, baseScore: baseScore == null ? null : num(baseScore) }),
+    };
+  })() : null;
   const dormancy = dormancyLikely({ colorHealth: scores.colorHealth, stressDamage: scores.stressDamage, month: assessMonth });
   if (dormancy.likely) {
     const colorCat = categories.find((c) => c.key === 'color_vigor');
@@ -752,7 +820,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const programLine = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()
     ? buildProgramLine({ month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
-  const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
+  const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel, !copyFixes || colorLineScores.currentOnly);
   // GATE_LAWN_PROGRAM_DETAIL: undefined unless live beside a program line, so
   // the key serializes away and the gate-off payload is byte-identical.
   const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine });
@@ -769,7 +837,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).
-    treatmentSummary: buildTreatmentSummary(treatment),
+    treatmentSummary: buildTreatmentSummary(treatment, copyFixes ? { categoryOnly: true } : undefined),
     watching: issues.slice(0, 3).map((i) => i.headline), // "main things we're watching"
     wavesNext,
     customerAction: realCustomerAction,
@@ -783,11 +851,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const smsSummary = buildSmsSummary(snapshot, grassLabel);
   const beforeAfter = buildBeforeAfter(lawnAssessment);
   // Cross-season comparison note: a winter-vs-summer wipe/trend shouldn't read as decline.
-  const progressionNote = (lawnAssessment.beforeAfter && lawnAssessment.beforeAfter.before && lawnAssessment.beforeAfter.after)
+  const progressionNote = (lawnAssessment.beforeAfter && lawnAssessment.beforeAfter.before && lawnAssessment.beforeAfter.after
+    && (!copyFixes || colorLineScores.allowed(lawnAssessment.beforeAfter.before.overallScore)))
     ? crossSeasonNote(lawnAssessment.beforeAfter.before.date, lawnAssessment.beforeAfter.after.date)
     : null;
   const trendRows = Array.isArray(lawnAssessment.trend) ? lawnAssessment.trend : [];
-  const trendSeasonNote = trendRows.length >= 2
+  const trendSeasonNote = trendRows.length >= 2 && (!copyFixes || colorLineScores.allowed(trendRows[0].overallScore))
     ? crossSeasonNoteFromSeasons(trendRows[0].season, trendRows[trendRows.length - 1].season)
     : null;
   // Chronological progression frames for the swipeable slider. Currently the two
@@ -823,8 +892,13 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       : ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
   }
 
-  const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);
+  const staleOut = {};
+  const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback, copyFixes ? { staleVisitDate: lawnAssessment.assessmentDate || null, staleOut } : undefined);
   if (trendSeasonNote) trends.seasonalNote = trendSeasonNote;
+  // GATE_LAWN_REPORT_COPY_FIXES: when the stale-chart rule took the only charts a report had,
+  // the empty block would print "Today's visit sets your baseline", false for a lawn with history.
+  // No block at all instead (every reader of trends is null-safe).
+  const trendsOut = staleOut.dropped && !Object.keys(trends).length ? null : trends;
 
   // The "Water / Coverage" diagnosis card is intentionally NOT displayed: its
   // score is derived from the fungus/over-water signals (not a true moisture
@@ -857,7 +931,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     // is hidden by its category card) exists only where a block was built.
     ...(Array.isArray(lawnAssessment.photoSet) && lawnAssessment.photoSet.length && Array.isArray(lawnAssessment.photoFindings) && lawnAssessment.photoFindings.length
       ? { photoFindings: filterByCardStatus(lawnAssessment.photoFindings, displayDiagnosis) } : {}),
-    beforeAfter, progression, progressionNote, aftercare, smsSummary, trends,
+    beforeAfter, progression, progressionNote, aftercare, smsSummary, trends: trendsOut,
   };
 }
 

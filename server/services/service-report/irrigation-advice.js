@@ -103,6 +103,14 @@ function recommendedFromEt0(et0InchesPerWeek, grassType, month = null) {
   return roundQuarter(et0 * baseKc * seasonalKcFactor(month));
 }
 
+// True when the grass is one the target tables list. An unknown or missing grass falls back to
+// St. Augustine inside the tables, so a customer sentence may name "your grass type" only when this
+// is true (GATE_LAWN_REPORT_COPY_FIXES water target source line).
+function isKnownGrass(grassType) {
+  const key = normalizeGrassKey(grassType);
+  return Object.hasOwn(PEAK_INCHES_BY_GRASS, key) && Object.hasOwn(CROP_COEFFICIENT_BY_GRASS, key);
+}
+
 function numberOrNull(value) {
   if (value == null || value === '') return null;
   const n = Number(value);
@@ -195,6 +203,7 @@ function buildIrrigationAdvice({
 module.exports = {
   recommendedInchesPerWeek,
   recommendedFromEt0,
+  isKnownGrass,
   buildIrrigationAdvice,
   _private: { seasonMultiplier, classifySeason, seasonalKcFactor, normalizeGrassKey, PEAK_INCHES_BY_GRASS, CROP_COEFFICIENT_BY_GRASS, SEASONAL_KC_FACTOR },
 };

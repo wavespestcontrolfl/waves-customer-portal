@@ -80,7 +80,11 @@ async function gatherTechParagraphInputs({ record, data, knex }) {
   const findings = (await readKeptFindings(knex, assessmentId))
     .filter((f) => LOW_CONFIDENCE.has(f.confidence) && FINDING_OF_PHOTO_LABEL[f.label])
     .map((f) => ({ key: FINDING_OF_PHOTO_LABEL[f.label] }));
-  return normalizeInputs({ technicianNote: record.technician_notes, products, findings });
+  // GATE_LAWN_REPORT_COPY_FIXES (owner 2026-10-08): a paragraph frozen while the gate is live
+  // names the product categories, never a catalog name. An older frozen entry replays as written.
+  const gates = require('../../config/feature-gates');
+  const categoryOnly = typeof gates.lawnReportCopyFixesLive === 'function' && gates.lawnReportCopyFixesLive();
+  return normalizeInputs({ technicianNote: record.technician_notes, products, findings, ...(categoryOnly ? { categoryOnly: true } : {}) });
 }
 
 module.exports = { gatherTechParagraphInputs, keptFindings };

@@ -1865,7 +1865,9 @@ export default function ServiceReportDocument({ data, token }) {
                 non-live render, precisely so a reschedule can't fossilize a
                 stale appointment in a cached PDF. Rendering it here was dead
                 code that only ever appeared in a direct component test. */}
-            {isWaveGuard ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
+            {/* GATE_LAWN_REPORT_COPY_FIXES (server sets lawnCopyFixes on a lawn report): this sentence is
+                the pest program's re-service wording, so a lawn report prints nothing here. */}
+            {isWaveGuard && data.lawnCopyFixes !== true ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
             Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
             <br />
             Full interactive report:{' '}

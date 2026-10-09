@@ -18,7 +18,7 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { isOneTimePressureExcludedRecord } = require('../pest-pressure/one-time-exclusion');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
-const { buildIrrigationAdvice } = require('./irrigation-advice');
+const { buildIrrigationAdvice, isKnownGrass } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
@@ -754,6 +754,9 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     effectiveInches7d: rainfallInches7d == null ? null : roundInches(weeklyInputs.reduce((sum, value) => sum + value, 0)),
     targetInchesPerWeek: irrigationAdvice.recommendedInchesPerWeek,
     targetInchesPerDay: roundInches(irrigationAdvice.recommendedInchesPerWeek / 7),
+    // GATE_LAWN_REPORT_COPY_FIXES: whether the grass is one the target tables list, so the water
+    // target's source line names "your grass type" only when it was used. Absent when the gate is off.
+    ...(lawnReportCopyFixesOn() ? { targetGrassKnown: isKnownGrass(grassType) } : {}),
     rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
       ? 'fawn_daily_observation'
       : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
@@ -2643,6 +2646,12 @@ function lawnReportPhotoSetLive() {
   return typeof featureGates.lawnReportPhotoSetLive === 'function' && featureGates.lawnReportPhotoSetLive();
 }
 // "What the photos showed" needs its own gate AND the photo set's.
+// GATE_LAWN_REPORT_COPY_FIXES, read defensively like the gates below (a partial feature-gates
+// mock means off, never a crash in a report build).
+function lawnReportCopyFixesOn() {
+  return typeof featureGates.lawnReportCopyFixesLive === 'function' && featureGates.lawnReportCopyFixesLive();
+}
+
 function lawnReportPhotoFindingsLive() {
   return lawnReportPhotoSetLive() && typeof featureGates.lawnReportPhotoFindingsLive === 'function' && featureGates.lawnReportPhotoFindingsLive();
 }
@@ -2869,6 +2878,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
   // so a PDF never depends on the customer's bookings and needs no key for them.
   if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  // The copy fixes (GATE_LAWN_REPORT_COPY_FIXES) change the lawn report's words, labels and
+  // charts, so its PDF key moves with it; the stamp rides only while the gate is live.
+  if (lawnReportCopyFixesOn()) irrigationStamp += ':copyfix=1';
   // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
@@ -7445,6 +7457,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // A-D legend either (they come from the same default zones). Absent = the
     // payload is byte-identical to before.
     ...(hideDefaultLawnCoverage ? { lawnCoverageHidden: true } : {}),
+    // GATE_LAWN_REPORT_COPY_FIXES (lawn only): tells the report page not to print the pest
+    // program's re-service wording (footer sentence, its booking link, the legacy re-service
+    // header). Absent = byte-identical payload.
+    ...(serviceLine === 'lawn' && lawnReportCopyFixesOn() ? { lawnCopyFixes: true } : {}),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {

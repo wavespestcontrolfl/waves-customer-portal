@@ -1132,6 +1132,11 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
         {!irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
         {hasTotal ? <><span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong></> : null}
         {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
+        {/* GATE_LAWN_REPORT_COPY_FIXES: one fixed sentence from the server naming where the
+            target came from. Absent key (gate off, or a target with no honest source) prints nothing. */}
+        {hasTarget && typeof water.targetNote === 'string' && water.targetNote.trim() ? (
+          <span data-testid="lawn-water-target-note" style={{ gridColumn: '1 / -1', color: MUTED, fontSize: 14, lineHeight: 1.45 }}>{water.targetNote}</span>
+        ) : null}
       </div>
       {/* Stacked bar with a target marker — segments grow on mount. Skipped
           entirely when nothing is measurable (all-missing payload kept alive

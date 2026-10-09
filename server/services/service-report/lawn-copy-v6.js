@@ -37,6 +37,12 @@ const { buildTreatmentSummary } = require('./treatment-summary');
 const { buildLawnExpectations } = require('./lawn-expectations');
 const { celsiusYtdCap } = require('../../config/lawn-expectations');
 
+// GATE_LAWN_REPORT_COPY_FIXES at call time; a partial feature-gates mock means off.
+function copyFixesLive() {
+  const gates = require('../../config/feature-gates');
+  return typeof gates.lawnReportCopyFixesLive === 'function' && gates.lawnReportCopyFixesLive();
+}
+
 const COPY_VERSION = 'lawn_report_v6_fixed_1';
 const FREEZE_KEY = 'lawnCopyV6';
 const FREEZE_VERSION = 1;
@@ -217,7 +223,13 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
   if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [], expectSentences: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
-  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
+  // GATE_LAWN_REPORT_COPY_FIXES: a copy frozen while the gate is live names the product
+  // categories, never an active ingredient or a product name. The gate decides only what a NEW
+  // freeze writes; a frozen entry replays as it was written.
+  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, {
+    noTiming: true,
+    ...(copyFixesLive() ? { categoryOnly: true } : {}),
+  }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   let expectSentences = [];
