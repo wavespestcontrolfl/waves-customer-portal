@@ -1854,6 +1854,9 @@ export default function EstimateToolViewV2({
       "svcRodentGuarantee",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
+    // The host a same-visit add-on rides is a priced ONE-TIME service (the one-time accept books the add-ons; a recurring plan
+    // cannot host them yet). The rodent guarantee is a payment rider, not a visit.
+    const hasOneTimeHost = onetimeKeys.some((k) => k !== "svcRodentGuarantee" && form[k]);
     const hasBaseService = recurringCount > 0 || commercialAutoPricedCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
     const addOnCount = countAreaAddOns(form.areaAddOns);
     const anySelected = hasBaseService || addOnCount > 0;
@@ -1871,8 +1874,10 @@ export default function EstimateToolViewV2({
       onetimeCount: onetimeCount + addOnCount,
       tier,
       anySelected,
-      // Any selection other than an add-on: the host a same-visit add-on rides on.
+      // Any selection other than an add-on.
       hasBaseService,
+      // A one-time service: the only host a same-visit add-on can ride.
+      hasOneTimeHost,
     };
   }, [form, rodentWaveguardPosture]);
 
@@ -6907,7 +6912,7 @@ export default function EstimateToolViewV2({
                 knownAreas={areaAddOnKnownAreas}
                 grassChoices={GRASS_CHOICES}
                 pickedGrass={pickedGrassForAddOns}
-                otherServiceSelected={livePreview.hasBaseService}
+                oneTimeHostSelected={livePreview.hasOneTimeHost}
               />
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}
               <CheckboxV2 k="svcWdo" label="WDO Inspection Service" />{" "}

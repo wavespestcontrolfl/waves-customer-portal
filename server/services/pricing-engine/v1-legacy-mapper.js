@@ -1624,6 +1624,7 @@ const AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE = 'This estimate includes add-o
 
 module.exports = {
   mapV1ToLegacyShape,
+  RECURRING_SERVICES,
   estimateDataCarriesBermudaSuppression,
   estimateDataCarriesAreaAddOns,
   estimateAreaAddOnsGated,

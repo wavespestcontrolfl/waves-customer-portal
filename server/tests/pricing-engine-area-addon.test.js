@@ -324,7 +324,7 @@ describe('same-visit area add-ons need a host visit on the same estimate', () =>
   const SAME = { areaAddOnVisit: 'sameTripAddOn' };
   const run = (areaAddOns, services = {}, extra = {}) => generateEstimate({ ...HOME, ...extra, services: { ...services, areaAddOns } });
   const HOST_ERROR = expect.objectContaining({
-    name: 'PricingError', statusCode: 400, failClosed: true, message: expect.stringMatching(/Add-ons on the same visit need a priced service on the same estimate/),
+    name: 'PricingError', statusCode: 400, failClosed: true, message: 'Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.',
     metadata: expect.objectContaining({ reason: 'AREA_ADDON_HOST_MISSING' }),
   });
   const SWEEP = [{ key: 'web_sweep' }];
@@ -333,9 +333,21 @@ describe('same-visit area add-ons need a host visit on the same estimate', () =>
     expect(() => run(SWEEP, SAME)).toThrow(HOST_ERROR);
   });
 
-  test('with recurring pest on the estimate it prices $59', () => {
-    const estimate = run(SWEEP, { pest: { frequency: 'quarterly' }, ...SAME });
+  test('a RECURRING service alone is not a host: the one-time accept books the add-ons and a recurring accept is refused, so it fails closed at quote', () => {
+    for (const services of [{ pest: { frequency: 'quarterly' } }, { lawn: { track: 'st_augustine', tier: 'enhanced' } }, { mosquito: { tier: 'silver' } }]) {
+      expect(() => run(SWEEP, { ...services, ...SAME })).toThrow(HOST_ERROR);
+    }
+    // ... also with the one-time CHOICE a pest estimate can offer (show_one_time_option is a saved-row flag, not a priced line)
+    expect(() => run(SWEEP, { pest: { frequency: 'quarterly' }, ...SAME }, { showOneTimeOption: true })).toThrow(HOST_ERROR);
+    // The same recurring service with the add-on on its OWN visit is quoted as before.
+    expect(addOnLines(run(SWEEP, { pest: { frequency: 'quarterly' } })).map((l) => l.price)).toEqual([89]);
+  });
+
+  test('a one-time host next to a recurring service prices the same-visit $59, and the fee that rides a recurring plan is not a host', () => {
+    const estimate = run(SWEEP, { pest: { frequency: 'quarterly' }, oneTimePest: true, ...SAME });
     expect(addOnLines(estimate).map((l) => [l.visitContext, l.price, l.carriesVisitDrive])).toEqual([['sameTripAddOn', 59, false]]);
+    // pest_initial_roach rides the recurring first visit (it is not a visit of its own)
+    expect(() => run(SWEEP, { pest: { frequency: 'quarterly', roachType: 'german' }, ...SAME })).toThrow(HOST_ERROR);
   });
 
   test('another one-time service is a host', () => {
@@ -402,7 +414,7 @@ describe('several area add-ons are one visit with one drive', () => {
   // The $8 booking-and-invoicing cost is one job's cost, however many add-ons ride on it (Codex round 7 P2).
   test('the visit pays one admin charge: the first priced add-on carries it, own visit or same visit', () => {
     const { adminPerJob } = AREA_ADDONS;
-    const sameVisit = { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' };
+    const sameVisit = { oneTimePest: true, areaAddOnVisit: 'sameTripAddOn' };
     for (const lines of [addOnLines(run(three)), addOnLines(run(three, sameVisit))]) {
       expect(lines.map((l) => l.costs.admin)).toEqual([adminPerJob, 0, 0]);
       expect(lines.map((l) => l.carriesJobAdmin)).toEqual([true, false, false]);
@@ -448,7 +460,7 @@ describe('several area add-ons are one visit with one drive', () => {
   });
 
   test('on the same visit as a service no add-on carries a drive', () => {
-    const lines = addOnLines(run(three, { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' }));
+    const lines = addOnLines(run(three, { oneTimePest: true, areaAddOnVisit: 'sameTripAddOn' }));
     expect(lines.map((l) => [l.visitContext, l.costs.driveMin, l.carriesVisitDrive])).toEqual(three.map(() => ['sameTripAddOn', 0, false]));
   });
 
@@ -470,7 +482,7 @@ describe('several area add-ons are one visit with one drive', () => {
   test('every line keeps at least the target margin, carrier or not, on either visit', () => {
     const lines = [
       ...addOnLines(run(three)),
-      ...addOnLines(run(three, { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' })),
+      ...addOnLines(run(three, { oneTimePest: true, areaAddOnVisit: 'sameTripAddOn' })),
     ];
     expect(lines).toHaveLength(6);
     for (const line of lines) expect(line.margin).toBeGreaterThanOrEqual(0.6);
@@ -483,7 +495,7 @@ describe('several area add-ons are one visit with one drive', () => {
       'Own visit, shared with the other add-ons',
       'Own visit, shared with the other add-ons',
     ]);
-    const same = addOnLines(run(three, { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' }));
+    const same = addOnLines(run(three, { oneTimePest: true, areaAddOnVisit: 'sameTripAddOn' }));
     expect(same.every((l) => l.detail.endsWith('Same visit as a booked service'))).toBe(true);
   });
 
@@ -491,7 +503,7 @@ describe('several area add-ons are one visit with one drive', () => {
     for (const visitContext of ['standalone', 'sameTripAddOn', 'builderBatch', null]) {
       refused(() => run([{ key: 'web_sweep', visitContext }]), /visitContext is set once for all area add-ons/, 'AREA_ADDON_VISIT_PER_ENTRY');
     }
-    refused(() => run([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }], { pest: { frequency: 'quarterly' } }),
+    refused(() => run([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }], { oneTimePest: true }),
       /visitContext is set once/, 'AREA_ADDON_VISIT_PER_ENTRY');
   });
 

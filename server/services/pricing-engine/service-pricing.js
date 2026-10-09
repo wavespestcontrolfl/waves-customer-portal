@@ -8647,7 +8647,7 @@ function assertGroupVisitOnly(entry, index) {
 }
 
 // The group's visit: 'standalone' (default, the add-ons are their own visit)
-// or 'sameTripAddOn' (they ride a priced service on the same estimate).
+// or 'sameTripAddOn' (they ride a priced ONE-TIME service on the same estimate).
 function normalizeAreaAddOnVisit(visit) {
   const value = visit ?? 'standalone';
   assertEnum(value, AREA_ADDON_VISIT_CONTEXTS, 'areaAddOnVisit');
@@ -8728,20 +8728,32 @@ function areaAddOnCatalog() {
 }
 
 // Same-visit area add-ons ride a host visit: the price drops the drive
-// minutes, which is only true when a priced SERVICE shares the estimate. The
-// host is another PRICED line that is not an area add-on (a recurring service
-// or another one-time service): an add-on never hosts add-ons that claim a
-// same visit, because the group is chosen once. An unpriced line (custom
-// quote, commercial manual quote) is never a host. Call it on the FINAL line list.
+// minutes, which is only true when the accepted visit is a priced SERVICE that
+// shares the estimate. The host is a priced ONE-TIME service line that is not
+// an area add-on (one_time_pest, another specialty): the add-ons are booked
+// by the ONE-TIME acceptance (a recurring accept is refused when the estimate
+// carries an add-on, AREA_ADDONS_ONE_TIME_ACCEPT_ONLY), so a recurring service
+// cannot host them until a recurring-host booking path exists. A recurring
+// line, a fee that rides a recurring plan, a discount row and an unpriced line
+// (custom quote, commercial manual quote) are never a host, and an add-on never
+// hosts add-ons. A pest estimate that only OFFERS a one-time choice has no
+// one-time line here and is refused too, so the customer's choice can never change which
+// price applies. Call it on the FINAL line list.
+const AREA_ADDON_NON_HOST_SERVICES = new Set([
+  'area_addon', 'waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee', 'pest_initial_roach',
+]);
+const AREA_ADDON_HOST_MISSING_MESSAGE = 'Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.';
 function assertAreaAddOnHostVisit({ visit, requests }, lineItems) {
   if (visit !== 'sameTripAddOn' || requests.length === 0) return;
+  const { RECURRING_SERVICES } = require('./v1-legacy-mapper');
   const isHost = (line) => !!line
-    && line.service !== 'area_addon'
+    && !AREA_ADDON_NON_HOST_SERVICES.has(line.service)
+    && !RECURRING_SERVICES.has(line.service)
     && line.quoteRequired !== true
     && line.requiresCustomQuote !== true
-    && [line.annual, line.price, line.total].some((amount) => Number(amount) > 0);
+    && [line.price, line.total].some((amount) => Number(amount) > 0);
   if (!lineItems.some(isHost)) {
-    throw buildPricingError('Add-ons on the same visit need a priced service on the same estimate (a recurring service or another one-time service); price them as their own visit or add the service they ride with', { field: 'areaAddOnVisit', visitContext: 'sameTripAddOn', reason: 'AREA_ADDON_HOST_MISSING' });
+    throw buildPricingError(AREA_ADDON_HOST_MISSING_MESSAGE, { field: 'areaAddOnVisit', visitContext: 'sameTripAddOn', reason: 'AREA_ADDON_HOST_MISSING' });
   }
 }
 

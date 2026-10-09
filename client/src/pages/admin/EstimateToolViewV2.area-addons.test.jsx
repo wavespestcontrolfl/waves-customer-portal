@@ -184,7 +184,7 @@ describe("what a checked row sends", () => {
   });
 
   it("shows the server's message when the calculate call is refused", async () => {
-    const message = "Add-ons on the same visit need a priced service on the same estimate (a recurring service or another one-time service); price them as their own visit or add the service they ride with";
+    const message = "Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.";
     calculateReply = () => Promise.resolve(jsonResponse({ error: message }, 400));
     renderNew();
     await openGroup();
@@ -254,18 +254,21 @@ describe("same-visit choice", () => {
     fireEvent.click(box("Web Sweep"));
     fireEvent.click(box("Fire Ant Yard Treatment"));
     fireEvent.change(screen.getByLabelText("Visit"), { target: { value: "sameTripAddOn" } });
-    expect(screen.getByText("Needs another service on this estimate")).toBeInTheDocument();
+    expect(screen.getByText("Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.")).toBeInTheDocument();
   });
 
-  it("stays selectable with no other service, shows a hint, and drops it once a service is picked", async () => {
+  it("stays selectable with no one-time service, shows the hint, keeps it for a RECURRING service (it cannot host the add-on), and drops it once a one-time service is picked", async () => {
     renderNew();
     await openGroup();
     fireEvent.click(box("Web Sweep"));
     fireEvent.change(screen.getByLabelText("Visit"), { target: { value: "sameTripAddOn" } });
     expect(screen.getByLabelText("Visit")).toHaveValue("sameTripAddOn");
-    expect(screen.getByText("Needs another service on this estimate")).toBeInTheDocument();
+    expect(screen.getByText("Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Same visit as a one-time service on this estimate" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: "Pest Control", exact: true }));
-    expect(screen.queryByText("Needs another service on this estimate")).not.toBeInTheDocument();
+    expect(screen.getByText("Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "One-Time Pest Control Service", exact: true }));
+    expect(screen.queryByText("Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.")).not.toBeInTheDocument();
   });
 });
 

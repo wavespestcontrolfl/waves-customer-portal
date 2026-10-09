@@ -97,20 +97,21 @@ function GrassField({ item, entry, grassChoices, pickedGrass, onEntry }) {
   );
 }
 
-// The one visit choice for every selected add-on. Same visit needs another
-// service on this estimate to ride with; an add-on is never that service.
-function VisitField({ visit, otherServiceSelected, onVisitChange }) {
+// The one visit choice for every selected add-on. Same visit needs a ONE-TIME
+// service on this estimate to ride with (the one-time accept books the add-ons;
+// a recurring plan cannot host them yet); an add-on is never that service.
+function VisitField({ visit, oneTimeHostSelected, onVisitChange }) {
   const same = visit === SAME_VISIT;
   return (
     <Field
       label="Visit"
       id="estimate-areaAddOns-visit"
-      help={same && !otherServiceSelected ? "Needs another service on this estimate" : "All selected add-ons share this visit."}
+      help={same && !oneTimeHostSelected ? "Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate." : "All selected add-ons share this visit."}
       className="mb-4"
     >
       <Select value={same ? SAME_VISIT : STANDALONE_VISIT} onChange={(e) => onVisitChange(e.target.value)}>
         <option value={STANDALONE_VISIT}>Own visit</option>
-        <option value={SAME_VISIT}>Same visit as another service on this estimate</option>
+        <option value={SAME_VISIT}>Same visit as a one-time service on this estimate</option>
       </Select>
     </Field>
   );
@@ -200,7 +201,7 @@ function useReseededEntries(selection, catalog, knownAreas, onChange) {
 }
 
 export default function AreaAddOnsGroup({
-  catalog, value, onChange, visit = STANDALONE_VISIT, onVisitChange, knownAreas, grassChoices, pickedGrass = null, otherServiceSelected,
+  catalog, value, onChange, visit = STANDALONE_VISIT, onVisitChange, knownAreas, grassChoices, pickedGrass = null, oneTimeHostSelected,
 }) {
   const [userOpen, setUserOpen] = useState(null);
   const selection = value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -242,7 +243,7 @@ export default function AreaAddOnsGroup({
               onChange={onChange}
             />
           ))}
-          {count > 0 && offered.length > 0 && <VisitField visit={visit} otherServiceSelected={otherServiceSelected} onVisitChange={onVisitChange} />}
+          {count > 0 && offered.length > 0 && <VisitField visit={visit} oneTimeHostSelected={oneTimeHostSelected} onVisitChange={onVisitChange} />}
           {unavailableKeys.map((key) => (
             <UnavailableRow
               key={key}

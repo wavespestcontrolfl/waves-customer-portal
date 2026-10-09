@@ -62,7 +62,7 @@ describe('estimator translator: options.areaAddOns -> services.areaAddOns', () =
       { key: 'web_sweep' },
     ]);
     expect(v1Input.services.areaAddOnVisit).toBe('standalone');
-    expect(estimate([{ key: 'web_sweep' }], { selected: ['PEST'], options: { areaAddOnVisit: 'sameTripAddOn' } }).v1Input.services.areaAddOnVisit).toBe('sameTripAddOn');
+    expect(estimate([{ key: 'web_sweep' }], { selected: ['OT_PEST'], options: { areaAddOnVisit: 'sameTripAddOn' } }).v1Input.services.areaAddOnVisit).toBe('sameTripAddOn');
     // No add-ons: no visit field either (byte-identical to before).
     expect(translateV2CallToV1Input(PROFILE, ['PEST'], { areaAddOnVisit: 'sameTripAddOn' }).services).not.toHaveProperty('areaAddOnVisit');
   });
@@ -141,8 +141,10 @@ describe('estimator translator: options.areaAddOns -> services.areaAddOns', () =
   test('a same-visit group is host-checked by the engine behind the same door', () => {
     const same = [{ key: 'web_sweep' }];
     const options = { areaAddOnVisit: 'sameTripAddOn' };
-    expect(() => estimate(same, { options })).toThrow(/Add-ons on the same visit need a priced service/);
-    expect(estimate(same, { selected: ['PEST'], options }).mapped.oneTime.items[0]).toMatchObject({ addOnKey: 'web_sweep', price: 59, visitContext: 'sameTripAddOn', carriesVisitDrive: false });
+    expect(() => estimate(same, { options })).toThrow(/Same visit needs a one-time service on this estimate/);
+    // A recurring service is not a host (the recurring accept refuses an add-on): fail closed at quote.
+    expect(() => estimate(same, { selected: ['PEST'], options })).toThrow(/Same visit needs a one-time service on this estimate/);
+    expect(estimate(same, { selected: ['OT_PEST'], options }).mapped.oneTime.items.find((item) => item.addOnKey === 'web_sweep')).toMatchObject({ addOnKey: 'web_sweep', price: 59, visitContext: 'sameTripAddOn', carriesVisitDrive: false });
   });
 
   test('null grass on a label-bound add-on is "not chosen": it never borrows the form grass (client sends unknown)', () => {
