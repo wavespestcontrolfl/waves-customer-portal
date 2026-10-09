@@ -9202,7 +9202,7 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = nul
 function WeatherPestWidget({ customer, nextService, hold = false }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
-  // Fungus / chinch / irrigation are lawn advisories — pest-only customers
+  // Fungus / chinch are lawn advisories — pest-only customers
   // see mosquito pressure only (owner ruling 2026-08-28: lawn surfaces are
   // gated on real lawn-care evidence, same predicate as the health card).
   const lawnHealth = useLawnHealth(customer?.id);
@@ -9270,11 +9270,6 @@ function WeatherPestWidget({ customer, nextService, hold = false }) {
       { label: 'Chinch Bug Risk', icon: 'bug', type: 'chinch', level: pressure.chinch?.level || 'LOW', color: pressure.chinch?.color || B.green },
     ] : []),
   ];
-  const irrigation = weather.irrigationRecommendation || {};
-  const irrigationInches = Number(irrigation.inches ?? 0);
-  const irrigationAmount = Number.isFinite(irrigationInches)
-    ? String(Number(irrigationInches.toFixed(2)))
-    : '0';
   const updatedAt = weather.updatedAt ? new Date(weather.updatedAt) : null;
   const updatedText = updatedAt && !isNaN(updatedAt)
     ? updatedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
@@ -9378,36 +9373,6 @@ function WeatherPestWidget({ customer, nextService, hold = false }) {
         })}
       </div>
 
-      {hasLawnCare && (
-      <div style={{
-        marginTop: 10,
-        padding: 14,
-        borderRadius: 8,
-        background: '#F8FCFE',
-        border: '1px solid #CFE7F5',
-        display: 'flex', alignItems: 'center', gap: 12,
-      }}>
-        <span style={{
-          width: 36,
-          height: 36,
-          borderRadius: 8,
-          background: '#fff',
-          color: B.glassNavy,
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-        }}>
-          <Icon name="droplet" size={18} strokeWidth={2} />
-        </span>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
-            Irrigation: {irrigationAmount}" recommended
-          </div>
-          <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{irrigation.note || 'Adjust watering around rainfall and local restrictions.'}</div>
-        </div>
-      </div>
-      )}
     </section>
   );
 }
