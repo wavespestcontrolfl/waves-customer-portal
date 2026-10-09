@@ -97,6 +97,15 @@ describe('terminal writer hand-off', () => {
     expect(merged.updates.map((u) => u.where[0])).toEqual([['id', uid('z')]]);
   });
 
+  test('a post merged today uses a daily slot; one merged on an earlier day does not', async () => {
+    const now = new Date('2026-10-09T18:00:00Z');
+    const rows = ['a', 'b', 'c', 'd'].map((c) => row(c));
+    const today = fakes({ rows, closed: [pr('x', { state: 'closed', merged_at: '2026-10-09T15:00:00Z' }), pr('y', { state: 'closed', merged_at: '2026-10-09T16:00:00Z' })] });
+    expect((await terminalWriterWork({ now, deps: today.deps })).due.map((r) => r.id)).toEqual([uid('a')]);
+    const earlier = fakes({ rows, closed: [pr('x', { state: 'closed', merged_at: '2026-10-08T15:00:00Z' })] });
+    expect((await terminalWriterWork({ now, deps: earlier.deps })).due.map((r) => r.id)).toEqual([uid('a'), uid('b'), uid('c')]);
+  });
+
   test('other queue rows cannot hide a writing row: each writing action is read on its own', async () => {
     const f = fakes({ rows: [row('a', { action_type: 'refresh_existing_page' })] });
     expect((await terminalWriterWork({ deps: f.deps })).due.map((r) => r.id)).toEqual([uid('a')]);
@@ -115,7 +124,7 @@ describe('terminal writer hand-off', () => {
     const out = await handOffToTerminal({ now: new Date('2026-10-09T13:00:00Z'), deps: f.deps });
     expect(out).toMatchObject({ outcome: 'handed_to_terminal', due: 1, merged: 1 });
     expect(f.updates).toHaveLength(1);
-    expect(f.updates[0].patch).toMatchObject({ status: 'done' });
+    expect(f.updates[0].patch).toMatchObject({ status: 'done', completed_at: new Date('2026-10-08T12:00:00Z') });
     expect(f.updates[0].where).toEqual(expect.arrayContaining([['id', uid('a')], ['status', 'pending']]));
     expect(f.deps.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = f.deps.raiseAdminAlert.mock.calls[0];

@@ -17,7 +17,7 @@
  *   no PR, or closed unmerged → due
  *
  * Caps are the engine's own: AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY bounds
- * due + in progress, AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK bounds due +
+ * due + in progress + posts merged today (ET), AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK bounds due +
  * in progress + rows completed this ET week.
  *
  * Not done for a terminal-written post: the PR poller's post-merge chain
@@ -83,7 +83,7 @@ async function terminalPrs(gh) {
   }
   for (const pr of await gh.ghFetchPaginated(`${base}?state=closed&sort=updated&direction=desc`, { maxPages: CLOSED_PR_PAGES })) {
     const id = opportunityIdOf(pr);
-    if (id && pr.merged_at) merged.set(id, pr.html_url);
+    if (id && pr.merged_at) merged.set(id, { url: pr.html_url, mergedAt: new Date(pr.merged_at) });
   }
   return { open, merged };
 }
@@ -110,7 +110,7 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
   const pending = [...byId.values()].sort((x, y) => y.score - x.score);
 
   // A merged PR whose row is still pending has not been settled yet.
-  const merged = pending.filter((r) => prs.merged.has(r.id)).map((r) => ({ ...r, pr_url: prs.merged.get(r.id) }));
+  const merged = pending.filter((r) => prs.merged.has(r.id)).map((r) => ({ ...r, pr_url: prs.merged.get(r.id).url }));
   const inProgress = pending.filter((r) => !prs.merged.has(r.id) && prs.open.has(r.id)).map((r) => ({ ...r, pr_url: prs.open.get(r.id) }));
   const candidates = pending.filter((r) => !prs.merged.has(r.id) && !prs.open.has(r.id));
 
@@ -126,8 +126,9 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
       const updated = await conn('opportunity_queue')
         .where('id', id)
         .where('status', 'pending')
-        .update({ status: 'done', completed_at: now, updated_at: now });
-      if (updated) logger.info(`[terminal-writer] done ${id}: merged ${prs.merged.get(id)}`);
+        // the merge time, so a post merged yesterday counts in yesterday's week
+        .update({ status: 'done', completed_at: prs.merged.get(id).mergedAt, updated_at: now });
+      if (updated) logger.info(`[terminal-writer] done ${id}: merged ${prs.merged.get(id).url}`);
     }
   }
 
@@ -140,11 +141,15 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
     .first();
   // Merged rows this pass did not mark done (read-only) still used a slot.
   const doneThisWeek = Number(doneRow?.n || 0) + (complete ? 0 : unsettled.length);
-  // Every open terminal PR holds a slot, whether or not its row was read above.
+  // Every open terminal PR holds a slot, whether or not its row was read above,
+  // and so does every post merged today: a second pass on the same day must
+  // not hand out the day's slots again.
   const openCount = prs.open.size;
-  const room = Math.max(0, Math.min(perDay - openCount, perWeek - doneThisWeek - openCount));
+  const dayStart = parseETDateTime(`${etDateString(now)}T00:00`);
+  const mergedToday = [...prs.merged.values()].filter((m) => m.mergedAt >= dayStart).length;
+  const room = Math.max(0, Math.min(perDay - openCount - mergedToday, perWeek - doneThisWeek - openCount));
   const due = candidates.slice(0, room).map((r) => ({ ...r, branch: branchFor(r.id) }));
-  return { due, inProgress, merged, caps: { perDay, perWeek, doneThisWeek } };
+  return { due, inProgress, merged, caps: { perDay, perWeek, doneThisWeek, mergedToday } };
 }
 
 const describe = (r) => `${r.action_type.replace(/_/g, ' ')}: ${r.query || r.page_url || [r.service, r.city].filter(Boolean).join(' in ') || 'untitled'}`;
