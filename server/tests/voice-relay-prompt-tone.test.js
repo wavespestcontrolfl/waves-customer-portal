@@ -56,8 +56,11 @@ test('the four capture fields are the job even on a price-only call', () => {
 // self-serve cancel on every prompt variant, and Sandy never claims the cancel.
 test.each([[false], [true]])('cancel request: portal self-cancel is offered, never a claimed cancellation (context %s)', (contextEnabled) => {
   const prompt = buildBasePrompt(contextEnabled);
-  expect(prompt).toMatch(/cancel on their own at any time in the Waves customer portal, under Plan/);
+  expect(prompt).toMatch(/on their own at any time in the Waves customer portal, under Plan/);
   expect(prompt).toMatch(/Waves team member can do it for them/);
   expect(prompt).toMatch(/never say a plan is cancelled/);
-  expect(prompt).toMatch(/do not push back or try to talk them out of it/);
+  expect(prompt).toMatch(/do not push\s+back or try to talk them out of it/);
+  // Codex r1 P2: a one-visit cancel is never routed to the whole-plan cancel.
+  expect(prompt).toMatch(/ONLY when the caller wants to end their recurring service plan altogether/);
+  expect(prompt).toMatch(/Cancelling or moving ONE visit is a different request: never point that caller to the\s+portal plan cancellation/);
 });
