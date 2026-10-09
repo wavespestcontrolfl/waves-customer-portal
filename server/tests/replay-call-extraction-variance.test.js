@@ -991,32 +991,56 @@ describe('replay extraction gets the call facts production gives the extractor',
   });
 
   test('catalog names, caller-ID name, direction and the prior call are passed the way production builds them', async () => {
-    const prior = { callId: 'c0', summary: 'earlier call' };
+    const prior = { summary: 'earlier call' };
     const crp = fakeCRP(prior);
-    const db = fakeDb({ call_log: { ai_extraction_enriched: JSON.stringify({ meta: { extracted_at: '2026-09-09T10:00:00Z' } }) } });
-    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [{ name: 'General Pest Control' }, { name: '' }, null], CRP: crp, db, callStart, storedExtractedAt: '2026-09-10T14:06:00Z' });
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [{ name: 'General Pest Control' }, { name: '' }, null], CRP: crp, db: DB, callStart, storedExtractedAt: '2026-09-10T14:06:00Z' });
     expect(facts.bookableServiceNames).toEqual(['General Pest Control']);
     expect(facts.callerIdName).toBe(CRP._test.callerIdNameForPrompt(call));
     expect(facts.callDirection).toBe('inbound');
     expect(facts.priorCall).toEqual(prior);
     expect(facts.knownCaller).toBeNull();
-    // Bounded to calls before this one, exactly as the processor asks.
-    expect(crp.summarizePriorCall).toHaveBeenCalledWith('+19415550100', 'c1', db, call.created_at);
+    // Bounded to calls before this one, exactly as the processor asks, plus the availability test.
+    expect(crp.summarizePriorCall).toHaveBeenCalledWith('+19415550100', 'c1', DB, call.created_at, { accept: expect.any(Function) });
   });
 
-  test('a prior call whose extraction did not exist when the stored pass ran is left out (codex #6214 r3 P1)', async () => {
-    const prior = { callId: 'c0', summary: 'earlier call' };
-    const enriched = (at) => ({ call_log: { ai_extraction_enriched: at ? { meta: { extracted_at: at } } : null } });
-    const run = (db, storedExtractedAt) => productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(prior), db, callStart, storedExtractedAt });
-    // Reprocessed (or processed out of order) after the stored pass.
-    expect((await run(fakeDb(enriched('2026-09-11T08:00:00Z')), '2026-09-10T14:06:00Z')).priorCall).toBeNull();
-    // No V2 record, so no extraction time to prove it.
-    expect((await run(fakeDb(enriched(null)), '2026-09-10T14:06:00Z')).priorCall).toBeNull();
-    // The stored pass's own time is unknown.
-    expect((await run(fakeDb(enriched('2026-09-09T10:00:00Z')), null)).priorCall).toBeNull();
-    // No call id on the summary.
-    const noId = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP({ summary: 'x' }), db: fakeDb(enriched('2026-09-09T10:00:00Z')), callStart, storedExtractedAt: '2026-09-10T14:06:00Z' });
-    expect(noId.priorCall).toBeNull();
+  test('a prior call counts only when its extraction existed when the stored pass ran (codex #6214 r3 + r4 P1)', async () => {
+    const crp = fakeCRP({ summary: 'x' });
+    await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: DB, callStart, storedExtractedAt: '2026-09-10T14:06:00Z' });
+    const { accept } = crp.summarizePriorCall.mock.calls[0][4];
+    const row = (at) => ({ ai_extraction_enriched: at ? JSON.stringify({ meta: { extracted_at: at } }) : null });
+    expect(accept(row('2026-09-09T10:00:00Z'))).toBe(true);
+    // Reprocessed, or processed out of order, after the stored pass.
+    expect(accept(row('2026-09-11T08:00:00Z'))).toBe(false);
+    // No V2 record: no extraction time to prove it.
+    expect(accept(row(null))).toBe(false);
+    expect(accept({ ai_extraction_enriched: { meta: {} } })).toBe(false);
+    // The stored pass's own time is unknown: no lookup at all.
+    const blind = fakeCRP({ summary: 'x' });
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: blind, db: DB, callStart, storedExtractedAt: null });
+    expect(facts.priorCall).toBeNull();
+    expect(blind.summarizePriorCall).not.toHaveBeenCalled();
+  });
+
+  test('summarizePriorCall with an accept test skips an unavailable newer call for the next older one', async () => {
+    const rows = [
+      { id: 'b', created_at: '2026-09-10T12:00:00Z', call_summary: 'newer, processed late', ai_extraction: '{}', ai_extraction_enriched: { meta: { extracted_at: '2026-09-11T08:00:00Z' } } },
+      { id: 'a', created_at: '2026-09-09T12:00:00Z', call_summary: 'older, on file', ai_extraction: '{}', ai_extraction_enriched: { meta: { extracted_at: '2026-09-09T12:03:00Z' } } },
+    ];
+    const chain = {};
+    for (const m of ['whereRaw', 'whereNotNull', 'whereNotIn', 'orderBy', 'where', 'whereNot', 'limit', 'modify', 'whereNull', 'orWhereNull', 'andWhere']) chain[m] = jest.fn(() => chain);
+    chain.select = jest.fn(async () => rows);
+    chain.first = jest.fn(async () => rows[0]);
+    const conn = jest.fn(() => chain);
+    conn.raw = jest.fn((x) => x);
+    const cutoff = new Date('2026-09-10T14:06:00Z').getTime();
+    const accept = (r) => new Date(r.ai_extraction_enriched.meta.extracted_at).getTime() < cutoff;
+    const picked = await CRP.summarizePriorCall('+19415550100', 'c1', conn, '2026-09-10T14:05:00Z', { accept });
+    expect(picked.summary).toBe('older, on file');
+    expect(chain.limit).toHaveBeenCalledWith(10);
+    // Production's call (no accept) is unchanged: the newest row.
+    const live = await CRP.summarizePriorCall('+19415550100', 'c1', conn, '2026-09-10T14:05:00Z');
+    expect(live.summary).toBe('newer, processed late');
+    expect(await CRP.summarizePriorCall('+19415550100', 'c1', conn, '2026-09-10T14:05:00Z', { accept: () => false })).toBeNull();
   });
 
   test('an outbound call is labeled outbound', async () => {
@@ -1099,6 +1123,17 @@ describe('replay extraction gets the call facts production gives the extractor',
     // No override: the first pass's own lead, found by phone, was on file for the reprocess.
     const byPhone = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, created), db: DB, callStart, storedExtractedAt: '2026-09-11T09:05:00Z' });
     expect(byPhone.knownCaller).toEqual(CRP._test.summarizeKnownCaller(created));
+  });
+
+  test('a customer row created just before the stored extraction finished is unknown: none passed, and the run says so (codex #6214 r4 P2)', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // A web form 2 minutes before the model answered: Step 2 may have looked before or after it.
+      const created = customer('2026-09-11T09:03:00Z');
+      const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, created), db: DB, callStart, storedExtractedAt: '2026-09-11T09:05:00Z' });
+      expect(facts.knownCaller).toBeNull();
+      expect(warn.mock.calls[0][0]).toMatch(/created within 10 min of the stored extraction/);
+    } finally { warn.mockRestore(); }
   });
 
   test('a lead the stored first pass created after extracting is not a known caller', async () => {

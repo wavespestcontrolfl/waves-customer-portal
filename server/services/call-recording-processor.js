@@ -1566,7 +1566,12 @@ function sanitizePriorText(value, max = 300) {
     .trim()
     .slice(0, max);
 }
-async function summarizePriorCall(contactPhone, currentCallId = null, conn = db, currentCallCreatedAt = null) {
+// `opts.accept` (offline replay only; production passes nothing): an async test
+// of a candidate row ({ id, created_at, ai_extraction_enriched }). The newest of
+// the 10 newest candidates that passes is used, so a call that was not yet
+// processed when the pass being replayed ran is skipped for the next older one,
+// which is what that pass's own `whereNotNull('ai_extraction')` did then.
+async function summarizePriorCall(contactPhone, currentCallId = null, conn = db, currentCallCreatedAt = null, opts = {}) {
   try {
     const digits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
     if (digits.length < 10) return null;
@@ -1595,7 +1600,15 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     // "Prior" means STRICTLY EARLIER: a force-reprocess or out-of-order queue
     // drain must never hand call 1 the extraction of call 2 as its past.
     if (currentCallCreatedAt) q.where('created_at', '<', currentCallCreatedAt);
-    const row = await q.first('id', 'created_at', 'call_summary', 'ai_extraction');
+    let row = null;
+    if (typeof opts.accept === 'function') {
+      const candidates = await q.limit(10).select('id', 'created_at', 'call_summary', 'ai_extraction', 'ai_extraction_enriched');
+      for (const candidate of candidates) {
+        if (await opts.accept(candidate)) { row = candidate; break; }
+      }
+    } else {
+      row = await q.first('id', 'created_at', 'call_summary', 'ai_extraction');
+    }
     if (!row) return null;
     const v1 = typeof row.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : (row.ai_extraction || {});
     if (v1.is_spam === true) return null;
@@ -1609,10 +1622,6 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     const anchorMs = currentCallCreatedAt ? new Date(currentCallCreatedAt).getTime() : Date.now();
     const hoursAgo = Math.max(1, Math.round((anchorMs - new Date(row.created_at).getTime()) / 3600000));
     return {
-      // Which call this is. Not rendered into the prompt (buildPriorCallBlock reads
-      // named fields only); the offline replay uses it to check that this call's
-      // extraction existed when the pass it replays ran.
-      callId: row.id,
       hoursAgo,
       summary: sanitizePriorText(row.call_summary || v1.call_summary) || null,
       captured: {

@@ -1339,6 +1339,9 @@ function overrideReachedStoredExtraction(call, storedExtractedAt) {
   return Number.isFinite(overrideMs) && Number.isFinite(extractedMs) && overrideMs < extractedMs;
 }
 
+// A model answer takes well under this; Step 2's lookup ran that long before meta.extracted_at at most.
+const LOOKUP_MARGIN_MS = 10 * 60 * 1000;
+
 // The prompt's customer for the stored extraction:
 //   - no override: the phone lookup (what Step 2 runs);
 //   - an override the stored extraction came AFTER: the override's customer;
@@ -1362,30 +1365,42 @@ async function promptCustomerForStoredExtraction({ call, contactPhone, CRP, db, 
 // The prior call's extraction must have existed when the stored pass ran (codex
 // #6214 r3 P1): summarizePriorCall bounds the prior CALL's time only, so an
 // earlier call processed out of order, or reprocessed later, would hand the
-// replay facts the stored pass never had. Its V2 record carries the time it was
-// extracted; when that is unknown or later than the stored pass, no prior call.
+// replay facts the stored pass never had. A candidate is accepted only when its
+// V2 record says it was extracted before the stored pass; a rejected one is
+// skipped for the next older call, as the stored pass's own query skipped a
+// call not yet processed (r4 P1). An unknown time on either side: no prior call.
 async function priorCallForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }) {
-  const priorCall = await CRP.summarizePriorCall(contactPhone, call.id, db, call.created_at);
-  if (!priorCall) return null;
   const cutoffMs = storedExtractedAt ? new Date(storedExtractedAt).getTime() : NaN;
-  if (!Number.isFinite(cutoffMs) || !priorCall.callId) return null;
-  const row = await db('call_log').where({ id: priorCall.callId }).first('ai_extraction_enriched');
-  const priorExtractedAt = parseJson(row?.ai_extraction_enriched, null)?.meta?.extracted_at;
-  const priorMs = priorExtractedAt ? new Date(priorExtractedAt).getTime() : NaN;
-  return Number.isFinite(priorMs) && priorMs < cutoffMs ? priorCall : null;
+  if (!Number.isFinite(cutoffMs)) return null;
+  const accept = (row) => {
+    const priorExtractedAt = parseJson(row?.ai_extraction_enriched, null)?.meta?.extracted_at;
+    const priorMs = priorExtractedAt ? new Date(priorExtractedAt).getTime() : NaN;
+    return Number.isFinite(priorMs) && priorMs < cutoffMs;
+  };
+  return CRP.summarizePriorCall(contactPhone, call.id, db, call.created_at, { accept });
 }
 
 async function productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart, storedExtractedAt = null }) {
   const linkedCustomer = await promptCustomerForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }).catch(() => null);
-  // The cutoff is the STORED extraction's own time when it is known, else the call
-  // start. A first pass extracts before its Step 3 creates the lead, so that row
-  // postdates the extraction and is left out. A reprocess extracts after the first
-  // pass's row (or an operator-linked row) already existed, and Step 2 gave it to the
-  // prompt with no call-start test (pre-push audit P1).
+  // When was this customer row on file for the stored pass's Step 2 lookup?
+  //   - created before the call started: yes.
+  //   - created after the call started but well before the stored extraction
+  //     finished: yes. That pass was a reprocess; a first pass extracts within a
+  //     few minutes of the call, before its own Step 3 creates the lead.
+  //   - created inside the last LOOKUP_MARGIN_MS before meta.extracted_at: unknown.
+  //     extracted_at is when the model answered, not when Step 2 looked, so a row
+  //     from a web form or another call in that window may or may not have been
+  //     seen (codex #6214 r4 P2). No known caller is passed, and the run says so.
+  //   - created after it: no.
   const extractedMs = storedExtractedAt ? new Date(storedExtractedAt).getTime() : NaN;
-  const startMs = Number.isFinite(extractedMs) ? extractedMs : (callStart instanceof Date ? callStart.getTime() : NaN);
+  const startMs = callStart instanceof Date ? callStart.getTime() : NaN;
   const createdMs = linkedCustomer?.created_at ? new Date(linkedCustomer.created_at).getTime() : NaN;
-  const predatesCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
+  const beforeCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
+  const beforeLookup = Number.isFinite(extractedMs) && Number.isFinite(createdMs) && createdMs < extractedMs - LOOKUP_MARGIN_MS;
+  const predatesCall = beforeCall || beforeLookup;
+  if (!predatesCall && Number.isFinite(extractedMs) && Number.isFinite(createdMs) && createdMs < extractedMs) {
+    console.warn(`[replay] call ${call?.id}: a customer row was created within ${LOOKUP_MARGIN_MS / 60000} min of the stored extraction; whether that pass saw it is unknown, no known caller is passed`);
+  }
   const priorCall = await priorCallForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }).catch(() => null);
   return {
     bookableServiceNames: (Array.isArray(bookableServices) ? bookableServices : []).map((svc) => svc?.name).filter(Boolean),
