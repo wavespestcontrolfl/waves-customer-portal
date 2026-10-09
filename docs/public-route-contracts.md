@@ -2547,6 +2547,15 @@ for a visit completed or first rendered while the gate is live (the paragraph's 
 gain a `categories` list); every older frozen entry replays unchanged. The lawn PDF
 signature carries `:copyfix=1` only while the gate is live, and the narrative key
 part is the `-tn0` sentinel for a lawn report.
+`GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
+payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
+`/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
+surface; tree & shrub and pest payloads never change): top-level `lawnLayout:
+{ mowingRange: { minInches, maxInches, grassLabel } | null }`. `mowingRange` is the row of the
+Mowing Height table (`HEIGHT_BAND_BY_GRASS`, `turf-height.js`) for the lawn's grass (the visit's
+own reading, else the turf profile); null for a grass the table does not list. The live web page
+orders and trims the lawn report from the key (a lead is also needed); the PDF document, static
+and SMS renders ignore it, so the lawn PDF signature carries no part for this gate.
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit

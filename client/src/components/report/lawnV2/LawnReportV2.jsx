@@ -210,7 +210,7 @@ export function StatusPill({ status, small = false }) {
   );
 }
 
-function Card({ children, style }) {
+export function Card({ children, style }) {
   // data-glass is inert without html[data-glass-theme] (set unconditionally on
   // the live report view) — glass-theme.css supplies all material.
   return (
@@ -220,7 +220,7 @@ function Card({ children, style }) {
   );
 }
 
-function CardTitle({ children, sub }) {
+export function CardTitle({ children, sub }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <h2 style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: 0 }}>{children}</h2>
@@ -241,7 +241,7 @@ function inchLabel(v) {
 // The next-visit sentence the hero and the lead share: a scheduled label as-is,
 // a cadence estimate as "Expected around …", and nothing for a missing or
 // 'Invalid Date' label (an older cached payload).
-function nextVisitSentence(nextVisit) {
+export function nextVisitSentence(nextVisit) {
   const hasNextVisit = nextVisit && nextVisit.label && nextVisit.label !== 'Invalid Date';
   return hasNextVisit
     ? (nextVisit.source === 'estimated'
@@ -334,6 +334,13 @@ function shortDay(ymd) {
   return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+// "Since your last visit, Oct 2" (the prior visit's day when the lead carries it), else the bare label.
+// The lead card and the lawn layout print this one label.
+export function sinceLastLabel(sinceLast) {
+  const day = shortDay(sinceLast?.priorDate);
+  return day ? `Since your last visit, ${day}` : 'Since your last visit';
+}
+
 // ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
 // The above-the-fold block when the payload carries reportV2.lead (server:
 // lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
@@ -352,7 +359,6 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
   const visitDate = nextVisitSentence(snapshot.nextVisit);
   const nextVisit = [visitDate, lead.next].filter(Boolean).join(' — ');
   const sinceLastLines = Array.isArray(lead.sinceLast?.lines) ? lead.sinceLast.lines.filter(Boolean) : [];
-  const sinceLastDay = shortDay(lead.sinceLast?.priorDate);
   return (
     <div data-testid="lawn-lead-region">
       <Card style={{ background: TAN, ...(style || {}) }}>
@@ -374,7 +380,7 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
         {sinceLastLines.length ? (
           <div data-testid="lawn-since-last" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
             <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              {sinceLastDay ? `Since your last visit, ${sinceLastDay}` : 'Since your last visit'}
+              {sinceLastLabel(lead.sinceLast)}
             </div>
             <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>
               {sinceLastLines.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}
@@ -488,7 +494,7 @@ function ProgramDetail({ detail }) {
   );
 }
 
-function KeyLine({ label, value, dot, valueSize = 14.5 }) {
+export function KeyLine({ label, value, dot, valueSize = 14.5 }) {
   return (
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
