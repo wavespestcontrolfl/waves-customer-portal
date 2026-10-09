@@ -927,7 +927,7 @@ function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHe
 // damage" tap. That entry has no card, but adding its product IS the technician's find, so the record says
 // chinch: found, taken (the report ties it to the product in one sentence, GATE_LAWN_REPORT_FACTS). Null when
 // the guide recorded nothing. Only while the server says the report ties are live: with that gate off the record is exactly what it was.
-function guideRecordCards({ guideCards, guideChecks, rows, on, ctx }) {
+function guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap = null }) {
   const cards = (guideCards || []).map((card) => ({
     kind: card.kind,
     shown: true,
@@ -935,14 +935,18 @@ function guideRecordCards({ guideCards, guideChecks, rows, on, ctx }) {
     taken: cardOnSheet(card, on),
     productIds: card.productIds,
   }));
-  const standing = ctx.treatmentGuide && ctx.lawnReportTies ? rows.find((row) => row.guided === 'chinch') : null;
+  // The row the technician's chinch tap is about: the one the entry (or the chinch card) opened, or the product
+  // already on the sheet that he tapped "found" for. A product that is merely on the sheet is no find.
+  const standing = ctx.treatmentGuide && ctx.lawnReportTies
+    ? (rows.find((row) => row.guided === 'chinch') || (chinchTap && rows.find((row) => String(row.productId).toLowerCase() === chinchTap)) || null)
+    : null;
   if (!standing) return guideCards ? cards : null;
   const own = cards.find((card) => card.kind === 'chinch');
   const chinch = { kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: own ? own.productIds : [String(standing.productId).toLowerCase()] };
   return [...cards.filter((card) => card.kind !== 'chinch'), chinch];
 }
 
-function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {} }) {
+function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
@@ -955,7 +959,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
       productName: String(item.name || '').trim().slice(0, 180),
     }))
     .filter((item) => item.productName && UUID_RE.test(item.productId));
-  const recordCards = guideRecordCards({ guideCards, guideChecks, rows, on, ctx });
+  const recordCards = guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap });
   return {
     visitOutcome: 'completed',
     // The context's service object, every key, nulls included.
@@ -1236,6 +1240,10 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
   // The treatment guide's cards for the confirmed assessment (not one the report would reject), and
   // what the tech checked on each.
+  // The technician's tap on "Chinch bugs found at the edge of damage" (the lowercased product id), so the find is
+  // recorded even when the product was already on the sheet (it came from another card) and the tap adds no row.
+  const [chinchTap, setChinchTap] = useState(null);
+  const onChinchTap = useCallback((productId) => setChinchTap(String(productId).toLowerCase()), []);
   const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable });
   // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
   const { gov, removed: removedByGuide } = useGuideGovernance({ ctx, guide, status: guideStatus, checks: guideChecks, products });
@@ -1321,7 +1329,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks }),
+      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap }),
       [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
     );
   };
@@ -1369,7 +1377,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1439,7 +1447,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1468,7 +1476,7 @@ function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: 
       ))}
       <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
-      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} markChinch={ctx.lawnReportTies ? { tapped: chinchTap, onTap: onChinchTap } : null} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
@@ -1513,7 +1521,7 @@ function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, cat
   };
 }
 
-function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd }) {
+function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd, markChinch = null }) {
   const titleId = useId();
   const { items, weedEntry, showWeed, showChinch } = addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog });
   if (!items.length && !showWeed && !showChinch) return null;
@@ -1528,7 +1536,7 @@ function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCar
       {showWeed && (
         <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />
       )}
-      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />}
+      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} markChinch={markChinch} />}
       {items.map((item) => (
         <AddOnLine
           key={item.productId}
@@ -1689,9 +1697,25 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }
 // Any chinch bugs the tech finds are treated in any month without asking the office; the photo
 // card is seasonal, this tap is not. The server picked the product (Arena, else the bifenthrin
 // product at the Arena yearly limit) and says why; with nothing to add it is a line only.
-function ChinchFoundEntry({ chinch, catalog, on, locked, waiting = false, onAdd }) {
+// The button's states: not on the sheet (Add), on the sheet and markable while the ties are live (Found), on the sheet (✓).
+const CHINCH_BUTTON = {
+  add: { aria: 'Add chinch bug treatment', text: 'Add', disabled: false },
+  mark: { aria: 'Chinch bugs found: mark the treatment on the sheet', text: 'Found', disabled: false },
+  done: { aria: 'Chinch bug treatment is on the sheet', text: '✓', disabled: true },
+};
+
+function ChinchFoundEntry({ chinch, catalog, on, locked, waiting = false, onAdd, markChinch = null }) {
   const { item, note } = chinch;
   const onSheet = !!item && on.has(String(item.productId).toLowerCase());
+  // While the report ties are live, a product already on the sheet (it came from another card) can still be
+  // tapped "found": the tap marks it as the technician's chinch find; it adds no row. Tapped once, it reads ✓.
+  const tapped = !!item && markChinch?.tapped === String(item.productId).toLowerCase();
+  const canMark = onSheet && !!markChinch && !tapped;
+  const button = CHINCH_BUTTON[canMark ? 'mark' : (onSheet ? 'done' : 'add')];
+  const onClick = () => {
+    if (!canMark) onAdd(catalogProductFor(item, catalog), { planned: item, guided: 'chinch' });
+    if (markChinch) markChinch.onTap(item.productId);
+  };
   return (
     <div className="tech-protocol-addon">
       <span className="tech-protocol-addon-text">
@@ -1699,15 +1723,8 @@ function ChinchFoundEntry({ chinch, catalog, on, locked, waiting = false, onAdd 
         <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : [item && `${item.name}, spot treatment`, ...(item?.gateNotes || []), note].filter(Boolean).join(' · ')}</span>
       </span>
       {item && !waiting && (
-        <Button
-          type="button"
-          variant="secondary"
-          className="tech-visit-action tech-protocol-addon-add"
-          aria-label={onSheet ? 'Chinch bug treatment is on the sheet' : 'Add chinch bug treatment'}
-          disabled={locked || onSheet}
-          onClick={() => onAdd(catalogProductFor(item, catalog), { planned: item, guided: 'chinch' })}
-        >
-          {onSheet ? '✓' : 'Add'}
+        <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={button.aria} disabled={locked || button.disabled} onClick={onClick}>
+          {button.text}
         </Button>
       )}
     </div>

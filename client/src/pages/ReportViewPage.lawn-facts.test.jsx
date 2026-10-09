@@ -11,8 +11,8 @@ import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 // and a spot product says where it was used. The client renders what the server sends; a payload without the new
 // fields renders exactly as before.
 
-const SPRAY = 'Ready to walk on once the application has dried.';
-const GRANULAR = 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.';
+const SPRAY = 'Ready to walk on once the application has dried — your technician confirms timing.';
+const GRANULAR = 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing.';
 const PETS = 'Keep people and pets off the lawn until then.';
 
 const condition = (text = SPRAY, statusLabel = 'Once dry') => ({ rule: 'dry', text, pets: PETS, statusLabel });

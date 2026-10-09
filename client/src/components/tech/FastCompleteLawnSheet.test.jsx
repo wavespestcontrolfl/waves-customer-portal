@@ -2601,6 +2601,61 @@ describe('suggested from this lawn', () => {
       expect(completeCalls()[0].body.lawnFast.treatmentGuide).toEqual({ v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA] }] });
     });
 
+    describe('the chinch product is already on the sheet (it came from the caterpillar card)', () => {
+      const cardWithArena = () => card('caterpillars', {
+        title: 'Insects: check for caterpillars', finding: 'Photos show moderate insect damage.', check: 'Check first: soap flush to bring them to the surface.',
+        detail: 'Arena 50 WDG — caterpillars', productIds: [P_ARENA], items: [ARENA_ITEM], actionLabel: 'Found them. Add it', dismissLabel: 'Nothing found',
+      });
+      const putArenaOnSheet = async (ctx) => {
+        answer([cardWithArena()]);
+        await open(ctx);
+        await analyze();
+        fireEvent.click(within(await suggested()).getByRole('button', { name: 'Found them. Add it' }));
+        fireEvent.click(within(editorFor('Arena 50 WDG')).getByRole('button', { name: '100 sq ft' }));
+      };
+      const chinchEntry = () => sentGuide().cards.filter((c) => c.kind === 'chinch');
+
+      test('product present + the technician taps "found": the chinch find is recorded, no second row is added', async () => {
+        await putArenaOnSheet(guideContext({ lawnReportTies: true }));
+        const mark = within(addons()).getByRole('button', { name: 'Chinch bugs found: mark the treatment on the sheet' });
+        expect(mark.disabled).toBe(false);
+        fireEvent.click(mark);
+        expect(screen.getAllByRole('group', { name: 'Arena 50 WDG' })).toHaveLength(1);
+        expect(within(addons()).getByRole('button', { name: 'Chinch bug treatment is on the sheet' }).disabled).toBe(true);
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        expect(chinchEntry()).toEqual([{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA] }]);
+        expect(completeCalls()[0].body.products.filter((p) => p.productId === P_ARENA)).toHaveLength(1);
+      });
+
+      test('product present, no tap: no chinch find (a product on the sheet is not a find)', async () => {
+        await putArenaOnSheet(guideContext({ lawnReportTies: true }));
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        expect(chinchEntry()).toEqual([]);
+        expect(sentGuide().cards.map((c) => c.kind)).toEqual(['caterpillars']);
+      });
+
+      test('the report ties not live (key absent): no Found button, the entry only shows the checkmark, and the request is as before', async () => {
+        await putArenaOnSheet(guideContext());
+        expect(within(addons()).queryByRole('button', { name: 'Chinch bugs found: mark the treatment on the sheet' })).toBeNull();
+        expect(within(addons()).getByRole('button', { name: 'Chinch bug treatment is on the sheet' }).disabled).toBe(true);
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        expect(chinchEntry()).toEqual([]);
+        expect(sentGuide().cards.map((c) => c.kind)).toEqual(['caterpillars']);
+      });
+
+      test('a tap and then removing the product records no find (nothing was treated)', async () => {
+        await putArenaOnSheet(guideContext({ lawnReportTies: true }));
+        fireEvent.click(within(addons()).getByRole('button', { name: 'Chinch bugs found: mark the treatment on the sheet' }));
+        fireEvent.click(within(editorFor('Arena 50 WDG')).getByRole('button', { name: 'Remove' }));
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        expect(chinchEntry()).toEqual([]);
+      });
+    });
+
     test('not tapped: the record has no chinch entry', async () => {
       answer([]);
       await open(guideContext({ lawnReportTies: true }));

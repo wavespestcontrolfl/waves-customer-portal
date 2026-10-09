@@ -316,7 +316,7 @@ describe('the customer wording is fixed and chosen by code', () => {
   test('spray only', () => {
     expect(facts.reentryCondition(dry)).toEqual({
       rule: 'dry',
-      text: 'Ready to walk on once the application has dried.',
+      text: 'Ready to walk on once the application has dried — your technician confirms timing.',
       pets: 'Keep people and pets off the lawn until then.',
       statusLabel: 'Once dry',
     });
@@ -325,16 +325,40 @@ describe('the customer wording is fixed and chosen by code', () => {
   test('granular or mixed', () => {
     expect(facts.reentryCondition(wet)).toEqual({
       rule: 'watered_in_and_dry',
-      text: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.',
+      text: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing.',
       pets: 'Keep people and pets off the lawn until then.',
       statusLabel: 'After watering in',
     });
   });
 
+  test('both rules carry the approved technician-confirmation clause, once, word for word (AGENTS.md re-entry idiom), and no "safe"', () => {
+    const { REENTRY_SAFE_COPY } = require('../services/social-media');
+    // The reused clause is the tail of the approved idiom the printed record already uses.
+    expect(REENTRY_SAFE_COPY).toBe('Ready once dry — your technician confirms timing.');
+    for (const r of [dry, wet]) {
+      const c = facts.reentryCondition(r);
+      expect(c.text.endsWith(' — your technician confirms timing.')).toBe(true);
+      expect(c.text.split('your technician confirms timing')).toHaveLength(2);
+      expect(`${c.text} ${c.pets}`).not.toMatch(/\bsafe/i);
+    }
+  });
+
+  test('the sentences pass the customer-copy screen and the printed-record timing strip unchanged', () => {
+    const { stripFixedReentryTiming, REENTRY_SAFE_COPY } = require('../services/social-media');
+    const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
+    for (const r of [dry, wet]) {
+      const c = facts.reentryCondition(r);
+      for (const line of [c.text, c.pets]) {
+        expect(customerCopyViolations(line)).toEqual([]);
+        expect(stripFixedReentryTiming(line, REENTRY_SAFE_COPY).text).toBe(line);
+      }
+    }
+  });
+
   test('no clock time and no countdown in a condition', () => {
     for (const r of [dry, wet]) {
       const c = facts.reentryCondition(r);
-      expect(`${c.text} ${c.pets}`).not.toMatch(/\d|min|sec|\bPM\b|\bAM\b/);
+      expect(`${c.text} ${c.pets}`).not.toMatch(/\d|\bmin(ute)?s?\b|\bsec(ond)?s?\b|\bPM\b|\bAM\b/);
     }
   });
 

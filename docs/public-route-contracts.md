@@ -2512,7 +2512,7 @@ render reads only that block, never the gate. New or changed public fields, each
 record that carries the frozen block (every other record is byte-identical): (1)
 `dynamicContext.reentry.condition = { rule, text, pets, statusLabel }` with `rule` one of `dry`,
 `watered_in_and_dry`, `text` and `pets` fixed sentences chosen by code ("Ready to walk on once the
-application has dried." / "... once today's treatment has dried and, after you water it in, the grass is dry again."
+application has dried — your technician confirms timing." / "... once today's treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing."
 and "Keep people and pets off the lawn until then."), `statusLabel` a short word ("Once dry", "After watering
 in"); for such a record `dynamicContext.reentry.targets` is `[]` (no ready-at time, no countdown), and
 `customerSummary` / `petAdvisory` carry the same two sentences. A record whose rule is marked `default` (a product with no approved frozen facts or no plain until-dry label), or one an

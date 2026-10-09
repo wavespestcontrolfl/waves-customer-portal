@@ -58,9 +58,15 @@ const RULES = Object.freeze(['dry', 'watered_in_and_dry']);
 const RANK = Object.freeze({ dry: 1, watered_in_and_dry: 2 });
 const SOURCES = Object.freeze(['facts', 'default']);
 
+// AGENTS.md (customer-surface compliance): the re-entry idiom is "once dry" + the technician confirms timing. The
+// clause is the one the report already prints on its non-live / printed record, word for word:
+// REENTRY_SAFE_COPY 'Ready once dry — your technician confirms timing.' (server/services/social-media.js:2848,
+// client/src/pages/ServiceReportDocument.jsx:246, and its per-target line at :280). One fixed clause, shared by
+// both rules, and it carries no figure and no "safe".
+const TECHNICIAN_CONFIRMS = 'your technician confirms timing';
 const REENTRY_TEXT = Object.freeze({
-  dry: 'Ready to walk on once the application has dried.',
-  watered_in_and_dry: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.',
+  dry: `Ready to walk on once the application has dried — ${TECHNICIAN_CONFIRMS}.`,
+  watered_in_and_dry: `Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again — ${TECHNICIAN_CONFIRMS}.`,
 });
 const REENTRY_PETS = 'Keep people and pets off the lawn until then.';
 const REENTRY_STATUS = Object.freeze({ dry: 'Once dry', watered_in_and_dry: 'After watering in' });
@@ -507,6 +513,7 @@ module.exports = {
   FREEZE_VERSION,
   REENTRY_TEXT,
   REENTRY_PETS,
+  TECHNICIAN_CONFIRMS,
   KIND_BY_LABEL,
   PRODUCT_FOR_KIND,
   TECH_PRODUCT,
