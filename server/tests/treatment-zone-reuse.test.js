@@ -60,6 +60,8 @@ const ZONE = {
 const PINNED = { lat: 27.485, lng: -82.565, address_line1: '1 Example Ln', city: 'Sampletown', state: 'FL', zip: '34200' };
 const UNPINNED = { ...PINNED, lat: null, lng: null };
 // The source's rows as the locked recheck reads them.
+// A report-flow completion judged against ZONE (its updated_at): the proof a copy needs.
+const JUDGED_RECORD = { id: 'rec-0', structured_notes: { traceJudged: { seen: '2026-07-02T10:00:00.000Z' } } };
 const SOURCE_VISIT = { status: 'completed', customer_id: 'cust-1', scheduled_date: '2026-07-01', service_id: 'cat-1', service_type: 'Quarterly Pest Control' };
 const SOURCE_ZONE = { id: 'zone-0', scheduled_service_id: 'svc-0', updated_at: '2026-07-02T10:00:00.000Z' };
 
@@ -68,7 +70,7 @@ const SOURCE_ZONE = { id: 'zone-0', scheduled_service_id: 'svc-0', updated_at: '
 // own trace to `own`, the locked rows to `lock`, `sourceVisit` and
 // `sourceZone`.
 function makeKnex({
-  candidates = [ZONE], own = null, record = { id: 'rec-0', structured_notes: null },
+  candidates = [ZONE], own = null, record = JUDGED_RECORD,
   locations = [PINNED], lock = { property_id: 'prop-1', status: 'confirmed' },
   sourceVisit = SOURCE_VISIT, sourceZone = SOURCE_ZONE, lockedRecord = undefined, targetRow = { scheduled_date: '2026-10-01' },
 } = {}) {
@@ -505,6 +507,8 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
       ['the source visit moved to another day', { sourceVisit: { ...SOURCE_VISIT, scheduled_date: '2026-10-05' } }],
       ['the source visit\'s record is another one now', { lockedRecord: { id: 'rec-9' } }],
       ['the source visit\'s record is gone', { lockedRecord: null }],
+      ['the source visit\'s record no longer carries the judgement', { lockedRecord: { id: 'rec-0', structured_notes: {} } }],
+      ['the source visit\'s record is now judged against another trace', { lockedRecord: { id: 'rec-0', structured_notes: { traceJudged: { seen: '2026-06-01T10:00:00.000Z' } } } }],
       ['the source visit became another service', { sourceVisit: { ...SOURCE_VISIT, service_id: 'cat-9' } }],
       ['the source visit was renamed to another service', { sourceVisit: { ...SOURCE_VISIT, service_type: 'WDO Inspection' } }],
     ])('is refused with no_reusable_trace when %s', async (_label, over) => {
@@ -603,6 +607,33 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
 });
 
 // Codex security P2 r7 on #6175: one copy per visit at a time.
+// Owner 2026-10-09 ("narrow it") after Codex r12 on #6175: a source is one
+// whose report-flow completion was judged against this very trace. That is
+// asked for as proof; the reasons a report may hide a trace are not listed.
+describe('findReusableTreatmentZone: proof that the source report showed this trace', () => {
+  test.each([
+    ['a record with no judgement (the full form, an older completion)', { id: 'rec-0', structured_notes: null }],
+    ['a record with empty notes', { id: 'rec-0', structured_notes: {} }],
+    ['a record judged with no trace', { id: 'rec-0', structured_notes: { traceJudged: { seen: null } } }],
+    ['a record judged against another trace', { id: 'rec-0', structured_notes: { traceJudged: { seen: '2026-06-01T10:00:00.000Z' } } }],
+    ['a record whose judgement is not a time', { id: 'rec-0', structured_notes: { traceJudged: { seen: 'yes' } } }],
+    ['a record whose notes cannot be read', { id: 'rec-0', structured_notes: '{not json' }],
+  ])('%s gives no trace', async (_label, record) => {
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ record }) })).toBeNull();
+  });
+
+  test('a callback closed as inspection only keeps its saved trace row but gives none (Codex P1 r12)', async () => {
+    // Completed on the full form with a non-performed outcome: no judgement on the record.
+    const record = { id: 'rec-0', visit_outcome: 'inspection_only', structured_notes: { visitOutcome: 'inspection_only' } };
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ record }) })).toBeNull();
+  });
+
+  test('the judgement is read from notes stored as text too', async () => {
+    const record = { id: 'rec-0', structured_notes: JSON.stringify({ traceJudged: { seen: '2026-07-02T10:00:00.000Z' } }) };
+    expect((await findReusableTreatmentZone(VISIT, { knex: makeKnex({ record }) }))?.sourceServiceId).toBe('svc-0');
+  });
+});
+
 // Codex P2 r11 on #6175: this visit's own eligibility is asked once.
 describe('findReusableTreatmentZone: the target is judged once', () => {
   test('many candidates the source checks reject cost one target check, not one per row', async () => {

@@ -179,6 +179,10 @@ async function recheckReuseSource(conn, source) {
     ? await conn('service_records').where({ scheduled_service_id: source.serviceId }).orderBy('created_at', 'desc').first()
     : null;
   if (!sourceVisit || !zone || !record) throw noReusableTraceError();
+  // Still the completion that was judged against this very trace row.
+  let judged = false;
+  try { judged = traceJudgedAgainst(notesOf(record), zone); } catch { judged = false; }
+  if (!judged) throw noReusableTraceError();
   await recheckSourceVerdicts(conn, source, sourceVisit, record);
   const sameInstant = (a, b) => Number.isFinite(new Date(a).getTime()) && new Date(a).getTime() === new Date(b).getTime();
   const sameText = (a, b) => String(a ?? '') === String(b ?? '');
@@ -704,12 +708,31 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
   return null;
 }
 
+// Positive proof that a record's report showed this very trace (owner
+// 2026-10-09, "narrow it"; Codex r12 on #6175): the record was completed
+// through the Fast Complete report flow, which froze the trace it was judged
+// against, and that trace is this row (same updated_at). A record with no
+// such judgement (the full form, or a completion before the report flow), or
+// one judged with no trace, proves nothing: the report has several separate
+// rules that can hide a trace (a callback closed as inspection only, a
+// declined visit), and this asks for the evidence instead of listing them.
+function traceJudgedAgainst(structuredNotes, row) {
+  const judged = structuredNotes?.traceJudged;
+  if (!judged || typeof judged !== 'object' || judged.seen == null) return false;
+  const seen = new Date(judged.seen).getTime();
+  return Number.isFinite(seen) && seen === new Date(row?.updated_at).getTime();
+}
+const notesOf = (record) => (typeof record?.structured_notes === 'string'
+  ? JSON.parse(record.structured_notes || '{}')
+  : record?.structured_notes);
+
 // The source trace was one its own report could show (Codex P1 r3 on #6175):
 // the render-side verdict, read from the source visit's frozen service record
 // (its completion facts and areas, which the capture-side check never sees),
-// did not suppress it, and a report-flow record was judged against this very
-// trace (traceJudgedAllows). No record, or any error, is not shown: the copy
-// would put the trace on a report, so this fails closed.
+// did not suppress it, AND the record carries the proof that it was judged
+// against this very trace (traceJudgedAgainst; a record with no judgement is
+// not enough). No record, or any error, is not shown: the copy would put the
+// trace on a report, so this fails closed.
 async function sourceTraceWasShown(row, knex) {
   try {
     const record = await knex('service_records')
@@ -720,9 +743,8 @@ async function sourceTraceWasShown(row, knex) {
     const { resolveTraceRenderVerdict } = require('./service-report/trace-eligibility');
     const verdict = await resolveTraceRenderVerdict(record, knex);
     if (!verdict || verdict.suppressed) return null;
-    const notes = typeof record.structured_notes === 'string' ? JSON.parse(record.structured_notes || '{}') : record.structured_notes;
     // The record the verdict read, so the write can tell it is still the one.
-    return traceJudgedAllows(notes, row) ? record.id : null;
+    return traceJudgedAgainst(notesOf(record), row) ? record.id : null;
   } catch (err) {
     logger.warn(`[treatment-zone] source trace verdict failed service=${row.source_service_id}: ${err.message}`);
     return null;
