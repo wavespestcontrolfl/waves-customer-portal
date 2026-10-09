@@ -326,6 +326,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/staff-documents/:id` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/:id/pdf` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/availability` | tech-staff-documents |
+| GET | `/api/tech/staff-documents/onboarding` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/people` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/acknowledge` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/records` | tech-staff-documents |
@@ -562,6 +563,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/triage/:id/confirm-email` | admin-triage |
 | PUT | `/api/admin/triage/:id/dismiss` | admin-triage |
 | PUT | `/api/admin/triage/:id/resolve` | admin-triage |
+| POST | `/api/admin/triage/:id/save-contact-note` | admin-triage |
 | POST | `/api/admin/triage/:id/verdict` | admin-triage |
 | GET | `/api/admin/triage/auto-routed` | admin-triage |
 | POST | `/api/admin/triage/auto-routed/:callLogId/verdict` | admin-triage |

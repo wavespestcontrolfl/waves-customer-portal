@@ -143,6 +143,7 @@ export default function RescheduleDialogView({
             )}
             {showManual && (
               <AvailabilityStrip
+                bestRows
                 availability={manualAvailability}
                 currentDate={manualDate}
                 currentStart={manualTime}

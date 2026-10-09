@@ -8,7 +8,10 @@ import { EditServiceModal } from './SchedulePage';
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
 const bestTimesState = vi.hoisted(() => ({ availability: undefined }));
 vi.mock('../../components/schedule/useBestTimes', () => ({
-  useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [], availability: bestTimesState.availability }),
+  useBestTimes: (args) => {
+    bestTimesState.args = args;
+    return { bestTimes: [], picked: null, bestInRange: [], availability: bestTimesState.availability };
+  },
 }));
 const saveNotice = vi.hoisted(() => ({ shown: [] }));
 vi.mock('../../components/schedule/ScheduleSaveNotice', async (importOriginal) => ({
@@ -238,6 +241,14 @@ it('choosing Separate is the same one request with that choice', async () => {
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(body(0)).toMatchObject({ comboMove: 'separate', scheduledDate: '2035-01-03' });
+});
+
+it('the best-times rows rank for the form\'s services and carry the move choice; the server adds the shared stop', () => {
+  const dialog = openCombo();
+  expect(bestTimesState.args).toMatchObject({ bestRows: true, serviceId: 'fixture-visit', moveScope: 'together', serviceTypes: ['Pest Control'], serviceKeys: [''] });
+  setDate(dialog, '2035-01-03');
+  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
+  expect(bestTimesState.args).toMatchObject({ moveScope: 'separate', serviceTypes: ['Pest Control'] });
 });
 
 it('a technician-only change on a combo asks too (owner ruling), and the request carries the choice and the technician', async () => {
