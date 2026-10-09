@@ -115,7 +115,7 @@ import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
   RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
-  methodLabel, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -1493,6 +1493,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const [gaugeHeightIn, setGaugeHeightIn] = useState(null);
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
+  const dictating = useDictationSources(onDictationPending);
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
@@ -1578,7 +1579,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
         <CustomerContact service={service} visit={ctx.visit} request={request} />
         <TimeOnSite since={service?.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked} micInside />
           <section className="tech-visit-choice-section">
             <div className="tech-visit-section-head">
               <h3 className="tech-visit-section-title">Lawn assessment</h3>
@@ -1631,6 +1632,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               locked={locked}
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+              mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
             />
           )}
           {blog.available && (

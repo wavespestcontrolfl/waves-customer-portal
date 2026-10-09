@@ -62,7 +62,7 @@ import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
-  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
+  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
@@ -87,6 +87,10 @@ const BEES_ACTIVE = 'Blooming — bees active';
 const BEES_ACTIVE_MESSAGE = 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.';
 const NP_BLACKOUT_TEXT = 'N/P blackout — can’t apply Jun 1–Sep 30';
 
+// The server's jointMosquitoAccount flag: this account also has mosquito service
+// (the T&S protocol asks for a scale / sooty mold / mite check at every visit).
+const JOINT_MOSQUITO_NOTICE = 'This account also has mosquito service. Check for scale, sooty mold and mites; photo any find.';
+
 // The seasonal watch list (GATE_TS_WATCH_LIST). Extent values are the server's.
 const WATCH_TITLE = "This month's watch list";
 const WATCH_EXTENTS = [
@@ -95,6 +99,9 @@ const WATCH_EXTENTS = [
   { value: 'many', label: 'Many' },
 ];
 const WATCH_REFER_LINE = 'Take a photo, add a note and call the office.';
+
+// A server boolean flag: only a literal true counts.
+const flagFrom = (data, key) => data?.[key] === true;
 
 // The server's list for the visit month, or null when the gate is off (no key).
 function watchListFrom(data) {
@@ -310,7 +317,9 @@ function contextFrom(data, service) {
       .filter(Boolean)
       .map((warning) => ({ ...warning, message: warningText(warning) }))
       .filter((warning) => warning.message),
-    warningsUnavailable: data?.warningsUnavailable === true,
+    warningsUnavailable: flagFrom(data, 'warningsUnavailable'),
+    // The account reminders listed above the note: neutral text, never an alert.
+    reminders: [JOINT_MOSQUITO_NOTICE].filter(() => flagFrom(data, 'jointMosquitoAccount')),
     visitIdentity: recapVisitIdentity(data?.service),
     watchList: watchListFrom(data),
     pestCheck: objectOrNull(data?.pestCheck),
@@ -554,6 +563,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
+  const dictating = useDictationSources(onDictationPending);
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
@@ -616,7 +626,8 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
+          {ctx.reminders.map((text) => <p key={text} className="tech-visit-muted" role="status">{text}</p>)}
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked} micInside />
           <PhotosSection photos={photos} lastPhotos={ctx.lastVisitPhotos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
           {ctx.watchList && ctx.watchList.length > 0 && (
             <WatchListSection
@@ -660,6 +671,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               locked={locked}
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+              mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
             />
           )}
         </fieldset>
