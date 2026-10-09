@@ -136,7 +136,7 @@ describe('resolveMonthProducts', () => {
     // text when GATE_TREE_SHRUB_FIELD_GUIDE is off (Codex r2 #6185).
     for (const month of ['Jan', 'Feb', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Nov']) {
       const oil = protocols.tree_shrub.visits.find((v) => v.month === month).secondary.split('\n').find((l) => /^TriTek/.test(l));
-      expect(oil).toMatch(/on live scale crawlers, nymphs, mites or sooty mold only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap/);
+      expect(oil).toMatch(/on live scale crawlers, nymphs or mites only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap/);
     }
     for (const month of ['Jun', 'Jul', 'Aug', 'Sep']) {
       expect(protocols.tree_shrub.visits.find((v) => v.month === month).secondary).toMatch(/TriTek spray oil 1\.0% only, before 9 AM,/);

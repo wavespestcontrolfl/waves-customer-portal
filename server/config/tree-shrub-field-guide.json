@@ -219,11 +219,29 @@
       "apply": "Cover all plant surfaces evenly. The label sets the finished spray volume by plant size. Tank mixing with a surfactant may improve control of adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
       "rates": [
         [
+          "4.0 fl oz / 100 gal",
+          "Aphids."
+        ],
+        [
+          "8.5 fl oz / 100 gal",
+          "Mealybugs."
+        ],
+        [
           "8.5–16.5 fl oz / 100 gal",
-          "Whiteflies, mealybugs, aphids and soft scales. Use the higher rate when pressure is high."
+          "Whiteflies and soft scales. Use the higher rate when pressure is high."
         ]
       ],
       "mixes": [
+        [
+          "Aphids",
+          0.04,
+          0.04
+        ],
+        [
+          "Mealybugs",
+          0.085,
+          0.085
+        ],
         [
           "Whitefly or soft scale",
           0.085,
@@ -260,7 +278,7 @@
         ]
       ],
       "limits": [
-        "Live scale crawlers, nymphs, mites or sooty mold only. Not a routine spray.",
+        "Live scale crawlers, nymphs or mites only. Not a routine spray.",
         "Do not spray above 90°F.",
         "Do not spray within 7 days of a forecast cold snap.",
         "Do not treat moisture-stressed plants.",
@@ -473,7 +491,7 @@
         ]
       ],
       "limits": [
-        "Live scale crawlers, nymphs, mites or sooty mold only. Not a routine spray.",
+        "Live scale crawlers, nymphs or mites only. Not a routine spray.",
         "Do not spray above 90°F.",
         "Do not spray within 7 days of a forecast cold snap.",
         "Do not treat moisture-stressed plants.",

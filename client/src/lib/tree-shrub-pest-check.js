@@ -25,8 +25,8 @@ const LIVE_FINDS_ONLY = [
   { pattern: /\bconserve\b/i, label: 'Conserve' },
   { pattern: /\bmainspring\b/i, label: 'Mainspring' },
   { pattern: /\bfloramite\b/i, label: 'Floramite' },
-  // Oil moved to live-find use only (owner 2026-10-09); a sooty-mold wash is
-  // the one case with no live insect, and this stays a note, never a block.
+  // Oil moved to live-find use only (owner 2026-10-09). This stays a note,
+  // never a block.
   { pattern: /\btritek\b/i, label: 'TriTek' },
 ];
 
