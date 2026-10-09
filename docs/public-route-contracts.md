@@ -849,8 +849,8 @@ what it holds with that answer (no key = no line). The key is OMITTED when the
 gate is off, the visit is a missed visit, or the move history cannot be read. `POST /api/public/reschedule/:token`
 answers `409 { code: 'MOVE_LIMIT' }` for a date past an applied limit or a
 blocked first visit, after its idempotent replay; the client reloads.
-`find-slots` answers its existing `409` with `reason: 'move_limit'` for a
-blocked first visit.
+`find-slots` answers `409 { code: 'MOVE_LIMIT', reason: 'move_limit' }` for a
+blocked first visit, and the client reloads there too.
 
 Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
 dark, read at call time in `routes/reschedule-public.js`): `GET

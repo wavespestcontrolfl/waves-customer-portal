@@ -734,7 +734,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     }
     const limit = await loadMoveLimit(svc, elig);
     if (limit?.firstVisitBlocked) {
-      return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: 'move_limit' });
+      return res.status(409).json({ error: MOVE_LIMIT_MESSAGE, reason: 'move_limit', code: 'MOVE_LIMIT' });
     }
 
     const booking = require('./booking');

@@ -729,7 +729,8 @@ function IneligibleCard({ data }) {
 function MoveLimitNote({ moveLimit }) {
   if (!moveLimit?.lastDate && !moveLimit?.noTimeSoon) return null;
   return (
-    <div data-glass="soft" data-testid="move-limit-note" style={{ ...SOFT_NOTE, marginTop: 14 }}>
+    // 16px: these lines are guidance the customer acts on, not fine print.
+    <div data-glass="soft" data-testid="move-limit-note" style={{ ...SOFT_NOTE, fontSize: 16, lineHeight: 1.55, marginTop: 14 }}>
       {moveLimit.noTimeSoon ? (
         <div>Nothing is open in the next 7 days. If you need a sooner visit, text or call the office and we&apos;ll find a time.</div>
       ) : null}
@@ -1809,6 +1810,13 @@ export default function ScheduleFlowPage({ flow }) {
     if (signal?.aborted) throw new Error('search superseded');
     if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
       showReserviceLocationReview();
+      return { summary: null };
+    }
+    // Reschedule: a move limit applied since the page loaded (another tab's
+    // move, a gate set while the page was open). Reload, as Confirm does, so
+    // the page shows the text-or-call card and not a stale picker.
+    if (body.code === 'MOVE_LIMIT') {
+      await load();
       return { summary: null };
     }
     if (!res.ok) throw new Error(body.error || 'search failed');

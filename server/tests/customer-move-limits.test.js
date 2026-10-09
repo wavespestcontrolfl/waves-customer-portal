@@ -113,6 +113,18 @@ describe('late-move limit', () => {
     expect(retimed).toEqual({ dueDate: '2026-10-30', lastDate: '2026-11-20', firstVisitBlocked: false });
   });
 
+  test('a staff edit BETWEEN two customer moves: the history starts at the move after it', async () => {
+    // Customer: Oct 15 → Oct 22. Staff (no log row): Oct 22 → Oct 26. Customer: Oct 26 → Oct 30.
+    const rows = [move(), move({ original_date: '2026-10-26', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
+    const database = dbFor({ rows });
+    const limit = await loadMoveLimit(onOct30(), { database, now: NOW });
+    expect(limit).toEqual({ dueDate: '2026-10-26', lastDate: '2026-11-16', firstVisitBlocked: false });
+    expect(database.calls).not.toContain('scheduled_services');
+    // A staff re-time on the same date breaks the chain too.
+    const retimed = [move(), move({ original_date: '2026-10-22', original_window: '13:00-15:00', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
+    expect(customerMovesSince(retimed, onOct30())).toHaveLength(1);
+  });
+
   test('a missed-visit rebook is not a move: its new date is the due date and it uses no first-visit move', async () => {
     // The Oct 1 visit passed; the customer rebooked it on Oct 2 to Oct 15, then moved it once.
     const rows = [
@@ -257,7 +269,7 @@ describe('reschedule-public wiring', () => {
     expect(search).toMatch(/full = await buildAvailabilityForService\(svc, \{ \.\.\.range, config \}\);/);
     expect(search).toMatch(/\(\{ availability, moveLimit \} = applyMoveLimit\(limit, full, availability\)\)/);
     expect(search).toMatch(/\.\.\.\(moveLimit \? \{ moveLimit \} : \{\}\)/);
-    expect(search).toMatch(/reason: 'move_limit'/);
+    expect(search).toMatch(/reason: 'move_limit', code: 'MOVE_LIMIT'/);
     const taken = src.slice(src.indexOf('const slotTakenResponse = async () => {'));
     const body = taken.slice(0, taken.indexOf('// Anti-forgery'));
     expect(body).toMatch(/\(\{ availability: refreshed, moveLimit \} = applyMoveLimit\(limit, refreshed, refreshed\)\)/);

@@ -17,8 +17,9 @@
 // history. The history starts again when:
 //   - Waves moves the visit (a slot-changing row from any other initiator:
 //     staff, weather, dispatch, the phone or text agent);
-//   - the visit is not where the customer's last move put it (the staff edit
-//     screen writes the row with no log row);
+//   - the visit is not where the customer's last move put it, or a move does
+//     not start where the move before it ended (the staff edit screen writes
+//     the row with no log row);
 //   - the customer rebooks a MISSED visit (a rebook, not a move: that row
 //     sets the appointment, and its date is the new due date).
 //
@@ -82,6 +83,14 @@ function windowParts(value) {
   return { start: start ? start.slice(0, 5) : null, end: end ? end.slice(0, 5) : null };
 }
 
+// Same date and same start. A side with no start compares by date only.
+function sameSlot(dateA, windowA, dateB, windowB) {
+  if (dateOnly(dateA) !== dateOnly(dateB)) return false;
+  const a = windowParts(windowA).start;
+  const b = windowParts(windowB).start;
+  return !a || !b || a === b;
+}
+
 // The customer rebooked a visit whose time had passed: the shared "missed"
 // rule, asked at the moment the row was written.
 function wasMissedRebook(row) {
@@ -103,13 +112,19 @@ function customerMovesSince(rows, svc) {
     if (!slotChanged(row)) return;
     if (row.initiated_by !== SELF_SERVE_INITIATOR || wasMissedRebook(row)) from = idx + 1;
   });
-  const moves = rows.slice(from).filter((row) => row.initiated_by === SELF_SERVE_INITIATOR && slotChanged(row));
+  let moves = rows.slice(from).filter((row) => row.initiated_by === SELF_SERVE_INITIATOR && slotChanged(row));
+  // A move that does not start where the move before it ended: Waves placed
+  // the visit between them with no log row. The history starts at that move.
+  for (let i = moves.length - 1; i >= 1; i--) {
+    if (!sameSlot(moves[i - 1].new_date, moves[i - 1].new_window, moves[i].original_date, moves[i].original_window)) {
+      moves = moves.slice(i);
+      break;
+    }
+  }
   if (!moves.length) return moves;
+  // The visit is not where the last move put it: Waves placed it since.
   const last = moves[moves.length - 1];
-  const sameDate = dateOnly(last.new_date) === dateOnly(svc?.scheduled_date);
-  const lastStart = windowParts(last.new_window).start;
-  const sameStart = !lastStart || !svc?.window_start || lastStart === String(svc.window_start).slice(0, 5);
-  return sameDate && sameStart ? moves : [];
+  return sameSlot(last.new_date, last.new_window, svc?.scheduled_date, svc?.window_start) ? moves : [];
 }
 
 // Moves that count: a pick inside CORRECTION_MINUTES of the one before it is
