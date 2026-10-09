@@ -596,14 +596,14 @@ describeDb('v13 count caps through PostgreSQL', () => {
       expect((await check(f.customerId, ARENA)).blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', max: 2 })]);
     });
 
-    test('a rename after the identity is cached keeps the cap; an exact alias carries it across a restart (Celsius, stored 3)', async () => {
+    test('a rename keeps the cap, cached or after a restart (the staged row holds the product id); an exact alias carries it too (Celsius, stored 3)', async () => {
       await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED });
       const f = await twoApplications(CELSIUS);
       expect((await check(f.customerId, CELSIUS)).blocks).toHaveLength(1); // caches the identity
       await knex('products_catalog').where({ id: catalog[CELSIUS].id }).update({ name: 'Celsius (renamed)' });
       expect((await check(f.customerId, CELSIUS)).blocks).toHaveLength(1); // cached id
-      resetV13CapIdentity(); // a restart: only the alias can carry it
-      expect((await check(f.customerId, CELSIUS)).blocks).toEqual([]);
+      resetV13CapIdentity(); // a restart: the staged protocol row still names Celsius WG and holds its product id
+      expect((await check(f.customerId, CELSIUS)).blocks).toEqual([expect.objectContaining({ max: 2 })]);
       await knex('product_aliases').insert({ product_id: catalog[CELSIUS].id, alias_name: CELSIUS });
       resetV13CapIdentity();
       expect((await check(f.customerId, CELSIUS)).blocks).toEqual([expect.objectContaining({ max: 2 })]);

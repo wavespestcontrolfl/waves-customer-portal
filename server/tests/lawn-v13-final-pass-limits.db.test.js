@@ -242,5 +242,28 @@ describeDb('v13 final pass limits through PostgreSQL', () => {
         caps.resetV13CapIdentity();
       }
     });
+
+    test('a catalog rename with no alias keeps the limit: the staged protocol row holds the product id (Dylox, Velista, Artavia carry no annualMaxApps)', async () => {
+      const [protocol] = await knex('lawn_protocols').insert({ protocol_key: 'fixture_fp_rename', version: '2026.10-v13', name: 'Fixture', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
+      const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: protocol.id, month: 6, window_key: 'jun_fixture', title: 'jun', visit_type: 'fixture', production_mode: 'fixture' }).returning('*');
+      for (const name of [DYLOX, VELISTA, ARTAVIA]) {
+        await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[name].id, product_name: name, role: 'spot', application_mode: 'spot', default_in_plan: false });
+        await knex('products_catalog').where({ id: catalog[name].id }).update({ name: `${name} (renamed)` });
+      }
+      try {
+        caps.resetV13CapIdentity();
+        for (const name of [DYLOX, VELISTA, ARTAVIA]) {
+          expect((await caps.v13CapEntryFor(knex, catalog[name].id, `${name} (renamed)`)).name).toBe(name);
+        }
+        const three = await history(DYLOX, [['2026-02-01', 3, 'lb'], ['2026-03-01', 3, 'lb'], ['2026-04-01', 3, 'lb']]);
+        expect((await check(three, DYLOX)).allowed).toBe(false);
+      } finally {
+        await knex('lawn_protocol_products').del();
+        await knex('lawn_protocol_windows').del();
+        await knex('lawn_protocols').del();
+        for (const name of [DYLOX, VELISTA, ARTAVIA]) await knex('products_catalog').where({ id: catalog[name].id }).update({ name });
+        caps.resetV13CapIdentity();
+      }
+    });
   });
 });

@@ -149,8 +149,11 @@ async function resolveCapIds(database) {
     const entry = v13CountCapFor(name);
     if (productId && entry) ids.set(String(productId), entry);
   };
-  // (1) the staged protocol rows that carry the cap: their product_id is the stable identity.
-  for (const row of await read(database, (k) => k('lawn_protocol_products').whereRaw("gates->>'annualMaxApps' is not null").distinct('product_id', 'product_name'))) {
+  // (1) the staged protocol rows: their product_id is the stable identity (a row keeps its own product_name when the
+  // catalog row is renamed). The rows that carry a cap, and the rows named as a limit entry: Dylox, Velista and
+  // Artavia rows carry no gates.annualMaxApps, and a catalog rename must not drop their limit.
+  const names = V13_LIMITS.map((entry) => entry.name);
+  for (const row of await read(database, (k) => k('lawn_protocol_products').whereRaw("gates->>'annualMaxApps' is not null").orWhereIn('product_name', names).distinct('product_id', 'product_name'))) {
     add(row.product_id, row.product_name);
   }
   // (2) the exact catalog name (active rows first), (3) an exact alias.
