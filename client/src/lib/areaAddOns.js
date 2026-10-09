@@ -68,6 +68,13 @@ export function countAreaAddOns(selection) {
   return isPlainObject(selection) ? Object.keys(selection).length : 0;
 }
 
+// An estimate whose only selection is area add-ons: it prices with no home or
+// lot size (a web sweep takes no area; a tiered add-on carries its own treated
+// area), so the footprint gate lets it through.
+export function isAreaAddOnOnly(selectedServices, selection) {
+  return Array.isArray(selectedServices) && selectedServices.length === 0 && countAreaAddOns(selection) > 0;
+}
+
 // The smallest tier that holds the area, or null when the area is above the
 // largest tier.
 export function tierHolding(tiers, area) {

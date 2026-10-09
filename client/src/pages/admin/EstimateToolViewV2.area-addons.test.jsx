@@ -192,6 +192,42 @@ describe("what a checked row sends", () => {
   });
 });
 
+describe("add-on-only quotes need no property data (Codex round 5 P2)", () => {
+  it.each([
+    ["a web sweep", "Web Sweep", { key: "web_sweep", visitContext: "standalone" }],
+    ["a tiered add-on", "Fire Ant Yard Treatment", { key: "fire_ant_yard", areaSqFt: 3000, visitContext: "standalone" }],
+  ])("generates %s alone with no property lookup, home size or lot size", async (_label, name, entry) => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(box(name));
+    const body = await generate();
+    expect(window.alert).not.toHaveBeenCalled();
+    expect(body.selectedServices).toEqual([]);
+    expect(body.profile).toMatchObject({ homeSqFt: 0, lotSqFt: 0 });
+    expect(body.options.areaAddOns).toEqual([entry]);
+  });
+
+  it("still asks for a home or lot size when a footprint-priced service is selected beside the add-on", async () => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Pest Control", exact: true }));
+    fireEvent.click(box("Web Sweep"));
+    fireEvent.click(screen.getByRole("button", { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith("Enter home sq ft or lot size."));
+    expect(calculateBodies()).toHaveLength(0);
+  });
+
+  it("an unchecked add-on leaves the footprint gate as it was", async () => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(box("Web Sweep"));
+    fireEvent.click(box("Web Sweep"));
+    fireEvent.click(screen.getByRole("button", { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith("Enter home sq ft or lot size."));
+    expect(calculateBodies()).toHaveLength(0);
+  });
+});
+
 describe("same-visit choice", () => {
   it("stays selectable with no other service, shows a hint, and drops it once a service is picked", async () => {
     renderNew();

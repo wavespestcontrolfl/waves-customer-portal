@@ -50,6 +50,7 @@ import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import AreaAddOnsGroup from "../../components/admin/AreaAddOnsGroup";
 import {
   areaAddOnOption,
+  isAreaAddOnOnly,
   pickedGrass,
   areaAddOnRowLabel,
   buildKnownAreas,
@@ -4365,19 +4366,16 @@ export default function EstimateToolViewV2({
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
-      const bedBugOnly =
-        selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
-      const preSlabOnly =
-        selectedServices.length === 1 && selectedServices[0] === "PRESLAB";
-      // Bora-Care is priced from attic/raw-wood sqft or surface linear ft, not
-      // the home/lot footprint, so a Bora-Care-only quote must not be gated on it.
-      const boraCareOnly =
-        selectedServices.length === 1 && selectedServices[0] === "BORACARE";
-      // Recurring foam is priced from drill points + cadence, not home/lot size,
-      // so an operator can quote it before a property lookup (or with no sqft).
-      const foamRecurringOnly =
-        selectedServices.length === 1 && selectedServices[0] === "FOAM_RECURRING";
-      if (!bedBugOnly && !preSlabOnly && !boraCareOnly && !foamRecurringOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      // Quotes priced without the home/lot footprint, so no property data is
+      // needed: bed bug, pre-slab, Bora-Care (priced from attic/raw-wood sqft
+      // or surface linear ft), recurring foam (drill points + cadence), and
+      // area add-ons alone (a web sweep takes no area; a tiered add-on carries
+      // its own treated area), so an operator can quote them before a property
+      // lookup (or with no sqft).
+      const onlyService = (key) => selectedServices.length === 1 && selectedServices[0] === key;
+      const footprintFree = ["BEDBUG", "PRESLAB", "BORACARE", "FOAM_RECURRING"].some(onlyService)
+        || isAreaAddOnOnly(selectedServices, form.areaAddOns);
+      if (!footprintFree && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }

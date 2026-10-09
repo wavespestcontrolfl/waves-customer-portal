@@ -516,6 +516,26 @@ describe('the admin save replays the estimator request and the stored engine inp
     expect(replay.serverResult.oneTime.items.find((i) => i.service === 'area_addon')).toMatchObject({ addOnKey: 'web_sweep', price: 89 });
   });
 
+  test('an add-on-only request with no property data prices at translate, calculate and save (the estimator sends home and lot as 0)', async () => {
+    const { needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
+    const EMPTY = { homeSqFt: 0, lotSqFt: 0 };
+    const cases = [
+      [[{ key: 'web_sweep' }], [['web_sweep', 89]]],
+      [[{ key: 'fire_ant_yard', areaSqFt: 3000 }], [['fire_ant_yard', 99]]],
+      [[{ key: 'web_sweep' }, { key: 'bed_pre_emergent', areaSqFt: 1000 }], [['web_sweep', 89], ['bed_pre_emergent', 99]]],
+    ];
+    for (const [areaAddOns, expected] of cases) {
+      const options = { grassType: 'st_augustine', areaAddOns };
+      expect(needsTurfManualConfirmation(EMPTY, [], options)).toBeNull();
+      const mapped = mapV1ToLegacyShape(generateEstimate(translateV2CallToV1Input(EMPTY, [], options)));
+      expect(mapped.oneTime.items.map((r) => [r.addOnKey, r.price])).toEqual(expected);
+      expect(mapped.oneTime.specItems).toEqual([]);
+      const saved = await serverRecomputeFromEstimateData({ engineRequest: { profile: EMPTY, selectedServices: [], options } }, deps);
+      expect(saved.recomputed).toBe(true);
+      expect(saved.serverResult.oneTime.items.map((r) => [r.addOnKey, r.price])).toEqual(expected);
+    }
+  });
+
   test('gate off: the save fails closed (never the browser-priced fallback) for the request and for stored engine inputs', async () => {
     delete process.env.GATE_AREA_ADDONS;
     await expect(serverRecomputeFromEstimateData(request([{ key: 'web_sweep' }]), deps))

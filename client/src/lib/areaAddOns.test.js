@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildAreaAddOnRequest,
   buildKnownAreas,
+  isAreaAddOnOnly,
   newAddOnEntry,
   pickedGrass,
   readAreaAddOnCatalog,
@@ -113,6 +114,16 @@ describe("request and saved estimates", () => {
       h: { areaSqFt: "1000", larger: false, visitContext: "standalone", grassType: "" },
       k: { areaSqFt: "1000", larger: false, visitContext: "standalone" },
     });
+  });
+});
+
+describe("add-on-only selection", () => {
+  it("is true only with no other service and at least one add-on", () => {
+    expect(isAreaAddOnOnly([], { a: {} })).toBe(true);
+    expect(isAreaAddOnOnly([], {})).toBe(false);
+    expect(isAreaAddOnOnly([], undefined)).toBe(false);
+    expect(isAreaAddOnOnly(["PEST"], { a: {} })).toBe(false);
+    expect(isAreaAddOnOnly(undefined, { a: {} })).toBe(false);
   });
 });
 
