@@ -638,6 +638,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const ctx = await context(tablesFor());
       expect('treatmentGuide' in ctx).toBe(false);
       expect('spotTargets' in ctx).toBe(false);
+      expect('mixHelp' in ctx.plannedProducts).toBe(false);
       expect('chinch' in ctx.plannedProducts).toBe(false);
       expect(v13VisitLimits).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.arrayContaining([expect.objectContaining({ product: expect.objectContaining({ id: P_ARENA }) })]), expect.anything(), expect.anything());
     });

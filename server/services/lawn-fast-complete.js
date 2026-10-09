@@ -737,6 +737,8 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       ...weed,
       ...chinch,
       ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet)),
+      // GATE_LAWN_MIX_HELP: the amount for a full tank of each spot spray (lawn-mix-help.js; `{}` while the gate is off).
+      ...await require('./lawn-mix-help').contextBlock({ loaded, weed, chinch, month: visitMonthOf(svc), knex }),
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
       ...(featureGates.lawnTroubleAreasLive() ? { troubleSeed: troubleSeedOf({ loaded, sheet, weed, chinch }) } : {}),
     };
@@ -1204,7 +1206,8 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   }
   // GATE_LAWN_TROUBLE_AREAS: every spot row names a place, and the place the yearly limits forbid is refused
   // (lawn-trouble-areas.js preflightPlaces; null while the gate is off).
-  return require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products });
+  // GATE_LAWN_MIX_HELP: gallons sprayed become the recorded spot area first (lawn-mix-help.js), so the places are judged on it.
+  return require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products }));
 }
 
 // The visit type re-judged INSIDE the completion transaction, beside the main flow's

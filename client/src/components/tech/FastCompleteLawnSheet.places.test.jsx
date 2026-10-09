@@ -1409,3 +1409,154 @@ describe('a target on a spot fungicide or insecticide row', () => {
     expect(sent(P_BIF)).toMatchObject({ targets: [], targetFind: 'chinch' });
   });
 });
+
+// ── mix help (GATE_LAWN_MIX_HELP, owner 2026-10-09) ─────────────────────────────────────────────────────────────
+// The server does the arithmetic and sends it as words per product and tank size (plannedProducts.mixHelp); the sheet shows the chosen
+// tank's line on each spot row and on the Weed spots card, remembers the tank size on the device, and takes "Gallons sprayed" in place
+// of the area (a preview: /complete converts and records). With no mixHelp the sheet is exactly what it was.
+describe('mix help: the amount for a full tank, and gallons sprayed', () => {
+  const dose = (oz1, oz2, oz4, unit = 'fl oz', ml = 29.5735) => Object.fromEntries([[1, oz1], [2, oz2], [4, oz4]].map(([tank, amount]) => [tank, { text: `${amount.toFixed(2)} ${unit} (${(amount * ml).toFixed(1)} mL)`, coversSqft: tank * 500 }]));
+  const FUNG = { name: 'Spot Fungicide', carrierGalPer1000: 2, perTank: dose(0.5, 1, 2), per1000: '1.00 fl oz (29.6 mL)', concentration: null, note: null };
+  const LEAD = { name: 'Lead WG', carrierGalPer1000: 1, perTank: { 1: { text: '0.09 oz (2.41 g)', coversSqft: 1000 }, 2: { text: '0.17 oz (4.82 g)', coversSqft: 2000 }, 4: { text: '0.34 oz (9.64 g)', coversSqft: 4000 } }, per1000: '0.09 oz (2.41 g)', concentration: null, note: null, labelLines: [{ text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Lead WG label, Precautions, item 3' }] };
+  const CERT = { name: 'Cert Herbicide', carrierGalPer1000: 1, perTank: { 1: { text: '0.03 oz (0.79 g)', coversSqft: 1000 }, 2: { text: '0.06 oz (1.59 g)', coversSqft: 2000 }, 4: { text: '0.11 oz (3.18 g)', coversSqft: 4000 } }, per1000: '0.03 oz (0.79 g)', concentration: null, note: null };
+  const SURF = { name: 'Tank Surfactant', carrierGalPer1000: null, perTank: { 1: { text: '0.32 fl oz (9.5 mL)', coversSqft: null }, 2: { text: '0.64 fl oz (18.9 mL)', coversSqft: null }, 4: { text: '1.28 fl oz (37.9 mL)', coversSqft: null } }, per1000: null, concentration: '0.25% v/v', note: null };
+  const MIX_HELP = (rows, extra = {}) => ({ v: 1, tanks: [1, 2, 4], rows, weedOrder: null, ...extra });
+  const withHelp = (ctx, mixHelp) => ({ ...ctx, plannedProducts: { ...ctx.plannedProducts, mixHelp } });
+  const openMix = (ctx, props = {}) => openSheet({ request: makeRequest({ ctx }), props: { catalog: CAT, operatorId: 'tech-1', ...props } });
+  const WEED = () => placeContext({ weedMix: { ...LEAD_SET, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF] } });
+  const tankKey = 'waves.lawnMixTank.tech-1';
+
+  beforeEach(() => { window.localStorage.removeItem(tankKey); });
+  afterEach(() => { window.localStorage.removeItem(tankKey); });
+
+  test('a spot row shows the full-tank amount; the tank defaults to the largest, one tap changes it and the device remembers it', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const mix = screen.getByRole('group', { name: 'Mix for Spot Fungicide' });
+    expect(pressed(within(mix).getByRole('group', { name: 'Spot Fungicide tank size' }))).toEqual(['4 gal']);
+    expect(within(mix).getByText('4 gal tank: 2.00 fl oz (59.1 mL) Covers about 2,000 sq ft.')).toBeTruthy();
+    fireEvent.click(chipOf(mix, '2 gal'));
+    expect(within(mix).getByText('2 gal tank: 1.00 fl oz (29.6 mL) Covers about 1,000 sq ft.')).toBeTruthy();
+    expect(window.localStorage.getItem(tankKey)).toBe('2');
+    // The next sheet on this device starts on the last tank used.
+    cleanup();
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    expect(pressed(screen.getByRole('group', { name: 'Spot Fungicide tank size' }))).toEqual(['2 gal']);
+  });
+
+  test('a stored tank the server does not offer is ignored', async () => {
+    window.localStorage.setItem(tankKey, '3');
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    expect(pressed(screen.getByRole('group', { name: 'Spot Fungicide tank size' }))).toEqual(['4 gal']);
+  });
+
+  test('a row with no carrier on file shows the per-1,000 dose and says so; no gallons entry is offered', async () => {
+    const noCarrier = { ...FUNG, carrierGalPer1000: null, perTank: null, note: 'The carrier volume is not on file for this product, so there is no tank amount.' };
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: noCarrier })));
+    addFungicide();
+    const mix = screen.getByRole('group', { name: 'Mix for Spot Fungicide' });
+    expect(within(mix).getByText('Per 1,000 sq ft: 1.00 fl oz (29.6 mL)')).toBeTruthy();
+    expect(within(mix).getByText('The carrier volume is not on file for this product, so there is no tank amount.')).toBeTruthy();
+    expect(screen.queryByText(/Gallons sprayed/)).toBeNull();
+  });
+
+  test('gallons sprayed give the spot area (a preview), the amount is figured from it, and the body carries the gallons and the area; typing an area takes the gallons back', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '2' } });
+    expect(within(row).getByText('About 1,000 sq ft at 2 gal per 1,000 sq ft.')).toBeTruthy();
+    expect(within(row).getByText('Spot area, 1,000 sq ft')).toBeTruthy();
+    expect(within(row).getByText(/1 fl oz per 1,000 sq ft × 1,000 sq ft/)).toBeTruthy();
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 2, areaPlace: 'back' });
+  });
+
+  test('an area typed after the gallons clears the gallons (one number, one way)', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    const gallons = within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide');
+    fireEvent.change(gallons, { target: { value: '2' } });
+    typeArea(row, '100');
+    expect(gallons.value).toBe('');
+    expect(within(row).getByText('Spot area, 100 sq ft')).toBeTruthy();
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ areaValue: 100 });
+    expect(sent(P_FUNG)).not.toHaveProperty('sprayedGallons');
+  });
+
+  test('the Weed spots card lists each weed product for the tank, the surfactant, and the label lines; the mixing order only when the server lists every product', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows, { weedOrder: [P_LEAD, P_CERT, P_SURF] })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    const mix = within(card).getByRole('group', { name: 'Mix for Weed spots' });
+    expect(card.contains(mix)).toBe(true);
+    expect(within(mix).getByText('Lead WG, 4 gal tank: 0.34 oz (9.64 g) Covers about 4,000 sq ft.')).toBeTruthy();
+    expect(within(mix).getByText('Cert Herbicide, 4 gal tank: 0.11 oz (3.18 g) Covers about 4,000 sq ft.')).toBeTruthy();
+    expect(within(mix).getByText('Tank Surfactant, 4 gal tank: 1.28 fl oz (37.9 mL)')).toBeTruthy();
+    expect(within(mix).getByText('Mixing order: Lead WG, Cert Herbicide, Tank Surfactant.')).toBeTruthy();
+    expect(within(mix).getByText('Lead WG label, Precautions, item 3: Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.')).toBeTruthy();
+    fireEvent.click(chipOf(mix, '2 gal'));
+    expect(within(mix).getByText('Lead WG, 2 gal tank: 0.17 oz (4.82 g) Covers about 2,000 sq ft.')).toBeTruthy();
+    expect(within(mix).getByText('Tank Surfactant, 2 gal tank: 0.64 fl oz (18.9 mL)')).toBeTruthy();
+  });
+
+  test('no mixing order when the server does not list every product on the card', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows, { weedOrder: [P_LEAD, P_SURF] })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    expect(screen.queryByText(/Mixing order/)).toBeNull();
+  });
+
+  test('a surfactant left out in the heat shows the existing note, with no surfactant amount', async () => {
+    const left = { ...LEAD_SET, productIds: [P_LEAD, P_CERT], surfactant: { productId: P_SURF, included: false, note: 'Surfactant left out: it is 90°F or hotter.' }, tempF: 93 };
+    const ctx = placeContext({ weedMix: { ...left, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF] } });
+    await openMix(withHelp(ctx, MIX_HELP({ [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const mix = screen.getByRole('group', { name: 'Mix for Weed spots' });
+    expect(within(mix).getByText('Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
+    expect(within(mix).queryByText(/Tank Surfactant/)).toBeNull();
+  });
+
+  test('gallons on the Weed spots card give every sized weed row its area; the surfactant (no area) gets none', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows)));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    fireEvent.change(within(card).getByLabelText('Gallons sprayed (instead of the area), Weed spots'), { target: { value: '1' } });
+    expect(within(card).getByText('About 1,000 sq ft at 1 gal per 1,000 sq ft.')).toBeTruthy();
+    fireEvent.click(chipOf(screen.getByRole('group', { name: 'Weed spots place' }), 'Front'));
+    await analyzeAndComplete();
+    expect(sent(P_LEAD)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 1 });
+    expect(sent(P_CERT)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 1 });
+    expect(sent(P_SURF)).not.toHaveProperty('sprayedGallons');
+  });
+
+  test('a typed weed area clears the card\'s gallons', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows)));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    const gallons = within(card).getByLabelText('Gallons sprayed (instead of the area), Weed spots');
+    fireEvent.change(gallons, { target: { value: '1' } });
+    fireEvent.click(within(card).getByRole('button', { name: '500 sq ft' }));
+    expect(gallons.value).toBe('');
+  });
+
+  test('no mixHelp in the context (gate off, or an older server): none of it renders and the body carries no gallons', async () => {
+    await openMix(placeContext());
+    addFungicide();
+    expect(screen.queryByText('Mix for a full tank')).toBeNull();
+    expect(screen.queryByText(/Gallons sprayed/)).toBeNull();
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).not.toHaveProperty('sprayedGallons');
+  });
+});

@@ -6763,6 +6763,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
+            // GATE_LAWN_MIX_HELP: the rows whose spot area the server derived from gallons sprayed (the record says so).
+            ...require('./lawn-mix-help').sprayedGallonsFreeze(products),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
