@@ -85,6 +85,7 @@ function countHold(product) {
 function ingredientResult(ingredient, rows) {
   const lines = {};
   const holds = [];
+  // These two holds need no bed area, so they come before the bed-area check on purpose.
   uncappedResult(ingredient, rows, lines, holds);
   const capped = cappedRows(ingredient, rows);
   for (const { product } of capped) {

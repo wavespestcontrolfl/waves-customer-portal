@@ -149,6 +149,9 @@ describe('Codex r5 #6204: the count limit and products with no limit on file', (
     expect(out.lines).toEqual({ alpine: 'Alpine WSG: no yearly limit on file.' });
     expect(out.blockMessage).toBe('Alpine WSG has no yearly limit on file, so it cannot be checked. Remove it or call the office.');
     expect(evaluateNeonicCap(withZylam(0), [row('alpine', 1, 'oz', false)]).holds).toEqual([]);
+    // No bed area on file: the count limit needs no area, so a fourth Zylam application still holds.
+    const noAreaCount = withZylam(3); noAreaCount.ingredients[0].reason = 'bed_area_needed';
+    expect(evaluateNeonicCap(noAreaCount, [row('zylam', 0.2, 'fl_oz')]).holds).toEqual(['Zylam: 3 applications already made this year. The label allows 3.']);
     // No bed area on file: the product still cannot be checked, so it still holds.
     const noArea = withZylam(0); noArea.ingredients[0].reason = 'bed_area_needed';
     expect(evaluateNeonicCap(noArea, [row('alpine', 1, 'oz')]).holds).toHaveLength(1);

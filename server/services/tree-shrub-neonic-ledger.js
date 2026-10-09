@@ -12,7 +12,8 @@
  * product's yearly amount, and a year's shares add up to 1. A ledger row that cannot be sized
  * (no quantity, a unit that does not convert, an imidacloprid or dinotefuran product with no
  * strength in the config) is counted in `unsized` and named, never counted as nothing in silence.
- * No usable bed area: the cap cannot be computed, the answer says so and nothing is blocked.
+ * No usable bed area: the yearly amount cannot be computed, the answer says so and the amount check
+ * blocks nothing. The application count and the no-limit-on-file hold need no bed area and still apply.
  */
 const db = require('../models/db');
 const logger = require('./logger');
