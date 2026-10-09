@@ -7,11 +7,14 @@
 // the stamped copy back, so neither a request nor a later config edit moves a
 // saved quote. Property-derived terms (lawn sq ft, complexity minutes, the
 // maintenance and pest-pressure callback adders, the property's route density)
-// stay live and are computed from the property.
+// stay live and are computed from the property. The basis also carries the
+// market schedule (the bracket table and its two arm switches), because the
+// market price is one of the candidates for the list price: a later table
+// edit must not move a saved quote either.
 //
 // One validator serves the pricer, the replay snapshot and (the costPlusList
 // part) the admin write boundary, so a save that passes there prices.
-const { LAWN_TIERS, LAWN_PRICING_V2, GLOBAL } = require('./constants');
+const { LAWN_TIERS, LAWN_PRICING_V2, LAWN_BRACKETS, GLOBAL } = require('./constants');
 
 const BASIS_VERSION = 1;
 // [min, max, decimals (null = any), minExclusive]
@@ -24,6 +27,8 @@ const LIMITS = {
   laborRateLoaded: [0, 500, null, true],
   minutes: [0, 240, null, false],
   dollars: [0, 1000, null, false],
+  marketSqFt: [0, 1000000, null, true],
+  marketMonthly: [0, 10000, null, false],
 };
 const KNOB_RULES = {
   listMargin: 'listMargin', minimumPerVisit: 'minimumPerVisit', spotMinutesPerVisit: 'spotMinutesPerVisit',
@@ -43,6 +48,21 @@ function inLimits(v, ruleName) {
   const [min, max, decimals, minExclusive] = LIMITS[ruleName];
   if (typeof v !== 'number' || !Number.isFinite(v) || v > max || (minExclusive ? v <= min : v < min)) return false;
   return decimals === null || Math.abs(v * 10 ** decimals - Math.round(v * 10 ** decimals)) < 1e-6;
+}
+// A bracket row is [lawn sq ft, monthly per cadence...]; a track needs two
+// rows (the above-table slope reads the last two) in rising size order.
+function marketScheduleError(market) {
+  if (!isPlainObject(market) || typeof market.cadenceFreqDiscountArmed !== 'boolean' || typeof market.edgeParityFloorArmed !== 'boolean') {
+    return 'cost basis market must carry brackets and both arm switches';
+  }
+  const width = cadences().length + 1;
+  const rowOk = (row, i, rows) => Array.isArray(row) && row.length === width && inLimits(row[0], 'marketSqFt')
+    && row.slice(1).every((v) => inLimits(v, 'marketMonthly')) && (i === 0 || row[0] > rows[i - 1][0]);
+  const tracks = isPlainObject(market.brackets) ? Object.values(market.brackets) : [];
+  if (!tracks.length || tracks.some((rows) => !Array.isArray(rows) || rows.length < 2 || !rows.every(rowOk))) {
+    return 'cost basis market brackets must be rising [sq ft, monthly...] rows for each grass track';
+  }
+  return null;
 }
 const badKey = (obj, rules) => Object.keys(rules).find((k) => !inLimits(obj[k], rules[k]));
 const cadences = () => Object.values(LAWN_TIERS).map((tier) => tier.freq);
@@ -72,7 +92,7 @@ function costPlusListKnobError(cfg) {
 // The whole basis (live or a replay snapshot).
 function costPlusBasisError(basis) {
   if (!isPlainObject(basis) || basis.version !== BASIS_VERSION) return `cost basis must be an object with version ${BASIS_VERSION}`;
-  const allowed = new Set(['version', 'costPlusList', 'routeDensityMinutes', 'defaultRouteDensity', ...Object.keys(BASIS_RULES)]);
+  const allowed = new Set(['version', 'costPlusList', 'market', 'routeDensityMinutes', 'defaultRouteDensity', ...Object.keys(BASIS_RULES)]);
   const unknown = Object.keys(basis).find((k) => !allowed.has(k));
   if (unknown) return `cost basis has an unknown field: ${unknown}`;
   const bad = badKey(basis, BASIS_RULES);
@@ -82,13 +102,23 @@ function costPlusBasisError(basis) {
     return 'cost basis routeDensityMinutes must map each density to minutes from 0 to 240';
   }
   if (!(basis.defaultRouteDensity in density)) return 'cost basis defaultRouteDensity must be a key of routeDensityMinutes';
-  return costPlusListKnobError(basis.costPlusList);
+  return marketScheduleError(basis.market) ?? costPlusListKnobError(basis.costPlusList);
+}
+
+// The market schedule lookupLawnBracket prices from, read from live config.
+function liveLawnMarketSchedule() {
+  return {
+    brackets: LAWN_BRACKETS,
+    cadenceFreqDiscountArmed: LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false,
+    edgeParityFloorArmed: LAWN_PRICING_V2.edgeParityFloorArmed !== false,
+  };
 }
 
 function liveCostPlusBasis() {
   return JSON.parse(JSON.stringify({
     version: BASIS_VERSION,
     costPlusList: LAWN_PRICING_V2.costPlusList,
+    market: liveLawnMarketSchedule(),
     collectedMarginFloor: LAWN_PRICING_V2.targetCollectedMarginFloor,
     laborMinutesBase: LAWN_PRICING_V2.laborMinutesBase,
     laborMinutesPer1000Sqft: LAWN_PRICING_V2.laborMinutesPer1000Sqft,
@@ -129,4 +159,4 @@ function costPlusFloorTuning(basis, freq, property = {}) {
   };
 }
 
-module.exports = { costPlusListKnobError, costPlusBasisError, resolveLawnCostPlusBasis, costPlusFloorTuning };
+module.exports = { costPlusListKnobError, costPlusBasisError, resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule };

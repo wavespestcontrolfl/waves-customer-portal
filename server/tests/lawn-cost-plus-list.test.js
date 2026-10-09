@@ -707,3 +707,41 @@ describe('a saved cost-plus quote reports against its own margin floor', () => {
     expect(lawnLine(generateEstimate(input)).belowMarginFloor).toBe(false);
   });
 });
+
+describe('a saved cost-plus quote keeps the market schedule it was priced with', () => {
+  const { LAWN_BRACKETS } = require('../services/pricing-engine/constants');
+  const { costPlusBasisError, resolveLawnCostPlusBasis } = require('../services/pricing-engine/lawn-cost-plus-knobs');
+  let liveBrackets;
+  let liveDiscountArm;
+  beforeEach(() => {
+    liveBrackets = JSON.parse(JSON.stringify(LAWN_BRACKETS.st_augustine));
+    liveDiscountArm = LAWN_PRICING_V2.cadenceFreqDiscountArmed;
+  });
+  afterEach(() => {
+    LAWN_BRACKETS.st_augustine = liveBrackets;
+    LAWN_PRICING_V2.cadenceFreqDiscountArmed = liveDiscountArm;
+  });
+
+  test('a later bracket-table raise reprices a fresh quote, not the replayed one', () => {
+    process.env[GATE] = 'true';
+    const input = estimateInput({ lawn: lawnService() });
+    const saved = generateEstimate(input);
+    expect(lawnLine(saved).annual).toBe(693);
+    LAWN_BRACKETS.st_augustine = liveBrackets.map(([sqft]) => [sqft, 200, 200, 200]);
+    LAWN_PRICING_V2.cadenceFreqDiscountArmed = false;
+    expect(lawnLine(generateEstimate(input)).annual).toBe(2400);
+    const replayed = lawnLine(generateEstimate({ ...input, ...savedFloorReplaySignals({ result: saved }) }));
+    expect(replayed.annual).toBe(693);
+  });
+
+  test('a basis with no usable market schedule is refused', () => {
+    const { basis } = resolveLawnCostPlusBasis();
+    expect(costPlusBasisError(basis)).toBeNull();
+    const { market, ...noMarket } = basis;
+    expect(costPlusBasisError(noMarket)).toMatch(/market/);
+    expect(costPlusBasisError({ ...basis, market: { ...market, edgeParityFloorArmed: 'yes' } })).toMatch(/market/);
+    const falling = { ...market.brackets, st_augustine: [...market.brackets.st_augustine].reverse() };
+    expect(costPlusBasisError({ ...basis, market: { ...market, brackets: falling } })).toMatch(/rising/);
+    expect(() => price(4500, { ...ON, costPlusListBasis: noMarket })).toThrow(/cost basis is invalid/);
+  });
+});
