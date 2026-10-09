@@ -371,6 +371,7 @@ function selectSvc(column, value, database = db) {
       's.is_recurring',
       's.visit_id',
       's.recurring_pattern',
+      's.recurring_interval_days',
       's.recurring_parent_id',
       's.self_booking_id',
       // Office approval to move inside the notice window (owner 2026-10-06);
@@ -762,12 +763,19 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
       return res.status(503).json({ error: 'Slot search is unavailable right now. Please pick from the times below.' });
     }
     // Late-move limit: the search is a filter over what GET offers, so it
-    // drops the same days. The extra build runs only when a result is past
-    // the limit.
-    if (limit?.lastDate
-      && (availability.days || []).some((d) => apptDateStr(d.date) > limit.lastDate)
-      && await lateLimitActive(svc, limit, range, config)) {
-      availability = moveLimits.withinLimit(availability, limit.lastDate);
+    // drops the same days, decided over the whole booking range as GET does.
+    // It also returns the limit as it stands now: the search replaces the
+    // day list on the page, so the line beside it must match these days.
+    let moveLimit = null;
+    if (limit) {
+      let full = null;
+      try {
+        full = await buildAvailabilityForService(svc, { ...range, config });
+      } catch (err) {
+        logger.warn(`[reschedule-public] move-limit availability failed for ${svc.id}: ${err.message}`);
+      }
+      // No whole-range list: apply no limit (fail open) and name none.
+      if (full) ({ availability, moveLimit } = applyMoveLimit(limit, full, availability));
     }
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -775,6 +783,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const nextVisit = await loadNextVisitShift(svc, availability);
     return res.json({
       ...(nextVisit ? { nextVisit } : {}),
+      ...(moveLimit ? { moveLimit } : {}),
       summary: summarizeWindow(when, { count: slotCount, nearby: availability.nearby }),
       understood: when.understood,
       window: { date_from: when.dateFrom, date_to: when.dateTo },
@@ -919,12 +928,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       } catch (err) {
         logger.warn(`[reschedule-public] refresh availability failed for ${svc.id}: ${err.message}`);
       }
-      if (refreshed) ({ availability: refreshed } = applyMoveLimit(limit, refreshed, refreshed));
+      let moveLimit = null;
+      if (refreshed) ({ availability: refreshed, moveLimit } = applyMoveLimit(limit, refreshed, refreshed));
       const nextVisit = refreshed ? await loadNextVisitShift(svc, refreshed) : null;
       return res.status(409).json({
         error: 'That time is no longer open. Here are the latest available times.',
         code: 'SLOT_TAKEN',
         ...(nextVisit ? { nextVisit } : {}),
+        ...(moveLimit ? { moveLimit } : {}),
         availability: refreshed
           ? { slots: refreshed.slots, days: refreshed.days, nearby: refreshed.nearby, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo }
           : null,

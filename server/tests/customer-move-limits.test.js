@@ -7,7 +7,7 @@
 const limits = require('../services/scheduling/customer-move-limits');
 
 const {
-  loadMoveLimit, lateLimitApplies, withinLimit, noTimeSoon, customerMovesSince, countedMoves, moveLimitsEnabled,
+  loadMoveLimit, lateLimitApplies, withinLimit, noTimeSoon, customerMovesSince, countedMoves, moveLimitsEnabled, allowanceDays,
 } = limits;
 
 const move = (overrides = {}) => ({
@@ -18,16 +18,16 @@ const move = (overrides = {}) => ({
   ...overrides,
 });
 
-// reschedule_log rows, the newest office-sent link, and the completed-visit probe.
-function dbFor({ rows = [], officeLinkAt = null, completed = null, fail = false } = {}) {
+// reschedule_log rows and the completed-visit probe.
+function dbFor({ rows = [], completed = null, fail = false } = {}) {
   const calls = [];
   const database = (table) => {
     calls.push(table);
     if (fail) throw new Error('db down');
     const chain = {};
-    for (const m of ['where', 'whereNotNull', 'orderBy', 'max']) chain[m] = () => chain;
+    for (const m of ['where', 'orderBy']) chain[m] = () => chain;
     chain.select = async () => rows;
-    chain.first = async () => (table === 'outbox_messages' ? { at: officeLinkAt } : completed);
+    chain.first = async () => completed;
     return chain;
   };
   database.calls = calls;
@@ -35,9 +35,13 @@ function dbFor({ rows = [], officeLinkAt = null, completed = null, fail = false 
 }
 
 const visit = (overrides = {}) => ({
-  id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2026-10-15', recurring_pattern: 'quarterly', ...overrides,
+  id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2026-10-15', window_start: '09:00:00',
+  recurring_pattern: 'quarterly', recurring_interval_days: null, ...overrides,
 });
 const NOW = new Date('2026-10-05T16:00:00Z');
+// Two standing moves: Oct 15 → Oct 22 → Oct 30.
+const twoMoves = [move(), move({ original_date: '2026-10-22', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
+const onOct30 = (overrides = {}) => visit({ scheduled_date: '2026-10-30', ...overrides });
 
 beforeEach(() => { process.env.GATE_RESCHEDULE_MOVE_LIMITS = 'true'; });
 afterEach(() => { delete process.env.GATE_RESCHEDULE_MOVE_LIMITS; });
@@ -64,28 +68,36 @@ describe('gate', () => {
 
 describe('late-move limit', () => {
   test.each([
-    ['quarterly', '2026-11-05'],
-    ['bimonthly', '2026-10-29'],
-    ['every_6_weeks', '2026-10-25'],
-    ['monthly', '2026-10-22'],
-  ])('%s: the last date is the due date plus the plan allowance', async (pattern, lastDate) => {
-    const limit = await loadMoveLimit(visit({ recurring_pattern: pattern }), { database: dbFor(), now: NOW });
+    ['quarterly', null, '2026-11-05'],
+    ['bimonthly', null, '2026-10-29'],
+    ['every_6_weeks', null, '2026-10-25'],
+    ['monthly', null, '2026-10-22'],
+    ['monthly_nth_weekday', null, '2026-10-22'],
+    ['custom', 42, '2026-10-25'],
+    ['custom', 60, '2026-10-29'],
+    ['custom', 30, '2026-10-22'],
+    ['custom', 90, '2026-11-05'],
+  ])('%s (interval %s): the last date is the due date plus the plan allowance', async (pattern, interval, lastDate) => {
+    const limit = await loadMoveLimit(
+      visit({ recurring_pattern: pattern, recurring_interval_days: interval }), { database: dbFor(), now: NOW },
+    );
     expect(limit).toEqual({ dueDate: '2026-10-15', lastDate, firstVisitBlocked: false });
   });
 
-  test('a visit with no plan allowance has no last date', async () => {
-    const limit = await loadMoveLimit(visit({ recurring_pattern: null }), { database: dbFor(), now: NOW });
-    expect(limit.lastDate).toBeNull();
+  test.each([
+    [null, null], ['one_time', null], ['seasonal_feb_oct', null], ['semiannual', null], ['annual', null],
+    ['weekly', null], ['biweekly', null], ['custom', 14], ['custom', 180],
+  ])('%s (interval %s): no plan allowance, no last date', async (pattern, interval) => {
+    expect(allowanceDays({ recurring_pattern: pattern, recurring_interval_days: interval })).toBeNull();
   });
 
   test('the due date is the date before the customer\'s first move, not the date the visit is on now', async () => {
-    const rows = [move(), move({ original_date: '2026-10-22', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
-    const limit = await loadMoveLimit(visit({ scheduled_date: '2026-10-30' }), { database: dbFor({ rows, completed: { id: 'x' } }), now: NOW });
+    const limit = await loadMoveLimit(onOct30(), { database: dbFor({ rows: twoMoves, completed: { id: 'x' } }), now: NOW });
     expect(limit.dueDate).toBe('2026-10-15');
     expect(limit.lastDate).toBe('2026-11-05');
   });
 
-  test('a move by Waves starts the history again: the date Waves chose is the due date', async () => {
+  test('a logged move by Waves starts the history again: the date Waves chose is the due date', async () => {
     const rows = [
       move(),
       move({ initiated_by: 'weather_auto', original_date: '2026-10-22', new_date: '2026-10-24', created_at: '2026-10-02T14:00:00Z' }),
@@ -94,26 +106,35 @@ describe('late-move limit', () => {
     expect(limit.dueDate).toBe('2026-10-24');
   });
 
-  test('a reschedule link the office sent after the moves starts the history again', async () => {
-    const rows = [move(), move({ original_date: '2026-10-22', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
-    const limit = await loadMoveLimit(
-      visit({ scheduled_date: '2026-10-30' }),
-      { database: dbFor({ rows, officeLinkAt: '2026-10-04T12:00:00Z' }), now: NOW },
-    );
-    expect(limit).toEqual({ dueDate: '2026-10-30', lastDate: '2026-11-20', firstVisitBlocked: false });
+  test('a staff edit writes no log row: a visit that is not where the last move put it starts again', async () => {
+    const moved = await loadMoveLimit(visit({ scheduled_date: '2026-11-02' }), { database: dbFor({ rows: twoMoves }), now: NOW });
+    expect(moved).toEqual({ dueDate: '2026-11-02', lastDate: '2026-11-23', firstVisitBlocked: false });
+    const retimed = await loadMoveLimit(onOct30({ window_start: '13:00:00' }), { database: dbFor({ rows: twoMoves }), now: NOW });
+    expect(retimed).toEqual({ dueDate: '2026-10-30', lastDate: '2026-11-20', firstVisitBlocked: false });
+  });
+
+  test('a missed-visit rebook is not a move: its new date is the due date and it uses no first-visit move', async () => {
+    // The Oct 1 visit passed; the customer rebooked it on Oct 2 to Oct 15, then moved it once.
+    const rows = [
+      move({ original_date: '2026-10-01', new_date: '2026-10-15', created_at: '2026-10-02T14:00:00Z' }),
+      move({ original_date: '2026-10-15', new_date: '2026-10-22', created_at: '2026-10-04T14:00:00Z' }),
+    ];
+    const database = dbFor({ rows });
+    const limit = await loadMoveLimit(visit({ scheduled_date: '2026-10-22' }), { database, now: NOW });
+    expect(limit).toEqual({ dueDate: '2026-10-15', lastDate: '2026-11-05', firstVisitBlocked: false });
+    expect(database.calls).not.toContain('scheduled_services');
+    expect(customerMovesSince(rows, visit({ scheduled_date: '2026-10-22' }))).toHaveLength(1);
   });
 });
 
 describe('first visit: 2 online moves', () => {
-  const twoMoves = [move(), move({ original_date: '2026-10-22', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
-
   test('a customer with no completed visit is handed to the office after 2 moves', async () => {
-    const limit = await loadMoveLimit(visit({ scheduled_date: '2026-10-30' }), { database: dbFor({ rows: twoMoves }), now: NOW });
+    const limit = await loadMoveLimit(onOct30(), { database: dbFor({ rows: twoMoves }), now: NOW });
     expect(limit.firstVisitBlocked).toBe(true);
   });
 
   test('a customer with a completed visit is not', async () => {
-    const limit = await loadMoveLimit(visit({ scheduled_date: '2026-10-30' }), { database: dbFor({ rows: twoMoves, completed: { id: 'done' } }), now: NOW });
+    const limit = await loadMoveLimit(onOct30(), { database: dbFor({ rows: twoMoves, completed: { id: 'done' } }), now: NOW });
     expect(limit.firstVisitBlocked).toBe(false);
   });
 
@@ -134,12 +155,12 @@ describe('first visit: 2 online moves', () => {
 
   test('inside 15 minutes of the second move the customer can still correct it', async () => {
     const now = new Date('2026-10-03T14:10:00Z');
-    const limit = await loadMoveLimit(visit({ scheduled_date: '2026-10-30' }), { database: dbFor({ rows: twoMoves }), now });
+    const limit = await loadMoveLimit(onOct30(), { database: dbFor({ rows: twoMoves }), now });
     expect(limit.firstVisitBlocked).toBe(false);
   });
 
   test('rows that changed no date or time are not moves', () => {
-    expect(customerMovesSince([move({ new_date: '2026-10-15' })], null)).toHaveLength(0);
+    expect(customerMovesSince([move({ new_date: '2026-10-15' })], visit())).toHaveLength(0);
   });
 });
 
@@ -231,9 +252,15 @@ describe('reschedule-public wiring', () => {
     expect(commit.slice(check - 400, check)).toMatch(/limit\?\.firstVisitBlocked/);
   });
 
-  test('the search drops the same days GET drops', () => {
+  test('the search and the slot-taken refresh decide over the whole range and return the limit they applied', () => {
     const search = src.slice(src.indexOf("router.post('/:token/find-slots'"), src.indexOf("router.post('/:token', commitLimiter"));
-    expect(search).toMatch(/await lateLimitActive\(svc, limit, range, config\)\) \{\s*availability = moveLimits\.withinLimit\(availability, limit\.lastDate\);/);
+    expect(search).toMatch(/full = await buildAvailabilityForService\(svc, \{ \.\.\.range, config \}\);/);
+    expect(search).toMatch(/\(\{ availability, moveLimit \} = applyMoveLimit\(limit, full, availability\)\)/);
+    expect(search).toMatch(/\.\.\.\(moveLimit \? \{ moveLimit \} : \{\}\)/);
     expect(search).toMatch(/reason: 'move_limit'/);
+    const taken = src.slice(src.indexOf('const slotTakenResponse = async () => {'));
+    const body = taken.slice(0, taken.indexOf('// Anti-forgery'));
+    expect(body).toMatch(/\(\{ availability: refreshed, moveLimit \} = applyMoveLimit\(limit, refreshed, refreshed\)\)/);
+    expect(body).toMatch(/\.\.\.\(moveLimit \? \{ moveLimit \} : \{\}\)/);
   });
 });

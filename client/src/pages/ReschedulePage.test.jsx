@@ -776,6 +776,23 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByTestId('move-limit-note')).not.toBeInTheDocument();
   });
 
+  it('move limits: a slot-taken refresh that carries no limit clears the line', async () => {
+    const payload = reschedulablePayload({ moveLimit: { lastDate: '2026-07-31', noTimeSoon: false } });
+    stubFetch({
+      get: jsonResponse(payload),
+      post: jsonResponse({
+        error: 'That time is no longer open. Here are the latest available times.',
+        code: 'SLOT_TAKEN',
+        availability: payload.availability,
+      }, 409),
+    });
+    renderPage();
+    expect(await screen.findByTestId('move-limit-note')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+    await waitFor(() => expect(screen.queryByTestId('move-limit-note')).not.toBeInTheDocument());
+  });
+
   it('move limits: a first visit past its online moves shows the text-us card, not an error', async () => {
     stubFetch({ get: jsonResponse({ ...reschedulablePayload(), state: 'not_reschedulable', reason: 'move_limit', availability: null }) });
     renderPage();

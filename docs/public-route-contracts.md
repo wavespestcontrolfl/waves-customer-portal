@@ -843,8 +843,10 @@ last date offered for this visit; when it is set, `availability` holds no day
 after it, and `find-slots` drops the same days. It is null when the visit has
 no plan allowance or when fewer than 3 times would remain inside the limit
 (the limit is then not applied). `noTimeSoon` is true when no time is open in
-the next 7 days. The key is OMITTED when the gate is off, the visit is a missed
-visit, or the move history cannot be read. `POST /api/public/reschedule/:token`
+the next 7 days. `POST .../find-slots` and the commit route's `SLOT_TAKEN`
+refresh carry the same key for the list they return, and the client replaces
+what it holds with that answer (no key = no line). The key is OMITTED when the
+gate is off, the visit is a missed visit, or the move history cannot be read. `POST /api/public/reschedule/:token`
 answers `409 { code: 'MOVE_LIMIT' }` for a date past an applied limit or a
 blocked first visit, after its idempotent replay; the client reloads.
 `find-slots` answers its existing `409` with `reason: 'move_limit'` for a

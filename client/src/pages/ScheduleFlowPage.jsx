@@ -469,10 +469,11 @@ function nextVisitShiftFor(data, slotDate) {
 }
 
 // A search or a slot-taken refresh replaces the day list, and its response
-// is the server's current answer for those days: take its dates whole, and
-// name none when it sends none (the next visit stopped being movable).
+// is the server's current answer for those days: take its next-visit dates
+// and its move limit whole, and show none when it sends none (the next visit
+// stopped being movable; the limit stopped applying).
 function withNextVisit(body) {
-  return { nextVisit: body?.nextVisit || null };
+  return { nextVisit: body?.nextVisit || null, moveLimit: body?.moveLimit || null };
 }
 
 function shortDateLabel(dateStr) {

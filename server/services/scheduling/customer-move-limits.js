@@ -14,24 +14,36 @@
 //
 // The due date and the move count come from reschedule_log. The series mover
 // logs only the visit the customer moved, so the visit's rows are its own
-// history. A move by Waves (staff, weather, dispatch, the phone or text
-// agent) and a reschedule link the office sent after a call both start the
-// history again: the date Waves put the visit on is the new due date.
+// history. The history starts again when:
+//   - Waves moves the visit (a slot-changing row from any other initiator:
+//     staff, weather, dispatch, the phone or text agent);
+//   - the visit is not where the customer's last move put it (the staff edit
+//     screen writes the row with no log row);
+//   - the customer rebooks a MISSED visit (a rebook, not a move: that row
+//     sets the appointment, and its date is the new due date).
 //
-// A missed visit is being rebooked, not moved: no limit applies to it.
+// A missed visit being rebooked now has no limit.
 //
 // Fail open: an unreadable history applies no limit. A limit only hands the
 // customer to the office, so a missed limit costs less than a wrong refusal.
 
 const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { intervalDaysForPattern } = require('../recurring-appointment-seeder');
+const { visitTimeElapsed } = require('../reschedule-eligibility');
 
-const ALLOWANCE_DAYS = Object.freeze({
-  quarterly: 21,
-  bimonthly: 14,
-  every_6_weeks: 10,
-  monthly: 7,
-});
+// Allowance by the plan's nominal gap in days (intervalDaysForPattern, the
+// shared reading of a stored cadence): monthly and monthly_nth_weekday 30,
+// every_6_weeks 42, bimonthly 60, quarterly 90, and a 'custom' plan by its
+// own interval, so a 42-day custom plan gets the 6-week allowance. Shorter
+// and longer gaps (weekly, semiannual, annual), the Feb-Oct season and
+// one-time visits have no late limit: the owner ruled these four only.
+const ALLOWANCE_BY_GAP_DAYS = Object.freeze([
+  { from: 28, to: 35, days: 7 },
+  { from: 36, to: 49, days: 10 },
+  { from: 50, to: 75, days: 14 },
+  { from: 76, to: 100, days: 21 },
+]);
 const FIRST_VISIT_ONLINE_MOVES = 2;
 // A second pick inside this window corrects the first; it is one move.
 const CORRECTION_MINUTES = 15;
@@ -58,19 +70,46 @@ function slotChanged(row) {
     || String(row.original_window || '') !== String(row.new_window || '');
 }
 
-// The customer's own picker moves since Waves last placed the visit, oldest
-// first. `resetAt` is the newest Waves event (a non-customer move, or an
-// office-sent reschedule link).
-function customerMovesSince(rows, resetAt) {
-  let boundary = resetAt ? new Date(resetAt).getTime() : -Infinity;
-  for (const row of rows) {
-    if (row.initiated_by !== SELF_SERVE_INITIATOR && slotChanged(row)) {
-      boundary = Math.max(boundary, new Date(row.created_at).getTime());
-    }
-  }
-  return rows.filter((row) => row.initiated_by === SELF_SERVE_INITIATOR
-    && slotChanged(row)
-    && new Date(row.created_at).getTime() > boundary);
+function allowanceDays(svc) {
+  const gap = intervalDaysForPattern(svc.recurring_pattern || null, svc.recurring_interval_days);
+  if (!gap) return null;
+  return ALLOWANCE_BY_GAP_DAYS.find((band) => gap >= band.from && gap <= band.to)?.days || null;
+}
+
+// reschedule_log windows are '<start>-<end>' clock strings.
+function windowParts(value) {
+  const [start, end] = String(value || '').split('-');
+  return { start: start ? start.slice(0, 5) : null, end: end ? end.slice(0, 5) : null };
+}
+
+// The customer rebooked a visit whose time had passed: the shared "missed"
+// rule, asked at the moment the row was written.
+function wasMissedRebook(row) {
+  const { start, end } = windowParts(row.original_window);
+  return visitTimeElapsed(
+    { scheduled_date: dateOnly(row.original_date), window_start: start, window_end: end },
+    new Date(row.created_at),
+  );
+}
+
+// The customer's own picker moves that still stand, oldest first.
+//   - Rows up to the last Waves move, and up to and including the last
+//     missed rebook, are history that started again.
+//   - When the visit is not where the last remaining move put it, Waves
+//     placed it since with no log row: nothing stands.
+function customerMovesSince(rows, svc) {
+  let from = 0;
+  rows.forEach((row, idx) => {
+    if (!slotChanged(row)) return;
+    if (row.initiated_by !== SELF_SERVE_INITIATOR || wasMissedRebook(row)) from = idx + 1;
+  });
+  const moves = rows.slice(from).filter((row) => row.initiated_by === SELF_SERVE_INITIATOR && slotChanged(row));
+  if (!moves.length) return moves;
+  const last = moves[moves.length - 1];
+  const sameDate = dateOnly(last.new_date) === dateOnly(svc?.scheduled_date);
+  const lastStart = windowParts(last.new_window).start;
+  const sameStart = !lastStart || !svc?.window_start || lastStart === String(svc.window_start).slice(0, 5);
+  return sameDate && sameStart ? moves : [];
 }
 
 // Moves that count: a pick inside CORRECTION_MINUTES of the one before it is
@@ -97,17 +136,11 @@ async function loadMoveLimit(svc, { database, missed = false, now = new Date() }
       .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'asc')
       .select('initiated_by', 'original_date', 'new_date', 'original_window', 'new_window', 'created_at');
-    const officeLink = await database('outbox_messages')
-      .where({ related_scheduled_service_id: svc.id })
-      .whereNotNull('commitment_id')
-      .whereNotNull('sent_at')
-      .max({ at: 'sent_at' })
-      .first();
-    const moves = customerMovesSince(rows, officeLink?.at || null);
+    const moves = customerMovesSince(rows, svc);
     const dueDate = moves.length ? dateOnly(moves[0].original_date) : dateOnly(svc.scheduled_date);
     if (!dueDate) return null;
 
-    const allowance = ALLOWANCE_DAYS[String(svc.recurring_pattern || '')] || null;
+    const allowance = allowanceDays(svc);
     const lastDate = allowance ? addDays(dueDate, allowance) : null;
 
     let firstVisitBlocked = false;
@@ -167,7 +200,8 @@ function noTimeSoon(availability, now = new Date()) {
 }
 
 module.exports = {
-  ALLOWANCE_DAYS,
+  ALLOWANCE_BY_GAP_DAYS,
+  allowanceDays,
   FIRST_VISIT_ONLINE_MOVES,
   CORRECTION_MINUTES,
   MIN_CHOICES,
