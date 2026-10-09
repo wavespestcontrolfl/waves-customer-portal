@@ -50,6 +50,9 @@ function writerConfigFor(brief) {
 }
 
 async function writingPack(opportunityId) {
+  // The kill switch covers the pack too: with the gate off the agent drafts,
+  // and a draft written from a leftover waiting row would never be read.
+  if (!tw.terminalWriterLive()) throw new Error('the terminal writer gate is off: no row waits for a terminal draft');
   const { due, written } = await tw.awaitingTerminalDrafts();
   const row = [...due, ...written].find((r) => r.opportunity_id === opportunityId);
   if (!row) throw new Error('that row does not wait for a terminal draft');
