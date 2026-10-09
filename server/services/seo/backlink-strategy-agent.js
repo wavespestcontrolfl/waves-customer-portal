@@ -15,7 +15,8 @@ const db = require('../../models/db');
 const { executeBacklinkTool } = require('./backlink-strategy-tools');
 const { BACKLINK_STRATEGY_AGENT_CONFIG } = require('./backlink-strategy-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
-const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
+const { isSessionTerminal, isSessionError, isBudgetReached } = require('../agent-control/session-events');
+const { sessionBudget } = require('../agent-control/session-guard');
 const { readSessionFrames } = require('../agent-control/session-stream');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -28,7 +29,7 @@ const BETA_HEADER = 'managed-agents-2026-04-01';
 const REQUIRED_TOOL_NAMES = ['list_prospects', 'create_link_prospects'];
 
 function buildSessionCreateBody(agentId, environmentId) {
-  return { agent: agentId, environment_id: environmentId };
+  return { agent: agentId, environment_id: environmentId, ...sessionBudget('agent_backlink') };
 }
 
 function buildUserMessageEvent(text) {
@@ -299,6 +300,12 @@ const BacklinkStrategyAgent = {
 
         if (isSessionTerminal(event, data)) {
           sessionEnded = true;
+          break;
+        }
+
+        if (isBudgetReached(data)) {
+          logger.error(`[backlink-strategy] Session ${sessionId} reached its spend cap`);
+          failure = 'budget_exhausted';
           break;
         }
 

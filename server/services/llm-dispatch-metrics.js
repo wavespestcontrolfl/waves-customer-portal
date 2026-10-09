@@ -650,6 +650,10 @@ async function upsertSessionRow(trx, row, turnKey) {
  * the session id (provider_ref) resolves it in the Console.
  */
 async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null } = {}) {
+  // Every runner exit passes through here, so this is the one place a session
+  // its runner gave up on is told to stop (GATE_AGENT_SESSION_GUARD; never
+  // throws). Before the usage GET, and independent of the ledger gate.
+  await require('./agent-control/session-guard').stopAbandonedSession(sessionId, failure);
   try {
     if (!ledgerEnabled() || !sessionId) return null;
     const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;

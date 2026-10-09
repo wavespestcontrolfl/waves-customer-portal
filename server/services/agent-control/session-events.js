@@ -24,8 +24,14 @@ function isSessionTerminal(event, data) {
   return TERMINAL_EVENTS.has(event) || stopReasonOf(data) === 'end_turn';
 }
 
+// The session reached its spend cap and paused (session-guard.js sessionBudget).
+// Not an end: no event resumes it, so a runner files it as `budget_exhausted`.
+function isBudgetReached(data) {
+  return stopReasonOf(data) === 'budget_reached';
+}
+
 function isSessionError(event) {
   return ERROR_EVENTS.has(event);
 }
 
-module.exports = { stopReasonOf, isSessionTerminal, isSessionError };
+module.exports = { stopReasonOf, isSessionTerminal, isSessionError, isBudgetReached };

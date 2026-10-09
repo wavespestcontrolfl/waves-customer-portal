@@ -20,7 +20,8 @@
  */
 
 const logger = require('../../logger');
-const { isSessionTerminal, isSessionError } = require('../../agent-control/session-events');
+const { isSessionTerminal, isSessionError, isBudgetReached } = require('../../agent-control/session-events');
+const { sessionBudget } = require('../../agent-control/session-guard');
 const { readSessionFrames } = require('../../agent-control/session-stream');
 const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint, registerSessionEditorial } = require('./brief-driven-tools');
 const { recordSessionUsage } = require('../../llm-dispatch-metrics');
@@ -205,6 +206,7 @@ class AgentDispatcher {
         agent: route.agent_id,
         environment_id: CONTENT_AGENT_ENVIRONMENT_ID,
         metadata: { source: 'autonomous-content-engine', opportunity_id: brief.opportunity_id },
+        ...sessionBudget(route.role === 'meta' ? 'agent_meta' : 'agent_content'),
       });
     } catch (err) {
       return { ok: false, reason: `session_create_failed: ${err.message}`, agent_id: route.agent_id };
@@ -383,6 +385,7 @@ class AgentDispatcher {
         // agent_did_not_emit_draft even though the agent was about to
         // continue. Only end_turn (handled below) is the real terminal.
         if (isSessionTerminal(event, data)) return;
+        if (isBudgetReached(data)) throw Object.assign(new Error(`session ${sessionId} reached its spend cap`), { code: 'budget_exhausted' });
         if (isSessionError(event)) {
           // Don't mask infrastructure failures as a content-quality
           // outcome — throw so runWithBrief surfaces streaming_failed
