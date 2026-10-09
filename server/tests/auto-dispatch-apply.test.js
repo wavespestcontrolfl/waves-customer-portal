@@ -439,6 +439,23 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
         .rejects.toMatchObject({ statusCode: 409 });
       expect(locked).toEqual([['scheduled_services', [UUID1]], ['job_applications', ['a1']]]);
       expect(blackoutDates.lockClosureState).toHaveBeenCalledWith(lockTrx);
+      // The re-read names a DIFFERENT stop than the one fenced: that stop is
+      // fenced too and the conflict is read again before the move goes on
+      // (pre-push P1). Gone on the second read = refuse.
+      const UUID2 = '22222222-2222-4222-8222-222222222222';
+      const other = { kind: 'overlap', date: '2026-12-07', with: [UUID2] };
+      locked.length = 0;
+      read.mockClear();
+      read.mockResolvedValueOnce(other).mockResolvedValueOnce(other);
+      // lockTrx only models the fence, so the guard stops at its next check;
+      // what matters is that it got past the conflict read.
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.not.toMatchObject({ statusCode: 409 });
+      expect(locked.slice(0, 2)).toEqual([['scheduled_services', [UUID1]], ['scheduled_services', [UUID2]]]);
+      expect(read).toHaveBeenCalledTimes(2);
+      read.mockResolvedValueOnce(other).mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
       // A grouped move runs the guard for each member in turn. The conflict
       // is read once, before the first member moves: afterwards the rest of
       // the unit no longer overlaps, and must still be allowed to follow.

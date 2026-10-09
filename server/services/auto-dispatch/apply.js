@@ -297,11 +297,28 @@ async function fenceSourceConflict(trx, sourceConflict) {
 // (pre-push P1). `check.held` carries the first answer to the later members.
 async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, check) {
   if (!sourceConflict || check.held) return;
-  await fenceSourceConflict(trx, sourceConflict);
   const { _internals: { readCurrentConflict } } = require('./candidate-slots');
-  const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
-  if (!still) throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
-  check.held = true;
+  // Fence, then re-read. The re-read may name a DIFFERENT conflict than the
+  // one fenced (the first stop left and another now overlaps): that one is
+  // not held yet, so fence it and read once more. A conflict that is gone,
+  // or still not the fenced one after the second read, refuses the move.
+  let fenced = sourceConflict;
+  for (let round = 0; round < 2; round += 1) {
+    await fenceSourceConflict(trx, fenced);
+    const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
+    if (!still) break;
+    if (coveredBy(still, fenced)) { check.held = true; return; }
+    fenced = still;
+  }
+  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
+}
+
+// Every row the re-read conflict rests on is already held by the fence.
+function coveredBy(still, fenced) {
+  if (still.kind !== fenced.kind) return false;
+  if (still.kind === 'closed_day') return true;
+  const held = new Set((fenced.with || []).map(String));
+  return (still.with || []).every((id) => held.has(String(id)));
 }
 
 function makeMoveGuard({ service, best, config = {} }) {
