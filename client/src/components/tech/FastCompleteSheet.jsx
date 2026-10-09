@@ -967,6 +967,8 @@ function writerPayload({ service, visit, form, rows, facts, sweptEaves, ratingAl
     // The full form's own writer field, sent as it sends it: the sweep heard in
     // the note (owner 2026-10-08), or an empty list.
     actionsCompleted: pestSweepActions(sweptEaves),
+    // The chip tapped off: the tech's word over the note for the writer too.
+    ...(form.sweepPick === false ? { sweepNotDone: true } : {}),
     // The first-visit 5 is a scoring default, not something the technician
     // saw: the writer gets a rating only once they choose one (codex local
     // r28 on #5538), as the completion recap leaves the default out.

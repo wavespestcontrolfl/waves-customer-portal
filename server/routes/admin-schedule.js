@@ -25697,6 +25697,12 @@ function buildTypedFindingsPromptBlock({
 }
 
 // POST /api/admin/schedule/generate-report — AI customer-facing service report copy
+// The sweep chip's correction for the report writer (owner 2026-10-08): the
+// technician's tap stands over the note, so a note that says "swept the eaves"
+// is not completed-work evidence for the sweep. Added only when the sheet says
+// so; every other request's prompt is as it was.
+const SWEEP_NOT_DONE_LINE = 'Technician correction: the eaves and webs were NOT swept on this visit. Do not say that eaves, webs or cobwebs were swept, brushed, knocked down or removed, whatever the note says.';
+
 router.post('/generate-report', async (req, res) => {
   try {
     const crypto = require('crypto');
@@ -25715,6 +25721,9 @@ router.post('/generate-report', async (req, res) => {
       // "Write again" (Fast Complete): a fresh draft for the same inputs, so
       // the cached one is not read back. The new draft still replaces it.
       fresh,
+      // The Fast Complete sweep chip (owner 2026-10-08): an exact true means
+      // the technician tapped the sweep OFF, over whatever the note says.
+      sweepNotDone,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -26652,7 +26661,7 @@ Arrival Time: ${arrivalTime || 'Not specified'}
 ${writerRulesOn
     ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
 ${writerRulesOn
     ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)

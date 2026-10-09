@@ -613,6 +613,9 @@ describe('the swept eaves and webs, read from the note', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
     await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
     expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([]);
+    // The writer is told so in so many words, over whatever the note says.
+    expect(request.bodies('/generate-report')[1].sweepNotDone).toBe(true);
+    expect(request.bodies('/generate-report')[0]).not.toHaveProperty('sweepNotDone');
     // The read still says swept; the tech's word stands.
     expect(sweepOff()).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
@@ -631,6 +634,7 @@ describe('the swept eaves and webs, read from the note', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
     await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
     expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([SWEEP_LABEL]);
+    expect(request.bodies('/generate-report')[1]).not.toHaveProperty('sweepNotDone');
     fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');
