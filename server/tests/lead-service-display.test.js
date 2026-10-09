@@ -14,7 +14,8 @@ const catalogNames = catalogNameIndex([
   'Cockroach Treatment Service', 'Monthly Lawn Care Service', 'One-Time Lawn Care Service',
   'WDO Inspection Service', 'Bee / Wasp Nest Removal Service', 'Flea Control Service',
   'Termite Inspection Service', 'Termite Monitoring Service', 'Rodent Trapping Service',
-  'Quarterly Rodent Bait Station Service', 'Waves Assessment',
+  'Quarterly Rodent Bait Station Service', 'Waves Assessment', 'Semiannual Pest Control Service',
+  'Every 6 Weeks Lawn Care Service',
 ]);
 const name = (text) => leadServiceDisplay(text, { catalogNames });
 
@@ -60,6 +61,8 @@ describe('leadServiceDisplay', () => {
     ['One-Time Cockroach Control', 'Cockroach Treatment Service'],
     ['One-Time Spider & Wasp Control', 'One-Time Pest Control Service'],
     ['One-Time Tree & Shrub Care', 'One-Time Tree & Shrub Care Service'],
+    ['One-Time Termite Inspection', 'Termite Inspection Service'],
+    ['One-Time Pest Control + Termite Inspection', 'One-Time Pest Control Service + Termite Inspection Service'],
     ['Waves Assessment + One-Time Pest Control', 'One-Time Pest Control Service'],
     ['One-Time Pest Control + Lawn Care', 'One-Time Pest Control Service + One-Time Lawn Care Service'],
   ])('a one-time request is never an assessment: %s → %s', (text, expected) => {
@@ -82,6 +85,9 @@ describe('leadServiceDisplay', () => {
     ['Monthly pest control for ants', 'Monthly Pest Control Service'],
     ['Bi-monthly lawn care', 'Monthly Lawn Care Service'], // no bi-monthly row in this catalog
     ['Quarterly Pest Control Service + monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
+    ['Pest control twice a year', 'Semiannual Pest Control Service'],
+    ['Lawn care every six weeks', 'Every 6 Weeks Lawn Care Service'],
+    ['Pest control every two months', 'Quarterly Pest Control Service'], // no bi-monthly row in this catalog
     ['Recurring Pest Control', 'Quarterly Pest Control Service'],
   ])('a stated cadence is kept when the catalog has that service: %s → %s', (text, expected) => {
     expect(name(text)).toBe(expected);

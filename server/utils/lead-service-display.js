@@ -28,7 +28,7 @@ const ASSESSMENT = 'Waves Assessment';
 const TOPICS = [
   { key: 'wdo', short: 'WDO', fixed: 'WDO Inspection Service', re: /\bwdo\b|\bwood[\s-]?destroying\b/i },
   { key: 'pre_slab', short: 'Termite', fixed: 'Slab Pre-Treat Termite Service', re: /\bpre[-\s]?(?:slab|pour|construction)\b|\bpreslab\b|\bsoil\s+treatment\b/i },
-  { key: 'termite_inspection', short: 'Termite', re: /\btermite\s+inspection\b/i },
+  { key: 'termite_inspection', short: 'Termite', oneTime: 'Termite Inspection Service', re: /\btermite\s+inspection\b/i },
   { key: 'wood_treatment', short: 'Termite', fixed: 'Bora-Care Wood Treatment Service', re: /\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i },
   { key: 'termite', short: 'Termite', recurring: 'Termite Bait Station Service', oneTime: 'Termite Liquid Treatment Service', re: /\btermit/i },
   { key: 'bed_bug', short: 'Bed Bug', fixed: 'Bed Bug Treatment Service', re: /\bbed[\s-]*bugs?\b|\bbedbugs?\b/i },
@@ -103,7 +103,7 @@ function catalogNameIndex(names) {
 
 function classify(part, catalogNames) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
-  const frequency = RECURRING_RE.test(part) ? 'recurring' : ONE_TIME_RE.test(part) ? 'one_time' : null;
+  const frequency = statesRecurring(part) ? 'recurring' : ONE_TIME_RE.test(part) ? 'one_time' : null;
   const catalogName = catalogMatch(part, catalogNames);
   const topics = topicsFor(part);
   if (catalogName) return { kind: 'catalog', name: catalogName, frequency, topic: topics[0] || null };
@@ -126,6 +126,12 @@ const CADENCES = [
   ['Semiannual', /\bsemi[-\s]?annual(?:ly)?\b|\btwice\s+a\s+year\b/i],
 ];
 const CADENCE_PREFIX_RE = new RegExp(`^(?:${CADENCES.map(([word]) => word).join('|')}) `);
+
+// Every cadence the naming step understands also counts as a recurring
+// request, so the two can never disagree.
+function statesRecurring(text) {
+  return RECURRING_RE.test(text) || CADENCES.some(([, re]) => re.test(text));
+}
 
 // The topic's recurring service at the stated cadence when the catalog has
 // that row ("Monthly pest control" → Monthly Pest Control Service); the
@@ -154,8 +160,11 @@ function placePart(part, plan, name, toAssessment) {
     for (const topic of part.topics) {
       if (part.assess && !plan.oneTime) toAssessment(topic.short);
       else if (topic.fixed) name(topic.fixed);
+      // The one-time branch never reaches toAssessment: a one-time request
+      // is never an assessment.
+      else if (plan.oneTime) name(topic.oneTime || part.text);
       else if (plan.assess || !topic.recurring) toAssessment(topic.short);
-      else name(plan.recurring ? recurringName(topic, part.text, plan.catalogNames) : topic.oneTime);
+      else name(recurringName(topic, part.text, plan.catalogNames));
     }
   }
 }
