@@ -18,7 +18,8 @@
  * the engine does not know can never be offered or stored. Technician surface and the record only: the customer sentences are the
  * existing approved ones (the expectations rows, the product card's purpose line).
  *
- * Fail closed: when the staged sets cannot be read nothing is stored.
+ * Fail closed: when the staged sets cannot be read nothing is stored. All of it is behind GATE_LAWN_SPOT_TARGET (dark; live only
+ * while the treatment guide is): with the gate off nothing here is read and the completion stores the row's own tags as before.
  */
 const logger = require('./logger');
 const { TARGET_CLASS_BY_NAME, FAMILY } = require('../config/lawn-expectations');
@@ -58,6 +59,9 @@ function targetsFor({ category, type, requested }) {
   return typeOfTarget(name) === type ? [name] : [];
 }
 
+/** `{ spotTargets }` for the context while GATE_LAWN_SPOT_TARGET is live, else `{}` (no key at all). */
+const contextKey = (live = () => require('../config/feature-gates').lawnSpotTargetLive()) => (live() ? { spotTargets: contextBlock() } : {});
+
 /**
  * The context block the sheet reads (technician surface): the closed lists and the two names the server ties to a type.
  * `{ v: 1, fungicide: [...], insecticide: [...], chinch, takeAll }`.
@@ -71,12 +75,12 @@ const ownTags = (row) => (Array.isArray(row?.targets) ? row.targets : []);
 
 /**
  * The stored targets for a completion's rows: `{ of(row) }`, where `of` answers the tags a row is stored with. For a spot fungicide
- * or insecticide row of a Lawn Fast Complete completion (a `lawnFast` block, the treatment guide live) that is the server's verdict
+ * or insecticide row of a Lawn Fast Complete completion (a `lawnFast` block, GATE_LAWN_SPOT_TARGET live) that is the server's verdict
  * (`[]` or `[name]`); for every other row it is the row's own tags, exactly as before. The staged sets are read once, only when a
  * candidate row exists. The sheet's `troubleType` / `targetFind` are hints: the server's `confirm()` sets decide (troubleTypeFor).
  * `catalog` is the completion's catalog map, `canonicalId` and `inferMethod` the completion's own functions.
  */
-async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, inferMethod, serviceLine, confirm, live = () => require('../config/feature-gates').lawnTreatmentGuideLive() }) {
+async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, inferMethod, serviceLine, confirm, live = () => require('../config/feature-gates').lawnSpotTargetLive() }) {
   const verdict = new Map();
   const result = { of: (row) => verdict.get(lowerId(row?.productId)) || ownTags(row) };
   if (lawnFast == null || !live()) return result;
@@ -110,5 +114,6 @@ module.exports = {
   typeOfTarget,
   targetsFor,
   contextBlock,
+  contextKey,
   resolveForCompletion,
 };
