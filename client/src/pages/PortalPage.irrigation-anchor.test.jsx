@@ -51,6 +51,35 @@ describe('the portal Irrigation section is the target of the report button', () 
     expect(scrolled[0].options).toMatchObject({ block: 'start' });
   });
 
+  it('stops below the sticky portal chrome: the section carries a scroll margin, measured from the header and the tab nav', async () => {
+    window.history.replaceState(null, '', '/?tab=property#irrigation');
+    // a phone header (sticky at 0, 64 high) and, on desktop, the tab nav stuck at 64 (56 high)
+    const chrome = (top, height) => {
+      const el = document.createElement('div');
+      el.setAttribute('data-portal-sticky', '');
+      el.style.position = 'sticky';
+      el.style.top = `${top}px`;
+      el.getBoundingClientRect = () => ({ top: 0, bottom: height, height, left: 0, right: 0, width: 0 });
+      document.body.appendChild(el);
+      return el;
+    };
+    const header = chrome(0, 64);
+    const nav = chrome(64, 56);
+    render(<PropertyTab customer={lawnCustomer} />);
+    const target = await irrigationSection();
+    await waitFor(() => expect(scrolled.some((entry) => entry.id === 'irrigation')).toBe(true));
+    expect(target.style.scrollMarginTop).toBe('132px'); // 64 + 56 of chrome + 12 gap: the heading is visible
+    header.remove();
+    nav.remove();
+  });
+
+  it('with nothing measurable the section still carries the portal\'s standard 90px margin (as the watering plan card does)', async () => {
+    window.history.replaceState(null, '', '/?tab=property');
+    render(<PropertyTab customer={lawnCustomer} />);
+    const target = await irrigationSection();
+    expect(target.style.scrollMarginTop).toBe('calc(90px + env(safe-area-inset-top, 0px))');
+  });
+
   it('scrolls nothing on a plain /?tab=property visit, and no other section is scrolled to', async () => {
     window.history.replaceState(null, '', '/?tab=property');
     render(<PropertyTab customer={lawnCustomer} />);

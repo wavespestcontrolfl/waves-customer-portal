@@ -7662,14 +7662,30 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 // Arriving at /?tab=property#<id> (the lawn report's "Add your weekly inches" button points at #irrigation) brings that
 // section into view. The sections mount only after the tab's data has loaded, so the first scroll happens on mount;
 // the cards above load a little later (the weekly plan), so one more scroll follows only if the section moved away.
+// The portal's header (and on desktop the tab nav) is sticky, so the section stops BELOW them: the margin is the sticky
+// chrome's measured height (elements marked data-portal-sticky: their sticky top plus their height) plus a gap, with the
+// same 90px fallback the weekly watering plan card uses when nothing can be measured.
+const SECTION_SCROLL_GAP = 12;
+const SECTION_SCROLL_FALLBACK = 'calc(90px + env(safe-area-inset-top, 0px))';
+function stickyChromeHeight() {
+  return Math.max(0, ...[...document.querySelectorAll('[data-portal-sticky]')].map((el) => (parseFloat(window.getComputedStyle(el).top) || 0) + el.getBoundingClientRect().height));
+}
 function useScrollToHashSection(id) {
   useEffect(() => {
     if (!id || typeof window === 'undefined' || window.location.hash !== `#${id}`) return undefined;
-    const scroll = () => document.getElementById(id)?.scrollIntoView?.({ behavior: 'auto', block: 'start' });
-    scroll();
+    const scroll = () => {
+      const el = document.getElementById(id);
+      if (!el) return 0;
+      const chrome = stickyChromeHeight();
+      const margin = chrome > 0 ? chrome + SECTION_SCROLL_GAP : 0;
+      el.style.scrollMarginTop = margin > 0 ? `${margin}px` : SECTION_SCROLL_FALLBACK;
+      el.scrollIntoView?.({ behavior: 'auto', block: 'start' });
+      return margin || 90;
+    };
+    const expected = scroll();
     const timer = setTimeout(() => {
       const top = document.getElementById(id)?.getBoundingClientRect?.().top;
-      if (Number.isFinite(top) && Math.abs(top) > 120) scroll();
+      if (Number.isFinite(top) && Math.abs(top - expected) > 120) scroll();
     }, 700);
     return () => clearTimeout(timer);
   }, [id]);
@@ -7680,6 +7696,7 @@ function PropertySection({ id, title, icon = 'document', summary, defaultOpen, c
   useScrollToHashSection(id);
   return (
     <section id={id} data-glass="card" style={{
+      ...(id ? { scrollMarginTop: SECTION_SCROLL_FALLBACK } : {}),
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
@@ -17119,7 +17136,7 @@ export default function PortalPage() {
           sticky header (styles in index.css). */}
       <a href="#portal-main" className="waves-skip-link">Skip to content</a>
       {/* Header */}
-      <div ref={headerRef} data-glass="soft" style={{
+      <div ref={headerRef} data-portal-sticky="" data-glass="soft" style={{
         background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
@@ -17595,7 +17612,7 @@ export default function PortalPage() {
           <CancelledBanner cancelledAt={customer.cancelledAt} onOpenBilling={() => switchTab('billing')} />
         )}
         {!isMobileShell && (
-          <nav aria-label="Customer portal" data-glass="card" style={{
+          <nav aria-label="Customer portal" data-portal-sticky="" data-glass="card" style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
             background: PORTAL_SHELL.soft,

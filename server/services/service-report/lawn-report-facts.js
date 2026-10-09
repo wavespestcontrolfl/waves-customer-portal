@@ -701,21 +701,30 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, with
     const tiesAllowed = withTies && !notes.lawnCopyV6 && !notes.lawnVisitSummary;
     const rows = await loadRows(record, knex);
     if (!rows) throw new Error('the visit\'s product facts could not be read');
-    if (!rows.length) return null;
-    const { assessment, run } = tiesAllowed ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
-    const taps = tiesAllowed ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
-    // A read that fails here THROWS (verifiedTechFindings): a find that could not be checked is not a find we may leave out.
-    const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
-    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, withLabelLines, waterAdvice: withWaterAdvice ? await waterAdviceFor(record, knex) : null, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
-    const frozen = await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
-    // freezeReportFacts swallows a write error and answers null: that is a failed attempt like any other, so the marker is
-    // attempted (below) before anything is allowed to render.
-    if (!frozen) throw new Error('the facts block could not be written');
-    return frozen;
+    // A lawn visit with no product rows has no re-entry rule, spot text, label line or tie to freeze. It still has a
+    // water-advice decision (GATE_LAWN_REPORT_POLISH), so a block carrying only that is frozen; without the polish
+    // decision nothing is frozen, as before (a later attempt may still freeze).
+    if (!rows.length && !withWaterAdvice) return null;
+    return await gatherRows({ record, knex, rows, tiesAllowed: tiesAllowed && rows.length > 0, withLabelLines, withWaterAdvice, now });
   } catch (err) {
     logger.warn(`[lawn-report-facts] gather failed for service_record ${record.id}: ${err.message}`);
     return (await recordFailedFreeze({ record, knex, now })) || UNRESOLVED_FREEZE;
   }
+}
+
+// The build and the write of one freeze attempt, once the rows are known. Throws on any failed read or write (the caller
+// records the failed-freeze marker).
+async function gatherRows({ record, knex, rows, tiesAllowed, withLabelLines, withWaterAdvice, now }) {
+  const { assessment, run } = tiesAllowed ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
+  const taps = tiesAllowed ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
+  // A read that fails here THROWS (verifiedTechFindings): a find that could not be checked is not a find we may leave out.
+  const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
+  const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, withLabelLines, waterAdvice: withWaterAdvice ? await waterAdviceFor(record, knex) : null, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
+  const frozen = await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
+  // freezeReportFacts swallows a write error and answers null: that is a failed attempt like any other, so the marker is
+  // attempted (by the caller) before anything is allowed to render.
+  if (!frozen) throw new Error('the facts block could not be written');
+  return frozen;
 }
 
 // The longer-cycles decision from the customer's prefs row. A failed read is "do not print", never a failed freeze.

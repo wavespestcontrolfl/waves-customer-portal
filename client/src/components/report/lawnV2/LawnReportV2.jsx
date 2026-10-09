@@ -1115,7 +1115,8 @@ function WaterScheduleCta({ water, irrOnFile, href }) {
   return (
     <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
       <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{inches ? POLISH_COPY.ctaTitle : 'Get a water reading built for your lawn'}</div>
-      <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
+      {/* Running prose is 16px (customer-surface policy); state C keeps today's 14px paragraph byte for byte. */}
+      <div style={{ fontSize: inches ? 16 : 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
         {inches
           ? scheduleCtaBody(water)
           : 'We’re estimating right now because we don’t have your watering schedule yet. Add it once and every report is tailored to exactly what your lawn gets.'}
@@ -1140,7 +1141,7 @@ function WaterScheduleCta({ water, irrOnFile, href }) {
 // water.longerCycles (3 or more watering days on file, no banner / weekly plan / after-visit watering note, no new sod).
 function LongerCyclesLine({ water }) {
   if (water.longerCycles !== true) return null;
-  return <div data-testid="lawn-water-longer-cycles" style={{ marginTop: 12, fontSize: 14, color: BODY, lineHeight: 1.5 }}>{POLISH_COPY.longerCyclesLine}</div>;
+  return <div data-testid="lawn-water-longer-cycles" style={{ marginTop: 12, fontSize: 16, color: BODY, lineHeight: 1.5 }}>{POLISH_COPY.longerCyclesLine}</div>;
 }
 
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────

@@ -141,3 +141,21 @@ describe('the longer-cycles line', () => {
     expect(COPY.longerCyclesLine).not.toMatch(/\d|monday|tuesday|wednesday|thursday|friday|saturday|sunday|minute|\bonce a week\b|\bone day\b/i);
   });
 });
+
+describe('new water-card prose is at the 16px body size (customer-surface policy)', () => {
+  it('the state B call-to-action body and the longer-cycles line are 16px; state C keeps its 14px paragraph', () => {
+    const b = render(<WaterIntakeBar water={mixed} />).container;
+    const body = [...b.querySelectorAll('.lawn-water-cta div')].find((el) => el.textContent === COPY.ctaBodyMinutes);
+    expect(body.style.fontSize).toBe('16px');
+    cleanup();
+    const days = render(<WaterIntakeBar water={{ ...mixed, scheduleText: 'Mondays', scheduleParts: 'days_only' }} />).container;
+    expect([...days.querySelectorAll('.lawn-water-cta div')].find((el) => el.textContent === COPY.ctaBodyDaysOnly).style.fontSize).toBe('16px');
+    cleanup();
+    const line = render(<WaterIntakeBar water={{ rainInches: 1.2, targetInches: 1, status: 'balanced', confidence: 'high', irrigationInches: 1, totalInches: 2.2, scheduleOnFile: true, scheduleKind: 'inches', longerCycles: true }} />);
+    expect(line.getByTestId('lawn-water-longer-cycles').style.fontSize).toBe('16px');
+    cleanup();
+    const c = render(<WaterIntakeBar water={{ ...BASE, irrigationInches: null, totalInches: 1.2, scheduleOnFile: false, scheduleKind: 'none' }} />).container;
+    const cBody = [...c.querySelectorAll('.lawn-water-cta div')].find((el) => el.textContent.startsWith('We’re estimating'));
+    expect(cBody.style.fontSize).toBe('14px');
+  });
+});

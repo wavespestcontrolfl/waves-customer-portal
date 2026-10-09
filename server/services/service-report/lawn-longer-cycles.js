@@ -16,6 +16,7 @@
  *       no hold or water-in banner on the visit (state hold, hold_then_water_in or water_in, expired or not: the
  *       decision never depends on the clock), no weekly plan on the card, no after-visit watering note, the schedule
  *       is confirmed (not withheld after a move)
+ * A schedule left unconfirmed after a move (irrigation-schedule-confirmation.js, the report's own guard) freezes false.
  * Every doubt answers "do not print": an unreadable sod record, a prefs row without the sod columns (migration not
  * applied), a failed read, a toggle that switched irrigation off.
  *
@@ -26,6 +27,7 @@
 
 const { normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
 const { sodHolds } = require('../lawn-sod-holds');
+const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 
 const MIN_WATERING_DAYS = 3;
 
@@ -54,6 +56,10 @@ function sodIsEstablished(prefs, visitDate) {
  */
 function longerCyclesDecision(prefs, visitDate) {
   if (!prefs || prefs.irrigation_system === false) return false;
+  // After an address change the row can still hold the former home's schedule, which the report withholds until the
+  // customer confirms a new one: the same guard the report uses, applied at completion, fails closed (a permanent
+  // record never carries advice built from another house).
+  if (scheduleUnconfirmedAfterMove(prefs)) return false;
   const days = normalizeRuntimeInputs({ wateringDays: prefs.watering_days }).wateringDays;
   return days.length >= MIN_WATERING_DAYS && sodIsEstablished(prefs, visitDate);
 }
