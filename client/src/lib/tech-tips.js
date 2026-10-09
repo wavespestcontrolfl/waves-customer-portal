@@ -99,9 +99,10 @@ const NOTE_PESTS = [
 
 // "No roaches seen" names no pest. A negation rules out the rest of its
 // clause ("no German roaches", "no ants or roaches", "without any evidence of
-// roaches"), up to the next punctuation mark or "but". The lift is a
-// suggestion, so dropping too much of a run-on note only loses a suggestion.
-const NEGATED_PEST_RE = /\b(?:no|not|zero|without)\b[^.;,!?\n]*?(?=\bbut\b|[.;,!?\n]|$)/g;
+// roaches", "no ants, roaches, or spiders"), up to the end of the sentence or
+// "but". A comma does not end it: a list of pests is the common case. The
+// lift is a suggestion, so dropping too much of a run-on note only loses one.
+const NEGATED_PEST_RE = /\b(?:no|not|zero|without)\b[^.;!?\n]*?(?=\bbut\b|[.;!?\n]|$)/g;
 
 const withoutNegated = (note) => String(note || "").toLowerCase().replace(NEGATED_PEST_RE, " ");
 

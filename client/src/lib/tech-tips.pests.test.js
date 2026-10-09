@@ -15,6 +15,8 @@ describe('pestsInNote', () => {
   it('does not name a pest the note rules out', () => {
     expect(pestsInNote('No roaches seen. No signs of ants. Spiders on the lanai.')).toEqual(['Spiders']);
     expect(pestsInNote('Not seeing any fleas, without live wasps.')).toEqual([]);
+    expect(pestsInNote('No ants, roaches, or spiders were seen.')).toEqual([]);
+    expect(pestsInNote('No ants, roaches, or spiders, but earwigs under the mat.')).toEqual(['Earwigs']);
     expect(pestsInNote('No German roaches. No ants or roaches inside; without any evidence of fleas.')).toEqual([]);
     expect(pestsInNote('No roaches inside but ants at the back door.')).toEqual(['Ants']);
   });

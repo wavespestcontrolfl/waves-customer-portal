@@ -625,7 +625,7 @@ describe('open search and pest tags (owner 2026-10-09)', () => {
 
   test('a pest-tagged tip claims no work, so it is true on a visit that did none of it', () => {
     for (const tip of TIPS.filter((t) => t.pests)) {
-      expect(tip.copy).not.toMatch(/\b(bait|traps|stations?|treated soil)\b/i);
+      expect(tip.copy).not.toMatch(/\b(bait|traps|stations?|treated soil|where the treatment is)\b/i);
     }
   });
 });

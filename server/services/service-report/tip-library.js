@@ -1009,7 +1009,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'gp_garage_dusk', group: 'sealing', label: "Garage door down before dark",
-    pests: ['Roaches'], keywords: ["garage", "dusk", "palmetto", "light", "flying"], lines: ["pest"], season: 'all',
+    keywords: ["garage", "dusk", "palmetto", "light", "flying"], lines: ["pest"], season: 'all',
     services: [...GENERAL_PEST_SERVICES, ...NATIVE_ROACH_SERVICES.filter((key) => !GENERAL_PEST_SERVICES.includes(key))],
     copy: "Palmetto bugs fly toward light at dusk, and an open garage with the light on is the widest door on the house. Closing it before the lights come on keeps most of them outside, where the treatment is.",
   },
