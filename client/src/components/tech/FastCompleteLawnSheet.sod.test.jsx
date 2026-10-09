@@ -478,14 +478,34 @@ describe('the rooted tick', () => {
       await waitFor(() => expect(completeButton().disabled).toBe(false));
     });
 
-    test('a refusal with a status (the server said no) does not block Complete', async () => {
+    test('the server says the sod record changed: Complete stays off (the rows are the old record\'s)', async () => {
       await openSheet(context(DAY31), context(AFTER));
       await confirmAssessment();
       await waitFor(() => expect(completeButton().disabled).toBe(false));
       rootedAnswer = Object.assign(new Error('The sod record changed. Reopen the visit.'), { status: 409, code: 'sod_record_changed' });
       fireEvent.click(within(banner()).getByRole('checkbox'));
-      await screen.findByText('The sod record changed. Reopen the visit.');
+      await waitFor(() => expect(screen.getAllByText('The sod record changed. Reopen the visit.').length).toBeGreaterThan(0));
+      expect(completeButton().disabled).toBe(true);
+    });
+
+    test('a refusal that says nothing about the record (too early) does not block Complete', async () => {
+      await openSheet(context(DAY31), context(AFTER));
+      await confirmAssessment();
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      rootedAnswer = Object.assign(new Error('The weed killer hold has not ended yet.'), { status: 409, code: 'sod_rooted_too_early' });
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await screen.findByText('The weed killer hold has not ended yet.');
       expect(completeButton().disabled).toBe(false);
+    });
+
+    test('a guide re-read that fails after the plan re-read drops the old cards (the sheet follows the fresh context)', async () => {
+      guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [{ kind: 'weeds', title: 'Weed spots', finding: 'Photos show weeds.', check: null, detail: null, note: null, productIds: [P_CELSIUS], items: [addOn(P_CELSIUS, 'Test Celsius')], actionLabel: 'Add weed spots', dismissLabel: null }] };
+      await openSheet({ ...context(DAY31), treatmentGuide: true }, { ...context(AFTER), treatmentGuide: true });
+      await confirmAssessment();
+      await screen.findByRole('group', { name: 'Weed spots suggestion' });
+      guideAnswer = { broken: true };
+      await tickIt();
+      await waitFor(() => expect(screen.queryByRole('group', { name: 'Weed spots suggestion' })).toBeNull());
     });
 
     test('the treatment guide is read again with the re-read', async () => {

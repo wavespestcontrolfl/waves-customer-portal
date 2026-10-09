@@ -287,6 +287,7 @@ const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 // without it is the legacy context, so the sheet then has no holds to show.
 const SOD_AWARE = 'sodAware=1';
 const SOD_BUSY_MESSAGE = 'Checking the new sod holds. Wait a moment.';
+const SOD_RECORD_STALE_CODES = ['sod_record_changed', 'sod_not_this_home'];
 const SOD_UNSURE_MESSAGE = 'The sheet could not confirm the save. Tap the box again.';
 const SOD_REOPEN_MESSAGE = 'Saved. The sheet could not reload the holds. Close this visit and open it again.';
 // The parts of the context that come from the visit's plan: the re-read after the rooted tick replaces them together.
@@ -460,7 +461,8 @@ const GUIDE_KINDS = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'];
 const cardPlaceEntries = (card) => (card.byPlace && typeof card.byPlace === 'object' ? Object.entries(card.byPlace).filter(([, entry]) => Array.isArray(entry?.items) && entry.items.length) : []);
 const cardAllIds = (card) => [...card.productIds, ...cardPlaceEntries(card).flatMap(([, entry]) => entry.items.map((item) => item.productId))];
 const guideCardOk = (card) => !!card && GUIDE_KINDS.includes(card.kind) && typeof card.title === 'string' && Array.isArray(card.productIds) && Array.isArray(card.items);
-function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 0, idsRef = null }) {
+// `planKey` counts the plan re-reads the sheet rebuilt from (the rooted tick): an answer read for an earlier plan is never kept.
+function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 0, planKey = 0, idsRef = null }) {
   const [state, setState] = useState({ for: null, status: 'idle', guide: null });
   useEffect(() => {
     // No confirmed assessment (a retake, or the guide is off): an answer held for an earlier one is dropped, so it can never come back.
@@ -468,24 +470,24 @@ function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 
     let active = true;
     // A failed read keeps the answer the sheet has ONLY while that answer belongs to this same confirmed assessment; for a new one
     // it is a failed read like any other (the sheet then follows the context's opening values).
-    const failed = () => setState((prev) => (refreshKey && prev.for === assessmentId && prev.status === 'answered' ? prev : { for: assessmentId, status: 'failed', guide: null }));
+    const failed = () => setState((prev) => (refreshKey && prev.for === assessmentId && prev.status === 'answered' && prev.plan === planKey ? prev : { for: assessmentId, status: 'failed', guide: null, plan: planKey }));
     request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}${searchedIdsQuery(refreshKey, idsRef, '&')}`)
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), placeBlockedTypes: freshPlaceTypes(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
+          setState({ for: assessmentId, status: 'answered', plan: planKey, guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), placeBlockedTypes: freshPlaceTypes(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
         } else failed();
       })
       .catch(() => { if (active) failed(); });
     return () => { active = false; };
-  }, [base, request, enabled, assessmentId, refreshKey]);
+  }, [base, request, enabled, assessmentId, refreshKey, planKey]);
   if (!enabled || !assessmentId) return { guide: null, status: 'idle' };
   return state.for === assessmentId ? { guide: state.guide, status: state.status } : { guide: null, status: 'pending' };
 }
 
 // The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
-function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable, refreshKey, idsRef }) {
-  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId, refreshKey, idsRef });
+function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable, refreshKey, planKey, idsRef }) {
+  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId, refreshKey, planKey, idsRef });
   const [checkedState, setCheckedState] = useState({ for: null, map: {} });
   const forId = guide?.assessmentId ?? null;
   const onGuideCheck = useCallback((kind, value) => setCheckedState((prev) => ({
@@ -1440,7 +1442,8 @@ function pruneAmountRefusals(refused, doses) {
 // GATE_LAWN_TROUBLE_AREAS: reads the place maps again after /complete refused a place (400 lawn_place_limit). The context is read aside
 // (the sheet is never reset): its troubleAreas, weed mix and chinch decision replace the opening ones where it carries them, and
 // `tick` makes the treatment guide read again. A read that fails changes nothing. `slot` is the ref the submit's error handler calls.
-function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
+// `planKey` counts the plan re-reads the sheet rebuilt from (the rooted tick): what a refresh read for an earlier plan is not laid over a newer one.
+function usePlaceRefresh({ base, request, ctx, planKey = 0, slot, idsRef, dosesRef }) {
   const [tick, setTick] = useState(0);
   const [fresh, setFresh] = useState(null);
   // What /complete refused, `{ [productId]: { [place]: { message, dose } } }`: authoritative, merged into the blocked map at once and kept.
@@ -1461,11 +1464,11 @@ function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
     const ids = searchedIdsQuery(1, idsRef, '?');
     // Sod-aware, as the sheet's own read: the weed mix and the chinch decision come back with the same holds.
     request(`${base}/lawn-fast/context${ids}${ids ? '&' : '?'}${SOD_AWARE}`)
-      .then((data) => setFresh({ troubleAreas: troubleAreasOf(data), weedMix: weedMixOf(data), chinch: chinchOf(data) }))
+      .then((data) => setFresh({ planKey, values: { troubleAreas: troubleAreasOf(data), weedMix: weedMixOf(data), chinch: chinchOf(data) } }))
       .catch(() => {});
-  }, [base, request]);
+  }, [base, request, planKey]);
   slot.current = refresh;
-  const placeCtx = useMemo(() => ({ ...ctx, ...Object.fromEntries(Object.entries(fresh || {}).filter(([, value]) => value)) }), [ctx, fresh]);
+  const placeCtx = useMemo(() => ({ ...ctx, ...Object.fromEntries(Object.entries((fresh?.planKey === planKey && fresh.values) || {}).filter(([, value]) => value)) }), [ctx, fresh, planKey]);
   // Drops the amount refusals whose row's dose is not the dose it was refused at; never touches a count or interval refusal.
   const pruneRefused = useCallback((doses) => {
     const before = lastDoses.current;
@@ -1514,6 +1517,9 @@ function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
         setSodStale(SOD_UNSURE_MESSAGE);
         throw new Error(SOD_UNSURE_MESSAGE);
       }
+      // The server says the sod record this sheet shows is not the current one: the rows here are the old record's, and the
+      // sheet does not complete on them. The server's own sentence says to reopen the visit.
+      if (SOD_RECORD_STALE_CODES.includes(err.code)) setSodStale(err.message || SOD_REOPEN_MESSAGE);
       // The tick was saved on an earlier tap and the server no longer offers it (404): this sheet cannot read the holds again.
       if (!(saved.current && err.status === 404)) throw err;
       setSodStale(SOD_REOPEN_MESSAGE);
@@ -1556,7 +1562,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
   const searchedIds = useRef([]);
   const dosesRef = useRef({});
-  const { tick: placeTick, placeCtx, refused, refusedCard, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx: sheetCtx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
+  const { tick: placeTick, placeCtx, refused, refusedCard, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx: sheetCtx, planKey: sodRereads, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
@@ -1572,7 +1578,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_TROUBLE_AREAS: the known areas the tech cleared on this sheet (and where the take-all ones were): the take-all card follows them at once.
   const [clearedAreas, setClearedAreas] = useState([]);
   const [clearedPlaces, setClearedPlaces] = useState([]);
-  const { guide: rawGuide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick + sodRereads, idsRef: searchedIds });
+  const { guide: rawGuide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick + sodRereads, planKey: sodRereads, idsRef: searchedIds });
   const guide = useMemo(() => withClearedTakeAll(rawGuide, { known: placeCtx.troubleAreas?.known, clearedIds: clearedAreas, clearedPlaces }), [rawGuide, placeCtx, clearedAreas, clearedPlaces]);
   // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
   const { gov, removed: removedByGuide } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks, products });
