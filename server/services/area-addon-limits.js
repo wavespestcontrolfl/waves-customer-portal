@@ -159,34 +159,52 @@ async function heldDates(database, { customerId, keys, place, prospect }) {
   return out;
 }
 
+// The catalog row each limited add-on reads its history for. A limited add-on whose governed product has no catalog row has
+// no readable ledger: that is an unreadable history (the callers answer it with the custom-quote line or the
+// history-unavailable refusal), never an empty one.
+async function limitProductIds(database, keys) {
+  const productByKey = await productIdsByKey(database, keys);
+  const unresolved = keys.filter((key) => !productByKey.has(key));
+  if (unresolved.length) {
+    throw Object.assign(new Error(`No catalog product for the limit of: ${unresolved.join(', ')}`), { code: 'AREA_ADDON_LIMIT_PRODUCT_UNRESOLVED' });
+  }
+  return productByKey;
+}
+
+// Is anyone known to read a history for? A customer, or a prospect with a phone or an address (their holds count).
+const hasHistorySubject = (customerId, prospect) => isUuid(customerId) || Boolean(prospect && (prospect.phone || prospect.address));
+
+// The treated property of the history read. A known customer: the caller's, else their only active property. No customer
+// yet (a new lead): the ledger is keyed by customer and has nothing; only the caller's own property id.
+const historyProperty = (database, customerId, propertyId) => (isUuid(customerId)
+  ? resolvePropertyId(database, customerId, propertyId)
+  : (isUuid(propertyId) ? propertyId : null));
+
+// The dates behind each wanted key: the ledger first, then the visits booked and held, sorted.
+function assembleHistory(wanted, asOf, ledger, booked) {
+  const byKey = {};
+  for (const key of wanted) byKey[key] = { dates: [...(ledger.get(key) || []), ...(booked.get(key) || [])].filter(Boolean).sort() };
+  return { available: true, asOf, byKey };
+}
+
 /**
  * The injected history summary for these add-on keys at this customer's property, or throws when a
  * read fails (the caller decides what a failed read means). { available: true, asOf, byKey }.
  * Keys with no limit (the web sweep) are not read. No known customer: no reads, an empty summary.
  */
-async function loadAreaAddOnHistory(database, { customerId, propertyId = null, keys = [], asOf = etDateString(), excludeVisitId = null, excludeVisitIds = [], prospect = null } = {}) {
+async function loadAreaAddOnHistory(database, options = {}) {
+  const { customerId, propertyId = null, keys = [], excludeVisitId = null, excludeVisitIds = [], prospect = null } = options;
+  const asOf = options.asOf || etDateString();
   const wanted = limitedKeys(keys);
-  const empty = { available: true, asOf, byKey: {} };
+  if (!wanted.length || !hasHistorySubject(customerId, prospect)) return { available: true, asOf, byKey: {} };
   const known = isUuid(customerId);
-  if (!wanted.length || !(known || (prospect && (prospect.phone || prospect.address)))) return empty;
-  // No customer yet (a new lead): the ledger is keyed by customer and has nothing; only the holds of the same person count.
-  const property = known ? await resolvePropertyId(database, customerId, propertyId) : (isUuid(propertyId) ? propertyId : null);
-  const productByKey = known ? await productIdsByKey(database, wanted) : new Map();
-  // A limited add-on whose governed product has no catalog row has no readable ledger: that is an unreadable
-  // history (the callers answer it with the custom-quote line or the history-unavailable refusal), never an empty one.
-  const unresolved = known ? wanted.filter((key) => !productByKey.has(key)) : [];
-  if (unresolved.length) {
-    const err = new Error(`No catalog product for the limit of: ${unresolved.join(', ')}`);
-    err.code = 'AREA_ADDON_LIMIT_PRODUCT_UNRESOLVED';
-    throw err;
-  }
+  const property = await historyProperty(database, customerId, propertyId);
+  const productByKey = known ? await limitProductIds(database, wanted) : new Map();
   const [ledger, booked] = await Promise.all([
     known ? ledgerDates(database, { customerId, propertyId: property, productByKey, asOf, excludeVisitId }) : new Map(),
     bookedDates(database, { customerId, propertyId: property, keys: wanted, excludeVisitIds: [...excludeVisitIds, excludeVisitId], prospect }),
   ]);
-  const byKey = {};
-  for (const key of wanted) byKey[key] = { dates: [...(ledger.get(key) || []), ...(booked.get(key) || [])].filter(Boolean).sort() };
-  return { available: true, asOf, byKey };
+  return assembleHistory(wanted, asOf, ledger, booked);
 }
 
 // What the QUOTE steps attach to the engine input (services.areaAddOnHistory): undefined when no limit can
