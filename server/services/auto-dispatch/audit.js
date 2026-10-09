@@ -302,12 +302,14 @@ async function standingNoticeKeys(keyPattern, resolvedTitle) {
   return new Set(rows.map((r) => r.dedupe_key));
 }
 
-// Dedupe keys of the budgeted lanes' notices raised in the last 24 hours.
+// Dedupe keys of the budgeted lanes' notices that RANG in the last 24 hours.
+// A reopened notice keeps its created_at; notification-service stamps
+// metadata.rungAt on each ring, so that is the time counted.
 async function recentBudgetKeys() {
   const rows = await db('notifications')
     .where({ recipient_type: 'admin', category: 'schedule_conflict' })
     .whereRaw(
-      `created_at >= now() - interval '24 hours' AND (${BUDGET_LANE_KEYS.map(() => "metadata->>'dedupeKey' LIKE ?").join(' OR ')})`,
+      `COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours' AND (${BUDGET_LANE_KEYS.map(() => "metadata->>'dedupeKey' LIKE ?").join(' OR ')})`,
       BUDGET_LANE_KEYS.map((k) => `${k}%`),
     )
     .select(db.raw("metadata->>'dedupeKey' as dedupe_key"));

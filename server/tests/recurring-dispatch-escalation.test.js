@@ -23,6 +23,7 @@ let existingNoticeKeys = [];
 // the same, but already closed: the retire rewrote their title to the resolved one
 let resolvedNoticeKeys = [];
 let rungLast24h = [];
+const budgetSql = [];
 const query = {};
 beforeEach(() => {
   jest.clearAllMocks();
@@ -30,6 +31,7 @@ beforeEach(() => {
   existingNoticeKeys = [];
   resolvedNoticeKeys = [];
   rungLast24h = [];
+  budgetSql.length = 0;
   retire.mockResolvedValue(1);
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   db.raw = jest.fn((sql) => sql);
@@ -56,7 +58,7 @@ beforeEach(() => {
     // The 24-hour budget read (recentBudgetKeys) is told apart by its SQL.
     let budgetRead = false;
     const whereRaw = cleanup.whereRaw.bind(cleanup);
-    cleanup.whereRaw = (sql, bindings) => { if (/interval '24 hours'/.test(sql)) budgetRead = true; return whereRaw(sql, bindings); };
+    cleanup.whereRaw = (sql, bindings) => { if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); } return whereRaw(sql, bindings); };
     cleanup.select = jest.fn(async () => (budgetRead ? rungLast24h.map((dedupe_key) => ({ dedupe_key })) : [
       ...existingNoticeKeys.map((dedupe_key) => ({ dedupe_key })),
       ...(excludedTitle === 'Recurring visit time alert resolved' ? [] : resolvedNoticeKeys.map((dedupe_key) => ({ dedupe_key }))),
@@ -249,6 +251,9 @@ describe('recurring visit with no arrival time and no due date', () => {
     query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
     notifications.notifyAdmin.mockResolvedValue({ id: 'noticeX' });
     expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(6);
+    // A reopened notice keeps its created_at: the read counts the last ring
+    // (metadata.rungAt), with created_at as the fallback.
+    expect(budgetSql.join(' ')).toContain("COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours'");
   });
 
   test('a resolved notice is not standing: reopening it spends budget (Codex #6208 r3)', async () => {
