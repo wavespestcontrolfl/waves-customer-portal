@@ -205,37 +205,23 @@ const BUDGET_LANE_KEYS = ['auto-dispatch-missing-geo:', 'recurring-no-window:', 
 const NO_WINDOW_RESOLVED_TITLE = 'Recurring visit time alert resolved';
 const MISSING_GEO_RESOLVED_TITLE = 'Address pin alert resolved';
 
-// Estimates the combined-booking check covers: accepted, not archived, and
-// two or more accepted service families (its own acceptedFamilies rule,
-// combined-booking-check.js runCombinedBookingCheck). Its missing_time_tech
-// bell already tells staff about an untimed visit of such a booking, so this
-// lane leaves those visits to it. A single-service estimate is NOT covered
-// there and stays here (Codex #6208 pre-push P1). An estimate that cannot be
-// read counts as not covered: one extra notice beats none.
+// Estimates whose untimed visit the combined-booking check ALREADY tells
+// staff about: an open bell of that check for the estimate that carries its
+// missing_time_tech problem. Read from the bell itself, not predicted from
+// that check's candidate rules: each copied rule (gates, customer state,
+// pipeline stage) left visits with no alert from either lane (Codex #6208
+// r5, r12, r18, r20). A closed bell has no dedupeKey (retireStanding drops
+// it), so a keyed row is an open one. No bell yet: the visit stays here; one
+// extra notice beats none.
 async function combinedBookingEstimateIds(estimateIds) {
   const ids = [...new Set(estimateIds.filter(Boolean).map(String))];
-  // The combined-booking check runs only inside the schedule-integrity
-  // watchdog; with that gate off nobody else covers these visits, so they
-  // stay in this lane (Codex #6208 r5 P1). The watchdog also needs cronJobs
-  // (scheduler.js registers it after the cronJobs early return), while this
-  // notice still runs with cronJobs off (r12 P1).
-  const { isEnabled } = require('../../config/feature-gates');
-  if (!ids.length || !isEnabled('scheduleIntegrityWatchdog') || !isEnabled('cronJobs')) return new Set();
-  const { acceptedFamilies } = require('../combined-booking-check');
-  // The check's own candidate rule (candidateQuery): an active, not archived
-  // customer. It never scans a NULL-active customer, so that customer's
-  // visits stay in this lane (Codex #6208 r18 P2).
-  const estimates = await db('estimates as e').join('customers as c', 'c.id', 'e.customer_id')
-    .whereIn('e.id', ids).where('e.status', 'accepted').whereNull('e.archived_at')
-    .where('c.active', true).whereNull('c.deleted_at')
-    .select('e.*');
-  const covered = new Set();
-  for (const estimate of estimates) {
-    try {
-      if ((acceptedFamilies(estimate)?.size || 0) >= 2) covered.add(String(estimate.id));
-    } catch (_) { /* unreadable: not covered */ }
-  }
-  return covered;
+  if (!ids.length) return new Set();
+  const rows = await db('notifications')
+    .where({ recipient_type: 'admin', category: 'alert' })
+    .whereRaw("metadata->>'dedupeKey' = ANY(?)", [ids.map((id) => `combined-booking-check:${id}`)])
+    .whereRaw("jsonb_exists(coalesce(metadata->'problemCodes', '[]'::jsonb), 'missing_time_tech')")
+    .select(db.raw("metadata->>'estimateId' as estimate_id"));
+  return new Set(rows.map((row) => String(row.estimate_id)));
 }
 
 // Recurring children that have neither an arrival window nor a due date, so
@@ -284,14 +270,22 @@ async function actionableNoWindowRows(today, to) {
       db.raw('(select p.source_estimate_id from scheduled_services as p where p.id = s.recurring_parent_id) as parent_estimate_id'),
       // The catalog key lives on `services`; scheduled_services stores only the
       // snapshot (Codex #6208 r18 P1: the bare column does not exist).
-      db.raw('(select coalesce(cat.service_key, p.service_key_snapshot) from scheduled_services as p left join services as cat on cat.id = p.service_id where p.id = s.recurring_parent_id) as root_service_key'));
+      db.raw('(select coalesce(cat.service_key, p.service_key_snapshot) from scheduled_services as p left join services as cat on cat.id = p.service_id where p.id = s.recurring_parent_id) as root_service_key'),
+      // The series root's date and its booking's first day: a seasonal series
+      // is exempt only when its root rolled past that first day (r20 P2).
+      db.raw('(select p.scheduled_date from scheduled_services as p where p.id = s.recurring_parent_id) as root_date'),
+      db.raw('(select min(r.scheduled_date) from scheduled_services as p join scheduled_services as r on r.source_estimate_id = p.source_estimate_id and r.customer_id = p.customer_id where p.id = s.recurring_parent_id) as booking_first_day'));
   // A seasonal mosquito series is booked with no time on purpose until the
   // office routes that season; it must have a time once inside the routing
   // horizon (combined-booking-check.js checkTimeAndTech, the same exemption;
   // Codex #6208 r15 P2).
   const routingHorizon = require('../../utils/datetime-et').etDateString(
     require('../../utils/datetime-et').addETDays(new Date(`${today}T12:00:00Z`), SEASONAL_ROUTING_HORIZON_DAYS));
-  const notRoutableYet = (row) => row.root_service_key === 'mosquito_seasonal' && toDateStr(row.scheduled_date) > routingHorizon;
+  // Rolled: the root sits after the booking's first day, so the converter
+  // booked it with no time on purpose. A root on the first day, or a booking
+  // that cannot be read, is not exempt.
+  const rolled = (row) => !!row.root_date && !!row.booking_first_day && toDateStr(row.root_date) > toDateStr(row.booking_first_day);
+  const notRoutableYet = (row) => row.root_service_key === 'mosquito_seasonal' && rolled(row) && toDateStr(row.scheduled_date) > routingHorizon;
   const estimateOf = (row) => row.source_estimate_id || row.parent_estimate_id || null;
   const covered = await combinedBookingEstimateIds(rows.map(estimateOf));
   const plans = new Map();

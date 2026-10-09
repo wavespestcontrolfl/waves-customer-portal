@@ -277,6 +277,20 @@ describe('reminder sync failure after a committed move', () => {
     }
   });
 
+  // Staff rescheduled the visit between the two reads: the old reminder and
+  // the new visit are not one state, and that writer syncs its own reminder
+  // (Codex #6208 r20 P2).
+  test('a visit that changed during the reminder check raises nothing', async () => {
+    AppointmentReminders.composeScheduledApptTime = jest.fn()
+      .mockReturnValueOnce(new Date('2026-08-11T12:00:00Z'))
+      .mockReturnValueOnce(new Date('2026-08-13T12:00:00Z'));
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    movableQueue();
+    db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: '2026-08-11T12:00:00Z' }, scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' } }));
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a quiet sync whose check cannot be read is escalated to staff (Codex #6208 r5 P2)', async () => {
     AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
     movableQueue();

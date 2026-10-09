@@ -552,6 +552,8 @@ async function committedReminderTime(AppointmentReminders, service) {
   return AppointmentReminders.composeScheduledApptTime({ scheduled_date: toDateStr(row.scheduled_date), window_start: start || '08:00' });
 }
 
+function timeOf(date) { return date ? date.getTime() : null; }
+
 // After a sync that returned nothing: whether a reminder row exists for the
 // visit and still names a time other than the one the committed visit holds.
 // No row is not a failure (nothing can go out for the old slot).
@@ -560,9 +562,15 @@ async function committedReminderTime(AppointmentReminders, service) {
 // (Codex #6208 r5 P2).
 async function reminderOffNewSlot(AppointmentReminders, service) {
   try {
+    // The visit is read before and after the reminder. A visit that changed
+    // between the two reads was rescheduled by someone else in that instant;
+    // that writer syncs its own reminder, and a compare of the old reminder
+    // with the new visit would ring for nothing (Codex #6208 r20 P2).
+    const before = await committedReminderTime(AppointmentReminders, service);
     const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time');
     if (!row) return false;
     const expected = await committedReminderTime(AppointmentReminders, service);
+    if (timeOf(before) !== timeOf(expected)) return false;
     const actual = new Date(row.appointment_time).getTime();
     return !expected || Number.isNaN(actual) || actual !== expected.getTime();
   } catch (err) {

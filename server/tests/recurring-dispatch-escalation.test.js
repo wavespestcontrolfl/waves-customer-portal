@@ -23,6 +23,9 @@ let existingNoticeKeys = [];
 // the same, but already closed: the retire rewrote their title to the resolved one
 let resolvedNoticeKeys = [];
 let rungLast24h = [];
+// estimates with an open combined-booking bell that carries missing_time_tech
+let combinedBells = [];
+const combinedBellSql = [];
 const budgetSql = [];
 const budgetBindings = [];
 const budgetWhere = [];
@@ -33,6 +36,8 @@ beforeEach(() => {
   existingNoticeKeys = [];
   resolvedNoticeKeys = [];
   rungLast24h = [];
+  combinedBells = [];
+  combinedBellSql.length = 0;
   budgetSql.length = 0;
   budgetBindings.length = 0;
   budgetWhere.length = 0;
@@ -65,8 +70,9 @@ beforeEach(() => {
     let firstWhere = null;
     const where = cleanup.where.bind(cleanup);
     cleanup.where = (...args) => { if (firstWhere === null) [firstWhere] = args; return where(...args); };
-    cleanup.whereRaw = (sql, bindings) => { if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); budgetBindings.push(bindings); budgetWhere.push(firstWhere); } return whereRaw(sql, bindings); };
-    cleanup.select = jest.fn(async () => (budgetRead ? rungLast24h.map((dedupe_key) => ({ dedupe_key })) : [
+    let combinedRead = false;
+    cleanup.whereRaw = (sql, bindings) => { if (/dedupeKey' = ANY|problemCodes/.test(sql)) { combinedRead = true; combinedBellSql.push({ sql, bindings }); } if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); budgetBindings.push(bindings); budgetWhere.push(firstWhere); } return whereRaw(sql, bindings); };
+    cleanup.select = jest.fn(async () => (combinedRead ? combinedBells.map((estimate_id) => ({ estimate_id })) : budgetRead ? rungLast24h.map((dedupe_key) => ({ dedupe_key })) : [
       ...existingNoticeKeys.map((dedupe_key) => ({ dedupe_key })),
       ...(excludedTitle === 'Recurring visit time alert resolved' ? [] : resolvedNoticeKeys.map((dedupe_key) => ({ dedupe_key }))),
     ]));
@@ -190,48 +196,29 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(retireStatements[0].bindings).toContain('recurring-dispatch:%');
   });
 
-  // With cronJobs off the scheduler never registers the watchdog, and this
-  // notice still runs: the combined visit stays here (Codex #6208 r12 P1).
-  test('cronJobs off: the watchdog does not run, so a combined-booking visit keeps its notice', async () => {
-    const gates = require('../config/feature-gates');
-    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'scheduleIntegrityWatchdog');
-    try {
-      const rows = [{ id: 'two', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-21', source_estimate_id: 'e2' }];
-      query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
-      notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
-      await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'));
-      expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['recurring-no-window:two:2026-08-21']);
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  test('a visit of a combined booking (two accepted families) is left to the combined-booking check; a single-service estimate still gets the notice', async () => {
-    const gates = require('../config/feature-gates');
-    const watchdogOn = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'scheduleIntegrityWatchdog' || key === 'cronJobs');
-    const combined = require('../services/combined-booking-check');
-    const families = jest.spyOn(combined, 'acceptedFamilies')
-      .mockImplementation((estimate) => new Set(estimate.id === 'e2' ? ['pest_control', 'lawn_care'] : ['pest_control']));
+  // "Covered" is read from the combined-booking check's own open bell, not
+  // predicted from its candidate rules (Codex #6208 r20 P2).
+  test('a visit whose booking has an open combined-booking bell for a missing time is left to that bell; any other visit gets the notice', async () => {
+    combinedBells = ['e2'];
     const rows = [
       { id: 'one', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20', source_estimate_id: 'e1' },
       { id: 'two', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-21', source_estimate_id: null, parent_estimate_id: 'e2' },
     ];
-    // Scan rows, then the estimates read, then the due-date scan.
-    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValueOnce([{ id: 'e1' }, { id: 'e2' }]).mockResolvedValue([]);
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
     notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
-    try {
-      await flagUnplacedVisits({ lockWindowDays: 14 }, now);
-    } finally {
-      families.mockRestore();
-      watchdogOn.mockRestore();
-    }
-    const keys = notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey);
-    expect(keys).toEqual(['recurring-no-window:one:2026-08-20']);
-    // Only an estimate the check itself scans counts as covered: an active,
-    // not archived customer (Codex #6208 r18 P2).
-    expect(query.join).toHaveBeenCalledWith('customers as c', 'c.id', 'e.customer_id');
-    expect(query.where).toHaveBeenCalledWith('c.active', true);
-    expect(query.whereNull).toHaveBeenCalledWith('c.deleted_at');
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['recurring-no-window:one:2026-08-20']);
+    // An open bell (it keeps its dedupeKey) that names the missing time.
+    expect(combinedBellSql[0]).toMatchObject({ bindings: [['combined-booking-check:e1', 'combined-booking-check:e2']] });
+    expect(combinedBellSql[1].sql).toContain("'missing_time_tech'");
+  });
+
+  test('a combined booking with no open bell (check off, customer not scanned, not run yet) keeps its visit in this lane', async () => {
+    const rows = [{ id: 'two', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-21', source_estimate_id: 'e2' }];
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['recurring-no-window:two:2026-08-21']);
   });
 
   // scheduled_services has no catalog key column; the key comes from the
@@ -244,14 +231,6 @@ describe('recurring visit with no arrival time and no due date', () => {
       expect(sql).toContain('left join services as cat on cat.id = p.service_id');
       expect(sql).not.toContain('p.catalog_service_key');
     }
-  });
-
-  test('with the watchdog gate off nobody else covers a combined booking, so its visit stays in this lane (Codex r5 P1)', async () => {
-    const rows = [{ id: 'two', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-21', source_estimate_id: 'e2' }];
-    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
-    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
-    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
-    expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['recurring-no-window:two:2026-08-21']);
   });
 
   // The plan lapsed after the candidate read and before the locked recheck:
@@ -302,13 +281,18 @@ describe('recurring visit with no arrival time and no due date', () => {
   test('a seasonal mosquito visit beyond the 14-day routing horizon raises nothing; inside it, it does', async () => {
     const now = new Date('2026-08-01T16:00:00Z');
     const rows = [
-      { id: 'far', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20', root_service_key: 'mosquito_seasonal' },
-      { id: 'near', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-10', root_service_key: 'mosquito_seasonal' },
+      { id: 'far', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20', root_service_key: 'mosquito_seasonal', root_date: '2026-08-20', booking_first_day: '2026-07-01' },
+      { id: 'near', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-10', root_service_key: 'mosquito_seasonal', root_date: '2026-08-10', booking_first_day: '2026-07-01' },
+      // A seasonal series whose root is the booking's first day did not roll:
+      // it needs a time like any other series (Codex #6208 r20 P2).
+      { id: 'sameday', customer_id: 'c3', recurring_parent_id: 'p3', scheduled_date: '2026-08-25', root_service_key: 'mosquito_seasonal', root_date: '2026-07-01', booking_first_day: '2026-07-01' },
+      // The booking cannot be read: not exempt.
+      { id: 'nobook', customer_id: 'c4', recurring_parent_id: 'p4', scheduled_date: '2026-08-26', root_service_key: 'mosquito_seasonal', root_date: '2026-08-05', booking_first_day: null },
     ];
     query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
     notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
     await flagUnplacedVisits({ lockWindowDays: 14 }, now);
-    expect(notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['recurring-no-window:near:2026-08-10']);
+    expect(notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['recurring-no-window:near:2026-08-10', 'recurring-no-window:sameday:2026-08-25', 'recurring-no-window:nobook:2026-08-26']);
   });
 
   test('rings at most 10 new notices a run, soonest date first; the rest wait for the next run', async () => {
