@@ -65,7 +65,7 @@ describe('the staff booking judges the add-ons on the estimate row its transacti
 
   test('the transaction reads the whole linked estimate FOR SHARE, judges that row, and writes the sold scope from it', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    expect(LINKED_ESTIMATE_COLUMNS).toEqual(expect.arrayContaining(['estimate_data', 'status', 'monthly_total', 'annual_total', 'onetime_total', 'customer_id', 'property_id']));
+    expect(LINKED_ESTIMATE_COLUMNS).toEqual(expect.arrayContaining(['estimate_data', 'status', 'monthly_total', 'annual_total', 'onetime_total', 'customer_id', 'property_id', 'address']));
     // The preflight and the locked read are the same column list.
     expect(src).toContain(".where({ id: linkedEstimateId }).forShare().first(...LINKED_ESTIMATE_COLUMNS);");
     expect(src).toContain('.first(...LINKED_ESTIMATE_COLUMNS);');

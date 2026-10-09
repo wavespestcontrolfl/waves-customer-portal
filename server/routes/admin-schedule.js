@@ -2015,7 +2015,7 @@ async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons, r
 // FOR SHARE inside it. The locked read is the row every add-on decision of the transaction uses.
 const LINKED_ESTIMATE_COLUMNS = Object.freeze([
   'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
-  'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id',
+  'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id', 'address',
 ]);
 
 // The add-on decisions of a staff booking made inside its transaction, on the linked estimate row that transaction holds locked:

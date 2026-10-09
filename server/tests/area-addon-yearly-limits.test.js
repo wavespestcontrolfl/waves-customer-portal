@@ -228,6 +228,11 @@ function fakeDb(tables, calls = []) {
     if (sql.includes('lower(COALESCE(address')) return (r) => addressKey(r.address) === bindings[0];
     throw new Error(`unsupported raw ${sql}`);
   };
+  // whereIn takes a list or a sub-query (evaluated at once, the first column of each row it selects).
+  const inPred = (col, values) => {
+    const list = Array.isArray(values) ? values : values._run().map((row) => Object.values(row)[0]);
+    return (r) => list.map(String).includes(String(get(r, col)));
+  };
   function evalGroup(fn, row) {
     const parts = [];
     const sub = {
@@ -237,6 +242,8 @@ function fakeDb(tables, calls = []) {
       orWhere(...args) { parts.push(['or', toPred(...args)]); return sub; },
       orWhereNull(col) { parts.push(['or', (r) => get(r, col) == null]); return sub; },
       orWhereNot(col, v) { parts.push(['or', (r) => String(get(r, col)) !== String(v)]); return sub; },
+      whereIn(col, values) { parts.push(['and', inPred(col, values)]); return sub; },
+      orWhereIn(col, values) { parts.push(['or', inPred(col, values)]); return sub; },
     };
     fn.call(sub);
     return parts.reduce((acc, [op, pred], i) => (i === 0 ? pred(row) : (op === 'and' ? acc && pred(row) : acc || pred(row))), true);
@@ -250,7 +257,7 @@ function fakeDb(tables, calls = []) {
     let cols = null; let max = Infinity; let single = false;
     const q = {
       where(...args) { preds.push(toPred(...args)); return q; },
-      whereIn(col, values) { preds.push((r) => values.map(String).includes(String(get(r, col)))); return q; },
+      whereIn(col, values) { preds.push(inPred(col, values)); return q; },
       whereNotIn(col, values) { preds.push((r) => !values.includes(get(r, col))); return q; },
       whereNull(col) { preds.push((r) => get(r, col) == null); return q; },
       whereNot(col, v) {
@@ -266,13 +273,16 @@ function fakeDb(tables, calls = []) {
       limit(n) { max = n; return q; },
       select(...c) { cols = c; return q; },
       first(...c) { cols = c; single = true; return q; },
+      _run() {
+        const rows = tables[table].filter((row) => preds.every((p) => p(row))).slice(0, max);
+        return rows.map((row) => (cols ? Object.fromEntries(cols.map((c) => {
+          const [from, to] = c.split(/\s+as\s+/i);
+          return [to || from.replace(/^\w+\./, ''), get(row, from)];
+        })) : row));
+      },
       then(resolve, reject) {
         try {
-          const rows = tables[table].filter((row) => preds.every((p) => p(row))).slice(0, max);
-          const shaped = rows.map((row) => (cols ? Object.fromEntries(cols.map((c) => {
-            const [from, to] = c.split(/\s+as\s+/i);
-            return [to || from.replace(/^\w+\./, ''), get(row, from)];
-          })) : row));
+          const shaped = q._run();
           resolve(single ? shaped[0] : shaped);
         } catch (e) { reject(e); }
       },
@@ -297,6 +307,7 @@ function world(over = {}) {
     product_aliases: [],
     customer_properties: [{ id: PROPERTY, customer_id: CUSTOMER, active: true }],
     property_application_history: [],
+    service_records: [],
     scheduled_services: [],
     scheduled_service_addons: [],
     estimates: [],
@@ -539,7 +550,7 @@ describe('accept time: the recheck inside the transaction (history can change be
 
   test('no customer known ANYWHERE passes, and reads no history (only the lookups that could have named one)', async () => {
     const db = fakeDb(world({ property_application_history: [ledger('p-snap', 1), ledger('p-snap', 2), ledger('p-snap', 3), ledger('p-snap', 4)] }));
-    await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: estimate(['bed_pre_emergent'], { customer_id: null }), resolveCustomer: async () => null })).resolves.toBeUndefined();
+    await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: estimate(['bed_pre_emergent'], { customer_id: null, property_id: null }), resolveCustomer: async () => null })).resolves.toBeUndefined();
     expect(db.calls).toEqual(['scheduled_services']);
   });
 
@@ -679,8 +690,9 @@ describe('a customer who does not exist yet: the holds of the same person count,
     await expect(check({ scheduled_services: [hold()], estimates: [theirs()] }, lead(['bed_pre_emergent']), { staff: true })).rejects.toMatchObject({ message: expect.stringContaining('applied or booked') });
   });
 
-  test('another phone, a lapsed hold, a hold of the same estimate, another add-on or a hold with no sold add-on do not count', async () => {
-    await expect(check({ scheduled_services: [hold()], estimates: [theirs({ customer_phone: '941-555-0199' })] })).resolves.toBeUndefined();
+  test('another place, a lapsed hold, a hold of the same estimate, another add-on or a hold with no sold add-on do not count; another phone at the same place does (Codex round 18)', async () => {
+    await expect(check({ scheduled_services: [hold()], estimates: [theirs({ customer_phone: '941-555-0199', address: '9 Other St, Bradenton, FL 34202' })] })).resolves.toBeUndefined();
+    await expect(check({ scheduled_services: [hold()], estimates: [theirs({ customer_phone: '941-555-0199' })] })).rejects.toMatchObject(refusal);
     await expect(check({ scheduled_services: [hold({ 's.reservation_expires_at': lapsed })], estimates: [theirs()] })).resolves.toBeUndefined();
     await expect(check({ scheduled_services: [hold({ 's.source_estimate_id': ESTIMATE })], estimates: [theirs({ id: ESTIMATE })] })).resolves.toBeUndefined();
     await expect(check({ scheduled_services: [hold()], estimates: [theirs({ estimate_data: storedWith(['fire_ant_yard']) })] })).resolves.toBeUndefined();
@@ -748,7 +760,7 @@ describe('a customer who does not exist yet: the holds of the same person count,
     });
   });
 
-  test('the same-phone lock is taken inside the transaction before anything is read, and not for a named customer or outside a transaction', async () => {
+  test('the same-phone lock is taken inside the transaction before anything is read; a named customer takes the place keys but no phone key; outside a transaction nothing', async () => {
     const order = [];
     const trx = fakeDb(world());
     trx.isTransaction = true;
@@ -759,10 +771,10 @@ describe('a customer who does not exist yet: the holds of the same person count,
     expect(order[0]).toEqual(["SELECT pg_advisory_xact_lock(hashtext('area-addon-identity'), hashtext(?::text))", 'phone:9415550142']);
     expect(order[1][1]).toBe('address:1testwaybradentonfl34202');
     expect(order.findIndex(([sql]) => sql.startsWith('SAVEPOINT'))).toBeGreaterThan(1);
-    // a customer already named is serialized by the customer lock: no identity lock
+    // a customer already named is serialized by the customer lock, but not against another person at the same place: no phone key, the place keys
     trx.raw.mockClear(); order.length = 0;
     await service.assertAreaAddOnLimitsOpen(wrapped, { estimate: lead(['bed_pre_emergent'], { customer_id: CUSTOMER }) });
-    expect(order.filter(([sql]) => sql.includes('advisory'))).toEqual([]);
+    expect(order.filter(([sql]) => sql.includes('advisory')).map(([, key]) => key)).toEqual(['address:1testwaybradentonfl34202', 'place:1testway34202']);
     // outside a transaction the lock would fence nothing: not taken
     const plain = fakeDb(world());
     plain.raw = jest.fn();
@@ -1056,5 +1068,277 @@ describe('the recheck finds the sold add-ons in every one-time shape the booking
     const data = { result: { oneTime: { items: [row({ price: null, requiresCustomQuote: true }), row({ price: 0 }), row({ price: 99, quoteRequired: true }), { service: 'one_time_pest', price: 199 }] } } };
     expect(service.soldAddOnKeys(data)).toEqual([]);
     expect(service.soldAddOnKeys('not json')).toEqual([]);
+  });
+});
+
+// Codex round 18 on #6135: a label limit is about the treatment PLACE, not the customer record. Two estimate links at one
+// address with two phones (two people, or one person with two numbers) are two customers, or one customer and one with
+// none yet, with two customer_properties rows of ONE address_key; the first accept's booking must stop the second.
+describe('the history is the place\'s, whoever the customer record is (Codex round 18)', () => {
+  const { addressKey: propertyKey } = require('../services/customer-property-address-keys');
+  const CUSTOMER_B = '11111111-1111-4111-8111-1111111111b2';
+  const PROPERTY_B = '22222222-2222-4222-8222-2222222222b2';
+  const UNIT_PROPERTY = '55555555-5555-4555-8555-555555555552';
+  const HOME_KEY = propertyKey({ address_line1: '1 Test Way', city: 'Bradenton', zip: '34202' });
+  const props = () => [
+    { id: PROPERTY, customer_id: CUSTOMER, active: true, address_key: HOME_KEY },
+    { id: PROPERTY_B, customer_id: CUSTOMER_B, active: true, address_key: HOME_KEY },
+    { id: OTHER_PROPERTY, customer_id: CUSTOMER, active: true, address_key: propertyKey({ address_line1: '9 Other St', city: 'Bradenton', zip: '34202' }) },
+    { id: UNIT_PROPERTY, customer_id: CUSTOMER_B, active: true, address_key: propertyKey({ address_line1: '1 Test Way', address_line2: 'Apt 4', city: 'Bradenton', zip: '34202' }) },
+  ];
+  const placeWorld = (tables = {}) => world({ customer_properties: props(), ...tables });
+  // The SECOND estimate: another phone, no customer yet, the address as free text.
+  const second = (over = {}) => ({ id: ESTIMATE, customer_id: null, property_id: null, customer_phone: '+19415550199', address: '1 Test Way, Bradenton, FL 34202', estimate_data: storedWith(['bed_pre_emergent']), ...over });
+  const check = (tables, estimate = second(), extra = {}) => service.assertAreaAddOnLimitsOpen(fakeDb(placeWorld(tables)), { estimate, resolveCustomer: async () => null, ...extra });
+  const refused = { code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' };
+  const soon = new Date(Date.now() + 600000).toISOString();
+
+  describe('a booking made under the first phone stops the second estimate at the same place', () => {
+    const FIRST = { own: () => ({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5))] }), row: () => ({ scheduled_service_addons: [rowVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5))] }) };
+
+    test.each([['the visit itself', 'own'], ['an add-on row on another service\'s visit', 'row']])('%s: refused for a lead with no customer, and for a different customer record at the place', async (_label, shape) => {
+      await expect(check(FIRST[shape]())).rejects.toMatchObject(refused);
+      await expect(check(FIRST[shape](), second({ customer_id: CUSTOMER_B, property_id: PROPERTY_B }))).rejects.toMatchObject(refused);
+      // customer B named, no property on the estimate: B's only property is the place
+      await expect(check(FIRST[shape](), second(), { customerId: CUSTOMER_B })).rejects.toMatchObject(refused);
+    });
+
+    test('a completed or cancelled booking, another add-on, another property of the first customer, or another place is not counted', async () => {
+      for (const extra of [{ 's.status': 'completed' }, { 's.status': 'cancelled' }, { 's.property_id': OTHER_PROPERTY }, { 's.property_id': UNIT_PROPERTY }]) {
+        await expect(check({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), extra)] })).resolves.toBeUndefined();
+      }
+      await expect(check({ scheduled_services: [ownVisit('area_addon_fire_ant_yard', limits.addDays(TODAY, 5))] })).resolves.toBeUndefined();
+      await expect(check(FIRST.own(), second({ address: '2 Test Way, Bradenton, FL 34202' }))).resolves.toBeUndefined();
+    });
+
+    test('the rows the caller is committing are still left out, for the other customer\'s estimate too', async () => {
+      await expect(check(FIRST.own(), second(), { excludeVisitIds: ['v-1'.padEnd(36, '0')] })).rejects.toMatchObject(refused);
+      const ADOPTED = '77777777-7777-4777-8777-777777777771';
+      const adopted = { scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.id': ADOPTED })] };
+      await expect(check(adopted, second(), { excludeVisitIds: [ADOPTED] })).resolves.toBeUndefined();
+    });
+
+    test('a visit with no property id of its own is placed by the address of the estimate it was booked from', async () => {
+      const unplaced = (estimateAddress, over = {}) => ({
+        scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': null, 's.source_estimate_id': OTHER_ESTIMATE, ...over })],
+        estimates: [{ id: OTHER_ESTIMATE, address: estimateAddress }],
+      });
+      await expect(check(unplaced('1 test way, bradenton fl 34202'), second({ address: '1 Test Way, Bradenton, FL 34202' }))).rejects.toMatchObject(refused);
+      // the same place in the canonical form (suffix, case, ZIP+4)
+      await expect(check(unplaced('1 TEST WAY, Bradenton, FL 34202-1234'))).rejects.toMatchObject(refused);
+      await expect(check(unplaced('9 Other St, Bradenton, FL 34202'))).resolves.toBeUndefined();
+      // no source estimate: it cannot be placed, so another customer's visit is not counted
+      await expect(check({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': null })] })).resolves.toBeUndefined();
+    });
+  });
+
+  describe('a completed application (the ledger) under another customer record counts at the same place', () => {
+    test('the application of the other customer at the place, program or add-on, stops the second estimate', async () => {
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER, property_id: PROPERTY })] })).rejects.toMatchObject(refused);
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, second({ customer_id: CUSTOMER, property_id: PROPERTY }))).rejects.toMatchObject(refused);
+      // the staff message names the property and never the other record
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, second({ customer_id: CUSTOMER, property_id: PROPERTY }), { staff: true }))
+        .rejects.toMatchObject({ message: expect.stringMatching(/applied or booked 1 time at this property in the 12 months up to/) });
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, second({ customer_id: CUSTOMER, property_id: PROPERTY }), { staff: true }))
+        .rejects.toMatchObject({ message: expect.not.stringContaining(CUSTOMER_B) });
+    });
+
+    test('a Tree & Shrub program application (Snapshot) recorded under another customer at the same property counts toward the bed add-on', async () => {
+      const programRow = ledger('p-snap', 40, { customer_id: CUSTOMER_B, property_id: PROPERTY_B, service_record_id: 'sr-program' });
+      await expect(check({ property_application_history: [programRow] }, second({ customer_id: CUSTOMER, property_id: PROPERTY }))).rejects.toMatchObject(refused);
+      // ... and it opens again when the next one is allowed (60 days) and when the product differs
+      await expect(check({ property_application_history: [programRow] }, second({ customer_id: CUSTOMER, property_id: PROPERTY }), { appliedOn: limits.addDays(TODAY, 30) })).resolves.toBeUndefined();
+      await expect(check({ property_application_history: [{ ...programRow, product_id: 'p-other' }] }, second({ customer_id: CUSTOMER, property_id: PROPERTY }))).resolves.toBeUndefined();
+    });
+
+    test('older than 12 months, retracted, at another place, or another customer\'s row that cannot be placed: not counted', async () => {
+      for (const row of [
+        ledger('p-snap', 400, { customer_id: CUSTOMER_B, property_id: PROPERTY_B }),
+        ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B, retracted_at: '2026-09-01' }),
+        ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: OTHER_PROPERTY }),
+        ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: null }),
+      ]) {
+        await expect(check({ property_application_history: [row] }, second({ customer_id: CUSTOMER, property_id: PROPERTY }))).resolves.toBeUndefined();
+      }
+    });
+
+    test('a legacy row with no frozen property is placed by its visit\'s property', async () => {
+      const legacy = ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: null, service_record_id: 'sr-1' });
+      await expect(check({ property_application_history: [legacy], service_records: [{ 'sr.id': 'sr-1', 'ss.property_id': PROPERTY_B }] })).rejects.toMatchObject(refused);
+      await expect(check({ property_application_history: [legacy], service_records: [{ 'sr.id': 'sr-1', 'ss.property_id': OTHER_PROPERTY }] })).resolves.toBeUndefined();
+    });
+
+    test('the visit being displayed on the job card is left out of the other customers\' rows too', async () => {
+      const VISIT = '55555555-5555-4555-8555-555555555551';
+      const rows = [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })];
+      const read = (excludeVisitId) => service.loadAreaAddOnHistory(fakeDb(placeWorld({ property_application_history: rows })), { customerId: CUSTOMER, propertyId: PROPERTY, asOf: TODAY, keys: ['bed_pre_emergent'], excludeVisitId });
+      expect((await read(VISIT)).byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
+    });
+  });
+
+  describe('the same place in any spelling; a different place is not counted', () => {
+    const booked = (propertyId) => ({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': propertyId })] });
+
+    test.each([
+      ['1 Test Way, Bradenton, FL 34202'],
+      ['1 TEST WAY,  bradenton , fl 34202-1234'],
+      ['1 Test Way, Bradenton, FL 34202, USA'],
+    ])('%s is the place', async (address) => {
+      await expect(check(booked(PROPERTY), second({ address }))).rejects.toMatchObject(refused);
+    });
+
+    test.each([
+      ['1 Test Way #4, Bradenton, FL 34202'],
+      ['Unit 4, 1 Test Way, Bradenton, FL 34202'],
+      ['1 Test Way, Apt 4, Bradenton, FL 34202'],
+      ['1 Test Way Apt. 4, Bradenton, FL 34202, USA'],
+    ])('%s is the unit\'s place, not the building\'s', async (address) => {
+      await expect(check(booked(UNIT_PROPERTY), second({ address }))).rejects.toMatchObject(refused);
+      await expect(check(booked(PROPERTY), second({ address }))).resolves.toBeUndefined();
+    });
+
+    test('another house, another street number or another ZIP is another place', async () => {
+      for (const address of ['9 Other St, Bradenton, FL 34202', '2 Test Way, Bradenton, FL 34202', '1 Test Way, Bradenton, FL 34203']) {
+        await expect(check(booked(PROPERTY), second({ address }))).resolves.toBeUndefined();
+      }
+    });
+
+    test('a property id on the estimate is the place: its address text is not consulted', async () => {
+      await expect(check(booked(PROPERTY), second({ property_id: PROPERTY_B, address: '9 Other St, Bradenton, FL 34202' }))).rejects.toMatchObject(refused);
+      await expect(check(booked(OTHER_PROPERTY), second({ property_id: PROPERTY_B }))).resolves.toBeUndefined();
+    });
+  });
+
+  describe('a known customer with two properties counts only the property being treated', () => {
+    const mine = (over = {}) => second({ customer_id: CUSTOMER, property_id: PROPERTY, ...over });
+    test('the customer\'s own booking and application at the other property do not count', async () => {
+      await expect(check({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': OTHER_PROPERTY })] }, mine())).resolves.toBeUndefined();
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { property_id: OTHER_PROPERTY })] }, mine())).resolves.toBeUndefined();
+      // another customer's application at the other property is not this place either
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: OTHER_PROPERTY })] }, mine())).resolves.toBeUndefined();
+    });
+
+    test('the same rows at the treated property count, and the customer\'s unplaced rows still count', async () => {
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { property_id: PROPERTY })] }, mine())).rejects.toMatchObject(refused);
+      await expect(check({ property_application_history: [ledger('p-snap', 25, { property_id: null })] }, mine())).rejects.toMatchObject(refused);
+      await expect(check({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': null })] }, mine())).rejects.toMatchObject(refused);
+    });
+  });
+
+  describe('holds at the place, whoever holds them', () => {
+    const hold = (over = {}) => ({ 's.customer_id': null, 's.source_estimate_id': OTHER_ESTIMATE, 's.reservation_expires_at': soon, 's.status': 'pending', 's.id': HOLD_ID, 's.scheduled_date': limits.addDays(TODAY, 5), 's.property_id': null, ...over });
+    const theirs = (over = {}) => ({ id: OTHER_ESTIMATE, customer_phone: '(941) 555-0142', address: '1 Test Way, Bradenton, FL 34202', customer_id: null, property_id: null, estimate_data: storedWith(['bed_pre_emergent']), ...over });
+
+    test('a hold of another phone on the sibling property row, or at the same address, counts; at another property it does not', async () => {
+      await expect(check({ scheduled_services: [hold({ 's.property_id': PROPERTY_B })], estimates: [theirs({ address: 'x' })] }, second({ property_id: PROPERTY }))).rejects.toMatchObject(refused);
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ address: '1 TEST WAY, Bradenton, FL 34202-1234' })] })).rejects.toMatchObject(refused);
+      await expect(check({ scheduled_services: [hold({ 's.property_id': OTHER_PROPERTY })], estimates: [theirs()] }, second({ property_id: PROPERTY }))).resolves.toBeUndefined();
+    });
+  });
+
+  describe('nothing is read when nothing can apply, and an unreadable place fails closed', () => {
+    test('gate off, or no limited add-on, reads nothing even with an address and a property on the estimate', async () => {
+      const db = fakeDb(placeWorld());
+      expect(await service.areaAddOnLimitRefusal(db, { estimate: second({ property_id: PROPERTY, estimate_data: storedWith(['web_sweep']) }) })).toBeNull();
+      process.env.GATE_AREA_ADDONS = '';
+      delete process.env.GATE_AREA_ADDONS;
+      expect(await service.areaAddOnLimitRefusal(db, { estimate: second({ property_id: PROPERTY }) })).toBeNull();
+      expect(await service.quoteAreaAddOnHistory(db, { entries: [{ key: 'bed_pre_emergent' }], address: '1 Test Way, Bradenton, FL 34202', requesterRole: 'admin' })).toBeUndefined();
+      expect(db.calls).toEqual([]);
+    });
+
+    test('a failed property lookup is the history-unavailable refusal, with a property id and with an address alone', async () => {
+      for (const estimate of [second({ property_id: PROPERTY }), second()]) {
+        const broken = fakeDb(placeWorld({ customer_properties: () => { throw new Error('connection lost'); } }));
+        await expect(service.assertAreaAddOnLimitsOpen(broken, { estimate, resolveCustomer: async () => null })).rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_HISTORY_UNAVAILABLE' });
+      }
+    });
+  });
+
+  describe('the lock: two different people at one place share a key', () => {
+    const recorded = async (estimate, extra = {}) => {
+      const order = [];
+      const trx = fakeDb(placeWorld());
+      trx.raw = jest.fn(async (sql, bindings) => { order.push(String(sql).startsWith('SELECT pg_advisory') ? bindings[0] : String(sql).split(' ')[0]); return {}; });
+      const wrapped = Object.assign((table) => trx(table), { isTransaction: true, raw: trx.raw });
+      await service.assertAreaAddOnLimitsOpen(wrapped, { estimate, resolveCustomer: async () => null, ...extra });
+      return order.filter((key) => key !== 'SAVEPOINT' && key !== 'RELEASE');
+    };
+
+    test('two customers on two property rows of one address take the same place key, in a fixed class order', async () => {
+      const a = await recorded(second({ customer_id: CUSTOMER, property_id: PROPERTY, customer_phone: '+19415550142' }));
+      const b = await recorded(second({ customer_id: CUSTOMER_B, property_id: PROPERTY_B, customer_phone: '+19415550199' }));
+      expect(a).toEqual([`property:${PROPERTY}`, `place:${HOME_KEY}`, 'address:1testwaybradentonfl34202'].sort((x, y) => ['address', 'property', 'place'].indexOf(x.split(':')[0]) - ['address', 'property', 'place'].indexOf(y.split(':')[0])));
+      expect(b).toEqual(a.map((key) => (key === `property:${PROPERTY}` ? `property:${PROPERTY_B}` : key)));
+      expect(a.filter((key) => b.includes(key))).toEqual([`place:${HOME_KEY}`, 'address:1testwaybradentonfl34202'].sort((x, y) => a.indexOf(x) - a.indexOf(y)));
+    });
+
+    test('a lead with no customer and an address in another spelling shares the place key; the phone key comes first and only then', async () => {
+      const lead = await recorded(second({ address: '1 TEST WAY,  Bradenton , FL 34202-1234' }));
+      expect(lead[0]).toBe('phone:9415550199');
+      expect(lead).toContain(`place:${HOME_KEY}`);
+      const named = await recorded(second({ customer_id: CUSTOMER_B }));
+      expect(named.some((key) => key.startsWith('phone:'))).toBe(false);
+      expect(named).toContain(`place:${HOME_KEY}`);
+    });
+
+    test('a caller\'s verified property (the staff booking\'s) is part of the place even when the estimate names none', async () => {
+      const keys = await recorded(second({ address: null, customer_phone: null }), { customerId: CUSTOMER_B, property: { property_id: PROPERTY_B } });
+      expect(keys).toEqual([`place:${HOME_KEY}`]);
+    });
+
+    test('a failed place lookup under the lock is the history-unavailable refusal', async () => {
+      const trx = fakeDb(placeWorld({ customer_properties: () => { throw new Error('connection lost'); } }));
+      trx.raw = jest.fn(async () => ({}));
+      const wrapped = Object.assign((table) => trx(table), { isTransaction: true, raw: trx.raw });
+      await expect(service.assertAreaAddOnLimitsOpen(wrapped, { estimate: second({ property_id: PROPERTY }), resolveCustomer: async () => null })).rejects.toMatchObject({ code: 'AREA_ADDON_HISTORY_UNAVAILABLE' });
+    });
+  });
+
+  describe('the quote steps and the job card see the place too', () => {
+    const entries = [{ key: 'bed_pre_emergent', areaSqFt: 1000 }];
+    const history = () => placeWorld({ property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] });
+
+    test('a new lead with no customer but an address at a property with history: the admin requester sees it', async () => {
+      const out = await service.quoteAreaAddOnHistory(fakeDb(history()), { entries, address: '1 Test Way, Bradenton, FL 34202', requesterRole: 'admin' });
+      expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
+      const v1 = await service.attachQuoteAreaAddOnHistory(fakeDb(history()), { ...HOME, services: { areaAddOns: entries } }, { address: '1 Test Way, Bradenton, FL 34202' }, { requesterRole: 'admin' });
+      expect(generateEstimate(v1).lineItems.find((l) => l.addOnKey === 'bed_pre_emergent')).toMatchObject({ price: null, customQuoteReason: 'area_addon_yearly_limit_reached' });
+      const other = await service.quoteAreaAddOnHistory(fakeDb(history()), { entries, address: '9 Other St, Bradenton, FL 34202', requesterRole: 'admin' });
+      expect(other.byKey.bed_pre_emergent.dates).toEqual([]);
+    });
+
+    test('a requester who is not an admin reads nothing for a lead, and no address reads nothing', async () => {
+      for (const requesterRole of ['technician', null, undefined]) {
+        const db = fakeDb(history());
+        expect(await service.quoteAreaAddOnHistory(db, { entries, address: '1 Test Way, Bradenton, FL 34202', requesterRole })).toBeUndefined();
+        expect(db.calls).toEqual([]);
+      }
+      const none = fakeDb(history());
+      expect(await service.quoteAreaAddOnHistory(none, { entries, requesterRole: 'admin' })).toBeUndefined();
+      expect(none.calls).toEqual([]);
+    });
+
+    test('the save reads the lead\'s address from the body, for an admin saving technician only', async () => {
+      const data = { engineRequest: { options: { areaAddOns: entries } } };
+      const body = { address: '1 Test Way, Bradenton, FL 34202' };
+      const out = await service.quoteAreaAddOnHistoryForSave(fakeDb(history()), data, body, { technicianId: ADMIN_TECH });
+      expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
+      expect(await service.quoteAreaAddOnHistoryForSave(fakeDb(history()), data, body, { technicianId: FIELD_TECH })).toBeUndefined();
+    });
+
+    test('a known customer\'s quote counts the other customer record at the same property', async () => {
+      const out = await service.quoteAreaAddOnHistory(fakeDb(history()), { entries, customerId: CUSTOMER, propertyId: PROPERTY, requesterRole: 'admin' });
+      expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
+    });
+
+    test('the job card "Application N of M" line counts the application made under the other record at the property', async () => {
+      const db = fakeDb(placeWorld({
+        scheduled_services: [{ id: 'visit-1', customer_id: CUSTOMER, property_id: PROPERTY }],
+        property_application_history: [ledger('p-arena', 90, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })],
+      }));
+      const cards = await service.attachLimitUse([{ id: 'p-arena', rowId: 'p-arena::x', addOnKey: 'area_addon_lawn_insect_spot', name: 'x', governed: { limit: 'Label limit text.' } }], { serviceId: 'visit-1', visitDay: TODAY, dbh: db });
+      expect(cards[0].governed.use).toBe(`Application 2 of 2 in 12 months; last applied ${daysBefore(90)}.`);
+    });
   });
 });
