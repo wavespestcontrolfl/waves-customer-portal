@@ -64,7 +64,9 @@ async function lockAppointmentAddress(trx, plan, updates = {}, { noWait = false 
 // judged at the DESTINATION property (area-addon-limits assertMovedVisitLimitsOpen), inside the caller's transaction on the
 // locked rows: the anchor, grouped siblings and series rows alike, for every caller (Update Details, the Intelligence Bar, the
 // geocode review). One batched row read; a plan with no area add-on reads nothing more.
-async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId) {
+// `edited` ({ id, ownKey, rowKeys }): the visit the SAME save edits. Its add-on rows are replaced later in that save, so what it
+// will carry (the posted own service and rows, where the save posts them) is judged, never the rows it is about to drop.
+async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId, edited = null) {
   const moving = lockedRows.filter((row) => String(row.property_id || '') !== String(propertyId || ''));
   if (!moving.length) return;
   const { areaAddOnKeysByVisit } = require('./area-addon-visit-rows');
@@ -73,14 +75,17 @@ async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId) {
   // is still at its old property), so two visits moved together cannot each take the destination's last allowed application.
   const alsoMoving = {};
   for (const row of moving) {
-    const serviceKeys = [row.service_key_snapshot, ...(rowKeys.get(String(row.id)) || [])].filter((key) => String(key || '').startsWith('area_addon_'));
+    const isEdited = edited && String(edited.id) === String(row.id);
+    const ownKey = isEdited && edited.ownKey !== undefined ? edited.ownKey : row.service_key_snapshot;
+    const carried = isEdited && Array.isArray(edited.rowKeys) ? edited.rowKeys : (rowKeys.get(String(row.id)) || []);
+    const serviceKeys = [ownKey, ...carried].filter((key) => String(key || '').startsWith('area_addon_'));
     if (!serviceKeys.length) continue;
     const judged = await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: row.id, visit: row, propertyId, serviceKeys, staff: true, alsoMoving });
     for (const key of (judged && judged.keys) || []) alsoMoving[key] = [...(alsoMoving[key] || []), judged.day];
   }
 }
 
-async function applyAppointmentAddress(trx, plan, actorId) {
+async function applyAppointmentAddress(trx, plan, actorId, { editedVisit = null } = {}) {
   const fresh = await planAppointmentAddress(trx, plan.anchor.id, plan.propertyId, plan.scope);
   const fingerprint = (p) => JSON.stringify(p.rows.map((row) => [row.id, row.customer_id, row.recurring_parent_id,
     row.property_id, dateOnly(row.scheduled_date), row.technician_id, row.visit_id, row.status]));
@@ -94,7 +99,7 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
-  await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId);
+  await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, editedVisit);
   const addressRows = locked.filter((row) => row.id === plan.anchor.id || (fresh.packageChildIds || []).includes(row.id)
     || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
   for (const visit of fresh.visits) {

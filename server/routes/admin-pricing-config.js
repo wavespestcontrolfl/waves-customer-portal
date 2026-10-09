@@ -232,8 +232,27 @@ function strictPricingNumber(v) {
 // The area add-on price knobs: bounded, plain JSON numbers, and no label-bound field (yearly limits, grass, product,
 // identity) - those stay in code. The same validator the sync applies, here strict about keys it does not own.
 function validateAreaAddOnPricing(data) {
-  const verdict = require('../services/pricing-engine/area-addon-config').normalizeAreaAddOnPricingConfig(data);
-  return verdict.ok ? { ok: true } : { ok: false, error: `area_addon_pricing: ${verdict.error}` };
+  const config = require('../services/pricing-engine/area-addon-config');
+  const verdict = config.normalizeAreaAddOnPricingConfig(data);
+  if (!verdict.ok) return { ok: false, error: `area_addon_pricing: ${verdict.error}` };
+  // The PUT replaces the whole stored object, and the sync fills anything absent from the code defaults: a partial payload
+  // would silently reset every tuned value it leaves out. The whole shape is required (the panel always sends it).
+  const missing = missingPricingKey(config.defaultAreaAddOnPricingData(), data);
+  return missing ? { ok: false, error: `area_addon_pricing: ${missing} is missing. Send the whole object.` } : { ok: true };
+}
+
+// The first key path of `shape` (objects only; arrays and values are leaves) that `data` does not carry, or null.
+function missingPricingKey(shape, data, path = '') {
+  for (const key of Object.keys(shape)) {
+    const here = path ? `${path}.${key}` : key;
+    if (!data || typeof data !== 'object' || !Object.prototype.hasOwnProperty.call(data, key)) return here;
+    const child = shape[key];
+    if (child && typeof child === 'object' && !Array.isArray(child)) {
+      const deeper = missingPricingKey(child, data[key], here);
+      if (deeper) return deeper;
+    }
+  }
+  return null;
 }
 
 // PUT /:key's validator: a key with its own validator module first, then the shared per-key checks below.
@@ -1660,5 +1679,6 @@ module.exports.resolvePricingQuoteInput = resolvePricingQuoteInput;
 // to the same billing-authoritative rows — it must run the SAME key-specific
 // validation on the prospective row before writing.
 module.exports.validatePricingConfigData = validatePricingConfigData;
+module.exports.validatePricingConfigFor = validatePricingConfigFor;
 module.exports.normalizeIncomingConfigData = normalizeIncomingConfigData;
 module.exports.parseConfigData = parseConfigData;

@@ -267,10 +267,29 @@ describe('an address change rechecks every visit it moves, at the destination pr
     } finally { keysByVisit.mockRestore(); moved.mockRestore(); }
   });
 
+  // Codex round 35: the same save replaces the edited visit's add-on rows AFTER the address is applied.
+  test('the visit the save edits is judged by what it will carry, not by the rows it is about to drop', async () => {
+    const keysByVisit = jest.spyOn(rowsModule, 'areaAddOnKeysByVisit').mockResolvedValue(new Map([[A, ['area_addon_fire_ant_yard']]]));
+    const moved = jest.spyOn(limitsModule, 'assertMovedVisitLimitsOpen').mockResolvedValue(null);
+    try {
+      const rows = [{ id: A, property_id: 'old', service_key_snapshot: 'pest_control' }];
+      // the save removes the add-on row: nothing to ask
+      await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new', { id: A, ownKey: undefined, rowKeys: [] });
+      expect(moved).not.toHaveBeenCalled();
+      // the save replaces it with another add-on: that one is asked
+      await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new', { id: A, ownKey: undefined, rowKeys: ['area_addon_hardscape_weed', 'mosquito_one_time'] });
+      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, expect.objectContaining({ visitId: A, serviceKeys: ['area_addon_hardscape_weed'] }));
+      // a save that does not post the rows keeps the stored ones
+      moved.mockClear();
+      await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new', { id: A, ownKey: undefined, rowKeys: undefined });
+      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, expect.objectContaining({ serviceKeys: ['area_addon_fire_ant_yard'] }));
+    } finally { keysByVisit.mockRestore(); moved.mockRestore(); }
+  });
+
   test('source: applyAppointmentAddress asks it on the locked rows, before any row is written', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-address.js'), 'utf8');
     const apply = src.slice(src.indexOf('async function applyAppointmentAddress('));
-    const ask = apply.indexOf('await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId);');
+    const ask = apply.indexOf('await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, editedVisit);');
     expect(ask).toBeGreaterThan(apply.indexOf('.forUpdate()'));
     expect(ask).toBeLessThan(apply.indexOf('const stamp = {'));
   });

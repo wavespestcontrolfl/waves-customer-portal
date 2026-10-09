@@ -135,9 +135,23 @@ describe('validation: bounds, plain JSON numbers, and no label-bound field', () 
   test('the admin PUT validates it with the same function, before the write', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-pricing-config.js'), 'utf8');
     expect(src).toContain('const OWN_VALIDATORS = { area_addon_pricing: validateAreaAddOnPricing };');
-    expect(src).toContain("require('../services/pricing-engine/area-addon-config').normalizeAreaAddOnPricingConfig(data)");
+    expect(src).toContain('const verdict = config.normalizeAreaAddOnPricingConfig(data);');
     expect(src).toContain('const verdict = validatePricingConfigFor(req.params.key, normalizedData, oldConfig);');
     expect(src).toContain("config_key: 'area_addon_pricing', name: 'Area Add-On Treatment Pricing', category: 'one_time'");
+  });
+});
+
+// Codex round 35: the PUT replaces the whole stored object; a partial payload would reset every tuned value it leaves out.
+describe('the admin PUT needs the whole area_addon_pricing object', () => {
+  const { validatePricingConfigFor } = require('../routes/admin-pricing-config');
+  const whole = () => JSON.parse(JSON.stringify(require('../services/pricing-engine/area-addon-config').defaultAreaAddOnPricingData()));
+  test('the whole object passes; a missing top-level key, item or item field is refused by name', () => {
+    expect(validatePricingConfigFor('area_addon_pricing', whole())).toEqual({ ok: true });
+    expect(validatePricingConfigFor('area_addon_pricing', { targetMargin: 0.7 })).toEqual({ ok: false, error: 'area_addon_pricing: adminPerJob is missing. Send the whole object.' });
+    const noItem = whole(); delete noItem.items.web_sweep;
+    expect(validatePricingConfigFor('area_addon_pricing', noItem)).toEqual({ ok: false, error: 'area_addon_pricing: items.web_sweep is missing. Send the whole object.' });
+    const noField = whole(); delete noField.items.bed_pre_emergent.setupMin;
+    expect(validatePricingConfigFor('area_addon_pricing', noField)).toEqual({ ok: false, error: 'area_addon_pricing: items.bed_pre_emergent.setupMin is missing. Send the whole object.' });
   });
 });
 
