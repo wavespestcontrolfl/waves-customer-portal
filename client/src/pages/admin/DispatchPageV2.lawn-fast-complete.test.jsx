@@ -26,8 +26,8 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
 }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: ({ service }) => <div>Lawn re-service sheet for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
-  default: ({ service, operatorId, catalog, onClose, onCompleted, onFullForm, onViewDetails }) => (
-    <div>
+  default: ({ service, operatorId, catalog, onClose, onCompleted, onFullForm, onViewDetails, suspended }) => (
+    <div data-suspended={String(!!suspended)}>
       Lawn sheet for {service.id} (catalog {catalog.length}, type {String(service.routedServiceType)})
       <span data-testid="lawn-operator">{operatorId}</span>
       <button type="button" onClick={() => onClose()}>Sheet close</button>
@@ -50,7 +50,15 @@ vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ ser
 vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
   default: ({ invoiceId, service }) => <div>Payment sheet for {invoiceId} ({service?.id || 'no service'})</div>,
 }));
-vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service }) => <div>Details sheet for {service.id}</div> }));
+vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({
+  default: ({ service, onClose, onCancelled }) => (
+    <div>
+      Details sheet for {service.id}
+      <button type="button" onClick={() => onClose()}>Details close</button>
+      <button type="button" onClick={() => { onCancelled(service); onClose(); }}>Details cancel</button>
+    </div>
+  ),
+}));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true, known: true }) }));
 
@@ -144,7 +152,9 @@ describe('Dispatch completion routing for lawn', () => {
     expect(screen.queryByText(/Lawn sheet/)).not.toBeInTheDocument();
   });
 
-  it('the sheet\'s Details pill closes it and opens the appointment details sheet, as the full form\'s does', async () => {
+  // Option 2 (owner 2026-10-09): the sheet stays mounted, suspended, behind
+  // Details, so its entries survive; Close returns to it, a cancel closes it.
+  it('the sheet\'s Details pill opens the appointment details sheet over the sheet, which comes back on Close and goes on a cancel', async () => {
     mount([visit('svc-lawn-details', { customerId: 'cust-9', address: '100 Example Lane, Bradenton, FL', customerPhone: '+19415550100', traceEligible: false })]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-details' }));
     expect(await screen.findByText('Sheet knows cust-9 / 100 Example Lane, Bradenton, FL / +19415550100')).toBeInTheDocument();
@@ -152,7 +162,14 @@ describe('Dispatch completion routing for lawn', () => {
     expect(screen.getByText('Sheet trace false')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Sheet details' }));
     expect(await screen.findByText('Details sheet for svc-lawn-details')).toBeInTheDocument();
-    expect(screen.queryByText(/Lawn sheet for/)).not.toBeInTheDocument();
+    const sheet = () => screen.getByText(/Lawn sheet for svc-lawn-details/).closest('[data-suspended]');
+    expect(sheet().getAttribute('data-suspended')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Details close' }));
+    await waitFor(() => expect(screen.queryByText('Details sheet for svc-lawn-details')).not.toBeInTheDocument());
+    expect(sheet().getAttribute('data-suspended')).toBe('false');
+    fireEvent.click(screen.getByRole('button', { name: 'Sheet details' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Details cancel' }));
+    await waitFor(() => expect(screen.queryByText(/Lawn sheet for/)).not.toBeInTheDocument());
   });
 
   it('passes the sheet the check-in time by the full form\'s rule: the on-site status-log entry, else checkInTime', async () => {

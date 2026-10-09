@@ -58,6 +58,7 @@ import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-compl
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
+import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
 import useSavedFastCompletions, { projectReportTool, savedAtLabel, withSavedCompletions } from '../../hooks/useSavedFastCompletions';
@@ -153,6 +154,15 @@ function openTypedCompletion(service) {
     return;
   }
   window.location.assign(`/admin/dispatch?tab=schedule&completeService=${encodeURIComponent(service.id)}`);
+}
+
+// The appointment details sheet's Dispatch-only destinations (edit, checkout,
+// treatment plan, book next) reopen the same sheet on Dispatch, which carries
+// them: ?appointment= is the detail-sheet deep link DispatchPageV2 consumes,
+// on the visit's own day.
+function openDispatchDetails(service) {
+  const date = String(service?.scheduledDate || '').split('T')[0] || etDateString();
+  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(date)}&appointment=${encodeURIComponent(service.id)}`);
 }
 
 // adminFetch-style helper for the tech portal: bearer-token fetch against
@@ -329,6 +339,18 @@ export default function TechHomePage({ section = 'today' }) {
   const [fastCompleteService, setFastCompleteService] = useState(null);
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
+  // The appointment details sheet (quick move, cancel, reschedule, price
+  // edit) a Fast Complete sheet's Details pill opens (owner 2026-10-09):
+  // the same sheet Dispatch opens, over the same /admin/schedule row.
+  const [detailService, setDetailService] = useState(null);
+  // A fast sheet left mounted (suspended) behind the details sheet; plain
+  // Close returns to it, a change to the visit closes it (owner 2026-10-09).
+  const fastSheetBehindDetails = !!(detailService && (fastCompleteService || treeShrubFastService || lawnReserviceFastService));
+  const closeFastSheetsBehindDetails = () => {
+    setFastCompleteService(null);
+    setTreeShrubFastService(null);
+    setLawnReserviceFastService(null);
+  };
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -1011,6 +1033,10 @@ export default function TechHomePage({ section = 'today' }) {
             // form is retired (codex local r1 on #5629).
             openTypedCompletion(raw);
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(fastCompleteService)}
+          suspended={!!detailService}
         />
       )}
 
@@ -1044,6 +1070,10 @@ export default function TechHomePage({ section = 'today' }) {
             setTreeShrubFastService(null);
             openTypedCompletion(raw);
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(treeShrubFastService)}
+          suspended={!!detailService}
         />
       )}
 
@@ -1079,6 +1109,42 @@ export default function TechHomePage({ section = 'today' }) {
             setLawnReserviceFastService(null);
             openTypedCompletion(raw);
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          suspended={!!detailService}
+        />
+      )}
+
+      {detailService && (
+        <MobileAppointmentDetailSheet
+          service={detailService}
+          onClose={() => setDetailService(null)}
+          // Office-only controls stay hidden for a technician login: the
+          // server refuses series cancels, whole-route moves and card sends.
+          adminActions={staff?.role === 'admin'}
+          // A move, cancel or billing change here lands on the route at once.
+          // A move only refreshes: the sheet closes itself after a clean move
+          // and keeps Quick Move open on a partial, not-texted or overlap
+          // result so its warning stays readable (as Dispatch does).
+          // A move, cancel or billing change also closes the fast sheet behind
+          // Details: that visit changed, so its entries must not complete it.
+          onCancelled={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          onRescheduled={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
+          onBillingChanged={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          // Complete from the details sheet: back to the fast sheet behind it,
+          // entries intact, or into this visit's own sheet when none is open.
+          onCompleteService={(svc) => {
+            setDetailService(null);
+            if (!fastSheetBehindDetails) openServiceReport(svc);
+          }}
+          // Edit, checkout, treatment plan and book-next live on Dispatch;
+          // the sheet reopens there (?appointment=, DispatchPageV2) with
+          // those destinations, as the typed-completion deep link does.
+          onEdit={openDispatchDetails}
+          onReviewCheckout={openDispatchDetails}
+          onTreatmentPlan={openDispatchDetails}
+          onBookNext={openDispatchDetails}
         />
       )}
 

@@ -52,17 +52,22 @@ function PartSheet({ kind, part, note, request, operatorId, catalog, onPrepared,
     : <FastCompleteLawnSheet {...common} catalog={catalog} />;
 }
 
-function Header({ titleId, pest, lawn, onFullForm, onClose, blocked }) {
+// `onViewDetails`: the Details pill (owner 2026-10-09), as on every Fast Complete sheet, offered once the stop is loaded,
+// still this pair and not finished (`detailsOffered`); absent = no pill.
+function Header({ titleId, pest, lawn, onFullForm, onViewDetails, detailsOffered, onClose, blocked }) {
   const { customerName, address } = pest.service;
   return (
     <header className="tech-visit-header">
-      <div>
+      <div className="tech-visit-header-text">
         <h2 id={titleId} className="tech-visit-title">Close out stop</h2>
         <p className="tech-visit-muted">{customerName || 'Customer'}</p>
         {address && <p className="tech-visit-muted">{address}</p>}
         <p className="tech-visit-muted">{pest.service.serviceType} + {lawn.service.serviceType}</p>
       </div>
-      <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={blocked}>Full form</Button>
+      <div className="tech-visit-header-actions">
+        {onViewDetails && detailsOffered && <Button variant="ghost" className="tech-visit-action" onClick={onViewDetails} disabled={blocked}>Details</Button>}
+        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={blocked}>Full form</Button>
+      </div>
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={blocked} aria-label="Close">×</Button>
     </header>
   );
@@ -92,10 +97,13 @@ function ComboPart({ kind, part, shared }) {
   const id = part.service.id;
   const label = LABELS[kind];
   const showSaved = readiness.ready(id) && readiness.restored.includes(id);
-  // A null after a body marks the part as changed; a body clears it.
+  // A null after a body marks the part as changed; a body clears it. Only the latest call settles the flag: an earlier
+  // save whose write lands after a later null must not flip the part back to "Not saved yet".
+  const latestSeq = useRef(0);
   const onPrepared = (serviceId, bodyOrNull, seq) => {
+    latestSeq.current = Math.max(latestSeq.current, seq);
     if (!bodyOrNull) markChanged(kind, true);
-    return readiness.apply(serviceId, bodyOrNull, seq).then(() => markChanged(kind, !bodyOrNull));
+    return readiness.apply(serviceId, bodyOrNull, seq).then(() => { if (seq === latestSeq.current) markChanged(kind, !bodyOrNull); });
   };
   return (
     <PartCard title={`${label} · ${part.service.serviceType || ''}`.trim()} status={partStatus(readiness, id, label, changed[kind]).status}>
@@ -154,10 +162,12 @@ function usePartsBusy() {
   return { anyPartBusy: Object.keys(busy).length > 0, report };
 }
 
-export default function FastCompleteComboSheet({ visitId, pest, lawn, request, operatorId, catalog, onClose, onSaved, onFullForm }) {
+// `suspended`: kept mounted but hidden behind the appointment details sheet (see FastCompleteFrame).
+// `onViewDetails(rows)`: gets the stop's live schedule rows from this load, not the board's snapshot.
+export default function FastCompleteComboSheet({ visitId, pest, lawn, request, operatorId, catalog, onClose, onSaved, onFullForm, onViewDetails, suspended }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
   useLockBodyScroll(true);
   const titleId = useId();
   const scope = operatorScope(operatorId);
@@ -195,8 +205,8 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   const error = leaveError || send.error || readiness.persistError;
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
-      <Header titleId={titleId} pest={pest} lawn={lawn} onFullForm={fullForm} onClose={close} blocked={blocked} />
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
+      <Header titleId={titleId} pest={pest} lawn={lawn} onFullForm={fullForm} onViewDetails={onViewDetails && (() => onViewDetails(load.rows))} detailsOffered={[samePair, !finished].every(Boolean)} onClose={close} blocked={blocked} />
       <div className="tech-visit-body">
         {load.status === 'loading' && <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading the stop…</ActionFeedback>}
         {load.status === 'error' && <FullFormCard text={load.error} onFullForm={fullForm} disabled={blocked} />}
