@@ -4,6 +4,7 @@
 const { randomUUID } = require('crypto');
 const db = require('../models/db');
 const ComplianceService = require('../services/compliance');
+const applicationLimits = require('../services/application-limits');
 const { resetV13CapIdentity } = require('../config/lawn-v13-count-caps');
 const { fixture } = require('./helpers/lawn-history-db');
 
@@ -69,6 +70,18 @@ describeDb('compliance page: the yearly count window', () => {
   test('an application 365 days back is out of the window', async () => {
     const customerId = await lawnWith(celsius, ['2025-01-12', '2025-12-20']);
     expect(await countRow(customerId, celsius.id)).toMatchObject({ currentUsage: 1, status: 'warning' });
+  });
+
+  test('getPropertyComplianceStatus lists Celsius with its two December passes (and the block) on 12 January; a calendar-year product with the same dates is not listed', async () => {
+    const customerId = await lawnWith(celsius, ['2025-12-05', '2025-12-20']);
+    const status = await applicationLimits.getPropertyComplianceStatus(customerId);
+    expect(status.products.map((p) => p.productId)).toEqual([celsius.id]);
+    expect(status.products[0]).toMatchObject({ applicationsThisYear: 2 });
+    expect(status.products[0].limits.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+    expect(status.blocks).toBe(1);
+    expect(status.totalApplications).toBe(0); // the calendar-year total and the nitrogen budget still start on 1 January
+    const other = await lawnWith(calendarProduct, ['2025-12-05', '2025-12-20']);
+    expect((await applicationLimits.getPropertyComplianceStatus(other)).products).toEqual([]);
   });
 
   test('gate off: the stored row and the calendar year (nothing counted on 12 January)', async () => {

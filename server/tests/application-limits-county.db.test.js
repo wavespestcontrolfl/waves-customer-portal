@@ -22,32 +22,50 @@ const ADDED = [
 ];
 
 describe('getCounties (no database)', () => {
+  // The eleven cities the function always mapped, each with a normal ZIP of the SAME county: the ZIP rule changes nothing for them.
   test.each([
-    ['Bradenton', MANATEE], ['Lakewood Ranch', MANATEE], ['Parrish', MANATEE], ['Palmetto', MANATEE], ['Ellenton', MANATEE],
-    ['Sarasota', SARASOTA], ['Venice', SARASOTA], ['Nokomis', SARASOTA], ['Osprey', SARASOTA], ['North Port', SARASOTA], ['Englewood', SARASOTA],
-  ])('the always-mapped city %s keeps %s, even with a ZIP the service-area map shares', (city, county) => {
-    expect(applicationLimits.getCounties({ city, zip: '34243' })).toEqual([county]);
+    ['Bradenton', '34205', MANATEE], ['Lakewood Ranch', '34202', MANATEE], ['Lakewood Ranch', '34211', MANATEE], ['Parrish', '34219', MANATEE],
+    ['Palmetto', '34221', MANATEE], ['Ellenton', '34222', MANATEE],
+    ['Sarasota', '34231', SARASOTA], ['Sarasota', '34236', SARASOTA], ['Venice', '34285', SARASOTA], ['Venice', '34292', SARASOTA],
+    ['Nokomis', '34275', SARASOTA], ['Osprey', '34229', SARASOTA], ['North Port', '34286', SARASOTA], ['North Port', '34287', SARASOTA],
+    ['Englewood', '34295', SARASOTA],
+  ])('the always-mapped city %s with its own-county ZIP %s is %s, as with no ZIP', (city, zip, county) => {
+    expect(applicationLimits.getCounties({ city, zip })).toEqual([county]);
+    expect(applicationLimits.getCounties({ city, zip: '' })).toEqual([county]);
     expect(applicationLimits.getCounty({ city })).toBe(county);
   });
 
-  test.each(ADDED)('%s', (city, counties) => {
+  test('the ZIP wins when city and ZIP disagree (the ZIP is the more precise datum); the city decides only when there is no usable ZIP', () => {
+    expect(applicationLimits.getCounties({ city: 'Bradenton', zip: '34285' })).toEqual([SARASOTA]); // a Venice ZIP on a Bradenton city
+    expect(applicationLimits.getCounties({ city: 'Venice', zip: '34205' })).toEqual([MANATEE]);
+    expect(applicationLimits.getCounties({ city: 'Lakewood Ranch', zip: '34240' })).toEqual([SARASOTA]); // the Sarasota-side Lakewood Ranch ZIP
+    expect(applicationLimits.getCounties({ city: 'Venice', zip: '33602' })).toEqual([SARASOTA]); // a ZIP the repo does not know: the city decides
+    expect(applicationLimits.getCounties({ city: 'Venice', zip: 'n/a' })).toEqual([SARASOTA]);
+    expect(applicationLimits.getCounties({ city: 'Venice', zip: null })).toEqual([SARASOTA]);
+  });
+
+  test.each(ADDED)('%s by name (no ZIP)', (city, counties) => {
     expect(applicationLimits.getCounties({ city })).toEqual(counties);
     expect(applicationLimits.getCounty({ city: city.toUpperCase() })).toBe(counties[0]);
   });
 
-  test('Longboat Key is Sarasota and Manatee whatever the ZIP says', () => {
-    expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '34228' })).toEqual([SARASOTA, MANATEE]);
-    expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '34202' })).toEqual([SARASOTA, MANATEE]);
+  test('Longboat Key: both counties by name and with its own ZIP 34228; a ZIP of one county wins over the name', () => {
+    expect(applicationLimits.getCounties({ city: 'Longboat Key' })).toEqual([SARASOTA, MANATEE]);
     expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '' })).toEqual([SARASOTA, MANATEE]);
+    expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '34228' })).toEqual([SARASOTA, MANATEE]);
+    expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '34202' })).toEqual([MANATEE]);
   });
 
   // Each shared ZIP resolves to its own pair, as the service-area map (config/county-zips.js) lists it.
   test.each([
     ['34228', 'Longboat Key', [SARASOTA, MANATEE]],
     ['34243', 'University Park', [SARASOTA, MANATEE]],
-    ['34223', 'Englewood area', [SARASOTA, CHARLOTTE]],
-    ['34224', 'Englewood area', [SARASOTA, CHARLOTTE]],
-  ])('shared ZIP %s (%s) is exactly %j', (zip, city, counties) => {
+    ['34223', 'Englewood', [SARASOTA, CHARLOTTE]],
+    ['34224', 'Englewood', [SARASOTA, CHARLOTTE]],
+    ['34224', 'Sarasota', [SARASOTA, CHARLOTTE]],
+    ['34243', 'Sarasota', [SARASOTA, MANATEE]],
+    ['34243', 'Lakewood Ranch', [SARASOTA, MANATEE]],
+  ])('shared ZIP %s (city %s) is exactly %j', (zip, city, counties) => {
     expect(applicationLimits.getCounties({ city, zip })).toEqual(counties);
     expect(applicationLimits.getCounties({ city: '', zip: `${zip}-1234` })).toEqual(counties);
   });
@@ -63,9 +81,13 @@ describe('getCounties (no database)', () => {
     }
   });
 
-  test('Englewood by name keeps the county it always had (Sarasota); a Charlotte ZIP outside the shared list is Charlotte alone', () => {
-    expect(applicationLimits.getCounties({ city: 'Englewood', zip: '34223' })).toEqual([SARASOTA]);
-    expect(applicationLimits.getCounties({ city: '', zip: '33950' })).toEqual([CHARLOTTE]);
+  test('Englewood: a Charlotte-side ZIP loads Charlotte (alone, or with Sarasota on the shared ZIPs), a Sarasota-only ZIP loads Sarasota, no ZIP keeps the legacy Sarasota', () => {
+    expect(applicationLimits.getCounties({ city: 'Englewood', zip: '33947' })).toEqual([CHARLOTTE]); // Rotonda West, Charlotte County
+    expect(applicationLimits.getCounties({ city: 'Englewood', zip: '33981' })).toEqual([CHARLOTTE]);
+    expect(applicationLimits.getCounties({ city: 'Englewood', zip: '34224' })).toEqual([SARASOTA, CHARLOTTE]);
+    expect(applicationLimits.getCounties({ city: 'Englewood', zip: '34295' })).toEqual([SARASOTA]);
+    expect(applicationLimits.getCounties({ city: 'Englewood' })).toEqual([SARASOTA]);
+    expect(applicationLimits.getCounties({ city: 'Englewood', zip: '' })).toEqual([SARASOTA]);
   });
 
   test('a ZIP decides when the city is not on a list; nothing found is no county, as before', () => {
@@ -111,9 +133,9 @@ describeDb('the county nitrogen blackout, through checkLimits', () => {
   const blackouts = (result) => result.blocks.filter((block) => block.type === 'seasonal_blackout').map((block) => block.message);
 
   test('a mapped city of each county is blocked in July and not in October (the baseline)', async () => {
-    expect(blackouts(await judge('Bradenton', '2026-07-15'))).toEqual([expect.stringContaining('manatee county restricts nitrogen 06/01 — 09/30')]);
-    expect(blackouts(await judge('Venice', '2026-07-15'))).toEqual([expect.stringContaining('sarasota county restricts nitrogen 06/01 — 09/30')]);
-    expect(blackouts(await judge('Bradenton', '2026-10-15'))).toEqual([]);
+    expect(blackouts(await judge('Bradenton', '2026-07-15', '34205'))).toEqual([expect.stringContaining('manatee county restricts nitrogen 06/01 — 09/30')]);
+    expect(blackouts(await judge('Venice', '2026-07-15', '34285'))).toEqual([expect.stringContaining('sarasota county restricts nitrogen 06/01 — 09/30')]);
+    expect(blackouts(await judge('Bradenton', '2026-10-15', '34205'))).toEqual([]);
   });
 
   test.each([
@@ -149,6 +171,13 @@ describeDb('the county nitrogen blackout, through checkLimits', () => {
     const lbk = blackouts(await judge('Somewhere', '2026-07-15', '34243'));
     expect(lbk.join(' ')).toMatch(/sarasota county/);
     expect(lbk.join(' ')).toMatch(/manatee county/);
+  });
+
+  test('Englewood: a Charlotte-side ZIP no longer loads Sarasota\'s blackout; a shared ZIP loads Sarasota once; a Sarasota-only ZIP and no ZIP load Sarasota', async () => {
+    expect(blackouts(await judge('Englewood', '2026-07-15', '33947'))).toEqual([]);
+    expect(blackouts(await judge('Englewood', '2026-07-15', '34224'))).toEqual([expect.stringMatching(/sarasota county/)]);
+    expect(blackouts(await judge('Englewood', '2026-07-15', '34295'))).toEqual([expect.stringMatching(/sarasota county/)]);
+    expect(blackouts(await judge('Englewood', '2026-07-15', ''))).toEqual([expect.stringMatching(/sarasota county/)]);
   });
 
   test('with the prod severity (warning, not hard_block) the blackout is a warning, not a block, in an added city', async () => {

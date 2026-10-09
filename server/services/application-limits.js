@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
-const { applyV13CountCaps, v13CapEntryFor, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
+const { applyV13CountCaps, v13CapEntryFor, v13CountCapFor, V13_COUNT_CAPS, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
 const V13_VERSION = '2026.10-v13';
 const { worstPropertyCount, worstPropertyTotal } = require('../utils/property-counts');
 const { resolveAddressCounty, SHARED_SERVICE_AREA_ZIPS } = require('../config/address-county');
@@ -16,16 +16,17 @@ const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const AI_CAP = 'active_ingredient';
 const AI_CAP_APPROACHING = 0.75;
 
-// A v13 cap entry (config/lawn-v13-count-caps.js) with `yearWindow: 'rolling365'` counts its yearly COUNT and yearly AMOUNT over
-// the 365 days ending on the day judged (that day included: the day 364 days before it is the first), not over the calendar year.
+// A v13 cap entry (config/lawn-v13-count-caps.js) with `yearWindow: 'rolling365'` counts its yearly COUNT over the 365 days
+// ending on the day judged (that day included: the day 364 days before it is the first), not over the calendar year. Count only:
+// an entry that also declares a yearly AMOUNT would be judged by calendar year, so the module refuses it at load (see below).
 // Celsius WG: the label says "per year (365 days)". Certainty: the label says "per year"; Waves counts 365 days too, the
 // stricter reading. An entry without the key keeps the calendar year, byte for byte. The stored product_limits rows (a legacy
 // Celsius annual_max_rate, the shared active-ingredient caps) are a separate mechanism and keep the calendar year.
 const ROLLING_365 = 'rolling365';
 const ROLLING_DAYS = 365;
 const WINDOW_WORDS = {
-  calendar: { when: 'this year', of: "this year's" },
-  rolling: { when: 'in the last 365 days', of: "the last 365 days'" },
+  calendar: { when: 'this year' },
+  rolling: { when: 'in the last 365 days' },
 };
 const dayNumber = (day) => Math.floor(Date.parse(`${day}T12:00:00Z`) / 86400000);
 const shiftDay = (day, days) => new Date((dayNumber(day) + days) * 86400000 + 43200000).toISOString().slice(0, 10);
@@ -48,6 +49,17 @@ const dated = (rows) => rows.map((row, index) => ({ row, index, no: dayNumber(et
 const COUNTY_ORDER = ['Sarasota', 'Manatee', 'Charlotte'];
 const SHARED_ZIP_COUNTIES = new Map([...SHARED_SERVICE_AREA_ZIPS].map((zip) => [zip, COUNTY_ORDER
   .filter((county) => SERVICE_AREA_COUNTY_ZIPS[county]?.includes(zip)).map((county) => `${county.toLowerCase()}_county`)]));
+
+// A rolling entry is count-only. Nothing judges a rolling yearly AMOUNT (the amount reader counts the calendar year), so an entry that
+// declares both would be silently held to the wrong window: refuse it when the module loads.
+function assertRollingIsCountOnly(entries) {
+  for (const entry of entries) {
+    if (entry.yearWindow && entry.annualAmount) {
+      throw new Error(`lawn-v13-count-caps: "${entry.name}" declares yearWindow "${entry.yearWindow}" and annualAmount; a rolling window is supported for the yearly count only. Remove one, or build the rolling amount reader first.`);
+    }
+  }
+}
+assertRollingIsCountOnly(V13_COUNT_CAPS);
 
 const pct = (share) => Math.round(share * 1000) / 10;
 const capUnitOf = (limitUnit) => String(limitUnit || '').split('/')[0].trim();
@@ -332,14 +344,21 @@ class ApplicationLimitChecker {
     return this.windowFor(etCalendarDayOf(day), entry && entry.yearWindow);
   }
 
+  // The same window for a reader that has a product NAME and no product row (the portal's Celsius count): the cap entry of that name
+  // while GATE_LAWN_V13 is live, else the calendar year.
+  windowForName(name, day) {
+    const entry = require('../config/feature-gates').lawnV13Live?.() === true ? v13CountCapFor(name) : null;
+    return this.windowFor(day, entry && entry.yearWindow);
+  }
+
   windowFor(day, yearWindow) {
     const rolling = yearWindow === ROLLING_365;
     return { rolling, start: rolling ? shiftDay(day, 1 - ROLLING_DAYS) : `${day.slice(0, 4)}-01-01`, ...WINDOW_WORDS[rolling ? 'rolling' : 'calendar'] };
   }
 
-  // A caller's window (ctx.window), else the calendar year from ctx.yearStart.
+  // A caller's window (ctx.window), else the calendar year.
   windowOf(ctx) {
-    return ctx.window || { rolling: false, start: ctx.yearStart, ...WINDOW_WORDS.calendar };
+    return ctx.window || WINDOW_WORDS.calendar;
   }
 
   // The season's applications of every product that shares this limit's active
@@ -422,7 +441,7 @@ class ApplicationLimitChecker {
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
       .where('pah.customer_id', ctx.customerId)
       .where('pah.product_id', product.id)
-      .where('pah.application_date', '>=', this.windowOf(ctx).start)
+      .where('pah.application_date', '>=', ctx.yearStart)
       .where('pah.application_date', '<=', etCalendarDayOf(ctx.proposedDate))
       .whereNull('pah.retracted_at')
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
@@ -453,7 +472,7 @@ class ApplicationLimitChecker {
     const adds = rowShare ? rowShare.share : (dose != null ? dose / cap : ((ctx.proposed || ctx.proposal) ? Number(limit.fallback_rate) / cap : 0));
     const total = used + adds;
     const detail = estimated ? ` (${estimated} earlier application${estimated === 1 ? '' : 's'} sized at the standard rate)` : '';
-    const label = `${product.name}: ${this.windowOf(ctx).of} applications on the lawn total ${pct(used)}% of the yearly label amount (${limit.limit_value} ${capUnitOf(limit.limit_unit)} per 1,000 sq ft)`;
+    const label = `${product.name}: this year's applications on the lawn total ${pct(used)}% of the yearly label amount (${limit.limit_value} ${capUnitOf(limit.limit_unit)} per 1,000 sq ft)`;
     const withThis = adds ? `; this application brings it to ${pct(total)}%` : '';
     if (used >= 1 - 1e-9 || total > 1 + 1e-9) {
       return { violated: true, message: `${label}${withThis} — ${used >= 1 - 1e-9 ? 'LIMIT REACHED' : 'THIS APPLICATION WOULD EXCEED IT'}${detail}.`, current: pct(used), max: 100, amountUsed };
@@ -466,24 +485,31 @@ class ApplicationLimitChecker {
     const customer = await db('customers').where({ id: customerId }).first();
     const county = this.getCounty(customer);
     const yearStart = this.getYearStart(new Date());
+    const today = etCalendarDayOf(new Date());
 
-    const applications = await db('property_application_history')
-      .where({ customer_id: customerId }).where('application_date', '>=', yearStart)
+    // Read back to the start of the longest window any product counts (the rolling 365 days always reaches before January 1), then
+    // judge each product over its own window: the calendar year, or the 365 days of a rolling product (countWindow).
+    const loaded = await db('property_application_history')
+      .where({ customer_id: customerId }).where('application_date', '>=', this.windowFor(today, ROLLING_365).start)
       .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .select('property_application_history.*', 'products_catalog.name as product_name')
       .orderBy('application_date', 'desc');
+    const applications = loaded.filter((app) => etCalendarDayOf(app.application_date) >= yearStart);
 
     const byProduct = {};
-    for (const app of applications) {
+    for (const app of loaded) {
       if (!byProduct[app.product_id]) byProduct[app.product_id] = { name: app.product_name, apps: [] };
       byProduct[app.product_id].apps.push(app);
     }
 
     const status = { products: [], warnings: 0, blocks: 0, county, totalApplications: applications.length };
     for (const [productId, data] of Object.entries(byProduct)) {
+      const { start } = await this.countWindow(db, { id: productId, name: data.name }, today);
+      const inWindow = data.apps.filter((app) => etCalendarDayOf(app.application_date) >= start);
+      if (!inWindow.length) continue;
       const check = await this.checkLimits(customerId, productId);
-      status.products.push({ productId, productName: data.name, applicationsThisYear: data.apps.length, lastApplied: data.apps[0]?.application_date, limits: check });
+      status.products.push({ productId, productName: data.name, applicationsThisYear: inWindow.length, lastApplied: inWindow[0]?.application_date, limits: check });
       status.warnings += check.warnings.length;
       status.blocks += check.blocks.length;
     }
@@ -511,25 +537,28 @@ class ApplicationLimitChecker {
     return this.getCounties(customer)[0] || 'all';
   }
 
-  // Every county whose nitrogen rules apply to a customer (a straddling place lists both, so the stricter of the two applies):
-  //  1. the eleven cities this function always mapped, unchanged;
-  //  2. Longboat Key, which lies in both Manatee and Sarasota counties (Wikipedia: "almost equally divided between Manatee and
-  //     Sarasota counties"; address-county.js leaves it out for the same reason): both;
-  //  3. the repo's address tables (config/address-county.js, the table the watering rules use): the ZIP first, then a city that sits
-  //     wholly in one county (Punta Gorda and Port Charlotte: Charlotte; Anna Maria, Holmes Beach, Bradenton Beach, Myakka City:
-  //     Manatee; Siesta Key: Sarasota);
-  //  4. a ZIP the service-area map lists under two counties: exactly those two, read from the map (34228 and 34243: Sarasota and
+  // Every county whose nitrogen rules apply to a customer (a straddling place lists both, so the stricter of the two applies). The ZIP
+  // decides whenever it is one the repo knows, because it is the more precise datum; the city name is the fallback when it is not:
+  //  1. a ZIP the service-area map lists under two counties: exactly those two, read from the map (34228 and 34243: Sarasota and
   //     Manatee; 34223 and 34224: Sarasota and Charlotte);
-  //  5. nothing found: [] (getCounty answers 'all', no county rule applies).
+  //  2. a ZIP in one county (config/address-county.js, the table the watering rules use): that county, whatever the city says;
+  //  3. no usable ZIP: the eleven cities this function always mapped, Longboat Key (Manatee and Sarasota), then the whole-county
+  //     cities of the repo table (Punta Gorda and Port Charlotte: Charlotte; Anna Maria, Holmes Beach, Bradenton Beach, Myakka City:
+  //     Manatee; Siesta Key: Sarasota);
+  //  4. nothing found: [] (getCounty answers 'all', no county rule applies).
   getCounties(customer) {
     if (!customer) return [];
-    const city = String(customer.city || '').trim().toLowerCase();
+    const zip = String(customer.zip || '').trim().slice(0, 5);
+    const byZip = SHARED_ZIP_COUNTIES.get(zip) || [resolveAddressCounty({ zip })].filter(Boolean).map((county) => `${county.toLowerCase()}_county`);
+    return byZip.length ? byZip : this.countiesOfCity(String(customer.city || '').trim().toLowerCase());
+  }
+
+  countiesOfCity(city) {
     if (['bradenton', 'lakewood ranch', 'parrish', 'palmetto', 'ellenton'].includes(city)) return ['manatee_county'];
     if (['sarasota', 'venice', 'nokomis', 'osprey', 'north port', 'englewood'].includes(city)) return ['sarasota_county'];
     if (city === 'longboat key') return ['sarasota_county', 'manatee_county'];
-    const county = resolveAddressCounty({ zip: customer.zip, city });
-    if (county) return [`${county.toLowerCase()}_county`];
-    return SHARED_ZIP_COUNTIES.get(String(customer.zip || '').trim().slice(0, 5)) || [];
+    const county = resolveAddressCounty({ city });
+    return county ? [`${county.toLowerCase()}_county`] : [];
   }
 
   isNitrogenFertilizer(product) {
@@ -609,7 +638,7 @@ class ApplicationLimitChecker {
       const max = Number(limit.limit_value);
       let violation;
       if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max, window);
-      else if (limit.match_type === V13_AMOUNT) violation = await this.auditAmount(database, customerId, product, day, limit, opts, window);
+      else if (limit.match_type === V13_AMOUNT) violation = await this.auditAmount(database, customerId, product, day, limit, opts);
       else violation = await this.auditInterval(others, product, day, max);
       if (violation) violations.push({ ...violation, limitId: limit.id, description: limit.description });
     }
@@ -635,14 +664,12 @@ class ApplicationLimitChecker {
 
   // The yearly amount: every other application of the product in the calendar year of the date (before and
   // after it) plus this visit's own recorded ones must fit the cap. A visit with no ledger rows of its own
-  // adds nothing (only the others filling the cap is flagged), as the count audit does. A rolling-365 product
-  // (see ROLLING_365) is judged in every 365-day window that contains the date, the fullest one reported.
-  async auditAmount(database, customerId, product, day, limit, opts = {}, window = this.windowFor(day, null)) {
+  // adds nothing (only the others filling the cap is flagged), as the count audit does.
+  async auditAmount(database, customerId, product, day, limit, opts = {}) {
     const year = day.slice(0, 4);
-    const [from, to] = window.rolling ? [shiftDay(day, 1 - ROLLING_DAYS), shiftDay(day, ROLLING_DAYS - 1)] : [`${year}-01-01`, `${year}-12-31`];
     const yearRows = (query) => query.where({ 'pah.customer_id': customerId, 'pah.product_id': product.id }).whereNull('pah.retracted_at')
-      .where('pah.application_date', '>=', from).where('pah.application_date', '<=', to)
-      .select('pah.application_date', 'pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft', 'pah.property_id', 'pah.service_record_id',
+      .where('pah.application_date', '>=', `${year}-01-01`).where('pah.application_date', '<=', `${year}-12-31`)
+      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft', 'pah.property_id', 'pah.service_record_id',
         'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
     const base = () => database('property_application_history as pah').leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id');
     const others = await scopeHistoryToTreatment(yearRows(base()), database, opts, 'pah');
@@ -650,18 +677,11 @@ class ApplicationLimitChecker {
       ? await scopeHistoryToTreatment(yearRows(base()), database, { propertyId: opts.propertyId, place: opts.place }, 'pah')
         .whereIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
       : [];
-    const tagged = [...others.map((row) => ({ ...row, own: false })), ...own.map((row) => ({ ...row, own: true }))];
-    const sets = window.rolling ? windowsAround(dated(tagged), day).map((set) => set.map((item) => item.row)) : [tagged];
     // Per lawn: with no treated property the busiest property of the customer is judged (this visit's rows count where it was done).
-    let worst = null;
-    for (const set of sets) {
-      const { share: used } = await this.lawnAmountShare(database, set.filter((row) => !row.own), limit, { propertyId: opts.propertyId });
-      const { share: total } = await this.lawnAmountShare(database, set, limit, { propertyId: opts.propertyId });
-      if ((total > 1 + 1e-9 || used >= 1 - 1e-9) && (!worst || total > worst.total)) worst = { total };
-    }
-    if (!worst) return null;
-    const span = window.rolling ? `the 365 days around ${day}` : year;
-    return { type: 'annual_max_rate', message: `${product.name}: ${pct(worst.total)}% of the yearly label amount in ${span} — LIMIT EXCEEDED.`, current: pct(worst.total), max: 100 };
+    const { share: used } = await this.lawnAmountShare(database, others, limit, { propertyId: opts.propertyId });
+    const { share: total } = await this.lawnAmountShare(database, [...others, ...own], limit, { propertyId: opts.propertyId });
+    if (total <= 1 + 1e-9 && used < 1 - 1e-9) return null;
+    return { type: 'annual_max_rate', message: `${product.name}: ${pct(total)}% of the yearly label amount in ${year} — LIMIT EXCEEDED.`, current: pct(total), max: 100 };
   }
 
   async auditInterval(others, product, day, min) {
@@ -679,3 +699,4 @@ class ApplicationLimitChecker {
 }
 
 module.exports = new ApplicationLimitChecker();
+module.exports.assertRollingIsCountOnly = assertRollingIsCountOnly;

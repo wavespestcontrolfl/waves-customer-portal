@@ -3,7 +3,7 @@
 // per-place read, the weed-mix decision and the closeout audit.
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const applicationLimits = require('../services/application-limits');
-const { V13_COUNT_CAPS, syntheticAmountLimit, resetV13CapIdentity } = require('../config/lawn-v13-count-caps');
+const { V13_COUNT_CAPS, resetV13CapIdentity } = require('../config/lawn-v13-count-caps');
 const { refusesAtPlace } = require('../services/lawn-trouble-areas');
 const engine = require('../services/waveguard-plan-engine');
 const { buildWeedMix } = require('../services/lawn-weed-mix');
@@ -21,6 +21,27 @@ describe('the cap entries (no database)', () => {
   test('only Celsius and Certainty carry the rolling window; every other entry has none', () => {
     const rolling = V13_COUNT_CAPS.filter((entry) => entry.yearWindow).map((entry) => [entry.name, entry.yearWindow]);
     expect(rolling).toEqual([[CELSIUS, 'rolling365'], [CERTAINTY, 'rolling365']]);
+  });
+
+  test('a rolling entry is count-only: yearWindow with annualAmount is refused with a clear message; Arena (amount, calendar) and entries with neither pass', () => {
+    expect(() => applicationLimits.assertRollingIsCountOnly(V13_COUNT_CAPS)).not.toThrow();
+    expect(V13_COUNT_CAPS.find((entry) => entry.name === ARENA).annualAmount).toBeTruthy();
+    expect(() => applicationLimits.assertRollingIsCountOnly([{ name: 'Fixture WG', cap: 2, yearWindow: 'rolling365', annualAmount: { cap: 1 } }]))
+      .toThrow(/"Fixture WG" declares yearWindow "rolling365" and annualAmount; a rolling window is supported for the yearly count only/);
+    // The program lane's entries (a yearly amount, no yearWindow) must not trip it.
+    expect(() => applicationLimits.assertRollingIsCountOnly([{ name: 'Blindside Herbicide', cap: 2, annualAmount: { cap: 1 } }, { name: 'Velista', cap: 2, annualAmount: { cap: 1 } }])).not.toThrow();
+  });
+
+  test('windowForName: the cap entry\'s window while GATE_LAWN_V13 is live, the calendar year otherwise', () => {
+    const saved = process.env.GATE_LAWN_V13;
+    try {
+      process.env.GATE_LAWN_V13 = 'true';
+      expect(applicationLimits.windowForName('Celsius WG', '2026-01-12')).toMatchObject({ rolling: true, start: '2025-01-13' });
+      expect(applicationLimits.windowForName('Blindside Herbicide', '2026-01-12')).toMatchObject({ rolling: false, start: '2026-01-01' });
+      expect(applicationLimits.windowForName('Not a product', '2026-01-12')).toMatchObject({ rolling: false, start: '2026-01-01' });
+      delete process.env.GATE_LAWN_V13;
+      expect(applicationLimits.windowForName('Celsius WG', '2026-01-12')).toMatchObject({ rolling: false, start: '2026-01-01' });
+    } finally { if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved; }
   });
 
   test('windowFor: the calendar year unless rolling365; the rolling window is the 365 days ending on the day', () => {
@@ -58,7 +79,7 @@ describeDb('rolling 365-day yearly caps through PostgreSQL', () => {
 
   beforeAll(async () => {
     owned = await createLawnHistoryDb(); knex = owned.knex;
-    for (const table of ['products_catalog', 'product_aliases', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_gates', 'product_limits', 'property_application_history']) {
+    for (const table of ['products_catalog', 'product_aliases', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_gates', 'service_products', 'product_limits', 'property_application_history']) {
       await clone(table);
     }
     for (const name of [CELSIUS, CERTAINTY, BLINDSIDE]) await product(name);
@@ -158,18 +179,20 @@ describeDb('rolling 365-day yearly caps through PostgreSQL', () => {
       resetV13CapIdentity();
       expect(types(await check(f, CELSIUS, '2026-01-12'))).toEqual([]);
     });
+  });
 
-    test('the yearly amount counts the same window (evaluateV13AmountCap with a rolling window), the calendar window sees only the new year', async () => {
-      const { f } = await lawn(ARENA, ['2025-12-05', '2025-12-20'], { rate: 0.147 });
-      const arena = catalog[ARENA];
-      const limit = syntheticAmountLimit(V13_COUNT_CAPS.find((entry) => entry.name === ARENA), arena.id);
-      const ctx = (window) => ({ customerId: f.customerId, propertyId: f.property.id, yearStart: '2026-01-01', window, proposedDate: '2026-01-12T16:00:00Z' });
-      const rolling = await applicationLimits.evaluateV13AmountCap(limit, arena, ctx(applicationLimits.windowFor('2026-01-12', 'rolling365')), knex);
-      expect(rolling).toMatchObject({ violated: true, current: 100 });
-      expect(rolling.message).toContain("the last 365 days' applications on the lawn total 100%");
-      const calendar = await applicationLimits.evaluateV13AmountCap(limit, arena, ctx(undefined), knex);
-      expect(calendar).toMatchObject({ violated: false, current: 0 });
-      expect(calendar.message || '').not.toContain('365');
+  describe('the portal\'s Celsius count follows the cap\'s window (celsiusApplicationsThisYear with windowForName)', () => {
+    const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
+    test('two December passes read 2 on 12 January under v13 (the cap blocks a third); the calendar start reads 0; gate off is the calendar year', async () => {
+      const { f } = await lawn(CELSIUS, ['2025-12-05', '2025-12-20']);
+      const count = (start, opts = {}) => celsiusApplicationsThisYear(f.customerId, start, { knex, ...opts });
+      expect(await count(applicationLimits.windowForName('Celsius WG', '2026-01-12').start)).toBe(2);
+      expect(await count('2026-01-01')).toBe(0);
+      expect(types(await check(f, CELSIUS, '2026-01-12'))).toEqual(['annual_max_apps']);
+      delete process.env.GATE_LAWN_V13;
+      expect(await count(applicationLimits.windowForName('Celsius WG', '2026-01-12').start)).toBe(0);
+      process.env.GATE_LAWN_V13 = 'true';
+      expect(await count(applicationLimits.windowForName('Celsius WG', '2026-12-21').start)).toBe(0); // 366 days on: out of the window
     });
   });
 
@@ -245,23 +268,8 @@ describeDb('rolling 365-day yearly caps through PostgreSQL', () => {
       expect(countViolation(await run('back'))).toBeUndefined();
       expect(countViolation(await run('front'))).toMatchObject({ current: 2 });
     });
-
-    test('the yearly amount audit (rolling window): two earlier passes plus this visit exceed it; the calendar reading sees only this visit', async () => {
-      const arena = catalog[ARENA];
-      const limit = syntheticAmountLimit(V13_COUNT_CAPS.find((entry) => entry.name === ARENA), arena.id);
-      const { f } = await lawn(ARENA, ['2025-12-15', '2025-12-20'], { rate: 0.147 });
-      const visit = await record(f, ARENA, '2026-01-10', { rate: 0.147 });
-      const opts = { propertyId: f.property.id, excludeScheduledServiceId: visit.id };
-      const rolling = await applicationLimits.auditAmount(knex, f.customerId, arena, '2026-01-10', limit, opts, applicationLimits.windowFor('2026-01-10', 'rolling365'));
-      expect(rolling).toMatchObject({ type: 'annual_max_rate', current: 150 });
-      expect(rolling.message).toContain('the 365 days around 2026-01-10');
-      expect(await applicationLimits.auditAmount(knex, f.customerId, arena, '2026-01-10', limit, opts)).toBeNull();
-      // One earlier pass plus this visit fits exactly (0.294 oz), in either window.
-      const fits = await lawn(ARENA, ['2025-12-15'], { rate: 0.147 });
-      const own = await record(fits.f, ARENA, '2026-01-10', { rate: 0.147 });
-      expect(await applicationLimits.auditAmount(knex, fits.f.customerId, arena, '2026-01-10', limit, { propertyId: fits.f.property.id, excludeScheduledServiceId: own.id }, applicationLimits.windowFor('2026-01-10', 'rolling365'))).toBeNull();
-    });
   });
+
   // Owner rulings: Blindside replaces Celsius only when Celsius is at its yearly cap, and February is Celsius alone. The data says it with
   // a retired flag on the month's Blindside row (gates.retired = true); no reader keeps a month list.
   describe('a retired staged row is never offered (Blindside in a month the program does not stage it)', () => {

@@ -193,8 +193,6 @@ const isAmountRow = (limit) => limit.limit_type === 'annual_max_rate' && limit.m
 //   amount    current = oz per 1,000 sq ft already used this year on the busiest lawn, exceeded at the cap,
 //             warning from 75% of it.
 async function limitStatusFor(limit, matchingApps, { today, customerCounty, customerId, yearStart, lastBefore }) {
-  // A rolling-365 product (application-limits ROLLING_365, `year_window` on its v13 rows) counts its yearly amount over the last 365 days.
-  const window = applicationLimits.windowFor(today, limit.year_window);
   const product = { id: limit.product_id, name: limit.product_name };
   if (isIntervalRow(limit)) {
     const latest = matchingApps.map((app) => etCalendarDayOf(app.application_date)).sort().pop()
@@ -204,7 +202,7 @@ async function limitStatusFor(limit, matchingApps, { today, customerCounty, cust
     return { status: check.violated ? 'exceeded' : 'ok', current: check.current ?? null };
   }
   if (isAmountRow(limit)) {
-    const check = await applicationLimits.evaluateV13AmountCap(limit, product, { customerId, yearStart, window, proposedDate: `${today}T12:00:00Z` }, db);
+    const check = await applicationLimits.evaluateV13AmountCap(limit, product, { customerId, yearStart, proposedDate: `${today}T12:00:00Z` }, db);
     return { status: check.violated ? 'exceeded' : (check.approaching ? 'warning' : 'ok'), current: check.amountUsed };
   }
   return limitStatus(limit, matchingApps, { today, customerCounty });
