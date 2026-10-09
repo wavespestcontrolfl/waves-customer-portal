@@ -428,14 +428,22 @@ async function bermudaAreaViolation(knex, submittedEntries, { serviceId } = {}) 
   // Each herbicide is measured in its own dimension: the catalog row's rate unit says which
   // (Recognition is a dry product, by weight; Fusilade II a liquid, by volume). Every unit the
   // entry states, for its rate and for its amount, must be of that family, so the application and
-  // inventory records describe what was really used. A product whose catalog unit names no
-  // family is not judged here.
+  // inventory records describe what was really used.
   const { measureFamily } = require('./application-limits');
+  // The family comes from the catalog row's rate unit; when that names none (an older row with a
+  // blank or nonstandard unit), from the step's own staged row for the product. A herbicide whose
+  // dimension neither source states cannot be checked, so its entry is refused (fail closed).
   const catalogUnits = await knex('products_catalog').whereIn('id', stepIds).select('id', 'rate_unit');
-  const familyOf = new Map(catalogUnits.map((row) => [String(row.id).toLowerCase(), measureFamily(row.rate_unit)]));
+  const stagedUnits = await knex('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'")
+    .whereIn('product_id', stepIds).whereNotNull('rate_unit').select('product_id as id', 'rate_unit');
+  const familyOf = new Map();
+  for (const row of [...catalogUnits, ...stagedUnits]) {
+    const id = String(row.id).toLowerCase();
+    if (!familyOf.get(id)) familyOf.set(id, measureFamily(row.rate_unit));
+  }
   const rightDimension = (p) => {
     const expected = familyOf.get(String(p.productId));
-    if (!expected) return true;
+    if (!expected) return false;
     const stated = [positive(p.rate) ? p.rateUnit : null, positive(p.totalAmount) ? amountUnit(p) : null].filter(Boolean);
     return stated.every((unit) => measureFamily(unit) === expected);
   };

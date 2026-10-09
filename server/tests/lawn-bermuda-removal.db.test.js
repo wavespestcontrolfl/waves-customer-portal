@@ -966,6 +966,12 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { areaValue: 5000, totalAmount: 5.5, amountUnit: 'lb' })])).toBe(MESSAGE);
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz', areaValue: 5000, totalAmount: 0.3, amountUnit: 'oz' })])).toBe(MESSAGE);
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl oz/1000sf' })])).toBeNull();
+      // A catalog row with no usable rate unit: the dimension comes from the step's staged row, so
+      // Fusilade II by weight is still refused and by volume still allowed (codex r55 P2).
+      await knex('products_catalog').where({ id: fus.id }).update({ rate_unit: null });
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'lb' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBeNull();
+      await knex('products_catalog').where({ id: fus.id }).update({ rate_unit: 'fl oz' });
       // An upper-case spelling of the product ids is the same products (codex r44 P2): still refused.
       expect(await check([entry({ id: String(rec.id).toUpperCase() }), entry({ id: String(fus.id).toUpperCase() })])).toBe(MESSAGE);
       // Not a step visit, no step product, nothing submitted, or the gate off: never refused.
