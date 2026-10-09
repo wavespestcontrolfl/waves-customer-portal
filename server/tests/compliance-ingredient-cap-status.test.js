@@ -31,6 +31,22 @@ describe('compliance limit status: active ingredient yearly amount', () => {
     expect(await limitStatusFor(LIMIT, [], CTX)).toEqual({ status: 'ok', current: 0 });
   });
 
+  test('the worst lawn is picked by severity first: a violated lawn beats an approaching lawn with the larger rounded usage, in either order', async () => {
+    stub({ approaching: true, current: 74.9 }, { violated: true, current: 74.9 });
+    expect(await limitStatusFor(LIMIT, [], { ...CTX, propertyIds: ['a', 'b'] })).toMatchObject({ status: 'exceeded' });
+    stub({ violated: true, current: 74.9 }, { approaching: true, current: 99.9 });
+    expect(await limitStatusFor(LIMIT, [], { ...CTX, propertyIds: ['a', 'b'] })).toMatchObject({ status: 'exceeded' });
+    stub({ violated: false, current: 80 }, { approaching: true, current: 75 });
+    expect(await limitStatusFor(LIMIT, [], { ...CTX, propertyIds: ['a', 'b'] })).toMatchObject({ status: 'warning' });
+  });
+
+  test('equal severity: the larger usage decides, and a tie keeps the first lawn', async () => {
+    stub({ violated: true, current: 100 }, { violated: true, current: 120 });
+    expect((await limitStatusFor(LIMIT, [], { ...CTX, propertyIds: ['a', 'b'] })).current).toBe(10.884);
+    stub({ approaching: true, current: 50 }, { approaching: true, current: 50 });
+    expect((await limitStatusFor(LIMIT, [], { ...CTX, propertyIds: ['a', 'b'] })).current).toBe(4.535);
+  });
+
   test('a customer with several properties is judged per lawn: the worst one decides', async () => {
     stub({ violated: false, current: 33.3 }, { violated: true, current: 100 });
     expect(await limitStatusFor(LIMIT, [], { ...CTX, propertyIds: ['a', 'b'] })).toEqual({ status: 'exceeded', current: 9.07 });
