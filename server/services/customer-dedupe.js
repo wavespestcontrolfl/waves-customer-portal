@@ -46,6 +46,8 @@ const { pairCustomersAtSameAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+const { NEW_SOD_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
+const { dateOnlyString } = require('../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -1360,7 +1362,19 @@ const PREF_DEFAULT_SENTINELS = {
   property_preferences: new Set([0, '0', 'no_preference']),
 };
 
-async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
+// The new-sod record of a property_preferences row as plain journal values (dates as YYYY-MM-DD), keyed by
+// column. Used for the merge's before-image so an undo can put the exact record back.
+function newSodBeforeImage(row) {
+  const image = {};
+  for (const col of NEW_SOD_COLUMNS) image[col] = row[col] == null ? null : dateOnlyString(row[col]);
+  return image;
+}
+
+// copyNewSod (property_preferences only): the loser's new-sod record describes the loser's HOME, so it is
+// copied onto a winner with no sod date only when the merge is a SAME-home one (the executor passes true then).
+// The four sod columns are one fact: they are copied together or not at all, never one by one.
+// Anywhere the answer is not known the record is not copied.
+async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId, { copyNewSod = false } = {}) {
   const lockedRows = new Map();
   // Match preference saves: lock by customer ID, independent of merge roles.
   for (const id of [winnerId, loserId].sort()) {
@@ -1408,6 +1422,8 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
     // Settled above: receipts are always on after a merge.
     if (table === 'notification_prefs' && col === 'payment_receipt') continue;
+    // The new-sod record is settled as one group below, never column by column.
+    if (table === 'property_preferences' && NEW_SOD_COLUMNS.includes(col)) continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -1426,6 +1442,12 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     } else if (isDefaultish(winnerVal) && !isDefaultish(loserVal)) {
       updates[col] = forUpdate(loserVal);
     }
+  }
+  // The new-sod record (a fact about one home): on a same-home merge a winner with no sod date takes the
+  // loser's whole record; a winner that has a date keeps its own record untouched. A different-homes merge
+  // never copies it (the winner's primary home did not move).
+  if (table === 'property_preferences' && copyNewSod && !winnerRow.sod_laid_on && loserRow.sod_laid_on) {
+    for (const col of NEW_SOD_COLUMNS) updates[col] = loserRow[col] ?? null;
   }
   if (table === 'notification_prefs' && Object.hasOwn(winnerRow, 'request_channel_explicit')) {
     const channel = updates.request_channel || winnerRow.request_channel;
@@ -3145,6 +3167,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // journal lists WHICH handlers ran (collision_handlers) and the revert
     // endpoint refuses any merge where one did.
     const repointedIds = {};
+    // Do the two records describe DIFFERENT homes? One premise test (the address fan-out's), decided once,
+    // before the sweep: the preferences fill (new-sod record) and the move stamp below both read it. Only two
+    // REAL addresses are evidence of different homes: an addressless shell inherits the loser's address in the
+    // backfill below.
+    const mergeFanout = require('./customer-address-fanout');
+    const mergeDifferentHomes = !!(mergeFanout.addressMatchKey(winner?.address_line1)
+      && mergeFanout.addressMatchKey(loser?.address_line1) && mergeFanout.homesDiffer(winner, loser));
+    // The loser's moved preferences row whose new-sod record the merge cleared ({ row_id, before }), for the undo.
+    let movedPrefNewSod = null;
     const collisionHandlers = [];
     // email_messages ids whose irrigation weekly trigger identity was
     // rewritten loser→winner (row ids, or { count } over the cap — the undo
@@ -3338,7 +3369,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         const uniqueViolation = e && e.code === '23505';
         const handler = UNIQUE_COLLISION_HANDLERS[table];
         if (uniqueViolation && handler) {
-          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId);
+          // copyNewSod is the executor's own premise test (the one the move stamp uses), so the
+          // preference fill and the stamp can never disagree about whether the home moved.
+          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId, { copyNewSod: !mergeDifferentHomes });
           // The handler moved/merged/deleted rows that are NOT in
           // repointedIds — this merge can no longer be replayed backwards.
           if (!collisionHandlers.includes(table)) collisionHandlers.push(table);
@@ -3532,11 +3565,35 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Only two REAL addresses are evidence of different homes: an addressless
     // shell inherits the loser's address in the backfill below, so those
     // settings belong to the surviving home (codex gh-r25).
-    if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1) && fanout.homesDiffer(winner, loser)) {
+    if (mergeDifferentHomes) {
       try {
         await trx.transaction(async (sp) => {
-          const n = await fanout.markSprinklerSettingsMoved(winnerId, sp);
+          // The STAMP never clears the new-sod record on a merge (it has no before-image: an undo leaves the
+          // stamp in place). The winner's own record stands (its home did not move) and the loser's is
+          // never copied by the field fill (mergeSingletonPrefRow). The one case where the loser's
+          // record does reach the winner is below, journaled and cleared with a before-image.
+          const n = await fanout.markSprinklerSettingsMoved(winnerId, sp, { clearNewSod: false });
           if (n) repointed['property_preferences.irrigation_home_changed_at'] = n;
+          // The winner had NO preferences row, so the FK sweep moved the loser's whole row (a plain,
+          // row-level-journaled repoint). Its new-sod record describes the LOSER's home, which is not
+          // the winner's: clear it on the moved row, and journal the original values so an undo (which
+          // moves the row back) restores them losslessly. Two rows colliding go through the field fill,
+          // which never copies the record on a different-homes merge (and whose merges are never auto-undone).
+          if (typeof repointed['property_preferences.customer_id'] === 'number') {
+            try {
+              await sp.transaction(async (sod) => {
+                const moved = await sod('property_preferences').where({ customer_id: winnerId }).forUpdate().first('id', ...NEW_SOD_COLUMNS);
+                if (moved && NEW_SOD_COLUMNS.some((c) => moved[c] != null)) {
+                  await sod('property_preferences').where({ id: moved.id }).update(clearedNewSodColumns());
+                  movedPrefNewSod = { row_id: moved.id, before: newSodBeforeImage(moved) };
+                  repointed['property_preferences.new_sod_cleared'] = 1;
+                }
+              });
+            } catch (sodErr) {
+              // Before the new-sod migration there is nothing to clear (42703); anything else aborts the merge.
+              if (!(sodErr && sodErr.code === '42703')) throw sodErr;
+            }
+          }
         });
       } catch (e) {
         throw new Error(`executeMerge: sprinkler-settings move stamp failed: ${e.message}`);
@@ -3944,6 +4001,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // rewrites exactly these back so the restored loser's customer-week
         // record follows the returned rows (hook P1 on 47b0a3146).
         irrigation_trigger_ids: irrigationTriggerIds,
+        // The new-sod record the merge cleared from the loser's preferences row that moved whole to a
+        // winner with none ({ row_id, before: { column: value } }); the undo puts it back while the row is
+        // returned and the columns are still the merge-written nulls. null = nothing was cleared.
+        moved_pref_new_sod: movedPrefNewSod,
         // The winner's ORIGINAL customer-level autopay fields for the exact
         // columns the most-restrictive block overwrote ({ before, applied }),
         // or null when the merge left the winner's autopay alone.
@@ -5625,6 +5686,18 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       }
     }
 
+    // The merge cleared the new-sod record on the loser's preferences row it moved whole to a winner that had
+    // none. If staff have entered a NEW record on that row since, an undo would repoint the row to the loser
+    // carrying the winner's record (a different home). The same refusal as colliding rows: a clear reason,
+    // zero writes, restore by hand.
+    const newSodCleared = recorded.moved_pref_new_sod || null;
+    if (newSodCleared && newSodCleared.row_id && newSodCleared.before) {
+      const sodRow = await trx('property_preferences').where({ id: newSodCleared.row_id }).forUpdate().first('id', 'customer_id', ...NEW_SOD_COLUMNS);
+      if (sodRow && NEW_SOD_COLUMNS.some((c) => sodRow[c] != null)) {
+        refuse('A sod record was entered for the kept customer after this merge moved the loser\'s preferences row to it; undoing would hand that record to the restored customer. Clear or move that record first, then revert (the original record is in the journal)');
+      }
+    }
+
     const repointedBack = {};
     for (const plan of plans) {
       const repointPayload = { [plan.column]: loserId };
@@ -5668,6 +5741,18 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: plan.key, reason: 'rows_changed_during_revert', count: plan.ids.length - count });
       }
       if (count) repointedBack[plan.key] = count;
+    }
+
+    // The merge cleared the new-sod record on the loser's preferences row it moved to a winner that had
+    // none (the record described the loser's home). The row just moved back with the others; restore
+    // the journaled record, only where the row is the loser's again and every column is still the
+    // merge-written null (a record entered since was refused above, before any write).
+    if (newSodCleared && newSodCleared.row_id && newSodCleared.before) {
+      let restoreQuery = trx('property_preferences').where({ id: newSodCleared.row_id, customer_id: loserId });
+      for (const col of NEW_SOD_COLUMNS) restoreQuery = restoreQuery.whereNull(col);
+      const restored = await restoreQuery.update(newSodCleared.before);
+      // (a record entered since was refused before any write above; here the row simply did not come back)
+      if (!restored) skipped.push({ key: 'property_preferences.new_sod', reason: 'rows_changed_during_revert' });
     }
 
     // Operator call links the merge rewrote to the winner go back to the

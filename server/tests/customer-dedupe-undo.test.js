@@ -995,6 +995,8 @@ describe('revertMerge', () => {
       }
       const cfg = tables[table];
       if (cfg) {
+        // A single-row read of a configured table (the new-sod conflict probe).
+        if (q.called('first') && cfg.firstRow !== undefined) return cfg.firstRow;
         if (q.called('sum')) {
           const whereArg = q.args('where')?.[0] || {};
           return { total: (cfg.ledgerSums || {})[whereArg.customer_id] ?? 0 };
@@ -1112,6 +1114,54 @@ describe('revertMerge', () => {
     expect(stamped.result.skipped).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'customers.last_seen_at', reason: 'winner_value_changed_since_merge' }),
     ]));
+  });
+
+  describe('undo restores the new-sod record the merge cleared on the moved preferences row', () => {
+    const BEFORE = { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'back lawn', sod_rooted_on: null };
+    const journalWithSod = () => {
+      const journal = baseJournal();
+      journal.repointed_ids.tables['property_preferences.customer_id'] = ['pp-1'];
+      journal.repointed_ids.moved_pref_new_sod = { row_id: 'pp-1', before: BEFORE };
+      return journal;
+    };
+    const tablesFor = () => ({
+      leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+      invoices: { stillOnWinner: ['inv-1'] },
+      property_preferences: { stillOnWinner: ['pp-1'] },
+    });
+    const sodRestores = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'sod_laid_on' in r.payload);
+
+    it('puts the original record back on the row the undo returns to the loser', async () => {
+      const { trx, state } = buildRevertTrx({ journal: journalWithSod(), winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+      // The row moves back first (plain repoint) ...
+      expect(state.repointedBack.find((r) => r.table === 'property_preferences')).toMatchObject({ ids: ['pp-1'], payload: { customer_id: LOSER } });
+      // ... then the whole record returns, only to the loser's row and only while it is still the merge-written nulls.
+      expect(sodRestores(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-1', customer_id: LOSER }, payload: BEFORE }]);
+      expect(result.skipped.filter((x) => x.key === 'property_preferences.new_sod')).toEqual([]);
+    });
+
+    it.each(['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on'])('REFUSES the undo, with zero writes, when %s was entered on that row after the merge', async (column) => {
+      const tables = tablesFor();
+      tables.property_preferences.firstRow = { id: 'pp-1', customer_id: WINNER, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null, [column]: 'x' };
+      const { trx, state } = buildRevertTrx({ journal: journalWithSod(), winner: baseWinner(), loser: baseLoser(), tables });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/sod record was entered .* after this merge/) });
+      expect(state.repointedBack).toEqual([]);
+      expect(sodRestores(state)).toEqual([]);
+      expect(state.journalUpdate).toBeNull();
+    });
+
+    it('a journal with no cleared record restores nothing', async () => {
+      const journal = journalWithSod();
+      journal.repointed_ids.moved_pref_new_sod = null;
+      const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+      expect(sodRestores(state)).toEqual([]);
+    });
   });
 
   it('restores the irrigation weekly delivery identity (trigger_event_id) for exactly the journaled rows (hook P1 on 47b0a3146)', async () => {

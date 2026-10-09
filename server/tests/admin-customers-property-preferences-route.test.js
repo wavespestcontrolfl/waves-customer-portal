@@ -346,3 +346,116 @@ describe('codex r3 — enum columns validate on value', () => {
     expect(mockState.prefsRow).toMatchObject({ preferred_day: 'tuesday', preferred_time: 'early_morning', contact_preference: null });
   });
 });
+
+describe('the new-sod record — staff-only sodLaidOn / sodCovers / sodArea', () => {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const daysAgo = (n) => etDateString(addETDays(new Date(), -n));
+  const stored = (extra = {}) => ({ id: 'pref-1', customer_id: 'cust-1', ...extra });
+
+  it('saves a real recent day as the plain YYYY-MM-DD string; covers defaults to whole; area stays empty', async () => {
+    const day = daysAgo(3);
+    const result = await putPrefs({ sodLaidOn: day });
+    expect(result.status).toBe(200);
+    expect(mockState.prefsRow).toMatchObject({ sod_laid_on: day, sod_covers: 'whole', sod_area: null, sod_rooted_on: null });
+    expect(typeof mockState.prefsRow.sod_laid_on).toBe('string');
+    expect(recordAuditEvent.mock.calls[0][0].metadata).toEqual({ fields: ['sod_laid_on'] });
+  });
+
+  it('part needs a named area (trimmed); whole drops it', async () => {
+    const day = daysAgo(3);
+    let res = await putPrefs({ sodLaidOn: day, sodCovers: 'part' });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected).toEqual([{ field: 'sodArea', message: 'Name the part of the lawn that has new sod.' }]);
+    expect(mockState.prefsRow).toBeNull();
+
+    res = await putPrefs({ sodLaidOn: day, sodCovers: 'part', sodArea: '  back lawn by the pool ' });
+    expect(res.status).toBe(200);
+    expect(mockState.prefsRow).toMatchObject({ sod_covers: 'part', sod_area: 'back lawn by the pool' });
+
+    res = await putPrefs({ sodCovers: 'whole', sodArea: 'ignored' });
+    expect(res.status).toBe(200);
+    expect(mockState.prefsRow).toMatchObject({ sod_laid_on: day, sod_covers: 'whole', sod_area: null });
+  });
+
+  it('merges with the stored row: an area-only edit keeps the date and covers; a covers-only switch to part needs an area', async () => {
+    const day = daysAgo(10);
+    mockState.prefsRow = stored({ sod_laid_on: day, sod_covers: 'part', sod_area: 'front yard' });
+    expect((await putPrefs({ sodArea: 'side yard' })).status).toBe(200);
+    expect(mockState.prefsRow).toMatchObject({ sod_laid_on: day, sod_covers: 'part', sod_area: 'side yard' });
+
+    mockState.prefsRow = stored({ sod_laid_on: day, sod_covers: 'whole', sod_area: null });
+    const res = await putPrefs({ sodCovers: 'part', accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected).toEqual([{ field: 'sodArea', message: 'Name the part of the lawn that has new sod.' }]);
+    expect(mockState.prefsRow).toMatchObject({ sod_covers: 'whole', access_notes: 'Side gate' });
+  });
+
+  it('covers and area without any date are rejected', async () => {
+    const res = await putPrefs({ sodCovers: 'part', sodArea: 'front yard' });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected[0]).toMatchObject({ field: 'sodLaidOn' });
+    expect(mockState.prefsRow).toBeNull();
+  });
+
+  it('null and an empty string both clear the whole record, including the rooted day', async () => {
+    for (const cleared of [null, '']) {
+      mockState.prefsRow = stored({ sod_laid_on: daysAgo(40), sod_covers: 'part', sod_area: 'front yard', sod_rooted_on: daysAgo(2) });
+      expect((await putPrefs({ sodLaidOn: cleared })).status).toBe(200);
+      expect(mockState.prefsRow).toMatchObject({ sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null });
+    }
+  });
+
+  it('a different sod date clears the rooted day; the same day keeps it', async () => {
+    const first = daysAgo(40);
+    mockState.prefsRow = stored({ sod_laid_on: first, sod_covers: 'whole', sod_rooted_on: daysAgo(2) });
+    expect((await putPrefs({ sodLaidOn: first })).status).toBe(200);
+    expect(mockState.prefsRow.sod_rooted_on).toBe(daysAgo(2));
+    expect((await putPrefs({ sodLaidOn: daysAgo(39) })).status).toBe(200);
+    expect(mockState.prefsRow).toMatchObject({ sod_laid_on: daysAgo(39), sod_rooted_on: null });
+  });
+
+  it('sod_rooted_on is not accepted from this route', async () => {
+    const res = await putPrefs({ sodLaidOn: daysAgo(40), sodRootedOn: daysAgo(2), sod_rooted_on: daysAgo(2) });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected).toBeUndefined();
+    expect(mockState.prefsRow.sod_rooted_on).toBeNull();
+  });
+
+  it('a future day, a day over 24 months old and a non-date are rejected by field; the rest of the batch still saves', async () => {
+    const future = etDateString(addETDays(new Date(), 2));
+    let res = await putPrefs({ sodLaidOn: future, accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected).toEqual([{ field: 'sodLaidOn', message: 'Sod date cannot be in the future.' }]);
+    expect(mockState.prefsRow.sod_laid_on).toBeUndefined();
+    expect(mockState.prefsRow.access_notes).toBe('Side gate');
+
+    res = await putPrefs({ sodLaidOn: daysAgo(800) });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected).toEqual([{ field: 'sodLaidOn', message: 'Sod date cannot be more than 24 months ago.' }]);
+
+    res = await putPrefs({ sodLaidOn: '2026-02-30' });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected[0].field).toBe('sodLaidOn');
+  });
+
+  it('rejects covers outside whole/part and an area over 120 characters (the column width)', async () => {
+    let res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'some' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected[0].field).toBe('sodCovers');
+    res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'part', sodArea: 'x'.repeat(121) });
+    expect(res.body.rejected.map((r) => r.field)).toEqual(['sodArea', 'sodArea']);
+    res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'part', sodArea: 'x'.repeat(120) });
+    expect(res.status).toBe(200);
+    expect(mockState.prefsRow.sod_area).toHaveLength(120);
+  });
+
+  it('the customer portal does not know any of the new-sod fields (staff only)', () => {
+    const { PREFS_FIELD_SCHEMAS, ALLOWED_FIELDS, validatePrefsBody } = require('../services/property-preferences-schema');
+    const body = { sodLaidOn: daysAgo(3), sodCovers: 'whole', sodArea: 'x', sodRootedOn: daysAgo(1), accessNotes: 'kept' };
+    expect(validatePrefsBody(PREFS_FIELD_SCHEMAS, body)).toMatchObject({ value: { accessNotes: 'kept' }, rejected: [] });
+    for (const field of ['sodLaidOn', 'sodCovers', 'sodArea', 'sodRootedOn']) expect(PREFS_FIELD_SCHEMAS).not.toHaveProperty(field);
+    for (const column of ['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on']) expect(ALLOWED_FIELDS).not.toContain(column);
+    const portalSource = require('fs').readFileSync(require('path').join(__dirname, '../routes/property.js'), 'utf8');
+    expect(portalSource).not.toMatch(/sod_|sodLaid|lawn-sod-holds/);
+  });
+});

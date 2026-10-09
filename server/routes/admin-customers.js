@@ -13,6 +13,7 @@ const { stageLifecycleStamps } = require('../services/customer-stages');
 const LifecycleGuard = require('../services/customer-lifecycle-guard');
 const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
+const { validateSodLaidOn, resolveSodRecord, NEW_SOD_COLUMNS, SOD_AREA_MAX } = require('../services/lawn-sod-holds');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
@@ -4750,11 +4751,28 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
 //     confirmation stamped for whatever number used to be there.
 //   - Field names only in the log/audit trail, never gate/lockbox/garage
 //     code VALUES in the clear.
+// sodLaidOn / sodCovers / sodArea: the new-sod record (Waves does not install
+// sod; the office records sod someone else laid, and lawn visits then hold some
+// products while it roots, server/services/lawn-sod-holds.js). Staff-only like
+// the sensitivities: the customer portal never accepts them, and sod_rooted_on
+// is not accepted from any route. The schemas below check each field alone; the
+// rules that need the stored row (covers defaults to whole, area is required for
+// part and dropped for whole, clearing the date clears the rest, a new date
+// resets the rooted day) run inside the locked write (resolveSodRecord).
+// sodLaidOn is a plain YYYY-MM-DD string, never a Joi date (a Date would bind as
+// a timestamp).
 const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
   chemicalSensitivities: Joi.boolean(),
   chemicalSensitivityDetails: prefsLongText,
+  sodLaidOn: Joi.string().trim().allow('', null).empty('').default(null).custom((value, helpers) => {
+    const checked = validateSodLaidOn(value, etDateString());
+    return checked.ok ? checked.value : helpers.message(checked.message);
+  }),
+  sodCovers: Joi.string().trim().valid('whole', 'part').allow(null).empty('').default(null),
+  sodArea: Joi.string().trim().max(SOD_AREA_MAX).allow(null).empty('').default(null),
 };
-const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details'];
+const SOD_PREFS_INPUT_FIELDS = NEW_SOD_COLUMNS.filter((c) => c !== 'sod_rooted_on');
+const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details', ...SOD_PREFS_INPUT_FIELDS];
 const ADMIN_PREFS_FIELD_SCHEMAS = { ...PREFS_FIELD_SCHEMAS, ...ADMIN_ONLY_PREFS_FIELD_SCHEMAS };
 const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS_ALLOWED_FIELDS];
 
@@ -4781,7 +4799,12 @@ function blackoutPairError(updates) {
 // The locked write. Returns false when the customer is missing or archived:
 // checked under a row lock inside the transaction so an archive committing
 // mid-request can't slip between the check and the upsert (codex r2/r4).
-async function writeAdminPreferences(customerId, updates) {
+//
+// The new-sod fields are settled here, against the stored row under the lock
+// (resolveSodRecord): a record the stored row cannot accept is dropped from the
+// write and its message reported through `outcome.sodRejected` ({ field, message }); `outcome.written`
+// lists the columns that were written.
+async function writeAdminPreferences(customerId, updates, outcome = {}) {
   return db.transaction(async (trx) => {
     // Same advisory-lock key/order the portal PUT and the customer-edit
     // route's address sync already take on this customer — one shared lock
@@ -4810,6 +4833,18 @@ async function writeAdminPreferences(customerId, updates) {
     const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { ...updates, irrigation_system: true }
       : { ...updates };
+    if (SOD_PREFS_INPUT_FIELDS.some((f) => f in updates)) {
+      const sodInput = {};
+      for (const f of SOD_PREFS_INPUT_FIELDS) {
+        if (f in updates) sodInput[f] = updates[f];
+        delete row[f];
+      }
+      const sod = resolveSodRecord(current, sodInput);
+      if (sod.ok) Object.assign(row, sod.columns);
+      else outcome.sodRejected = { field: sod.field, message: sod.message };
+    }
+    outcome.written = Object.keys(row);
+    if (!outcome.written.length) return true;
     if (!current) {
       await trx('property_preferences').insert({ customer_id: customerId, ...row });
       return true;
@@ -4892,15 +4927,24 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
 
     // A missing or archived customer is a 404, not a foreign-key 500 on
     // the insert, and a stale tab must not edit a soft-deleted customer.
-    if (!(await writeAdminPreferences(customerId, updates))) {
+    const outcome = {};
+    if (!(await writeAdminPreferences(customerId, updates, outcome))) {
       return res.status(404).json({ error: 'Customer not found' });
+    }
+    if (outcome.sodRejected) {
+      rejected.push(outcome.sodRejected);
+      if (!outcome.written.length) {
+        return res.status(400).json({ error: outcome.sodRejected.message, rejected });
+      }
     }
 
     const preferences = await db('property_preferences')
       .where({ customer_id: customerId })
       .first();
 
-    const loggedFields = Object.keys(updates).sort();
+    const loggedFields = Object.keys(updates)
+      .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
+      .sort();
     await recordAuditEvent({
       actor_type: 'technician',
       actor_id: req.technicianId || null,
