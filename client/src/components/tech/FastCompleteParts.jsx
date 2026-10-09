@@ -482,7 +482,14 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
 // a phone or beside an extra action (`children`, e.g. "Check stock").
 // `reasonInButton` (the lawn sheet): a short reason is the disabled button's
 // own label instead of a line above it.
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false }) {
+// Prepare mode (a part of a grouped stop): the action saves the part for the
+// stop instead of completing the visit.
+const preparedLabel = (submission, label) => {
+  if (!submission.preparing) return label;
+  return submission.prepared ? 'Update for this stop' : 'Save for this stop';
+};
+
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
@@ -490,6 +497,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
       {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
+      {submission.prepared && <p className="tech-visit-muted" role="status">Saved for this stop</p>}
       <div className="tech-visit-actions">
         {children}
         <Button
@@ -498,7 +506,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           loading={submission.submitting}
           disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : (isAction ? label : preparedLabel(submission, label))}
         </Button>
       </div>
     </footer>
@@ -616,11 +624,20 @@ function noteMaxHeight(el) {
   return Math.ceil(line * NOTE_MAX_LINES + px(style.paddingTop) + px(style.paddingBottom) + px(style.borderTopWidth) + px(style.borderBottomWidth));
 }
 
-export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false }) {
+// A part of a grouped stop (GATE_COMBO_FAST_COMPLETE) reads the stop's one note in place of its own: the form with
+// its `note` replaced by `sharedNote`. Without a shared note (undefined or null) the form is returned as it is.
+export function useSharedNoteForm(ownForm, sharedNote) {
+  return useMemo(() => (sharedNote == null ? ownForm : { ...ownForm, note: String(sharedNote) }), [ownForm, sharedNote]);
+}
+
+// `shared` (a part of a grouped stop): the stop's one note box lives in the container, so this one
+// shows neither its text box nor its mic, only what sits inside it (the note-box photos).
+export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false, shared = false }) {
   const noteId = useId();
   const noteRef = useRef(null);
   const maxHeight = useCallback(() => noteMaxHeight(noteRef.current), []);
   useAutoGrowTextarea(noteRef, note, maxHeight);
+  if (shared) return children ? <section className="tech-visit-choice-section">{children}</section> : null;
   const text = (
     <Textarea
       ref={noteRef}

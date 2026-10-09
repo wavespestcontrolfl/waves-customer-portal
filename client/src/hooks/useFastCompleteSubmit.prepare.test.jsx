@@ -1,0 +1,284 @@
+// @vitest-environment jsdom
+// GATE_COMBO_FAST_COMPLETE (PR 1): useFastCompleteSubmit in prepare mode hands the body it would have
+// posted to onPrepared and does nothing else with it: no request, no saved-completion record, no
+// recovery of an older saved attempt, no held body for a retry. Synthetic ids only.
+import 'fake-indexeddb/auto';
+import { IDBFactory } from 'fake-indexeddb';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import useFastCompleteSubmit from './useFastCompleteSubmit';
+import { getFastCompletionAttempt, putFastCompletionAttempt } from '../lib/completion-resume-store';
+
+beforeEach(() => { globalThis.indexedDB = new IDBFactory(); });
+afterEach(() => cleanup());
+
+const mount = (extra = {}) => {
+  const request = vi.fn(async () => ({ success: true }));
+  const props = { base: '/admin/dispatch/svc-a', request, serviceId: 'svc-a', operatorId: 'op-a', ...extra };
+  return { request, ...renderHook((p) => useFastCompleteSubmit(p), { initialProps: props }) };
+};
+
+describe('prepare mode', () => {
+  test('hands over the body a send would post (key, built fields, invoice fields), and only that', async () => {
+    const onPrepared = vi.fn();
+    const prepared = mount({ onPrepared, invoiceFields: { invoiceAlreadySent: true } });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'n' }), 'sum'); });
+    expect(prepared.request).not.toHaveBeenCalled();
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    const [serviceId, body] = onPrepared.mock.calls[0];
+    expect(serviceId).toBe('svc-a');
+    expect(body).toEqual({ idempotencyKey: expect.any(String), technicianNotes: 'n', invoiceAlreadySent: true });
+    expect(prepared.result.current.prepared).toEqual(body);
+    expect(prepared.result.current.preparing).toBe(true);
+    expect(prepared.result.current.done).toBeNull();
+
+    const sent = mount({ invoiceFields: { invoiceAlreadySent: true } });
+    await waitFor(() => expect(sent.result.current.recovering).toBe(false));
+    await act(async () => { await sent.result.current.submit(() => ({ technicianNotes: 'n' }), 'sum'); });
+    const posted = JSON.parse(sent.request.mock.calls[0][1].body);
+    const { idempotencyKey: _a, ...preparedRest } = body;
+    const { idempotencyKey: _b, ...postedRest } = posted;
+    expect(preparedRest).toEqual(postedRest);
+  });
+
+  test('writes no saved-completion record and holds no body for a retry', async () => {
+    const prepared = mount({ onPrepared: vi.fn() });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'n' }), 'sum'); });
+    expect((await getFastCompletionAttempt('svc-a', 'op-a')).attempt).toBeNull();
+    expect(prepared.result.current.hasPendingBody()).toBe(false);
+    expect(prepared.result.current.retryPending).toBe(false);
+    expect(prepared.result.current.restored).toBe(false);
+  });
+
+  test('does not recover or offer an older saved attempt, and leaves it where it is', async () => {
+    const old = { idempotencyKey: 'old-key', technicianNotes: 'older send' };
+    await putFastCompletionAttempt('svc-a', 'op-a', { body: old, summary: 's' });
+    const prepared = mount({ onPrepared: vi.fn() });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    expect(prepared.result.current.restored).toBe(false);
+    expect(prepared.result.current.failure).toBeNull();
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'new' }), 'sum'); });
+    expect((await getFastCompletionAttempt('svc-a', 'op-a')).attempt.body).toEqual(old);
+  });
+
+  test('submitting again after an edit replaces the prepared body', async () => {
+    const onPrepared = vi.fn();
+    const prepared = mount({ onPrepared });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'one' }), 's'); });
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'two' }), 's'); });
+    expect(onPrepared).toHaveBeenCalledTimes(2);
+    expect(prepared.result.current.prepared.technicianNotes).toBe('two');
+    expect(onPrepared.mock.calls[0][1].idempotencyKey).toBe(onPrepared.mock.calls[1][1].idempotencyKey);
+  });
+
+  test('a refused hand-over shows the message and sends nothing', async () => {
+    const prepared = mount({ onPrepared: vi.fn(async () => { throw new Error('No room on this device'); }) });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({}), 's'); });
+    expect(prepared.result.current.error).toBe('No room on this device');
+    expect(prepared.result.current.prepared).toBeNull();
+    expect(prepared.request).not.toHaveBeenCalled();
+  });
+
+  test('without onPrepared the hook still posts and stores as before', async () => {
+    const sent = mount();
+    await waitFor(() => expect(sent.result.current.recovering).toBe(false));
+    expect(sent.result.current.preparing).toBe(false);
+    await act(async () => { await sent.result.current.submit(() => ({ technicianNotes: 'n' }), 's'); });
+    expect(sent.request).toHaveBeenCalledTimes(1);
+    expect(sent.result.current.done).not.toBeNull();
+    expect(sent.result.current.prepared).toBeNull();
+  });
+
+  test('a change behind the prepared body revokes it and tells the container; no change keeps it', async () => {
+    const onPrepared = vi.fn();
+    const prepared = mount({ onPrepared });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'one', products: [1] }), 's'); });
+    onPrepared.mockClear();
+    // The same inputs (a fresh builder, equal result): stays prepared, nobody is told.
+    act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'one', products: [1] })));
+    expect(prepared.result.current.prepared).not.toBeNull();
+    expect(onPrepared).not.toHaveBeenCalled();
+    // A changed input: revoked, container told with null.
+    act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'one', products: [1, 2] })));
+    await waitFor(() => expect(prepared.result.current.prepared).toBeNull());
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null, expect.any(Number));
+    // Revoked once: a later change does not tell the container again.
+    act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'three' })));
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    // Preparing again hands over the new body.
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'three' }), 's'); });
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-a', expect.objectContaining({ technicianNotes: 'three' }), expect.any(Number));
+    expect(prepared.result.current.prepared.technicianNotes).toBe('three');
+  });
+
+  test('a body that can no longer be built revokes the prepared state', async () => {
+    const onPrepared = vi.fn();
+    const prepared = mount({ onPrepared });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({ a: 1 }), 's'); });
+    onPrepared.mockClear();
+    act(() => prepared.result.current.revokeIfChanged(() => { throw new Error('no draft'); }));
+    await waitFor(() => expect(prepared.result.current.prepared).toBeNull());
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null, expect.any(Number));
+  });
+
+  test('outside prepare mode revokeIfChanged does nothing', async () => {
+    const sent = mount();
+    await waitFor(() => expect(sent.result.current.recovering).toBe(false));
+    act(() => sent.result.current.revokeIfChanged(() => ({ a: 1 })));
+    expect(sent.result.current.prepared).toBeNull();
+  });
+
+  test('a handoff that settles after the scope changed does not touch the next part\'s signature or state', async () => {
+    let release;
+    const slow = vi.fn(() => new Promise((resolve) => { release = resolve; }));
+    const request = vi.fn(async () => ({}));
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: { base: '/a', request, serviceId: 'svc-a', operatorId: 'op-a', onPrepared: slow } });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    let pending;
+    act(() => { pending = view.result.current.submit(() => ({ n: 'A' }), 's'); });
+    await waitFor(() => expect(slow).toHaveBeenCalled());
+    // Switch to part B before A's handoff settles; B prepares at once.
+    const fast = vi.fn();
+    view.rerender({ base: '/b', request, serviceId: 'svc-b', operatorId: 'op-a', onPrepared: fast });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 'B' }), 's'); });
+    expect(view.result.current.prepared.n).toBe('B');
+    fast.mockClear();
+    await act(async () => { release(); await pending; });
+    // A's late settle left B's prepared state and signature alone: B's own body does not revoke.
+    expect(view.result.current.prepared.n).toBe('B');
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 'B' })));
+    expect(view.result.current.prepared.n).toBe('B');
+    expect(fast).not.toHaveBeenCalled();
+  });
+
+  // A container that applies a call only when its seq is the greatest seen for the service, as the contract says.
+  function container({ delays = [] } = {}) {
+    const state = { body: undefined, lastSeq: 0, applied: [], calls: [] };
+    const fn = vi.fn(async (serviceId, body, seq) => {
+      const delay = delays.shift() ?? 0;
+      state.calls.push({ body, seq });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (delay === -1) throw new Error('container refused');
+      if (seq > state.lastSeq) { state.lastSeq = seq; state.body = body; state.applied.push(seq); }
+    });
+    return { state, fn };
+  }
+
+  test('a slow revocation then a fast body: calls run in order with rising seq, and the container ends with the body', async () => {
+    const { state, fn } = container({ delays: [0, 60, 0] });
+    const view = mount({ onPrepared: fn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 1 }), 's'); });
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 2 })));
+    // The revocation (60 ms) is still pending when the tech saves again.
+    await act(async () => { await view.result.current.submit(() => ({ n: 2 }), 's'); });
+    expect(state.calls.map((call) => call.body?.n ?? null)).toEqual([1, null, 2]);
+    const seqs = state.calls.map((call) => call.seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(3);
+    expect(state.body.n).toBe(2);
+    expect(view.result.current.prepared.n).toBe(2);
+  });
+
+  test('two quick edits make one revocation, after the handoff', async () => {
+    const { state, fn } = container({ delays: [0, 40] });
+    const view = mount({ onPrepared: fn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 1 }), 's'); });
+    act(() => { view.result.current.revokeIfChanged(() => ({ n: 2 })); view.result.current.revokeIfChanged(() => ({ n: 3 })); });
+    await waitFor(() => expect(state.applied).toHaveLength(2));
+    expect(state.calls.map((call) => call.body?.n ?? null)).toEqual([1, null]);
+  });
+
+  test('a revocation that rejects shows the error, stays not prepared, and the next prepare clears it', async () => {
+    const { state, fn } = container({ delays: [0, -1, 0] });
+    const view = mount({ onPrepared: fn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 1 }), 's'); });
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 2 })));
+    await waitFor(() => expect(view.result.current.error).toBe('Could not update this stop. Try again.'));
+    expect(view.result.current.prepared).toBeNull();
+    await act(async () => { await view.result.current.submit(() => ({ n: 2 }), 's'); });
+    expect(view.result.current.error).toBe('');
+    expect(view.result.current.prepared.n).toBe(2);
+    expect(state.body.n).toBe(2);
+  });
+
+  test('a scope switch mid-queue: the old part\'s queued call is skipped and its late settle touches nothing', async () => {
+    const { fn: slowFn, state: slowState } = container({ delays: [0, 60] });
+    const request = vi.fn(async () => ({}));
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: { base: '/a', request, serviceId: 'svc-a', operatorId: 'op-a', onPrepared: slowFn } });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 'A' }), 's'); });
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 'A2' })));
+    const { fn: fastFn, state: fastState } = container();
+    view.rerender({ base: '/b', request, serviceId: 'svc-b', operatorId: 'op-a', onPrepared: fastFn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 'B' }), 's'); });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fastState.body.n).toBe('B');
+    expect(view.result.current.prepared.n).toBe('B');
+    expect(view.result.current.error).toBe('');
+    expect(slowState.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  test('prepare refuses when the part is not valid, and a valid:false check revokes even with the same body', async () => {
+    const onPrepared = vi.fn();
+    const view = mount({ onPrepared });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ a: 1 }), 's', { valid: false }); });
+    expect(onPrepared).not.toHaveBeenCalled();
+    expect(view.result.current.error).toBe('This visit cannot be part of a combined stop. Use the full form.');
+    expect(view.result.current.prepared).toBeNull();
+    await act(async () => { await view.result.current.submit(() => ({ a: 1 }), 's', { valid: true }); });
+    expect(view.result.current.prepared).not.toBeNull();
+    onPrepared.mockClear();
+    act(() => view.result.current.revokeIfChanged(() => ({ a: 1 }), { valid: true }));
+    expect(view.result.current.prepared).not.toBeNull();
+    act(() => view.result.current.revokeIfChanged(() => ({ a: 1 }), { valid: false }));
+    await waitFor(() => expect(view.result.current.prepared).toBeNull());
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null, expect.any(Number));
+  });
+
+  test('switching a mounted sheet into prepare mode clears a restored saved attempt, and Retry can never POST /complete', async () => {
+    await putFastCompletionAttempt('svc-a', 'op-a', { body: { idempotencyKey: 'old-key', technicianNotes: 'older send' }, summary: 's' });
+    const request = vi.fn(async () => ({ success: true }));
+    const base = { base: '/admin/dispatch/svc-a', request, serviceId: 'svc-a', operatorId: 'op-a' };
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: base });
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    expect(view.result.current.hasPendingBody()).toBe(true);
+    view.rerender({ ...base, onPrepared: vi.fn() });
+    await waitFor(() => expect(view.result.current.restored).toBe(false));
+    expect(view.result.current.hasPendingBody()).toBe(false);
+    expect(view.result.current.failure).toBeNull();
+    await act(async () => { await view.result.current.retry(); await view.result.current.confirm(); });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  test('switching out of prepare mode drops the prepared state and hydrates a saved attempt', async () => {
+    const onPrepared = vi.fn();
+    const request = vi.fn(async () => ({}));
+    const base = { base: '/admin/dispatch/svc-a', request, serviceId: 'svc-a', operatorId: 'op-a' };
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: { ...base, onPrepared } });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ a: 1 }), 's'); });
+    expect(view.result.current.prepared).not.toBeNull();
+    await putFastCompletionAttempt('svc-a', 'op-a', { body: { idempotencyKey: 'saved-key', technicianNotes: 'saved' }, summary: 's' });
+    view.rerender(base);
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    expect(view.result.current.prepared).toBeNull();
+    expect(view.result.current.preparing).toBe(false);
+    // The stale prepared signature is gone: nothing is revoked or sent by a check.
+    act(() => view.result.current.revokeIfChanged(() => ({ a: 2 })));
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+  });
+});
