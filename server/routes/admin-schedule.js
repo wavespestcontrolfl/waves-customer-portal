@@ -2033,6 +2033,22 @@ async function assertLockedEstimateAddOns(trx, estimate, { billingTerm, customer
   });
 }
 
+// The catalog keys a booking REQUEST names before it is priced: its own service and its add-on lines. A line is posted by
+// catalog id (and sometimes by key): the ids are resolved in one read. A failed read returns null = judge every sold add-on.
+async function requestedAreaAddOnServiceKeys(database, serviceId, serviceAddons) {
+  const lines = Array.isArray(serviceAddons) ? serviceAddons.filter(Boolean) : [];
+  const posted = lines.map((line) => line.serviceKey).filter(Boolean).map((key) => String(key).trim().toLowerCase());
+  const ids = [...new Set([serviceId, ...lines.map((line) => line.serviceId)].filter((id) => /^[0-9a-f-]{36}$/i.test(String(id || ''))).map(String))];
+  if (!ids.length) return posted;
+  try {
+    const rows = await database('services').whereIn('id', ids).select('service_key');
+    return [...new Set([...posted, ...rows.map((row) => row.service_key).filter(Boolean)])];
+  } catch (err) {
+    logger.warn(`[admin-schedule] posted service keys unreadable for the add-on limit preflight: ${err.message}`);
+    return null;
+  }
+}
+
 // The visit's own service and each add-on line of a staff booking as the area add-on guard reads them (catalog key; the gross
 // price of the line, the visit's own included: a primary add-on booked at a stale price is refused too): area-addon-visit-rows assertPostedAreaAddOnsSold.
 const postedAreaAddOnLines = (pricing) => [
@@ -8113,7 +8129,13 @@ async function scheduleCreateHandler(req, res, next) {
         // The add-ons' yearly limits on the day being booked (the same recheck the customer's accept runs), read for
         // the booking's customer and property: an unowned estimate (a lead or standalone quote) is attached to this
         // customer on book, so its own customer_id is empty here.
-        const limitRefusal = await require('../services/area-addon-limits').areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true });
+        // Only the add-ons this request posts (the office may book fewer than were sold): the request's own service and its
+        // add-on lines, by catalog key (one small catalog read for the posted ids). The locked recheck inside the transaction
+        // judges the priced lines again.
+        const limitRefusal = await require('../services/area-addon-limits').areaAddOnLimitRefusal(db, {
+          estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,
+          onlyServiceKeys: await requestedAreaAddOnServiceKeys(db, serviceId, serviceAddons),
+        });
         if (limitRefusal) return res.status(409).json(limitRefusal.body);
       }
       // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
@@ -28343,7 +28365,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
-  assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit,
+  assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,

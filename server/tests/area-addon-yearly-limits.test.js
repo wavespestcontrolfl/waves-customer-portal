@@ -502,7 +502,7 @@ describe('booking time: an estimate with no customer_id of its own is checked fo
 
   test('staff booking: the route passes the booking customer and property to the recheck', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    expect(src).toContain('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
+    expect(src).toMatch(/areaAddOnLimitRefusal\(db, \{\s+estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,\s+onlyServiceKeys: await requestedAreaAddOnServiceKeys\(db, serviceId, serviceAddons\),\s+\}\)/);
     // Inside the transaction the recheck reads the row that transaction locked (assertLockedEstimateAddOns), never the preflight copy.
     expect(src).toMatch(/assertLockedEstimateAddOns\(trx, freshLinkedEstimate, \{\s+billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,\s+postedServiceKeys: postedAreaAddOnLines\(pricing\)\.map\(\(line\) => line\.key\)\.filter\(Boolean\),\s+\}\)/);
     expect(src).toMatch(/assertAreaAddOnLimitsOpen\(trx, \{\s+estimate, customerId, property, appliedOn, staff: true, onlyServiceKeys: postedServiceKeys,\s+\}\)/);
@@ -817,7 +817,7 @@ describe('where the recheck runs (source order)', () => {
     expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx, \{ date \} = \{\}\) => \{[\s\S]{0,700}lockedAreaAddOnRuleRefusal\(row, requestedServiceMode\)[\s\S]{0,80}lockedAreaAddOnLimitRefusal\(row, trx, date\)/);
     expect(read('services/slot-reservation.js')).toContain('await revalidateEstimate(estimate, trx, { date });');
     const schedule = read('routes/admin-schedule.js');
-    const book = schedule.indexOf('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
+    const book = schedule.indexOf('estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,\n          onlyServiceKeys: await requestedAreaAddOnServiceKeys(db, serviceId, serviceAddons),');
     expect(book).toBeGreaterThan(0);
     expect(book).toBeLessThan(schedule.indexOf('db.transaction', book));
     const customerLock = schedule.indexOf('await lockCustomerComms(trx, customerId);', book);

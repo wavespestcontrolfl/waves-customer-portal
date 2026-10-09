@@ -102,6 +102,24 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
   });
 });
 
+// Codex round 39: the preflight limit check judges only the add-ons the request posts.
+describe('the posted service keys of a booking request (the limit preflight)', () => {
+  const { requestedAreaAddOnServiceKeys } = router._test;
+  const ID_A = '10000000-0000-4000-8000-0000000000a1';
+  const ID_B = '10000000-0000-4000-8000-0000000000b2';
+  const catalog = (rowsById) => () => ({ whereIn: (_col, ids) => ({ select: async () => ids.map((id) => ({ service_key: rowsById[id] })) }) });
+  test('the request\'s own service and its add-on lines, by catalog id and by key', async () => {
+    const database = catalog({ [ID_A]: 'one_time_pest', [ID_B]: WEB });
+    await expect(requestedAreaAddOnServiceKeys(database, ID_A, [{ serviceId: ID_B }, { serviceKey: ' Area_Addon_Bed_Pre_Emergent ' }, null]))
+      .resolves.toEqual([BED, 'one_time_pest', WEB]);
+    await expect(requestedAreaAddOnServiceKeys(database, null, undefined)).resolves.toEqual([]);
+  });
+  test('a failed catalog read judges every sold add-on (null)', async () => {
+    const broken = () => ({ whereIn: () => ({ select: async () => { throw new Error('down'); } }) });
+    await expect(requestedAreaAddOnServiceKeys(broken, ID_A, [])).resolves.toBeNull();
+  });
+});
+
 describe('the staff booking transaction asks it of the locked row, before anything is inserted', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
 
