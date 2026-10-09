@@ -2,7 +2,7 @@
 //
 // A plan that carries a bermuda backpack mix order shows it as its own block beside the
 // base mixing order, and only then.
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import TreatmentPlanPanel from './TreatmentPlanPanel';
 
@@ -46,4 +46,22 @@ it('shows no such block when the plan carries none', async () => {
   await mount();
   expect(screen.getByText('Fixture potassium')).toBeTruthy();
   expect(screen.queryByText('Bermuda backpack mix')).toBeNull();
+});
+
+// The step is one selection (codex r42 P2): the request carries all three ids or none.
+it('a click on any bermuda step line selects all three, and a click on any checked member takes all three off', async () => {
+  const line = (id, name, selected) => ({ raw: name, conditional: true, bermudaStep: true, selected, product: { id, name } });
+  const other = { raw: 'Fixture extra', conditional: true, selected: false, product: { id: 'extra', name: 'Fixture extra' } };
+  const withStep = (selected) => ({ ...base, protocol: { ...base.protocol, conditional: [line('rec', 'Fixture Recognition', selected), line('fus', 'Fixture Fusilade', selected), line('nis', 'Fixture surfactant', selected), other] } });
+  const asked = () => new URL(fetch.mock.calls.at(-1)[0], 'http://fixture').searchParams.get('selectedConditionalProductIds');
+  plan = withStep(false);
+  await mount();
+  plan = withStep(true);
+  await act(async () => { fireEvent.click(screen.getByLabelText('Select Fixture Fusilade')); });
+  expect(asked().split(',').sort()).toEqual(['fus', 'nis', 'rec']);
+  // A different member than the one first clicked: the whole group leaves, the other line is untouched.
+  await act(async () => { fireEvent.click(screen.getByLabelText('Select Fixture extra')); });
+  plan = withStep(false);
+  await act(async () => { fireEvent.click(screen.getByLabelText('Select Fixture surfactant')); });
+  expect(asked()).toBe('extra');
 });

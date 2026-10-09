@@ -925,7 +925,16 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       // The one that fails among the two names it: Fusilade II has only an area.
       expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3 }), entry(fus, { areaValue: 5000 })])).toBe(MESSAGE);
       // Area with the amount, or a rate with a valid unit, on each step product (the surfactant needs neither): allowed.
-      expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3 }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' }), entry(nis)])).toBeNull();
+      expect(await check([entry(rec, { areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.3, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' }), entry(nis)])).toBeNull();
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { areaValue: 5000, totalAmount: 5.5 })])).toBeNull();
+      // Recognition is counted by weight (codex r42 P1): a volume rate, or an amount the ledger cannot
+      // read in ounces (no unit, a volume unit, an area that is not sq ft), would count as zero.
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'fl_oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.3 }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.3, amountUnit: 'fl_oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
+      // A wrong-unit rate with a countable amount and area beside it is counted from the amount.
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.15, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBeNull();
       // Not a step visit, no step product, nothing submitted, or the gate off: never refused.
       const plain = await lawn({ date: '2026-06-20' });
       expect(await check([entry(rec), entry(fus)], plain.visit)).toBeNull();

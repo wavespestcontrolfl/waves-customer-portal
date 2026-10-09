@@ -385,7 +385,23 @@ async function bermudaAreaViolation(knex, products, { serviceId } = {}) {
   const positive = (value) => Number(value) > 0;
   const { isValidRateUnit } = require('./inventory-units');
   const sized = (p) => (positive(p.areaValue) && positive(p.totalAmount)) || (positive(p.rate) && isValidRateUnit(p.rateUnit));
-  const missing = products.some((p) => stepIds.includes(String(p?.productId)) && !sized(p));
+  // The product the label-rate cap counts (Recognition, by the tagged row's product) must also be
+  // COUNTABLE: its history row, built here as the completion will write it, has to read as more
+  // than zero in the cap's own unit. A weight product entered as 0.03 fl oz, or an amount with no
+  // unit, is valid input but would count for nothing, so it is refused like a missing amount.
+  const capRow = await knex('product_limits').where({ match_value: BERMUDA_GROUP, limit_type: 'annual_max_rate' }).first('product_id', 'limit_unit');
+  const { baseQuantityUnit } = require('./inventory-units');
+  const countable = (p) => {
+    if (!capRow || String(p.productId) !== String(capRow.product_id)) return true;
+    return require('./application-limits').bermudaRowRate({
+      application_rate: p.rate,
+      rate_unit: p.rateUnit || null,
+      quantity_applied: positive(p.totalAmount) ? p.totalAmount : null,
+      quantity_unit: positive(p.totalAmount) ? baseQuantityUnit(p.amountUnit || p.rateUnit || null) : null,
+      area_treated_sqft: String(p.areaUnit || '').toLowerCase() === 'sqft' ? p.areaValue : null,
+    }, capRow) > 0;
+  };
+  const missing = products.some((p) => stepIds.includes(String(p?.productId)) && (!sized(p) || !countable(p)));
   return missing ? AREA_REQUIRED_MESSAGE : null;
 }
 

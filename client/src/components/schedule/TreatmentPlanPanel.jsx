@@ -179,6 +179,17 @@ export default function TreatmentPlanPanel({ service, onClose }) {
   function toggleConditional(item) {
     const id = item.product?.id;
     if (!id) return;
+    // The bermuda removal step is one selection: the server marks all three lines selected when
+    // any one is asked for, so a click on any member takes every member off, or puts them all on.
+    if (item.bermudaStep) {
+      const groupIds = [...base, ...conditional].filter((line) => line.bermudaStep && line.product?.id).map((line) => String(line.product.id));
+      setSelectedConditionalIds((prev) => {
+        const on = !!item.selected || groupIds.some((member) => prev.includes(member));
+        const rest = prev.filter((v) => !groupIds.includes(v));
+        return on ? rest : [...rest, ...groupIds];
+      });
+      return;
+    }
     setSelectedConditionalIds((prev) => (
       prev.includes(String(id))
         ? prev.filter((v) => v !== String(id))

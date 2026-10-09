@@ -655,3 +655,6 @@ class ApplicationLimitChecker {
 }
 
 module.exports = new ApplicationLimitChecker();
+// What one bermuda removal row counts toward the label-rate cap (0 = nothing): the completion
+// check asks it before the row is written (lawn-bermuda-removal.js bermudaAreaViolation).
+module.exports.bermudaRowRate = bermudaRowRate;
