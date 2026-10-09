@@ -142,3 +142,34 @@ describe('rows that stay on the sheet without the tag of the entry that opened t
     expect(placeProblems(row({ productId: 'W1' }), { areas, weedMix, weedRows: [row({ productId: 'W1', weedGroup: true })] }).front).toBe('Use the replacement up front.');
   });
 });
+
+describe('a sibling\'s failed read never releases a product that read as capped', () => {
+  const areas = troubleAreasOf(data());
+  // At the front Certainty's read failed ('unavailable') while Celsius read as capped (blockedIds); the back is clean.
+  const weedMix = {
+    groupProductIds: ['W1', 'W2'], noAreaProductIds: [],
+    byPlace: {
+      front: { mode: 'unavailable', productIds: [], note: 'The weed-spray limits could not be checked. Use Other product for what you sprayed.', blockedIds: ['W1'] },
+      back: { mode: 'lead', productIds: ['W1', 'W2'], note: null },
+    },
+  };
+
+  test('the capped member stays closed at the front; the member whose read failed is allowed there, with the unreadable flag', () => {
+    expect(placeProblems(row({ productId: 'w1' }), { areas, weedMix }).front).toMatch(/yearly limit is reached/);
+    expect(placeProblems(row({ productId: 'W2' }), { areas, weedMix })).toEqual({ front: null, back: null });
+    const celsius = withPlace(row({ productId: 'W1' }), { areas, chosen: 'front', weedMix });
+    expect(celsius).toMatchObject({ placeUnreadable: false });
+    expect(celsius.placeBlock).toMatch(/yearly limit is reached/);
+    expect(withPlace(row({ productId: 'W2' }), { areas, chosen: 'front', weedMix })).toMatchObject({ placeBlock: null, placeUnreadable: true });
+  });
+
+  test('the entry\'s shared set is closed at the front while any member read as capped there', () => {
+    const weedRows = [row({ productId: 'W1', weedGroup: true }), row({ productId: 'W2', weedGroup: true })];
+    expect(placeProblems(weedRows[1], { areas, weedMix, weedRows }).front).toMatch(/yearly limit is reached/);
+    // With no capped member, the failed read is the unknown: allowed.
+    const unknownOnly = { ...weedMix, byPlace: { ...weedMix.byPlace, front: { ...weedMix.byPlace.front, blockedIds: [] } } };
+    expect(placeProblems(weedRows[1], { areas, weedMix: unknownOnly, weedRows }).front).toBeNull();
+    expect(withPlace(weedRows[1], { areas, chosen: 'front', weedMix: unknownOnly, weedRows })).toMatchObject({ placeUnreadable: true });
+  });
+});
+

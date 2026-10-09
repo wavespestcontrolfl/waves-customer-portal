@@ -550,6 +550,27 @@ describe('per-place offers: a product is held back only when NO place permits it
       expect(offers.unreadable).toEqual([]);
     });
 
+    test('chinch per place: Arena capped at the front while Talak\'s read fails there stays closed (blocked), Talak stays unreadable; a different place is judged on its own', async () => {
+      readsBy({ front: { [P_ARENA]: TYPED, [P_TALAK]: TYPELESS }, back: {}, left_side: {}, right_side: {} }, { [P_ARENA]: TYPED });
+      engine.v13ProtocolRows.mockReturnValue(new Map([[P_ART, {}]]));
+      const found = await resolveChinch({ svc, structured: { id: 'protocol-1', version: 'v13' }, knex: fakeKnex([
+        { product_id: P_ARENA, product_name: 'Arena 50 WDG', gates: { trigger: 'chinch_20_to_25_per_sqft' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 4, catalog_id: P_ARENA, catalog_name: 'Arena 50 WDG', catalog_active: true },
+        { product_id: P_TALAK, product_name: 'Atticus Talak 7.9 F', gates: { trigger: 'chinch_second_product_caterpillars_or_mole_cricket_nymphs' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 7, catalog_id: P_TALAK, catalog_name: 'Atticus Talak 7.9 F', catalog_active: true },
+      ]), places: PLACES });
+      expect(found.byPlace.front).toMatchObject({ productId: null, blockedIds: [P_ARENA], unreadableIds: [P_TALAK] });
+      expect(found.byPlace.back).toMatchObject({ productId: P_ARENA, blockedIds: [], unreadableIds: [] });
+    });
+
+    test('add-on picks are judged one by one: a pick capped at the front stays closed there while another pick\'s failed read does not release it', async () => {
+      const ROWS3 = new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } }], [P_ACE, { role: 'insecticide_spot', gates: { trigger: 'caterpillars' } }]]);
+      const cs = [{ raw: { product: { id: P_ART, name: 'Artavia' } }, item: { productId: P_ART, name: 'Artavia' } }, { raw: { product: { id: P_ACE, name: 'Acelepryn' } }, item: { productId: P_ACE, name: 'Acelepryn' } }];
+      // Artavia: capped everywhere. Acelepryn: unknown everywhere. Neither read changes the other's verdict.
+      readsBy(Object.fromEntries(PLACES.map((p) => [p, { [P_ART]: TYPED, [P_ACE]: TYPELESS }])), { [P_ART]: TYPED, [P_ACE]: TYPELESS });
+      const offers = await addOnOffers({ candidates: cs, rows: ROWS3, svc, knex: {}, places: PLACES });
+      expect(offers.blocked).toEqual([P_ART]);
+      expect(offers.unreadable).toEqual([P_ACE]);
+    });
+
     test('the guide\'s blocked and unreadable lists follow the top-level unreadable ids of the weed mix and the chinch ladder', () => {
       const { unreadableProductIds, blockedProductIds } = require('../services/lawn-treatment-guide');
       const weedMix = { mode: 'replacement', productIds: ['b'], groupProductIds: ['a', 'b', 'c'], unreadableIds: ['a'] };
@@ -651,6 +672,11 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
   ])('%s', async (_name, _unused, entries, expected) => {
     limited(entries);
     expect(await run()).toMatchObject({ rungIds: RUNGS, ...expected });
+  });
+
+  test('another limit on Arena holds the offer, but a rung whose own read failed stays unreadable (a sibling\'s known limit does not make it forbidden)', async () => {
+    limited([[P_ARENA, [{ type: 'min_interval_days', message: 'Arena: wait 14 days.' }]], [P_TALAK, UNREAD]]);
+    expect(await run()).toMatchObject({ productId: null, note: 'Arena: wait 14 days.', blockedIds: [P_ARENA], unreadableIds: [P_TALAK] });
   });
 
   test('the whole read threw: nothing offered, every rung unreadable, none blocked', async () => {

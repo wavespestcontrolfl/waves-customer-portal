@@ -282,6 +282,20 @@ describe('buildWeedMix with places: one decision per place', () => {
     expect(mix.mode).toBe('none');
   });
 
+  test('mixed reads at one place: the member read as capped stays blocked there, only the member whose read failed is unreadable', async () => {
+    const TYPELESS = [{ message: 'application limits could not be read.' }];
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(!options?.place || options.place === 'front' ? [[LEAD, CAP], [CERT, TYPELESS]] : []), warnings: [], blocks: [],
+    }));
+    const mix = await runPlaces();
+    expect(mix.byPlace.front).toMatchObject({ mode: 'unavailable', blockedIds: [LEAD] });
+    // Only Certainty (and the members no read forbade) is the unknown at the front; the lead is not.
+    expect(mix.unreadableIds).toEqual(expect.arrayContaining([CERT, SURF, REPL]));
+    expect(mix.unreadableIds).not.toContain(LEAD);
+    // Another place is judged on its own.
+    expect(mix.byPlace.back).toMatchObject({ mode: 'lead' });
+  });
+
   test('every read succeeded: no unreadableIds key', async () => {
     cappedAt('front');
     expect(await runPlaces()).not.toHaveProperty('unreadableIds');

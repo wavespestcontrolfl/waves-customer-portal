@@ -71,9 +71,15 @@ function problemAt(placeId, row, { areas, weedMix, chinch, weedRows }) {
   return closed?.[placeId] ? reasonText(closed[placeId], 'A yearly limit is reached at this place.') : null;
 }
 
+const KNOWN_WEED_BLOCK = 'A yearly limit is reached for a weed product on the sheet at this place.';
+const blockedHere = (decision, row) => lowerIds(decision.blockedIds).includes(String(row.productId).toLowerCase());
+
 // The weed decision at a place takes the rows on the sheet, or says why not. Unavailable closes nothing.
 function weedProblem(decision, weedRows) {
-  if (!decision || decision.mode === 'unavailable') return null;
+  if (!decision) return null;
+  // A place where some member's limit read FAILED is the unknown for that member only: a member whose read succeeded and said
+  // capped (decision.blockedIds) stays closed there, whatever its siblings' reads did.
+  if (decision.mode === 'unavailable') return weedRows.some((other) => blockedHere(decision, other)) ? KNOWN_WEED_BLOCK : null;
   const taken = Array.isArray(decision.productIds) ? decision.productIds : [];
   const fits = ['lead', 'replacement'].includes(decision.mode) && weedRows.every((other) => taken.some((id) => sameId(id, other.productId)));
   return fits ? null : reasonText(decision.note, 'The weed products on the sheet do not fit this place.');
@@ -94,7 +100,10 @@ function chinchProblem(decision, row) {
 // closeout). Only the decisions that say so are asked: the weed mix at a place that is 'unavailable', the chinch ladder at a place
 // that lists the product as unreadable.
 function unreadableAt(placeId, row, { weedMix, chinch }) {
-  if (weedMix?.byPlace && inWeedGroup(row, weedMix)) return weedMix.byPlace[placeId]?.mode === 'unavailable';
+  if (weedMix?.byPlace && inWeedGroup(row, weedMix)) {
+    const decision = weedMix.byPlace[placeId];
+    return decision?.mode === 'unavailable' && !blockedHere(decision, row);
+  }
   if (chinch?.byPlace && inChinchLadder(row, chinch)) return (chinch.byPlace[placeId]?.unreadableIds || []).some((id) => sameId(id, row.productId));
   return false;
 }

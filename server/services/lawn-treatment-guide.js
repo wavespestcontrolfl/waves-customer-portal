@@ -411,7 +411,11 @@ function chooseChinch(products, capped) {
       return { ...product, note, blockedIds: earlier, unreadableIds: [] };
     }
     if (state === 'unreadable') return none(UNREADABLE_NOTE, [...earlier, ...idsOf(products.slice(index + 1), 'blocked')], [product.productId, ...idsOf(products.slice(index + 1), 'unreadable')]);
-    if (!typedOf(product).every((block) => block.type === YEARLY_CAP)) return none(typedOf(product)[0].message || CHINCH_LIMIT_REACHED, products.map((p) => p.productId));
+    // Another limit (an interval, a blackout) holds the whole offer with its own words. A rung whose OWN read failed is still the unknown,
+    // not blocked: a sibling's known limit never turns an unreadable rung into a forbidden one.
+    if (!typedOf(product).every((block) => block.type === YEARLY_CAP)) {
+      return none(typedOf(product)[0].message || CHINCH_LIMIT_REACHED, products.filter((p) => stateOf(p) !== 'unreadable').map((p) => p.productId), idsOf(products, 'unreadable'));
+    }
     skipped = skipped || product;
   }
   return none(CHINCH_LIMIT_REACHED, products.map((p) => p.productId));

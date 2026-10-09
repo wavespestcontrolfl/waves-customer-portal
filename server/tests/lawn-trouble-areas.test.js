@@ -242,6 +242,16 @@ describe('preflightPlaces: the /complete check of the places', () => {
     expect(await run([spot({ areaPlace: 'front' }), spot({ productId: uuid(2), areaPlace: 'front' })])).toMatchObject({ status: 400, payload: { productId: uuid(2) } });
   });
 
+  test('a known cap on one row refuses whichever way a sibling row\'s failed read is ordered', async () => {
+    const closed = { allowed: false, blocks: [{ type: 'annual_max_apps', matchType: 'product', message: 'Celsius WG: LIMIT REACHED.' }], warnings: [] };
+    for (const order of [['throw', 'closed'], ['closed', 'throw']]) {
+      limits.checkLimits.mockReset();
+      for (const kind of order) limits.checkLimits.mockImplementationOnce(async () => { if (kind === 'throw') throw new Error('db down'); return closed; });
+      const rows = order.map((_kind, i) => spot({ productId: uuid(60 + i), areaPlace: 'front' }));
+      expect(await run(rows)).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit' } });
+    }
+  });
+
   test('the same product at the same place is read once', async () => {
     await run([spot({ areaPlace: 'front' }), spot({ areaPlace: 'front' })]);
     expect(limits.checkLimits).toHaveBeenCalledTimes(1);
