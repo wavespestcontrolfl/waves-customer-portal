@@ -156,6 +156,11 @@ describe('late-move limit', () => {
     expect(limit).toEqual({ dueDate: '2026-10-15', lastDate: '2026-11-05', firstVisitBlocked: true });
   });
 
+  test('staff cleared the window after the customer\'s moves: the visit is unplaced and the history starts again', async () => {
+    const limit = await loadMoveLimit(onOct30({ window_start: null }), { database: dbFor({ rows: twoMoves }), now: NOW });
+    expect(limit).toEqual({ dueDate: '2026-10-30', lastDate: '2026-11-20', firstVisitBlocked: false });
+  });
+
   test('a staff edit BETWEEN two customer moves: the history starts at the move after it', async () => {
     // Customer: Oct 15 → Oct 22. Staff (no log row): Oct 22 → Oct 26. Customer: Oct 26 → Oct 30.
     const rows = [move(), move({ original_date: '2026-10-26', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];

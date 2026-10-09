@@ -92,12 +92,12 @@ function windowParts(value) {
   return { start: start ? start.slice(0, 5) : null, end: end ? end.slice(0, 5) : null };
 }
 
-// Same date and same start. A side with no start compares by date only.
+// Same date and same start. A start on one side and none on the other is
+// not the same slot: staff can clear a visit's window with no log row, and
+// that unplaces it. Two sides with no start compare by date.
 function sameSlot(dateA, windowA, dateB, windowB) {
   if (dateOnly(dateA) !== dateOnly(dateB)) return false;
-  const a = windowParts(windowA).start;
-  const b = windowParts(windowB).start;
-  return !a || !b || a === b;
+  return windowParts(windowA).start === windowParts(windowB).start;
 }
 
 // The customer rebooked a visit whose time had passed: the shared "missed"
