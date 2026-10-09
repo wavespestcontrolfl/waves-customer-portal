@@ -101,6 +101,7 @@ import {
 } from "../../lib/dispatchCompletionRouting";
 import FastCompleteTreeShrubSheet from "../../components/tech/FastCompleteTreeShrubSheet";
 import FastCompleteLawnSheet from "../../components/tech/FastCompleteLawnSheet";
+import FastCompleteAssessmentSheet from "../../components/tech/FastCompleteAssessmentSheet";
 import FastCompleteLawnReserviceSheet from "../../components/tech/FastCompleteLawnReserviceSheet";
 import FastCompleteSheet from "../../components/tech/FastCompleteSheet";
 import { shortAddress } from "../tech/visitBrief";
@@ -481,6 +482,8 @@ export default function DispatchPageV2({
   // an eligible visit opens instead of CompletionPanel.
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnFastService, setLawnFastService] = useState(null);
+  // The Waves Assessment's one-screen sheet (GATE_ASSESSMENT_FAST_COMPLETE).
+  const [assessmentFastService, setAssessmentFastService] = useState(null);
   // The lawn re-service's own sheet (GATE_LAWN_RESERVICE_FAST_COMPLETE, owner
   // 2026-10-08), as the technician home opens it.
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
@@ -958,6 +961,7 @@ export default function DispatchPageV2({
       lawn_reservice: setLawnReserviceFastService,
       tree_shrub: setTreeShrubFastService,
       lawn: setLawnFastService,
+      assessment: setAssessmentFastService,
       pest: setPestFastService,
     }[fastCompleteSheetFor(service, { stationMapOff, stationSheetOn })];
     if (openSheet) {
@@ -2087,6 +2091,43 @@ export default function DispatchPageV2({
             const service = lawnFastService;
             setLawnFastService(null);
             setDetailService(service);
+          }}
+        />
+      )}
+      {assessmentFastService && (
+        <FastCompleteAssessmentSheet
+          key={assessmentFastService.id}
+          service={{
+            id: assessmentFastService.id,
+            customerName: assessmentFastService.customer_name || assessmentFastService.customerName,
+            serviceType: assessmentFastService.service_type || assessmentFastService.serviceType,
+            address: shortAddress(assessmentFastService.address) || assessmentFastService.address || "",
+            timeLabel: serviceWindowLabel(assessmentFastService) || "",
+            // The visit the user opened. The sheet sends it with the completion
+            // for the server to check against the live visit.
+            routedCustomerId: assessmentFastService.customerId || assessmentFastService.customer_id || null,
+            routedScheduledDate: assessmentFastService.scheduledDate || assessmentFastService.scheduled_date || null,
+            routedPropertyId: "propertyId" in assessmentFastService ? assessmentFastService.propertyId : undefined,
+            routedServiceType: assessmentFastService.serviceTypeRaw || null,
+            // What decides whether the sheet shows the inspection credit.
+            completionProfile: assessmentFastService.completionProfile || null,
+            inspectionCreditAvailable: assessmentFastService.inspectionCreditAvailable === true,
+          }}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          onClose={closeFastSheet(setAssessmentFastService)}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, refetch.
+            const service = assessmentFastService;
+            setAssessmentFastService(null);
+            applyCompletionResult(service.id, response, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          onFullForm={() => {
+            const service = assessmentFastService;
+            setAssessmentFastService(null);
+            handleComplete(service, { fullForm: true });
           }}
         />
       )}
