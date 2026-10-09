@@ -842,7 +842,11 @@ const HELD_VISIT_GUARDS = [
     status: 409, code: 'CONSULTATION_IN_FUTURE', message: 'That consultation has not happened yet — record its outcome on or after the visit day',
   },
   {
-    fails: (v, c) => (visitWindowOpensMs(v) ?? -Infinity) > c.nowMs,
+    // Not for the completion path (opts.duringCompletion): the technician closing
+    // the visit is the stronger fact, and /complete itself only refuses a future
+    // calendar day (kept above). This guard stops office staff from recording a
+    // read for a visit that has not started.
+    fails: (v, c) => !c.duringCompletion && (visitWindowOpensMs(v) ?? -Infinity) > c.nowMs,
     status: 409, code: 'CONSULTATION_IN_FUTURE', message: 'That consultation has not started yet — record its outcome once the visit window opens',
   },
   {
@@ -901,7 +905,11 @@ async function recordOutcome(params = {}, opts = {}) {
   }
 }
 
-async function recordOutcomeOnce(params = {}, { trx } = {}) {
+// opts.trx: the caller's transaction (or the singleton). opts.duringCompletion:
+// the call comes from the visit's own /complete, inside its transaction and under
+// the visit lock it already holds (services/completion-consultation-outcome.js);
+// the rules are the same ones, except the arrival-window guard.
+async function recordOutcomeOnce(params = {}, { trx, duringCompletion = false } = {}) {
   const database = trx || db;
   const {
     scheduledServiceId, outcome, lostReason = null, interests = [],
@@ -968,7 +976,7 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     // r9 P2 table-driven): a customer merge mid-write retries, a visit that
     // never happened or has not started is refused, and a technician no
     // longer assigned cannot write.
-    const guardCtx = { customerId, actingTechnicianId, actingIsAdmin, nowMs: Date.now() };
+    const guardCtx = { customerId, actingTechnicianId, actingIsAdmin, nowMs: Date.now(), duringCompletion };
     const refused = HELD_VISIT_GUARDS.find((guard) => guard.fails(liveVisit || {}, guardCtx));
     if (refused) throw makeError(refused.message, refused.status, refused.code);
     // The visit's IDENTITY re-checked on the locked row too (Codex #4710 r11

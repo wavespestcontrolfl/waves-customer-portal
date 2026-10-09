@@ -739,6 +739,61 @@ describe('recordOutcome — success + upsert', () => {
   });
 });
 
+describe('recordOutcome — duringCompletion (the Waves Assessment Fast Complete sheet records its read in /complete)', () => {
+  const today = () => etDateString(new Date());
+  const seeded = (visit = {}) => makeFakeDb({
+    scheduled_services: [{
+      id: 'visit-1', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', service_id: null,
+      status: 'on_site', scheduled_date: today(), window_start: '23:59:00', ...visit,
+    }],
+    leads: [{ id: 'lead-1', customer_id: 'cust-1', deleted_at: null, created_at: '2026-01-01' }],
+  });
+
+  test('a same-day visit before its arrival window: the office route is refused, the completion path records', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(parseETDateTime(`${today()}T09:00`));
+    try {
+      const refusedDb = seeded();
+      await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: refusedDb }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_IN_FUTURE' });
+      expect(refusedDb.__store.consultation_outcomes || []).toHaveLength(0);
+
+      const fakeDb = seeded();
+      const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb, duringCompletion: true });
+      expect(saved.outcome).toBe('warm');
+      expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the completion path still refuses a future calendar day', async () => {
+    const fakeDb = seeded({ scheduled_date: etDateString(addETDays(new Date(), 2)) });
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb, duringCompletion: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_IN_FUTURE' });
+    expect(fakeDb.__store.consultation_outcomes || []).toHaveLength(0);
+  });
+
+  test.each(['no_show', 'cancelled', 'skipped', 'rescheduled'])('the completion path still refuses a %s visit', async (status) => {
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: seeded({ status }), duringCompletion: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_NOT_HELD' });
+  });
+
+  test('the completion path keeps the ownership check and the won guard', async () => {
+    await expect(recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', actingTechnicianId: 'tech-2', actingIsAdmin: false },
+      { trx: seeded(), duringCompletion: true },
+    )).rejects.toMatchObject({ statusCode: 403, code: 'NOT_ASSIGNED' });
+
+    const fakeDb = seeded();
+    fakeDb.__store.consultation_outcomes.push({ id: 'co-1', scheduled_service_id: 'visit-1', outcome: 'won', won_via: 'closeout_booking', won_at: new Date() });
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'cold' }, { trx: fakeDb, duringCompletion: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_WON' });
+    expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('won');
+  });
+});
+
 describe('recordOutcome — P1-1 post-record reconciliation (the sale closed before the tech recorded the outcome)', () => {
   const SCHEDULED_DATE = '2026-09-10';
   const NOW = new Date('2026-09-23T12:00:00Z'); // 13 days after the visit
