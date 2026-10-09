@@ -22,6 +22,8 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
+const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
+const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
@@ -670,7 +672,7 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
   // total rows (codex gh-r25). "Not on file" + a re-enter note instead.
   const turfIrrigationInches = scheduleUnconfirmed ? null : numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = scheduleUnconfirmed ? null : numberOrNull(assessment.irrigation_inches_per_week);
-  const prefsIrrigationInches = scheduleUnconfirmed ? null : portalIrrigationInches(propertyPrefs);
+  const prefsIrrigationInches = scheduleUnconfirmed ? null : prefsInchesFor(propertyPrefs, portalIrrigationInches);
   // PORTAL ENTRY WINS: what the customer enters in the portal is what the report
   // shows. The customer's own schedule takes priority over turf/assessment readings.
   // (A figure derived from their runtime entries counts as a portal entry — same
@@ -770,6 +772,8 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     // was detected) so the report can badge the 7-day chart "Limited data this week".
     dailyRain7dConfidence: completionRainConfidence || null,
     irrigationAdvice,
+    // GATE_LAWN_REPORT_POLISH: the card's third state and the basis line of a derived figure (nothing while the gate is off).
+    ...polishWaterContext({ propertyPrefs, scheduleUnconfirmed, profileMissing: irrigationAdvice.profileMissing, fromPrefs: prefsIrrigationInches != null }),
   };
 }
 
@@ -2876,6 +2880,8 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // The copy fixes (GATE_LAWN_REPORT_COPY_FIXES) change the lawn report's words, labels and charts,
   // so its PDF key moves with it; the part is empty while the gate is off.
   irrigationStamp += copyFixesPdfStamp();
+  // The lawn report polish (GATE_LAWN_REPORT_POLISH) derives weekly inches from the owner's rate table, so its PDF key moves with it.
+  irrigationStamp += polishPdfStamp();
   // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
@@ -3819,7 +3825,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // from the same source or one report shows a tech reading next to a
       // balance computed from the customer's own (possibly derived) schedule.
       irrigationInchesPerWeek: reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) ? null
-        : (portalIrrigationInches(propertyPrefs)
+        : (prefsInchesFor(propertyPrefs, portalIrrigationInches)
           ?? numberOrNull(turfProfile.irrigation_inches_per_week)
           ?? numberOrNull(assessment.irrigation_inches_per_week)),
       soilPh: turfProfile.soil_ph || null,
@@ -3827,7 +3833,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       knownDiseaseHistory: !!turfProfile.known_disease_history,
       knownDroughtStress: !!turfProfile.known_drought_stress,
     } : (propertyPrefs ? {
-      irrigationInchesPerWeek: reportScheduleUnconfirmed({ propertyPrefs, turfProfile: null, assessment }) ? null : portalIrrigationInches(propertyPrefs),
+      irrigationInchesPerWeek: reportScheduleUnconfirmed({ propertyPrefs, turfProfile: null, assessment }) ? null : prefsInchesFor(propertyPrefs, portalIrrigationInches),
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
@@ -4794,6 +4800,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // GATE_LAWN_REPORT_FACTS: a spot product's frozen "where it was used" text. Read from the record only
   // (never a gate): a record without the frozen block, and every whole-lawn row, keep the card text they had.
   const frozenUseTexts = reportFacts.frozenUseTextsFor(serviceLine, service.structured_notes);
+  // GATE_LAWN_REPORT_POLISH: the one-label-line decision frozen at completion ({} when the record carries none).
+  const frozenLabelDrops = reportFacts.frozenLabelDropsFor(serviceLine, service.structured_notes);
   const applications = products.map((product, index) => {
     const method = methodFromProduct(product, serviceLine);
     return {
@@ -4808,7 +4816,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         manufacturer: product.approved_report_product_facts?.manufacturer || null,
         public_summary: product.approved_report_product_facts?.publicSummary || null,
         service_report_summary: product.approved_report_product_facts?.serviceReportSummary || null,
-        precaution_summary: product.approved_report_product_facts?.precautionSummary || null,
+        precaution_summary: reportFacts.precautionForCard(frozenLabelDrops, product, product.approved_report_product_facts?.precautionSummary) || null,
         reentry_summary: product.approved_report_product_facts?.reentrySummary || null,
         reentry_hours: product.approved_report_product_facts?.reentryHours ?? null,
         irrigation_notes: product.approved_report_product_facts?.irrigationNotes || null,
@@ -5749,6 +5757,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
         if (banner) reportV2.banner = banner;
       }
+      // GATE_LAWN_REPORT_POLISH: the longer-cycles line, from the decision frozen at completion (lawn-longer-cycles.js).
+      attachLongerCycles(reportV2, reportFacts.frozenLongerCycles('lawn', service.structured_notes));
       // GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time. The stored light of
       // visits is read at most once per render (memoized) and ONLY for a caller that
       // opted in (opts.lawnLighting, the /data render); /ask and the PDF builder read
@@ -7470,6 +7480,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // GATE_LAWN_REPORT_LAYOUT (lawn only): the key the page orders the web report from. Absent =
     // byte-identical payload.
     ...lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight }),
+    // GATE_LAWN_REPORT_POLISH (lawn only): the key the page reads for the status card and the hero. Absent = byte-identical payload.
+    ...lawnPolishPayload({ serviceLine, reportV2 }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {
