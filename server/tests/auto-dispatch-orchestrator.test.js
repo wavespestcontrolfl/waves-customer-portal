@@ -717,3 +717,220 @@ describe('shared-model apply path (Codex r1)', () => {
     }
   });
 });
+
+describe('day moves need a real drive saving (owner 2026-10-09)', () => {
+  const DEFAULT_WINDOW = { key: 'early_morning', startMin: 480, endMin: 600 };
+  const prefsWithDefaultWindow = {
+    preferred_day_indexes: [], effective_time_window: DEFAULT_WINDOW, preferred_time_window: null,
+    blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
+  };
+  const preferences = require('../services/auto-dispatch/preferences');
+  // Afternoon visit; the candidates save no drive and gain from the default
+  // window, a tighter cluster and a lighter day.
+  const AFTERNOON = { ...CURRENT, detour_minutes: 5, start_time: '14:00', same_area_share: 0, route_minutes: 600 };
+  const NO_SAVING_DAY_MOVE = { ...CAND_BIG, detour_minutes: 5, start_time: '08:00', same_area_share: 1, route_minutes: 300 };
+
+  afterEach(() => {
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue({
+      preferred_day_indexes: [], effective_time_window: null, preferred_time_window: null,
+      blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
+    });
+  });
+
+  test('a day move that saves no drive is not recommended, and the audit says why', async () => {
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue(prefsWithDefaultWindow);
+    servicesResult = [svc({ window_start: '14:00', window_end: '15:00' })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: AFTERNOON, candidates: [NO_SAVING_DAY_MOVE] });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ recommended: 0 });
+    const row = lastDecision('no_change');
+    expect(row.routeMetrics).toMatchObject({ day_move: true, drive_saving_minutes: 0 });
+    expect(['NO_DRIVE_SAVING', 'NO_SCORE_IMPROVEMENT']).toContain(row.reason_code);
+  });
+
+  test('the same gain as a same-day re-time is recommended', async () => {
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue(prefsWithDefaultWindow);
+    servicesResult = [svc({ window_start: '14:00', window_end: '15:00' })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: AFTERNOON, candidates: [{ ...NO_SAVING_DAY_MOVE, date: CURRENT.date }] });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('recommended').routeMetrics).toMatchObject({ day_move: false });
+  });
+
+  test('a day move over the score bar with under 6 minutes saved reads NO_DRIVE_SAVING', async () => {
+    const current = { ...CURRENT, detour_minutes: 5, same_area_share: 0, route_minutes: 600 };
+    const cand = { ...CAND_BIG, detour_minutes: 2, same_area_share: 1, route_minutes: 300, start_time: '09:00' };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+    const prevGate = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    try {
+      const res = await runAutoDispatch({ mode: 'dry_run' });
+      expect(res).toMatchObject({ recommended: 0 });
+      expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_DRIVE_SAVING' });
+    } finally {
+      if (prevGate === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = prevGate;
+    }
+  });
+});
+
+describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
+  const OVERLAP = { kind: 'overlap', date: CURRENT.date, with: ['other-1'] };
+
+  test('the gate reaches the candidate read as ctx.conflictMoves', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [CAND_SMALL] });
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(candidateSlots.findValidCandidateSlots.mock.calls[0][2].conflictMoves).toBe(false);
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(candidateSlots.findValidCandidateSlots.mock.calls[1][2].conflictMoves).toBe(true);
+  });
+
+  test('dry run: one recommendation per overlapping pair; a slot past the drive ceiling is not taken', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+    candidateSlots.findValidCandidateSlots
+      .mockResolvedValueOnce({ current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: ['b1'] } }, candidates: [CAND_SMALL] })
+      .mockResolvedValueOnce({ current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: ['a1'] } }, candidates: [CAND_SMALL] });
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('recommended').reason_description).toMatch(/^Would move off an overlapping stop \(/);
+    expect(lastDecision('no_change').reason_code).toBe('CONFLICT_PARTNER_MOVES');
+
+    servicesResult = [svc()];
+    const FAR = { ...CAND_SMALL, detour_minutes: 60 };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [FAR] });
+    const held = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(held).toMatchObject({ recommended: 0 });
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_NO_NEAR_SLOT', reason_description: expect.stringContaining('adds 50 drive minutes > 15') });
+  });
+
+  // Apply mode re-evaluates the partner with no conflict after the first
+  // move; a partner that clears the ordinary bar moves too, so the dry run
+  // recommends both (Codex #6207 r8 P2).
+  test('dry run: a partner an ordinary optimization would move anyway is recommended too', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+    candidateSlots.findValidCandidateSlots
+      .mockResolvedValueOnce({ current: { ...CURRENT, conflict: { ...OVERLAP, with: ['b1'] } }, candidates: [CAND_BIG] })
+      .mockResolvedValueOnce({ current: { ...CURRENT, conflict: { ...OVERLAP, with: ['a1'] } }, candidates: [CAND_BIG] });
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 2 });
+  });
+
+  // While in conflict the same-day slot ranks first. Once the partner has
+  // left, apply mode evaluates this visit with no conflict and takes the
+  // higher-gain day move: the dry run shows that slot (Codex #6207 r10 P2).
+  test('dry run: the partner that moves anyway shows its ordinary slot, not the conflict-ranked one', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+    const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: { ...CURRENT, conflict: { ...OVERLAP, with: [service.id === 'a1' ? 'b1' : 'a1'] } },
+      candidates: service.id === 'a1' ? [SAME_DAY] : [SAME_DAY, CAND_BIG],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 2 });
+    const recs = audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action === 'recommended');
+    const b = recs.find((d) => d.service.id === 'b1');
+    expect(b.newPlacement).toMatchObject({ date: CAND_BIG.date, window_start: CAND_BIG.start_time });
+    expect(b.reason_description).toMatch(/^Would move \(.*\) after the overlapping visit moves \(estimate/);
+  });
+
+  // Chain A-B-C. A's fix is certain. B then moves only on an ordinary-rules
+  // estimate, which apply mode may not make: that estimate must not clear
+  // C's overlap with B, so C keeps its own recommendation (Codex r14 P2).
+  test('dry run: an estimated ordinary move does not clear a later overlap', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' }), svc({ id: 'c1' })];
+    const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+    const chain = { a1: ['b1'], b1: ['a1'], c1: ['b1'] };
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: { ...(service.id === 'b1' ? CURRENT : CURRENT_GOOD), conflict: { ...OVERLAP, with: chain[service.id] } },
+      candidates: service.id === 'b1' ? [CAND_BIG] : [SAME_DAY],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    const decisions = audit.logDecision.mock.calls.map((c) => c[1]);
+    const c = decisions.find((d) => d.service.id === 'c1');
+    expect(c.action).toBe('recommended');
+    expect(c.reason_description).toMatch(/^Would move off an overlapping stop/);
+    expect(res).toMatchObject({ recommended: 3 });
+  });
+
+  // No slot survives for a visit in conflict: the audit row still names the
+  // conflict, so the rollout audit shows it (Codex r14 P2).
+  test('a visit in conflict with no candidate keeps the conflict on its NO_VALID_SLOT row', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_VALID_SLOT', constraints: expect.objectContaining({ conflict: OVERLAP }) });
+  });
+
+  // Apply moves a grouped visit as one unit. The partner overlaps two of its
+  // members: one recommendation for the unit, and the partner stays (r9 P2).
+  test('dry run: a recommended grouped visit counts every member as moved', async () => {
+    servicesResult = [svc({ id: 'g1' }), svc({ id: 'g2' }), svc({ id: 'p1' })];
+    const unit = ['g1', 'g2'];
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: service.id === 'p1'
+        ? { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: unit }, conflict_unit_ids: ['p1'] }
+        : { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: ['p1'] }, conflict_unit_ids: unit },
+      candidates: [CAND_SMALL],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_PARTNER_MOVES', service: expect.objectContaining({ id: 'p1' }) });
+  });
+
+  test('an overlapping visit moves on a gain far under the bar, and the audit names the conflict', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
+      const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ changed: 1 });
+      const changed = lastDecision('changed');
+      expect(changed.reason_description).toMatch(/^Moved off an overlapping stop/);
+      expect(changed.constraints.conflict).toEqual(OVERLAP);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  test('dry run names the visit apply would move: the cheaper fix of a pair, whatever the load order (Codex r6 P2)', async () => {
+    servicesResult = [svc({ id: 'daymove' }), svc({ id: 'sameday' })];
+    const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: [service.id === 'sameday' ? 'daymove' : 'sameday'] } },
+      candidates: [service.id === 'sameday' ? SAME_DAY : CAND_BIG],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('recommended').service.id).toBe('sameday');
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_PARTNER_MOVES' });
+  });
+
+  test('pass 2: of two visits in conflict, a same-day fix goes before a day move', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      servicesResult = [svc({ id: 'daymove' }), svc({ id: 'sameday' })];
+      const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+      candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+        current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [service.id === 'sameday' ? SAME_DAY : CAND_BIG],
+      }));
+      await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(apply.applyAutoDispatchMove.mock.calls.map((c) => c[0].id)).toEqual(['sameday', 'daymove']);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  test('pass 2 applies a visit in conflict before a larger ordinary gain', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      servicesResult = [svc({ id: 'gain' }), svc({ id: 'overlap' })];
+      candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => (service.id === 'overlap'
+        ? { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] }
+        : { current: CURRENT, candidates: [CAND_BIG] }));
+      await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(apply.applyAutoDispatchMove.mock.calls.map((c) => c[0].id)).toEqual(['overlap', 'gain']);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+});
