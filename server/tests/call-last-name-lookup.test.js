@@ -344,6 +344,13 @@ describe('county owner record', () => {
 });
 
 describe('our own records', () => {
+  test('the call read selects every column the run uses (the mock returns whole rows, so pin the projection)', async () => {
+    const { records } = setupDb({ call: tenant(), customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
+    await run();
+    const callRead = records.find(([verb, ...cols]) => verb === 'first' && cols.includes('v2_extraction_status'));
+    expect(callRead).toEqual(expect.arrayContaining(['customer_id', 'direction', 'from_phone', 'to_phone', 'created_at', 'v2_extraction_status', 'ai_extraction_enriched']));
+  });
+
   test('only rows last written before the call count: the call\'s own lead write is never read back', async () => {
     const { records } = setupDb({ call: tenant(), customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
     await run();

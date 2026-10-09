@@ -92,7 +92,7 @@ function leadingHouseNumber(address) {
 // Every eligibility fact, read fresh. Returns { customer, relationship } or a skip code.
 async function loadEligible({ callLogId, customerId }) {
   const call = await db('call_log').where({ id: callLogId })
-    .first('id', 'customer_id', 'direction', 'from_phone', 'to_phone', 'v2_extraction_status', 'ai_extraction_enriched');
+    .first('id', 'customer_id', 'direction', 'from_phone', 'to_phone', 'v2_extraction_status', 'ai_extraction_enriched', 'created_at');
   if (!call || String(call.customer_id) !== String(customerId)) return { skip: 'call_not_linked' };
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at')
     .first('id', 'first_name', 'last_name', 'phone', 'email', 'latitude', 'longitude', 'address_line1');
