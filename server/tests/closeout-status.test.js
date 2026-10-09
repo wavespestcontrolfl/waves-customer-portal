@@ -655,6 +655,19 @@ describe('closeout-status: comms + follow-up', () => {
     expect(facts.license).toMatchObject({ state: 'done', expiryUnrecorded: true });
   });
 
+  test('a blank license expiry settles the expiry only: a required category is still judged (Codex r6)', () => {
+    const tech = (categories) => ({ id: 'tech-1', fl_applicator_license: 'JE362022', license_expiry: null, license_categories: categories });
+    const run = (categories, req) => deriveCloseoutFacts(closedOutInputs({
+      requirements: baseRequirements(req), visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: tech(categories),
+    })).facts.license;
+    const needsLo = { requiresLicense: true, licenseCategory: 'L&O' };
+    expect(run(['GHP'], needsLo)).toMatchObject({ state: 'failed', reason: 'technician_license_category_mismatch' });
+    expect(run(null, needsLo)).toMatchObject({ state: 'unknown', reason: 'technician_license_categories_unrecorded' });
+    expect(run(['L&O'], needsLo)).toMatchObject({ state: 'done', reason: 'technician_licensed', expiryUnrecorded: true });
+    expect(run(['GHP'], { requiresLicense: true, licenseCategory: 'GHP', licenseCategories: ['GHP', 'L&O'] }))
+      .toMatchObject({ state: 'failed', reason: 'technician_license_category_mismatch', requiredCategories: ['ghp', 'lo'] });
+  });
+
   test('no comms marker: delivered report email counts; otherwise UNKNOWN, never pending; explicit catalog no-notice → not_required', () => {
     const bare = { ...closedOutInputs().record, structured_notes: {} };
     expect(deriveCloseoutFacts(closedOutInputs({ record: bare })).facts.comms).toMatchObject({ state: 'done', reason: 'report_email_delivered' });

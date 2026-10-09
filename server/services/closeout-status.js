@@ -209,6 +209,18 @@ function fact(state, reason, extra = {}) {
   return { state, reason, ...extra };
 }
 
+// The technician's license verdict. The expiry and the category are judged
+// independently: a blank expiry is ACTIVE by design (the certificate applicator
+// picker treats a blank license_expiry as active until the owner records one,
+// seed 20260703000004) and is surfaced, never failed - but that only settles
+// the expiry. A category the visit needs still has to be held (Codex r6).
+function technicianLicenseFact(tech, { expiry, visitDay, categoryProblem, evidence }) {
+  if (!tech.fl_applicator_license) return fact('pending', 'technician_license_missing', evidence);
+  if (expiry && visitDay && expiry < visitDay) return fact('failed', 'technician_license_expired_at_visit', evidence);
+  if (categoryProblem) return fact(categoryProblem.state, categoryProblem.reason, evidence);
+  return fact('done', 'technician_licensed', expiry ? evidence : { ...evidence, expiryUnrecorded: true });
+}
+
 function parseJsonObjectSafe(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -1162,14 +1174,7 @@ function deriveCloseoutFacts(inputs) {
       ...multiCategoryEvidence(requiredAll),
       categories, judgedAt: visitDay, asOf: 'current_technician_row', identity: inputs.licenseTechSource || 'scheduled_technician',
     };
-    if (!tech.fl_applicator_license) license = fact('pending', 'technician_license_missing', evidence);
-    // A missing expiry is ACTIVE by design - the certificate applicator
-    // picker treats a blank license_expiry as active until the owner records
-    // one (seed 20260703000004); surfaced, not failed.
-    else if (!expiry) license = fact('done', 'technician_licensed', { ...evidence, expiryUnrecorded: true });
-    else if (expiry && visitDay && expiry < visitDay) license = fact('failed', 'technician_license_expired_at_visit', evidence);
-    else if (categoryProblem) license = fact(categoryProblem.state, categoryProblem.reason, evidence);
-    else license = fact('done', 'technician_licensed', evidence);
+    license = technicianLicenseFact(tech, { expiry, visitDay, categoryProblem, evidence });
   }
 
   // ---- packet (grouped stop) ---------------------------------------------------------------
