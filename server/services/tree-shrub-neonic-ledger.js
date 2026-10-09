@@ -113,7 +113,9 @@ async function loadNeonicLedgerRows(database, svc, serviceDate) {
   const query = database('property_application_history as pah')
     .leftJoin('products_catalog as pc', 'pc.id', 'pah.product_id')
     .leftJoin('service_products as sp', 'sp.id', 'pah.service_product_id')
-    .join('service_records as sr', 'sr.id', 'pah.service_record_id')
+    // LEFT join: a ledger row with no service record (an import, a hand entry) still counts when its
+    // product does; the property scope below keeps such rows on purpose.
+    .leftJoin('service_records as sr', 'sr.id', 'pah.service_record_id')
     .where('pah.customer_id', svc.customer_id)
     .whereNull('pah.retracted_at')
     .where('pah.application_date', '>=', `${year}-01-01`)

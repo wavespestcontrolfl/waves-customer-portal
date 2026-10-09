@@ -153,9 +153,12 @@ describe('the ledger scope: which rows spend the bed allowance', () => {
       row(MERIT, 9, 'fl_oz', { service_line: 'lawn' }),
       row(ZYLAM, 1, 'fl_oz', { service_line: null, service_type: 'Shrub Care' }),
       row(ZYLAM, 2, 'fl_oz', { service_line: 'lawn' }),
+      // No service record at all: dinotefuran still counts, imidacloprid cannot be placed.
+      row(ZYLAM, 4, 'fl_oz', { service_line: null, service_type: null }),
+      row(MERIT, 7, 'fl_oz', { service_line: null, service_type: null }),
     ]);
     const kept = await loadNeonicLedgerRows(database, svc, '2026-10-09');
-    expect(kept.map((r) => [r.product_name, r.quantity_applied])).toEqual([['Merit 2F', 3], ['Zylam Insecticide', 1], ['Zylam Insecticide', 2]]);
+    expect(kept.map((r) => [r.product_name, r.quantity_applied])).toEqual([['Merit 2F', 3], ['Zylam Insecticide', 1], ['Zylam Insecticide', 2], ['Zylam Insecticide', 4]]);
     const ledger = computeNeonicLedger({ rows: kept, bedSqft: BED, catalog: CATALOG });
     expect(entryOf(ledger, 'imidacloprid').usedShare).toBeCloseTo(0.46875, 6);
   });
@@ -166,7 +169,9 @@ describe('the ledger scope: which rows spend the bed allowance', () => {
     const { sql, bindings } = built.query.toSQL();
     expect(sql).toContain('"pah"."retracted_at" is null');
     expect(sql).toContain('"pah"."customer_id" = ?');
-    expect(sql).toContain('inner join "service_records" as "sr"');
+    // A row with no service record stays in the read (dinotefuran counts from any source).
+    expect(sql).toContain('left join "service_records" as "sr"');
+    expect(sql).not.toContain('inner join');
     expect(sql).toMatch(/"pah"\."property_id" is null or "pah"\."property_id" = \?/);
     expect(sql).toContain('not exists');
     expect(sql).toMatch(/"pah"\."service_record_id" is null or "pah"\."service_record_id" not in/);
