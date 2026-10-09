@@ -101,6 +101,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import LawnAssessmentCompletionBlock from '../lawn/LawnAssessmentCompletionBlock';
 import { LAWN_FINDINGS_TYPE } from '../../lib/lawn-fast-complete';
 import { detectServiceCategory } from '../../lib/service-colors';
@@ -1235,7 +1236,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const submitRequest = useMemo(() => plainErrors(request, reloadAreas, refreshPlaces), [request]);
   // `sheet` tags a saved attempt as this sheet's: its findings type matches the
   // lawn re-service sheet's, and Tech Home cannot open this one.
-  const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit' });
+  const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit', invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. "+ Other
   // product" and Complete wait for it, so the words are not missed.

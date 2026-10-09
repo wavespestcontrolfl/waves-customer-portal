@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  invoicedSheetResponse,
   mergePostPaymentService,
   fastCompleteSheetFor,
   shouldOpenLawnReserviceFastComplete,
@@ -231,5 +232,113 @@ describe("reportFlowFields (the row fields both screens pass the sheet)", () => 
     const pest = { id: "svc", status: "on_site", fastCompleteReportEnabled: true, completionProfile: { category: "pest_control", findingsType: null } };
     expect(reportFlowFields(pest)).toMatchObject({ reportFlow: true, laneFlow: false, typedFlow: false, traceEligible: true });
     expect(reportFlowFields({ ...pest, traceEligible: false }, { stationMapOff: true })).toMatchObject({ reportFlow: true, traceEligible: false });
+  });
+});
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): a visit already
+// invoiced, or returning from the payment flow, opens its sheet instead of the
+// full form, on the row's `invoicedVisitFastCompleteEnabled` (exactly true).
+describe("the invoiced-visit gate on every sheet rule", () => {
+  const base = { id: "svc", status: "on_site", propertyId: null };
+  const FIXTURES = {
+    pest: { ...base, fastCompleteReportEnabled: true, completionProfile: { category: "pest_control", serviceKey: "pest_control_quarterly", findingsType: null } },
+    specialty_typed: { ...base, typedReportFlowEnabled: true, completionProfile: { category: "pest_control", serviceKey: "cockroach_control", findingsType: "cockroach" }, findingsSchema: { type: "cockroach" } },
+    specialty_lane: { ...base, laneVoiceFillEnabled: true, fastCompleteReportEnabled: true, completionProfile: { category: "pest_control", serviceKey: "bed_bug_treatment", findingsType: null } },
+    lawn: { ...base, lawnFastCompleteEnabled: true, completionProfile: { category: "lawn_care", serviceKey: "lawn_care_recurring", findingsType: null } },
+    lawn_reservice: { ...base, lawnReserviceFastCompleteEnabled: true, completionProfile: { category: "lawn_care", serviceKey: "lawn_re_service", findingsType: "one_time_lawn_treatment" } },
+    tree_shrub: { ...base, treeShrubFastCompleteEnabled: true, completionProfile: { category: "lawn_care", findingsType: "tree_shrub" } },
+  };
+  const SHEET = { pest: "pest", specialty_typed: "pest", specialty_lane: "pest", lawn: "lawn", lawn_reservice: "lawn_reservice", tree_shrub: "tree_shrub" };
+  const MARKERS = {
+    completionInvoiceAlreadySent: true,
+    checkoutInvoiceId: "inv-fixture",
+    checkoutInvoiceToken: "tok-fixture",
+  };
+
+  for (const [name, fixture] of Object.entries(FIXTURES)) {
+    it(`${name}: opens with no invoice marker whatever the gate says`, () => {
+      expect(fastCompleteSheetFor(fixture)).toBe(SHEET[name]);
+      expect(fastCompleteSheetFor({ ...fixture, invoicedVisitFastCompleteEnabled: true })).toBe(SHEET[name]);
+    });
+
+    for (const [marker, value] of Object.entries(MARKERS)) {
+      it(`${name}: a visit carrying ${marker} keeps the full form with the gate off or absent`, () => {
+        expect(fastCompleteSheetFor({ ...fixture, [marker]: value })).toBeNull();
+        expect(fastCompleteSheetFor({ ...fixture, [marker]: value, invoicedVisitFastCompleteEnabled: false })).toBeNull();
+        // Exactly true, as every other row flag.
+        expect(fastCompleteSheetFor({ ...fixture, [marker]: value, invoicedVisitFastCompleteEnabled: "true" })).toBeNull();
+        expect(fastCompleteSheetFor({ ...fixture, [marker]: value, invoicedVisitFastCompleteEnabled: 1 })).toBeNull();
+      });
+
+      it(`${name}: a visit carrying ${marker} opens its sheet with the gate on`, () => {
+        expect(fastCompleteSheetFor({ ...fixture, [marker]: value, invoicedVisitFastCompleteEnabled: true })).toBe(SHEET[name]);
+      });
+    }
+  }
+
+  it("the gate does not loosen any other guard: a row with no propertyId key, a closed visit, a grouped lawn re-service", () => {
+    for (const [name, fixture] of Object.entries(FIXTURES)) {
+      const invoiced = { ...fixture, completionInvoiceAlreadySent: true, invoicedVisitFastCompleteEnabled: true };
+      const { propertyId: _dropped, ...noKey } = invoiced;
+      expect(fastCompleteSheetFor(noKey), name).toBeNull();
+      expect(fastCompleteSheetFor({ ...invoiced, status: "completed" }), name).toBeNull();
+    }
+    expect(fastCompleteSheetFor({ ...FIXTURES.lawn_reservice, completionInvoiceAlreadySent: true, invoicedVisitFastCompleteEnabled: true, visitId: "v1" })).toBeNull();
+  });
+});
+
+// Codex round 1 on #6196: the refetch owns the routing flags, so a gate turned
+// off while the payment sheet was open reaches the reopened completion.
+describe("mergePostPaymentService and the routing flags", () => {
+  const pest = { id: "svc", status: "on_site", propertyId: null, fastCompleteReportEnabled: true, completionProfile: { category: "pest_control", serviceKey: "pest_control_quarterly", findingsType: null } };
+  const snapshot = { ...pest, checkoutInvoiceId: "inv-fixture", completionInvoiceAlreadySent: true, invoicedVisitFastCompleteEnabled: true };
+
+  it("fresh row false + stale snapshot true = the full form", () => {
+    const fresh = { ...pest, invoicedVisitFastCompleteEnabled: false };
+    expect(fastCompleteSheetFor(snapshot)).toBe("pest");
+    const merged = mergePostPaymentService(fresh, snapshot);
+    expect(merged.invoicedVisitFastCompleteEnabled).toBe(false);
+    expect(merged.completionInvoiceAlreadySent).toBe(true);
+    expect(fastCompleteSheetFor(merged)).toBeNull();
+  });
+
+  it("a fresh row that no longer sends the flag drops it", () => {
+    const merged = mergePostPaymentService({ ...pest }, snapshot);
+    expect(merged.invoicedVisitFastCompleteEnabled).toBeUndefined();
+    expect(fastCompleteSheetFor(merged)).toBeNull();
+  });
+
+  it("the fresh row owns every *Enabled routing flag, not only this one", () => {
+    const merged = mergePostPaymentService(
+      { ...pest, fastCompleteReportEnabled: false, lawnFastCompleteEnabled: false },
+      { ...snapshot, fastCompleteReportEnabled: true, lawnFastCompleteEnabled: true, treeShrubFastCompleteEnabled: true },
+    );
+    expect(merged).toMatchObject({ fastCompleteReportEnabled: false, lawnFastCompleteEnabled: false });
+    expect(merged.treeShrubFastCompleteEnabled).toBeUndefined();
+  });
+
+  it("the gate still on in the fresh row opens the sheet, and the snapshot's invoice fields still ride in", () => {
+    const merged = mergePostPaymentService({ ...pest, invoicedVisitFastCompleteEnabled: true }, { ...snapshot, invoicedVisitFastCompleteEnabled: false });
+    expect(merged.invoicedVisitFastCompleteEnabled).toBe(true);
+    expect(fastCompleteSheetFor(merged)).toBe("pest");
+  });
+
+  it("no fresh row: the snapshot is used as it is", () => {
+    expect(mergePostPaymentService(null, snapshot)).toBe(snapshot);
+  });
+});
+
+describe("invoicedSheetResponse", () => {
+  const response = { invoiceId: "inv-fixture", invoicePaymentActionRequired: true };
+  it("passes the response on for a visit the gate admitted for its invoice", () => {
+    for (const marker of [{ checkoutInvoiceId: "inv" }, { checkoutInvoiceToken: "tok" }, { completionInvoiceAlreadySent: true }]) {
+      expect(invoicedSheetResponse({ ...marker, invoicedVisitFastCompleteEnabled: true }, response)).toBe(response);
+    }
+  });
+  it("drops it with the gate off or for a visit with no invoice marker, as before", () => {
+    expect(invoicedSheetResponse({ checkoutInvoiceId: "inv" }, response)).toBeNull();
+    expect(invoicedSheetResponse({ checkoutInvoiceId: "inv", invoicedVisitFastCompleteEnabled: false }, response)).toBeNull();
+    expect(invoicedSheetResponse({ invoicedVisitFastCompleteEnabled: true }, response)).toBeNull();
+    expect(invoicedSheetResponse(null, response)).toBeNull();
   });
 });
