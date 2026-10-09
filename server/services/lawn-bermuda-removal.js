@@ -869,8 +869,13 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
       ];
       return {
         lines: active ? markStepLines(parseLines(addOn.secondary)) : [],
-        // The window's staged rows, with the appointment month's step rows laid over them.
-        rows: (windowRows) => (stepRows ? new Map([...windowRows, ...stepRows]) : windowRows),
+        // The window's staged rows, with the appointment month's step rows in place of the assigned
+        // window's own step rows: those belong to another month (April's carry no June morning
+        // limit), so they are removed first. A missing or partial load then leaves the step
+        // unavailable, never offered on the other month's conditions.
+        rows: (windowRows) => (stepRows
+          ? new Map([...[...windowRows].filter(([, row]) => row?.gates?.bermudaRemoval !== true), ...stepRows])
+          : windowRows),
         select: (items) => (active ? selectStepAtomically(items) : items),
         async project(items, { enabled: v13Active, rows, probeLimits, productOf }) {
           const projected = active && v13Active

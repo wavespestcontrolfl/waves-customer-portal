@@ -84,12 +84,22 @@ test('a window that is not on v13 carries no step, whatever the date', async () 
 test('a missing staged protocol for the appointment month reads as no step rows (the step is withheld), not an error', async () => {
   mockLoadRows.mockRejectedValue(Object.assign(new Error('missing'), { code: 'lawn_v13_protocol_missing' }));
   const result = await stage('2026-06-09', 'Apr', { strict: true });
-  expect(result.rows(WINDOW_ROWS).get('rec')).toBe(WINDOW_ROWS.get('rec'));
+  // The assigned (April) window's own step row is NOT kept: it carries another month's conditions.
+  expect(result.rows(WINDOW_ROWS).has('rec')).toBe(false);
+  expect(result.rows(WINDOW_ROWS).get('base')).toBe(WINDOW_ROWS.get('base'));
 });
 
 test('another read error: the plan panel withholds the rows, a strict caller gets the error', async () => {
   mockLoadRows.mockRejectedValue(new Error('read failed'));
   await expect(stage('2026-06-09', 'Apr', { strict: true })).rejects.toThrow('read failed');
   const lenient = await stage('2026-06-09', 'Apr');
-  expect(lenient.rows(WINDOW_ROWS).get('rec')).toBe(WINDOW_ROWS.get('rec'));
+  expect(lenient.rows(WINDOW_ROWS).has('rec')).toBe(false);
+});
+
+test('a partial load for the appointment month never falls back to the assigned window\'s step rows', async () => {
+  const windowRows = new Map([...WINDOW_ROWS, ['fus', { productId: 'fus', gates: { bermudaRemoval: true } }]]);
+  const result = await stage('2026-06-02', 'Apr');
+  const merged = result.rows(windowRows);
+  expect(merged.get('rec')).toBe(STEP_ROW);
+  expect(merged.has('fus')).toBe(false);
 });
