@@ -153,7 +153,14 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
   test('caterpillar jobs name Acelepryn; Mainspring is the whitefly product', () => {
     for (const month of ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug']) {
       const visit = visits.find((v) => v.month === month);
-      expect(visit.secondary).toMatch(/^Acelepryn Insecticide: 2–16 fl oz\/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; no more than 0\.37 fl oz per 1,000 sq ft in one spray; not when rain is forecast within 48 hours; at least 7 days between sprays \(\$5\.66\)$/m);
+      const line = visit.secondary.split('\n').find((l) => /^Acelepryn Insecticide: 2–16 fl oz\/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly;/.test(l));
+      expect(line).toBeDefined();
+      // The raw line is the whole card when the guide gate is off: it carries every label limit itself.
+      for (const limit of [
+        'no more than 0.37 fl oz per 1,000 sq ft in one spray and 0.88 fl oz per 1,000 sq ft a year, lawn Acelepryn on the same area included',
+        'at least 1 gal of mix per 1,000 sq ft', 'not when rain is forecast within 48 hours',
+        'keep people and pets out until the spray dries', 'at least 7 days between sprays ($5.66)',
+      ]) expect(line).toContain(limit);
       expect(visit.primary).not.toMatch(/acelepryn/i);
     }
     for (const visit of visits) {
@@ -190,10 +197,11 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     // drench (0.5–1% at 25 gal per 100 sq ft) is named as a limit, never offered as a rate.
     expect(reliant.source).toMatch(/residential Ornamental Applications/);
     expect(reliant.rates.map((r) => r[0])).toEqual(['Foliar: 2–4 tsp / gal']);
-    // No computed mix: a decimal fl oz cannot keep both the 1-gallon (2-4 tsp) and the rig bounds
-    // exact, so the row shows the label's own two statements of the rate.
-    expect(reliant.mix).toBeUndefined();
-    expect(reliant.summary).toBe('2–4 tsp per gallon (1–2 qt per 100 gal)');
+    // Exact thirds of a fl oz (2 and 4 tsp per gallon). The mix must exist: the job card's
+    // label and weather hold applies only to guide products with one (job-card.js).
+    expect(reliant.mix).toEqual([1 / 3, 2 / 3]);
+    expect(reliant.mix[0] * 6).toBe(2);
+    expect(reliant.mix[1] * 6).toBe(4);
     expect(reliant.limits.join(' ')).toMatch(/rain is forecast within 24 hours.*out until the spray dries/);
     expect(JSON.stringify(reliant)).not.toMatch(/6¼|12¾/);
     expect(reliant.limits.join(' ')).toMatch(/No soil drench on the program\..*0\.5–1% mix/);
@@ -231,7 +239,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     const lines = visits.flatMap((v) => `${v.primary}\n${v.secondary}`.split('\n')).filter((line) => /^Distance IGR/.test(line));
     expect(lines).toHaveLength(7);
     for (const line of lines) {
-      expect(line).toMatch(/whiteflies 6–8 fl oz\/100 gal, no more than 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 at least 21 days apart; scale: HOLD, call the office first/);
+      expect(line).toMatch(/whiteflies 6–8 fl oz\/100 gal at the label volume of 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 with 21 to 28 days between; scale: HOLD, call the office first/);
       expect(line).not.toMatch(/listed scales 8–12/);
     }
     const distance = guide.products.distance;
@@ -240,7 +248,8 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(JSON.stringify(distance.rates)).not.toMatch(/8–12/);
     expect(distance.rates[1][0]).toBe('Scale and mealybug: HOLD');
     const limits = distance.limits.join(' ');
-    expect(limits).toMatch(/6 fl oz followed by 6 fl oz at least 21 days later/);
+    expect(limits).toMatch(/6 fl oz followed by 6 fl oz 21 to 28 days later/);
+    expect(distance.apply).toMatch(/Use the label volume/);
     expect(limits).toMatch(/Scale and mealybug use is on hold\./);
     expect(limits).not.toMatch(/two per six months/);
     for (const visit of visits) {

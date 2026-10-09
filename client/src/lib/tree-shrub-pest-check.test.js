@@ -105,6 +105,7 @@ describe('live-finds-only rule', () => {
       expect(liveFindsOnlyLabel(row(name))).not.toBe('');
     }
     expect(liveFindsOnlyLabel(row('Snapshot 2.5TG'))).toBe('');
+    expect(liveFindsOnlyLabel(row('Acelepryn Xtra'))).toBe('');
   });
   test('Yes or unanswered adds no live-finds note', () => {
     expect(evaluatePestCheck({ found: true, types: ['mites'] }, [TRISTAR]).noteMessages).toEqual([]);

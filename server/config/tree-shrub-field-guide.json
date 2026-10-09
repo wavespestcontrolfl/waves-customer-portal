@@ -207,7 +207,7 @@
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
       "targets": "Whiteflies. The label also lists scale crawlers and mealybug suppression; that use is on hold (see Restrictions).",
-      "apply": "Cover all plant surfaces evenly to the point of runoff. The label volume is 100 gal of mix per 20,000 sq ft, which is 5 gal per 1,000 sq ft: do not exceed it. Time scale treatments for crawlers.",
+      "apply": "Cover all plant surfaces evenly to the point of runoff. Use the label volume: 100 gal of mix per 20,000 sq ft, which is 5 gal per 1,000 sq ft.",
       "rates": [
         [
           "6–8 fl oz / 100 gal",
@@ -227,7 +227,7 @@
       ],
       "limits": [
         "Does not provide rapid adult-insect control.",
-        "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz at least 21 days later. Yearly limit 0.176 lb of active ingredient per acre, all pyriproxyfen products together.",
+        "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz 21 to 28 days later. Yearly limit 0.176 lb of active ingredient per acre, all pyriproxyfen products together.",
         "Scale and mealybug use is on hold. The label allows one application a year and prints the yearly limit two ways (12 fl oz per acre, and 0.176 lb active ingredient per acre, which is 26 fl oz per acre). No scale spray until Valent confirms which one applies.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
@@ -418,7 +418,11 @@
         "flowzone",
         "rig"
       ],
-      "summary": "2–4 tsp per gallon (1–2 qt per 100 gal)"
+      "summary": "",
+      "mix": [
+        0.3333333333333333,
+        0.6666666666666666
+      ]
     },
     "conserve": {
       "kind": "Insects · foliar spray",
