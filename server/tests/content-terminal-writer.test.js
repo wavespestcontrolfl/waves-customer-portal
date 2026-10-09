@@ -16,8 +16,11 @@ const pr = (c, over = {}) => ({ head: { ref: `terminal-writer/${uid(c)}` }, html
 const mergedPr = (c) => pr(c, { state: 'closed', merged_at: '2026-10-08T12:00:00Z' });
 
 // open / closed: the GitHub pull lists. peek answers per action type, as the queue does.
-function fakes({ rows, open = [], closed = [], doneThisWeek = 0 }) {
+function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }) {
   const updates = [];
+  // the module counts the week first, then the day
+  const counts = [doneThisWeek, doneToday];
+  let counted = 0;
   const query = (calls) => {
     const q = {
       where: (...a) => { calls.push(a); return q; },
@@ -26,7 +29,7 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0 }) {
       select: async () => closed.filter((p) => p.merged_at).map((p) => ({ id: p.head.ref.split('/')[1] })).filter((m) => rows.some((r) => r.id === m.id && r.status === 'pending')),
       update: async (patch) => { updates.push({ where: calls, patch }); return 1; },
       count: () => q,
-      first: async () => ({ n: doneThisWeek }),
+      first: async () => ({ n: counts[counted++ % 2] }),
     };
     return q;
   };
@@ -102,9 +105,10 @@ describe('terminal writer hand-off', () => {
   test('a post merged today uses a daily slot; one merged on an earlier day does not', async () => {
     const now = new Date('2026-10-09T18:00:00Z');
     const rows = ['a', 'b', 'c', 'd'].map((c) => row(c));
-    const today = fakes({ rows, closed: [pr('x', { state: 'closed', merged_at: '2026-10-09T15:00:00Z' }), pr('y', { state: 'closed', merged_at: '2026-10-09T16:00:00Z' })] });
+    // x merged today and its row is still pending; one more row was completed today (either writer)
+    const today = fakes({ rows: rows.concat([row('x')]), closed: [pr('x', { state: 'closed', merged_at: '2026-10-09T15:00:00Z' })], doneToday: 1 });
     expect((await terminalWriterWork({ now, deps: today.deps })).due.map((r) => r.id)).toEqual([uid('a')]);
-    const earlier = fakes({ rows, closed: [pr('x', { state: 'closed', merged_at: '2026-10-08T15:00:00Z' })] });
+    const earlier = fakes({ rows: rows.concat([row('x')]), closed: [pr('x', { state: 'closed', merged_at: '2026-10-08T15:00:00Z' })] });
     expect((await terminalWriterWork({ now, deps: earlier.deps })).due.map((r) => r.id)).toEqual([uid('a'), uid('b'), uid('c')]);
   });
 

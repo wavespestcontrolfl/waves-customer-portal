@@ -150,11 +150,21 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
   // and so does every post merged today: a second pass on the same day must
   // not hand out the day's slots again.
   const openCount = prs.open.size;
+  // Rows completed today cover both writers: a settled terminal merge (its
+  // completed_at is the merge time) and a post the API engine published from
+  // the Run now button. Unsettled merges from today are added on top.
   const dayStart = parseETDateTime(`${etDateString(now)}T00:00`);
-  const mergedToday = [...prs.merged.values()].filter((m) => m.mergedAt >= dayStart).length;
-  const room = Math.max(0, Math.min(perDay - openCount - mergedToday, perWeek - doneThisWeek - openCount));
+  const doneTodayRow = await conn('opportunity_queue')
+    .where('status', 'done')
+    .whereIn('action_type', WRITER_ACTIONS)
+    .where('completed_at', '>=', dayStart)
+    .count({ n: '*' })
+    .first();
+  const unsettledToday = complete ? 0 : unsettled.filter((id) => prs.merged.get(id).mergedAt >= dayStart).length;
+  const doneToday = Number(doneTodayRow?.n || 0) + unsettledToday;
+  const room = Math.max(0, Math.min(perDay - openCount - doneToday, perWeek - doneThisWeek - openCount));
   const due = candidates.slice(0, room).map((r) => ({ ...r, branch: branchFor(r.id) }));
-  return { due, inProgress, merged, caps: { perDay, perWeek, doneThisWeek, mergedToday } };
+  return { due, inProgress, merged, caps: { perDay, perWeek, doneThisWeek, doneToday } };
 }
 
 const describe = (r) => `${r.action_type.replace(/_/g, ' ')}: ${r.query || r.page_url || [r.service, r.city].filter(Boolean).join(' in ') || 'untitled'}`;
