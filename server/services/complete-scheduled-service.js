@@ -4747,7 +4747,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           expectedVisit,
           lawnFast,
           products,
-          packetId: packetRecords ? packetContext.packetId : null,
+          packetContext,
           technicianNotes,
         });
         if (lawnFastBlock) {

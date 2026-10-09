@@ -20,8 +20,8 @@ function comboStopRequested(req) {
 
 /**
  * May this grouped member use the lawn Fast Complete routes? The gate is live, and `ask` says which tie:
- *   - { packetId } (the /complete preflight inside the visit-closeout packet's records phase): the packet id
- *     must be named; the stop is `closing` and that packet row belongs to this stop. A /complete that names
+ *   - { packetContext } (the /complete preflight; the packet's context object, or null/undefined for a plain
+ *     /complete): its packetId must be named; the stop is `closing` and that packet row belongs to this stop. A /complete that names
  *     no packet is never allowed.
  *   - { stop: true } (the sheet's reads, before a packet exists): the stop is `open` and has exactly two
  *     open members, this service one of them.
@@ -31,9 +31,10 @@ async function groupedStopAllowed(knex, svc, ask) {
   if (!comboFastCompleteLive() || !svc?.visit_id || !ask) return false;
   const visit = await knex('service_visits').where({ id: svc.visit_id }).first('id', 'status');
   if (!visit) return false;
-  if ('packetId' in ask) {
-    if (!ask.packetId || String(visit.status || '') !== 'closing') return false;
-    return !!(await knex('visit_completion_packets').where({ id: ask.packetId, visit_id: visit.id }).first('id'));
+  if ('packetContext' in ask) {
+    const packetId = ask.packetContext?.packetId;
+    if (!packetId || String(visit.status || '') !== 'closing') return false;
+    return !!(await knex('visit_completion_packets').where({ id: packetId, visit_id: visit.id }).first('id'));
   }
   if (String(visit.status || '') !== 'open') return false;
   const open = await require('./visit-groups').openMembers(knex, visit.id);
