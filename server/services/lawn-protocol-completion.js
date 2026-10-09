@@ -165,7 +165,8 @@ function resolveAttribution(plan, allLawn) {
   const window = structured?.window || null;
   const attributed = Boolean(structured && window);
   if (!attributed && !allLawn) return null;
-  return { structured, window, attributed };
+  // `bermudaStep`: the plan carries the bermuda removal step, so its staged rows are planned work.
+  return { structured, window, attributed, bermudaStep: plan?.bermudaRemoval?.active === true };
 }
 
 // The protocol rows the completion attributes to: protocol → window →
@@ -505,7 +506,7 @@ async function recordLawnProtocolCompletion(trx, {
   const attribution = resolveAttribution(plan, allLawn);
   if (!attribution) return null;
 
-  const rows = await loadProtocolRows(trx, { ...attribution, bermudaStep: plan?.bermudaRemoval?.active === true });
+  const rows = await loadProtocolRows(trx, attribution);
   const equipment = resolveEquipment({ plan, equipmentSystemId, calibrationId, calibrationCleared });
   // A plan whose protocol attribution is withheld contributes no
   // substitution labels either: an applied product that happens to be the

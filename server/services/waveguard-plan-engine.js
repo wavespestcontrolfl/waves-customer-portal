@@ -2011,7 +2011,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   // The April and June bermuda removal step: its three spot lines join the visit's secondary
   // list (opt-in lines, like every other spot product).
-  const step = bermuda.resolve({ structuredProtocol, trackKey, month, parseLines: (text) => parseProtocolLines(text, 'conditional', { exactName }) });
+  const step = await bermuda.resolve({ structuredProtocol, trackKey, parseLines: (text) => parseProtocolLines(text, 'conditional', { exactName }) });
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
     ...step.lines,
@@ -2019,7 +2019,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
   // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
   // own protocol row supplies its rate, its sunny-turf limit and its gates.
-  const v13Rows = v13ProtocolRows(structuredProtocol);
+  const v13Rows = step.rows(v13ProtocolRows(structuredProtocol));
   const resolvedItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
