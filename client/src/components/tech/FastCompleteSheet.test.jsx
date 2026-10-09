@@ -694,32 +694,21 @@ describe('FastCompleteSheet', () => {
 
 });
 
-// "Swept eaves and webs" (owner 2026-10-05): the re-service sheet the report
-// gate leaves in place records the sweep the same way the report flow does.
-describe('the swept eaves and webs box on the re-service form', () => {
-  const SWEEP_LABEL = 'Swept eaves, window frames, door frames, and lanai';
-  const sweepBox = () => screen.queryByRole('checkbox', { name: 'Swept eaves and webs' });
-  async function completeWith(request, { sweep }) {
+// "Swept eaves and webs" (owner 2026-10-08): the re-service sheet the report
+// gate leaves in place has no note read, so it has no box for the sweep and
+// sends none.
+describe('the re-service form and the swept eaves and webs', () => {
+  test('shows no box for it and the completion carries no sweep', async () => {
+    const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
     await screen.findByRole('button', { name: /Taurus SC/ });
-    expect(sweepBox().checked).toBe(false);
-    if (sweep) fireEvent.click(sweepBox());
+    expect(screen.queryByRole('checkbox', { name: 'Swept eaves and webs' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
     fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
     await waitFor(() => expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true));
-    return JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
-  }
-
-  test('checked: the completion carries the label with its exterior, no-treatment scope', async () => {
-    const body = await completeWith(makeRequest(), { sweep: true });
-    expect(body.protocolActionsCompleted).toEqual([SWEEP_LABEL]);
-    expect(body.protocolActionScopesCompleted).toEqual([{ label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false }]);
-  });
-
-  test('unchecked: the body is unchanged', async () => {
-    const body = await completeWith(makeRequest(), { sweep: false });
+    const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
     expect(body).not.toHaveProperty('protocolActionsCompleted');
     expect(body).not.toHaveProperty('protocolActionScopesCompleted');
   });

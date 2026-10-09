@@ -17,6 +17,10 @@
  *     only). The sheet reads this before the report is written, so the
  *     report and the record agree on it; the trace only gives a perimeter
  *     spray its length.
+ *   - whether the technician SWEPT the eaves and webs today (owner ruling
+ *     2026-10-08: the short sheet has no box for it, the note carries it). It
+ *     stands only on a quote that names a web-removal action and a web or
+ *     eave, that the note does not deny or put on another day.
  *
  * Every fact must quote the note word for word, or it is dropped; a pest's
  * words must sit inside its own quote, and an area, a pest or a way of
@@ -34,7 +38,7 @@ const { redactAccessCodes } = require('./context-aggregator');
 const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
 
 // Bump on any prompt or schema change.
-const VOICE_FACTS_VERSION = 'visit-voice-facts-v6';
+const VOICE_FACTS_VERSION = 'visit-voice-facts-v7';
 // A dictated visit note runs a few hundred characters. A longer one is never
 // cut short (a fact said past the cut would go unread while the report
 // writer read the note whole): it is refused as too long, and the sheet asks
@@ -89,8 +93,17 @@ const VOICE_FACTS_SCHEMA = {
       required: ['method', 'quote'],
       additionalProperties: false,
     },
+    sweep: {
+      type: 'object',
+      properties: {
+        done: { type: 'boolean' },
+        quote: { type: 'string' },
+      },
+      required: ['done', 'quote'],
+      additionalProperties: false,
+    },
   },
-  required: ['areas', 'pests', 'spray'],
+  required: ['areas', 'pests', 'spray', 'sweep'],
   additionalProperties: false,
 };
 
@@ -202,7 +215,7 @@ function nameAssertion(name) {
 // Whether the note denies what a quote asserts at every place the quote
 // appears. A quote with no assertion is read whole: a denial in it, right
 // before it or right after it.
-function deniedInNote(quote, note, { assertion, denialAfter }) {
+function deniedInNote(quote, note, { assertion, denialAfter, denialBefore = DENIAL_RIGHT_BEFORE_RE }) {
   const span = assertion(quote);
   const from = span ? span.offset : 0;
   const to = span ? span.offset + span.length : quote.length;
@@ -213,7 +226,7 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
     // Said for another day where it stands in the note ("will spray inside
     // tomorrow" quoted as "spray inside") reads as not done today (pre-push
     // P1 on #5538).
-    const denied = DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to))
+    const denied = denialBefore.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to))
       || (!!span && notToday(note, at + from));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
@@ -495,7 +508,7 @@ const AREA_DENIED_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area,
 ]));
 
 // Rules only; the note rides the user channel as labeled data.
-const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out three facts, using ONLY the note.
+const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out four facts, using ONLY the note.
 
 areas: where the technician put product down (sprayed, baited, dusted, spread granules, placed bait stations or glue boards).
 - "inside": anywhere inside the home (kitchen, bathrooms, baseboards, cabinets, under sinks, inside door tracks, attic, any room).
@@ -506,6 +519,8 @@ List an area only when the note says product went down there. A place the techni
 pests: the pests the treatment was for, in the technician's OWN words (for example "ghost ants", "roaches", "palmetto bugs"). Keep the technician's word exactly: never change it to another name or to a species they did not say ("roaches" stays "roaches", never "German roaches"). A pest the note says was not found ("no roaches") is not listed. For each pest give name (the technician's own words, at most ${MAX_PEST_WORDS} words) and a quote: the exact words from the note that contain that name.
 
 spray: how the technician sprayed, as the note says it. "perimeter" when they sprayed around the outside of the home (around the house, the perimeter, the foundation, all the way around); "spot" when they sprayed only particular spots; "none" when the note says they did not spray ("didn't spray today"); "not_said" when the note does not say whether or how they sprayed. Give the quote: the exact words from the note that say it, copied character for character ("" for not_said).
+
+sweep: whether the technician swept, brushed or knocked down webs (cobwebs, spider webs) from the eaves, soffits or other parts of the house on this visit. done is true only when the note says they did it ("swept the eaves", "knocked down the webs", "brushed cobwebs off the lanai"). Webs only seen ("saw webs on the eaves"), a sweep the note says was not done ("didn't sweep", "no webs to sweep", "customer asked us not to knock down webs") and a sweep for another day ("will sweep next time") are NOT done. Give the quote: the exact words from the note that say it, copied character for character ("" and done false when the note does not say).
 
 Return empty lists when the note does not say. Never guess.
 
@@ -599,6 +614,8 @@ function validateVoiceFacts(json, note) {
     // Pests the note treats for that the reading left out (Codex #5538).
     unclearPests: pestsLeftOut(grounding, heardNames),
     ...readSpray(answer.spray || {}, grounding),
+    // Only when heard: { quote } of a web sweep done today.
+    ...readSweep(answer.sweep, grounding),
   };
 }
 
@@ -712,17 +729,45 @@ function readSpray(spray, grounding) {
   };
 }
 
+// The sweep (owner ruling 2026-10-08): a quote must name a web-removal action
+// (swept, brushed, knocked down, removed, cleared, wiped, took down, dewebbed)
+// AND a web (webs, cobwebs, spider webs) or an eave (eaves, soffits, fascia),
+// so "saw webs on the eaves" (a sighting) and "swept the lanai" (no web, no
+// eave) never count. An eave with no web is not enough when the quote speaks of
+// a nest or wasps: "removed a wasp nest from the eaves" is not a web sweep.
+const SWEEP_ACTION_RE = /\b(?:swe(?:ep|pt|eping)s?|brush(?:ed|es|ing)?|knock(?:ed|s|ing)?\s+(?:down|off|out)|remov(?:e|ed|es|ing)|clear(?:ed|s|ing)?|clean(?:ed|s|ing)?|wip(?:ed|es|ing)|tak(?:e|es|ing)\s+down|took\s+down|de-?web(?:bed|bing|s)?)\b/;
+const SWEEP_WEB_RE = /web/;
+const SWEEP_EAVE_RE = /\b(?:eaves?|soffits?|fascia)\b/;
+const SWEEP_NEST_RE = /\b(?:nests?|hives?|wasps?|hornets?|bees?|daubers?)\b/;
+// A denial just before the action, over the few filler words a denial runs on
+// ("didn't sweep", "not to knock down", "no webs to sweep", "wasn't able to
+// brush"); words past those (not home and I swept) are another clause's.
+const SWEEP_DENIAL_FILLER = String.raw`to|us|me|them|him|her|you|able|get|got|any|the|a|an|of|be|been|need|needed|necessary|want|wanted|have|has|had|asked|told|allowed|let|webs?|cobwebs?|spider\s*webs?|eaves?|soffits?`;
+const SWEEP_DENIAL_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|unable|asked\s+(?:us\s+)?not)\b(?:\s+(?:${SWEEP_DENIAL_FILLER})){0,4}\s+$`);
+const sweepAssertion = (quote) => spanOf(SWEEP_ACTION_RE.exec(quote));
+
+function readSweep(sweep, grounding) {
+  if (sweep?.done !== true) return {};
+  const read = readQuote(sweep.quote, grounding, {
+    assertion: sweepAssertion, denialAfter: TRAILING_DENIAL.treatment, denialBefore: SWEEP_DENIAL_BEFORE_RE,
+  });
+  if (!read || read.denied || !sweepAssertion(read.quote)) return {};
+  const names = SWEEP_WEB_RE.test(read.quote) || (SWEEP_EAVE_RE.test(read.quote) && !SWEEP_NEST_RE.test(read.quote));
+  return names ? { sweep: { quote: read.quote } } : {};
+}
+
 /**
  * Reads where product went down, the pests named and how the sprays went
- * down from the technician's note. Returns { status, areas, unclearAreas,
- * pests, spray, heard } where status is 'read',
+ * down from the technician's note, and whether they swept the eaves and webs.
+ * Returns { status, areas, unclearAreas,
+ * pests, spray, sweptEaves, heard } where status is 'read',
  * 'empty_note', 'too_long' or 'failed'; areas and pests are what the sheet records
  * (labels and the technician's words), heard carries each fact's quote.
  * Never throws.
  */
 async function readVoiceFacts(note) {
   const empty = (status) => ({
-    status, areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false,
+    status, areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false, sweptEaves: false,
     heard: { areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false }, version: VOICE_FACTS_VERSION,
   });
   // Access codes never reach a provider; quotes are checked against what
@@ -761,6 +806,8 @@ async function readVoiceFacts(note) {
     unclearSpray: heard.unclearSpray,
     // "Didn't spray", in the note's own words.
     noSpray: heard.noSpray,
+    // A web sweep the technician did today, in the note's own words (heard.sweep).
+    sweptEaves: !!heard.sweep,
     heard,
     version: VOICE_FACTS_VERSION,
   };

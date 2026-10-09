@@ -759,6 +759,71 @@ describe('validateVoiceFacts', () => {
   });
 });
 
+// The sweep (owner ruling 2026-10-08): "swept eaves and webs" is read from the
+// note, never ticked. It stands only on a quote that names a web-removal action
+// and a web or eave, that the note does not deny or put on another day.
+describe('validateVoiceFacts: the web sweep', () => {
+  const readSweep = (note, sweep) => validateVoiceFacts({ areas: [], pests: [], spray: { method: 'not_said', quote: '' }, sweep }, note).sweep || null;
+  const said = (note, quote) => readSweep(note, { done: true, quote });
+
+  test.each([
+    ['Sprayed the perimeter. Swept the eaves and knocked down the webs.', 'Swept the eaves and knocked down the webs'],
+    ['Brushed cobwebs off the lanai ceiling, sprayed around the house.', 'Brushed cobwebs off the lanai ceiling'],
+    ['Sprayed outside and removed the spider webs from the soffits.', 'removed the spider webs from the soffits'],
+    ['Dewebbed the front entry. Sprayed the perimeter.', 'Dewebbed the front entry'],
+    ['Customer asked about webs; I swept the eaves.', 'I swept the eaves'],
+    ['Customer was not home and I swept the eaves.', 'I swept the eaves'],
+  ])('a sweep done today stands: %s', (note, quote) => {
+    expect(said(note, quote)).toEqual({ quote: quote.toLowerCase() });
+  });
+
+  test.each([
+    ["Sprayed the perimeter. Didn't sweep the eaves today.", "sweep the eaves"],
+    ['No webs to sweep this time. Sprayed the perimeter.', 'No webs to sweep'],
+    ['Customer asked us not to knock down webs. Sprayed the perimeter.', 'knock down webs'],
+    ['Customer asked us not to knock down webs. Sprayed the perimeter.', 'not to knock down webs'],
+    ['Sprayed the perimeter. Will sweep the eaves next time.', 'sweep the eaves'],
+    ['Sprayed the perimeter. Need to sweep the eaves.', 'sweep the eaves'],
+    ['Swept the eaves last visit. Sprayed the perimeter today.', 'Swept the eaves'],
+    ['Sprayed the perimeter. Eaves swept, not done today.', 'Eaves swept'],
+    ['Unable to sweep the eaves, ladder was locked up.', 'sweep the eaves'],
+  ])('a sweep the note denies or puts on another day is not a sweep: %s', (note, quote) => {
+    expect(said(note, quote)).toBeNull();
+  });
+
+  test('webs only seen are not a sweep', () => {
+    const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
+    expect(said(note, 'Saw webs on the eaves')).toBeNull();
+    expect(said(note, 'webs on the eaves and under the lanai')).toBeNull();
+  });
+
+  test('a quote needs both an action word and a web or eave word', () => {
+    expect(said('Swept the lanai floor. Sprayed the perimeter.', 'Swept the lanai floor')).toBeNull();
+    expect(said('Removed the ant bait stations. Sprayed the perimeter.', 'Removed the ant bait stations')).toBeNull();
+    expect(said('Removed a wasp nest from the eaves.', 'Removed a wasp nest from the eaves')).toBeNull();
+    expect(said('Removed a wasp nest and webs from the eaves.', 'Removed a wasp nest and webs from the eaves')).not.toBeNull();
+  });
+
+  test('a quote the note does not hold, a done:false answer and a missing answer are no sweep', () => {
+    const note = 'Sprayed the perimeter. Swept the eaves.';
+    expect(said(note, 'Swept the porch ceiling and webs')).toBeNull();
+    expect(readSweep(note, { done: false, quote: 'Swept the eaves' })).toBeNull();
+    expect(readSweep(note, { done: true, quote: '' })).toBeNull();
+    expect(readSweep(note, undefined)).toBeNull();
+    expect(readSweep(note, 'yes')).toBeNull();
+  });
+
+  test('a sweep said twice stands when one saying is not denied', () => {
+    const note = "Didn't sweep the eaves out back, but did sweep the eaves out front.";
+    expect(said(note, 'sweep the eaves')).toEqual({ quote: 'sweep the eaves' });
+  });
+
+  test('a reading with no sweep keeps the facts it always had', () => {
+    const facts = validateVoiceFacts({ areas: [], pests: [], spray: { method: 'not_said', quote: '' } }, 'Sprayed the perimeter.');
+    expect(facts).not.toHaveProperty('sweep');
+  });
+});
+
 describe('readVoiceFacts', () => {
   test('reads the note through the fast structured lane and returns what the sheet records', async () => {
     dispatchWithFallback.mockResolvedValue(answer({
@@ -774,6 +839,29 @@ describe('readVoiceFacts', () => {
     expect(payload).toMatchObject({ laneId: 'visit_voice_facts', jsonSchema: expect.any(Object) });
     expect(payload.text).toContain('Baited the counter edge');
     expect(options).toEqual({ reserveFallbackBudget: true });
+  });
+
+  test('returns the sweep as sweptEaves with its quote, false when the note does not hold it', async () => {
+    const note = 'Sprayed around the outside of the house. Swept the eaves and webs.';
+    const base = { areas: [{ area: 'outside', quote: 'Sprayed around the outside of the house' }], pests: [], spray: { method: 'perimeter', quote: 'Sprayed around the outside of the house' } };
+    dispatchWithFallback.mockResolvedValueOnce(answer({ ...base, sweep: { done: true, quote: 'Swept the eaves and webs' } }));
+    const swept = await readVoiceFacts(note);
+    expect(swept.sweptEaves).toBe(true);
+    expect(swept.heard.sweep).toEqual({ quote: 'swept the eaves and webs' });
+    expect(swept.version).toBe('visit-voice-facts-v7');
+    expect(dispatchWithFallback.mock.calls[0][1].jsonSchema.required).toContain('sweep');
+    // An older answer with no sweep, and a sweep the note does not hold.
+    dispatchWithFallback.mockResolvedValueOnce(answer(base));
+    expect((await readVoiceFacts(note)).sweptEaves).toBe(false);
+    dispatchWithFallback.mockResolvedValueOnce(answer({ ...base, sweep: { done: true, quote: 'Swept the porch webs' } }));
+    expect((await readVoiceFacts(note)).sweptEaves).toBe(false);
+  });
+
+  test('a failed, empty or too long read has no sweep', async () => {
+    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+    expect((await readVoiceFacts(NOTE)).sweptEaves).toBe(false);
+    expect((await readVoiceFacts('  ')).sweptEaves).toBe(false);
+    expect((await readVoiceFacts(`Swept the eaves. ${'x'.repeat(9000)}`)).sweptEaves).toBe(false);
   });
 
   test('access codes never reach the provider', async () => {

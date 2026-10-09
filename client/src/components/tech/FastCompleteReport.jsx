@@ -571,6 +571,8 @@ function HeardLine({ facts }) {
     SPRAY_HEARD[facts.spray] || (facts.unclearSpray ? 'not clear: how you sprayed' : '') || (facts.noSpray ? 'no spraying' : ''),
     facts.pests.length ? `for ${facts.pests.join(', ')}` : '',
     (facts.unclearPests || []).length ? `not clear: whether for ${joinAnd(facts.unclearPests)}` : '',
+    // The eaves and webs swept (owner 2026-10-08): said in the note, so shown here, not asked.
+    facts.sweptEaves ? 'swept eaves and webs' : '',
   ].filter(Boolean);
   return (
     <p className="tech-visit-muted" data-testid="fast-complete-heard">
