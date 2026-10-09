@@ -474,6 +474,27 @@ function persistedAddOnRefusal(estimate = {}, { action, billingTerm = 'standard'
     ? { code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE, message: AREA_ADDON_RECURRING_MARK_WON_MESSAGE } : null;
 }
 
+// The refusals a stored estimate's add-ons give an acceptance, thrown as the 409 the staff see: a gated add-on whose gate
+// is off, and a recurring accept that would drop a sold area add-on.
+function assertAddOnRefusalsClear(estimate, billingTerm) {
+  const addOnRefusal = persistedAddOnRefusal(estimate, { action: 'accepting', billingTerm });
+  if (addOnRefusal) throw Object.assign(httpError(addOnRefusal.message, 409), { code: addOnRefusal.code });
+}
+
+// Every add-on decision of an acceptance, on the estimate row the transaction holds locked: the refusals above, and the
+// yearly-limit recheck (an add-on whose limit is now reached, or whose history cannot be read, is not marked won either).
+// The visits this call books (the staff booking's own rows) ARE this acceptance: left out of the count, and their day is the
+// day judged. Any other booking of the estimate counts. A customer the check finds for itself (an unowned estimate's group
+// owner or linked appointment) is fenced like the public accept's, without waiting: the estimate's own customer is already
+// locked and so is the estimate row.
+async function assertAddOnsAcceptable(trx, estimate, { billingTerm, bookedAppointmentIds }) {
+  assertAddOnRefusalsClear(estimate, billingTerm);
+  const addOnLimits = require('./area-addon-limits');
+  await addOnLimits.assertAreaAddOnLimitsOpen(trx, {
+    estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer: (id) => addOnLimits.fenceCustomerBookings(trx, id),
+  });
+}
+
 async function markEstimateManuallyAccepted({
   estimateId,
   adminUserId,
@@ -569,17 +590,9 @@ async function markEstimateManuallyAccepted({
     // add-on estimate must not be accepted/billed/scheduled while its gate is off, and a
     // recurring accept must not drop a sold add-on. Already-accepted retries returned
     // above stay untouched.
-    const addOnRefusal = persistedAddOnRefusal(estimate, { action: 'accepting', billingTerm: normalizedBillingTerm });
-    if (addOnRefusal) throw Object.assign(httpError(addOnRefusal.message, 409), { code: addOnRefusal.code });
-    // An add-on whose yearly limit is now reached (or whose history cannot be read) is not marked won either.
-    // The visits this call books (the staff booking's own rows) ARE this acceptance: left out of the count, and their day is the
-    // day judged. Any other booking of the estimate counts.
-    // A customer the check finds for itself (an unowned estimate's group owner or linked appointment) is fenced like the public
-    // accept's: the estimate's own customer is already locked above.
-    const addOnLimits = require('./area-addon-limits');
-    await addOnLimits.assertAreaAddOnLimitsOpen(trx, {
-      estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer: (id) => addOnLimits.fenceCustomerBookings(trx, id),
-    });
+    // A fast refusal on the row as first read; the same refusals run again, with the yearly-limit recheck, on the LOCKED row
+    // below (assertAddOnsAcceptable), because an estimator save can change the add-ons between this read and that lock.
+    assertAddOnRefusalsClear(estimate, normalizedBillingTerm);
     if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }
@@ -596,15 +609,18 @@ async function markEstimateManuallyAccepted({
     // for this transaction's terminal write and its reconcile applies the
     // marker-only terminal invalidation.
     {
-      const freshLinkRow = await trx('estimates').where({ id: estimateId })
-        .forUpdate().first('estimate_data', 'archived_at', 'status');
+      const freshLinkRow = await trx('estimates').where({ id: estimateId }).forUpdate().first();
       // Propagate the LOCKED re-read back onto `estimate` (codex P1): every
       // check below this point — including the existing-member prepay guard
       // — read `estimate.estimate_data` from the earlier UNLOCKED select, so
       // a membershipSnapshot that flipped to isExistingCustomer between the
       // two reads (e.g. a concurrent reprice/save) was invisible here even
       // though the row is, from this line on, held FOR UPDATE.
-      if (freshLinkRow) estimate = { ...estimate, estimate_data: freshLinkRow.estimate_data };
+      if (freshLinkRow) estimate = { ...estimate, ...freshLinkRow };
+      // Every add-on decision of this acceptance reads the LOCKED row: the gated and recurring-plan refusals and the
+      // yearly-limit recheck. A concurrent estimator save that added or replaced a limited add-on waits behind this
+      // lock, so what is judged here is what is converted below.
+      await assertAddOnsAcceptable(trx, estimate, { billingTerm: normalizedBillingTerm, bookedAppointmentIds });
       const manualAcceptData = (() => {
         const raw = freshLinkRow?.estimate_data;
         if (!raw) return null;

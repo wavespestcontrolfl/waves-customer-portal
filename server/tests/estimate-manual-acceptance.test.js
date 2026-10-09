@@ -865,6 +865,78 @@ describe('estimate manual acceptance', () => {
     });
   });
 
+  // Codex round 14 P1: the add-on refusals and the yearly-limit recheck judged the estimate as first read, and the locked
+  // re-read replaced estimate_data without running them again. An estimator save that commits between the two reads is
+  // judged now: every add-on decision reads the row this transaction holds FOR UPDATE.
+  describe('the add-on decisions read the LOCKED estimate row (Codex round 14)', () => {
+    const addOnRow = { service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 59 };
+    const plain = { id: 'estimate-stale', status: 'sent', customer_id: null, monthly_total: 0, annual_total: 0, onetime_total: 120, estimate_data: JSON.stringify({ result: { oneTime: { items: [{ service: 'rodent_trapping', price: 120 }] } } }) };
+    // The row an estimator save committed after the first read: the same estimate with an area add-on on it.
+    const saved = (extra = {}) => ({ ...plain, onetime_total: 179, estimate_data: JSON.stringify({ engineInputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } }, result: { recurring: { services: [] }, oneTime: { items: [addOnRow] } } }), ...extra });
+    // First (unlocked) reads see `stale`; the FOR UPDATE read sees `fresh`.
+    function raceDb(stale, fresh) {
+      const base = makeDb(fresh);
+      const database = jest.fn((table) => {
+        const builder = base.database(table);
+        if (table !== 'estimates') return builder;
+        let locked = false;
+        const lock = builder.forUpdate.bind(builder);
+        builder.forUpdate = () => { locked = true; return lock(); };
+        builder.first = async () => (locked ? fresh : stale);
+        return builder;
+      });
+      Object.assign(database, { fn: base.database.fn, raw: base.database.raw, transaction: jest.fn(async (callback) => callback(database)) });
+      return { database, updates: base.updates };
+    }
+    const withGate = async (value, fn) => {
+      const prev = process.env.GATE_AREA_ADDONS;
+      if (value === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = value;
+      try { return await fn(); } finally { if (prev === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prev; }
+    };
+
+    test('an add-on saved after the first read, with its gate off, is refused', async () => {
+      await withGate(undefined, async () => {
+        const { database, updates } = raceDb(plain, saved());
+        await expect(markEstimateManuallyAccepted({ estimateId: plain.id, adminUserId: 1, database }))
+          .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/GATE_AREA_ADDONS/) });
+        expect(updates).toHaveLength(0);
+      });
+    });
+
+    test('a recurring plan saved onto a one-time estimate after the first read is refused, with the one-time-only code', async () => {
+      await withGate('true', async () => {
+        const recurring = saved({ monthly_total: 65, annual_total: 780, estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', mo: 65 }] }, oneTime: { items: [addOnRow] } } }) });
+        const { database, updates } = raceDb(plain, recurring);
+        await expect(markEstimateManuallyAccepted({ estimateId: plain.id, adminUserId: 1, database }))
+          .rejects.toMatchObject({ statusCode: 409, code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY' });
+        expect(updates).toHaveLength(0);
+      });
+    });
+
+    test('the yearly-limit recheck is handed the LOCKED row\'s add-ons, after the lock, and its refusal stops the acceptance', async () => {
+      const limits = require('../services/area-addon-limits');
+      const fresh = saved();
+      const seen = [];
+      const spy = jest.spyOn(limits, 'assertAreaAddOnLimitsOpen').mockImplementation(async (trx, { estimate }) => {
+        seen.push(estimate.estimate_data);
+        throw Object.assign(new Error('limit reached'), { statusCode: 409, code: 'AREA_ADDON_LIMIT_REACHED' });
+      });
+      try {
+        await withGate('true', async () => {
+          const { database, updates } = raceDb(plain, fresh);
+          await expect(markEstimateManuallyAccepted({ estimateId: plain.id, adminUserId: 1, database }))
+            .rejects.toMatchObject({ code: 'AREA_ADDON_LIMIT_REACHED' });
+          expect(updates).toHaveLength(0);
+        });
+        // Judged once, on the locked row: the stale first read never reached the recheck.
+        expect(seen).toEqual([fresh.estimate_data]);
+        expect(seen[0]).not.toBe(plain.estimate_data);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   test('refuses manual acceptance of a not-yet-accepted 4x/quarterly tree & shrub estimate (retired 2026-09-24, codex P1 r9)', async () => {
     const estimate = {
       id: 'estimate-ts-quarterly',
