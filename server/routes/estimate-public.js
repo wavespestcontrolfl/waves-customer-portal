@@ -10639,6 +10639,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptLinkedSsId = (existingAppointmentId && existingAppointmentRow?.id)
       ? String(existingAppointmentRow.id)
       : (slotId ? null : await linkedScheduledServiceId(estimate));
+    // A sold area add-on needs a visit to ride on: the /book fallback link creates none of its add-on rows.
+    assertAreaAddOnsHaveAppointment(estimate, Boolean(slotId || existingAppointmentId || acceptLinkedSsId));
     // resolveDepositPolicyForEstimate adds the LIVE plan-customer fallback
     // (legacy customer-linked estimates have no membershipSnapshot) and
     // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
@@ -19926,6 +19928,15 @@ function assertAreaAddOnsAcceptedOneTime(estimate, treatAsOneTime) {
   if (treatAsOneTime || !mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) return;
   logger.warn(`[estimate-accept] estimate ${estimate.id} carries area add-ons and was accepted in recurring mode - ${mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE}; office books the add-on by hand`);
   throw Object.assign(new Error(mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE), { status: 409, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE });
+}
+
+// Throws the 400 AREA_ADDON_APPOINTMENT_REQUIRED for an accept of an estimate that carries an area add-on and
+// names no appointment (no slot, no adopted visit, no visit already booked from it). Without a visit the sold
+// add-on gets no add-on row, so its limit recheck, governed rate and closeout would never run.
+function assertAreaAddOnsHaveAppointment(estimate, hasAppointment) {
+  const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+  if (hasAppointment || !mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) return;
+  throw Object.assign(new Error('Please pick your appointment time to finish booking.'), { status: 400, code: 'AREA_ADDON_APPOINTMENT_REQUIRED' });
 }
 
 function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {

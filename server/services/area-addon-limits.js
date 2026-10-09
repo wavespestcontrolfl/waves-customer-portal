@@ -136,10 +136,15 @@ async function ledgerDates(database, { customerId, propertyId, place, productByK
     .where('application_date', '>', addDays(asOf, -WINDOW_DAYS)).whereNull('retracted_at');
   const scope = (query, treated) => applicationLimits.scopeHistoryToTreatment(query, database, { propertyId: treated, excludeScheduledServiceId: excludeVisitId }, 'property_application_history')
     .select('product_id', 'application_date');
-  const [own, placed] = await Promise.all([
+  // The known customer's OTHER property rows at the place (an older or inactive row with the same address key). `own` is scoped
+  // to the treated property, so these are disjoint from it; with no treated property `own` already holds every row.
+  const siblingIds = known && propertyId ? place.ids.filter((id) => String(id) !== String(propertyId)) : [];
+  const [own, placed, siblings] = await Promise.all([
     known ? scope(recent().where({ customer_id: customerId }), propertyId) : [],
     place.ids.length ? scope(ledgerAtPlace(database, recent(), place.ids, known ? customerId : null), null) : [],
+    siblingIds.length ? scope(ledgerAtPlace(database, recent().where({ customer_id: customerId }), siblingIds, null), null) : [],
   ]);
+  own.push(...siblings);
   const keyOfProduct = new Map([...productByKey].flatMap(([key, productIds]) => productIds.map((id) => [String(id), key])));
   for (const row of [...own, ...placed]) {
     const key = keyOfProduct.get(String(row.product_id));
@@ -200,7 +205,8 @@ async function bookedDates(database, { customerId, propertyId, place, keys, excl
   const base = { serviceKeys: [...keyOfService.keys()], skip: excludeVisitIds.filter(isUuid) };
   const mine = (query) => {
     query.where('s.customer_id', customerId);
-    if (propertyId) query.where(function placedHereOrUnplaced() { this.whereNull('s.property_id').orWhere('s.property_id', propertyId); });
+    // The treated property, the customer's other property rows at the same place, and a visit with no property.
+    if (propertyId) query.where(function placedHereOrUnplaced() { this.whereNull('s.property_id').orWhereIn('s.property_id', [...new Set([propertyId, ...place.ids])]); });
     return query;
   };
   const [own, here, unplaced, held] = await Promise.all([

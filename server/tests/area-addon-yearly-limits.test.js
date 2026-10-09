@@ -1048,6 +1048,26 @@ describe('the history is the place\'s, whoever the customer record is (Codex rou
     });
   });
 
+  // Codex round 19: one customer with an older (or inactive) property row of the same address_key. The estimate names the
+  // current row; an application or a booking recorded against the older row is still at the place.
+  describe('the same customer\'s older property row at the same place counts', () => {
+    const OLD_PROPERTY = '22222222-2222-4222-8222-2222222222c3';
+    const withOld = (tables) => ({ customer_properties: [...props(), { id: OLD_PROPERTY, customer_id: CUSTOMER, active: false, address_key: HOME_KEY }], ...tables });
+    const mine = second({ customer_id: CUSTOMER, property_id: PROPERTY });
+
+    test('a ledger row on the older row is counted once; a row at the customer\'s other address is not', async () => {
+      await expect(check(withOld({ property_application_history: [ledger('p-snap', 25, { property_id: OLD_PROPERTY })] }), mine)).rejects.toMatchObject(refused);
+      await expect(check(withOld({ property_application_history: [ledger('p-snap', 25, { property_id: OTHER_PROPERTY })] }), mine)).resolves.toBeUndefined();
+      const out = await service.loadAreaAddOnHistory(fakeDb(placeWorld(withOld({ property_application_history: [ledger('p-snap', 25, { property_id: OLD_PROPERTY }), ledger('p-snap', 90)] }))), { customerId: CUSTOMER, propertyId: PROPERTY, asOf: TODAY, keys: ['bed_pre_emergent'] });
+      expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(90), daysBefore(25)]);
+    });
+
+    test('a booked add-on visit on the older row is counted; one at the other address is not', async () => {
+      await expect(check(withOld({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': OLD_PROPERTY })] }), mine)).rejects.toMatchObject(refused);
+      await expect(check(withOld({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': OTHER_PROPERTY })] }), mine)).resolves.toBeUndefined();
+    });
+  });
+
   describe('a completed application (the ledger) under another customer record counts at the same place', () => {
     test('the application of the other customer at the place, program or add-on, stops the second estimate', async () => {
       await expect(check({ property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER, property_id: PROPERTY })] })).rejects.toMatchObject(refused);

@@ -18665,7 +18665,8 @@ export function CompletionPanel({
         return;
       }
     }
-    const productRowProblem = isIncompleteVisit ? null : completionProductRowProblem(service, selectedProducts, typeFor);
+    // An incomplete visit skips the ordinary row checks, but a submitted add-on row still needs its actuals (the server refuses it).
+    const productRowProblem = isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) : completionProductRowProblem(service, selectedProducts, typeFor);
     if (productRowProblem) {
       alert(productRowProblem);
       return;

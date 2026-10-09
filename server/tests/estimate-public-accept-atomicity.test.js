@@ -4280,6 +4280,20 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
       }
     });
 
+    // Codex round 19 on #6135: with no appointment the accept would hand back the generic /book link, which writes no add-on row.
+    test('area add-on accepted in one-time mode with no appointment -> coded 400 before any write', async () => {
+      const prior = process.env.GATE_AREA_ADDONS;
+      process.env.GATE_AREA_ADDONS = 'true';
+      try {
+        const addOnPatch = { result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] }, oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 89 }], specItems: [] } } };
+        const attempt = await unparkedAttempt({ ...withData('est-mx-area-noappt-1', addOnPatch), show_one_time_option: true, onetime_total: 199 }, { serviceMode: 'one_time' });
+        expect([attempt.status, attempt.data]).toEqual([400, { error: 'Please pick your appointment time to finish booking.', code: 'AREA_ADDON_APPOINTMENT_REQUIRED' }]);
+        expect(storedEstimate().status).toBe('sent');
+      } finally {
+        if (prior === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prior;
+      }
+    });
+
     test('quote-required AND parked -> quote_required wins (not the park, no alert); trenching AND parked -> trenching wins', async () => {
       const quote = await parkedAttempt(withData('est-mx-quote-1', { proposal: { enabled: true } }));
       expect(quote.status).toBe(409);
