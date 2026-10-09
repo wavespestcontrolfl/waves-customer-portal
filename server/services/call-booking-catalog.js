@@ -125,6 +125,30 @@ const LOCATION_LOT_RE = new RegExp(`\\b(?:in|at|on)\\s+the\\s+(?:driveway|parkin
 // An address is where, not what: "home address", "service address".
 const LOCATION_ADDRESS_RE = /\b(?:home|house|apartment|condo|residence|mailing|billing|service)\s+address\b/gi;
 
+// Clause breaks: sentence punctuation, a comma, or a joining word.
+const VEHICLE_CLAUSE_SPLIT_RE = /[.;!?\n]+|,\s+|\s+(?:and|but|while|so|then|who|she|he|they)\s+/i;
+// Every place the roaches are said to be must be the vehicle (codex #6166 r1 P2): a word
+// list cannot name every place ("the building", "the property", "indoors"). In a sentence that
+// names roaches, once the vehicle phrases and the location phrases are removed, any other
+// "in / inside / throughout / around / all over ..." place vetoes. A time ("in the
+// morning", "in 2 weeks") is not a place.
+const VEHICLE_PHRASE_ALL_RE = new RegExp(`\\b${VEHICLE_PHRASE}`, 'gi');
+const TIME_PHRASE_RE = /\b(?:in|within|around)\s+(?:(?:the|a|an|about)\s+)?(?:\d+|one|two|three|few|couple|last|past|next|morning|afternoon|evening|night|meantime|week|month|day)\b[^,.;!?]*/gi;
+const OTHER_PLACE_RE = /\b(?:in|inside|throughout|around|within|across|all\s+over)\s+[a-z]|\b(?:indoors|everywhere|elsewhere)\b/i;
+function roachesSomewhereElse(text) {
+  // Judged per SENTENCE: "roaches in my car and throughout the building" is one sentence.
+  return String(text || '').split(/[.;!?\n]+/).some((clause) => {
+    if (!clause || !hasAffirmativeRoachMention(clause)) return false;
+    const rest = clause
+      .replace(NEGATED_VEHICLE_PHRASE_RE, ' ')
+      .replace(VEHICLE_PHRASE_ALL_RE, ' ')
+      .replace(LOCATION_LOT_RE, ' ')
+      .replace(LOCATION_AFTER_ANCHOR_RE, ' ')
+      .replace(TIME_PHRASE_RE, ' ');
+    return OTHER_PLACE_RE.test(rest);
+  });
+}
+
 function namesHomeOrRoom(text) {
   const cleaned = String(text || '')
     .replace(LOCATION_LOT_RE, ' ')
@@ -132,8 +156,6 @@ function namesHomeOrRoom(text) {
     .replace(LOCATION_ADDRESS_RE, ' ');
   return HOME_WORD_RE.test(cleaned);
 }
-// Clause breaks: sentence punctuation, a comma, or a joining word.
-const VEHICLE_CLAUSE_SPLIT_RE = /[.;!?\n]+|,\s+|\s+(?:and|but|while|so|then|who|she|he|they)\s+/i;
 
 function hasVehicleRoachRequest(extracted = {}) {
   const fields = [extracted.requested_service, extracted.pain_points, extracted.call_summary]
@@ -146,7 +168,7 @@ function hasVehicleRoachRequest(extracted = {}) {
     && hasAffirmativeRoachMention(clause)
     && VEHICLE_PHRASE_RE.test(clause.replace(NEGATED_VEHICLE_PHRASE_RE, ' '))));
   if (!vehicleField) return false;
-  return !fields.some(namesHomeOrRoom);
+  return !fields.some((text) => namesHomeOrRoom(text) || roachesSomewhereElse(text));
 }
 
 // A model pick the vehicle request may replace: nothing, a generic row, or a

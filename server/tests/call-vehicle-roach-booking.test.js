@@ -99,6 +99,12 @@ describe('hasVehicleRoachRequest', () => {
     [{ requested_service: 'roaches in my car', call_summary: 'Meet her in the driveway of her house on Friday.' }, true],
     [{ requested_service: 'roaches in my car', call_summary: 'Her home address is 100 Example Street, Bradenton.' }, true],
     [{ requested_service: 'roaches in my car at her home address' }, true],
+    // Every place named for the roaches must be the vehicle (codex #6166 r1 P2).
+    [{ requested_service: 'roaches in my car and throughout the building' }, false],
+    [{ requested_service: 'roaches in my car', pain_points: 'roaches throughout the property' }, false],
+    [{ requested_service: 'roaches in my car', call_summary: 'She also has roaches indoors.' }, false],
+    [{ call_summary: 'Roaches in her truck and all over the place.' }, false],
+    [{ call_summary: 'She found roaches inside her minivan in the last two weeks.' }, true],
   ])('%j -> %s', (extracted, expected) => {
     expect(hasVehicleRoachRequest(extracted)).toBe(expected);
   });
