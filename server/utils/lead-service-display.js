@@ -43,6 +43,7 @@ const TOPICS = [
   { key: 'plugging', short: 'Lawn', fixed: 'Lawn Plugging Service', re: /\baeration\b|\bplugging\b|\bplugs\b/i },
   { key: 'lawn_pest', short: 'Lawn', recurring: 'Monthly Lawn Care Service', oneTime: 'Lawn Pest Knockdown Service', re: /\blawn\s+(?:pest|insect)\b|\bchinch\b|\bmole\s+crickets?\b/i },
   { key: 'lawn', short: 'Lawn', recurring: 'Monthly Lawn Care Service', oneTime: 'One-Time Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz]|\bweeds?\b|\bsod\b|\bfungus\b|\bfungal\b|\bfungicide\b/i },
+  { key: 'german_roach', short: 'Pest', fixed: 'German Roach Cleanout Service', re: /\bgerman\s+(?:cock)?roach(?:es)?\b/i },
   { key: 'cockroach', short: 'Pest', recurring: 'Quarterly Pest Control Service', oneTime: 'Cockroach Treatment Service', re: /\broach(?:es)?\b|\bcockroach(?:es)?\b|\bpalmetto\s+bugs?\b/i },
   { key: 'pest', short: 'Pest', recurring: 'Quarterly Pest Control Service', oneTime: 'One-Time Pest Control Service', re: /\bpests?\b|\bbugs?\b|\binsects?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bsilverfish\b|\bearwigs?\b|\bscorpions?\b|\bcentipedes?\b|\bmillipedes?\b/i },
 ];
@@ -77,7 +78,8 @@ const COVERED_BY = {
   rodent: ['rodent_exclusion'],
   tree_shrub: ['palm'],
   lawn: ['lawn_pest', 'plugging'],
-  pest: ['lawn_pest', 'cockroach'],
+  pest: ['lawn_pest', 'cockroach', 'german_roach'],
+  cockroach: ['german_roach'],
 };
 const TERMITE_WORK_RE = /\btreat(?:ment|ments|ing)?\b|\bbait\b|\btermite\s+(?:control|protection)\b/i;
 const RODENT_NAMED_RE = /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/i;

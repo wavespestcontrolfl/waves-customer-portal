@@ -79,6 +79,8 @@ describe('leadServiceDisplay', () => {
     ['WDO Inspection Service', 'WDO Inspection Service'],
     ['WDO inspection and report', 'WDO Inspection Service'],
     ['Wasp & Hornet Control', 'Bee / Wasp Nest Removal Service'],
+    ['Quarterly Pest Control + German Cockroach Treatment', 'Quarterly Pest Control Service + German Roach Cleanout Service'],
+    ['German Cockroach Treatment', 'German Roach Cleanout Service'],
     ['One-Time WDO inspection and termite treatment', 'WDO Inspection Service + Termite Liquid Treatment Service'],
     ['Termite inspection for a closing', 'Waves Assessment (Termite)'],
     ['Quarterly Pest Control Service + Bee / Wasp Nest Removal Service', 'Quarterly Pest Control Service + Bee / Wasp Nest Removal Service'],
