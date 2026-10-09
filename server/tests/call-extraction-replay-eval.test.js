@@ -354,23 +354,31 @@ describe('call extraction replay scheduled eval', () => {
   });
 });
 
-// The deploy-kill retry asks this before re-running a killed replay.
-describe('verdictNotifiedSince', () => {
-  const { verdictNotifiedSince } = require('../services/eval/call-extraction-replay');
-  const connWith = (found) => {
-    const calls = [];
-    const q = { where: (...a) => { calls.push(a); return q; }, whereRaw: (...a) => { calls.push(a); return q; }, first: async () => found };
-    return { conn: () => q, calls };
-  };
+// The deploy-kill retry asks this before re-running a killed replay. The
+// marker is a settings row, not the notification: the bell policy can suppress
+// that row while the verdict still goes out by digest or email.
+describe('verdictNotifiedSince / markVerdictReported', () => {
+  const { verdictNotifiedSince, markVerdictReported } = require('../services/eval/call-extraction-replay');
+  const reading = (value) => ({ conn: () => ({ where: () => ({ first: async () => (value === undefined ? undefined : { value }) }) }) });
   const since = new Date('2026-10-05T07:40:00Z');
 
-  test('true when this eval raised its notification at or after the killed run started', async () => {
-    const { conn, calls } = connWith({ id: 'n1' });
-    expect(await verdictNotifiedSince(since, { conn })).toBe(true);
-    expect(calls).toEqual([[{ recipient_type: 'admin' }], ["metadata->>'evalKey' = ?", ['call-extraction-eval']], ['created_at', '>=', since]]);
+  test('true when a verdict was reported at or after the killed run started', async () => {
+    expect(await verdictNotifiedSince(since, reading('2026-10-05T07:47:00.000Z'))).toBe(true);
   });
 
-  test('false when it raised nothing: the killed run is retried', async () => {
-    expect(await verdictNotifiedSince(since, { conn: connWith(undefined).conn })).toBe(false);
+  test('false when the last report is older, absent or unreadable: the killed run is retried', async () => {
+    expect(await verdictNotifiedSince(since, reading('2026-09-28T07:56:00.000Z'))).toBe(false);
+    expect(await verdictNotifiedSince(since, reading(undefined))).toBe(false);
+    expect(await verdictNotifiedSince(since, reading('not a date'))).toBe(false);
+  });
+
+  test('markVerdictReported upserts the one settings row and never throws', async () => {
+    const calls = [];
+    const conn = () => ({ insert: (row) => { calls.push(row); return { onConflict: () => ({ merge: async () => {} }) }; } });
+    const now = new Date('2026-10-05T07:47:00Z');
+    await markVerdictReported(now, { conn });
+    expect(calls[0]).toMatchObject({ key: 'eval.call_replay.reported_at', value: '2026-10-05T07:47:00.000Z' });
+    const broken = () => ({ insert: () => { throw new Error('db down'); } });
+    await expect(markVerdictReported(now, { conn: broken })).resolves.toBeUndefined();
   });
 });
