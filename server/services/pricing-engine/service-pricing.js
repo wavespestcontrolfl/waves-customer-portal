@@ -11,6 +11,7 @@ const {
   WAVEGUARD,
 } = require('./constants');
 const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
+const { areaAddOnKnobsFor } = require('./area-addon-config');
 const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
@@ -8490,6 +8491,8 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
     throw buildPricingError('Area add-on options must be an object', { field: 'areaAddOns', addOnKey });
   }
   const cfg = AREA_ADDONS.items[addOnKey];
+  // The tiers this line is judged against: the live row, or the ones a stored estimate was priced with (replay).
+  const tiers = areaAddOnKnobsFor(addOnKey, options.pricingKnobs).tiers;
   // Not silently priced as one: a caller asking for several applications
   // would be quoted a single visit.
   if (options.applications !== undefined) {
@@ -8499,7 +8502,7 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
   assertEnum(visitContext, AREA_ADDON_VISIT_CONTEXTS, 'visitContext');
   let areaSqFt = null;
   let tierSqFt = null;
-  if (cfg.tiers) {
+  if (tiers) {
     // Only a number or a numeric string is an area: Number(true) is 1 and
     // Number([1200]) is 1200, which would quote malformed input.
     const rawArea = options.areaSqFt;
@@ -8509,7 +8512,7 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
     if (!Number.isFinite(areaSqFt) || areaSqFt <= 0) {
       throw buildPricingError(`areaSqFt is required for ${addOnKey} (the ${cfg.areaLabel} area in sq ft)`, { field: 'areaSqFt', value: options.areaSqFt });
     }
-    tierSqFt = cfg.tiers.find((top) => areaSqFt <= top) ?? null;
+    tierSqFt = tiers.find((top) => areaSqFt <= top) ?? null;
   }
   // Alias match only: an unknown or missing grass is null, never a default.
   const grassTrack = matchGrassTrack(options.grassType ?? options.track);
@@ -8589,14 +8592,17 @@ function priceAreaAddOn(addOnKey, options = {}) {
     return customQuote('area_addon_area_above_largest_tier', { areaSqFt, tierSqFt: null });
   }
 
+  // The knobs this price is made of: the live pricing_config row, or, on a replay of a stored estimate, the ones it was
+  // priced with. Stamped on the line (pricingKnobs) so a later edit never re-prices a sent quote.
+  const knobs = areaAddOnKnobsFor(addOnKey, options.pricingKnobs);
   const tierK = (tierSqFt || 0) / 1000;
-  const materialCost = tierK * cfg.materialPer1000;
-  const onSiteMin = cfg.setupMin + cfg.minPer1000 * tierK;
+  const materialCost = tierK * knobs.materialPer1000;
+  const onSiteMin = knobs.setupMin + knobs.minPer1000 * tierK;
   const driveMin = visitContext === 'standalone' && carriesDrive ? GLOBAL.DRIVE_TIME : 0;
   const laborCost = (onSiteMin + driveMin) * GLOBAL.LABOR_RATE / 60;
-  const adminCost = carriesAdmin ? AREA_ADDONS.adminPerJob : 0;
+  const adminCost = carriesAdmin ? knobs.adminPerJob : 0;
   const cost = materialCost + laborCost + adminCost;
-  const price = roundUpToNine(cost / (1 - AREA_ADDONS.targetMargin));
+  const price = roundUpToNine(cost / (1 - knobs.targetMargin));
 
   const detailParts = [];
   if (tierSqFt) detailParts.push(`Up to ${tierSqFt.toLocaleString()} sq ft ${cfg.areaLabel} area`);
@@ -8613,6 +8619,7 @@ function priceAreaAddOn(addOnKey, options = {}) {
     // the booked visit carries it so the technician sees the evidence, not only the price.
     ...(cfg.requiresGrassTrack ? { grassType: grassTrack } : {}),
     manualReviewReasons: [],
+    pricingKnobs: knobs,
     detail: detailParts.join(' | '),
     costs: {
       material: roundMoney(materialCost),
@@ -8671,7 +8678,7 @@ function normalizeAreaAddOnVisit(visit) {
 // the first priced add-on the same way, on either visit: a second add-on does
 // not cost a second booking.
 // Returns the priced lines, the normalized requests and the visit (for the host check).
-function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote, visit, history } = {}) {
+function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote, visit, history, pricingKnobs } = {}) {
   // The estimate's grass: the first source (lawn service, request, property)
   // that names one, by `track` then `grassType`.
   const grassType = grassSources
@@ -8689,7 +8696,8 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
       throw buildPricingError('Each services.areaAddOns entry must be an object', { field: 'areaAddOns', index });
     }
     assertGroupVisitOnly(entry, index);
-    const options = { ...entry, grassType: areaAddOnEntryGrass(entry, grassType), visitContext };
+    // pricingKnobs is the server's replay signal for the whole list, never an entry's own field.
+    const options = { ...entry, grassType: areaAddOnEntryGrass(entry, grassType), visitContext, pricingKnobs };
     const normalized = normalizeAreaAddOnInput(entry.key, options);
     if (seenKeys.has(normalized.addOnKey)) {
       throw buildPricingError(`services.areaAddOns lists ${normalized.addOnKey} more than once - each add-on is sold once per estimate (a second application is a new estimate)`, { field: 'areaAddOns', index, key: normalized.addOnKey });

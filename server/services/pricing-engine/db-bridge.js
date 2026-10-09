@@ -1807,6 +1807,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       constants.ONE_TIME.mosquito = next;
     }
 
+    // Area add-on treatments (pricing_config `area_addon_pricing`): rebased onto the in-code defaults on EVERY sync, then the
+    // row applied only when the whole row is valid. A deleted or malformed row leaves the defaults (never the previous edit,
+    // never half a row); the label-bound fields (yearly limits, grass, product) are not in the row's reach.
+    require('./area-addon-config').syncAreaAddOnPricingConfig(config.area_addon_pricing, constants.AREA_ADDONS);
+
     // ── One-Time / Specialty ─────────────────────────────────
     if (config.onetime_urgency) {
       if (config.onetime_urgency.soon) constants.URGENCY.SOON.standard = config.onetime_urgency.soon;

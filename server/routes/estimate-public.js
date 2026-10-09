@@ -19590,6 +19590,8 @@ function savedFloorReplayOverrides(estData) {
   const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
+  // Area add-on price knobs (pricing_config area_addon_pricing): a sent add-on keeps the price it was quoted at.
+  Object.assign(overrides, require('../services/estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estData));
   // Termite station-cost snapshot (plan 2026-09-03 §A1) — same home, same
   // tri-state: stamped replays verbatim, unstamped termite replays the
   // pre-stamp constant, no termite line injects nothing.
@@ -28016,7 +28018,9 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // reason note (client lib quoteDisplay.js).
 // onSiteMinutes (area add-on rows) is the engine's internal labor estimate: the
 // booking path reads it from the unsanitized breakdown, the customer never sees it.
-const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes'];
+// pricingKnobs (area add-on rows) holds the target margin and the cost knobs the row was priced with (the replay reads
+// them from the stored estimate); the customer never sees them either.
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'pricingKnobs'];
 function sanitizePublicOneTimeBreakdown(breakdown) {
   if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
   return {
@@ -28037,6 +28041,8 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
   const out = {};
   for (const [key, nested] of Object.entries(value)) {
     if (key === 'marginFloorMonthly') continue;
+    // An area add-on row's price knobs include the target margin: internal, like the margin floor.
+    if (key === 'pricingKnobs' && value.service === 'area_addon') continue;
     out[key] = stripInternalMarginFieldsDeep(nested, depth + 1);
   }
   return out;

@@ -224,6 +224,9 @@ function areaAddOnFields(li = {}) {
     carriesJobAdmin: li.carriesJobAdmin === true,
     // Engine on-site minutes (no drive): the booked visit's duration floor.
     onSiteMinutes: li.costs?.onSiteMin ?? null,
+    // The price knobs this row was priced with (pricing_config area_addon_pricing at quote time): the replay of a stored
+    // estimate reads them back, so a later edit of the row never re-prices a sent quote.
+    ...(li.pricingKnobs ? { pricingKnobs: li.pricingKnobs } : {}),
     discountable: false,
   };
 }

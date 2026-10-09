@@ -228,6 +228,19 @@ function strictPricingNumber(v) {
   return typeof v === 'number' ? v : NaN;
 }
 
+// The area add-on price knobs: bounded, plain JSON numbers, and no label-bound field (yearly limits, grass, product,
+// identity) - those stay in code. The same validator the sync applies, here strict about keys it does not own.
+function validateAreaAddOnPricing(data) {
+  const verdict = require('../services/pricing-engine/area-addon-config').normalizeAreaAddOnPricingConfig(data);
+  return verdict.ok ? { ok: true } : { ok: false, error: `area_addon_pricing: ${verdict.error}` };
+}
+
+// PUT /:key's validator: a key with its own validator module first, then the shared per-key checks below.
+const OWN_VALIDATORS = { area_addon_pricing: validateAreaAddOnPricing };
+function validatePricingConfigFor(configKey, data, oldConfig) {
+  return OWN_VALIDATORS[configKey] ? OWN_VALIDATORS[configKey](data) : validatePricingConfigData(configKey, data, oldConfig);
+}
+
 function validatePricingConfigData(configKey, data, oldConfig) {
   const fail = (error) => ({ ok: false, error });
   const num = strictPricingNumber;
@@ -730,6 +743,7 @@ async function ensureTable() {
       { config_key: 'rodent_waveguard', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 10, data: JSON.stringify({ tier_qualifier: true, exclude_from_pct_discount: false, setup_credit: 0, note: 'Owner directive 2026-08-29: rodent bait is a full WaveGuard member — counts toward the tier and receives the tier discount.' }) },
 
       // One-time
+      { config_key: 'area_addon_pricing', name: 'Area Add-On Treatment Pricing', category: 'one_time', sort_order: 40, data: JSON.stringify(require('../services/pricing-engine/area-addon-config').defaultAreaAddOnPricingData()) },
       { config_key: 'onetime_urgency', name: 'Urgency Multipliers', category: 'one_time', sort_order: 1, data: JSON.stringify({ routine: 1.0, soon: 1.25, soon_after_hours: 1.50, urgent: 1.50, urgent_after_hours: 2.0 }) },
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
       { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 2.2 }) },
@@ -1432,7 +1446,7 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
       // row over the in-code constants, so a bad commit immediately poisons
       // live pricing rather than waiting for someone to notice.
       if (normalizedData !== undefined) {
-        const verdict = validatePricingConfigData(req.params.key, normalizedData, oldConfig);
+        const verdict = validatePricingConfigFor(req.params.key, normalizedData, oldConfig);
         if (!verdict.ok) { validationError = verdict.error; return true; }
         updates.data = JSON.stringify(normalizedData);
       }

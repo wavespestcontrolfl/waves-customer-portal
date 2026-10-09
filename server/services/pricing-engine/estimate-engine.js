@@ -1678,6 +1678,8 @@ function generateEstimate(input) {
     visit: services.areaAddOnVisit,
     // Injected by the route from the database (services/area-addon-limits.js); the engine never queries.
     history: services.areaAddOnHistory,
+    // A stored estimate replays the price knobs it was priced with (server-derived, estimate-area-addon-knob-replay).
+    pricingKnobs: input.areaAddOnPricingKnobs,
   });
   areaAddOns.lines.forEach((line) => {
     line.manualReviewReasons.forEach(addManualReviewReason);

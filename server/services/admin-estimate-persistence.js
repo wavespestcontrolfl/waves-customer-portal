@@ -1242,6 +1242,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
+    // Area add-on price knobs: the same stored-row reader the public replay uses.
+    Object.assign(v1Input, require('./estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estimateData));
     // Termite station-cost snapshot (plan 2026-09-03 §A1) — same reader the
     // public replay uses, so the authoritative recompute (membership
     // reconcile, opt-out, admin re-save) keeps a sent install at its quoted

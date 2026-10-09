@@ -1656,6 +1656,22 @@ const AREA_ADDONS = {
   },
 };
 
+// The in-code defaults of the DB-editable knobs (pricing_config key `area_addon_pricing`): the group's target margin and
+// admin charge, and per add-on the material cost, setup minutes, minutes per 1,000 sq ft and the area tiers. Frozen at load
+// from the table above and NEVER mutated: db-bridge rebases AREA_ADDONS onto it on every sync (a row that is deleted or
+// malformed leaves the code defaults), and a stored estimate without a stamp replays it. The label-bound fields (maxPerYear,
+// minDaysApart, requiresGrassTrack, limitProduct, serviceKey, name, category, areaLabel) are NOT here and no row can edit them.
+const AREA_ADDON_PRICING_DEFAULTS = Object.freeze({
+  targetMargin: AREA_ADDONS.targetMargin,
+  adminPerJob: AREA_ADDONS.adminPerJob,
+  items: Object.freeze(Object.fromEntries(Object.entries(AREA_ADDONS.items).map(([key, cfg]) => [key, Object.freeze({
+    materialPer1000: cfg.materialPer1000,
+    setupMin: cfg.setupMin,
+    minPer1000: cfg.minPer1000,
+    tiers: cfg.tiers ? Object.freeze([...cfg.tiers]) : null,
+  })]))),
+});
+
 // The AREA_ADDONS item a priced or mapped row stands for, or null. Rows are
 // identified by their add-on key, never by display name: "Fire Ant Yard
 // Treatment" reads as a pest job to every name matcher. Own-property lookup
@@ -2483,6 +2499,12 @@ const WAVEGUARD = {
     // apply — otherwise the fee is silently discounted in exactly the case
     // where we need full capture.
     pest_initial_roach: true,
+    // Area add-on treatments (owner ruling 2026-10-08): a priced one-time job with its own cost-plus margin, never cut by a
+    // percentage. The engine line says so itself (`discountable: false`), but the catalog rows carry no engine_keys, so the
+    // scheduler, the completion pricing and the invoice paths judge them by THESE keys: the engine key and each add-on's catalog
+    // service_key, taken from the one AREA_ADDONS table (a new add-on cannot be added without being excluded).
+    area_addon: true,
+    ...Object.fromEntries(Object.values(AREA_ADDONS.items).map((item) => [item.serviceKey, true])),
   },
   // One-time service perk for recurring customers. Flat 15% off one-time
   // services only. Does NOT stack with WaveGuard tier discount (recurring
@@ -2499,12 +2521,6 @@ const ACH_DISCOUNT = {
   percentage: 0,
   paymentMethod: 'us_bank_account',
   exemptFromCompositeCap: true,
-    // Area add-on treatments (owner ruling 2026-10-08): a priced one-time job with its own cost-plus margin, never cut by a
-    // percentage. The engine line says so itself (`discountable: false`), but the catalog rows carry no engine_keys, so the
-    // scheduler, the completion pricing and the invoice paths judge them by THESE keys: the engine key and each add-on's catalog
-    // service_key, taken from the one AREA_ADDONS table (a new add-on cannot be added without being excluded).
-    area_addon: true,
-    ...Object.fromEntries(Object.values(AREA_ADDONS.items).map((item) => [item.serviceKey, true])),
 };
 
 // ── Estimate acceptance deposit ───────────────────────────────
@@ -2562,3 +2578,7 @@ module.exports = {
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,
 };
+
+// Not an enumerable export on purpose: db-bridge snapshots and restores every enumerable export in place, and the frozen
+// defaults must never be touched by that.
+Object.defineProperty(module.exports, 'AREA_ADDON_PRICING_DEFAULTS', { value: AREA_ADDON_PRICING_DEFAULTS, enumerable: false });
