@@ -228,6 +228,12 @@ function noSlotReason(drops, skipped) {
     : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
 }
 
+// Ids and codes only: the overlap or closed day a visit sits in, for an audit
+// row with no candidate (a person must place it; Codex #6207 r14 P2).
+function conflictOf(current) {
+  return current && current.conflict ? { conflict: current.conflict } : {};
+}
+
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
     current, candidates, drops, skipped,
@@ -240,7 +246,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       kind: 'no_change',
       reason_code: reason.code,
       reason_description: reason.description,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
     };
   }
 
@@ -326,12 +332,16 @@ function unitIdsOf(pm) {
 }
 
 async function recommendOverlapFixes(run) {
+  // `movers`: rows a conflict fix moves for certain; only these clear a
+  // partner's overlap. `estimated`: rows of an ordinary-rules estimate, which
+  // apply mode may not make, so they clear nothing downstream (r14 P2).
   const movers = new Set();
+  const estimated = new Set();
   for (const pm of run.dryRunOverlaps.sort(byDueThenImprovement)) {
     const partners = (overlapOf(pm.result).with || []).map(String);
     // A visit whose own unit is already recommended moves with it: one
     // recommendation for the unit, as apply mode makes one move (r9 P2).
-    if (movers.has(String(pm.service.id))) {
+    if (movers.has(String(pm.service.id)) || estimated.has(String(pm.service.id))) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'This visit moves with its group, which is already recommended to move', ...pm.result.audit });
       continue;
     }
@@ -343,7 +353,7 @@ async function recommendOverlapFixes(run) {
       // schedule before the partner's move; apply mode evaluates the visit
       // again after that move and may pick another slot or none. The row
       // says so (Codex #6207 r12 P2).
-      for (const id of unitIdsOf(pm)) movers.add(id);
+      for (const id of unitIdsOf(pm)) estimated.add(id);
       await logDryRunRecommendation(run, pm.service, pm.result.withoutConflict, ' after the overlapping visit moves (estimate: scored before that move)');
     } else if (cleared) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });

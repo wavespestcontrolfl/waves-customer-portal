@@ -523,8 +523,26 @@ function legacyCap(service, candidates, ctx) {
 // survivor, ordered by the shared model's detour — index.js scores ALL of
 // them and caps by total score instead (Codex r1: a pre-score cap on a
 // detour proxy could drop the best-scoring candidate unscored).
+// Legacy model, grouped visit in an overlap: find-time sized each opening
+// for the tapped row only, with the whole unit excluded. The unit mover
+// shifts every member, so a slot the members' predicted windows do not fit
+// (the writer's SLOT_TAKEN) is dropped before the ranking; legacy apply
+// makes one attempt (Codex #6207 r14 P1). Any other visit: unchanged.
+async function dropSlotsTheUnitCannotTake(service, candidates, ctx, drops) {
+  if (!ctx.evalConflict || ctx.evalConflict.kind !== 'overlap') return candidates;
+  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
+  if (!siblings.length) return candidates;
+  const group = { members: unitMembers(service, siblings), visitWindowStart };
+  const occupiedByDate = await loadOccupiedSpansByDate(ctx.db, candidates.map((c) => c.date), excludeIds);
+  return candidates.filter((cand) => {
+    const taken = slotTaken(planUnitPlacement(service, group, cand), occupiedByDate.get(cand.date) || []);
+    if (taken && drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
+    return !taken;
+  });
+}
+
 async function rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops) {
-  if (!autoDispatchSharedModelLive()) return legacyCap(service, candidates, ctx);
+  if (!autoDispatchSharedModelLive()) return legacyCap(service, await dropSlotsTheUnitCannotTake(service, candidates, ctx, drops), ctx);
   const survivors = await filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops);
   return survivors.slice().sort((a, b) => (a.detour_minutes || 0) - (b.detour_minutes || 0));
 }
@@ -892,6 +910,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, legacyCap, movingUnitIds,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

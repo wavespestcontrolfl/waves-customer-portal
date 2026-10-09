@@ -832,6 +832,33 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     expect(b.reason_description).toMatch(/^Would move \(.*\) after the overlapping visit moves \(estimate/);
   });
 
+  // Chain A-B-C. A's fix is certain. B then moves only on an ordinary-rules
+  // estimate, which apply mode may not make: that estimate must not clear
+  // C's overlap with B, so C keeps its own recommendation (Codex r14 P2).
+  test('dry run: an estimated ordinary move does not clear a later overlap', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' }), svc({ id: 'c1' })];
+    const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+    const chain = { a1: ['b1'], b1: ['a1'], c1: ['b1'] };
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: { ...(service.id === 'b1' ? CURRENT : CURRENT_GOOD), conflict: { ...OVERLAP, with: chain[service.id] } },
+      candidates: service.id === 'b1' ? [CAND_BIG] : [SAME_DAY],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    const decisions = audit.logDecision.mock.calls.map((c) => c[1]);
+    const c = decisions.find((d) => d.service.id === 'c1');
+    expect(c.action).toBe('recommended');
+    expect(c.reason_description).toMatch(/^Would move off an overlapping stop/);
+    expect(res).toMatchObject({ recommended: 3 });
+  });
+
+  // No slot survives for a visit in conflict: the audit row still names the
+  // conflict, so the rollout audit shows it (Codex r14 P2).
+  test('a visit in conflict with no candidate keeps the conflict on its NO_VALID_SLOT row', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_VALID_SLOT', constraints: expect.objectContaining({ conflict: OVERLAP }) });
+  });
+
   // Apply moves a grouped visit as one unit. The partner overlaps two of its
   // members: one recommendation for the unit, and the partner stays (r9 P2).
   test('dry run: a recommended grouped visit counts every member as moved', async () => {
