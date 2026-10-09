@@ -151,3 +151,54 @@ describe('the OK remainder against the roster the server reads', () => {
     expect(observed).not.toMatch(/is OK/);
   });
 });
+
+// Codex P2 on #6205: when both providers fail, the deterministic fallback copy
+// gets the same station facts as the prompt.
+describe('the deterministic fallback when both providers fail', () => {
+  const fallback = async (extra, gate = 'true') => {
+    if (gate === null) delete process.env.GATE_STATION_FAST_COMPLETE; else process.env.GATE_STATION_FAST_COMPLETE = gate;
+    mockProvider.mockReset();
+    mockProvider.mockResolvedValue({ ok: false, reason: 'provider_error' });
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: NOTE, actionsCompleted: [], structuredFindings: FINDINGS, fresh: true, ...extra }), res);
+    mockProvider.mockReset();
+    mockProvider.mockImplementation(async () => ({ ok: true, text: 'WHAT WE DID\n\nTreated the exterior perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' }));
+    return { status: res.statusCode, body: res.json.mock.calls[0][0] };
+  };
+
+  test('activity and a station nobody could reach are stated', async () => {
+    const { status, body } = await fallback({ stationChecks: [{ number: 2, status: 'activity' }, { number: 3, status: 'inaccessible' }] });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ fallback: true, deterministic: true });
+    expect(body.report).toContain('Checked the rodent bait stations');
+    expect(body.report).toContain('Bait consumption was found at station 2');
+    expect(body.report).toContain('Could not reach station 3');
+    expect(body.report).toContain('Every other station was checked and found OK');
+  });
+
+  test('a visit whose only recorded work is servicing a station returns copy, not a 503', async () => {
+    const { status, body } = await fallback({ stationChecks: [{ number: 1, status: 'serviced' }, { number: 4, status: 'serviced' }] });
+    expect(status).toBe(200);
+    expect(body.report).toContain('Serviced stations 1, 4');
+  });
+
+  test('all OK says the stations were checked and found OK', async () => {
+    const { status, body } = await fallback({ stationChecks: [] });
+    expect(status).toBe(200);
+    expect(body.report).toContain('Checked the rodent bait stations');
+    expect(body.report).toContain('Every station was checked and found OK');
+  });
+
+  test('every station flagged claims no OK remainder', async () => {
+    const { body } = await fallback({ stationChecks: [1, 2, 3, 4].map((number) => ({ number, status: 'inaccessible' })) });
+    expect(body.report).toContain('Could not reach stations 1, 2, 3, 4');
+    expect(body.report).not.toMatch(/found OK/);
+  });
+
+  test('gate off: the fallback is exactly what it is without station checks', async () => {
+    const withChecks = await fallback({ stationChecks: [{ number: 2, status: 'activity' }] }, null);
+    const without = await fallback({}, null);
+    expect(withChecks).toEqual(without);
+    expect(JSON.stringify(withChecks.body)).not.toMatch(/station 2|bait stations/);
+  });
+});

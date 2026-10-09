@@ -26820,13 +26820,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       const report = buildDeterministicReportCopy({
         serviceType: fallbackServiceType,
         areas: rulesItems(promptAreas),
-        actions: rulesItems([...promptActions, ...typedFallbackActions]),
+        // The technician's station checks lead (visit-station-facts.js; empty with
+        // the gate off or on any other visit): the fallback keeps the first items.
+        actions: rulesItems([...stationLines.fallbackActions, ...promptActions, ...typedFallbackActions]),
         // Typed structured findings ride the fallback as technician work /
         // observations / next steps (profile-confirmed above; product
         // application fields excluded) — a typed-only request must not 503
         // when the free-text fields are empty. All free-text inputs arrive
         // pre-redacted (codex r34).
-        observations: rulesItems([...promptObs, ...typedFallbackObservations]),
+        observations: rulesItems([...stationLines.fallbackObservations, ...promptObs, ...typedFallbackObservations]),
         recommendations: writerRulesOn ? [] : [...promptRecs, ...typedFallbackNextSteps],
         // A zero rating ("Recorded pest activity was none.") names no place
         // checked, a property-wide absence the writer rules refuse (rule 4):

@@ -707,7 +707,7 @@ describe('stationChecksWriterLines: the tech\'s statuses for the report writer',
   });
 
   test('adds nothing with the gate off, for a trap check or another form, or for anything that is not a clean list', () => {
-    const none = { completed: '', observed: '' };
+    const none = { completed: '', observed: '', fallbackActions: [], fallbackObservations: [] };
     expect(lines('rodent_trapping', [{ number: 2, status: 'activity' }])).toEqual(none);
     expect(lines('cockroach', [])).toEqual(none);
     expect(stationChecksWriterLines(undefined, [])).toEqual(none);

@@ -267,8 +267,33 @@ function cleanStationChecks(checks) {
   return true;
 }
 
+// The same facts for the deterministic last-resort report copy (both providers
+// failed), in customer wording, built from the SAME cleaned list and remainder
+// rule as the prompt lines so the two cannot disagree: completed work (the
+// stations were checked; the ones serviced) and observations (activity or bait
+// consumption, a station that could not be reached, the OK remainder). A few
+// short items: the fallback keeps only the first of each list.
+const FALLBACK_WORDS = {
+  termite: { checked: 'Checked the termite bait stations', activity: 'Termite activity was found at' },
+  rodent: { checked: 'Checked the rodent bait stations', activity: 'Bait consumption was found at' },
+};
+function stationFallbackItems(program, checks, rest) {
+  const numbersOf = (status) => checks.filter((check) => check.status === status).map((check) => check.number).sort((a, b) => a - b);
+  const named = (numbers) => `${numbers.length === 1 ? 'station' : 'stations'} ${numbers.join(', ')}`;
+  const words = FALLBACK_WORDS[program];
+  const [activity, serviced, blocked] = [numbersOf('activity'), numbersOf('serviced'), numbersOf('inaccessible')];
+  return {
+    fallbackActions: [words.checked, ...(serviced.length ? [`Serviced ${named(serviced)}`] : [])],
+    fallbackObservations: [
+      ...(activity.length ? [`${words.activity} ${named(activity)}`] : []),
+      ...(blocked.length ? [`Could not reach ${named(blocked)}`] : []),
+      ...(rest ? [checks.length ? 'Every other station was checked and found OK' : 'Every station was checked and found OK'] : []),
+    ],
+  };
+}
+
 function stationChecksWriterLines(structuredFindings, checks, { total = null } = {}) {
-  const none = { completed: '', observed: '' };
+  const none = { completed: '', observed: '', fallbackActions: [], fallbackObservations: [] };
   const program = STATION_SHEET_PROGRAMS[structuredFindings?.type];
   if (!program || !Array.isArray(checks) || checks.length > MAX_STATION_CHECKS) return none;
   if (!require('../config/feature-gates').stationFastCompleteLive()) return none;
@@ -291,6 +316,7 @@ function stationChecksWriterLines(structuredFindings, checks, { total = null } =
   if (checks.length) rest = Number.isInteger(total) && total > checks.length ? 'Every other station was checked and is OK.' : '';
   const observedText = `${seenParts.length ? `${seenParts.join('; ')}. ` : ''}${rest}`.trim();
   return {
+    ...stationFallbackItems(program, checks, rest),
     completed: done.length ? `\nTechnician station checks, work done ${AUTHORITY}: ${done.join('; ')}.` : '',
     // With servicing the only exception the observation is the remainder alone.
     observed: observedText ? `\nTechnician station checks, observed ${AUTHORITY}: ${observedText}` : '',
