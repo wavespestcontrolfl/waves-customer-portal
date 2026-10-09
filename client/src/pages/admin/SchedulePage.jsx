@@ -25580,6 +25580,8 @@ const TRACK_SAFETY_RULES = {
 const PRODUCT_DESCRIPTIONS_V13 = {
   "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
   celsius: "selective weed killer for warm-season grass (max 2x/year)",
+  "lesco 10-0-22":
+    "slow-release fertilizer with extra potassium for winter hardiness",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

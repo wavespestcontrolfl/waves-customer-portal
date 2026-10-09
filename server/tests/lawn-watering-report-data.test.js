@@ -728,3 +728,152 @@ describe('GATE_LAWN_WATERING_FORECAST on the report payload', () => {
     }
   });
 });
+
+// GATE_LAWN_REPORT_CLARITY (owner 2026-10-08) through the real report builder: a
+// water-in BUILT AT COMPLETION with no sprinkler setup on file freezes the amount
+// and no minutes; the gate never changes an instruction that is already frozen or
+// an unfrozen render; the invitation is a live-only banner key.
+describe('GATE_LAWN_REPORT_CLARITY on the report payload', () => {
+  const { stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
+  const { lawnWateringSmsPlan } = require('../services/service-report/lawn-watering-sms');
+  const { leadWords } = require('../services/service-report/lawn-report-lead');
+  const KEYS = ['GATE_LAWN_WATERING_RULE', 'GATE_LAWN_REPORT_CLARITY'];
+  const SAVED = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  beforeEach(() => { process.env.GATE_LAWN_WATERING_RULE = 'true'; delete process.env.GATE_LAWN_REPORT_CLARITY; });
+  afterEach(() => { for (const k of KEYS) { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; } });
+
+  const AMOUNT_LINE = 'Water in today’s treatment with about ¼ inch by Thu 2 PM.';
+  const MINUTES_LINE = 'Run spray heads about 15 minutes a zone and rotors about 40 minutes.';
+  const PREFS = (headTypes) => [{ customer_id: 'cust-lawn-w1', irrigation_system_type: headTypes, irrigation_system: true }];
+  const surfaces = (data) => JSON.stringify({
+    lines: data.reportV2.banner.lines, aftercare: data.reportV2.aftercare, customerAction: data.reportV2.snapshot.customerAction,
+  });
+  // The completion pass (the write gate passes wateringInstructionOut) and the instruction it freezes.
+  async function completion(rule, prefs = []) {
+    const service = serviceWith(rule);
+    const out = {};
+    const data = await buildReportV1Data(service, 'token-w1', makeKnex(fixtures(prefs)), { wateringInstructionOut: out });
+    const frozen = { ...service, structured_notes: JSON.stringify({ lawnWateringFreeze: { wateringInstruction: JSON.parse(JSON.stringify(out.instruction)) } }) };
+    return { data, out, frozen };
+  }
+  const replay = (frozen, prefs = []) => buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures(prefs)));
+
+  test('gate on, completion, nothing on file: the amount in the banner, aftercare and hero task; no minutes anywhere; the instruction is flagged', async () => {
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const { data, out } = await completion(WATER_IN);
+    const v2 = data.reportV2;
+    expect(v2.banner.lines).toEqual([AMOUNT_LINE, 'Run it even if it is not your usual day.']);
+    expect(out.instruction.amountOnly).toBe(true);
+    expect(out.instruction.minutes).toEqual({ spray: null, rotor: null, unknown: false, measured: null });
+    expect(v2.aftercare.watering).toBe(`${AMOUNT_LINE} Run it even if it is not your usual day.`);
+    expect(JSON.stringify(v2)).not.toMatch(/about \d+ minutes|minutes a zone/);
+    expect(v2.banner.setupLine).toBe('Add your sprinkler setup and we’ll give you minutes for each zone.');
+    // The invitation is not part of any text that reads `lines`.
+    expect(v2.banner.lines.join(' ')).not.toMatch(/sprinkler setup/);
+    expect(v2.aftercare.watering).not.toMatch(/sprinkler setup/);
+    expect(JSON.stringify(v2.snapshot.customerAction)).not.toMatch(/sprinkler setup/);
+  });
+
+  test('gate on, completion, a head type on file: minutes exactly as before and no invitation', async () => {
+    const off = await completion(WATER_IN, PREFS(['rotor']));
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const on = await completion(WATER_IN, PREFS(['rotor']));
+    expect(on.data.reportV2.banner.lines[1]).toBe('Run each zone about 40 minutes.');
+    expect(on.data.reportV2.banner).not.toHaveProperty('setupLine');
+    expect(on.out.instruction).not.toHaveProperty('amountOnly');
+    expect(JSON.stringify(on.data.reportV2)).toBe(JSON.stringify(off.data.reportV2));
+  });
+
+  test('gate on, completion, a hold: no invitation and the hold text is unchanged', async () => {
+    const off = await completion(HOLD);
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const on = await completion(HOLD);
+    expect(on.data.reportV2.banner).not.toHaveProperty('setupLine');
+    expect(JSON.stringify(on.data.reportV2)).toBe(JSON.stringify(off.data.reportV2));
+  });
+
+  test('gate on, completion, hold then water-in: the hold line stays, the water-in clause is the amount, the invitation shows', async () => {
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const rule = { mode: 'hold', hold_hours: 6, source: 'label' };
+    const service = serviceWith(rule);
+    // Two products: a hold and a water-in.
+    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: facts(rule), 'aaaaaaaa-2222-4333-8444-555555555555': facts(WATER_IN) } });
+    const two = { ...service, service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
+    const fx = fixtures();
+    fx.service_products = [...fx.service_products, { id: 'sp-2', service_record_id: 'svc-lawn-w1', product_id: 'aaaaaaaa-2222-4333-8444-555555555555', product_name: 'Second', product_category: 'fertilizer', created_at: '2026-09-30T18:01:00Z' }];
+    const out = {};
+    const data = await buildReportV1Data(two, 'token-w1', makeKnex(fx), { wateringInstructionOut: out });
+    expect(data.reportV2.banner.state).toBe('hold_then_water_in');
+    expect(data.reportV2.banner.lines[0]).toMatch(/^Skip your turf watering until /);
+    expect(data.reportV2.banner.lines[1]).toMatch(/^After that, water in today’s treatment with about ¼ inch by /);
+    expect(data.reportV2.banner.setupLine).toBeTruthy();
+    expect(data.reportV2.aftercare.holdTask).toBe(`${data.reportV2.banner.lines[0]} ${data.reportV2.banner.lines[1]}`);
+  });
+
+  test('gate on, an UNFROZEN render (no completion pass): minutes as before, whatever the gate says', async () => {
+    const service = serviceWith(WATER_IN);
+    const off = await replay(service);
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const on = await replay(service);
+    expect(on.reportV2.banner.lines[1]).toBe(MINUTES_LINE);
+    expect(on.reportV2.banner).not.toHaveProperty('setupLine');
+    expect(JSON.stringify(on.reportV2)).toBe(JSON.stringify(off.reportV2));
+  });
+
+  test('gate off, completion: byte-identical to the minutes wording, no flag, no invitation', async () => {
+    const { data, out } = await completion(WATER_IN);
+    expect(data.reportV2.banner.lines[1]).toBe(MINUTES_LINE);
+    expect(data.reportV2.banner).not.toHaveProperty('setupLine');
+    expect(out.instruction).not.toHaveProperty('amountOnly');
+  });
+
+  test('a frozen amount-only instruction renders as frozen with the gate either way; only the live invitation follows the gate', async () => {
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const { frozen } = await completion(WATER_IN);
+    const withGate = await replay(frozen, PREFS(['rotor'])); // the customer has since added a head type
+    delete process.env.GATE_LAWN_REPORT_CLARITY;
+    const withoutGate = await replay(frozen, PREFS(['rotor']));
+    expect(withGate.reportV2.banner.lines[0]).toBe(AMOUNT_LINE);
+    expect(surfaces(withGate)).toBe(surfaces(withoutGate));
+    expect(withGate.reportV2.banner.setupLine).toBeTruthy();
+    expect(withoutGate.reportV2.banner).not.toHaveProperty('setupLine');
+    // Everything but the live invitation is identical.
+    const { setupLine: _drop, ...bannerOn } = withGate.reportV2.banner;
+    expect(bannerOn).toEqual(withoutGate.reportV2.banner);
+    // And the lawn PDF's replay stamp does not depend on the gate.
+    stripLiveOnlyScheduleFields(withGate);
+    expect(withGate.reportV2.banner).not.toHaveProperty('setupLine');
+    expect(JSON.stringify(withGate.reportV2)).toBe(JSON.stringify(withoutGate.reportV2));
+  });
+
+  test('a frozen minutes instruction renders as frozen when the gate is turned on', async () => {
+    const { frozen } = await completion(WATER_IN);
+    const before = await replay(frozen);
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const after = await replay(frozen);
+    expect(after.reportV2.banner.lines[1]).toBe(MINUTES_LINE);
+    expect(after.reportV2.banner).not.toHaveProperty('setupLine');
+    expect(JSON.stringify(after.reportV2)).toBe(JSON.stringify(before.reportV2));
+  });
+
+  test('the watering text carries the frozen lines only: the amount, no minutes, no invitation', async () => {
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const { out } = await completion(WATER_IN);
+    const plan = lawnWateringSmsPlan({
+      instruction: out.instruction, deliveryMode: 'auto_send', phone: '+15555550100', gateOn: true, ruleGateOn: true,
+      completedAt: out.instruction.completedAt, nowMs: Date.parse(out.instruction.completedAt) + 60000,
+    });
+    expect(plan.send).toBe(true);
+    expect(plan.vars.watering_lines).toBe("Water in today's treatment with about ¼ inch by Thu 2 PM. Run it even if it is not your usual day.");
+    expect(plan.vars.watering_lines).not.toMatch(/minute|sprinkler setup/);
+  });
+
+  test('the live invitation counts toward the lead word budget, and the strip removes it', () => {
+    const base = { banner: { state: 'water_in', lines: [AMOUNT_LINE, 'Run it even if it is not your usual day.'] } };
+    const line = 'Add your sprinkler setup and we’ll give you minutes for each zone.';
+    expect(leadWords({ ...base, banner: { ...base.banner, setupLine: line } }) - leadWords(base)).toBe(line.split(' ').length);
+    const data = { reportV2: { banner: { ...base.banner, setupLine: line } } };
+    stripLiveOnlyScheduleFields(data);
+    expect(data.reportV2.banner).not.toHaveProperty('setupLine');
+  });
+});

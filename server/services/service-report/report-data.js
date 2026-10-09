@@ -44,7 +44,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule, validateRule } = require('./lawn-watering-rule');
-const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold, SETUP_INVITE_LINE } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2217,6 +2217,9 @@ function stripLiveOnlyScheduleFields(data) {
   if (data.reportV2?.banner && typeof data.reportV2.banner === 'object') {
     delete data.reportV2.banner.forecastLine;
     delete data.reportV2.banner.observedRain;
+    // GATE_LAWN_REPORT_CLARITY: the sprinkler-setup invitation is a link to the
+    // portal, so it is live-only too.
+    delete data.reportV2.banner.setupLine;
   }
   // The lawn v6 copy's by-next-visit sentences are schedule content too: a
   // non-live render prints "What to expect" without them (lawn-copy-v6.js
@@ -2648,6 +2651,11 @@ function lawnReportPhotoFindingsLive() {
 // GATE_REPORT_PLAN_RESCHEDULE: read at call time; a partial feature-gates mock (or a missing export) means off.
 function reportPlanRescheduleLive() {
   return typeof featureGates.reportPlanRescheduleLive === 'function' && featureGates.reportPlanRescheduleLive();
+}
+
+// GATE_LAWN_REPORT_CLARITY: read at call time; a partial feature-gates mock (or a missing export) means off.
+function lawnReportClarityLive() {
+  return typeof featureGates.lawnReportClarityLive === 'function' && featureGates.lawnReportClarityLive();
 }
 
 async function lawnPhotoUrl(photo) {
@@ -3848,7 +3856,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
 // Runtime facts come from the same property_preferences row
 // portalIrrigationInches reads, and are withheld after a move
 // (scheduleUnconfirmed: the entries describe the former home).
-async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }) {
+//
+// forCompletion (the completion build that gets frozen, and the Fast Complete
+// preview of it): with GATE_LAWN_REPORT_CLARITY on, a water-in with no sprinkler
+// head type on file states the amount and no minutes. A later render that has to
+// regenerate (nothing frozen) passes nothing and never reads the gate, so a gate
+// flip cannot change what an unfrozen render prints or what its PDF key covers.
+async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion = false }) {
   const waterContext = lawnAssessment?.waterContext || {};
   let runtime = null;
   if (!waterContext.scheduleUnconfirmed) {
@@ -3875,6 +3889,7 @@ async function buildReportWateringInstruction({ products, service, completionTim
     })),
     completedAt: completionTime,
     runtime,
+    plainWhenNoSetup: forCompletion && lawnReportClarityLive(),
   });
 }
 
@@ -3917,6 +3932,17 @@ function bannerForecastExtras(instruction) {
   return forecastLine ? { forecastLine } : {};
 }
 
+// GATE_LAWN_REPORT_CLARITY: the invitation under an amount-only water-in (the
+// instruction was frozen without minutes because no sprinkler setup was on file).
+// Live view only, like the forecast sentence: stripLiveOnlyScheduleFields drops it
+// and it is never part of `lines`. Read at call time; only a frozen amountOnly
+// instruction can carry it, and the gate-off render has no key.
+function bannerSetupExtras(instruction) {
+  const waterIn = ['water_in', 'hold_then_water_in'].includes(instruction.state);
+  return instruction.amountOnly === true && waterIn && lawnReportClarityLive()
+    ? { setupLine: SETUP_INVITE_LINE } : {};
+}
+
 // The banner payload: one server-built object the client, PDF and (later)
 // the completion text all read. expiresAt is when the instruction lapses.
 // The plan-dependent sentence is composed here, from the weekly plan present on
@@ -3955,6 +3981,7 @@ function buildWateringBanner(instruction, weekPlan = null) {
     // from every non-live render by stripLiveOnlyScheduleFields, and it is
     // never part of `lines`. Gate off = no key.
     ...bannerForecastExtras(instruction),
+    ...bannerSetupExtras(instruction),
   };
 }
 
@@ -5628,7 +5655,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // only from a complete rule set: a failed catalog read builds none).
           wateringInstruction = readFrozenWateringInstruction(structured)
             || (rulesUnknown ? null
-              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
+              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion: !!opts.wateringInstructionOut }));
         } catch { wateringInstruction = null; wateringInputsFailed = true; readFailures.add('watering_inputs'); }
         // An UNFROZEN render whose inputs could not be read omits the customer's
         // watering direction: serve it, never cache it, and let a pinned delivery
@@ -6653,6 +6680,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let upcomingVisitsCard = null;
   if (opts.mode === 'live' && opts.upcomingVisitsCard === true
     && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
+    // GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): a LAWN report's card shows one
+    // visit, the next upcoming LAWN visit at this property (never another
+    // line's). The card then starts EMPTY and stays empty when there is none (or
+    // a read fails), so the plan section falls back to no visit line rather than
+    // naming another line's visit in its place. Other lines are untouched.
+    const lawnOnly = serviceLine === 'lawn' && lawnReportClarityLive();
+    const visitCap = lawnOnly ? 1 : 6;
+    if (lawnOnly) upcomingVisitsCard = reportPlanRescheduleLive() ? { visits: [], merged: true } : { visits: [] };
     try {
       // Shared stamp → property_id → source_estimate_id resolver (codex
       // round-4 P1 — a FOURTH consecutive parallel reimplementation of
@@ -6787,7 +6822,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const propertyById = new Map();
         const estimateById = new Map();
 
-        for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
+        for (let page = 0; page < MAX_PAGES && matched.length < visitCap; page += 1) {
           const candidates = await knex('scheduled_services')
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>=', todayIso)
@@ -6850,7 +6885,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           }
 
           for (const row of candidates) {
-            if (matched.length >= 6) break;
+            if (matched.length >= visitCap) break;
+            if (lawnOnly && !isSameLineVisit(row, { serviceLine: 'lawn' })) continue;
             // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
             // property_id/source_estimate_id lookups below are cache hits
             // after the batched reads above.

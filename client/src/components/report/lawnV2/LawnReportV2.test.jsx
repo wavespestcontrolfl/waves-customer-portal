@@ -4,7 +4,7 @@
 // unknown-trend behavior, MeterSvg empty-string guard.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LawnTrends, LawnWateringBanner, PrintContext, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
 import LawnReportV2Section from './LawnReportV2Section';
@@ -528,6 +528,39 @@ describe('LawnWateringBanner', () => {
     cleanup();
     renderBanner({ ...BANNERS.water_in, expiresAt: PAST, observedRain: CLOSE_OUT });
     expect(screen.queryByTestId('lawn-watering-banner-observed')).toBeNull();
+  });
+
+  // GATE_LAWN_REPORT_CLARITY: a water-in with the amount and no minutes (no sprinkler setup on file).
+  const SETUP_LINE = 'Add your sprinkler setup and we’ll give you minutes for each zone.';
+  const AMOUNT_BANNER = { ...BANNERS.water_in, lines: ['Water in today’s treatment with about ½ inch by Thu 2 PM.', 'Run it even if it is not your usual day.'], setupLine: SETUP_LINE };
+
+  it('sprinkler-setup invitation: a link to the portal property tab, after the lines, on the live view', () => {
+    renderBanner(AMOUNT_BANNER);
+    const note = screen.getByTestId('lawn-watering-banner-setup');
+    expect(note).toHaveTextContent(SETUP_LINE);
+    expect(within(note).getByRole('link', { name: SETUP_LINE })).toHaveAttribute('href', '/?tab=property');
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('with about ½ inch by Thu 2 PM');
+    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent(/minutes a zone|about \d+ minutes/);
+    const banner = screen.getByTestId('lawn-watering-banner');
+    expect(banner.textContent.indexOf(AMOUNT_BANNER.lines[1])).toBeLessThan(banner.textContent.indexOf(SETUP_LINE));
+  });
+
+  it('sprinkler-setup invitation: also under a hold then water-in; never printed, never on an ended note', () => {
+    renderBanner({ ...BANNERS.hold_then_water_in, setupLine: SETUP_LINE });
+    expect(screen.getByTestId('lawn-watering-banner-setup')).toBeInTheDocument();
+    cleanup();
+    renderBanner(AMOUNT_BANNER, { print: true });
+    expect(screen.queryByTestId('lawn-watering-banner-setup')).toBeNull();
+    cleanup();
+    renderBanner({ ...AMOUNT_BANNER, expiresAt: PAST });
+    expect(screen.queryByTestId('lawn-watering-banner-setup')).toBeNull();
+  });
+
+  it('an old payload (no setupLine) renders exactly as before, minutes lines included', () => {
+    const { container } = renderBanner(BANNERS.water_in);
+    expect(screen.queryByTestId('lawn-watering-banner-setup')).toBeNull();
+    expect(container.textContent).not.toMatch(/sprinkler setup/);
+    expect(screen.getByTestId('lawn-watering-banner')).toHaveTextContent(BANNERS.water_in.lines[1]);
   });
 
   it('no forecast / close-out fields: the banner is exactly today\'s', () => {

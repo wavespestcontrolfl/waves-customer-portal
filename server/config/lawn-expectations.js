@@ -97,6 +97,8 @@ const PRODUCT_CLASS_ENTRIES = [
   // Granular slow-release nitrogen
   ['LESCO 24-0-11', FAMILY.GRANULAR_N],
   ['LESCO 24-0-11 with PolyPlus OPTI', FAMILY.GRANULAR_N],
+  // December feeding (v13): slow-release N with potassium; the same expectation line the 24-0-11 gave there.
+  ['LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', FAMILY.GRANULAR_N],
   ['LESCO 24-2-11', FAMILY.GRANULAR_N],
   ['LESCO 24-2-11 50% NOS Plus BIO 6% Fe', FAMILY.GRANULAR_N],
 

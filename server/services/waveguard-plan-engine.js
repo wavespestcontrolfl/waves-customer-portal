@@ -1728,9 +1728,11 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
       capped.set(id, [{ ...prohibited }]);
       continue;
     }
+    // Every product here is selected, i.e. about to be applied: a proposal. A product with no row in this visit's window (Arena in
+    // October, a search-added product) has no stated dose here; the limit reader then counts the product's staged v13 dose.
     const row = rows.get(id);
     const proposed = v13ProposedApplication(item.product, row, targets);
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, proposal: true, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
@@ -1818,7 +1820,17 @@ function v13ItemFields(line, gateContext, product) {
     gateNotes: row ? v13GateNotes(row.gates, gateContext) : [],
     // A row with no calculated quantity: selectable, label rate as reference, never an amount.
     spot: line?.state === 'spot'
-      ? { note: 'Spot: enter the area treated and the amount used.', reference: v13SpotReference(row, product) }
+      ? {
+        note: 'Spot: enter the area treated and the amount used.',
+        reference: v13SpotReference(row, product),
+        // The row's own stated rate, for a reader that sizes a tank dose (the job card's product search): the program's
+        // rate, never the catalog default (Arena: 0.147 oz here, the main label's 0.29 oz in the catalog).
+        ratePer1000: Number(row?.ratePer1000) > 0 ? Number(row.ratePer1000) : null,
+        rateUnit: Number(row?.ratePer1000) > 0 ? row.rateUnit || null : null,
+        // ... and the row's own carrier (Arena: 4 gal per 1,000 sq ft into the thatch), which the rate is stated over:
+        // the window's carrier (1 gal in May and June) would show a 4-gallon fill covering 4,000 sq ft.
+        carrierGalPer1000: Number(row?.carrierGalPer1000) > 0 ? Number(row.carrierGalPer1000) : null,
+      }
       : null,
     // A line the plan cannot size at all: say why; the tech enters the actual work.
     unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}) } : null,
