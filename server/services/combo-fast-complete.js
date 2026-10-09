@@ -32,10 +32,17 @@ function reportFlowShape(profile) {
   return !(profile?.companions || []).length && !profile?.findingsType;
 }
 
-// A pest visit the plain pest report flow admits (gate aside): pest control, reportFlowShape, not completed through a
-// project, and not a lane visit (the lane voice fill's own reader, visit-lane-facts voiceLaneFor).
-function pestReportFlowAdmits(profile, serviceType) {
-  return profile?.category === 'pest_control' && reportFlowShape(profile)
+// A pest re-service: the pest re-service itself, or a free callback (the same rule as the pest sheet's
+// isReserviceVisit in client/src/lib/pest-fast-complete.js; a drift test pins them together).
+function isPestReservice(profile, isCallback) {
+  return profile?.serviceKey === 'pest_re_service' || isCallback === true;
+}
+
+// A pest visit the plain pest report flow admits (gate aside): pest control, reportFlowShape, not a re-service or
+// callback, not completed through a project, and not a lane visit (the lane voice fill's own reader,
+// visit-lane-facts voiceLaneFor).
+function pestReportFlowAdmits(profile, serviceType, isCallback) {
+  return profile?.category === 'pest_control' && reportFlowShape(profile) && !isPestReservice(profile, isCallback)
     && !profile.projectBacked && !profile.requiresProject
     && require('./visit-lane-facts').voiceLaneFor({ profile, serviceType }) == null;
 }
@@ -49,7 +56,7 @@ async function pairAdmitted(knex, memberIds, allowStatuses) {
   const verdicts = await Promise.all(memberIds.map((id) => resolveLawnFastEligibility(id, knex, { withVisitType: false, allowStatuses })));
   if (verdicts.some((verdict) => !verdict.ok)) return false;
   const lawn = verdicts.filter((verdict) => verdict.profile?.category === 'lawn_care' && LAWN_REASONS_SET_ASIDE.includes(verdict.reason));
-  const pest = verdicts.filter((verdict) => pestReportFlowAdmits(verdict.profile, verdict.svc?.service_type));
+  const pest = verdicts.filter((verdict) => pestReportFlowAdmits(verdict.profile, verdict.svc?.service_type, verdict.svc?.is_callback));
   return lawn.length === 1 && pest.length === 1;
 }
 
@@ -86,4 +93,4 @@ function comboRowFlag(row) {
   return comboFastCompleteLive() && !!row?.visit_id;
 }
 
-module.exports = { COMBO_STOP_HEADER, comboStopRequested, lawnFastGroupedAsk, reportFlowShape, pestReportFlowAdmits, groupedStopAllowed, comboRowFlag };
+module.exports = { COMBO_STOP_HEADER, comboStopRequested, lawnFastGroupedAsk, reportFlowShape, isPestReservice, pestReportFlowAdmits, groupedStopAllowed, comboRowFlag };

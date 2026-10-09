@@ -1231,9 +1231,12 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const base = `/admin/dispatch/${service?.id}`;
   // A part of a grouped stop (onPrepared) says so on every lawn-fast read: the server lifts its grouped-stop
   // refusal only for a stop it confirms as a combined stop (X-Combo-Stop is a request, never an authority).
-  const stopRequest = useMemo(() => (typeof onPrepared === 'function'
+  // Keyed on whether this is prepare mode, never on the callback's identity: a container that passes an inline
+  // onPrepared must not recreate the request (the context would reload and the form would remount).
+  const preparing = typeof onPrepared === 'function';
+  const stopRequest = useMemo(() => (preparing
     ? (path, options = {}) => request(path, { ...options, ...(path.includes('/lawn-fast/') ? { headers: { ...options.headers, 'X-Combo-Stop': '1' } } : {}) })
-    : request), [request, onPrepared]);
+    : request), [request, preparing]);
   const ctx = useLawnFastContext({ base, request: stopRequest, service });
   // The visit's own property areas (read by PropertyServiceAreas, in the form) and
   // their hold: see usePropertyAreaLifecycle. A refused completion starts a refresh.

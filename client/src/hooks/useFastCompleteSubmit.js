@@ -447,8 +447,12 @@ export default function useFastCompleteSubmit({
     setError('');
     try {
       await onPreparedRef.current(scope.serviceId, body);
-      preparedSignatureRef.current = bodySignature(body);
-      if (sameScope(scopeRef.current, scope)) setPrepared(body);
+      // Every write after the await is scope-checked: a part switched away from while its handoff was in flight
+      // must not touch the next part's signature or state.
+      if (sameScope(scopeRef.current, scope)) {
+        preparedSignatureRef.current = bodySignature(body);
+        setPrepared(body);
+      }
     } catch (err) {
       if (sameScope(scopeRef.current, scope)) setError(err?.message || 'Could not save this part of the stop.');
     } finally {

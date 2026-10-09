@@ -3859,6 +3859,29 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(onPrepared.mock.calls.at(-1)[1].technicianNotes).toBe('Changed words');
   });
 
+  test('a container that passes a new inline onPrepared on every render keeps the form, reloads nothing and revokes nothing', async () => {
+    const calls = [];
+    const request = makeRequest();
+    const { rerender } = render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Typed before the re-render' } });
+    const contextReads = () => requests.filter((r) => r.path.endsWith('/lawn-fast/context')).length;
+    const before = contextReads();
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('Typed before the re-render');
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(calls).toHaveLength(1);
+    // After the handoff the parent re-renders with another inline callback.
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText('Saved for this stop')).toBeTruthy();
+    expect(calls).toHaveLength(1);
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('Typed before the re-render');
+    expect(contextReads()).toBe(before);
+  });
+
   test('a refused hand-over shows its message and leaves the sheet editable', async () => {
     const onPrepared = vi.fn(async () => { throw new Error('Could not save this on the device'); });
     await openSheet({ props: { operatorId: 'op-1', onPrepared } });

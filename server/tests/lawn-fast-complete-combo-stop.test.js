@@ -218,6 +218,10 @@ describe('the pair is validated before the grouped refusal lifts (header path an
     ['lawn + project-backed pest', { [VISIT]: LAWN_V, [OTHER]: withProfile(PEST_V, { projectBacked: true }) }, false],
     ['lawn + pest needing a project', { [VISIT]: LAWN_V, [OTHER]: withProfile(PEST_V, { requiresProject: true }) }, false],
     ['lawn + pest with companions', { [VISIT]: LAWN_V, [OTHER]: withProfile(PEST_V, { companions: [{ type: 'rodent_bait_station' }] }) }, false],
+    ['lawn + pest re-service (profile key)', { [VISIT]: LAWN_V, [OTHER]: withProfile(PEST_V, { serviceKey: 'pest_re_service' }) }, false],
+    ['lawn + pest callback', { [VISIT]: LAWN_V, [OTHER]: withProfile(PEST_V, {}, { is_callback: true }) }, false],
+    ['lawn re-service + pest', { [VISIT]: { ...withProfile(LAWN_V, { serviceKey: 'lawn_re_service' }), reason: 'lawn_re_service' }, [OTHER]: PEST_V }, false],
+    ['lawn callback + pest (a lawn visit the lawn rule admits)', { [VISIT]: withProfile(LAWN_V, {}, { is_callback: true }), [OTHER]: PEST_V }, true],
     ['lawn + a profile that failed to read', { [VISIT]: LAWN_V, [OTHER]: { ok: false, reason: 'not_found' } }, false],
     ['lawn with companions + pest', { [VISIT]: withProfile(LAWN_V, { companions: ['tree_shrub'] }, {}), [OTHER]: PEST_V }, true],
   ];

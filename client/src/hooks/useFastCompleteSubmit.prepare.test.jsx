@@ -134,4 +134,27 @@ describe('prepare mode', () => {
     act(() => sent.result.current.revokeIfChanged(() => ({ a: 1 })));
     expect(sent.result.current.prepared).toBeNull();
   });
+
+  test('a handoff that settles after the scope changed does not touch the next part\'s signature or state', async () => {
+    let release;
+    const slow = vi.fn(() => new Promise((resolve) => { release = resolve; }));
+    const request = vi.fn(async () => ({}));
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: { base: '/a', request, serviceId: 'svc-a', operatorId: 'op-a', onPrepared: slow } });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    let pending;
+    act(() => { pending = view.result.current.submit(() => ({ n: 'A' }), 's'); });
+    // Switch to part B before A's handoff settles; B prepares at once.
+    const fast = vi.fn();
+    view.rerender({ base: '/b', request, serviceId: 'svc-b', operatorId: 'op-a', onPrepared: fast });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 'B' }), 's'); });
+    expect(view.result.current.prepared.n).toBe('B');
+    fast.mockClear();
+    await act(async () => { release(); await pending; });
+    // A's late settle left B's prepared state and signature alone: B's own body does not revoke.
+    expect(view.result.current.prepared.n).toBe('B');
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 'B' })));
+    expect(view.result.current.prepared.n).toBe('B');
+    expect(fast).not.toHaveBeenCalled();
+  });
 });

@@ -79,6 +79,7 @@ import {
 import { submittedAmount } from '../../lib/measure-units';
 import { pestSweepActions, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { isReserviceVisit } from '../../lib/pest-fast-complete';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -500,7 +501,6 @@ const SHEET_TITLES = {
 const INERT = { 'aria-hidden': true, inert: '' };
 // A re-service: the pest re-service itself, or a free callback booked under
 // a regular service key. Neither gets a pay link or a review ask.
-const isReserviceVisit = (visit) => visit?.serviceKey === 'pest_re_service' || visit?.isCallback === true;
 function sheetTitle(reportFlow, visit, done) {
   return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
 }

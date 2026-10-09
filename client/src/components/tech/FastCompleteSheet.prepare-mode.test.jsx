@@ -134,6 +134,23 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(onPrepared).toHaveBeenLastCalledWith('svc-1', null);
   });
 
+  test('a new inline onPrepared on a parent re-render keeps the sheet prepared and tells the container nothing', async () => {
+    const calls = [];
+    const request = makeRequest();
+    const element = () => <FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} onPrepared={(...args) => calls.push(args)} sharedNote={NOTE} />;
+    const { rerender } = render(element());
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    await generate({ type: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Save for this stop' }));
+    await screen.findByText('Saved for this stop');
+    const reads = request.bodies('/pest-recap/context').length;
+    rerender(element());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText('Saved for this stop')).toBeTruthy();
+    expect(calls).toHaveLength(1);
+    expect(request.calls.filter((call) => call.path.split('?')[0].endsWith('/pest-recap/context')).length).toBe(reads || 1);
+  });
+
   test('a visit that is not the plain pest report flow refuses to prepare and never posts', async () => {
     const onPrepared = vi.fn();
     const request = makeRequest({ service: { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' } });
