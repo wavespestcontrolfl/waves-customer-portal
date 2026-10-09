@@ -97,7 +97,7 @@ describe('retireTerminalDraft', () => {
     expect(gh.retireBranch).toHaveBeenCalledWith(`terminal-writer/${ID}`);
   });
 
-  test('a newer push since the read is kept: nothing is deleted and the draft is not used', async () => {
+  test('a push since the read is kept: nothing is deleted', async () => {
     const gh = ghWith(good(), { sha: 'commit-2' });
     expect(await tw.retireTerminalDraft(ID, { gh, revision: 'commit-1' })).toBe(false);
     expect(gh.retireBranch).not.toHaveBeenCalled();

@@ -21,10 +21,13 @@
  * catch-up and the next morning's batch look again. After the batch ONE admin
  * item lists the rows that wait for a draft.
  *
- * A draft is judged against the brief it was written from: the runner loads
- * that stored brief for the rest of the run. A draft is read once: its branch
- * is deleted when the runner takes it, so a gate retry asks for a fresh draft,
- * written against the retry brief the next run composes.
+ * A draft must name the brief on the row's latest run, and that run must have
+ * ended waiting. The runner loads that stored brief for the rest of the run,
+ * so the draft is judged against the brief it was written from. The same
+ * binding makes a draft read-once: the run that takes it becomes the latest
+ * run, so the file's brief is no longer the one the row waits on. A gate
+ * retry therefore asks for a fresh draft, written against the retry brief
+ * the next run composes. Deleting the branch afterwards is cleanup.
  *
  * The branch lives in the Astro repo itself (ghFetch reads owner/repo from
  * the environment), so only an account with push access can supply a draft.
@@ -103,8 +106,7 @@ async function waitingBriefId(opportunityId, { conn = db } = {}) {
  * so the runner's code after the dispatch does not change.
  *   { ok: true, draft, brief_id, revision }      a usable draft
  *   { ok: false, code: MISSING | INVALID, ... }  wait for the terminal
- * `revision` is the branch commit the file was read at; retireTerminalDraft
- * deletes only that commit. A GitHub failure other than "not found" throws:
+ * `revision` is the branch commit the file was read at (for the cleanup). A GitHub failure other than "not found" throws:
  * the run fails and retries, it must not be recorded as "no draft yet".
  */
 async function fetchTerminalDraft(opportunityId, { gh = require('../content-astro/github-client'), expectedBriefId } = {}) {
@@ -133,12 +135,11 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
 }
 
 /**
- * Delete the draft branch once the runner holds the draft. Returns true only
- * when the branch is confirmed gone; never throws. The runner uses a draft
- * only after a confirmed delete: a file that survives would be read again by
- * a gate retry, which must get a new draft. The branch is deleted only while
- * it still points at `revision`: a push that landed after the read is a newer
- * draft, and it is left for the next attempt.
+ * Cleanup after the runner took a draft: delete its branch. Best effort and
+ * never throws. Nothing depends on it: a file that stays behind names a brief
+ * the row no longer waits on, so no run accepts it and the list shows it as
+ * rejected until the next draft replaces it. The branch is left alone when it
+ * no longer points at `revision` (something was pushed after the read).
  */
 async function retireTerminalDraft(opportunityId, { gh = require('../content-astro/github-client'), revision } = {}) {
   const branch = branchFor(opportunityId);

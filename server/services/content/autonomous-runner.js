@@ -669,21 +669,20 @@ class AutonomousRunner {
       await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
       return finalized;
     }
-    // The runner holds the draft now. Delete its branch so the file is read
-    // once: a gate retry must get a draft written against the retry brief.
-    // No confirmed delete = the draft is not used; the claim is released and
-    // the next attempt reads the same file and deletes again.
+    // The draft is judged against the brief it was written from, not the
+    // one this attempt just composed. That binding is also what makes a
+    // draft read-once: this run now becomes the row's latest, so the brief
+    // stops being "the one the row waits on" and the same file can never be
+    // accepted again. Deleting the branch is cleanup only.
     if (viaTerminal && dispatchResult.ok) {
-      const retired = await terminalWriter.retireTerminalDraft(opp.id, { revision: dispatchResult.revision });
-      // The draft is judged against the brief it was written from, not the
-      // one this attempt just composed.
-      const writtenFrom = retired ? await this._loadReviewedBrief({ brief_id: dispatchResult.brief_id }) : null;
+      const writtenFrom = await this._loadReviewedBrief({ brief_id: dispatchResult.brief_id });
       if (!writtenFrom || String(writtenFrom.id) !== String(dispatchResult.brief_id)) {
         await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
-        return finalize(run, t0, { outcome: 'failed', failure_message: retired ? 'terminal_draft_brief_missing' : 'terminal_draft_retire_failed' });
+        return finalize(run, t0, { outcome: 'failed', failure_message: 'terminal_draft_brief_missing' });
       }
       brief = writtenFrom;
       run.brief_id = writtenFrom.id;
+      await terminalWriter.retireTerminalDraft(opp.id, { revision: dispatchResult.revision });
     }
 
     if (!dispatchResult.ok) {

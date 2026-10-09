@@ -5322,7 +5322,7 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('a draft: its branch is deleted at the commit that was read, and the draft goes on to the gates with the brief it was written from', async () => {
+  test('a draft goes on to the gates with the brief it was written from, and its branch is cleaned up at the commit that was read', async () => {
     const { dispatcher, runner, terminalWriter } = setup({ fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read', duration_ms: 5, agent_id: 'terminal-writer', session_id: null } });
     jest.doMock('../services/content/editorial-evidence', () => ({
       prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('editorial'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED', findings: [] })),
@@ -5339,11 +5339,15 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(onward.mock.calls[0][2].agent_id).toBe('terminal-writer');
   });
 
-  test('a draft whose branch could not be deleted is not used: the claim is released for another attempt', async () => {
-    const { queue, runner } = setup({ fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read' }, retired: false });
-    const result = await runner.runNext();
-    expect(result).toMatchObject({ outcome: 'failed', failure_message: 'terminal_draft_retire_failed' });
-    expect(queue.release).toHaveBeenCalledWith('opp_tw', { claimToken: claimedAt });
+  test('a failed branch cleanup does not stop the run: the brief binding already makes the draft read-once', async () => {
+    const { runner, terminalWriter } = setup({ fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read' }, retired: false });
+    jest.doMock('../services/content/editorial-evidence', () => ({
+      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('editorial'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED', findings: [] })),
+      reviewError: jest.fn(),
+    }));
+    jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'reached_the_gates' });
+    await expect(runner.runNext()).resolves.toEqual({ outcome: 'reached_the_gates' });
+    expect(terminalWriter.retireTerminalDraft).toHaveBeenCalledTimes(1);
   });
 
   test('a draft whose brief is no longer stored is not used', async () => {
