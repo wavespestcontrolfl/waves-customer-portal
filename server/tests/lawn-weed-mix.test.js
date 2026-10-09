@@ -121,6 +121,15 @@ describe('buildWeedMix', () => {
     expect(await run()).toMatchObject({ mode: 'unavailable', productIds: [] });
   });
 
+  // Additive, for the treatment guide: the members whose limit WAS read as forbidding stay named, so a
+  // sibling's failed read never releases them. The mix is 'unavailable' either way.
+  test('an unavailable mix names the members read as forbidding (blockedIds); a thrown read names none', async () => {
+    engine.v13VisitLimits.mockResolvedValue({ capped: new Map([[LEAD, [{ type: 'annual_max_apps', message: 'limit' }]], [CERT, [{ message: 'unread' }]]]), warnings: [], blocks: [] });
+    expect(await run()).toMatchObject({ mode: 'unavailable', blockedIds: [LEAD] });
+    engine.v13VisitLimits.mockRejectedValue(new Error('boom'));
+    expect(await run()).toMatchObject({ mode: 'unavailable', blockedIds: [] });
+  });
+
   test('a lead held by another limit (a minimum interval) is not handed to the replacement', async () => {
     engine.v13VisitLimits.mockResolvedValue({ capped: new Map([[LEAD, [{ type: 'min_interval_days', message: 'Alpha Weed: only 5 days from another application (min 14).' }]]]), warnings: [], blocks: [] });
     expect(await run()).toMatchObject({ mode: 'none', productIds: [], note: 'Alpha Weed: only 5 days from another application (min 14).' });
