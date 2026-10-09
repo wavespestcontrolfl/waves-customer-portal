@@ -324,11 +324,9 @@ class AutonomousRunner {
     // catch-up, the next batch) and the run that finally takes the draft use
     // that one stored brief, from here on: the run's metadata, the pre-draft
     // gates and the gates on the draft all read the brief the draft was
-    // written from. A fresh brief is composed only when none is waiting.
+    // written from. Null (gate off, dry run, nothing waiting) = compose.
     const terminalWriter = require('./terminal-writer');
-    const handedBrief = !dryRun && terminalWriter.terminalWriterLive()
-      ? await this._briefHandedToTerminal(opp.id)
-      : null;
+    const handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun });
     let brief;
     try {
       brief = handedBrief || await briefBuilder.compose(opp.id, {
@@ -603,14 +601,8 @@ class AutonomousRunner {
     // Kill switch (house rule: every lane keeps one): default ON; set
     // AUTONOMOUS_WRITER_SELF_LINT=false to disarm the in-loop lint — the
     // authoritative run-level gates are untouched either way.
-    // GATE_CONTENT_WRITER_TERMINAL: the draft comes from the owner's terminal
-    // (terminal-writer.js), not from an agent session. Only this step
-    // changes; the claim, the brief and every gate below are the same.
-    const viaTerminal = !dryRun && terminalWriter.writesInTerminal(brief);
     let selfLintOptions = null;
-    // The in-loop lint belongs to an agent session; a terminal draft meets
-    // the authoritative run-level gates directly.
-    if (!viaTerminal && envBool('AUTONOMOUS_WRITER_SELF_LINT', true)) {
+    if (envBool('AUTONOMOUS_WRITER_SELF_LINT', true)) {
       selfLintOptions = brief.action_type === 'refresh_existing_page'
         ? await this._deriveGuardrailOptions(opp, brief).catch((err) => {
           logger.warn(`[autonomous-runner] refresh self-lint options unavailable (${err.message}) — writer runs without the in-loop lint; gate 3c stays authoritative`);
@@ -623,12 +615,13 @@ class AutonomousRunner {
       sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
       selfLintOptions,
     };
-    const dispatchOnce = () => (viaTerminal
-      // Only a draft written from the brief this row was handed is usable;
-      // a row with a fresh brief has nothing to read yet.
-      ? terminalWriter.fetchTerminalDraft(opp.id, { expectedBriefId: handedBrief ? brief.id : null })
-      : dispatcher.runWithBrief(brief, dispatchOptions)
-    ).catch((err) => ({
+    // GATE_CONTENT_WRITER_TERMINAL: the draft can come from the owner's
+    // terminal instead of an agent session. draftSourceFor returns a source
+    // with the dispatcher's own runWithBrief contract, or null (gate off,
+    // dry run, a title/meta rewrite) = the agent. Only this step changes:
+    // the claim, the brief and every gate below are the same.
+    const draftSource = terminalWriter.draftSourceFor(opp.id, brief, { handed: Boolean(handedBrief), dryRun }) || dispatcher;
+    const dispatchOnce = () => draftSource.runWithBrief(brief, dispatchOptions).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
     let dispatchResult = await dispatchOnce();
@@ -667,27 +660,22 @@ class AutonomousRunner {
     run.agent_id = lastSessionResult.agent_id || null;
     run.agent_session_id = lastSessionResult.session_id || null;
 
-    // No usable draft from the terminal: not a failure. Record the run on
-    // the same brief and look again later (defer refunds the attempt this
-    // claim used). That covers a draft that could not be READ too (GitHub
-    // down): a failed run here would stop the row waiting on its brief and
-    // orphan a draft that is already pushed.
-    if (viaTerminal && !dispatchResult.ok) {
+    // The terminal has no usable draft yet (`wait`): not a failure. Record
+    // the run on the same brief and look again later (defer refunds the
+    // attempt this claim used).
+    if (dispatchResult.wait) {
       const finalized = await finalize(run, t0, {
         outcome: terminalWriter.AWAITING_OUTCOME,
-        skip_reason: dispatchResult.code || terminalWriter.UNREADABLE,
+        skip_reason: dispatchResult.code,
         reviewer_notes: dispatchResult.reason,
       });
       await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
       return finalized;
     }
-    // The run that takes a draft becomes the row's latest run, so its brief
-    // stops being "the one the row waits on" and the same file can never be
-    // accepted again. Its branch is deleted only AFTER this run is persisted
-    // (cleanupConsumedDrafts, end of the batch): until then the pushed file
-    // is the only copy of the draft. In-memory only, like
-    // citability_backfill_brief (finalize persists named columns).
-    if (viaTerminal && dispatchResult.ok) run.terminal_draft_revision = dispatchResult.revision;
+    // A terminal draft's branch commit, for the cleanup after this run is
+    // stored (settleTerminalWork); undefined for an agent draft. In-memory
+    // only, like citability_backfill_brief (finalize persists named columns).
+    run.terminal_draft_revision = dispatchResult.revision;
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
@@ -1649,17 +1637,9 @@ class AutonomousRunner {
       // (the 06-12 zero-alert shape, Codex r2) — re-trigger the alert rather
       // than stay silent; the sms_log day-dedupe inside _sendBlogDroughtSms
       // keeps it to one text per ET day no matter how many passes run.
-      // Terminal writer: a blog deferred this morning is not claimable yet at
-      // 1pm, which looks like a drought here. While today's terminal item
-      // stands, the owner has already been told a post waits for its draft.
-      const terminalWriter = require('./terminal-writer');
-      if (terminalWriter.terminalWriterLive() && await terminalWriter.terminalItemOpenToday().catch(() => false)) {
-        logger.info('[autonomous-runner] catch-up skipped: posts wait for a terminal draft (item open)');
-        return { outcome: 'skipped_no_claimable', skipped: true, reason: 'waiting_for_terminal_draft', count: 0, runs: [] };
-      }
-      await this._sendBlogDroughtSms([]).catch((err) => {
-        logger.warn(`[autonomous-runner] catch-up drought SMS failed: ${err.message}`);
-      });
+      // (_reportBlogDrought: not while a blog waits for its terminal draft —
+      // a blog deferred this morning is not claimable yet at 1pm.)
+      await this._reportBlogDrought([]);
       logger.info('[autonomous-runner] catch-up skipped: no claimable blog opportunities (drought alert ensured)');
       return { outcome: 'skipped_no_claimable', skipped: true, reason: 'no_claimable_opportunities', count: 0, runs: [] };
     }
@@ -1991,30 +1971,11 @@ class AutonomousRunner {
       break;
     }
     logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
-    // Terminal writer: one admin item for the rows that now wait for a draft.
-    // Its own failure must not fail the batch (the 1pm pass raises it again).
-    const terminalWriter = require('./terminal-writer');
-    let terminalItemRaised = false;
-    // Drafts this batch took are stored on their runs now; delete their branches.
-    await terminalWriter.cleanupConsumedDrafts(runs);
-    if (terminalWriter.terminalWriterLive()) {
-      terminalItemRaised = await terminalWriter.raiseTerminalDue().then((r) => r.due > 0).catch((err) => {
-        logger.warn(`[autonomous-runner] terminal writer item failed: ${err.message}`);
-        return false;
-      });
-    } else {
-      // Gate off (the kill switch): no terminal work is asked for any more.
-      await terminalWriter.closeTerminalItems().catch((err) => {
-        logger.warn(`[autonomous-runner] closing terminal writer items failed: ${err.message}`);
-      });
-    }
+    await this.settleTerminalWork(runs);
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
     });
-    // Spread only when set, so the call is unchanged with the gate off.
-    await this._sendBlogDroughtSms(runs, { haltBeforeBlog, ...(terminalItemRaised ? { terminalItemRaised } : {}) }).catch((err) => {
-      logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
-    });
+    await this._reportBlogDrought(runs, { haltBeforeBlog });
     return {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
@@ -2084,7 +2045,21 @@ class AutonomousRunner {
    * silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false. Routed as
    * internal_alert so OWNER_SMS_DISABLED still silences everything.
    */
-  async _sendBlogDroughtSms(runs, { haltBeforeBlog = null, terminalItemRaised = false } = {}) {
+  /**
+   * The blog drought alert, for the batch and for the catch-up. Terminal
+   * writer: a blog that waits for its draft, with the owner told by the
+   * terminal item, is not a drought, so nothing is sent then. Decided here so
+   * the alert's own rules stay as they are. A send failure is logged.
+   */
+  async _reportBlogDrought(...args) {
+    if (await require('./terminal-writer').blogDraftRequested()) return;
+    // the caller's own arguments, unchanged
+    await this._sendBlogDroughtSms(...args).catch((err) => {
+      logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
+    });
+  }
+
+  async _sendBlogDroughtSms(runs, { haltBeforeBlog = null } = {}) {
     if (!envBool('AUTONOMOUS_BLOG_DROUGHT_ALERT', true)) return;
     const real = (runs || []).filter(Boolean);
     // "Started" = published directly, or parked awaiting its PR merge
@@ -2093,10 +2068,6 @@ class AutonomousRunner {
       && (r.outcome === 'completed_published'
         || (r.outcome === 'completed_pending_review' && r.skip_reason === 'astro_pr_pending_merge')));
     if (blogStarted) return;
-    // A blog that waits for its terminal draft is not a drought, but only
-    // when the content admin item that names it was really raised: without
-    // it this alert is the one signal left.
-    if (terminalItemRaised && real.some((r) => r.action_type === 'new_supporting_blog' && r.outcome === require('./terminal-writer').AWAITING_OUTCOME)) return;
 
     // Day-dedupe (Codex r2+r3): the 1pm catch-up re-triggers this alert when
     // the morning batch died before ITS send, so without a persisted marker
@@ -4397,13 +4368,15 @@ class AutonomousRunner {
   // (run.brief_id), falling back to the latest brief for the opportunity only
   // when the run carries no brief_id. Shape consumed by the astro-publisher.
   /**
-   * The stored brief a row waits on for its terminal draft, or null: no run
-   * of the row is waiting, the brief is gone, or it is older than the
-   * terminal writer allows (a row nobody wrote for gets a fresh brief). A
-   * lookup failure is null too: the row is then briefed again, never blocked.
+   * The stored brief a row waits on for its terminal draft, or null: the
+   * gate is off, this is a dry run, no run of the row is waiting, the brief
+   * is gone, or it is older than the terminal writer allows (a row nobody
+   * wrote for gets a fresh brief). A lookup failure is null too: the row is
+   * then briefed again, never blocked.
    */
-  async _briefHandedToTerminal(opportunityId) {
+  async _briefHandedToTerminal(opportunityId, { dryRun = false } = {}) {
     const terminalWriter = require('./terminal-writer');
+    if (dryRun || !terminalWriter.terminalWriterLive()) return null;
     try {
       const briefId = await terminalWriter.waitingBriefId(opportunityId);
       const brief = briefId ? await this._loadReviewedBrief({ brief_id: briefId }) : null;
@@ -4413,6 +4386,23 @@ class AutonomousRunner {
     } catch (err) {
       logger.warn(`[autonomous-runner] terminal brief lookup failed for ${opportunityId}: ${err.message}`);
       return null;
+    }
+  }
+
+  /**
+   * Terminal writer, after one or more runs are stored — the daily batch, the
+   * admin Run now button and the --live script all end here: delete the
+   * branch of each draft a run took, then bring the admin item up to date
+   * (gate on: the rows that wait; gate off: close what is open). Its own
+   * failure never fails the caller.
+   */
+  async settleTerminalWork(runs) {
+    const terminalWriter = require('./terminal-writer');
+    try {
+      await terminalWriter.cleanupConsumedDrafts(runs);
+      await (terminalWriter.terminalWriterLive() ? terminalWriter.raiseTerminalDue() : terminalWriter.closeTerminalItems());
+    } catch (err) {
+      logger.warn(`[autonomous-runner] terminal writer follow-up failed: ${err.message}`);
     }
   }
 

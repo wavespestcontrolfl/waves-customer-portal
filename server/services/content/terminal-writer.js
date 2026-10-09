@@ -120,9 +120,8 @@ async function waitingBriefId(opportunityId, { conn = db } = {}) {
  *   { ok: true, draft, brief_id, revision }      a usable draft
  *   { ok: false, code: MISSING | INVALID, ... }  wait for the terminal
  * `revision` is the branch commit the file was read at (for the cleanup).
- * A GitHub failure other than "not found" throws; the runner records it as
- * `terminal_draft_unreadable` (never as "no draft yet") and the row keeps
- * waiting on the same brief.
+ * A GitHub failure other than "not found" throws; draftSourceFor turns it
+ * into a wait with `terminal_draft_unreadable` (never "no draft yet").
  */
 async function fetchTerminalDraft(opportunityId, { gh = require('../content-astro/github-client'), expectedBriefId } = {}) {
   const t0 = Date.now();
@@ -147,6 +146,30 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
   if (problem) return invalid(problem);
   const draft = Object.fromEntries(DRAFT_FIELDS.filter((f) => parsed[f] != null).map((f) => [f, parsed[f]]));
   return result({ ok: true, draft, brief_id: expectedBriefId, revision });
+}
+
+/**
+ * Where runNext gets the draft for this brief when it is the terminal's to
+ * write: an object with agent-dispatcher's own runWithBrief contract, so the
+ * runner's dispatch code is the same for both. Null = the agent writes it
+ * (gate off, a dry run, a title/meta rewrite).
+ *
+ * `handed` says the brief is the stored one the row already waits on; only
+ * then can a draft exist for it. A result with `wait: true` means "no usable
+ * draft yet" (missing, rejected, or GitHub could not be read): the runner
+ * records the run as waiting and looks again later. A read failure waits too
+ * and never fails the run: a failed run would stop the row waiting on its
+ * brief and orphan a draft that is already pushed.
+ */
+function draftSourceFor(opportunityId, brief, { handed = false, dryRun = false, gh } = {}) {
+  if (dryRun || !writesInTerminal(brief)) return null;
+  return {
+    async runWithBrief() {
+      const fetched = await fetchTerminalDraft(opportunityId, { ...(gh ? { gh } : {}), expectedBriefId: handed ? brief.id : null })
+        .catch((err) => ({ ok: false, code: UNREADABLE, reason: `terminal draft could not be read: ${err.message}`, agent_id: TERMINAL_AGENT_ID, session_id: null }));
+      return fetched.ok ? fetched : { ...fetched, wait: true };
+    },
+  };
 }
 
 /**
@@ -234,11 +257,37 @@ async function closeTerminalItems({ now = new Date(), deps = {} } = {}) {
   return episodes.closeAdminAlertKeys(conn, open, 'terminal_writer_off', { now, resolution: 'Cleared: the portal writes these drafts itself again' });
 }
 
-/** True while today's terminal item stands: the owner has been told a post waits. */
-async function terminalItemOpenToday({ now = new Date(), deps = {} } = {}) {
-  const episodes = deps.episodes || require('../admin-alert-episodes');
-  const open = await episodes.openAdminAlertKeys(deps.db || db, ALERT_KEY_PREFIX);
-  return open.includes(`${ALERT_KEY_PREFIX}${etDateString(now)}`);
+/**
+ * True when a blog waits for its terminal draft AND today's item stands, so
+ * the owner has been told. The blog drought alert reads this: "no blog today"
+ * is false news then. False when the gate is off, when only other page types
+ * wait, when the item was suppressed or closed, and on any read failure (the
+ * drought alert is the fallback signal, so doubt keeps it).
+ */
+async function blogDraftRequested({ now = new Date(), deps = {} } = {}) {
+  if (!terminalWriterLive()) return false;
+  try {
+    const conn = deps.db || db;
+    const episodes = deps.episodes || require('../admin-alert-episodes');
+    const open = await episodes.openAdminAlertKeys(conn, ALERT_KEY_PREFIX);
+    if (!open.includes(`${ALERT_KEY_PREFIX}${etDateString(now)}`)) return false;
+    const { rows } = await conn.raw(`
+      SELECT 1 FROM (
+        SELECT DISTINCT ON (r.opportunity_id) r.outcome, r.action_type
+          FROM autonomous_runs r
+          JOIN opportunity_queue q ON q.id = r.opportunity_id
+         WHERE q.status = 'pending'
+           AND r.created_at >= now() - (?::int * interval '1 day')
+           AND NOT (r.outcome = ? AND r.agent_id IS NULL)
+         ORDER BY r.opportunity_id, r.created_at DESC
+      ) latest
+      WHERE outcome = ? AND action_type = 'new_supporting_blog'
+      LIMIT 1`, [AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME]);
+    return rows.length > 0;
+  } catch (err) {
+    logger.warn(`[terminal-writer] could not tell whether a blog waits for its draft: ${err.message}`);
+    return false;
+  }
 }
 
 const describe = (r) => `${String(r.action_type || 'post').replace(/_/g, ' ')}: ${r.query || r.page_url || [r.service, r.city].filter(Boolean).join(' in ') || 'untitled'}`;
@@ -260,7 +309,7 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
   await episodes.closeAdminAlertKeys(conn, stale, 'drafts_written', { now, resolution: 'Cleared: these website posts no longer wait for a draft' });
   logger.info(`[terminal-writer] ${n} waiting for a draft, ${written.length} written, ${rebrief.length} waiting for a retry brief`);
   const counts = { due: n, written: written.length, rebrief: rebrief.length };
-  if (!n) return counts;
+  if (!n) return { ...counts, delivered: false };
 
   const composed = require('../admin-alert-compose').composeAdminAlert({
     area: 'Content',
@@ -272,9 +321,12 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
     doneWhen: 'drafts_written',
     who: 'claude',
   });
-  await episodes.raiseAdminAlertWithReopen('content', composed.headline, composed.why, {
+  const raised = await episodes.raiseAdminAlertWithReopen('content', composed.headline, composed.why, {
     link: composed.link,
     metadata: composed.metadata,
+    // `content` is not on the bell policy's default list; this item asks the
+    // owner for work, so it rings unless the owner turned the category off.
+    bellDefault: true,
     dedupeKey: todayKey,
     // What is due, so the same list is a plain dedupe and a changed one is a rewrite.
     dedupeVersion: crypto.createHash('sha1').update(due.map((r) => `${r.opportunity_id}:${r.brief_id}`).sort().join('|')).digest('hex').slice(0, 16),
@@ -287,11 +339,13 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
       ...(rebrief.length ? ['', `Waiting for a new brief at the next run: ${rebrief.length}`] : []),
     ].join('\n'),
   });
-  return counts;
+  // An item the bell policy (or the owner's own setting) suppressed was not
+  // delivered: callers must not treat the owner as told.
+  return { ...counts, delivered: raised?.suppressed !== true };
 }
 
 module.exports = {
-  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, terminalItemOpenToday,
+  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
   branchFor, draftPathFor, draftProblem,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
 };

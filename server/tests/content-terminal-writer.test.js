@@ -94,6 +94,36 @@ describe('fetchTerminalDraft', () => {
   });
 });
 
+describe('draftSourceFor: the terminal as a draft source with the dispatcher\'s contract', () => {
+  const saved = { ...process.env };
+  beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; });
+  afterEach(() => { process.env = { ...saved }; });
+  const brief = { id: BRIEF, action_type: 'new_supporting_blog', page_type: 'supporting-blog' };
+
+  test('no source (the agent writes) with the gate off, on a dry run, and for a title/meta rewrite', () => {
+    expect(tw.draftSourceFor(ID, brief, { handed: true, dryRun: true })).toBeNull();
+    expect(tw.draftSourceFor(ID, { ...brief, action_type: 'rewrite_title_meta', page_type: 'metadata' }, { handed: true })).toBeNull();
+    process.env.GATE_CONTENT_WRITER_TERMINAL = 'false';
+    expect(tw.draftSourceFor(ID, brief, { handed: true })).toBeNull();
+  });
+
+  test('a usable draft is returned as the dispatcher would return one', async () => {
+    const out = await tw.draftSourceFor(ID, brief, { handed: true, gh: ghWith(good()) }).runWithBrief();
+    expect(out).toMatchObject({ ok: true, brief_id: BRIEF, revision: 'commit-1' });
+    expect(out.wait).toBeUndefined();
+  });
+
+  test('a brief that was not handed out yet, a missing or rejected file, and a GitHub failure all WAIT', async () => {
+    const unread = ghWith(good());
+    expect(await tw.draftSourceFor(ID, brief, { handed: false, gh: unread }).runWithBrief()).toMatchObject({ ok: false, wait: true, code: tw.MISSING });
+    expect(unread.getBranchSha).not.toHaveBeenCalled();
+    expect(await tw.draftSourceFor(ID, brief, { handed: true, gh: ghWith('{nope') }).runWithBrief()).toMatchObject({ ok: false, wait: true, code: tw.INVALID });
+    const down = ghWith(good());
+    down.getBranchSha.mockRejectedValue(Object.assign(new Error('Bad Gateway'), { status: 502 }));
+    expect(await tw.draftSourceFor(ID, brief, { handed: true, gh: down }).runWithBrief()).toMatchObject({ ok: false, wait: true, code: tw.UNREADABLE, agent_id: 'terminal-writer' });
+  });
+});
+
 describe('retireTerminalDraft', () => {
   test('deletes the branch while it still points at the commit that was read', async () => {
     const gh = ghWith(good());
@@ -181,12 +211,13 @@ describe('waiting rows and the admin item', () => {
   test('rows due: one item for today through the reopen mechanism, versioned by what is due; earlier days are closed', async () => {
     const now = new Date('2026-10-09T13:00:00Z');
     const d = deps({ rows: [waiting(ID), waiting(C)], branches: { [C]: '{bad' }, openKeys: ['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09'] });
-    expect(await tw.raiseTerminalDue({ now, deps: d })).toEqual({ due: 2, written: 0, rebrief: 0 });
+    expect(await tw.raiseTerminalDue({ now, deps: d })).toEqual({ due: 2, written: 0, rebrief: 0, delivered: true });
     expect(d.episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-08']);
     const [category, title, why, opts] = d.episodes.raiseAdminAlertWithReopen.mock.calls[0];
     expect([category, title]).toEqual(['content', 'Content — write 2 website posts in the terminal']);
     expect(why).toBe('The content queue has 2 posts that wait for a draft from the terminal.');
-    expect(opts).toMatchObject({ dedupeKey: 'content-terminal-due:2026-10-09', refreshOnDedupe: true, link: '/admin/blog?tab=autopilot' });
+    // bellDefault: the content category is off the bell policy's default list; this item asks for work
+    expect(opts).toMatchObject({ dedupeKey: 'content-terminal-due:2026-10-09', refreshOnDedupe: true, link: '/admin/blog?tab=autopilot', bellDefault: true });
     expect(opts.metadata).toMatchObject({ severity: 'needs-you', doneWhen: 'drafts_written', who: 'claude' });
     expect(opts.ringOnRefresh()).toBe(false);
     expect(opts.detail).toContain('topic aa');
@@ -201,10 +232,16 @@ describe('waiting rows and the admin item', () => {
     expect(other.episodes.raiseAdminAlertWithReopen.mock.calls[0][3].dedupeVersion).not.toBe(versions[0]);
   });
 
+  test('an item the bell policy suppressed is reported as not delivered', async () => {
+    const d = deps({ rows: [waiting(ID)] });
+    d.episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: null, suppressed: true, rang: false });
+    expect(await tw.raiseTerminalDue({ now: new Date('2026-10-09T13:00:00Z'), deps: d })).toMatchObject({ due: 1, delivered: false });
+  });
+
   test('nothing due: no item, and today\'s open item is closed too; a row that waits for its retry brief raises nothing', async () => {
     const now = new Date('2026-10-09T17:00:00Z');
     const d = deps({ rows: [waiting(B), waiting(R, { outcome: tw.GATE_RETRY_OUTCOME, agent_id: tw.TERMINAL_AGENT_ID })], branches: { [B]: draftFor(B) }, openKeys: ['content-terminal-due:2026-10-09'] });
-    expect(await tw.raiseTerminalDue({ now, deps: d })).toEqual({ due: 0, written: 1, rebrief: 1 });
+    expect(await tw.raiseTerminalDue({ now, deps: d })).toEqual({ due: 0, written: 1, rebrief: 1, delivered: false });
     expect(d.episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(d.episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-09']);
   });
@@ -220,9 +257,26 @@ describe('the gate as a kill switch, and the 1pm catch-up', () => {
     expect(e.closeAdminAlertKeys.mock.calls[0][2]).toBe('terminal_writer_off');
   });
 
-  test('terminalItemOpenToday is true only while today\'s item stands', async () => {
+  describe('blogDraftRequested: is the drought alert false news?', () => {
+    const saved = { ...process.env };
+    beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; });
+    afterEach(() => { process.env = { ...saved }; });
     const now = new Date('2026-10-09T17:00:00Z');
-    expect(await tw.terminalItemOpenToday({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: {} } })).toBe(true);
-    expect(await tw.terminalItemOpenToday({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-08']), db: {} } })).toBe(false);
+    const withBlog = (rows) => ({ raw: jest.fn(async () => ({ rows })) });
+
+    test('true only when today\'s item stands AND a blog waits', async () => {
+      expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: withBlog([{}]) } })).toBe(true);
+      // the item is open but only other page types wait
+      expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: withBlog([]) } })).toBe(false);
+      // a blog waits but today's item is not open (never raised, suppressed, or closed)
+      expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-08']), db: withBlog([{}]) } })).toBe(false);
+    });
+
+    test('false with the gate off and on any read failure: the drought alert is the fallback signal', async () => {
+      const failing = { openAdminAlertKeys: jest.fn(async () => { throw new Error('db down'); }) };
+      expect(await tw.blogDraftRequested({ now, deps: { episodes: failing, db: withBlog([{}]) } })).toBe(false);
+      process.env.GATE_CONTENT_WRITER_TERMINAL = 'false';
+      expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: withBlog([{}]) } })).toBe(false);
+    });
   });
 });

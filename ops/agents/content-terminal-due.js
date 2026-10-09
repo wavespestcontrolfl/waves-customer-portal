@@ -51,8 +51,15 @@ async function writingPack(opportunityId) {
   const { due, written } = await tw.awaitingTerminalDrafts();
   const row = [...due, ...written].find((r) => r.opportunity_id === opportunityId);
   if (!row) throw new Error('that row does not wait for a terminal draft');
-  const brief = await db('content_briefs').where('id', row.brief_id).first();
-  if (!brief) throw new Error('the brief for that row was not found');
+  const stored = await db('content_briefs').where('id', row.brief_id).first();
+  if (!stored) throw new Error('the brief for that row was not found');
+  // The brief as the writer agent gets it from get_content_brief: JSON columns
+  // parsed, and seo_requirements computed (it is derived, not a column).
+  const brief = { ...stored };
+  for (const col of ['score_breakdown', 'serp_signal', 'gsc_signal', 'customer_signal', 'conversion_signal', 'required_sections', 'schema_types', 'internal_links_to_add', 'voice_constraints', 'facts_pack']) {
+    if (typeof brief[col] === 'string') { try { brief[col] = JSON.parse(brief[col]); } catch { /* leave as stored */ } }
+  }
+  brief.seo_requirements = require(server('services', 'content', 'blog-seo-contract')).buildSeoRequirements(brief);
   const config = writerConfigFor(brief);
   return {
     opportunity_id: opportunityId,

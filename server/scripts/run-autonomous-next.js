@@ -57,6 +57,8 @@ function redactCli(value) {
     // and race the per-day/week caps. Dry runs never publish, so they skip the lock.
     const runOnce = () => runner.runNext({ dryRun: !LIVE, minScore: MIN_SCORE });
     const result = LIVE ? await runner._withEngineLock('manual-runNext', runOnce) : await runOnce();
+    // Terminal writer: the same after-run step the daily batch takes.
+    if (LIVE) await runner.settleTerminalWork([result]);
 
     console.log(`Outcome:           ${result.outcome}`);
     if (result.skip_reason) console.log(`Skip reason:       ${redactCli(result.skip_reason)}`);
