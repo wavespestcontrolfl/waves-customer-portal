@@ -21,13 +21,15 @@ const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
 const INTERRUPT_TIMEOUT_MS = 5000;
 
-// Cents, list price. About 3 to 5 times a normal run of each lane (ledger,
-// Sep 25 to Oct 8 2026). AGENT_SESSION_BUDGET_CENTS_<LANE> overrides one.
+// Cents, list price. Sized from the sessions' own `usage.list_cost` on
+// 2026-10-08: a blog write or refresh ran 56 to 401 cents, a lead reply 22 to
+// 31. About 3 times the largest normal run; the meta, backlink and briefing
+// lanes had no recent run to read. AGENT_SESSION_BUDGET_CENTS_<LANE> overrides one.
 const DEFAULT_BUDGET_CENTS = Object.freeze({
-  agent_content: 500,
+  agent_content: 1000,
   agent_meta: 100,
   agent_backlink: 500,
-  agent_bi: 150,
+  agent_bi: 300,
   agent_lead: 100,
 });
 
