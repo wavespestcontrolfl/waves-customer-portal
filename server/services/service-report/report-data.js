@@ -1,7 +1,7 @@
 const { lawnScoreValue, resolveStressDamage, calculateLawnOverallScore } = require('../../../shared/lawn-scores.cjs');
 const crypto = require('crypto');
 const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
-const { irrigationRateOptions } = require('../irrigation-rates');
+const { irrigationRateOptions, storedRateTable } = require('../irrigation-rates');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
@@ -646,7 +646,9 @@ function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
 // plan renders no card.
 function buildReportWeekPlan(snapshot, assessmentServiceDate) {
   // Compare against the runtime Monday's decision saw, never today's prefs.
-  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+  // The head rate table is the one the snapshot was decided on (decisionInputs.rateTable), never today's gate.
+  const rateTable = storedRateTable(snapshot.decisionInputs);
+  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null, rateTable });
   // The card credits a REQUIRED watering-in against the plan only when
   // this visit sits inside the plan week — a reopened older report
   // loads the current week's snapshot and must not count a treatment
@@ -661,7 +663,7 @@ function buildReportWeekPlan(snapshot, assessmentServiceDate) {
   // force. The literal token is filled (or the key dropped) by
   // applyAfterHoldOverlay once the visit's instruction is known.
   const afterHold = featureGates.lawnWateringRuleLive()
-    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null, rateTable })
     : null;
   return rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessmentServiceDate), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
 }

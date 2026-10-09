@@ -283,6 +283,40 @@ const SKIP = !process.env.DATABASE_URL;
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
   }, 30000);
 
+  test.each([
+    { decidedOn: 'off', retryOn: 'on' },
+    { decidedOn: 'on', retryOn: 'off' },
+  ])('GATE_IRRIGATION_OWNER_RATES flipped $decidedOn -> $retryOn after publication keeps the plan, its minutes and the pending email', async ({ decidedOn }) => {
+    const setOwnerRates = (on) => { if (on) process.env.GATE_IRRIGATION_OWNER_RATES = 'true'; else delete process.env.GATE_IRRIGATION_OWNER_RATES; };
+    try {
+      setOwnerRates(decidedOn === 'on');
+      await resetDraft();
+      EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'synthetic-rejection' });
+      expect(await runWeeklyIrrigationEmailSweep({ now })).toMatchObject({ published: 1, sent: 0, failed: 1 });
+      const original = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+      const inputs = typeof original.weather_inputs === 'string' ? JSON.parse(original.weather_inputs) : original.weather_inputs;
+      expect(inputs.rateTable).toBe(decidedOn === 'on' ? 'owner' : undefined);
+      const firstCall = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+      const before = await loadCustomerWateringPlan(customerId, { now });
+      expect(before).not.toBeNull();
+      // The gate flips with the plan published and its email pending.
+      setOwnerRates(decidedOn !== 'on');
+      const after = await loadCustomerWateringPlan(customerId, { now });
+      expect(after).toEqual(before);
+      await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ claimed_at: new Date(Date.now() - 180000) });
+      fetchServiceWeekWeather.mockRejectedValue(new Error('A retry must use frozen weather'));
+      const retry = await runWeeklyIrrigationEmailSweep({ now: new Date('2026-09-07T15:00:00Z') });
+      expect(retry).toMatchObject({ published: 0, sent: 1, failed: 0 });
+      expect(retry.plan.unavailable).toBe(0);
+      expect(EmailTemplateLibrary.sendTemplate.mock.calls[1][0].payload).toEqual(firstCall.payload);
+      const final = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+      expect(final.decision_hash).toBe(original.decision_hash);
+      expect(final.sent_at).not.toBeNull();
+    } finally {
+      delete process.env.GATE_IRRIGATION_OWNER_RATES;
+    }
+  }, 30000);
+
   test('reads repair a published plan email stamp after both post-send writes fail, preserving its availability pin', async () => {
     await resetDraft();
     mockFailedSentWrites = 2;

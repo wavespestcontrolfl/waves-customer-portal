@@ -113,21 +113,20 @@ describe('Monday plan (decideWeekPlan) and its generic sentences', () => {
   });
 
   test('gate on: the same sentences, computed from the owner table (30 and 80)', () => {
-    gateOn();
-    const email = renderWeekPlanEmail(EVENTS_ONLY, CTX);
+    const OWNER = { ...CTX, rateTable: 'owner' };
+    const email = renderWeekPlanEmail(EVENTS_ONLY, OWNER);
     expect(email.week_plan).toContain('run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 30 minutes on spray zones and 80 on rotor zones');
-    expect(renderWeekPlanEmail(HOLD, CTX).week_plan).toContain('one full cycle on each turf zone (½ to ¾ inch — about 30 minutes on spray zones, 80 on rotor zones)');
-    expect(renderWeekPlanReport(HOLD, { restriction: ONE_DAY }).detail).toContain('(½ to ¾ inch — about 30 minutes on spray zones, 80 on rotor zones)');
-    expect(renderWeekPlanReport(CONDITIONAL, { restriction: ONE_DAY }).detail).toContain('(½ to ¾ inch — about 30 minutes on spray zones, 80 on rotor zones)');
-    const all = JSON.stringify([email, renderWeekPlanReport(HOLD, { restriction: ONE_DAY }), renderWeekPlanReport(CONDITIONAL, { restriction: ONE_DAY })]);
+    expect(renderWeekPlanEmail(HOLD, OWNER).week_plan).toContain('one full cycle on each turf zone (½ to ¾ inch — about 30 minutes on spray zones, 80 on rotor zones)');
+    expect(renderWeekPlanReport(HOLD, { restriction: ONE_DAY, rateTable: 'owner' }).detail).toContain('(½ to ¾ inch — about 30 minutes on spray zones, 80 on rotor zones)');
+    expect(renderWeekPlanReport(CONDITIONAL, { restriction: ONE_DAY, rateTable: 'owner' }).detail).toContain('(½ to ¾ inch — about 30 minutes on spray zones, 80 on rotor zones)');
+    const all = JSON.stringify([email, renderWeekPlanReport(HOLD, { restriction: ONE_DAY, rateTable: 'owner' }), renderWeekPlanReport(CONDITIONAL, { restriction: ONE_DAY, rateTable: 'owner' })]);
     expect(all).not.toMatch(/about 20 minutes on spray/);
   });
 
   test('the "typical rates" note drops the University of Florida attribution only with the gate on', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     expect(renderWeekPlanEmail(plan, CTX).plan_note).toContain('Minutes assume typical spray heads rates from University of Florida turf guidance.');
-    gateOn();
-    const note = renderWeekPlanEmail(plan, CTX).plan_note;
+    const note = renderWeekPlanEmail(plan, { ...CTX, rateTable: 'owner' }).plan_note;
     expect(note).toContain('Minutes assume typical spray heads rates. If you know');
     expect(note).not.toMatch(/University of Florida/);
   });
@@ -137,11 +136,11 @@ describe('weekly email, report figure and schedule guard', () => {
   const derivedFor = (rates) => deriveIrrigationInchesPerWeek({ runMinutes: 30, wateringDays: ['Mon', 'Thu'], systemType: ['spray'] }, rates ? { rates } : undefined);
 
   test('the schedule provenance sentence: UF attribution off; plain "typical rate" on, with the owner rate per hour', () => {
-    const args = (derived) => ({ scheduleSource: 'portal_derived', derived, scheduleFmt: String(derived.inchesPerWeek) });
+    const args = (derived, rateTable) => ({ scheduleSource: 'portal_derived', derived, scheduleFmt: String(derived.inchesPerWeek), rateTable });
     const off = weeklyEmail._private.buildScheduleNote(args(derivedFor()));
     expect(off).toContain('using the typical spray heads rate from University of Florida turf guidance (about 1.5" per hour).');
     gateOn();
-    const on = weeklyEmail._private.buildScheduleNote(args(derivedFor(OWNER_HEAD_RATE_IN_PER_HR)));
+    const on = weeklyEmail._private.buildScheduleNote(args(derivedFor(OWNER_HEAD_RATE_IN_PER_HR), 'owner'));
     expect(on).toContain('using the typical spray heads rate (about 1" per hour).');
     expect(on).not.toMatch(/University of Florida/);
   });

@@ -9,6 +9,11 @@
  *   deriveIrrigationInchesPerWeek(input, irrigationRateOptions())
  *   resolveApplicationRate(input, irrigationRateOptions())  /  buildWeekPlan({ ..., rates: irrigationRates() })
  * A customer's MEASURED rate (typed weekly inches plus a runtime) outranks either table, unchanged.
+ *
+ * FREEZE RULE (Codex round 1 on #6236): the live gate is read only when a NEW week-plan decision is made. That decision
+ * records the table it used in its snapshot's decisionInputs as `rateTable: 'owner'` (key written ONLY for the owner
+ * table, so a gate-off snapshot is byte-identical to before). Replay and every renderer of a STORED plan take the table
+ * from that key through storedRateTable(); a row without the key is the package table, whatever the gate reads now.
  */
 const { HEAD_PRECIP_RATE_IN_PER_HR, OWNER_HEAD_RATE_IN_PER_HR } = require('@waves/irrigation-runtime');
 
@@ -27,4 +32,42 @@ function irrigationRateOptions() {
   return { rates: irrigationRates() };
 }
 
-module.exports = { irrigationRates, irrigationRateOptions, irrigationOwnerRatesLive };
+// 'owner' | 'package': the table a NEW decision uses (the live gate).
+function liveRateTable() {
+  return irrigationOwnerRatesLive() ? 'owner' : 'package';
+}
+
+// The table a STORED decision used: its decisionInputs.rateTable, else the package table (legacy rows). Never the gate.
+function storedRateTable(decisionInputs) {
+  return decisionInputs && decisionInputs.rateTable === 'owner' ? 'owner' : 'package';
+}
+
+// Anything that is not exactly 'owner' or 'package' (including undefined) means "decide now": read the live gate.
+function resolveRateTable(table) {
+  return table === 'owner' || table === 'package' ? table : liveRateTable();
+}
+
+function ratesForTable(table) {
+  return table === 'owner' ? OWNER_HEAD_RATE_IN_PER_HR : HEAD_PRECIP_RATE_IN_PER_HR;
+}
+
+function rateOptionsForTable(table) {
+  return { rates: ratesForTable(table) };
+}
+
+// What a snapshot's decisionInputs carries: the key only for the owner table, so a package-table snapshot is unchanged.
+function rateTableInputs(table) {
+  return table === 'owner' ? { rateTable: 'owner' } : {};
+}
+
+module.exports = {
+  irrigationRates,
+  irrigationRateOptions,
+  irrigationOwnerRatesLive,
+  liveRateTable,
+  storedRateTable,
+  resolveRateTable,
+  ratesForTable,
+  rateOptionsForTable,
+  rateTableInputs,
+};
