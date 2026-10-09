@@ -24,6 +24,7 @@ const { WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
 const { balanceOf } = require('./irrigation-advice');
 const { instructionCarriesWatering, sodIsEstablished } = require('./lawn-longer-cycles');
 const { scheduleUnconfirmedAfterMove, rainSensorConfirmedAfterMove } = require('../irrigation-schedule-confirmation');
+const { liveRateTable } = require('../irrigation-rates');
 const COPY = require('../../../shared/lawn-water-rain-copy.json');
 const { wiltSigns: WILT_SIGNS } = require('../../../shared/watering-copy.json');
 
@@ -142,7 +143,7 @@ const SENSOR_TRUE = new Set([true, 't']);
 function rainCardDecision(prefs, visitDate) {
   if (prefs === undefined) return { rainCard: false, rainSensorLine: false };
   if (prefs === null) return { rainCard: true, rainSensorLine: true };
-  const allowed = sodIsEstablished(prefs, visitDate) && !scheduleUnconfirmedAfterMove(prefs);
+  const allowed = sodIsEstablished(prefs, visitDate) && !scheduleUnconfirmedAfterMove(prefs, liveRateTable());
   const hasSensor = rainSensorConfirmedAfterMove(prefs) && SENSOR_TRUE.has(prefs.rain_sensor);
   return { rainCard: allowed, rainSensorLine: allowed && !hasSensor };
 }

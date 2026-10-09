@@ -229,6 +229,13 @@ describe('the rain sensor line', () => {
     expect(decide('t')).toBe(false);
     [false, null, undefined, 'f', 0].forEach((value) => expect(decide(value)).toBe(true));
   });
+
+  // The move guard needs a rate table since the one-rate-table change; the freeze is a live read, so it passes the live one.
+  test('a customer who moved, with an unconfirmed schedule, gets no rain card (and the guard is given a rate table)', () => {
+    const moved = { sod_laid_on: null, rain_sensor: false, irrigation_home_changed_at: '2026-06-01T00:00:00Z', irrigation_run_minutes: 30, irrigation_confirmed_fields: '[]' };
+    expect(rain.rainCardDecision(moved, '2026-07-15')).toEqual({ rainCard: false, rainSensorLine: false });
+    expect(rain.rainCardDecision({ ...moved, irrigation_confirmed_fields: '["irrigation_run_minutes"]' }, '2026-07-15').rainCard).toBe(true);
+  });
 });
 
 describe('the snapshot path (no property rain, an area snapshot instead)', () => {
