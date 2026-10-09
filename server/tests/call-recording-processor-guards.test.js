@@ -132,6 +132,12 @@ describe('call recording appointment guardrails', () => {
       appointment_confirmed: true,
       call_summary: 'The caller confirmed their 4:30 PM appointment with Waves Pest Control.',
     }).service).not.toBe('General Pest Control');
+    expect(resolveSchedulableCallService({
+      requested_service: null,
+      matched_service: null,
+      appointment_confirmed: true,
+      call_summary: 'The caller confirmed a Waves Pest Control appointment for 4:30 PM.',
+    }).service).not.toBe('General Pest Control');
     // Wildlife and non-service calls no longer resolve a service from the name.
     for (const summary of [
       'A roofing contractor called Waves Pest Control seeking assistance with bats in an attic.',
