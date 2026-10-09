@@ -67,7 +67,8 @@ describe('celsiusWindow: the window the Celsius count used, from the same window
     expect(body.celsiusWindow).toBe('rolling365');
     expect(body.celsiusApplicationsThisYear).toBe(0);
     expect(countStart()).toBe(require('../services/application-limits').windowFor(etDateString(), 'rolling365').start);
-    expect(countStart() < `${etDateString().slice(0, 4)}-01-02`).toBe(true);
+    // Not the calendar-year start (on 30 and 31 December of a leap year the rolling start is after 1 January).
+    expect(countStart()).not.toBe(`${etDateString().slice(0, 4)}-01-01`);
   });
 
   test('gate off: calendar_year and a count that starts on 1 January', async () => {
