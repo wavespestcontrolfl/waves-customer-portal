@@ -80,7 +80,9 @@ function stubFetch({ prefs = {}, newSod = NEW_SOD, newSodFails = false, onPut } 
     if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
     if (path.includes('/admin/customers/customer-a/new-sod')) {
       if (newSodFails) return Promise.reject(new Error('network'));
-      return response({ newSod: typeof newSod === 'function' ? newSod(path) : newSod });
+      const value = typeof newSod === 'function' ? newSod(path) : newSod;
+      // A function may return a promise (a held request).
+      return typeof value?.then === 'function' ? value.then((body) => response({ newSod: body })) : response({ newSod: value });
     }
     if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
       return onPut(JSON.parse(options.body), options);
@@ -273,6 +275,24 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     await screen.findAllByText('Avery Customer');
     fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
     expect(await screen.findByTestId('sod-read-warning')).toHaveTextContent(warning);
+  });
+
+  it('while the summary is loading the read view says so, and shows no lines from an earlier answer', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    stubFetch({
+      prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null },
+      newSod: () => gate.then(() => ({ ...NEW_SOD, holdLines: [{ key: 'fertilizer', active: true, text: 'Fertilizer is held until Oct 31, 2026.' }] })),
+      onPut: () => response({}),
+    });
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    expect(await screen.findByTestId('sod-loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('sod-hold-lines')).not.toBeInTheDocument();
+    release();
+    expect(await screen.findByText('Fertilizer is held until Oct 31, 2026.')).toBeInTheDocument();
+    expect(screen.queryByTestId('sod-loading')).not.toBeInTheDocument();
   });
 
   it('a failed sod read is stated on the read view, never shown as no warning', async () => {

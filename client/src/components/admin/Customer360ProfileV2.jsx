@@ -7047,6 +7047,9 @@ function AccessPrefsSodReadBlock({ p, sodInfo }) {
       <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
       <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
       <AccessPrefRow label="Covers" value={covers} />
+      {sodInfo?.loading && (
+        <div className="text-ui-label text-ink-secondary" data-testid="sod-loading">Checking the hold dates and pre-emergent history…</div>
+      )}
       <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />
       {/* The saved record's warning stays on the read view: a fast Save can close the form before the form's own check returns. */}
       {sodInfo?.preEmergentWarning && (
@@ -7264,7 +7267,10 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
           Save to see the hold dates for this change.
         </div>
       )}
-      {sodInfo && (
+      {sodInfo?.loading && (
+        <div className="text-ui-label text-ink-secondary" data-testid="sod-loading">Checking the pre-emergent history…</div>
+      )}
+      {sodInfo && !sodInfo.loading && (
         <div className="text-ui-label text-ink-secondary" data-testid="sod-last-pre-emergent">
           {last
             ? `Last pre-emergent by Waves: ${last.dateText} (${last.product})`
@@ -7731,6 +7737,8 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   useEffect(() => {
     if (!isAdmin) return undefined;
     const mine = ++sodSeq.current;
+    // Not loaded yet is its own state: the lines of the last answer (or none) must not stand beside a newer record.
+    setSodInfo({ loading: true });
     const query = typedSodDate === null ? "" : `?sodLaidOn=${encodeURIComponent(typedSodDate)}`;
     adminFetch(`/admin/customers/${customerId}/new-sod${query}`)
       .then((data) => { if (mine === sodSeq.current) setSodInfo(data?.newSod || null); })
