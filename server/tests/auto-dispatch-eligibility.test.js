@@ -207,7 +207,8 @@ describe('isPersonPlacedVisit', () => {
     const slotChanged = (r) => r.original_date !== r.new_date || r.original_window !== r.new_window;
     return (table) => {
       if (table === 'scheduled_services') {
-        return { where: () => ({ first: async () => { if (fail) throw new Error('connection reset'); return row; } }) };
+        const read = { forShare: () => read, first: async () => { if (fail) throw new Error('connection reset'); return row; } };
+        return { where: () => read };
       }
       if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
       const preds = [];
@@ -340,6 +341,12 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(visit, locked, { refresh: true })).toMatchObject({ placed: true, reason_code: 'MANUALLY_LOCKED' });
     const stamped = fakeDb({ log: [], row: { auto_dispatch_locked: false, date_exception: true, date_exception_source: 'admin', date_exception_at: '2026-10-07T01:00:00Z' } });
     expect(await isPersonPlacedVisit(visit, stamped, { refresh: true })).toMatchObject({ placed: true, reason_description: 'Date chosen by staff (date edit)' });
+  });
+
+  test('refresh sees a confirmation that landed after the snapshot (Codex #6207 r3 P2)', async () => {
+    const confirmed = fakeDb({ log: [], row: { auto_dispatch_locked: false, customer_confirmed: true } });
+    expect(await isPersonPlacedVisit(visit, confirmed)).toEqual({ placed: false }); // snapshot only
+    expect(await isPersonPlacedVisit(visit, confirmed, { refresh: true })).toMatchObject({ placed: true, reason_code: 'CUSTOMER_CONFIRMED' });
   });
 
   test('refresh fails closed and degraded on a read error', async () => {

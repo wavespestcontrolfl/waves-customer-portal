@@ -196,9 +196,13 @@ function personExceptionAt(service) {
 // opts.refresh: re-read the row's own staff lock and date-exception columns
 // through `db` first (the apply-time move guard holds a pre-transaction
 // snapshot; an edit-screen change lands only in those columns).
+// It also reads customer_confirmed and holds the row (FOR SHARE) until the
+// caller's transaction ends: a grouped sibling's CAS carries no confirmation
+// flag, so a confirmation that lands after the mover's pre-read must either
+// be seen here or wait for the move to commit (Codex #6207 r3 P2).
 async function refreshedPlacementRow(service, db) {
-  const fresh = await db('scheduled_services').where({ id: service.id })
-    .first('auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source', 'date_exception_at');
+  const fresh = await db('scheduled_services').where({ id: service.id }).forShare()
+    .first('auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source', 'date_exception_at', 'customer_confirmed');
   return fresh ? { ...service, ...fresh } : service;
 }
 
@@ -210,6 +214,11 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
     const service = opts.refresh ? await refreshedPlacementRow(input, db) : input;
     if (service.auto_dispatch_locked === true || service.auto_dispatch_excluded === true) {
       return { placed: true, reason_code: 'MANUALLY_LOCKED', reason_description: 'Locked from auto-dispatch by staff' };
+    }
+    // Only on the refreshed (apply-time) read: evaluation refuses a confirmed
+    // visit through isEligibleForAutoDispatch before it gets here.
+    if (opts.refresh && service.customer_confirmed === true) {
+      return { placed: true, reason_code: 'CUSTOMER_CONFIRMED', reason_description: 'Customer confirmed this visit' };
     }
     // The newest placement's rows, chosen entirely in SQL: created_at has
     // microsecond precision and a JS Date keeps only milliseconds, so the
