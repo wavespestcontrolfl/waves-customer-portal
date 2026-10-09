@@ -42,8 +42,16 @@ describe('sessionBudget', () => {
 });
 
 describe('stopAbandonedSession', () => {
+  const stop = (over = {}) => stopAbandonedSession({ laneId: 'agent_content', sessionId: 'sess-1', failure: 'session_timeout', pollMs: 1, settleMs: 50, ...over });
+  // POST = the interrupt; GET = the session, running for the first `runningPolls` reads.
+  const platform = (runningPolls = 0) => {
+    let reads = 0;
+    return jest.fn(async (_url, opts = {}) => ({ ok: true, status: 200, json: async () => (opts.method === 'POST' ? {} : { status: reads++ < runningPolls ? 'running' : 'idle' }) }));
+  };
+
   it('sends user.interrupt to a session whose runner failed', async () => {
-    await expect(stopAbandonedSession('sess-1', 'session_timeout')).resolves.toBe(true);
+    global.fetch = platform();
+    await expect(stop()).resolves.toBe(true);
     const [url, opts] = global.fetch.mock.calls[0];
     expect(url).toBe('https://api.anthropic.com/v1/sessions/sess-1/events');
     expect(opts.method).toBe('POST');
@@ -51,22 +59,37 @@ describe('stopAbandonedSession', () => {
     expect(JSON.parse(opts.body)).toEqual({ events: [{ type: 'user.interrupt' }] });
   });
 
+  it('returns only after the session stopped running, so the usage read next is settled', async () => {
+    global.fetch = platform(2);
+    await expect(stop()).resolves.toBe(true);
+    const reads = global.fetch.mock.calls.filter(([, opts]) => opts.method !== 'POST');
+    expect(reads).toHaveLength(3);
+    expect(reads[0][0]).toBe('https://api.anthropic.com/v1/sessions/sess-1');
+  });
+
+  it('gives up waiting at the limit and still reports the interrupt as sent', async () => {
+    global.fetch = platform(Infinity);
+    await expect(stop({ settleMs: 5 })).resolves.toBe(true);
+  });
+
   it('reads a thrown Error as a failure too', async () => {
-    await expect(stopAbandonedSession('sess-1', Object.assign(new Error('x'), { code: 'session_stream_eof' }))).resolves.toBe(true);
+    global.fetch = platform();
+    await expect(stop({ failure: Object.assign(new Error('x'), { code: 'session_stream_eof' }) })).resolves.toBe(true);
   });
 
   it.each([
-    ['a run that succeeded', 'sess-1', null],
-    ['a session already paused at its cap', 'sess-1', 'budget_exhausted'],
-    ['no session id', null, 'session_timeout'],
-  ])('sends nothing for %s', async (_label, sessionId, failure) => {
-    await expect(stopAbandonedSession(sessionId, failure)).resolves.toBe(false);
+    ['a run that succeeded', { failure: null }],
+    ['a session already paused at its cap', { failure: 'budget_exhausted' }],
+    ['no session id', { sessionId: null }],
+    ['the customer assistant, whose session takes the next turn', { laneId: 'agent_assistant' }],
+  ])('sends nothing for %s', async (_label, over) => {
+    await expect(stop(over)).resolves.toBe(false);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it('sends nothing with the gate off', async () => {
     delete process.env.GATE_AGENT_SESSION_GUARD;
-    await expect(stopAbandonedSession('sess-1', 'session_timeout')).resolves.toBe(false);
+    await expect(stop()).resolves.toBe(false);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
@@ -75,7 +98,7 @@ describe('stopAbandonedSession', () => {
     ['a network error', async () => { throw new Error('socket hang up'); }],
   ])('never throws on %s', async (_label, impl) => {
     global.fetch = jest.fn(impl);
-    await expect(stopAbandonedSession('sess-1', 'max_events')).resolves.toBe(false);
+    await expect(stop({ failure: 'max_events' })).resolves.toBe(false);
   });
 });
 
