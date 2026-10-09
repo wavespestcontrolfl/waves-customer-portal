@@ -14,7 +14,10 @@ jest.mock('../services/appointment-reminders', () => ({
   REMINDER_BLOCKING_STATUSES: new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show', 'rescheduled']),
   reminderRowCanSend: (row) => !!row && row.cancelled !== true && row.suppressed_by_sibling !== true && row.windows_preclosed !== true,
 }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }),
+  _private: { doneColumns: jest.fn(({ by, resolution, at }) => ({ done_at: at, done_by: by, resolution })) },
+}));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn().mockResolvedValue({ failed: false, frozen: new Set() }),
@@ -293,6 +296,42 @@ describe('reminder sync failure after a committed move', () => {
     db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: '2026-08-11T12:00:00Z' }, scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' } }));
     await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // A later move whose sync worked repaired the reminder: the visit's open
+  // reminder-sync notices close; a failed sync closes nothing (Codex #6208 r25 P2).
+  describe('closing a reminder-sync notice', () => {
+    const closer = () => {
+      const calls = { like: [], update: jest.fn().mockResolvedValue(1) };
+      const q = { where() { return this; }, whereNull() { return this; }, whereRaw(sql, b) { calls.like.push(b); return this; }, update: calls.update };
+      return { calls, q };
+    };
+    const withNotifications = (q) => { const read = db.getMockImplementation(); db.mockImplementation((table) => (table === 'notifications' ? q : read(table))); };
+
+    test('a sync that returned the reminder record closes this visit\'s notices', async () => {
+      AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: true });
+      movableQueue();
+      const { calls, q } = closer();
+      withNotifications(q);
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(calls.like).toEqual([['auto-dispatch-reminder-sync:s1:%']]);
+      expect(calls.update).toHaveBeenCalledWith(expect.objectContaining({ title: 'Reminder time alert resolved', done_by: 'auto-dispatch' }));
+      expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('a failed sync with the reminder still on the old time closes nothing', async () => {
+      AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+      AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+      movableQueue();
+      db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' }, scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' } }));
+      const { calls, q } = closer();
+      q.select = async () => [];
+      withNotifications(q);
+      db.raw = jest.fn((x) => x);
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(calls.update).not.toHaveBeenCalled();
+      expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+    });
   });
 
   // A cancelled reminder, or one for a visit no longer open, cannot go out

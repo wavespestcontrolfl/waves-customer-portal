@@ -600,8 +600,39 @@ async function flagReminderSyncFailed(service, best) {
 // handleReschedule catches its own errors and returns null, as it does for a
 // visit with no reminder row. Tell the two apart by the row itself.
 async function flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best) {
-  if (reminderRecord) return;
-  if (await reminderOffNewSlot(AppointmentReminders, service)) await flagReminderSyncFailed(service, best);
+  if (reminderRecord) { await closeReminderSyncNotices(service.id); return; }
+  await checkMovedReminder(AppointmentReminders, service, best);
+}
+
+// The reminder of a moved row against its committed slot: off raises the
+// notice; in step (or unable to send) closes any notice an earlier move left
+// open for this visit.
+async function checkMovedReminder(AppointmentReminders, service, slot) {
+  if (await reminderOffNewSlot(AppointmentReminders, service)) await flagReminderSyncFailed(service, slot);
+  else await closeReminderSyncNotices(service.id);
+}
+
+// A later move whose sync succeeded repaired the reminder: close the open
+// reminder-sync notices of this visit, whatever slot they named (Codex #6208
+// r25 P2). The day's overflow notice has its own key and stays. Best-effort.
+const REMINDER_SYNC_RESOLVED_TITLE = 'Reminder time alert resolved';
+async function closeReminderSyncNotices(serviceId) {
+  try {
+    await db('notifications')
+      .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+      .whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${REMINDER_SYNC_KEY}${serviceId}:%`])
+      .update({
+        ...require('../notification-service')._private.doneColumns({
+          by: 'auto-dispatch', resolution: 'A later move updated the reminder', at: new Date(), keepExisting: true, conn: db,
+        }),
+        title: REMINDER_SYNC_RESOLVED_TITLE,
+        body: 'The reminder for this visit now names its current time.',
+        detail: null,
+      });
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder-sync notice close failed for ${serviceId}: ${err.message}`);
+  }
 }
 
 // The time the reminder should name: the committed row's canonical arrival
@@ -665,7 +696,7 @@ async function flagSiblingReminders(AppointmentReminders, service, best, sibling
   for (const sib of siblingMembers) {
     try {
       const row = { id: sib.id, customer_id: sib.customer_id || service.customer_id };
-      if (await reminderOffNewSlot(AppointmentReminders, row)) await flagReminderSyncFailed(row, siblingSlot(sib, best));
+      await checkMovedReminder(AppointmentReminders, row, siblingSlot(sib, best));
     } catch (err) {
       logger.warn(`[auto-dispatch] reminder check for grouped sibling ${sib && sib.id} failed: ${err.message}`);
     }
@@ -696,7 +727,7 @@ async function syncMovedReminders(service, best, moveResult, siblingMembers) {
     // The throw may come from the re-arm update, after the time was written:
     // tell staff only when the persisted reminder is really off the new slot
     // (an unreadable row counts as off: the sync itself threw).
-    if (await reminderOffNewSlot(AppointmentReminders, service)) await flagReminderSyncFailed(service, best);
+    await checkMovedReminder(AppointmentReminders, service, best);
   }
   await flagSiblingReminders(AppointmentReminders, service, best, siblingMembers);
 }
