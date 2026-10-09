@@ -169,27 +169,67 @@ describe('preflightPlaces: the /complete check of the places', () => {
     expect(limits.checkLimits).not.toHaveBeenCalled();
   });
 
-  test('the limit reader is asked at the place, as a proposal on the visit\'s date, the visit\'s own rows left out, with the row\'s own dose', async () => {
-    expect(await run([spot({ areaPlace: 'back', rate: 0.147, rateUnit: 'oz' })])).toBeNull();
+  test('the limit reader is asked at the place, as a proposal on the visit\'s date, the visit\'s own rows left out, with the row as the ledger will hold it', async () => {
+    expect(await run([spot({ areaPlace: 'back', rate: 0.147, rateUnit: 'oz', totalAmount: 0.05, amountUnit: 'oz', areaValue: 100.4, areaUnit: 'sqft' })])).toBeNull();
     expect(limits.checkLimits).toHaveBeenCalledTimes(1);
     const [customerId, productId, day, knex, options] = limits.checkLimits.mock.calls[0];
     expect([customerId, productId, knex]).toEqual(['cust-1', P_CEL, {}]);
     expect(day.getUTCFullYear()).toBe(2026);
-    expect(options).toEqual({ propertyId: svc.property_id, place: 'back', proposal: true, proposed: { ratePer1000: 0.147, unit: 'oz' }, excludeScheduledServiceId: svc.id });
+    expect(options).toEqual({
+      propertyId: svc.property_id, place: 'back', proposal: true, excludeScheduledServiceId: svc.id,
+      proposedRow: { application_rate: 0.147, rate_unit: 'oz', quantity_applied: 0.05, quantity_unit: 'oz', area_treated_sqft: 100 },
+    });
   });
 
-  test('a rate the sheet spelled with an underscore is read as the cap reads units; no rate sends no dose (the program\'s own dose counts)', async () => {
-    await run([spot({ areaPlace: 'back', rate: 1, rateUnit: 'fl_oz' }), spot({ productId: uuid(2), areaPlace: 'back' })]);
-    expect(limits.checkLimits.mock.calls[0][4].proposed).toEqual({ ratePer1000: 1, unit: 'fl oz' });
-    expect(limits.checkLimits.mock.calls[1][4].proposed).toBeUndefined();
+  test('a typed quantity with no rate carries the quantity and the whole-square-foot spot area; a "/gal" unit is stored as its base unit; no area or a non-sqft area carries none', () => {
+    expect(areas.proposedRow({ totalAmount: '2', amountUnit: 'fl_oz/gal', areaValue: 250, areaUnit: 'sqft' }))
+      .toEqual({ application_rate: null, rate_unit: null, quantity_applied: 2, quantity_unit: 'fl_oz', area_treated_sqft: 250 });
+    expect(areas.proposedRow({ totalAmount: 2, amountUnit: 'oz', areaValue: 40, areaUnit: 'linear_ft' }).area_treated_sqft).toBeNull();
+    expect(areas.proposedRow({ rate: 0.1, rateUnit: 'oz' })).toEqual({ application_rate: 0.1, rate_unit: 'oz', quantity_applied: null, quantity_unit: null, area_treated_sqft: null });
   });
 
-  test.each(['annual_max_apps', 'min_interval_days', 'annual_max_rate'])('a %s block at the place refuses with the limit\'s own words', async (type) => {
-    limits.checkLimits.mockResolvedValue({ allowed: false, blocks: [{ type, message: 'Celsius WG: LIMIT REACHED.' }], warnings: [] });
+  test('which limits refuse at a place: the product\'s own count and interval, and the v13 yearly amount, and nothing else', () => {
+    expect(areas.refusesAtPlace({ type: 'annual_max_apps', matchType: 'product' })).toBe(true);
+    expect(areas.refusesAtPlace({ type: 'annual_max_apps', matchType: null })).toBe(true);
+    expect(areas.refusesAtPlace({ type: 'min_interval_days', matchType: 'product' })).toBe(true);
+    expect(areas.refusesAtPlace({ type: 'annual_max_rate', matchType: 'v13_amount' })).toBe(true);
+    // The shared active-ingredient cap, a stored yearly rate, MOA rotation, a blackout and a count on another match type: advisory.
+    for (const block of [
+      { type: 'annual_max_rate', matchType: 'active_ingredient', matchValue: 'prodiamine' },
+      { type: 'annual_max_rate', matchType: 'product' },
+      { type: 'annual_max_rate', matchType: null },
+      { type: 'annual_max_apps', matchType: 'nitrogen' },
+      { type: 'moa_rotation_max', matchType: 'moa_group' },
+      { type: 'consecutive_use_max', matchType: 'moa_group' },
+      { type: 'seasonal_blackout', matchType: 'nitrogen' },
+    ]) expect(areas.refusesAtPlace(block)).toBe(false);
+  });
+
+  test.each([
+    [{ type: 'annual_max_rate', matchType: 'active_ingredient', matchValue: 'prodiamine', message: 'shared cap' }],
+    [{ type: 'annual_max_rate', matchType: 'product', message: 'stored rate' }],
+    [{ type: 'seasonal_blackout', matchType: 'nitrogen', message: 'blackout' }],
+  ])('a violation of an advisory limit (%j) never produces lawn_place_limit', async (block) => {
+    limits.checkLimits.mockResolvedValue({ allowed: false, blocks: [block], warnings: [] });
+    expect(await run([spot({ areaPlace: 'front' })])).toBeNull();
+  });
+
+  test('an advisory block does not hide a refusing one beside it', async () => {
+    limits.checkLimits.mockResolvedValue({ allowed: false, blocks: [{ type: 'annual_max_rate', matchType: 'active_ingredient', message: 'shared' }, { type: 'annual_max_apps', matchType: 'product', message: 'count' }], warnings: [] });
+    expect(await run([spot({ areaPlace: 'front' })])).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_apps', error: expect.stringContaining('count') } });
+  });
+
+  test.each(['annual_max_apps', 'min_interval_days'])('a %s block at the place refuses with the limit\'s own words', async (type) => {
+    limits.checkLimits.mockResolvedValue({ allowed: false, blocks: [{ type, matchType: 'product', message: 'Celsius WG: LIMIT REACHED.' }], warnings: [] });
     expect(await run([spot({ areaPlace: 'front' })])).toEqual({
       status: 400,
       payload: { error: 'Celsius WG: LIMIT REACHED. Choose another place, or take it off the sheet.', code: 'lawn_place_limit', productId: P_CEL, place: 'front', limitType: type },
     });
+  });
+
+  test('the v13 yearly amount refuses with the limit\'s own words', async () => {
+    limits.checkLimits.mockResolvedValue({ allowed: false, blocks: [{ type: 'annual_max_rate', matchType: 'v13_amount', message: 'Arena: THIS APPLICATION WOULD EXCEED IT.' }], warnings: [] });
+    expect(await run([spot({ areaPlace: 'front' })])).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate' } });
   });
 
   test('a limit that is not about the product\'s own applications (MOA rotation) does not refuse here', async () => {

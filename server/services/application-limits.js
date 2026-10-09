@@ -112,6 +112,9 @@ class ApplicationLimitChecker {
   // history and the shared cap, for a plan rebuilt after the visit completed. opts.propertyId
   // limits both to the treated property (no property: every property of the customer).
   // Both read applications up to the proposed ET day only.
+  // opts.proposedRow (GATE_LAWN_TROUBLE_AREAS, with opts.proposal) is the row being completed, as a ledger row would hold it:
+  // { application_rate, rate_unit, quantity_applied, quantity_unit, area_treated_sqft }. A v13 yearly amount cap then counts that
+  // row exactly as the closeout audit will count it once recorded (see evaluateV13AmountCap).
   // opts.place (GATE_LAWN_TROUBLE_AREAS; a place id of lawn-trouble-areas.js) judges the product's own history, its yearly
   // count and its minimum interval (and the v13 yearly amount) at that PLACE of the lawn: the rows placed elsewhere on the
   // lawn are left out, a row with no place on record still counts. The shared active-ingredient cap, the MOA rotation and
@@ -380,9 +383,16 @@ class ApplicationLimitChecker {
       const size = dose ? rateInUnit(dose.ratePer1000, dose.unit ?? dose.rateUnit, capUnit) : null;
       return size > 0 ? size : null;
     };
+    // GATE_LAWN_TROUBLE_AREAS: the /complete preflight names the row it is about to record (`proposedRow`: the rate, the typed quantity
+    // and the row's own spot area, as the ledger will hold them). It is sized by capShare, the very function that sizes a recorded
+    // ledger row (the recorded rate when readable, else the quantity over the treated area), so the preflight and the closeout audit
+    // compute one number from the same inputs. A row capShare cannot size falls back to the program's dose, as any proposal does.
+    const rowShare = ctx.proposedRow
+      ? capShare({ ...ctx.proposedRow, default_rate_per_1000: null, limit_value: limit.limit_value, limit_unit: limit.limit_unit })
+      : null;
     let dose = readable(ctx.proposed);
-    if (dose == null && ctx.proposal) dose = readable(await this.programDose(database, product.id));
-    const adds = dose != null ? dose / cap : ((ctx.proposed || ctx.proposal) ? Number(limit.fallback_rate) / cap : 0);
+    if (dose == null && ctx.proposal && !rowShare) dose = readable(await this.programDose(database, product.id));
+    const adds = rowShare ? rowShare.share : (dose != null ? dose / cap : ((ctx.proposed || ctx.proposal) ? Number(limit.fallback_rate) / cap : 0));
     const total = used + adds;
     const detail = estimated ? ` (${estimated} earlier application${estimated === 1 ? '' : 's'} sized at the standard rate)` : '';
     const label = `${product.name}: this year's applications on the lawn total ${pct(used)}% of the yearly label amount (${limit.limit_value} ${capUnitOf(limit.limit_unit)} per 1,000 sq ft)`;

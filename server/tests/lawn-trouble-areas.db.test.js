@@ -254,6 +254,62 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       expect(await areas.preflightPlaces({ knex, svc, products: [row('back')] })).toBeNull();
     });
 
+    // A typed QUANTITY on a small spot: the preflight and the closeout audit size the row the same way (the recorded rate when it
+    // is readable, else the quantity over the row's own area), so a large amount on a small spot cannot pass the Arena yearly amount.
+    describe('a typed quantity on a spot, against the Arena yearly amount (0.294 oz per 1,000 sq ft)', () => {
+      const typed = (extra) => ({ productId: catalog[ARENA].id, name: ARENA, applicationMethod: 'spot_treatment', areaPlace: 'front', areaValue: 100, areaUnit: 'sqft', amountUnit: 'oz', ...extra });
+      // The same inputs recorded on the ledger as the completion writes them, then audited.
+      const audited = async (row) => {
+        const { baseQuantityUnit } = require('../services/inventory-units');
+        const record = (await knex('service_records').insert({ customer_id: world.customerId, scheduled_service_id: (await world.visit(0)).id, service_date: dayAgo(0), service_type: 'Lawn fixture' }).returning('*'))[0];
+        await knex('property_application_history').insert({
+          customer_id: world.customerId, property_id: world.property.id, product_id: catalog[ARENA].id, application_date: dayAgo(0), service_record_id: record.id,
+          application_rate: row.rate || null, rate_unit: row.rateUnit || null, quantity_applied: row.totalAmount, quantity_unit: baseQuantityUnit(row.amountUnit),
+          area_treated_sqft: Math.round(row.areaValue), treated_place: 'front',
+        });
+        const found = await limits.auditHardCountLimits(world.customerId, catalog[ARENA].id, dayAgo(0), knex, { propertyId: world.property.id, place: 'front', excludeScheduledServiceId: null });
+        await knex('property_application_history').where({ service_record_id: record.id }).del();
+        return found.some((v) => v.type === 'annual_max_rate');
+      };
+      const visit = async () => ({ ...(await world.visit(0)), customer_id: world.customerId, property_id: world.property.id });
+
+      test.each([
+        ['0.05 oz on 100 sq ft is 0.5 oz per 1,000: over the cap', 0.05, true],
+        ['0.02 oz on 100 sq ft is 0.2 oz per 1,000: under the cap', 0.02, false],
+        ['0.0294 oz on 100 sq ft is exactly the cap: allowed', 0.0294, false],
+      ])('%s', async (_label, totalAmount, refused) => {
+        const row = typed({ totalAmount });
+        const result = await areas.preflightPlaces({ knex, svc: await visit(), products: [row] });
+        if (refused) expect(result).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate', place: 'front' } });
+        else expect(result).toBeNull();
+        // The audit, given the row as the ledger would hold it, reaches the same verdict.
+        expect(await audited(row)).toBe(refused);
+      });
+
+      test('the same quantity on a larger spot is under the cap (the row\'s OWN area decides)', async () => {
+        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [typed({ totalAmount: 0.05, areaValue: 1000 })] })).toBeNull();
+      });
+
+      test('a stated rate wins over the quantity, as it does for a recorded row; a quantity on a row with no area falls back to the program\'s dose', async () => {
+        const rateRow = typed({ totalAmount: 5, rate: 0.147, rateUnit: 'oz' });
+        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [rateRow] })).toBeNull();
+        expect(await audited(rateRow)).toBe(false);
+        const noArea = typed({ totalAmount: 5, areaValue: undefined, areaUnit: undefined });
+        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [noArea] })).toBeNull();
+      });
+    });
+
+    test('a shared active-ingredient cap broken at the chosen place never refuses here (it stays an advisory)', async () => {
+      const [ai] = await knex('products_catalog').insert({ name: 'Shared AI fixture', category: 'herbicide', active_ingredient: 'Zzzzine', default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*');
+      catalog['Shared AI fixture'] = ai;
+      await knex('product_limits').insert({ product_id: ai.id, match_type: 'active_ingredient', match_value: 'Zzzzine', limit_type: 'annual_max_rate', limit_value: 1, limit_unit: 'oz/1000sf/year', severity: 'hard_block', description: 'fixture' });
+      await applied('Shared AI fixture', { place: 'front', rate: 1 });
+      const checked = await check('Shared AI fixture', { place: 'front' });
+      expect(checked.blocks.some((b) => b.matchType === 'active_ingredient')).toBe(true);
+      const svc = await svcOf();
+      expect(await areas.preflightPlaces({ knex, svc, products: [{ productId: ai.id, name: 'Shared AI fixture', applicationMethod: 'spot_treatment', areaPlace: 'front', rate: 0.5, rateUnit: 'oz' }] })).toBeNull();
+    });
+
     test('the closeout audit judges a recorded spot application at its place, not the lawn', async () => {
       await applied(CELSIUS, { place: 'front' });
       await applied(CELSIUS, { place: 'front', daysAgo: 20 });

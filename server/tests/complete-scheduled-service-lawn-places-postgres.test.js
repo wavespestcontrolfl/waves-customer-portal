@@ -217,6 +217,39 @@ postgres('closeout: the place of a spot treatment', () => {
     } finally { await cleanup(f); }
   });
 
+  test('a shared active-ingredient cap broken at the chosen place stays an advisory: /complete accepts, the closeout reports it as before the gate', async () => {
+    const f = await seedLawnVisit();
+    const ai = `Zzfixtureine${randomUUID().slice(0, 6)}`;
+    const [shared] = await mockPg('products_catalog').insert({
+      name: `Shared cap fixture ${ai}`, category: 'herbicide', active_ingredient: ai, default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(),
+      inventory_on_hand: 1000, inventory_unit: 'oz', active: true,
+    }).returning('*');
+    try {
+      await mockPg('product_limits').insert({ product_id: shared.id, match_type: 'active_ingredient', match_value: ai, limit_type: 'annual_max_rate', limit_value: 1, limit_unit: 'oz/1000sf/year', severity: 'hard_block', description: 'fixture' });
+      const year = etDateString().slice(0, 4);
+      const [past] = await mockPg('scheduled_services').insert({ customer_id: f.customerId, property_id: f.propertyId, scheduled_date: `${year}-01-02`, service_type: 'Lawn fixture', status: 'completed' }).returning('*');
+      const [prior] = await mockPg('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: `${year}-01-02`, service_type: 'Lawn fixture' }).returning('*');
+      await mockPg('property_application_history').insert({ customer_id: f.customerId, property_id: f.propertyId, product_id: shared.id, application_date: `${year}-01-02`, application_rate: 1, rate_unit: 'oz', active_ingredient: ai, service_record_id: prior.id, treated_place: 'front' });
+      const row = spot(f, { productId: shared.id, areaPlace: 'front', rate: 0.5 });
+      // The shared cap is already broken for this product at the front ...
+      const checked = await require('../services/application-limits').checkLimits(f.customerId, shared.id, new Date(), mockPg, { propertyId: f.propertyId, place: 'front', proposal: true });
+      expect(checked.blocks.map((b) => b.matchType)).toContain('active_ingredient');
+      // ... and the places preflight does not refuse on it.
+      const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+      expect(await require('../services/lawn-trouble-areas').preflightPlaces({ knex: mockPg, svc, products: [row] })).toBeNull();
+      // The completion accepts, and the shared-cap advisory and the office alert are raised as ever.
+      const out = await complete(f, { products: [row] });
+      expect(out.status).toBe(200);
+      expect(await ledgerOf(f, (await recordOf(f)).id)).toMatchObject({ treated_place: 'front' });
+      expect(await mockPg('dispatch_alerts').where({ type: 'application_limit', job_id: f.serviceId }).whereRaw("payload->>'active_ingredient' = ?", [ai])).toHaveLength(1);
+    } finally {
+      await mockPg('dispatch_alerts').where({ job_id: f.serviceId }).del().catch(() => {});
+      await cleanup(f);
+      await mockPg('product_limits').where({ product_id: shared.id }).del().catch(() => {});
+      await mockPg('products_catalog').where({ id: shared.id }).del().catch(() => {});
+    }
+  });
+
   test('gate off: the place is not stored anywhere, no area is written, and the lawn-wide flag is raised as before', async () => {
     const f = await seedLawnVisit();
     try {

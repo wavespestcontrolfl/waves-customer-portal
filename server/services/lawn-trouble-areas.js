@@ -47,9 +47,6 @@ const TYPE_IDS = Object.freeze(TYPES.map((type) => type.id));
 const TYPE_LABELS = Object.freeze(Object.fromEntries(TYPES.map((type) => [type.id, type.label])));
 const SOURCES = Object.freeze(['tech_tap', 'guide_card']);
 
-// application-limits types a place decides (the product's own count, interval and yearly amount). Any other
-// hard limit (MOA rotation, a blackout) is lawn-wide and keeps its after-the-fact handling.
-const PLACE_LIMIT_TYPES = new Set(['annual_max_apps', 'min_interval_days', 'annual_max_rate']);
 
 const isPlace = (value) => typeof value === 'string' && PLACE_IDS.includes(value);
 const placeLabel = (id) => PLACE_LABELS[id] || id;
@@ -266,12 +263,31 @@ const requiredRefusal = (name) => ({
   payload: { error: `Pick where on the lawn ${name || 'the spot treatment'} went.`, code: 'lawn_place_required' },
 });
 
-// The dose the row states, in the shape checkLimits reads a proposal (it falls back to the program's own dose when
-// the unit cannot be read, so a proposal never reads as fitting when it does not).
-function proposedDose(row) {
-  const rate = Number(row?.rate);
-  const unit = String(row?.rateUnit || '').trim().replace(/_/g, ' ');
-  return rate > 0 && unit ? { ratePer1000: rate, unit } : undefined;
+// The row as the completion will record it on the ledger (compliance.createComplianceRecords): the rate and its unit, the typed
+// quantity in its base unit (a "/gal" mix concentration is stored as the base unit) and the spot area rounded to whole square feet.
+// application-limits sizes it with the function that sizes a recorded ledger row, so a large typed quantity on a small spot counts
+// at quantity over the row's own area, exactly as the closeout audit will count it.
+function proposedRow(row) {
+  const { baseQuantityUnit } = require('./inventory-units');
+  const rate = parseFloat(row?.rate);
+  const quantity = row?.totalAmount != null && row.totalAmount !== '' ? parseFloat(row.totalAmount) : null;
+  const area = row?.areaUnit === 'sqft' && Number(row.areaValue) > 0 ? Math.round(Number(row.areaValue)) : null;
+  return {
+    application_rate: rate || null,
+    rate_unit: row?.rateUnit || null,
+    quantity_applied: Number.isFinite(quantity) ? quantity : null,
+    quantity_unit: Number.isFinite(quantity) ? baseQuantityUnit(row.amountUnit || row.rateUnit || null) || null : null,
+    area_treated_sqft: area,
+  };
+}
+
+// The limit types a place may refuse at completion: the product's OWN count, minimum interval and v13 yearly amount, the three the
+// closeout audit judges (application-limits auditHardCountLimits). The shared active-ingredient cap, a stored yearly rate,
+// MOA rotation and everything else stay advisory after the fact, exactly as before the gate.
+function refusesAtPlace(block) {
+  const matchType = block.matchType || 'product';
+  if (block.type === 'annual_max_apps' || block.type === 'min_interval_days') return matchType === 'product';
+  return block.type === 'annual_max_rate' && matchType === 'v13_amount';
 }
 
 /**
@@ -304,14 +320,14 @@ async function preflightPlaces({ knex = db, svc, products }) {
         propertyId: svc.property_id || null,
         place: row.areaPlace.trim(),
         proposal: true,
-        proposed: proposedDose(row),
+        proposedRow: proposedRow(row),
         excludeScheduledServiceId: svc.id,
       });
     } catch (err) {
       logger.warn(`[lawn-trouble-areas] place limits unavailable at completion for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
       continue;
     }
-    const block = (result.blocks || []).find((b) => PLACE_LIMIT_TYPES.has(b.type));
+    const block = (result.blocks || []).find(refusesAtPlace);
     if (block) {
       // 400, not 409: the shared submit hook treats a 4xx other than a 409 conflict as correctable (a fresh key and an editable
       // sheet), which is what the technician needs: pick another place or take the row off, then complete again.
@@ -336,7 +352,8 @@ module.exports = {
   TYPES,
   TYPE_IDS,
   SOURCES,
-  PLACE_LIMIT_TYPES,
+  refusesAtPlace,
+  proposedRow,
   isPlace,
   placeLabel,
   placeChoices,
