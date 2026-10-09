@@ -272,6 +272,39 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
     expect(knex.state.inserted).toBeNull();
   });
 
+  // Codex r2 on #6175.
+  test.each(['cancelled', 'skipped', 'no_show', 'rescheduled'])('a visit that became %s during the copy is refused', async (status) => {
+    const knex = makeKnex({ lock: locked({ status }) });
+    await expect(reuseLastTreatmentZone({ visit: VISIT, actor: admin, expectedPropertyId: 'prop-1', openVisitOnly: true, knex }))
+      .rejects.toMatchObject({ code: 'visit_changed' });
+    expect(knex.state.inserted).toBeNull();
+  });
+
+  describe('a property-less visit', () => {
+    const NO_PROP = { ...VISIT, property_id: null };
+    const source = { ...ZONE, source_property_id: null };
+    const stamped = (line1, line2 = null) => ({
+      service_address_line1: line1, service_address_line2: line2, service_address_city: 'Sampletown', service_address_state: 'FL', service_address_zip: '34200',
+    });
+
+    test('saves when the address stamped on the locked visit is still the one the source was matched on', async () => {
+      const knex = makeKnex({ candidates: [source], lock: locked({ property_id: null, ...stamped('1 EXAMPLE ln') }) });
+      const row = await reuseLastTreatmentZone({ visit: NO_PROP, actor: admin, expectedPropertyId: null, openVisitOnly: true, knex });
+      expect(row.linear_ft).toBe(220);
+    });
+
+    test.each([
+      ['another street address', stamped('99 Other St')],
+      ['another unit', stamped('1 Example Ln', 'Unit 4')],
+      ['no stamped address', stamped(null)],
+    ])('is refused when the locked visit now has %s', async (_label, address) => {
+      const knex = makeKnex({ candidates: [source], lock: locked({ property_id: null, ...address }) });
+      await expect(reuseLastTreatmentZone({ visit: NO_PROP, actor: admin, expectedPropertyId: null, openVisitOnly: true, knex }))
+        .rejects.toMatchObject({ code: 'visit_property_changed' });
+      expect(knex.state.inserted).toBeNull();
+    });
+  });
+
   test('a visit no longer in the caller\'s scope is refused', async () => {
     const knex = makeKnex({ lock: null });
     await expect(reuseLastTreatmentZone({ visit: VISIT, actor: admin, expectedPropertyId: 'prop-1', openVisitOnly: true, knex }))

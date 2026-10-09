@@ -1759,7 +1759,7 @@ function ReportFlowForm({
   const [traceError, setTraceError] = useState('');
   // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
   const reuse = useTraceReuse({
-    serviceId: service.id, request, propertyId: loadedPropertyId, trace, plain: !mode && traceAvailable && !writing, setError: setTraceError,
+    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
   });
   const removeTrace = async () => {
     setRemovingTrace(true);
@@ -1812,7 +1812,7 @@ function ReportFlowForm({
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
-        reuse={stepTrace ? reuse : NO_REUSE}
+        reuse={reuse}
         traceError={traceError}
         sources={writerSources({
           productCount: active.length,
@@ -1882,7 +1882,9 @@ function ReportFlowForm({
 // No copy offered (a lane or typed visit, a spot visit, a trace already saved).
 const NO_REUSE = { offer: null, reusing: false, feet: null };
 
-function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse }) {
+// `traceStep`: the report step has a perimeter spray to trace (the hold the
+// copy clears); with none, the last trace is not offered.
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep }) {
   return (
     <>
       {onRetryTrace && (
@@ -1891,7 +1893,7 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
       {onRemoveTrace && (
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
       )}
-      {reuse.offer && (
+      {traceStep && reuse.offer && (
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={reuse.reusing} disabled={locked} onClick={reuse.offer}>
           {reuse.feet ? `Same as last visit · ${reuse.feet} ft` : 'Same as last visit'}
         </Button>
@@ -1920,6 +1922,7 @@ function ReportStep({
         onRemoveTrace={onRemoveTrace}
         removingTrace={removingTrace}
         reuse={reuse}
+        traceStep={!!trace}
       />
     </CompleteFooter>
   );

@@ -486,7 +486,9 @@ function useLastTrace({ serviceId, request, wanted }) {
 // sheet loaded, a visit still open); a refusal goes to `setError` and the
 // Trace button stays usable. `plain` is a plain pest visit that can be traced
 // (a lane or typed visit is left out). `offer` is null when nothing is offered.
-export function useTraceReuse({ serviceId, request, propertyId, trace, plain, setError }) {
+export function useTraceReuse({ serviceId, request, propertyId, trace, mode, traceAvailable, writing, setError }) {
+  // A plain pest visit (no lane or typed mode) that can be traced, at rest.
+  const plain = !mode && !!traceAvailable && !writing;
   const last = useLastTrace({ serviceId, request, wanted: plain && trace.loaded && !trace.failed && !trace.zone });
   const [reusing, setReusing] = useState(false);
   const reuse = async () => {

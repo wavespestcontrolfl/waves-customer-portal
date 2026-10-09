@@ -117,14 +117,30 @@ async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, o
 // the lock, inside the technician's own scope (a reassigned visit is refused
 // as on the remove path), and must still be the visit the request read: same
 // customer, same service, same property, still open.
-async function lockScopedVisitForTrace(conn, scheduledServiceId, { actor, visit }, openVisitOnly) {
+// A property-less visit's place is its stamped address: `addressKey` is the
+// key the source was matched on, and an address corrected during the copy is
+// a move (Codex P1 r2). Any closed status refuses the copy, not only
+// completed: an administrator's lock carries no status filter (Codex P2 r2).
+const TRACE_CLOSED_STATUSES = new Set(['cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled']);
+async function lockScopedVisitForTrace(conn, scheduledServiceId, { actor, visit, addressKey: expectedAddressKey = null }, openVisitOnly) {
   const { lockOwnedLiveVisit } = require('./technician-visit-scope');
-  const locked = await lockOwnedLiveVisit(conn, actor, scheduledServiceId,
-    ['property_id', 'status', 'customer_id', 'service_id', 'service_type'], { allowCompleted: true });
+  const locked = await lockOwnedLiveVisit(conn, actor, scheduledServiceId, [
+    'property_id', 'status', 'customer_id', 'service_id', 'service_type',
+    'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
+  ], { allowCompleted: true });
   if (String(locked.property_id ?? '') !== String(visit.property_id ?? '')) throw propertyChangedError();
+  if (!locked.property_id && stampedAddressKey(locked) !== expectedAddressKey) throw propertyChangedError();
   if (openVisitOnly && locked.status === 'completed') throw visitCompletedError();
+  if (TRACE_CLOSED_STATUSES.has(String(locked.status || ''))) throw visitChangedError();
   const same = (key) => String(locked[key] ?? '') === String(visit[key] ?? '');
   if (!same('customer_id') || !same('service_id') || !same('service_type')) throw visitChangedError();
+}
+// The address key of a scheduled_services row's own stamped columns.
+function stampedAddressKey(row) {
+  return addressKey({
+    line1: row.service_address_line1, line2: row.service_address_line2,
+    city: row.service_address_city, state: row.service_address_state, zip: row.service_address_zip,
+  });
 }
 
 // One visit's row: the keys it replaces, then the upsert.
@@ -518,7 +534,7 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     // another service the report hides the map for is never copied onto a
     // visit that would show it (Codex P1 on #6175).
     if (await traceCaptureBlockPayload(sourceVisitOf(row), knex, { captureMode: row.capture_mode })) continue;
-    return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date) };
+    return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date), addressKey: hereAddress };
   }
   return null;
 }
@@ -594,7 +610,7 @@ async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null
   if (!found) {
     throw Object.assign(operationalError('There is no earlier trace for this property to reuse.', 409), { code: 'no_reusable_trace' });
   }
-  const { zone, sourceServiceId } = found;
+  const { zone, sourceServiceId, addressKey: matchedAddressKey } = found;
   const snapshotPngBuffer = zone.snapshot_s3_key ? await readStoredImage(zone.snapshot_s3_key) : null;
   const maskPngBuffer = zone.mask_s3_key ? await readStoredImage(zone.mask_s3_key) : null;
   const pathPoints = typeof zone.path_points === 'string' ? JSON.parse(zone.path_points) : zone.path_points;
@@ -615,7 +631,7 @@ async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null
     ...(expectedPropertyId !== undefined ? { expectedPropertyId } : {}),
     openVisitOnly,
     createOnly: true,
-    ...(actor ? { lockedScope: { actor, visit } } : {}),
+    ...(actor ? { lockedScope: { actor, visit, addressKey: matchedAddressKey } } : {}),
     knex,
   });
   // No column records where a copy came from; the log line does.
