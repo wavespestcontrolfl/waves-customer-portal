@@ -9,6 +9,7 @@ const {
   hasCanonicalWriteBlock,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   hasNameEmailMismatch,
+  emailRewrittenFromSpoken,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
 } = require('../services/call-triage-flags');
@@ -949,6 +950,67 @@ describe('side-effect guards', () => {
 // ═══════════════════════════════════════════════════
 // Name ↔ Email reconciliation (name_review)
 // ═══════════════════════════════════════════════════
+
+// The model changed a SAID email so that it matches the SPELLED name. The name and the
+// email then agree, so hasNameEmailMismatch stays quiet; the transcript shows the change.
+describe('emailRewrittenFromSpoken', () => {
+  const transcript = [
+    'Agent: Can I get your name?',
+    'Caller: My name is Dana Hartwel,',
+    'Caller: H, A, R, T, W, E, L, L.',
+    'Agent: Okay, and email address?',
+    'Caller: Email address is hartwall at outlook.com.',
+  ].join('\n');
+
+  test('email equal to the spelled surname, transcript says a word one letter away → true', () => {
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, transcript)).toBe(true);
+  });
+  test('email written as it was said → false', () => {
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwall@outlook.com' }, transcript)).toBe(false);
+  });
+  test('"word@domain" in the transcript is read the same way as "word at domain"', () => {
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, 'Caller: it is hartwall@outlook.com')).toBe(true);
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwall@outlook.com' }, 'Caller: it is hartwall@outlook.com')).toBe(false);
+  });
+  test('email spelled letter by letter counts as said, also after the same word was said wrong', () => {
+    const spelled = `${transcript}\nAgent: Can you spell that?\nCaller: H, A, R, T, W, E, L, L at outlook.com.`;
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, spelled)).toBe(false);
+  });
+  test('email said in several words is joined before the comparison', () => {
+    expect(emailRewrittenFromSpoken({ first_name: 'Dana', last_name: 'Hartwell', email: 'dana.hartwell@outlook.com' }, 'Caller: dana dot hartwell at outlook dot com')).toBe(false);
+  });
+  test('email built from "my last name at ..." leaves no near word → false', () => {
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, 'Caller: H, A, R, T, W, E, L, L.\nCaller: it is just my last name at outlook.com')).toBe(false);
+  });
+  test('a word that is far from the email, a short word, another domain → false', () => {
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, 'Caller: you can reach me at outlook, it is my wife\'s')).toBe(false);
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, 'Caller: hartwall at gmail.com')).toBe(false);
+    expect(emailRewrittenFromSpoken({ first_name: 'Dana', email: 'dana@outlook.com' }, 'Caller: dan at outlook.com')).toBe(false);
+  });
+  test('a local part that only adds letters around the said word is not a rewrite', () => {
+    // "D" on one turn, "hartwell at ..." on the next: the joined-letters comparison misses it.
+    expect(emailRewrittenFromSpoken({ first_name: 'Dana', last_name: 'Hartwell', email: 'dhartwell@outlook.com' }, 'Caller: D\nCaller: hartwell at outlook.com')).toBe(false);
+  });
+  test('a change that does not bring the email to the name is not this case', () => {
+    // No caller name: nothing to rewrite toward.
+    expect(emailRewrittenFromSpoken({ email: 'hartwell@outlook.com' }, transcript)).toBe(false);
+    // The said word already holds the name; the model changed something else.
+    expect(emailRewrittenFromSpoken({ last_name: 'Hart', email: 'hartwell@outlook.com' }, transcript)).toBe(false);
+  });
+  test('no transcript, no email, malformed email → false', () => {
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' })).toBe(false);
+    expect(emailRewrittenFromSpoken({ email: null }, transcript)).toBe(false);
+    expect(emailRewrittenFromSpoken({ email: 'hartwell' }, transcript)).toBe(false);
+    expect(emailRewrittenFromSpoken({ email: 'hartwell@(.com' }, transcript)).toBe(false);
+  });
+  test('computeDeterministicTriageFlags raises name_email_mismatch only with the transcript', () => {
+    const extraction = { meta: {}, caller: { first_name: 'Dana', last_name: 'Hartwell', email: 'hartwell@outlook.com' } };
+    expect(computeDeterministicTriageFlags(extraction, { transcript })).toContain('name_email_mismatch');
+    expect(computeDeterministicTriageFlags(extraction, {})).not.toContain('name_email_mismatch');
+    const asSaid = { meta: {}, caller: { first_name: 'Dana', last_name: 'Hartwall', email: 'hartwall@outlook.com' } };
+    expect(computeDeterministicTriageFlags(asSaid, { transcript })).not.toContain('name_email_mismatch');
+  });
+});
 
 describe('hasNameEmailMismatch', () => {
   test('spoken name not corroborated by email → mismatch (Jeanette vs gennettryan@)', () => {
