@@ -26,8 +26,7 @@ const stop = (extra = {}) => ({
 
 function deps(rows, extra = {}) {
   return {
-    loadStops: jest.fn(async () => _test.groupStops(rows)),
-    storedVisitServices: jest.fn(async () => null),
+    loadStops: jest.fn(async () => _test.groupStops(rows, extra.addOns || [])),
     withCatalogKeys: jest.fn(async (items) => items.map((item) => ({ name: item.name, serviceKey: item.serviceKey, findingsType: null }))),
     visitPoint: jest.fn(async () => ({ lat: 27.4, lng: -82.4 })),
     hourlyRain: jest.fn(async () => hourlyFor()),
@@ -117,12 +116,7 @@ describe('auto-dispatch rain pass', () => {
     const d = deps([
       stop({ window_start: '11:00:00', window_end: '12:00:00', visit_id: 'stop-1' }),
       stop({ id: 'visit-2', service_type: 'Lawn Care', service_key_snapshot: 'lawn_care_monthly', window_start: '12:00:00', window_end: '13:00:00', estimated_duration_minutes: 120, visit_id: 'stop-1' }),
-    ], {
-      storedVisitServices: jest.fn(async () => ({
-        own: [{ name: 'Quarterly Pest Control Service', key: 'pest_general_quarterly' }],
-        siblings: [{ name: 'Lawn Care', key: 'lawn_care_monthly' }],
-      })),
-    });
+    ]);
     const rows = await planRainPass({ now: NOW, db: {}, deps: d });
     expect(rows).toHaveLength(1);
     // 11:00-14:00 of work is in the 13:00 rain. Three hours of work and two
@@ -132,10 +126,12 @@ describe('auto-dispatch rain pass', () => {
   });
 
   test('two services stored in the same hour on one stop are done one after the other', async () => {
-    // Both stored 10:00-11:00: two hours of work, drying through 14:00, in the 13:00 rain.
+    // Both stored 10:00-11:00 with a 30-minute estimate: the stored hour is the
+    // work (the route's own duration rule), so two hours, drying through
+    // 14:00, in the 13:00 rain.
     const d = deps([
-      stop({ window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60, visit_id: 'stop-1' }),
-      stop({ id: 'visit-2', window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60, visit_id: 'stop-1' }),
+      stop({ window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 30, visit_id: 'stop-1' }),
+      stop({ id: 'visit-2', window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 30, visit_id: 'stop-1' }),
     ]);
     const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
     expect(row).toMatchObject({ wet: true, peak: 80, proposal: '09:00' });
@@ -165,7 +161,21 @@ describe('auto-dispatch rain pass', () => {
     });
     d.episodes.openAdminAlertKeys = jest.fn(async () => [key('visit-1'), key('visit-2')]);
     expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, noticed: 0, closed: 1 });
-    expect(d.episodes.closeAdminAlertKeys.mock.calls[0].slice(1, 3)).toEqual([[key('visit-1')], 'forecast_dry']);
+    expect(d.episodes.closeAdminAlertKeys.mock.calls[0].slice(1, 3)).toEqual([[key('visit-1')], 'no_longer_in_rain']);
+  });
+
+  test('an add-on that is outdoor work makes a rain-OK visit outdoor', async () => {
+    const wdo = stop({ service_type: 'WDO Inspection', service_key_snapshot: 'wdo_inspection' });
+    const addOns = [{ scheduled_service_id: 'visit-1', service_name: 'Mosquito Treatment', service_key_snapshot: 'mosquito_one_time' }];
+    expect((await planRainPass({ now: NOW, db: {}, deps: deps([wdo]) }))[0]).toMatchObject({ wet: false, reason: 'not_outdoor' });
+    expect((await planRainPass({ now: NOW, db: {}, deps: deps([wdo], { addOns }) }))[0]).toMatchObject({ wet: true });
+  });
+
+  test('a standing notice is closed when its visit becomes rain-OK work', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const d = deps([stop({ service_type: 'WDO Inspection', service_key_snapshot: 'wdo_inspection' })]);
+    d.episodes.openAdminAlertKeys = jest.fn(async () => [`rain-pass:visit-1:${D1}:14:00`]);
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, closed: 1 });
   });
 
   test('a date column value (a Date at UTC midnight) keeps its calendar date', async () => {

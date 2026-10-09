@@ -456,7 +456,9 @@ const CLASSES = [
   },
   { // auto-dispatch/rain-pass.js — one notice per visit at a date and start;
     // the same metadata, so the same rule: closed, moved, or the date passed.
-    key: 'rain_pass', categories: ['schedule'], prefix: 'rain-pass:', rule: callBookingRainSettled,
+    // Never put back here: a visit back on its old slot says nothing about
+    // the forecast, and the pass itself closes and re-rings by the weather.
+    key: 'rain_pass', categories: ['schedule'], prefix: 'rain-pass:', rule: callBookingRainSettled, rearm: false,
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
