@@ -47,7 +47,7 @@ test('an April-window visit moved into June gets the June step, with the June st
   const result = await stage('2026-06-09', 'Apr');
   expect(result.lines).toHaveLength(1);
   expect(result.lines[0]).toMatchObject({ raw: stepAddOn('st_augustine', 'Jun').secondary, bermudaStep: true });
-  expect(result.field.bermudaRemoval).toEqual({ active: true, source: 'staff', mix: stepAddOn('st_augustine', 'Jun').summary });
+  expect(result.field.bermudaRemoval).toEqual({ active: true, source: 'staff', mix: stepAddOn('st_augustine', 'Jun').summary, month: 'Jun' });
   expect(mockLoadRows).toHaveBeenCalledWith(expect.anything(), 'st_augustine', 'Jun', { includeBermudaRemoval: true });
   // The window's own rows stay; the June step row replaces the April one.
   expect(result.rows(WINDOW_ROWS).get('rec')).toBe(STEP_ROW);
@@ -64,7 +64,7 @@ test('an April-window visit moved into May gets no step and loads nothing', asyn
 
 test('a June-window visit moved into April gets the April step, with the April staged rows', async () => {
   const result = await stage('2026-04-14', 'Jun');
-  expect(result.field.bermudaRemoval).toEqual({ active: true, source: 'staff', mix: stepAddOn('st_augustine', 'Apr').summary });
+  expect(result.field.bermudaRemoval).toEqual({ active: true, source: 'staff', mix: stepAddOn('st_augustine', 'Apr').summary, month: 'Apr' });
   expect(mockLoadRows).toHaveBeenCalledWith(expect.anything(), 'st_augustine', 'Apr', { includeBermudaRemoval: true });
 });
 

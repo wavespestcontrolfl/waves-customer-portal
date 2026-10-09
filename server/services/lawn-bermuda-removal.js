@@ -887,7 +887,8 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
           const probeWarnings = items.some((item) => isStepLine(item) && item.selected) ? [] : (projected.limitWarnings || []).map((warning) => ({ ...warning, code: 'lawn_bermuda_limit_warning' }));
           return { ...projected, warnings: [...excludedWarnings, ...projected.warnings, ...probeWarnings] };
         },
-        field: active ? { bermudaRemoval: { active: true, source: wanted.source, mix: addOn.summary } } : {},
+        // `month`: the appointment month the step is read from (the completion attributes to that month's rows).
+        field: active ? { bermudaRemoval: { active: true, source: wanted.source, mix: addOn.summary, month: stepMonth } } : {},
         mixOrderField,
       };
     },

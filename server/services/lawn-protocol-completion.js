@@ -166,7 +166,9 @@ function resolveAttribution(plan, allLawn) {
   const attributed = Boolean(structured && window);
   if (!attributed && !allLawn) return null;
   // `bermudaStep`: the plan carries the bermuda removal step, so its staged rows are planned work.
-  return { structured, window, attributed, bermudaStep: plan?.bermudaRemoval?.active === true };
+  // `bermudaStepMonth`: the appointment month the plan read the step from (it can differ from the
+  // assigned window's when the visit was rescheduled).
+  return { structured, window, attributed, bermudaStep: plan?.bermudaRemoval?.active === true, bermudaStepMonth: plan?.bermudaRemoval?.month || null };
 }
 
 // The protocol rows the completion attributes to: protocol → window →
@@ -177,7 +179,26 @@ function resolveAttribution(plan, allLawn) {
 // the transaction aborted, and the completion upsert that follows would
 // fail with 25P02 and roll back the closeout — or its whole packet
 // (Codex #4113 P2). Outside a transaction failSoftRead is a plain read.
-async function loadProtocolRows(trx, { structured, window, attributed, bermudaStep = false }) {
+// The bermuda removal step's staged rows for a visit whose plan carries the step: the rows of the
+// APPOINTMENT month's window of the same protocol (the plan's own source, lawn-bermuda-removal.js
+// openPlanStep), which is the assigned window unless the visit was rescheduled across months.
+const STEP_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+async function loadBermudaStepRows(trx, protocolId, assignedWindowId, stepMonth) {
+  const month = STEP_MONTHS.indexOf(stepMonth) + 1;
+  return failSoftRead(trx, (k) => {
+    const query = k('lawn_protocol_products as lpp')
+      .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
+      .whereRaw("lpp.gates->>'bermudaRemoval' = 'true'");
+    if (month > 0) {
+      query.whereIn('lpp.lawn_protocol_window_id', k('lawn_protocol_windows').where({ lawn_protocol_id: protocolId, month }).select('id'));
+    } else {
+      query.where({ lawn_protocol_window_id: assignedWindowId });
+    }
+    return query.select('lpp.*', 'pc.name as catalog_product_name');
+  }, []);
+}
+
+async function loadProtocolRows(trx, { structured, window, attributed, bermudaStep = false, bermudaStepMonth = null }) {
   if (!attributed) return { protocolRow: null, windowRow: null, protocolProducts: [] };
   const protocolRow = await failSoftRead(trx, (k) => k('lawn_protocols')
     .where({ protocol_key: structured.protocolKey, version: structured.version })
@@ -187,19 +208,20 @@ async function loadProtocolRows(trx, { structured, window, attributed, bermudaSt
       .where({ lawn_protocol_id: protocolRow.id, window_key: window.key })
       .first('id'), null)
     : null;
-  const protocolProducts = windowRow?.id
-    ? await failSoftRead(trx, (k) => {
-      const query = k('lawn_protocol_products as lpp')
-        .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
-        .where({ lawn_protocol_window_id: windowRow.id });
-      // The bermuda removal rows are planned work only on a visit whose plan carries the step.
-      // On any other visit (gate off, an unflagged lawn) Recognition or Fusilade II recorded by
-      // hand is off-protocol, so the rows are left out of the attribution.
-      const rows = bermudaStep ? query : require('./lawn-bermuda-removal').withoutBermudaRemovalRows(query, 'lpp');
-      return rows.select('lpp.*', 'pc.name as catalog_product_name');
-    }, [])
+  // The window's own rows never include the bermuda removal rows: those are planned work only on
+  // a visit whose plan carries the step, and then they come from the appointment month's window
+  // (loadBermudaStepRows). On any other visit (gate off, an unflagged lawn) Recognition or
+  // Fusilade II recorded by hand is off-protocol.
+  const windowProducts = windowRow?.id
+    ? await failSoftRead(trx, (k) => require('./lawn-bermuda-removal').withoutBermudaRemovalRows(k('lawn_protocol_products as lpp')
+      .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
+      .where({ lawn_protocol_window_id: windowRow.id }), 'lpp')
+      .select('lpp.*', 'pc.name as catalog_product_name'), [])
     : [];
-  return { protocolRow, windowRow, protocolProducts };
+  const stepProducts = bermudaStep && windowRow?.id
+    ? await loadBermudaStepRows(trx, protocolRow.id, windowRow.id, bermudaStepMonth)
+    : [];
+  return { protocolRow, windowRow, protocolProducts: [...windowProducts, ...stepProducts] };
 }
 
 // The completion screen no longer submits a protocol checklist (read-only

@@ -89,13 +89,17 @@ describe('direct readers of the staged protocol rows', () => {
 
   test.each([
     ['lawn-protocol-operating-layer.js', /if \(!includeBermudaRemoval\) require\('\.\/lawn-bermuda-removal'\)\.withoutBermudaRemovalRows\(productsQuery, 'lpp'\)/],
-    ['lawn-protocol-completion.js', /const rows = bermudaStep \? query : require\('\.\/lawn-bermuda-removal'\)\.withoutBermudaRemovalRows\(query, 'lpp'\)/],
+    ['lawn-protocol-completion.js', /require\('\.\/lawn-bermuda-removal'\)\.withoutBermudaRemovalRows\(k\('lawn_protocol_products as lpp'\)/],
     ['estimate-ai-context.js', /withoutBermudaRemovalRows\(db\('lawn_protocol_products'\)/],
   ])('%s uses it', (file, pattern) => {
     expect(read(file)).toMatch(pattern);
   });
 
-  test('the completion ledger attributes to the step rows only when the visit plan carries the step', () => {
-    expect(read('lawn-protocol-completion.js')).toMatch(/bermudaStep: plan\?\.bermudaRemoval\?\.active === true/);
+  test('the completion ledger attributes to the step rows only when the visit plan carries the step, from the appointment month\'s window', () => {
+    const source = read('lawn-protocol-completion.js');
+    expect(source).toMatch(/bermudaStep: plan\?\.bermudaRemoval\?\.active === true/);
+    expect(source).toMatch(/bermudaStepMonth: plan\?\.bermudaRemoval\?\.month \|\| null/);
+    expect(source).toMatch(/const stepProducts = bermudaStep && windowRow\?\.id\s+\? await loadBermudaStepRows\(trx, protocolRow\.id, windowRow\.id, bermudaStepMonth\)/);
+    expect(read('lawn-bermuda-removal.js')).toMatch(/mix: addOn\.summary, month: stepMonth/);
   });
 });
