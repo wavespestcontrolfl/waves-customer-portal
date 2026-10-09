@@ -7,6 +7,7 @@
 const guard = require('../models/migrations/20261010140000_area_addon_protocol_rows_rollback_guard');
 const seed = require('../models/migrations/20261010120000_area_addon_protocol_rows');
 const fieldGuard = require('../models/migrations/20261010190000_area_addon_protocol_rows_field_guard');
+const activeProduct = require('../models/migrations/20261010200000_area_addon_protocol_active_product');
 
 function fakeKnex(db) {
   const knex = (table) => {
@@ -102,5 +103,34 @@ describe('area add-on protocol rows rollback guard', () => {
   test('missing tables skip without error', async () => {
     await expect(fieldGuard.down(fakeKnex({}))).resolves.toBeUndefined();
     await expect(guard.down(fakeKnex({}))).resolves.toBeUndefined();
+  });
+});
+
+// Codex round 34: the seed resolved by exact name first, so an inactive legacy row could win over the renamed active row.
+describe('20261010200000: a seeded protocol row points at the active catalog row of its product', () => {
+  const withSelect = (db) => {
+    const knex = fakeKnex(db);
+    const wrapped = (table) => { const q = knex(table); q.select = () => q; return q; };
+    wrapped.schema = knex.schema;
+    return wrapped;
+  };
+  test('an inactive legacy row is replaced by the renamed active row that aliases its name; an active id, an edited row and a product with no active row are left', async () => {
+    const db = seeded();
+    db.products_catalog.find((r) => r.id === 'cat-2').active = false;
+    db.products_catalog.push({ id: 'cat-2-new', name: 'Arena Renamed', active: true });
+    db.product_aliases = [{ product_id: 'cat-2-new', alias_name: 'Arena 50 WDG' }];
+    db.products_catalog.find((r) => r.id === 'cat-3').active = false; // no active row at all
+    db.lawn_protocol_products.find((r) => r.id === 'p-4').product_name = 'Edited';
+    db.products_catalog.find((r) => r.id === 'cat-4').active = false;
+    await activeProduct.up(withSelect(db));
+    const idOf = (id) => db.lawn_protocol_products.find((r) => r.id === id).product_id;
+    expect([idOf('p-1'), idOf('p-2'), idOf('p-3'), idOf('p-4')]).toEqual(['cat-1', 'cat-2-new', 'cat-3', 'cat-4']);
+    // the rollback guards still read the corrected row as the seeded product
+    await rollBack(db);
+    expect(db.lawn_protocol_products.map((r) => r.id)).toEqual(['p-4']);
+  });
+  test('missing tables skip without error; down changes nothing', async () => {
+    await expect(activeProduct.up(withSelect({}))).resolves.toBeUndefined();
+    await expect(activeProduct.down()).resolves.toBeUndefined();
   });
 });

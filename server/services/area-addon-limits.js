@@ -618,12 +618,15 @@ async function visitProspect(database, visit, property) {
   return estimate ? { estimate, prospect: prospectOf(estimate) } : null;
 }
 
-async function movedVisitHistory(database, { visit, visitId, property, keys }) {
+async function movedVisitHistory(database, { visit, visitId, property, keys, day }) {
   const found = await visitProspect(database, visit, property);
   // Two requests for one place share this key, and a move waits behind a booking of the same place.
   await lockProspectIdentity(database, found ? found.estimate : { property_id: isUuid(property) ? property : null }, { named: true, seeds: [property] });
   return savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
     customerId: visit.customer_id, propertyId: isUuid(property) ? property : null, keys, excludeVisitIds: [visitId], prospect: found ? found.prospect : null,
+    // The 12 months are counted back from the day the visit lands on, not from today: a backdated visit is judged against
+    // the applications that were inside its own window.
+    asOf: day,
   }));
 }
 
@@ -655,7 +658,7 @@ async function assertMovedVisitLimitsOpen(database, options = {}) {
   const { row, day, property, keys } = subject;
   let history;
   try {
-    history = await movedVisitHistory(database, { visit: row, visitId: options.visitId, property, keys });
+    history = await movedVisitHistory(database, { visit: row, visitId: options.visitId, property, keys, day });
     // `alsoMoving` ({ limit key: [days] }): visits the SAME move takes to this place and has already judged. They are still at
     // their old property in the tables, so the caller hands their days over and they count here.
     for (const key of keys) {

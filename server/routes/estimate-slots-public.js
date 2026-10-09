@@ -968,7 +968,9 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       // Both estimate UIs bootstrap Stripe Elements from this response — the
       // public estimate pages have no other authenticated key source.
       publishableKey: require('../config/stripe-config').publishableKey,
-    });
+      // The mode is judged again on the reloaded row: an estimate revised into a recurring plan with an area add-on while
+      // the intent was minted answers the one-time-only refusal, and no secret is returned.
+    }, { requestedServiceMode: req.body?.serviceMode ?? '' });
   } catch (err) {
     logger.error(`[estimate-slots-public:card-hold-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });

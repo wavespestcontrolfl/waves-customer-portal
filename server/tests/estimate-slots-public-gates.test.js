@@ -544,6 +544,10 @@ describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_AD
       const recheck = src.slice(src.indexOf('async function postMintRefusal('), src.indexOf('async function refuseParkedRecurringIntent('));
       expect(recheck).toContain('|| lockedAreaAddOnRuleRefusal(row, requestedServiceMode)');
       expect(src).toContain("{ retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? '' }");
+      // Codex round 34: the card-hold success exit passes the requested mode too (an estimate revised into a recurring plan
+      // with an add-on while the intent was minted).
+      const cardHold = src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'"));
+      expect(cardHold).toContain("}, { requestedServiceMode: req.body?.serviceMode ?? '' });");
     });
   });
 

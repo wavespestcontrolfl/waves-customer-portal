@@ -112,6 +112,17 @@ describe('a moved visit that carries a limited add-on is judged for the new day'
   });
 });
 
+// Codex round 34: the 12 months are counted back from the day the visit lands on.
+describe('a backdated move is judged against its own window', () => {
+  test('an application over a year before today but within 60 days of the backdated day closes that day', async () => {
+    const BACK = addDays(TODAY, -340);
+    const tables = () => world({ property_application_history: [ledger(addDays(BACK, -30))] });
+    await expect(judge(tables(), { scheduledDate: BACK, staff: true })).rejects.toMatchObject({ code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' });
+    // the same application does not close a day near today
+    await expect(judge(tables(), { scheduledDate: NEW_DAY, staff: true })).resolves.toEqual({ keys: ['bed_pre_emergent'], day: NEW_DAY });
+  });
+});
+
 // Codex round 27: a batch mover hands the visits it already judged for the same destination.
 describe('visits moved in the same batch count at the destination', () => {
   test('a pass returns what was judged; a sibling handed over as alsoMoving closes the day', async () => {
