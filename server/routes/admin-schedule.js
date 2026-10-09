@@ -5202,12 +5202,7 @@ async function loadProjectCompletionContextByServiceId(services) {
       // two bait station forms (a trap check keeps the full form) and never a
       // combined visit. The client also needs the map known on
       // (pest-fast-complete.js isTypedReportEligible).
-      stationFastCompleteEnabled: require('../config/feature-gates').stationFastCompleteLive()
-        && require('../config/feature-gates').fastCompleteReportLive()
-        && require('../config/feature-gates').typedVoiceFillLive()
-        && Object.hasOwn(require('../services/visit-station-facts').STATION_SHEET_PROGRAMS, completionProfile?.findingsType || '')
-        && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
-        && !(completionProfile?.companions || []).length,
+      stationFastCompleteEnabled: require('../services/visit-station-facts').stationFastCompleteEnabled(completionProfile),
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -25681,10 +25676,10 @@ router.post('/generate-report', async (req, res) => {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
 
-    // The technician's station statuses, with the gate on and a bait station form.
-    const stationChecksLine = require('../config/feature-gates').stationFastCompleteLive()
-      ? require('../services/visit-station-facts').stationChecksWriterLine(structuredFindings?.type, stationChecks)
-      : '';
+    // The technician's station statuses (gate on, a bait station form): a serviced
+    // station under the completed work, the rest under what the technician
+    // observed (visit-station-facts.js stationChecksWriterLines).
+    const stationLines = require('../services/visit-station-facts').stationChecksWriterLines(structuredFindings, stationChecks);
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
     const areas = asArray(areasServiced);
     const actions = asArray(actionsCompleted);
@@ -26602,14 +26597,14 @@ Arrival Time: ${arrivalTime || 'Not specified'}
 ${writerRulesOn
     ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}${stationChecksLine ? `\n${stationChecksLine}` : ''}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}${stationLines.completed}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
 ${writerRulesOn
     ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)
     : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
 
 [OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
+Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}${stationLines.observed}
 Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
 
 [REPORTED BY CUSTOMER]

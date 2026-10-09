@@ -985,10 +985,9 @@ router.post('/:serviceId/standard-wording', async (req, res, next) => {
 async function loadAndReadStationFacts({ svc, profile, note, requested }) {
   if (!Array.isArray(requested) || !requested.length) return null;
   if (!require('../config/feature-gates').stationFastCompleteLive()) return null;
-  const { readStationExceptions, STATION_SHEET_PROGRAMS } = require('../services/visit-station-facts');
-  const program = STATION_SHEET_PROGRAMS[profile?.findingsType];
-  if (!program || !svc.customer_id || (profile.companions || []).length) return null;
-  if (TermiteStations.stationProgramForProfile(profile) !== program) return null;
+  const { readStationExceptions, stationSheetProgramFor } = require('../services/visit-station-facts');
+  const program = stationSheetProgramFor(profile);
+  if (!program || !svc.customer_id) return null;
   const sent = new Set(requested.map((station) => String(station?.id)));
   let rows;
   try {
@@ -999,8 +998,13 @@ async function loadAndReadStationFacts({ svc, profile, note, requested }) {
     return { status: 'failed', exceptions: [] };
   }
   const stations = (Array.isArray(rows) ? rows : [])
-    .filter((row) => (row.program || 'termite') === program && sent.has(String(row.id)))
+    .filter((row) => (row.program || 'termite') === program)
     .map((row) => ({ id: row.id, number: row.station_number, program, is_active: row.is_active }));
+  // The sheet's roster must be the registry's: a station retired since the
+  // sheet loaded, or added, means the sheet would assert and count stations that
+  // are not the property's. No read; the sheet loads the registry again.
+  const live = new Set(stations.map((station) => String(station.id)));
+  if (live.size !== sent.size || [...live].some((id) => !sent.has(id))) return { status: 'roster_changed', exceptions: [] };
   return readStationExceptions({ note, stations, program });
 }
 

@@ -59,21 +59,37 @@ const send = async (extra, gate = 'true') => {
 };
 afterEach(() => { delete process.env.GATE_STATION_FAST_COMPLETE; });
 
-test('a station the tech corrected to Serviced is written as serviced, over the note, right under the completed actions', async () => {
-  const text = await send({ stationChecks: [{ number: 2, status: 'serviced' }] });
-  expect(text).toContain('Actions completed: Not specified\nTechnician station checks (authoritative: they override anything the note says about a station): station 2: the technician serviced the station');
-  expect(text).toContain('Every other station was checked and is OK.');
-  expect(text).not.toContain('bait consumption (the bait was eaten');
+const OBS = 'Technician station checks, observed (authoritative: they override anything the note says about a station): ';
+const DONE = 'Technician station checks, work done (authoritative: they override anything the note says about a station): ';
+const sectionsOf = (text) => ({
+  completed: text.slice(text.indexOf('[COMPLETED WORK]'), text.indexOf('[OBSERVED BY TECHNICIAN]')),
+  observed: text.slice(text.indexOf('[OBSERVED BY TECHNICIAN]'), text.indexOf('[REPORTED BY CUSTOMER]')),
 });
 
-test('a consumption mark and a station nobody could reach read in station order', async () => {
-  const text = await send({ stationChecks: [{ number: 3, status: 'inaccessible' }, { number: 2, status: 'activity' }] });
-  expect(text).toMatch(/station 2: bait consumption.*; station 3: could not be reached or checked\. Every other station/);
+test('a station the tech corrected to Serviced is work done, under the completed work, over the note', async () => {
+  const { completed, observed } = sectionsOf(await send({ stationChecks: [{ number: 2, status: 'serviced' }] }));
+  expect(completed).toContain(`Actions completed: Not specified\n${DONE}station 2: the technician serviced the station`);
+  expect(completed).not.toContain('Technician station checks, observed');
+  // The stations found OK are an observation, with the same authority.
+  expect(observed).toContain(`${OBS}every station was checked and is OK.`);
+  expect(observed).not.toContain('serviced the station');
 });
 
-test('an empty list says every station is OK, over a note that named one', async () => {
-  const text = await send({ stationChecks: [] });
-  expect(text).toContain('every station was checked and is OK.');
+test('bait consumption and a station nobody could reach are what the technician observed, never work performed', async () => {
+  const text = await send({ stationChecks: [{ number: 3, status: 'inaccessible' }, { number: 2, status: 'activity' }, { number: 1, status: 'serviced' }] });
+  const { completed, observed } = sectionsOf(text);
+  expect(observed).toMatch(/observed \(authoritative.*\): station 2: bait consumption.*; station 3: could not be reached or checked\. Every other station was checked and is OK\./);
+  expect(observed).not.toContain('station 1:');
+  expect(completed).toContain('work done (authoritative');
+  expect(completed).toContain('station 1: the technician serviced the station');
+  expect(completed).not.toContain('bait consumption');
+  expect(completed).not.toContain('could not be reached');
+});
+
+test('an empty list says every station is OK, as an observation, over a note that named one', async () => {
+  const { completed, observed } = sectionsOf(await send({ stationChecks: [] }));
+  expect(observed).toContain(`${OBS}every station was checked and is OK.`);
+  expect(completed).not.toContain('Technician station checks');
 });
 
 test('nothing is added with the gate off, without a list, or for a status that is not known', async () => {

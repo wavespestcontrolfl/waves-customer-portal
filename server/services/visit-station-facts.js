@@ -193,29 +193,61 @@ async function readStationExceptions({ note, stations, program = null } = {}) {
   };
 }
 
+// The program a visit's station checks ride the sheet for, or null: a termite or
+// rodent bait station form with no companion form, the program the completion
+// itself syncs (stationProgramForProfile). Used by the schedule row's flag and by
+// the typed-facts route, so the two cannot disagree.
+function stationSheetProgramFor(profile) {
+  const program = STATION_SHEET_PROGRAMS[profile?.findingsType];
+  if (!program || (profile.companions || []).length) return null;
+  return require('./termite-stations').stationProgramForProfile(profile) === program ? program : null;
+}
+
+// The schedule row's `stationFastCompleteEnabled`: this gate, the report flow and
+// the typed voice fill all live, and a visit whose checks ride the sheet.
+function stationFastCompleteEnabled(profile) {
+  const gates = require('../config/feature-gates');
+  return gates.stationFastCompleteLive() && gates.fastCompleteReportLive() && gates.typedVoiceFillLive()
+    && stationSheetProgramFor(profile) != null;
+}
+
 // The technician's own station statuses for the report writer
 // (GATE_STATION_FAST_COMPLETE): they stand over what the note says, so a chip
 // tapped to Serviced is never written up as consumption because the note said
 // so. `checks` is [{ number, status }], an exception each; an empty list says
-// every station was checked and is OK. Anything that is not a list of known
-// statuses on a bait station form adds nothing.
+// every station was checked and is OK. Each status goes under the writer prompt
+// section it belongs to: a station SERVICED is work done ([COMPLETED WORK]); bait
+// consumption or termite activity, a station that could not be reached, and the
+// stations found OK are what the technician saw ([OBSERVED BY TECHNICIAN]),
+// never work performed. The statement that they override the note applies to
+// both lines. Each line starts with its own newline, ready to follow the prompt
+// line it belongs under. With the gate off, or anything that is not a clean list
+// of known statuses on a bait station form, nothing is added.
 const MAX_STATION_CHECKS = 80;
-function stationChecksWriterLine(formType, checks) {
-  const program = STATION_SHEET_PROGRAMS[formType];
-  if (!program || !Array.isArray(checks) || checks.length > MAX_STATION_CHECKS) return '';
+const AUTHORITY = '(authoritative: they override anything the note says about a station)';
+function stationChecksWriterLines(structuredFindings, checks) {
+  const none = { completed: '', observed: '' };
+  const program = STATION_SHEET_PROGRAMS[structuredFindings?.type];
+  if (!program || !Array.isArray(checks) || checks.length > MAX_STATION_CHECKS) return none;
+  if (!require('../config/feature-gates').stationFastCompleteLive()) return none;
   const words = PROGRAM_WORDS[program];
   const said = { activity: words.activity, serviced: words.serviced, inaccessible: 'could not be reached or checked' };
   const seen = new Set();
-  const parts = [];
   for (const check of checks) {
     const number = check?.number;
-    if (!Number.isInteger(number) || number < 1 || seen.has(number) || !EXCEPTION_STATUSES.includes(check?.status)) return '';
+    if (!Number.isInteger(number) || number < 1 || seen.has(number) || !EXCEPTION_STATUSES.includes(check?.status)) return none;
     seen.add(number);
-    parts.push({ number, text: `station ${number}: ${said[check.status]}` });
   }
-  const head = 'Technician station checks (authoritative: they override anything the note says about a station)';
-  if (!parts.length) return `${head}: every station was checked and is OK.`;
-  return `${head}: ${parts.sort((a, b) => a.number - b.number).map((part) => part.text).join('; ')}. Every other station was checked and is OK.`;
+  const partsOf = (wanted) => checks
+    .filter((check) => wanted(check.status))
+    .sort((a, b) => a.number - b.number)
+    .map((check) => `station ${check.number}: ${said[check.status]}`);
+  const done = partsOf((status) => status === 'serviced');
+  const seenParts = partsOf((status) => status !== 'serviced');
+  return {
+    completed: done.length ? `\nTechnician station checks, work done ${AUTHORITY}: ${done.join('; ')}.` : '',
+    observed: `\nTechnician station checks, observed ${AUTHORITY}: ${seenParts.length ? `${seenParts.join('; ')}. Every other station was checked and is OK.` : 'every station was checked and is OK.'}`,
+  };
 }
 
 // What the sheet may take from a station read: 'read' only when the note was
@@ -228,8 +260,10 @@ function stationReadVerdict(status) {
 }
 
 module.exports = {
+  stationSheetProgramFor,
+  stationFastCompleteEnabled,
   stationReadVerdict,
-  stationChecksWriterLine,
+  stationChecksWriterLines,
   readStationExceptions,
   validateStationExceptions,
   namableStations,

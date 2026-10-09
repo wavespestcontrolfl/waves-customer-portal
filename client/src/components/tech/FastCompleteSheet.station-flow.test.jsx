@@ -515,3 +515,60 @@ describe('the typed read and the station read are independent: all four combinat
     }
   }, 30000);
 });
+
+describe('the Full form stays reachable on a station visit', () => {
+  const fullFormButton = () => screen.queryByRole('button', { name: /full form/i });
+
+  test('with the stations loaded and the note read, the header still offers the Full form (add, move and retire a station, inspection only)', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    expect(fullFormButton()).toBeTruthy();
+    await generate();
+    expect(within(stationsCard()).getByText('4 stations, 2 flagged, the rest OK')).toBeTruthy();
+    expect(fullFormButton()).toBeTruthy();
+  }, 30000);
+
+  test('a typed visit with no stations flow keeps the rule it had: no Full form until the sheet says it is needed', async () => {
+    const request = makeRequest({ typedFacts: { ...TERMITE_READ, stationRead: undefined, stationExceptions: undefined } });
+    await openSheet(request, { ...TERMITE, stationsFlow: false });
+    expect(fullFormButton()).toBeNull();
+  }, 20000);
+});
+
+describe('a read that is refreshed or whose roster went stale', () => {
+  test('"Write it again" that fails on a note already read leaves it read: the card and the send are not downgraded', async () => {
+    let calls = 0;
+    const request = makeRequest({ typedFacts: () => { calls += 1; return calls === 1 ? TERMITE_READ : { ...TERMITE_READ, stationRead: 'failed', stationExceptions: [] }; } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 2: Activity' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+    // The note is still read: the stations are still known.
+    expect(within(stationsCard()).getByText('4 stations, 2 flagged, the rest OK')).toBeTruthy();
+    expect(within(stationsCard()).queryByText(/Couldn’t read them/)).toBeNull();
+    expect(within(stationsCard()).queryByRole('button', { name: 'Stations checked by hand' })).toBeNull();
+  }, 30000);
+
+  test('the server saying the roster changed loads the registry again and asks for another try', async () => {
+    let calls = 0;
+    const request = makeRequest({
+      typedFacts: () => {
+        calls += 1;
+        return calls === 1 ? { ...TERMITE_READ, stationRead: 'failed', stationReadDetail: 'roster_changed', stationExceptions: [] } : TERMITE_READ;
+      },
+    });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    const mapCalls = () => request.paths().filter((path) => path.endsWith('/property-map')).length;
+    expect(mapCalls()).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText(/The stations on this property changed/, {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')).toEqual([]);
+    await waitFor(() => expect(mapCalls()).toBe(2));
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'activity' }, { number: 3, status: 'serviced' }]);
+  }, 30000);
+});

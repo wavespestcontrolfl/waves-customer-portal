@@ -90,7 +90,7 @@ import {
   useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
-import { FastCompleteStations, useStationChecks } from './FastCompleteStations';
+import { NO_STATION_GATE, NO_STATION_READ, StationCard, useStationChecks } from './FastCompleteStations';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
 import AREA_SCOPES from '../../../../shared/treatment-area-scopes.json';
 import {
@@ -192,6 +192,8 @@ const routedLaneOf = (service) => (service?.reportFlow === true && service.laneF
 // the form the live visit must still read as, and whose record the sheet
 // reads.
 const routedTypedOf = (service) => (service?.reportFlow === true && service.typedFlow === true ? service.typedType || null : null);
+// Whether the visit was routed with the station checks on the sheet (GATE_STATION_FAST_COMPLETE).
+const routedStationsOf = (service) => !!routedTypedOf(service) && service.stationsFlow === true;
 
 // Whether the live visit is still one this sheet takes as it was routed: a
 // lane visit its lane, a typed visit its form, any other one the short form.
@@ -503,9 +505,12 @@ function sheetTitle(reportFlow, visit, done) {
 
 // Whether the header shows Full form: always on the older short form (a
 // re-service outside the report flow); in the report flow only while the form
-// says the visit needs it or the sheet could not open the visit.
-function fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx }) {
-  if (!reportFlow || fullFormNeeded) return true;
+// says the visit needs it or the sheet could not open the visit. A bait station
+// visit (`stationsFlow`, GATE_STATION_FAST_COMPLETE) always offers it: adding,
+// moving or retiring a station and the inspection-only outcome are the full
+// form's alone, and the visit routes here whenever it is eligible.
+function fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow = false }) {
+  if (!reportFlow || fullFormNeeded || stationsFlow) return true;
   return !!(ctx.loadError || ctx.blockedReason);
 }
 
@@ -553,7 +558,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   const [voiceBusy, setVoiceBusy] = useState(false);
   // The form's own word that this visit needs the full form (see the header).
   const [fullFormNeeded, setFullFormNeeded] = useState(false);
-  const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx });
+  const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow: routedStationsOf(service) });
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -1409,7 +1414,7 @@ function typedPartOf(heard) {
 }
 
 function stationPartOf(heard) {
-  return { stationExceptions: stationExceptionsOf(heard), stationRead: stationReadOf(heard) };
+  return { stationExceptions: stationExceptionsOf(heard), stationRead: stationReadOf(heard), stationReadDetail: heard?.stationReadDetail };
 }
 
 // The station exceptions the note named (GATE_STATION_FAST_COMPLETE): the
@@ -1435,14 +1440,12 @@ const READS = {
 };
 const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
 
-const STATION_READ_FAILED = 'Couldn’t read the stations from your note. Try again, or mark the stations by hand and confirm.';
-
 function useReportDraft({ request, base, mode = null, houseMix = false }) {
   const [draft, setDraft] = useState(null);
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
-  const write = useCallback(async ({ buildPayload, note, current, scoreSet, stationRead = null, signature, fresh, extraRead = null }) => {
+  const write = useCallback(async ({ buildPayload, note, current, scoreSet, stationRead = NO_STATION_READ, signature, fresh, extraRead = null }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
     setWriteError('');
@@ -1451,9 +1454,8 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     // stored on the server).
     // A station visit's read also carries the stations the sheet shows
     // (GATE_STATION_FAST_COMPLETE), for the server to read their exceptions.
-    const stations = stationRead?.roster;
-    const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true, ...(stations?.length ? { stations } : {}) } : { note };
-    stationRead?.begin(note);
+    const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true, ...stationRead.body() } : { note };
+    stationRead.begin(note);
     // `extraRead` (voice fill): the note's products, read beside its facts; the
     // answer goes to `signature` and `buildPayload`, which land it on the rows.
     const [heard, extra] = await Promise.all([
@@ -1463,16 +1465,13 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     const facts = read.factsOf(heard, { houseMix });
     if (sequence !== sequenceRef.current) return;
     // A station visit's report is never written without the station read: a
-    // read that did not succeed (a timeout, a registry error, no answer) leaves
-    // the stations unknown, and unknown is never "all OK".
-    if (stationRead) {
-      const ok = facts.stationRead === 'read';
-      stationRead.settle(ok, note);
-      if (!ok) {
-        setWriting(false);
-        setWriteError(STATION_READ_FAILED);
-        return;
-      }
+    // read that did not succeed leaves the stations unknown, and unknown is
+    // never "all OK" (the station module settles the read and says why not).
+    const stationError = stationRead.check(facts, note);
+    if (stationError) {
+      setWriting(false);
+      setWriteError(stationError);
+      return;
     }
     // The signature of what the report is written from, read included (a
     // lane visit's record fills from the read).
@@ -1512,6 +1511,9 @@ function useLaneRecord(service) {
   const recordFor = (facts) => (lane ? mergeLaneRecord(ref.current, facts, preset) : null);
   return {
     lane,
+    // A lane visit has no stations.
+    stationRead: NO_STATION_READ,
+    stationGate: NO_STATION_GATE,
     mode: lane ? 'lane' : null,
     record: lane ? laneRecord : null,
     // What the report is written from, for its stale check.
@@ -1527,7 +1529,8 @@ function useLaneRecord(service) {
       }
       return filled;
     },
-    card: ({ draft, locked, writing }) => (lane ? (
+    // The report step renders this unconditionally: the record shows with the report.
+    card: ({ draft, locked, writing }) => (lane && draft && !writing ? (
       <LaneRecordCard
         lane={lane}
         preset={preset}
@@ -1600,16 +1603,13 @@ function useTypedRecord(service, request, note = '') {
     signaturePart: (record) => (record
       ? { typed: record.stationStatuses ? [record.values, record.score, record.stationStatuses, record.stationBasis] : [record.values, record.score] }
       : null),
-    // How the report write reads the stations from the note (null: not to).
+    // How the report write reads the stations from the note (a no-op when not to).
     stationRead: stations.stationRead,
-    // The stations card shows even before a report exists when the read failed.
-    stationCardOpen: stations.active && (stations.readStatus === 'failed' || stations.byHand),
-    // What holds the send: a registry the sheet cannot judge (the full form
-    // does), or a consumption mark beside "None".
-    stationHold: stations.active ? stations.hold : '',
-    // What holds Complete: the stations not known yet (the note's read, or the
-    // tech's hand check), then a consumption mark beside "None".
-    stationSendHold: stations.active ? (stations.readHold || stations.conflictFor(shown?.values) || '') : '',
+    // What the stations allow now: Generate waits on the registry (a registry the
+    // sheet cannot judge goes to the full form); Complete on the stations being
+    // known (the note's read, or the tech's hand check), then on a consumption
+    // mark beside "None".
+    stationGate: { generate: stations.gate.generate, complete: stations.gate.complete || stations.gate.conflict(shown?.values) },
     inputs: (record, facts) => {
       const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
       const entries = stations.entries();
@@ -1643,22 +1643,30 @@ function useTypedRecord(service, request, note = '') {
       }
       return filled;
     },
-    card: ({ draft, locked, writing }) => (schema ? (
-      <>
-        <FastCompleteStations checks={stations} locked={locked || writing} />
-        <TypedRecordCard
-          schema={cardSchema}
-          record={typedRecord}
-          unclear={draft?.facts?.unclearFields || []}
-          scoreUnclear={draft?.facts?.scoreUnclear === true}
-          readFailed={draft?.facts?.status === 'failed'}
-          locked={locked || writing}
-          onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
-          onScore={(score) => setTypedRecord((prev) => scoreTypedRecord(prev, score))}
-        />
-        {creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
-      </>
-    ) : null),
+    // The report step renders this unconditionally. The record shows with the
+    // report; the stations card also shows before one when its read failed.
+    card: ({ draft, locked, writing }) => {
+      if (!schema) return null;
+      const reportOn = !!draft && !writing;
+      return (
+        <>
+          <StationCard checks={stations} locked={locked || writing} shown={reportOn} />
+          {reportOn && (
+            <TypedRecordCard
+              schema={cardSchema}
+              record={typedRecord}
+              unclear={draft?.facts?.unclearFields || []}
+              scoreUnclear={draft?.facts?.scoreUnclear === true}
+              readFailed={draft?.facts?.status === 'failed'}
+              locked={locked || writing}
+              onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
+              onScore={(score) => setTypedRecord((prev) => scoreTypedRecord(prev, score))}
+            />
+          )}
+          {reportOn && creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
+        </>
+      );
+    },
   };
 }
 
@@ -1755,7 +1763,7 @@ function ReportFlowForm({
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
     form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
-    stationHold: recordState.stationHold,
+    stationHold: recordState.stationGate.generate,
   };
   const noteText = form.note.trim();
   const generateMissing = reportFlowMissing({
@@ -1763,7 +1771,7 @@ function ReportFlowForm({
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
-    stationSendHold: recordState.stationSendHold,
+    stationSendHold: recordState.stationGate.complete,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
   // The header's Full form button: a hold that sends the tech to the full
@@ -1925,7 +1933,6 @@ function ReportFlowForm({
         pestHeard={!mode}
         productVoice={productVoice}
         laneCard={recordState.card({ draft, locked, writing })}
-        cardWithoutDraft={!!recordState.stationCardOpen}
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
@@ -1999,7 +2006,7 @@ function ReportFlowForm({
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, sweep = null, cardWithoutDraft = false,
+  onBackFromPrompt, sweep = null,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2053,7 +2060,7 @@ function ReportStep({
         {/* Voice fill: the product rows the note filled, each waiting on the tech's
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
-        {(showDraft || (cardWithoutDraft && !writing)) && laneCard}
+        {laneCard}
         {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>

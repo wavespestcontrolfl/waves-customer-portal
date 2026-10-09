@@ -57,7 +57,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 }));
 const { dispatchWithFallback } = require('../services/llm/call');
 const {
-  readStationExceptions, validateStationExceptions, stationChecksWriterLine, stationReadVerdict, namableStations, stationFactsSchema, STATION_SHEET_PROGRAMS, EXCEPTION_STATUSES,
+  readStationExceptions, validateStationExceptions, stationChecksWriterLines, stationReadVerdict, namableStations, stationFactsSchema, STATION_SHEET_PROGRAMS, EXCEPTION_STATUSES,
 } = require('../services/visit-station-facts');
 const router = require('../routes/admin-dispatch');
 
@@ -275,16 +275,45 @@ describe('POST /:serviceId/typed-facts with the sheet\'s stations', () => {
     expect(calls).toContainEqual({ table: 'termite_stations', clause: { customer_id: 'cust-1', is_active: true } });
   });
 
-  test('a station the client names that the registry does not hold (or holds retired or in another program) is never an exception', async () => {
-    // The registry query returns active rows only; a retired row the client still shows is not in it.
-    mockDbCurrent = stationDb(SERVICE, [row(1), row(7), row(4, { program: 'rodent' })]);
-    modelAnswers({ exceptions: [item(4, 'activity', 'station 4 had activity'), item(7, 'serviced', 'I replaced the bait in 7')] });
-    const res = await invoke({ serviceId: 'svc-1' }, { note: NOTE, stations: [...SHEET_STATIONS, { id: 'ghost', number: 8 }] });
-    expect(res.body.stationExceptions.map((e) => e.number)).toEqual([7]);
-    // And a registry row the sheet did not show is not named either.
-    mockDbCurrent = stationDb(SERVICE, ROSTER);
-    const sheetShowed = await invoke({ serviceId: 'svc-1' }, { note: NOTE, stations: [{ id: 'st-7', number: 7 }] });
-    expect(sheetShowed.body.stationExceptions.map((e) => e.number)).toEqual([7]);
+  // The roster the sheet shows must be the registry's active stations of the
+  // visit's program; otherwise the sheet would assert and count stations that
+  // are not the property's, and no read is answered (the sheet loads again).
+  describe('a roster that went stale', () => {
+    const says = async (stations = SHEET_STATIONS) => (await invoke({ serviceId: 'svc-1' }, { note: NOTE, stations })).body;
+    const staleBody = (body) => {
+      expect(body).toMatchObject({ available: true, stationRead: 'failed', stationReadDetail: 'roster_changed', stationExceptions: [] });
+    };
+
+    test('a station shown on the sheet was retired since (the registry no longer holds it)', async () => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER.filter((s) => s.id !== 'st-7'));
+      modelAnswers({ exceptions: [item(4, 'activity', 'station 4 had activity')] });
+      staleBody(await says());
+    });
+
+    test('a station was added since the sheet loaded (the registry holds one the sheet did not show)', async () => {
+      mockDbCurrent = stationDb(SERVICE, [...ROSTER, row(9)]);
+      modelAnswers({ exceptions: [item(4, 'activity', 'station 4 had activity')] });
+      staleBody(await says());
+    });
+
+    test('a station the client names that is not the property\'s at all', async () => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER);
+      modelAnswers({ exceptions: [] });
+      staleBody(await says([...SHEET_STATIONS, { id: 'ghost', number: 8 }]));
+    });
+
+    test('another program\'s station in the registry is not part of the roster', async () => {
+      mockDbCurrent = stationDb(SERVICE, [...ROSTER, row(9, { program: 'rodent' })]);
+      modelAnswers({ exceptions: [item(4, 'activity', 'station 4 had activity')] });
+      expect(await says()).toMatchObject({ stationRead: 'read' });
+    });
+
+    test('the same roster is read, and the model is not asked about a stale one', async () => {
+      mockDbCurrent = stationDb(SERVICE, [...ROSTER, row(9)]);
+      modelAnswers({ exceptions: [] });
+      await says();
+      expect(dispatchWithFallback.mock.calls.some(([, request]) => String(request.system).includes('station number'))).toBe(false);
+    });
   });
 
   test('gate off, no stations carried, a combined visit or any other form: the answer is exactly as before', async () => {
@@ -456,20 +485,65 @@ describe('POST /:serviceId/typed-facts with the sheet\'s stations', () => {
   });
 });
 
-describe('stationChecksWriterLine: the tech\'s statuses for the report writer', () => {
-  test('names each exception by number in the program\'s words, and says the rest are OK', () => {
-    expect(stationChecksWriterLine('termite_bait_station', [{ number: 7, status: 'serviced' }, { number: 4, status: 'activity' }]))
-      .toMatch(/station 4: termite activity.*; station 7: the technician serviced the station.*Every other station was checked and is OK\.$/);
-    expect(stationChecksWriterLine('rodent_bait_station', [{ number: 2, status: 'activity' }])).toContain('bait consumption');
-    expect(stationChecksWriterLine('rodent_bait_station', [])).toContain('every station was checked and is OK');
+describe('stationChecksWriterLines: the tech\'s statuses for the report writer', () => {
+  const saved = process.env.GATE_STATION_FAST_COMPLETE;
+  beforeEach(() => { process.env.GATE_STATION_FAST_COMPLETE = 'true'; });
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_STATION_FAST_COMPLETE; else process.env.GATE_STATION_FAST_COMPLETE = saved; });
+  const lines = (type, checks) => stationChecksWriterLines({ type }, checks);
+
+  test('a serviced station is work done; activity and no access are observed; both carry the authority', () => {
+    const { completed, observed } = lines('termite_bait_station', [{ number: 7, status: 'serviced' }, { number: 4, status: 'activity' }]);
+    expect(completed).toMatch(/^\nTechnician station checks, work done \(authoritative: they override anything the note says about a station\): station 7: the technician serviced the station/);
+    expect(completed).not.toContain('station 4');
+    expect(observed).toMatch(/^\nTechnician station checks, observed \(authoritative: they override anything the note says about a station\): station 4: termite activity.*Every other station was checked and is OK\.$/);
+    expect(observed).not.toContain('station 7');
+    expect(lines('rodent_bait_station', [{ number: 2, status: 'activity' }]).observed).toContain('bait consumption');
+    expect(lines('rodent_bait_station', [{ number: 2, status: 'inaccessible' }]).observed).toContain('could not be reached or checked');
   });
 
-  test('adds nothing for a trap check, another form, or anything that is not a clean list', () => {
-    expect(stationChecksWriterLine('rodent_trapping', [{ number: 2, status: 'activity' }])).toBe('');
-    expect(stationChecksWriterLine('cockroach', [])).toBe('');
-    expect(stationChecksWriterLine('rodent_bait_station', undefined)).toBe('');
-    expect(stationChecksWriterLine('rodent_bait_station', [{ number: 2, status: 'ok' }])).toBe('');
-    expect(stationChecksWriterLine('rodent_bait_station', [{ number: '2', status: 'activity' }])).toBe('');
-    expect(stationChecksWriterLine('rodent_bait_station', [{ number: 2, status: 'activity' }, { number: 2, status: 'activity' }])).toBe('');
+  test('an empty list is an observation that every station is OK, with no work done', () => {
+    const result = lines('rodent_bait_station', []);
+    expect(result.completed).toBe('');
+    expect(result.observed).toContain('every station was checked and is OK');
+  });
+
+  test('adds nothing with the gate off, for a trap check or another form, or for anything that is not a clean list', () => {
+    const none = { completed: '', observed: '' };
+    expect(lines('rodent_trapping', [{ number: 2, status: 'activity' }])).toEqual(none);
+    expect(lines('cockroach', [])).toEqual(none);
+    expect(stationChecksWriterLines(undefined, [])).toEqual(none);
+    expect(lines('rodent_bait_station', undefined)).toEqual(none);
+    expect(lines('rodent_bait_station', [{ number: 2, status: 'ok' }])).toEqual(none);
+    expect(lines('rodent_bait_station', [{ number: '2', status: 'activity' }])).toEqual(none);
+    expect(lines('rodent_bait_station', [{ number: 2, status: 'activity' }, { number: 2, status: 'activity' }])).toEqual(none);
+    process.env.GATE_STATION_FAST_COMPLETE = 'false';
+    expect(lines('rodent_bait_station', [])).toEqual(none);
+  });
+});
+
+describe('stationSheetProgramFor and stationFastCompleteEnabled', () => {
+  const GATES = ['GATE_STATION_FAST_COMPLETE', 'GATE_FAST_COMPLETE_REPORT', 'GATE_TYPED_VOICE_FILL'];
+  const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
+  afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
+  const { stationSheetProgramFor, stationFastCompleteEnabled } = require('../services/visit-station-facts');
+
+  test('the two bait station forms with no companion form; never a trap check, a combined visit or another form', () => {
+    expect(stationSheetProgramFor({ findingsType: 'termite_bait_station' })).toBe('termite');
+    expect(stationSheetProgramFor({ findingsType: 'rodent_bait_station', companions: [] })).toBe('rodent');
+    expect(stationSheetProgramFor({ findingsType: 'rodent_trapping' })).toBeNull();
+    expect(stationSheetProgramFor({ findingsType: 'termite_bait_station', companions: [{ type: 'rodent_bait_station' }] })).toBeNull();
+    expect(stationSheetProgramFor({ findingsType: 'cockroach' })).toBeNull();
+    expect(stationSheetProgramFor(null)).toBeNull();
+  });
+
+  test('the row flag needs all three gates exactly "true" and such a visit', () => {
+    for (const name of GATES) process.env[name] = 'true';
+    expect(stationFastCompleteEnabled({ findingsType: 'termite_bait_station' })).toBe(true);
+    expect(stationFastCompleteEnabled({ findingsType: 'rodent_trapping' })).toBe(false);
+    for (const name of GATES) {
+      process.env[name] = 'false';
+      expect(stationFastCompleteEnabled({ findingsType: 'termite_bait_station' })).toBe(false);
+      process.env[name] = 'true';
+    }
   });
 });
