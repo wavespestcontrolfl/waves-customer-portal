@@ -78,13 +78,15 @@ async function guardFetch(path, init = {}) {
 }
 
 // The interrupt POST only queues the event: the session stops at its next
-// safe boundary. Wait (bounded) until it is no longer running, so the usage
+// safe boundary. Wait (bounded) until it is idle or terminated, so the usage
 // the caller reads next is the settled figure.
 async function waitUntilStopped(sessionId, settleMs, pollMs) {
   const deadline = Date.now() + settleMs;
   for (;;) {
     const session = await guardFetch(`/sessions/${encodeURIComponent(sessionId)}`);
-    if (session.status !== 'running') return true;
+    // `rescheduling` is the platform retrying: still spending. Only idle or
+    // terminated is stopped.
+    if (session.status === 'idle' || session.status === 'terminated') return true;
     if (Date.now() + pollMs > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }

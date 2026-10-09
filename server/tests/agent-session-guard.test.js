@@ -67,6 +67,13 @@ describe('stopAbandonedSession', () => {
     expect(reads[0][0]).toBe('https://api.anthropic.com/v1/sessions/sess-1');
   });
 
+  it('keeps waiting through rescheduling: the platform is retrying and still spending', async () => {
+    const statuses = ['rescheduling', 'running', 'terminated'];
+    global.fetch = jest.fn(async (_url, opts = {}) => ({ ok: true, status: 200, json: async () => (opts.method === 'POST' ? {} : { status: statuses.shift() }) }));
+    await expect(stop()).resolves.toBe(true);
+    expect(statuses).toHaveLength(0);
+  });
+
   it('gives up waiting at the limit and still reports the interrupt as sent', async () => {
     global.fetch = platform(Infinity);
     await expect(stop({ settleMs: 5 })).resolves.toBe(true);
