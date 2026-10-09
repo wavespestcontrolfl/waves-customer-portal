@@ -185,4 +185,4 @@ async function flagCallBookingRain({
   }
 }
 
-module.exports = { flagCallBookingRain, visitPoint, GATE, _test: { peakChance } };
+module.exports = { flagCallBookingRain, GATE, _test: { peakChance } };
