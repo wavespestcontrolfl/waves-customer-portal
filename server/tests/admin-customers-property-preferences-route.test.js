@@ -439,11 +439,22 @@ describe('the new-sod record — staff-only sodLaidOn / sodCovers / sodArea', ()
   });
 
   it('rejects covers outside whole/part and an area over 120 characters (the column width)', async () => {
-    let res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'some' });
+    // One bad sod field rejects the whole sod record: a valid date beside a bad
+    // covers value must not persist as a whole-lawn record.
+    let res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'some', sodArea: 'back lawn' });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected[0].field).toBe('sodCovers');
+    expect(mockState.prefsRow?.sod_laid_on ?? null).toBeNull();
+    res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'part', sodArea: 'x'.repeat(121) });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected.map((r) => r.field)).toEqual(['sodArea']);
+    expect(mockState.prefsRow?.sod_laid_on ?? null).toBeNull();
+    // The other fields of a mixed batch still save.
+    res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'some', chemicalSensitivities: true });
     expect(res.status).toBe(200);
     expect(res.body.rejected[0].field).toBe('sodCovers');
-    res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'part', sodArea: 'x'.repeat(121) });
-    expect(res.body.rejected.map((r) => r.field)).toEqual(['sodArea', 'sodArea']);
+    expect(mockState.prefsRow.chemical_sensitivities).toBe(true);
+    expect(mockState.prefsRow.sod_laid_on ?? null).toBeNull();
     res = await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'part', sodArea: 'x'.repeat(120) });
     expect(res.status).toBe(200);
     expect(mockState.prefsRow.sod_area).toHaveLength(120);

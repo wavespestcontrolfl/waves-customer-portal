@@ -159,79 +159,89 @@ function largePatchWatchUntil(sodLaidOn) {
  */
 function sodHolds(input) {
   try {
-    const { sodLaidOn: rawLaid, sodCovers, sodArea, sodRootedOn, visitDate: rawVisit, grass } = input || {};
-    const laid = ymdOrNull(rawLaid);
-    const visit = ymdOrNull(rawVisit);
-    if (!laid || !visit) return null;
-    const day = daysBetween(laid, visit) + 1;
-    if (day < 1) return null;
-
-    // Anything but 'part' is the whole lawn: the cautious reading for every class.
-    const covers = sodCovers === 'part' ? 'part' : 'whole';
-    const whole = covers === 'whole';
-    const area = whole ? null : ((typeof sodArea === 'string' && sodArea.trim()) || null);
-    const scope = whole ? 'whole' : 'area';
-
-    // A rooted check dated before the sod or after the visit does not count.
-    const rootedDay = ymdOrNull(sodRootedOn);
-    const rooted = !!rootedDay && rootedDay >= laid && rootedDay <= visit;
-
-    const fertilizerUntil = addDaysYmd(laid, FERTILIZER_HOLD_DAYS);
-    const fertilizer = whole && visit < fertilizerUntil
-      ? { held: true, until: fertilizerUntil, scope: 'whole' }
-      : { held: false, until: null, scope: 'whole' };
-
-    const weedWindowUntil = addDaysYmd(laid, WEED_KILLER_HOLD_DAYS);
-    const inWeedWindow = visit < weedWindowUntil;
-    const weedKiller = {
-      held: inWeedWindow || !rooted,
-      until: inWeedWindow ? weedWindowUntil : null,
-      needsRootedCheck: !inWeedWindow && !rooted,
-      scope,
-    };
-
-    const preEmergentUntil = preEmergentHoldUntil(laid);
-    const preEmergent = { held: visit < preEmergentUntil, until: preEmergentUntil, scope };
-
-    const tetrinoUntil = addDaysYmd(laid, TETRINO_HOLD_DAYS);
-    const tetrino = { held: visit < tetrinoUntil, until: tetrinoUntil, scope };
-
-    const dyloxUntil = addDaysYmd(laid, DYLOX_HOLD_DAYS);
-    const dylox = whole && visit < dyloxUntil
-      ? { held: true, until: dyloxUntil, scope: 'whole' }
-      : { held: false, until: null, scope: 'whole' };
-
-    const fungicideGravex = { ...weedKiller };
-
-    const watchUntil = largePatchWatchUntil(laid);
-    const watchGrass = LARGE_PATCH_GRASSES.has(grassKey(grass));
-    const largePatchWatch = {
-      on: !!watchUntil && watchGrass && visit <= watchUntil,
-      until: watchUntil && watchGrass ? watchUntil : null,
-    };
-
-    const swapPreEmergentBag = preEmergent.held && preEmergent.scope === 'whole' && !fertilizer.held;
-    const active = fertilizer.held || weedKiller.held || preEmergent.held || tetrino.held
-      || dylox.held || fungicideGravex.held || largePatchWatch.on;
-
-    return {
-      sodLaidOn: laid,
-      covers,
-      area,
-      day,
-      fertilizer,
-      weedKiller,
-      preEmergent,
-      tetrino,
-      dylox,
-      fungicideGravex,
-      largePatchWatch,
-      swapPreEmergentBag,
-      active,
-    };
+    const record = readSodVisit(input);
+    return record ? buildSodHolds(record) : null;
   } catch {
     return null;
   }
+}
+
+// The inputs of sodHolds as checked calendar days, or null when there is no
+// usable sod date / visit date or the visit is before the sod went down.
+function readSodVisit(input) {
+  const { sodLaidOn, sodCovers, sodArea, sodRootedOn, visitDate, grass } = input || {};
+  const laid = ymdOrNull(sodLaidOn);
+  const visit = ymdOrNull(visitDate);
+  if (!laid || !visit || visit < laid) return null;
+  // Anything but 'part' is the whole lawn: the cautious reading for every class.
+  const whole = sodCovers !== 'part';
+  const area = !whole && typeof sodArea === 'string' ? sodArea.trim() : '';
+  // A rooted check dated before the sod or after the visit does not count.
+  const rootedDay = ymdOrNull(sodRootedOn);
+  return {
+    laid,
+    visit,
+    whole,
+    area: area || null,
+    rooted: !!rootedDay && rootedDay >= laid && rootedDay <= visit,
+    grass,
+  };
+}
+
+// A hold that ends on a date: held while the visit is before `until`.
+function datedHold(visit, until, scope) {
+  return { held: visit < until, until, scope };
+}
+
+// Fertilizer and Dylox: whole-lawn sod only (a spreader cannot skip a patch).
+function wholeLawnHold(visit, until, whole) {
+  return whole && visit < until
+    ? { held: true, until, scope: 'whole' }
+    : { held: false, until: null, scope: 'whole' };
+}
+
+function weedKillerHold({ laid, visit, rooted }, scope) {
+  const windowUntil = addDaysYmd(laid, WEED_KILLER_HOLD_DAYS);
+  const inWindow = visit < windowUntil;
+  return {
+    held: inWindow || !rooted,
+    until: inWindow ? windowUntil : null,
+    needsRootedCheck: !inWindow && !rooted,
+    scope,
+  };
+}
+
+function largePatchWatchFor({ laid, visit, grass }) {
+  const until = LARGE_PATCH_GRASSES.has(grassKey(grass)) ? largePatchWatchUntil(laid) : null;
+  return { on: !!until && visit <= until, until };
+}
+
+function buildSodHolds(record) {
+  const { laid, visit, whole } = record;
+  const scope = whole ? 'whole' : 'area';
+  const fertilizer = wholeLawnHold(visit, addDaysYmd(laid, FERTILIZER_HOLD_DAYS), whole);
+  const weedKiller = weedKillerHold(record, scope);
+  const preEmergent = datedHold(visit, preEmergentHoldUntil(laid), scope);
+  const tetrino = datedHold(visit, addDaysYmd(laid, TETRINO_HOLD_DAYS), scope);
+  const dylox = wholeLawnHold(visit, addDaysYmd(laid, DYLOX_HOLD_DAYS), whole);
+  const fungicideGravex = { ...weedKiller };
+  const largePatchWatch = largePatchWatchFor(record);
+  const holds = [fertilizer, weedKiller, preEmergent, tetrino, dylox, fungicideGravex];
+  return {
+    sodLaidOn: laid,
+    covers: whole ? 'whole' : 'part',
+    area: record.area,
+    day: daysBetween(laid, visit) + 1,
+    fertilizer,
+    weedKiller,
+    preEmergent,
+    tetrino,
+    dylox,
+    fungicideGravex,
+    largePatchWatch,
+    swapPreEmergentBag: preEmergent.held && whole && !fertilizer.held,
+    active: holds.some((h) => h.held) || largePatchWatch.on,
+  };
 }
 
 /**
@@ -250,37 +260,44 @@ function sodHolds(input) {
  *   columns holds every column to write, in NEW_SOD_COLUMNS order
  */
 function resolveSodRecord(current, input) {
-  const sent = (key) => Object.prototype.hasOwnProperty.call(input || {}, key);
   const row = current || {};
+  const pick = (key) => (Object.prototype.hasOwnProperty.call(input || {}, key) ? input[key] : row[key]);
   const storedLaid = ymdOrNull(row.sod_laid_on);
 
-  const laid = sent('sod_laid_on') ? ymdOrNull(input.sod_laid_on) : storedLaid;
-  if (!laid) {
-    const wantsMore = (sent('sod_covers') && input.sod_covers != null && input.sod_covers !== '')
-      || (sent('sod_area') && String(input.sod_area ?? '').trim() !== '');
-    if (wantsMore) return { ok: false, field: 'sodLaidOn', message: 'Set the sod date before saying how much of the lawn it covers.' };
-    return { ok: true, columns: clearedNewSodColumns() };
-  }
+  const laid = ymdOrNull(pick('sod_laid_on'));
+  if (!laid) return resolveWithoutDate(input || {});
 
-  let covers = sent('sod_covers') ? input.sod_covers : row.sod_covers;
-  if (covers == null || covers === '') covers = 'whole';
+  const covers = pick('sod_covers') || 'whole';
   if (covers !== 'whole' && covers !== 'part') {
     return { ok: false, field: 'sodCovers', message: "Sod covers must be 'whole' or 'part'." };
   }
-
-  let area = sent('sod_area') ? input.sod_area : row.sod_area;
-  area = area == null ? null : String(area).trim();
-  if (area === '') area = null;
-  if (area && area.length > SOD_AREA_MAX) {
-    return { ok: false, field: 'sodArea', message: `Sod area must be ${SOD_AREA_MAX} characters or fewer.` };
-  }
-  if (covers === 'whole') area = null;
-  else if (!area) return { ok: false, field: 'sodArea', message: 'Name the part of the lawn that has new sod.' };
+  const area = resolveSodArea(covers, pick('sod_area'));
+  if (!area.ok) return area;
 
   // The rooted day belongs to one sod date: a different date starts over.
-  const rooted = storedLaid === laid ? (ymdOrNull(row.sod_rooted_on) || null) : null;
+  const rooted = storedLaid === laid ? ymdOrNull(row.sod_rooted_on) : null;
+  return { ok: true, columns: { sod_laid_on: laid, sod_covers: covers, sod_area: area.value, sod_rooted_on: rooted } };
+}
 
-  return { ok: true, columns: { sod_laid_on: laid, sod_covers: covers, sod_area: area, sod_rooted_on: rooted } };
+// No sod date after the write: the whole record clears, unless the caller sent
+// covers or an area with nothing to attach them to.
+function resolveWithoutDate(input) {
+  const hasText = (value) => String(value ?? '').trim() !== '';
+  if (hasText(input.sod_covers) || hasText(input.sod_area)) {
+    return { ok: false, field: 'sodLaidOn', message: 'Set the sod date before saying how much of the lawn it covers.' };
+  }
+  return { ok: true, columns: clearedNewSodColumns() };
+}
+
+// The area for a covers value: dropped for 'whole', required and capped for 'part'.
+function resolveSodArea(covers, raw) {
+  if (covers === 'whole') return { ok: true, value: null };
+  const area = String(raw ?? '').trim();
+  if (!area) return { ok: false, field: 'sodArea', message: 'Name the part of the lawn that has new sod.' };
+  if (area.length > SOD_AREA_MAX) {
+    return { ok: false, field: 'sodArea', message: `Sod area must be ${SOD_AREA_MAX} characters or fewer.` };
+  }
+  return { ok: true, value: area };
 }
 
 module.exports = {

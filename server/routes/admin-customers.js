@@ -4772,6 +4772,7 @@ const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
   sodArea: Joi.string().trim().max(SOD_AREA_MAX).allow(null).empty('').default(null),
 };
 const SOD_PREFS_INPUT_FIELDS = NEW_SOD_COLUMNS.filter((c) => c !== 'sod_rooted_on');
+const SOD_PREFS_INPUT_CAMEL = ['sodLaidOn', 'sodCovers', 'sodArea'];
 const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details', ...SOD_PREFS_INPUT_FIELDS];
 const ADMIN_PREFS_FIELD_SCHEMAS = { ...PREFS_FIELD_SCHEMAS, ...ADMIN_ONLY_PREFS_FIELD_SCHEMAS };
 const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS_ALLOWED_FIELDS];
@@ -4880,6 +4881,13 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     if (blackoutError) {
       rejected.push({ field: 'blackoutEnd', message: blackoutError });
       BLACKOUT_FIELDS.forEach((f) => delete updates[f]);
+    }
+
+    // The sod record saves whole or not at all: one rejected sod field drops the
+    // other sod fields of the batch too (a valid date with a bad covers value
+    // must not persist as a whole-lawn record). Other fields still save.
+    if (rejected.some((r) => SOD_PREFS_INPUT_CAMEL.includes(r.field))) {
+      SOD_PREFS_INPUT_FIELDS.forEach((f) => delete updates[f]);
     }
 
     // Same Weekly-Inches eligibility gate as the portal write: never persist

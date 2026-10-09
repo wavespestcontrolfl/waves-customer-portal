@@ -601,7 +601,7 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(Object.keys(up.row).sort()).toEqual(['customer_id', 'irrigation_confirmed_fields', 'irrigation_home_changed_at', ...NEW_SOD_COLUMNS].sort());
     const fs = require('fs');
     const path = require('path');
-    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
+    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx, \{ clearNewSod: !sameHomeFlip \}\)/);
     expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp, \{ clearNewSod: false \}\)/);
     const src = fs.readFileSync(path.join(__dirname, '../services/customer-address-fanout.js'), 'utf8');
     expect(src.match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);

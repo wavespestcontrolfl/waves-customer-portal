@@ -3178,6 +3178,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     const mergeFanout = require('./customer-address-fanout');
     const mergeDifferentHomes = !!(mergeFanout.addressMatchKey(winner?.address_line1)
       && mergeFanout.addressMatchKey(loser?.address_line1) && mergeFanout.homesDiffer(winner, loser));
+    // Does the loser's new-sod record describe the home the winner has AFTER the merge? Only on positive
+    // evidence: both records carry the same real address, or the winner is an addressless shell that
+    // inherits the loser's real address in the backfill below. An addressless loser, or two shells, is
+    // unknown: the record is not copied and not carried (a hold for another property is worse than none).
+    const winnerAddressed = !!mergeFanout.addressMatchKey(winner?.address_line1);
+    const loserAddressed = !!mergeFanout.addressMatchKey(loser?.address_line1);
+    const sodFollowsMerge = loserAddressed && (!winnerAddressed || !mergeFanout.homesDiffer(winner, loser));
     // The loser's moved preferences row whose new-sod record the merge cleared ({ row_id, before }), for the undo.
     let movedPrefNewSod = null;
     const collisionHandlers = [];
@@ -3375,7 +3382,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         if (uniqueViolation && handler) {
           // copyNewSod is the executor's own premise test (the one the move stamp uses), so the
           // preference fill and the stamp can never disagree about whether the home moved.
-          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId, { copyNewSod: !mergeDifferentHomes });
+          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId, { copyNewSod: sodFollowsMerge });
           // The handler moved/merged/deleted rows that are NOT in
           // repointedIds — this merge can no longer be replayed backwards.
           if (!collisionHandlers.includes(table)) collisionHandlers.push(table);
@@ -3574,37 +3581,37 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         await trx.transaction(async (sp) => {
           // The STAMP never clears the new-sod record on a merge (it has no before-image: an undo leaves the
           // stamp in place). The winner's own record stands (its home did not move) and the loser's is
-          // never copied by the field fill (mergeSingletonPrefRow). The one case where the loser's
-          // record does reach the winner is below, journaled and cleared with a before-image.
+          // never copied by the field fill (mergeSingletonPrefRow). A loser row that moved whole is
+          // cleared after this block, journaled with a before-image.
           const n = await fanout.markSprinklerSettingsMoved(winnerId, sp, { clearNewSod: false });
           if (n) repointed['property_preferences.irrigation_home_changed_at'] = n;
-          // The winner had NO preferences row, so the FK sweep moved the loser's whole row (a plain,
-          // row-level-journaled repoint). Its new-sod record describes the LOSER's home, which is not
-          // the winner's: clear it on the moved row, and journal the original values so an undo (which
-          // moves the row back) restores them losslessly. Two rows colliding go through the field fill,
-          // which never copies the record on a different-homes merge (and whose merges are never auto-undone).
-          if (typeof repointed['property_preferences.customer_id'] === 'number') {
-            try {
-              await sp.transaction(async (sod) => {
-                const moved = await sod('property_preferences').where({ customer_id: winnerId }).forUpdate().first('id', ...NEW_SOD_COLUMNS);
-                if (moved) {
-                  // Journaled even when the record is empty: the undo guard reads this entry, so a record
-                  // staff enter on the moved row AFTER the merge is still refused rather than handed back.
-                  movedPrefNewSod = { row_id: moved.id, before: newSodBeforeImage(moved) };
-                  if (NEW_SOD_COLUMNS.some((c) => moved[c] != null)) {
-                    await sod('property_preferences').where({ id: moved.id }).update(clearedNewSodColumns());
-                    repointed['property_preferences.new_sod_cleared'] = 1;
-                  }
-                }
-              });
-            } catch (sodErr) {
-              // Before the new-sod migration there is nothing to clear (42703); anything else aborts the merge.
-              if (!(sodErr && sodErr.code === '42703')) throw sodErr;
-            }
-          }
         });
       } catch (e) {
         throw new Error(`executeMerge: sprinkler-settings move stamp failed: ${e.message}`);
+      }
+    }
+    // The winner had NO preferences row, so the FK sweep moved the loser's whole row (a plain,
+    // row-level-journaled repoint). Unless the record is known to describe the winner's home after the
+    // merge (sodFollowsMerge), clear it on the moved row and journal the original values so an undo (which
+    // moves the row back) restores them losslessly. Two rows colliding go through the field fill, which
+    // copies the record only under the same premise (and whose merges are never auto-undone).
+    if (!sodFollowsMerge && typeof repointed['property_preferences.customer_id'] === 'number') {
+      try {
+        await trx.transaction(async (sod) => {
+          const moved = await sod('property_preferences').where({ customer_id: winnerId }).forUpdate().first('id', ...NEW_SOD_COLUMNS);
+          if (moved) {
+            // Journaled even when the record is empty: the undo guard reads this entry, so a record
+            // staff enter on the moved row AFTER the merge is still refused rather than handed back.
+            movedPrefNewSod = { row_id: moved.id, before: newSodBeforeImage(moved) };
+            if (NEW_SOD_COLUMNS.some((c) => moved[c] != null)) {
+              await sod('property_preferences').where({ id: moved.id }).update(clearedNewSodColumns());
+              repointed['property_preferences.new_sod_cleared'] = 1;
+            }
+          }
+        });
+      } catch (sodErr) {
+        // Before the new-sod migration there is nothing to clear (42703); anything else aborts the merge.
+        if (!(sodErr && sodErr.code === '42703')) throw new Error(`executeMerge: new-sod record clear failed: ${sodErr.message}`);
       }
     }
     // Referral surfaces load ONE promoter per customer (`.first()` in

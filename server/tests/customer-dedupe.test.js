@@ -1576,8 +1576,8 @@ describe('executeMerge', () => {
   // for the same home.
   describe('the new-sod record on a preferences row that moves whole to a winner with none', () => {
     const MOVED_ROW = { id: 'pp-1', sod_laid_on: new Date('2026-10-01T00:00:00Z'), sod_covers: 'part', sod_area: 'back lawn by the pool cage', sod_rooted_on: null };
-    async function merge(loserAddr, { hasRecord = true } = {}) {
-      const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };
+    async function merge(loserAddr, { hasRecord = true, winnerAddr = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' } } = {}) {
+      const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', ...winnerAddr };
       const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', ...loserAddr };
       const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'property_preferences', column_name: 'customer_id' }] });
       const base = trx.getMockImplementation();
@@ -1610,6 +1610,22 @@ describe('executeMerge', () => {
 
     it('same home: the record stays on the moved row and nothing is journaled', async () => {
       const { prefUpdates, recorded } = await merge({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' });
+      expect(touchesSod(prefUpdates)).toBe(false);
+      expect(recorded.moved_pref_new_sod).toBe(null);
+    });
+
+    it('the loser has NO address (unknown home): the record is not carried to the winner\'s addressed home; cleared and journaled', async () => {
+      const { prefUpdates, result, recorded } = await merge({ address_line1: null, city: null, zip: null });
+      expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null }]);
+      expect(recorded.moved_pref_new_sod.before.sod_laid_on).toBe('2026-10-01');
+      expect(result.repointed['property_preferences.new_sod_cleared']).toBe(1);
+    });
+
+    it('an addressless winner shell inherits the loser\'s home: the record stays on the moved row and nothing is journaled', async () => {
+      const { prefUpdates, recorded } = await merge(
+        { address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' },
+        { winnerAddr: { address_line1: null, city: null, zip: null } },
+      );
       expect(touchesSod(prefUpdates)).toBe(false);
       expect(recorded.moved_pref_new_sod).toBe(null);
     });

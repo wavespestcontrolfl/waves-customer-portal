@@ -69,7 +69,7 @@ describe('a move clears the whole new-sod record', () => {
     const empty = makeStore(null);
     await markSprinklerSettingsMoved('cust-1', empty.db);
     expect(sodOf(empty.prefs)).toEqual(CLEARED);
-    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
+    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx, \{ clearNewSod: !sameHomeFlip \}\)/);
   });
 
   test('the merge path stamps the move WITHOUT clearing the record, so an undo returns the row with it', async () => {
@@ -83,9 +83,9 @@ describe('a move clears the whole new-sod record', () => {
     const read = (f) => fs.readFileSync(path.join(__dirname, '../services', f), 'utf8');
     expect(read('customer-dedupe.js')).toMatch(/markSprinklerSettingsMoved\(winnerId, sp, \{ clearNewSod: false \}\)/);
     // One premise test, decided once: the preferences fill and the move stamp read the same value.
-    expect(read('customer-dedupe.js')).toMatch(/copyNewSod: !mergeDifferentHomes/);
+    expect(read('customer-dedupe.js')).toMatch(/copyNewSod: sodFollowsMerge/);
     expect(read('customer-dedupe.js')).toMatch(/if \(mergeDifferentHomes\) \{\s*try \{/);
-    expect(read('property-role-proposals.js')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
+    expect(read('property-role-proposals.js')).toMatch(/markSprinklerSettingsMoved\(customerId, trx, \{ clearNewSod: !sameHomeFlip \}\)/);
     expect(read('customer-address-fanout.js').match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);
   });
 
