@@ -48,6 +48,7 @@ const { routeCost, clusterShare } = require('./route-model');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
+const { capacityEnabled } = require('../scheduling/policy');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -719,6 +720,92 @@ async function movingUnitIds(service, ctx) {
   return [...new Set([String(service.id), ...[...(excludeIds || [])].map(String)])];
 }
 
+// One find-time slot through the auto-dispatch HARD filters, as a candidate;
+// null (and a tally in `drops`) when a filter drops it. Also the filter every
+// added same-day hour (conflictSameDaySlots) passes.
+function candidateFromSlot(slot, {
+  service, prefs, ctx, category, siblingDates, drops,
+}) {
+  // HARD: find-time (findAvailableSlots) shares ONE admission bound across
+  // every caller once GATE_SCHEDULING_CAPACITY is on — scheduling/policy.js
+  // SHIFT.endMinutes is the CUSTOMER day close (18:00 since picker-windows
+  // PR 2, 2026-09-23), not an auto-dispatch one. Auto-dispatch re-optimizes
+  // an EXISTING technician's route, not a customer-facing offer, and this
+  // module's own DAY_CLOSE (used for the current-placement HQ anchor,
+  // above) has always been 17:00 — without this filter, capacity mode
+  // would let auto-dispatch move a visit into the new 17:00-18:00 hour the
+  // owner's ruling only extended for customer booking (Codex r1 P1 on
+  // #4663). Post-filtered here rather than threaded through find-time's
+  // shared admission check, which every customer-facing caller (booking,
+  // reschedule, re-service, the estimate picker, slot-reservation) also
+  // relies on for offer/commit parity at the real 18:00 close.
+  if (hhmmToMin(slot.end_time) > DAY_CLOSE) { drops.after_hours++; return null; }
+  if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; return null; }       // HARD: blackout
+  if (siblingDates.has(slot.date)) { drops.sibling++; return null; }                  // HARD: same-series occurrence that day
+  if (service.skip_weekends === true && isSaturday(slot.date)) { drops.weekend++; return null; } // HARD: skip_weekends series
+  // HARD: explicit portal preferences override route efficiency. Route may
+  // only optimize among slots on the customer's preferred day + time window.
+  if (violatesPreferredDay(slot.date, prefs)) { drops.preferred_day++; return null; }
+  if (violatesPreferredTime(slot.start_time, prefs)) { drops.preferred_time++; return null; }
+  const techId = slot.technician && slot.technician.id;
+  const cap = ctx.capabilityFor(techId, category);
+  if (cap === 'deactivated') { drops.deactivated++; return null; }                    // HARD: tech turned off for this category
+  return {
+    is_current: false,
+    date: slot.date,
+    start_time: slot.start_time,
+    end_time: slot.end_time,
+    detour_minutes: slot.detour_minutes,
+    total_drive_minutes: slot.total_drive_minutes,
+    // find-time reports stops BEFORE insertion; +1 for the moved visit so it
+    // matches the current placement's count (which includes the visit itself).
+    stops_that_day: (slot.stops_that_day || 0) + 1,
+    technician_id: techId || null,
+    technician_name: (slot.technician && slot.technician.name) || null,
+    capability_level: cap,
+    find_time_score: slot.score,
+  };
+}
+
+const minToHHMM = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+/**
+ * Every whole-hour start on the visit's OWN date, for a visit whose current
+ * placement overlaps another stop (conflict.kind 'overlap'). The legacy slot
+ * finder (find-time.js candidatesForDay) offers ONE start per gap in the day,
+ * the earliest feasible one, so a visit in overlap often saw one to three
+ * candidates and took a far one. (Capacity mode, GATE_SCHEDULING_CAPACITY,
+ * already enumerates every whole-hour start the route accepts, so it needs
+ * nothing added; and without the shared model the added slots would carry no
+ * route numbers, so nothing is added then either.) The slots below carry no
+ * numbers of their own: they pass the same HARD filters as every find-time
+ * slot (candidateFromSlot, flex admission), then the writer's own conflict
+ * probe and the shared route model score (filterAndScoreSharedModelCandidates),
+ * which drops the hours still taken. Only the visit's own technician, and not
+ * the hour it already holds. A visit not in overlap gets nothing added.
+ */
+function conflictSameDaySlots(service, current, slots) {
+  if (!current || !current.conflict || current.conflict.kind !== 'overlap' || !service.technician_id) return [];
+  if (!autoDispatchSharedModelLive() || capacityEnabled()) return [];
+  const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
+  const techId = String(service.technician_id);
+  const offered = new Set(slots
+    .filter((s) => s.date === current.date && String(s.technician && s.technician.id) === techId)
+    .map((s) => s.start_time));
+  const extra = [];
+  for (let start = DAY_OPEN; start + duration <= DAY_CLOSE; start += 60) {
+    const startTime = minToHHMM(start);
+    if (startTime === current.start_time || offered.has(startTime)) continue;
+    extra.push({
+      date: current.date,
+      technician: { id: service.technician_id, name: null },
+      start_time: startTime,
+      end_time: minToHHMM(start + duration),
+    });
+  }
+  return extra;
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
@@ -847,58 +934,22 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
   const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0 };
+  // The current placement is read first: a visit in overlap also gets every
+  // free same-day hour (conflictSameDaySlots), through the same filters.
+  const current = await computeCurrentPlacement(service, prefs, ctx);
   // FLEX-TIER (Codex #4995): HARD — a destination inside the 73h freeze, or
   // on a date the window does not admit, never becomes a candidate (apply.js
   // re-checks both authoritatively, grouped members' derived starts included).
-  const admitted = flexRules.admit(slots, drops);
-  const candidates = [];
-  for (const slot of admitted) {
-    // HARD: find-time (findAvailableSlots) shares ONE admission bound across
-    // every caller once GATE_SCHEDULING_CAPACITY is on — scheduling/policy.js
-    // SHIFT.endMinutes is the CUSTOMER day close (18:00 since picker-windows
-    // PR 2, 2026-09-23), not an auto-dispatch one. Auto-dispatch re-optimizes
-    // an EXISTING technician's route, not a customer-facing offer, and this
-    // module's own DAY_CLOSE (used for the current-placement HQ anchor,
-    // above) has always been 17:00 — without this filter, capacity mode
-    // would let auto-dispatch move a visit into the new 17:00-18:00 hour the
-    // owner's ruling only extended for customer booking (Codex r1 P1 on
-    // #4663). Post-filtered here rather than threaded through find-time's
-    // shared admission check, which every customer-facing caller (booking,
-    // reschedule, re-service, the estimate picker, slot-reservation) also
-    // relies on for offer/commit parity at the real 18:00 close.
-    if (hhmmToMin(slot.end_time) > DAY_CLOSE) { drops.after_hours++; continue; }
-    if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; continue; }       // HARD: blackout
-    if (siblingDates.has(slot.date)) { drops.sibling++; continue; }                  // HARD: same-series occurrence that day
-    if (service.skip_weekends === true && isSaturday(slot.date)) { drops.weekend++; continue; } // HARD: skip_weekends series
-    // HARD: explicit portal preferences override route efficiency. Route may
-    // only optimize among slots on the customer's preferred day + time window.
-    if (violatesPreferredDay(slot.date, prefs)) { drops.preferred_day++; continue; }
-    if (violatesPreferredTime(slot.start_time, prefs)) { drops.preferred_time++; continue; }
-    const techId = slot.technician && slot.technician.id;
-    const cap = ctx.capabilityFor(techId, category);
-    if (cap === 'deactivated') { drops.deactivated++; continue; }                    // HARD: tech turned off for this category
-    candidates.push({
-      is_current: false,
-      date: slot.date,
-      start_time: slot.start_time,
-      end_time: slot.end_time,
-      detour_minutes: slot.detour_minutes,
-      total_drive_minutes: slot.total_drive_minutes,
-      // find-time reports stops BEFORE insertion; +1 for the moved visit so it
-      // matches the current placement's count (which includes the visit itself).
-      stops_that_day: (slot.stops_that_day || 0) + 1,
-      technician_id: techId || null,
-      technician_name: (slot.technician && slot.technician.name) || null,
-      capability_level: cap,
-      find_time_score: slot.score,
-    });
-  }
+  const admitted = flexRules.admit(slots.concat(conflictSameDaySlots(service, current, slots)), drops);
+  const hard = {
+    service, prefs, ctx, category, siblingDates, drops,
+  };
+  const candidates = admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean);
 
   // Gate off: find-time's best-first order, top SCORE_CAP survivors (see
   // rankSurvivorsForSharedModel). Gate on: SLOT_TAKEN candidates dropped and
   // every survivor re-scored on the shared model.
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
-  const current = await computeCurrentPlacement(service, prefs, ctx);
   return { current, candidates: scored, drops, feasible: slots.length };
 }
 
