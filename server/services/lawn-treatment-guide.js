@@ -329,6 +329,8 @@ async function resolveChinch({ svc, structured, knex, places = null }) {
   const capped = await readCaps({ products: lines, rows, svc, knex });
   const wide = withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
   if (!places || !places.length) return wide;
+  // GATE_LAWN_TROUBLE_AREAS: which rungs are chinch-only (the sheet types a row of one as chinch without being told). See chinchOnlyIds.
+  const chinchOnlyIds = await chinchOnlyIdsOf({ products, structured, knex });
   // GATE_LAWN_TROUBLE_AREAS: the same ladder walked at each place of the lawn (the yearly count, the interval and the
   // yearly amount are judged per place for a spot treatment), `byPlace[place]` shaped like the lawn-wide answer. A place
   // can only be more open than the lawn, so with nothing capped lawn-wide every place takes the lawn-wide answer; a limit
@@ -345,7 +347,31 @@ async function resolveChinch({ svc, structured, knex, places = null }) {
   // The sheet's search and reconciliation read the TOP-LEVEL unreadable ids, which follow one place only. A rung unreadable at ANY
   // place stays unreadable here (released to the search with the note, never dropped by reconciliation) and is not also blocked.
   const unreadableIds = [...new Set(places.flatMap((place) => byPlace[place].unreadableIds || []))];
-  return { ...top, unreadableIds, blockedIds: (top.blockedIds || []).filter((id) => !unreadableIds.includes(id)), byPlace };
+  return { ...top, unreadableIds, blockedIds: (top.blockedIds || []).filter((id) => !unreadableIds.includes(id)), byPlace, chinchOnlyIds };
+}
+
+/**
+ * The chinch rungs that are chinch-only in this program, by the staged rows' triggers (never the name): the ladder's first rung, when
+ * every row the protocol stages for that product carries a first-rung trigger. A later rung (Talak) is also the caterpillar and mole
+ * cricket product, so a row of it is chinch only when the technician says so (the chinch entry or card, or the place's own decision).
+ */
+async function chinchOnlyIdsOf({ products, structured, knex }) {
+  const first = products.filter((product) => product.rung === 0);
+  if (!first.length) return [];
+  const { activeProtocolProducts } = require('./lawn-protocol-retired');
+  const staged = await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
+    .join('lawn_protocol_windows as w', 'lpp.lawn_protocol_window_id', 'w.id')
+    .where('w.lawn_protocol_id', structured.id)
+    .whereRaw('lpp.product_id::text = ANY(?)', [first.map((product) => product.productId)])
+    .select('lpp.product_id', 'lpp.gates');
+  const only = (id) => staged.filter((row) => idOf(row.product_id) === id).every((row) => CHINCH_RUNGS[0].includes((parseJson(row.gates) || {}).trigger));
+  return first.map((product) => product.productId).filter(only);
+}
+
+/** Every chinch rung's product id for a protocol (the staged-row rule resolveChinch uses), with no limit read: what the completion confirms a `chinch` hint against. */
+async function chinchLadderIds({ structured, knex }) {
+  if (!structured?.id) return [];
+  return chinchProducts(await stagedChinchRows({ structured, knex })).map((product) => product.productId);
 }
 
 // Every rung's product id (all of them are governed by the guide, offered or not). The rungs a READ limit
@@ -378,12 +404,12 @@ async function stagedChinchRows({ structured, knex }) {
 function chinchProducts(staged) {
   const usable = (Array.isArray(staged) ? staged : []).filter((row) => row.catalog_id && row.catalog_active !== false);
   const products = [];
-  for (const rung of CHINCH_RUNGS) {
+  for (const [rungIndex, rung] of CHINCH_RUNGS.entries()) {
     const row = usable
       .filter((candidate) => rung.includes((parseJson(candidate.gates) || {}).trigger))
       .sort((a, b) => (Number(a.month) - Number(b.month)) || (Number(a.sort_order) - Number(b.sort_order)))[0];
     if (row && !products.some((product) => product.productId === idOf(row.product_id))) {
-      products.push({ productId: idOf(row.product_id), name: row.catalog_name || row.product_name, stagedRow: row });
+      products.push({ productId: idOf(row.product_id), name: row.catalog_name || row.product_name, stagedRow: row, rung: rungIndex });
     }
   }
   return products;
@@ -475,6 +501,8 @@ function fungusCard({ s, offers, troubleAreas }) {
   }
   return cardFor('fungus', {
     title: 'Fungus', finding, check: CHECKS.fungus, detail: protocolLine(item), productIds: [item.productId], items: [item],
+    // A take-all card offered because the lawn has take-all areas on file names them (GATE_LAWN_TROUBLE_AREAS).
+    ...(takeAll ? { note: `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.` } : {}),
     actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
   });
 }
@@ -552,7 +580,10 @@ function frozenCard(card, productIds, appliedIds) {
  * `taken` a boolean (every product the card offers is on the sheet; the client decides). Every card kept was shown. Frozen on the record for tuning the rules and read
  * by no customer or public path. With GATE_LAWN_TROUBLE_AREAS live a card taken at a place also carries `place` (see frozenCard).
  */
-function treatmentGuideFreeze(lawnFast, { appliedIds = null } = {}) {
+// The lower-case ids of the products a completion applied, or null when its list is not known.
+const appliedIdsOf = (products) => (Array.isArray(products) ? new Set(products.map((row) => String(row?.productId || '').toLowerCase())) : null);
+
+function treatmentGuideFreeze(lawnFast, { products = null, appliedIds = appliedIdsOf(products) } = {}) {
   if (!require('../config/feature-gates').lawnTreatmentGuideLive()) return {};
   const block = lawnFast && typeof lawnFast === 'object' ? lawnFast.treatmentGuide : null;
   if (!block || typeof block !== 'object' || Array.isArray(block) || block.v !== 1) return {};
@@ -582,6 +613,8 @@ module.exports = {
   unreadableProductIds,
   UNREADABLE_NOTE,
   resolveChinch,
+  chinchLadderIds,
+  chinchOnlyIdsOf,
   buildCards,
   treatmentGuideFreeze,
 };

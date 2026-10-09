@@ -209,7 +209,7 @@ function plainErrors(request, onAreaChanged, onPlaceRefused) {
       if (message && err) err.message = message;
       if (err?.code === 'property_service_area_changed') onAreaChanged?.current?.();
       // GATE_LAWN_TROUBLE_AREAS: a place the limits close refreshes the place maps, so the chip closes without a reload.
-      if (err?.code === 'lawn_place_limit') onPlaceRefused?.current?.();
+      if (err?.code === 'lawn_place_limit') onPlaceRefused?.current?.(err);
       throw err;
     }
   };
@@ -258,7 +258,8 @@ const chinchShape = (chinch) => {
   const rungIds = Array.isArray(chinch?.rungIds) ? chinch.rungIds : [];
   const unreadableIds = Array.isArray(chinch?.unreadableIds) ? chinch.unreadableIds : [];
   const byPlace = chinchByPlace(chinch);
-  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, ...(byPlace ? { byPlace } : {}) } : null;
+  const chinchOnlyIds = Array.isArray(chinch?.chinchOnlyIds) ? chinch.chinchOnlyIds : null;
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
@@ -381,6 +382,11 @@ function freshWeedMix(data) {
   return mix && Array.isArray(mix.productIds) && Array.isArray(mix.groupProductIds) ? mix : undefined;
 }
 
+// GATE_LAWN_TROUBLE_AREAS: after /complete refused a place (refreshKey > 0) the reads name the spot products on the sheet, so the server reads
+// their per-place limits too (a Search-added product outside the month's recipe is not in the opening seed). Nothing is added to any
+// other request, so a sheet that was never refused sends exactly what it always did.
+const searchedIdsQuery = (refreshKey, idsRef, lead) => (refreshKey && idsRef?.current?.length ? `${lead}productIds=${idsRef.current.join(',')}` : '');
+
 // GATE_LAWN_TROUBLE_AREAS: what the guide's read found closed at each place, `{ [productId]: { [place]: message } }` (an empty entry =
 // open everywhere), or undefined when the answer carries none (then the context's map stands).
 const freshPlaceBlocked = (data) => (data.placeBlocked && typeof data.placeBlocked === 'object' && !Array.isArray(data.placeBlocked) ? data.placeBlocked : undefined);
@@ -412,7 +418,7 @@ const GUIDE_KINDS = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'];
 const cardPlaceEntries = (card) => (card.byPlace && typeof card.byPlace === 'object' ? Object.entries(card.byPlace).filter(([, entry]) => Array.isArray(entry?.items) && entry.items.length) : []);
 const cardAllIds = (card) => [...card.productIds, ...cardPlaceEntries(card).flatMap(([, entry]) => entry.items.map((item) => item.productId))];
 const guideCardOk = (card) => !!card && GUIDE_KINDS.includes(card.kind) && typeof card.title === 'string' && Array.isArray(card.productIds) && Array.isArray(card.items);
-function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 0 }) {
+function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 0, idsRef = null }) {
   const [state, setState] = useState({ for: null, status: 'idle', guide: null });
   useEffect(() => {
     // No confirmed assessment (a retake, or the guide is off): an answer held for an earlier one is dropped, so it can never come back.
@@ -421,7 +427,7 @@ function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 
     // A failed read keeps the answer the sheet has ONLY while that answer belongs to this same confirmed assessment; for a new one
     // it is a failed read like any other (the sheet then follows the context's opening values).
     const failed = () => setState((prev) => (refreshKey && prev.for === assessmentId && prev.status === 'answered' ? prev : { for: assessmentId, status: 'failed', guide: null }));
-    request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}`)
+    request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}${searchedIdsQuery(refreshKey, idsRef, '&')}`)
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
@@ -436,8 +442,8 @@ function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 
 }
 
 // The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
-function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable, refreshKey }) {
-  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId, refreshKey });
+function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable, refreshKey, idsRef }) {
+  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId, refreshKey, idsRef });
   const [checkedState, setCheckedState] = useState({ for: null, map: {} });
   const forId = guide?.assessmentId ?? null;
   const onGuideCheck = useCallback((kind, value) => setCheckedState((prev) => ({
@@ -1313,32 +1319,37 @@ function useStockHold({ ctx, service, rows, products, request }) {
 // GATE_LAWN_TROUBLE_AREAS: reads the place maps again after /complete refused a place (400 lawn_place_limit). The context is read aside
 // (the sheet is never reset): its troubleAreas, weed mix and chinch decision replace the opening ones where it carries them, and
 // `tick` makes the treatment guide read again. A read that fails changes nothing. `slot` is the ref the submit's error handler calls.
-function usePlaceRefresh({ base, request, ctx, slot }) {
+function usePlaceRefresh({ base, request, ctx, slot, idsRef }) {
   const [tick, setTick] = useState(0);
   const [fresh, setFresh] = useState(null);
-  const refresh = useCallback(() => {
+  // What /complete refused, `{ [productId]: { [place]: message } }`: authoritative, merged into the blocked map at once and kept.
+  const [refused, setRefused] = useState({});
+  const refresh = useCallback((err) => {
+    const { productId, place, error } = err?.details || {};
+    if (productId && place) setRefused((prev) => ({ ...prev, [String(productId).toLowerCase()]: { ...prev[String(productId).toLowerCase()], [place]: error || err.message } }));
     setTick((n) => n + 1);
-    request(`${base}/lawn-fast/context`)
+    request(`${base}/lawn-fast/context${searchedIdsQuery(1, idsRef, '?')}`)
       .then((data) => setFresh({ troubleAreas: troubleAreasOf(data), weedMix: weedMixOf(data), chinch: chinchOf(data) }))
       .catch(() => {});
   }, [base, request]);
   slot.current = refresh;
   const placeCtx = useMemo(() => ({ ...ctx, ...Object.fromEntries(Object.entries(fresh || {}).filter(([, value]) => value)) }), [ctx, fresh]);
-  return { tick, placeCtx };
+  return { tick, placeCtx, refused };
 }
 
 // The sheet's places: the context's closed list and known areas (less the ones cleared here), with what is closed where taken from the
 // guide's fresh read once it has answered, else the context's.
-function useSheetAreas({ placeCtx, guide, cleared }) {
+function useSheetAreas({ placeCtx, guide, cleared, refused }) {
   const base = placeCtx.troubleAreas;
   const fresh = guide?.placeBlocked;
-  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh } } : null), [base, fresh, cleared]);
+  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, refused } : null), [base, fresh, cleared, refused]);
 }
 
 function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
   const base = `/admin/dispatch/${service?.id}`;
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
-  const { tick: placeTick, placeCtx } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces });
+  const searchedIds = useRef([]);
+  const { tick: placeTick, placeCtx, refused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds });
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
@@ -1350,7 +1361,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
   // The treatment guide's cards for the confirmed assessment (not one the report would reject), and
   // what the tech checked on each.
-  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick });
+  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick, idsRef: searchedIds });
   // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
   const { gov, removed: removedByGuide } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks, products });
   // The one Weed spots decision on screen (the guide's fresh read once it has answered).
@@ -1367,7 +1378,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlace, setWeedPlace] = useState('');
   const [clearedAreas, setClearedAreas] = useState([]);
-  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas });
+  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
     setClearedAreas((prev) => [...prev, id]);
@@ -1381,6 +1392,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
     },
     [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, areas, chinchDecision, weedPlace, gov.takeAll],
   );
+  // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
+  searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).

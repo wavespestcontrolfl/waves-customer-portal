@@ -561,13 +561,27 @@ function guidedProductIds(loaded, sheet) {
  * `take_all` trouble area, so the sheet's hint alone never creates one.
  */
 async function takeAllProductIdsFor(svc, knex = db) {
+  return (await troubleTypeIdsFor(svc, knex)).takeAll;
+}
+
+/**
+ * What the completion confirms a trouble-type hint against, as `{ takeAll, chinch }` (Sets of lower-case product ids): the month's take-all
+ * fungicide rows (takeAllAddOns) and the chinch ladder's rungs (the staged-row rule resolveChinch uses). Empty for a visit with no plan.
+ */
+async function troubleTypeIdsFor(svc, knex = db) {
+  const empty = { takeAll: new Set(), chinch: new Set() };
   const loaded = await loadPlan(svc, knex);
-  if (!loaded?.eligible) return new Set();
+  if (!loaded?.eligible) return empty;
   const guide = require('./lawn-treatment-guide');
   const sheet = await sheetPlanned(loaded, knex);
-  const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
+  const structured = loaded.plan?.protocol?.structured;
+  const rows = require('./waveguard-plan-engine').v13ProtocolRows(structured);
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  return new Set(guide.takeAllAddOns(candidates, rows).map((candidate) => String(candidate.item.productId).toLowerCase()));
+  const lower = (id) => String(id).toLowerCase();
+  return {
+    takeAll: new Set(guide.takeAllAddOns(candidates, rows).map((candidate) => lower(candidate.item.productId))),
+    chinch: new Set((await guide.chinchLadderIds({ structured, knex })).map(lower)),
+  };
 }
 
 async function chinchOffer({ svc, structured, sheetAddOns, knex, places = null }) {
@@ -615,8 +629,10 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex, places = null }
   // technician adds), and why.
   const offerOf = async (f) => {
     const { rungIds, blockedIds, unreadableIds } = f;
-    if (!f.productId) return { item: null, note: f.note, rungIds, blockedIds, unreadableIds };
-    return { item: await itemFor(f), note: f.note, rungIds, blockedIds, unreadableIds };
+    // chinchOnlyIds exists only with the places gate live (see lawn-treatment-guide chinchOnlyIdsOf).
+    const only = f.chinchOnlyIds ? { chinchOnlyIds: f.chinchOnlyIds } : {};
+    if (!f.productId) return { item: null, note: f.note, rungIds, blockedIds, unreadableIds, ...only };
+    return { item: await itemFor(f), note: f.note, rungIds, blockedIds, unreadableIds, ...only };
   };
   const top = await offerOf(found);
   if (!found.byPlace) return top;
@@ -823,7 +839,7 @@ async function loadReCheckNote(svc, knex) {
  * missing visit; an ineligible visit answers `eligible: false` with the reason
  * and the visit identity and skips the heavier reads.
  */
-async function buildLawnFastContext(serviceId, { knex = db, technicianId = null } = {}) {
+async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds } = {}) {
   const base = await resolveLawnFastEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile, reason, visitType, readFailures } = base;
@@ -858,7 +874,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     ...(featureGates.lawnSpotRulesLive() ? { spotRules: true } : {}),
     // GATE_LAWN_TROUBLE_AREAS: the closed list of places, the lawn's known trouble areas and the products a limit closes
     // at a place (lawn-trouble-areas.js). The key exists only while the gate is live, so gate off is byte-identical.
-    ...await require('./lawn-trouble-areas').buildContextBlock({ knex, svc, seed: troubleSeed, readFailures }),
+    ...await require('./lawn-trouble-areas').buildContextBlock({ knex, svc, seed: troubleSeed, readFailures, extraIds: productIds }),
     // GATE_LAWN_TREATMENT_GUIDE: the sheet reads the "Suggested from this lawn" cards once the
     // assessment is confirmed (the treatment-guide route). Only a visit with a plan has any, and
     // the key exists only while the gate is live, so gate off is byte-identical.
@@ -898,6 +914,29 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
 
 // ── treatment guide ─────────────────────────────────────────────────────────
 
+// GATE_LAWN_TROUBLE_AREAS: the guide's per-place blocks with the products the sheet names (Search-added rows outside the month's recipe)
+// read per place too, in the context's shape; an entry the guide already read stands. `undefined` while the gate is off or nothing was read.
+async function withSearchedProducts({ svc, knex, rows, ids, known }) {
+  if (!featureGates.lawnTroubleAreasLive() || !Array.isArray(ids) || !ids.length) return known;
+  const extra = await require('./lawn-trouble-areas').searchedPlaceBlocks({ knex, svc, rows, ids });
+  return { ...extra, ...(known || {}) };
+}
+
+// GATE_LAWN_TROUBLE_AREAS: the lawn's active take_all areas (a stored area is server-confirmed; a cleared one is not active), less the
+// places where the month's take-all product is closed by a limit. `[]` while the gate is off, as the card always had it; a failed read is
+// `[]` too (the check-only card, never a guess).
+async function takeAllAreasOn({ svc, knex, offers }) {
+  if (!featureGates.lawnTroubleAreasLive()) return [];
+  try {
+    const productId = offers?.fungus?.takeAll ? offers.fungus.item.productId : null;
+    const closed = (offers?.placeBlocked || {})[productId] || {};
+    return (await require('./lawn-trouble-areas').loadActive(knex, svc.property_id)).filter((area) => area.type === 'take_all' && !closed[area.place]);
+  } catch (err) {
+    logger.warn(`[lawn-fast] take-all areas unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return [];
+  }
+}
+
 /**
  * GET /:serviceId/lawn-fast/treatment-guide?assessmentId=: the "Suggested from this lawn" cards for
  * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
@@ -912,7 +951,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
  * not_found, not_eligible, not_confirmed, not_usable. A plan or limit read that fails throws (a 500:
  * the sheet then shows no cards and works as before).
  */
-async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
+async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, productIds = null }) {
   if (!featureGates.lawnTreatmentGuideLive()) return { ok: false, reason: 'disabled' };
   if (!isUuid(assessmentId)) return { ok: false, reason: 'invalid_assessment' };
   const base = await resolveLawnFastEligibility(serviceId, knex);
@@ -954,9 +993,9 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     month: visitMonthOf(svc),
     offers: { ...offers, chinch },
     weeds: guide.weedOffer(weedMix, sheet.addOns),
-    // No trouble-area store exists yet, so take-all stays the check only.
-    troubleAreas: [],
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId), placeBlocked: offers.placeBlocked });
+    // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active) at places the take-all product is not closed at.
+    troubleAreas: await takeAllAreasOn({ svc, knex, offers }),
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId), placeBlocked: await withSearchedProducts({ svc, knex, rows, ids: productIds, known: offers.placeBlocked }) });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────
@@ -1190,6 +1229,7 @@ module.exports = {
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
   takeAllProductIdsFor,
+  troubleTypeIdsFor,
   preflightLawnFastCompletion,
   assertLawnFastVisitTypeUnderLock,
 };

@@ -70,7 +70,8 @@ describe('troubleTypeFor: the sheet\'s hint when it is on the list, else the cat
     [{ category: 'herbicide' }, 'weeds'],
     [{ category: 'Fungicide' }, 'fungus'],
     [{ category: 'insecticide' }, 'other_insect'],
-    [{ category: 'insecticide', hint: 'chinch' }, 'chinch'],
+    [{ category: 'insecticide', hint: 'chinch' }, 'other_insect'],
+    [{ category: 'insecticide', hint: 'chinch', chinch: true }, 'chinch'],
     [{ category: 'fungicide', hint: 'take_all' }, 'fungus'],
     [{ category: 'fungicide', hint: 'take_all', takeAll: true }, 'take_all'],
     [{ category: 'adjuvant', hint: 'weeds' }, 'weeds'],
@@ -89,16 +90,29 @@ describe('take_all is never created by the hint alone', () => {
     expect(areas.troubleTypeFor({ category: 'fungicide', hint: 'take_all' })).toBe('fungus');
     expect(areas.troubleTypeFor({ category: 'herbicide', hint: 'take_all' })).toBe('weeds');
     expect(areas.troubleTypeFor({ category: 'adjuvant', hint: 'take_all' })).toBeNull();
+    // chinch needs the same confirmation: the product is a rung of the chinch ladder.
+    expect(areas.troubleTypeFor({ category: 'insecticide', hint: 'chinch' })).toBe('other_insect');
+    expect(areas.troubleTypeFor({ category: 'insecticide', hint: 'chinch', chinch: true })).toBe('chinch');
     // The other hints are unchanged.
-    expect(areas.troubleTypeFor({ category: 'insecticide', hint: 'chinch' })).toBe('chinch');
+    expect(areas.troubleTypeFor({ category: 'insecticide', hint: 'dry_spot' })).toBe('dry_spot');
   });
 
   test('areaRowsOf: confirmed against the take-all ids; a claim on another product, or with no ids, falls back', () => {
     const catalog = new Map([[P_CEL, { category: 'fungicide' }], [uuid(2), { category: 'fungicide' }]]);
     const inserted = [{ product_id: P_CEL, treated_place: 'front', application_method: 'spot_treatment' }, { product_id: uuid(2), treated_place: 'back', application_method: 'spot_treatment' }];
     const request = [{ productId: P_CEL, troubleType: 'take_all' }, { productId: uuid(2), troubleType: 'take_all' }];
-    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog, takeAllIds: new Set([P_CEL]) }).map((r) => r.type)).toEqual(['take_all', 'fungus']);
+    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog, confirmed: { takeAll: new Set([P_CEL]), chinch: new Set() } }).map((r) => r.type)).toEqual(['take_all', 'fungus']);
     expect(areas.areaRowsOf({ requestRows: request, inserted, catalog }).map((r) => r.type)).toEqual(['fungus', 'fungus']);
+  });
+});
+
+describe('chinch is never created by the hint alone', () => {
+  test('areaRowsOf: a chinch claim stands for a rung of the ladder; any other product falls back to the category type', () => {
+    const catalog = new Map([[P_CEL, { category: 'insecticide' }], [uuid(2), { category: 'insecticide' }]]);
+    const inserted = [{ product_id: P_CEL, treated_place: 'front', application_method: 'spot_treatment' }, { product_id: uuid(2), treated_place: 'back', application_method: 'spot_treatment' }];
+    const request = [{ productId: P_CEL, troubleType: 'chinch' }, { productId: uuid(2), troubleType: 'chinch' }];
+    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog, confirmed: { takeAll: new Set(), chinch: new Set([P_CEL]) } }).map((r) => r.type)).toEqual(['chinch', 'other_insect']);
+    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog }).map((r) => r.type)).toEqual(['other_insect', 'other_insect']);
   });
 });
 
@@ -120,7 +134,7 @@ describe('what a completion stores', () => {
       { product_id: P_CEL, treated_place: 'front', application_method: 'broadcast_spray' },
     ];
     const request = [{ productId: uuid(2).toUpperCase(), troubleType: 'chinch', troubleSource: 'guide_card' }, { productId: P_CEL }];
-    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog })).toEqual([
+    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog, confirmed: { takeAll: new Set(), chinch: new Set([uuid(2)]) } })).toEqual([
       { place: 'front', type: 'weeds', source: undefined },
       { place: 'back', type: 'chinch', source: 'guide_card' },
     ]);

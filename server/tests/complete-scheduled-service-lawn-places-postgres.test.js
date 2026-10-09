@@ -184,6 +184,8 @@ postgres('closeout: the place of a spot treatment', () => {
   test('the sheet\'s type hint writes the area as that type; a place off the list, or a whole-lawn row, stores no place and no area', async () => {
     const f = await seedLawnVisit();
     try {
+      // A chinch claim stands only for a rung of the ladder (the server confirms); here the ladder holds the product.
+      jest.spyOn(require('../services/lawn-fast-complete'), 'troubleTypeIdsFor').mockResolvedValue({ takeAll: new Set(), chinch: new Set([f.celsius.id.toLowerCase()]) });
       const out = await complete(f, { products: [spot(f, { areaPlace: 'front', troubleType: 'chinch', troubleSource: 'guide_card' })] });
       expect(out.status).toBe(200);
       const [area] = await areasOf(f);
@@ -214,8 +216,8 @@ postgres('closeout: the place of a spot treatment', () => {
     const f = await seedLawnVisit();
     const [fungicide] = await mockPg('products_catalog').insert({ name: `Take-all fixture ${randomUUID().slice(0, 6)}`, category: 'fungicide', default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*');
     try {
-      const lookup = jest.spyOn(require('../services/lawn-fast-complete'), 'takeAllProductIdsFor')
-        .mockImplementation(async () => { if (!resolve) throw new Error('plan unavailable'); return resolve(fungicide.id); });
+      const lookup = jest.spyOn(require('../services/lawn-fast-complete'), 'troubleTypeIdsFor')
+        .mockImplementation(async () => { if (!resolve) throw new Error('plan unavailable'); return { takeAll: resolve(fungicide.id), chinch: new Set() }; });
       const out = await complete(f, { products: [spot(f, { productId: fungicide.id, areaPlace: 'front', troubleType: 'take_all' })] });
       expect(out.status).toBe(200);
       expect(lookup).toHaveBeenCalledTimes(1);
@@ -229,7 +231,7 @@ postgres('closeout: the place of a spot treatment', () => {
   test('no take_all claim: the take-all lookup is not made', async () => {
     const f = await seedLawnVisit();
     try {
-      const lookup = jest.spyOn(require('../services/lawn-fast-complete'), 'takeAllProductIdsFor').mockResolvedValue(new Set());
+      const lookup = jest.spyOn(require('../services/lawn-fast-complete'), 'troubleTypeIdsFor').mockResolvedValue({ takeAll: new Set(), chinch: new Set() });
       await complete(f, { products: [spot(f, { areaPlace: 'front' })] });
       expect(lookup).not.toHaveBeenCalled();
     } finally { await cleanup(f); }
@@ -338,6 +340,49 @@ postgres('closeout: the place of a spot treatment', () => {
         expect(out.status).toBe(200);
         expect(out.body.completionAdvisories).toEqual([]);
       } finally { await cleanup(f); }
+    });
+  });
+
+  // Two visits of one lawn, the same product at the same place, both past the preflight before either commits: both are recorded (the
+  // application already happened); the audit runs after each commit, so the later-committing completion sees both rows and flags it.
+  describe('two visits completing back to back, each passing the preflight on the data from before the other committed', () => {
+    const twoVisits = async () => {
+      const a = await seedLawnVisit({ daysAgo: 20 });
+      const arena = await mockPg('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      const bId = randomUUID();
+      const bDate = etDateString(new Date(Date.now() - 5 * 86400000));
+      await mockPg('scheduled_services').insert({ id: bId, customer_id: a.customerId, property_id: a.propertyId, technician_id: a.techId, service_id: a.catalogId,
+        service_type: LAWN_TYPE, scheduled_date: bDate, window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false });
+      return { a, b: { ...a, serviceId: bId }, arena };
+    };
+
+    test.each([['A then B', false], ['B then A', true]])('%s: both preflights pass, both complete 200, the later commit raises the advisory, and either visit audited afterwards flags it', async (_label, reversed) => {
+      const { a, b, arena } = await twoVisits();
+      try {
+        const areas = require('../services/lawn-trouble-areas');
+        const rowFor = (f) => spot(f, { productId: arena.id, areaPlace: 'front', rate: 0.147, rateUnit: 'oz' });
+        const svcOf = (f) => mockPg('scheduled_services').where({ id: f.serviceId }).first();
+        // Both preflights are computed before either completion commits.
+        expect(await areas.preflightPlaces({ knex: mockPg, svc: await svcOf(a), products: [rowFor(a)] })).toBeNull();
+        expect(await areas.preflightPlaces({ knex: mockPg, svc: await svcOf(b), products: [rowFor(b)] })).toBeNull();
+        const [first, second] = reversed ? [b, a] : [a, b];
+        const one = await complete(first, { products: [rowFor(first)] });
+        const two = await complete(second, { products: [rowFor(second)] });
+        expect([one.status, two.status]).toEqual([200, 200]);
+        expect(await mockPg('property_application_history').where({ customer_id: a.customerId, product_id: arena.id, treated_place: 'front' }).whereNull('retracted_at')).toHaveLength(2);
+        expect(one.body.completionAdvisories).toEqual([]);
+        expect(two.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Arena 50 WDG is over its minimum days between applications\.$/)]);
+        // The earlier-committing visit, audited now that the other row exists, flags it as well: the audit reads both sides of the date.
+        const limits = require('../services/application-limits');
+        for (const f of [a, b]) {
+          const svc = await svcOf(f);
+          const violations = await limits.auditHardCountLimits(f.customerId, arena.id, etDateString(svc.scheduled_date), mockPg, { propertyId: f.propertyId, excludeScheduledServiceId: f.serviceId, place: 'front' });
+          expect(violations.map((v) => v.type)).toContain('min_interval_days');
+        }
+      } finally {
+        await mockPg('service_completion_attempts').where('service_id', b.serviceId).del().catch(() => {});
+        await cleanup(a);
+      }
     });
   });
 

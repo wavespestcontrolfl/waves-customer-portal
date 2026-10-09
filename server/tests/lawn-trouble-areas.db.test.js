@@ -310,6 +310,40 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       expect(await areas.preflightPlaces({ knex, svc, products: [{ productId: ai.id, name: 'Shared AI fixture', applicationMethod: 'spot_treatment', areaPlace: 'front', rate: 0.5, rateUnit: 'oz' }] })).toBeNull();
     });
 
+    // Which chinch rungs are chinch-only is read from the staged rows' triggers, never the name (real SQL).
+    describe('chinch-only rungs and the ladder, from the staged rows', () => {
+      const guide = require('../services/lawn-treatment-guide');
+      const stage = async (rows) => {
+        const [protocol] = await knex('lawn_protocols').insert({ protocol_key: `fixture_${randomUUID().slice(0, 6)}`, version: `v-${randomUUID().slice(0, 6)}`, name: 'Fixture', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
+        const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: protocol.id, month: 5, window_key: `w_${randomUUID().slice(0, 6)}`, title: 'w', visit_type: 'fixture' }).returning('*');
+        for (const [name, trigger] of rows) {
+          await knex('lawn_protocol_products').insert({
+            lawn_protocol_window_id: window.id, product_id: catalog[name].id, product_name: name, role: 'insecticide_spot', application_mode: 'spot',
+            default_in_plan: false, rate_per_1000: 0.1, rate_unit: 'oz', gates: JSON.stringify(trigger ? { trigger } : {}),
+          });
+        }
+        return { id: protocol.id };
+      };
+      const FIRST = 'chinch_20_to_25_per_sqft';
+      const SECOND = 'chinch_second_product_caterpillars_or_mole_cricket_nymphs';
+      beforeAll(async () => { await knex('lawn_protocol_products').del(); });
+
+      test('the first rung is chinch-only when every row staged for it carries a first-rung trigger; a second staged purpose, or a later rung, is not', async () => {
+        const structured = await stage([[ARENA, FIRST], [ARENA, FIRST], ['Stored Cap Caterpillar Insecticide', SECOND], ['Stored Cap Caterpillar Insecticide', 'caterpillars']]);
+        const found = await guide.chinchLadderIds({ structured, knex });
+        expect(found.sort()).toEqual([catalog[ARENA].id, catalog['Stored Cap Caterpillar Insecticide'].id].sort());
+        const products = [{ productId: catalog[ARENA].id, rung: 0 }, { productId: catalog['Stored Cap Caterpillar Insecticide'].id, rung: 1 }];
+        expect(await guide.chinchOnlyIdsOf({ products, structured, knex })).toEqual([catalog[ARENA].id]);
+        const mixed = await stage([[ARENA, FIRST], [ARENA, null]]);
+        expect(await guide.chinchOnlyIdsOf({ products: [{ productId: catalog[ARENA].id, rung: 0 }], structured: mixed, knex })).toEqual([]);
+      });
+
+      test('a protocol with no chinch rows has an empty ladder', async () => {
+        expect(await guide.chinchLadderIds({ structured: await stage([[CELSIUS, null]]), knex })).toEqual([]);
+        expect(await guide.chinchLadderIds({ structured: null, knex })).toEqual([]);
+      });
+    });
+
     test('the closeout audit judges a recorded spot application at its place, not the lawn', async () => {
       await applied(CELSIUS, { place: 'front' });
       await applied(CELSIUS, { place: 'front', daysAgo: 20 });

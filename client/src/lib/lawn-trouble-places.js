@@ -34,6 +34,9 @@ const CATEGORY_TYPE = { herbicide: 'weeds', fungicide: 'fungus', insecticide: 'o
 export function troubleTypeOfRow(row) {
   // A take-all fungicide is added through Search (no guide tag) and is cataloged as a fungicide: the guide's take-all set says it.
   if (row?.takeAllRow) return 'take_all';
+  // A chinch rung the staged rows make chinch-only (Arena), or one that is the chinch decision's product where it sits (Talak, which is
+  // also the caterpillar product, is chinch only then or when the chinch entry or card opened it: `guided`).
+  if (row?.chinchRow) return 'chinch';
   return GUIDED_TYPE[row?.guided] || CATEGORY_TYPE[String(row?.product?.category || '').trim().toLowerCase()] || null;
 }
 
@@ -63,6 +66,9 @@ const inChinchLadder = (row, chinch) => row.guided === 'chinch' || lowerIds(chin
 const uncapped = (row, weedMix) => lowerIds(weedMix?.noAreaProductIds).includes(String(row.productId).toLowerCase());
 
 function problemAt(placeId, row, { areas, weedMix, chinch, weedRows }) {
+  // What /complete itself refused for this product at this place is authoritative, whatever any map says.
+  const refused = areas.refused?.[String(row.productId).toLowerCase()]?.[placeId];
+  if (refused) return reasonText(refused, 'A yearly limit is reached at this place.');
   if (weedMix?.byPlace && inWeedGroup(row, weedMix)) {
     if (uncapped(row, weedMix)) return null;
     // The rows of the entry share one set; a group product that is on the sheet on its own is judged on its own.
@@ -131,8 +137,11 @@ export const knownPlacesOfType = (areas, type) => new Set(areas.known.filter((ar
  */
 export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows, takeAll = null }) {
   // `takeAll`: the guide's take-all product ids (a Set of lower-case ids); the row stands for a take-all area, not plain fungus.
-  const tagged = takeAll?.has(String(row.productId).toLowerCase()) ? { ...row, takeAllRow: true } : row;
-  return placed(tagged, { areas, chosen, weedMix, chinch, weedRows });
+  const takeAllRow = !!takeAll?.has(String(row.productId).toLowerCase());
+  const chinchRow = !takeAllRow && (chinch?.chinchOnlyIds || []).some((id) => sameId(id, row.productId));
+  const out = placed({ ...row, ...(takeAllRow ? { takeAllRow } : {}), ...(chinchRow ? { chinchRow } : {}) }, { areas, chosen, weedMix, chinch, weedRows });
+  const decided = chinch?.byPlace?.[out.place]?.item;
+  return !out.takeAllRow && !out.chinchRow && decided && sameId(decided.productId, row.productId) ? { ...out, chinchRow: true } : out;
 }
 
 function placed(row, { areas, chosen, weedMix, chinch, weedRows }) {

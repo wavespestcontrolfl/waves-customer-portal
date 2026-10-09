@@ -4644,6 +4644,14 @@ async function lawnFastRequestId(req, res) {
   return (await assertRecapOwnership(req, res)) ? id : null;
 }
 
+// GATE_LAWN_TROUBLE_AREAS: the product ids the sheet names after /complete refused a place (`?productIds=a,b`), read per place too.
+// Only uuids, at most 20, and only while the gate is live; absent otherwise (so a request without the parameter is read as it always was).
+function lawnFastProductIds(req) {
+  if (!require('../config/feature-gates').lawnTroubleAreasLive() || typeof req.query?.productIds !== 'string') return undefined;
+  const ids = req.query.productIds.split(',').map((id) => id.trim().toLowerCase()).filter((id) => require('../services/lawn-fast-complete').isUuid(id));
+  return ids.length ? [...new Set(ids)].slice(0, 20) : undefined;
+}
+
 // GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
 // What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
 // lawn visit type is eligible, recurring program visits first): the eligibility
@@ -4657,7 +4665,8 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
   try {
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
-    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId });
+    const productIds = lawnFastProductIds(req);
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
     res.json({ enabled: true, ...body });
@@ -4698,7 +4707,8 @@ router.get('/:lawnFastServiceId/lawn-fast/treatment-guide', async (req, res, nex
     if (!require('../config/feature-gates').lawnTreatmentGuideLive()) return res.status(404).json({ enabled: false });
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
-    const result = await require('../services/lawn-fast-complete').buildLawnTreatmentGuide({ serviceId, assessmentId: req.query.assessmentId });
+    const productIds = lawnFastProductIds(req);
+    const result = await require('../services/lawn-fast-complete').buildLawnTreatmentGuide({ serviceId, assessmentId: req.query.assessmentId, ...(productIds ? { productIds } : {}) });
     if (!result.ok) {
       const status = TREATMENT_GUIDE_STATUS[result.reason] || recapStatusForReason(result.reason);
       return res.status(status).json({ error: result.reason, code: result.reason });

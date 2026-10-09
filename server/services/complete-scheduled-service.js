@@ -6744,7 +6744,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
-            ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { appliedIds: new Set((products || []).map((row) => String(row?.productId || '').toLowerCase())) }),
+            ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -8004,7 +8004,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
           // GATE_LAWN_TROUBLE_AREAS: the lawn's trouble-area store, from the spot rows that carry a place (secondary; never fails the visit).
-          await require('../services/lawn-trouble-areas').recordStore(trx, { svc, record, products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById, takeAllIds: () => require('./lawn-fast-complete').takeAllProductIdsFor(svc) });
+          await require('../services/lawn-trouble-areas').recordStore(trx, { svc, record, products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById, confirm: () => require('./lawn-fast-complete').troubleTypeIdsFor(svc) });
         }
 
         // Ledger row: legacy = completed WaveGuard visits with a structured

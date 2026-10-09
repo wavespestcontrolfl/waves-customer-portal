@@ -1122,6 +1122,104 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [], actionLabel: null, note: 'Take-all is treated on known trouble areas only. None is on file for this lawn.' });
     });
 
+    describe('take-all areas on file (GATE_LAWN_TROUBLE_AREAS)', () => {
+      const AREA = { id: uuid(70), place: 'back', type: 'take_all', last_treated_on: '2026-06-01', last_seen_on: '2026-06-01' };
+      const takeAllMonth = () => {
+        const takeAllPlan = plan(addOns());
+        takeAllPlan.completionDefaults.addOns[2].raw = 'Test Artavia — mapped take-all areas, second spring application';
+        buildPlanForService.mockResolvedValue(takeAllPlan);
+        v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
+      };
+      const read = (areasOnFile) => guide(tablesFor({
+        scheduled_services: visit({ scheduled_date: '2026-07-14', property_id: uuid(40) }),
+        lawn_trouble_areas: areasOnFile,
+        lawn_assessment_runs: run({ fungal_activity: { level: 'moderate' } }),
+      }));
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+      test('gate off: an area on file changes nothing (the check only, as before)', async () => {
+        live();
+        takeAllMonth();
+        const result = await read([AREA]);
+        expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [], actionLabel: null });
+      });
+
+      test('gate on, a take_all area on file: the card offers the take-all product with one tap, and the note names the stored place', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        const result = await read([AREA]);
+        expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [P_ART], actionLabel: 'I checked. Add it', note: 'Take-all area on file: Back.' });
+        // Still governed: the answer lists it as a take-all product, so the sheet never lists it with the plain add-ons.
+        expect(result.takeAllProductIds).toEqual([P_ART]);
+      });
+
+      test('gate on: no area on file (or only another type) is the check only; a cleared area is not returned by the store, so it offers nothing', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        expect((await read([])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+        expect((await read([{ ...AREA, type: 'fungus' }])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+      });
+
+      test('gate on: the stored place where the product is capped is not offered; with no other stored place the card is the check only', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+          capped: new Map(items.filter((i) => i.product.id === P_ART && (!options?.place || options.place === 'back')).map((i) => [P_ART, YEARLY])), warnings: [], blocks: [],
+        }));
+        expect((await read([AREA])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+        // The same product capped at the back but a second stored area at the front: the card stands, naming the front only.
+        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], note: 'Take-all area on file: Front.' });
+      });
+
+      test('gate on: a failed read of the store is the check only, never a guess', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        expect((await read(new Error('synthetic read failure'))).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+      });
+    });
+
+    describe('products the sheet names (Search-added rows outside the month\'s recipe)', () => {
+      const P_SEARCHED = uuid(80);
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+      test('gate on: they are read per place and ride the answer in the context\'s shape; the guide\'s own reads stand', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+          capped: new Map(items.filter((i) => i.product.id === P_SEARCHED && (!options?.place || options.place === 'front')).map((i) => [P_SEARCHED, YEARLY])), warnings: [], blocks: [],
+        }));
+        const tables = tablesFor({ products_catalog: [{ id: P_SEARCHED, name: 'Searched Product' }] });
+        const result = await buildLawnTreatmentGuide({ serviceId: VISIT, assessmentId: CONFIRMED, knex: fakeKnex(tables), productIds: [P_SEARCHED, 'not-a-uuid'] });
+        expect(result.placeBlocked[P_SEARCHED]).toEqual({ front: 'limit' });
+        expect(result.placeBlocked[P_ART]).toEqual({});
+      });
+
+      test('gate off, or no ids named: the answer is as it was', async () => {
+        live();
+        const tables = tablesFor();
+        expect(await buildLawnTreatmentGuide({ serviceId: VISIT, assessmentId: CONFIRMED, knex: fakeKnex(tables), productIds: [P_SEARCHED] })).not.toHaveProperty('placeBlocked');
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        expect((await guide(tables)).placeBlocked).not.toHaveProperty(P_SEARCHED);
+      });
+
+      test('the context reads them too (a one-time visit with no plan has an empty seed)', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+        v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+          capped: new Map(items.filter((i) => i.product.id === P_SEARCHED && (!options?.place || options.place === 'back')).map((i) => [P_SEARCHED, YEARLY])), warnings: [], blocks: [],
+        }));
+        const knex = fakeKnex({ ...tablesFor(), products_catalog: [{ id: P_SEARCHED, name: 'Searched Product' }] });
+        expect((await buildLawnFastContext(VISIT, { knex })).troubleAreas.blocked).toEqual({});
+        const named = await buildLawnFastContext(VISIT, { knex, productIds: [P_SEARCHED] });
+        expect(named.troubleAreas.blocked).toEqual({ [P_SEARCHED]: { back: 'limit' } });
+      });
+    });
+
     test('the chinch card is seasonal: October has none, and the caterpillar card stays', async () => {
       live();
       const result = await guide(tablesFor({

@@ -117,7 +117,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
   return vi.fn(async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path, options, body });
-    if (path.endsWith('/lawn-fast/context')) {
+    if (path.includes('/lawn-fast/context')) {
       if (contextError) throw contextError;
       return ctx;
     }
@@ -834,7 +834,7 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
     let guideReads = 0;
     const base = makeRequest({ ctx: ctxWith({}) });
     const request = vi.fn(async (path, options) => {
-      if (path.endsWith('/lawn-fast/context')) { contextReads += 1; return contextReads === 1 ? ctxWith({}) : ctxWith(closedFront); }
+      if (path.includes('/lawn-fast/context')) { contextReads += 1; return contextReads === 1 ? ctxWith({}) : ctxWith(closedFront); }
       return base(path, options);
     });
     guideAnswer = () => { guideReads += 1; return guideWith(guideReads === 1 ? {} : closedFront); };
@@ -870,7 +870,7 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
       let guideReads = 0;
       const base = makeRequest({ ctx: ctxWith({}) });
       const request = vi.fn(async (path, options) => {
-        if (path.endsWith('/lawn-fast/context')) { contextReads += 1; return ctxWith({}); }
+        if (path.includes('/lawn-fast/context')) { contextReads += 1; return ctxWith({}); }
         return base(path, options);
       });
       guideAnswer = () => { guideReads += 1; if (guideReads === 1) return guideWith(closedFront); return rereads(); };
@@ -912,11 +912,40 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
     });
   });
 
+  test('the refusal names the product and the place: the chip closes at once and stays closed, though the maps it reads again say open; the reads name the spot products on the sheet', async () => {
+    const urls = [];
+    const base = makeRequest({ ctx: ctxWith({}) });
+    const request = vi.fn(async (path, options) => {
+      urls.push(path);
+      if (path.includes('/lawn-fast/context')) return ctxWith({});
+      return base(path, options);
+    });
+    guideAnswer = guideWith({ [P_FUNG]: {} });
+    await openSheet({ request, props: { catalog: CAT } });
+    await analyze();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(chipsOf(), 'Front'));
+    // Nothing is named before a refusal: the first reads are exactly what they always were.
+    expect(urls.filter((u) => /productIds=/.test(u))).toEqual([]);
+    completeErrors.push(Object.assign(refusal(400, 'lawn_place_limit', 'Spot Fungicide: LIMIT REACHED. Choose another place, or take it off the sheet.', { productId: P_FUNG.toUpperCase(), place: 'front' })));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
+    // Both re-reads named the spot product on the sheet.
+    await waitFor(() => expect(urls.filter((u) => u.includes(`productIds=${P_FUNG}`))).toHaveLength(2));
+    expect(urls.some((u) => u.includes('/lawn-fast/context?productIds='))).toBe(true);
+    expect(urls.some((u) => u.includes('/treatment-guide?assessmentId=assessment-1&productIds='))).toBe(true);
+    // The maps said open (the guide's placeBlocked is empty): the refusal still holds.
+    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    expect(chipOf(chipsOf(), 'Back').disabled).toBe(false);
+  });
+
   test('other refusals do not re-read the place maps; a failed refresh changes nothing', async () => {
     let contextReads = 0;
     const base = makeRequest({ ctx: ctxWith({}) });
     const request = vi.fn(async (path, options) => {
-      if (path.endsWith('/lawn-fast/context')) { contextReads += 1; if (contextReads > 1) throw new Error('offline'); return ctxWith({}); }
+      if (path.includes('/lawn-fast/context')) { contextReads += 1; if (contextReads > 1) throw new Error('offline'); return ctxWith({}); }
       return base(path, options);
     });
     guideAnswer = guideWith({});
@@ -938,3 +967,29 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
     expect(chipOf(chipsOf(), 'Front').disabled).toBe(false);
   });
 });
+
+// ── a planned or Search-added chinch rung is typed by the program ──────────────────────────────────────────────────
+describe('the type sent for a chinch-ladder row', () => {
+  const ARENA_ITEM = { productId: P_ARENA, name: 'Arena 50 WDG', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: 0.147, rateUnit: 'oz', gateNotes: [] };
+  const BIF_ITEM = { productId: P_BIF, name: 'Atticus Talak 7.9 F', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: null, rateUnit: null, gateNotes: [] };
+  const CHINCH = {
+    item: ARENA_ITEM, note: null, rungIds: [P_ARENA, P_BIF], blockedIds: [], unreadableIds: [], chinchOnlyIds: [P_ARENA],
+    byPlace: { front: { item: BIF_ITEM, note: null, unreadableIds: [], blockedIds: [P_ARENA] }, back: { item: ARENA_ITEM, note: null, unreadableIds: [], blockedIds: [] } },
+  };
+
+  test('Arena planned: chinch; Talak planned at the back (not the decision there): an insect; Talak where the decision names it: chinch', async () => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: CHINCH };
+    await open(placeContext({ treatmentGuide: true, chinch: CHINCH, planned: [ARENA_ITEM, BIF_ITEM], addOns: [] }));
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    fireEvent.click(chipOf(within(placeGroup('Arena 50 WDG')).getByRole('group', { name: 'Place for Arena 50 WDG' }), 'Back'));
+    fireEvent.click(chipOf(within(placeGroup('Atticus Talak 7.9 F')).getByRole('group', { name: 'Place for Atticus Talak 7.9 F' }), 'Back'));
+    typeArea(placeGroup('Arena 50 WDG'), '100');
+    typeArea(placeGroup('Atticus Talak 7.9 F'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_ARENA)).toMatchObject({ areaPlace: 'back', troubleType: 'chinch' });
+    expect(sent(P_BIF)).toMatchObject({ areaPlace: 'back', troubleType: 'other_insect' });
+  });
+});
+

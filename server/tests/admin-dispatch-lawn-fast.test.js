@@ -35,6 +35,7 @@ jest.mock('../services/lawn-fast-complete', () => ({
   isUuid: (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value)),
   buildLawnFastContext: jest.fn(),
   buildLawnFastWateringPreview: jest.fn(),
+  buildLawnTreatmentGuide: jest.fn(),
   resolveLawnFastEligibility: jest.fn(),
 }));
 jest.mock('../services/lawn-trouble-areas', () => ({ clearArea: jest.fn() }));
@@ -47,7 +48,7 @@ function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
 }
 
-function invoke(method, routePath, { params = {}, body, actor = { techRole: 'admin', technicianId: 'admin-1' } } = {}) {
+function invoke(method, routePath, { params = {}, body, query = {}, actor = { techRole: 'admin', technicianId: 'admin-1' } } = {}) {
   const layer = routeLayer(method, routePath);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
@@ -57,7 +58,7 @@ function invoke(method, routePath, { params = {}, body, actor = { techRole: 'adm
     json(payload) { this.body = payload; return this; },
   };
   return new Promise((resolve, reject) => {
-    handler({ params, body, query: {}, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
+    handler({ params, body, query, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
       .then(() => resolve(res))
       .catch(reject);
   });
@@ -322,3 +323,44 @@ describe('POST lawn-fast/trouble-areas/:areaId/clear', () => {
     expect(other.body.code).toBe('trouble_area_not_found');
   });
 });
+
+// ?productIds= on the context and the treatment-guide reads (GATE_LAWN_TROUBLE_AREAS): the products the sheet names after a refused place.
+describe('the sheet names its spot products after a refused place', () => {
+  const GUIDE = '/:lawnFastServiceId/lawn-fast/treatment-guide';
+  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'];
+  const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
+  const A = '00000000-0000-4000-8000-0000000000a1';
+  const B = '00000000-0000-4000-8000-0000000000b2';
+  const { buildLawnTreatmentGuide } = require('../services/lawn-fast-complete');
+  const admin = { techRole: 'admin', technicianId: 'admin-1' };
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    mockDbCurrent = dbWithOwner('tech-1');
+    buildLawnFastContext.mockReset().mockResolvedValue({ ok: true, eligible: true });
+    buildLawnTreatmentGuide.mockReset().mockResolvedValue({ ok: true, v: 1, cards: [] });
+  });
+  afterEach(() => {
+    for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+    mockDbCurrent = null;
+  });
+
+  test('uuids only, deduplicated, at most 20, handed to the context and the guide', async () => {
+    const many = Array.from({ length: 25 }, (_, i) => `00000000-0000-4000-8000-${String(i + 100).padStart(12, '0')}`);
+    await invoke('get', CONTEXT, { params, actor: admin, query: { productIds: `${A}, ${B.toUpperCase()},${A},not-a-uuid,` } });
+    expect(buildLawnFastContext).toHaveBeenCalledWith(VISIT, { technicianId: 'admin-1', productIds: [A, B] });
+    await invoke('get', GUIDE, { params, actor: admin, query: { assessmentId: 'x', productIds: many.join(',') } });
+    expect(buildLawnTreatmentGuide.mock.calls[0][0].productIds).toEqual(many.slice(0, 20));
+  });
+
+  test('no parameter, no uuid in it, or the places gate off: the builders are called exactly as before', async () => {
+    await invoke('get', CONTEXT, { params, actor: admin, query: {} });
+    await invoke('get', CONTEXT, { params, actor: admin, query: { productIds: 'nope' } });
+    expect(buildLawnFastContext.mock.calls.map((call) => call[1])).toEqual([{ technicianId: 'admin-1' }, { technicianId: 'admin-1' }]);
+    delete process.env.GATE_LAWN_TROUBLE_AREAS;
+    await invoke('get', CONTEXT, { params, actor: admin, query: { productIds: A } });
+    expect(buildLawnFastContext.mock.calls[2][1]).toEqual({ technicianId: 'admin-1' });
+    await invoke('get', GUIDE, { params, actor: admin, query: { assessmentId: 'x', productIds: A } });
+    expect(buildLawnTreatmentGuide.mock.calls[0][0]).toEqual({ serviceId: VISIT, assessmentId: 'x' });
+  });
+});
+

@@ -191,3 +191,47 @@ describe('a sibling\'s failed read never releases a product that read as capped'
   });
 });
 
+describe('a chinch-ladder row is chinch when the program makes it so', () => {
+  const area = (id, place, type) => ({ id, place, type, typeLabel: type, placeLabel: place });
+  const areas = troubleAreasOf(data({ known: [area('a', 'back', 'chinch')] }));
+  const insecticide = (id, extra = {}) => row({ productId: id, product: { category: 'insecticide' }, ...extra });
+  const chinch = { chinchOnlyIds: ['A1'], rungIds: ['A1', 'T1'], byPlace: { front: { item: { productId: 'T1' }, note: null, unreadableIds: [] }, back: { item: { productId: 'A1' }, note: null, unreadableIds: [] } } };
+
+  test('the chinch-only rung (Arena, by the staged triggers) is chinch with no tag, and pre-fills from the known chinch area', () => {
+    const out = withPlace(insecticide('a1'), { areas, chosen: '', chinch });
+    expect(out.chinchRow).toBe(true);
+    expect(troubleTypeOfRow(out)).toBe('chinch');
+    expect(out.place).toBe('back');
+  });
+
+  test('the later rung (also the caterpillar product) stays an insect unless the chinch entry or card opened it, or it is the decision\'s product where it sits', () => {
+    expect(troubleTypeOfRow(withPlace(insecticide('t1'), { areas, chosen: 'back', chinch }))).toBe('other_insect');
+    expect(troubleTypeOfRow(withPlace(insecticide('t1'), { areas, chosen: 'front', chinch }))).toBe('chinch');
+    expect(troubleTypeOfRow(withPlace(insecticide('t1', { guided: 'chinch' }), { areas, chosen: 'back', chinch }))).toBe('chinch');
+    expect(troubleTypeOfRow(withPlace(insecticide('t1', { guided: 'caterpillars' }), { areas, chosen: 'back', chinch }))).toBe('other_insect');
+  });
+
+  test('a product outside the ladder, or an answer with no chinch-only ids, is typed by its category as before', () => {
+    expect(troubleTypeOfRow(withPlace(insecticide('x9'), { areas, chosen: 'back', chinch }))).toBe('other_insect');
+    // (at the front the decision names the later rung, so Arena there is not the decision's product)
+    expect(troubleTypeOfRow(withPlace(insecticide('a1'), { areas, chosen: 'front', chinch: { ...chinch, chinchOnlyIds: undefined } }))).toBe('other_insect');
+  });
+
+  test('a take-all product is never retyped as chinch', () => {
+    expect(troubleTypeOfRow(withPlace(insecticide('a1'), { areas, chosen: 'back', chinch, takeAll: new Set(['a1']) }))).toBe('take_all');
+  });
+});
+
+describe('what /complete refused is authoritative', () => {
+  test('closes the place for that product whatever any map says, and for no other product', () => {
+    const base = troubleAreasOf(data());
+    const areas = { ...base, refused: { w1: { front: 'Celsius WG: LIMIT REACHED.' } } };
+    expect(placeProblems(row({ productId: 'W1' }), { areas }).front).toBe('Celsius WG: LIMIT REACHED.');
+    // Even a weed-group row the weed decision says fits the place.
+    const weedMix = { groupProductIds: ['W1'], byPlace: { front: { mode: 'lead', productIds: ['W1'], note: null } } };
+    expect(placeProblems(row({ productId: 'w1', weedGroup: true }), { areas, weedMix, weedRows: [row({ productId: 'w1', weedGroup: true })] }).front).toBe('Celsius WG: LIMIT REACHED.');
+    expect(placeProblems(row({ productId: 'W2' }), { areas }).front).toBeNull();
+    expect(placeProblems(row({ productId: 'W1' }), { areas: base }).front).toBeNull();
+  });
+});
+

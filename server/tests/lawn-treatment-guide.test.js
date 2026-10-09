@@ -951,6 +951,6 @@ describe('the record never leaves the technician side', () => {
 
   test('the completion freezes it through the validator, from the lawnFast echo', () => {
     const source = fs.readFileSync(path.join(root, 'services', 'complete-scheduled-service.js'), 'utf8');
-    expect(source).toContain("...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, {");
+    expect(source).toContain("...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),");
   });
 });
