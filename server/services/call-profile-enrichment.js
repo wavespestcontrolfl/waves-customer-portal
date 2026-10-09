@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { etDateString } = require('../utils/datetime-et');
 
 // Pull a gate/lockbox/garage code out of free-form access notes when the model
 // heard one ("front gate code is 4545", "lockbox 6214"). Conservative: 3-8
@@ -48,8 +49,20 @@ function petDetailsFrom(pets) {
   return raw ? String(raw).slice(0, 1000) : null;
 }
 
+// The dated tag on a note line: the call's EASTERN calendar day, YYYY-MM-DD.
+// A day already in that form is kept; anything else (the pipeline passes the
+// call's created_at as a Date) is read as an instant. The old form sliced
+// String(date), which for a Date printed "[call Thu Oct 08]".
+function callDayTag(callDate) {
+  if (typeof callDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(callDate)) return `[call ${callDate}]`;
+  const instant = new Date(callDate);
+  return Number.isNaN(instant.getTime()) ? legacyCallDayTag(callDate) : `[call ${etDateString(instant)}]`;
+}
+// The tag notes carried before callDayTag: lines already written keep it.
+const legacyCallDayTag = (callDate) => `[call ${String(callDate).slice(0, 10)}]`;
+
 function appendWithProvenance(existing, addition, callDate, separator = '\n') {
-  const tag = `[call ${String(callDate).slice(0, 10)}]`;
+  const tag = callDayTag(callDate);
   const line = `${tag} ${addition}`.trim();
   if (!existing || !String(existing).trim()) return line;
   if (String(existing).includes(addition)) return existing; // idempotent reprocess
@@ -64,10 +77,14 @@ function appendWithProvenance(existing, addition, callDate, separator = '\n') {
 const PROVIDER_NOTE_LABELS = ['Switching from', 'Other provider named'];
 function providerAlreadyNoted(existing, callDate, name) {
   if (!existing || !name) return false;
-  const tag = `[call ${String(callDate).slice(0, 10)}] `;
+  // This day's line under the tag written now, or under the old tag a line
+  // written before the tag fix still carries.
+  const tags = [...new Set([callDayTag(callDate), legacyCallDayTag(callDate)])].map((tag) => `${tag} `);
   const bits = PROVIDER_NOTE_LABELS.map((label) => `${label}: ${name}`);
-  return String(existing).split('\n').some((line) => line.startsWith(tag)
-    && line.slice(tag.length).split(' | ').some((part) => bits.includes(part)));
+  return String(existing).split('\n').some((line) => {
+    const tag = tags.find((t) => line.startsWith(t));
+    return !!tag && line.slice(tag.length).split(' | ').some((part) => bits.includes(part));
+  });
 }
 
 /**
@@ -162,4 +179,4 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   return { applied };
 }
 
-module.exports = { enrichFromCall, appendWithProvenance, _test: { extractCodes, appendWithProvenance, providerAlreadyNoted } };
+module.exports = { enrichFromCall, appendWithProvenance, _test: { extractCodes, appendWithProvenance, providerAlreadyNoted, callDayTag } };

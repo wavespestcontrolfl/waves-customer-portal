@@ -99,7 +99,7 @@ List service history with products applied.
 Single service detail with signed photo URLs.
 
 ### GET /services/stats/summary
-Aggregated stats: services YTD, Celsius application count (vs. the yearly Celsius cap: 2 under the v13 lawn program, 3 before it), thatch measurements over time.
+Aggregated stats: services YTD, Celsius application count (vs. the yearly Celsius cap: 2 under the v13 lawn program, 3 before it), thatch measurements over time. `celsiusApplicationsThisYear` counts the window named by `celsiusWindow`: `rolling365` (the last 365 days, GATE_LAWN_V13 on) or `calendar_year` (GATE_LAWN_V13 off). The field name is unchanged; a client that does not know `celsiusWindow` keeps its old wording.
 
 ---
 
