@@ -127,7 +127,7 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     ceilingFailed: qualifying.length === 0 && !!top && !!conflict && !top.ceilingOk,
     // A visit in conflict that an ordinary optimization would move anyway:
     // it still moves after its overlapping partner has left.
-    movesWithoutConflict: !!conflict && rows.some((r) => r.normalOk),
+    movesWithoutConflict: !!conflict && rows.some((r) => r.normalOk && !r.cand.past_cap),
     // ...and the slot it would take then: ranked by gain alone, the order of
     // a visit with no conflict (Codex #6207 r10 P2).
     ...normalBestOf(conflict, rows),
@@ -137,7 +137,8 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
 
 function normalBestOf(conflict, rows) {
   if (!conflict) return {};
-  const top = rows.filter((r) => r.normalOk).sort((a, b) => b.gain - a.gain || a.index - b.index)[0];
+  // A past_cap slot is in the list only for the conflict repair (legacyCap).
+  const top = rows.filter((r) => r.normalOk && !r.cand.past_cap).sort((a, b) => b.gain - a.gain || a.index - b.index)[0];
   return top ? { normalBest: top.cand, normalBestScore: top.sc } : {};
 }
 

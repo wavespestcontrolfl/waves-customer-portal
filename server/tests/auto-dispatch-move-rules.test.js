@@ -101,6 +101,10 @@ describe('rankCandidates', () => {
     const weak = rank([{ cand: dayMove({ detour_minutes: 0 }), sc: score(70) }], { current: { ...CURRENT, conflict } });
     expect(weak).toMatchObject({ qualifies: true, movesWithoutConflict: false });
     expect(rank([{ cand: dayMove({ detour_minutes: 2 }), sc: score(90, 12.5) }]).movesWithoutConflict).toBe(false);
+    // A slot kept past the cap only for the conflict repair is not an ordinary candidate (r11 P2).
+    const pastCap = rank([{ cand: { ...dayMove({ detour_minutes: 2 }), past_cap: true }, sc: score(90, 12.5) }], { current: { ...CURRENT, conflict } });
+    expect(pastCap).toMatchObject({ qualifies: true, movesWithoutConflict: false });
+    expect(pastCap.normalBest).toBeUndefined();
   });
 
   test('under the bar: the audit shows the nearest miss and no fallback list', () => {

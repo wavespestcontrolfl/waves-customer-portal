@@ -398,7 +398,8 @@ test('legacy cap keeps a same-day candidate that sits beyond the cap when confli
   const other = Array.from({ length: 3 }, (_, i) => ({ date: '2026-08-06', start_time: `0${8 + i}:00` }));
   const sameDay = { date: '2026-08-04', start_time: '14:00' };
   const evalConflict = { kind: 'overlap', date: '2026-08-04', with: ['o1'] };
-  expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2, conflictMoves: true, evalConflict })).toEqual([sameDay, other[0]]);
+  // The capped set stays; the same-day slot past the cap is added, marked (r11 P2).
+  expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2, conflictMoves: true, evalConflict })).toEqual([other[0], other[1], { ...sameDay, past_cap: true }]);
   expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2 })).toEqual([other[0], other[1]]);
   // Gate on, visit NOT in conflict: find-time's route-ranked order stays (Codex #6207 r8 P2).
   expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2, conflictMoves: true, evalConflict: null })).toEqual([other[0], other[1]]);

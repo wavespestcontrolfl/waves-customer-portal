@@ -502,17 +502,19 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   return kept;
 }
 
-// The legacy pre-score cap. For a visit in conflict, its own date goes
-// first (stable), so a same-day repair is never cut behind cheaper other-day
-// slots before move-rules.js ranks same-day first (pre-push P1). Gate off:
-// the order is untouched.
+// The legacy pre-score cap. For a visit in conflict, same-day slots that sit
+// past the cap are ADDED to the capped set (marked `past_cap`), so a same-day
+// repair is never cut behind cheaper other-day slots before move-rules.js
+// ranks same-day first (pre-push P1). The capped set itself is untouched:
+// it is what the visit is ranked on once its conflict is gone, and past_cap
+// slots take no part in that ordinary ranking (Codex #6207 r8, r11 P2).
+// Any other visit, or gate off: the capped set only.
 function legacyCap(service, candidates, ctx) {
   const cap = ctx.scoreCap || SCORE_CAP;
-  // Only for a visit that IS in conflict: any other visit keeps find-time's
-  // route-ranked order under the cap (Codex #6207 r8 P2).
-  if (!ctx.evalConflict) return candidates.slice(0, cap);
+  const capped = candidates.slice(0, cap);
+  if (!ctx.evalConflict) return capped;
   const own = toDateStr(service.scheduled_date);
-  return [...candidates.filter((c) => c.date === own), ...candidates.filter((c) => c.date !== own)].slice(0, cap);
+  return [...capped, ...candidates.slice(cap).filter((c) => c.date === own).map((c) => ({ ...c, past_cap: true }))];
 }
 
 // Single entry point findValidCandidateSlots calls unconditionally, so the
