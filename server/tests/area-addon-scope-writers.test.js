@@ -213,8 +213,10 @@ describe('1. every other writer of visits and add-on rows', () => {
       }
     };
     walk(path.join(__dirname, '..'));
-    // area-addon-visit-rows.js is the single writer (the booking, the restore and the clear).
-    expect(offenders.sort()).toEqual(['services/area-addon-visit-rows.js']);
+    // area-addon-visit-rows.js is the single writer (the booking, the restore and the clear). The schedule route names
+    // the column only to READ it: the late-column probe and the /week projection (Codex round 17), never an assignment.
+    expect(offenders.sort()).toEqual(['routes/admin-schedule.js', 'services/area-addon-visit-rows.js']);
+    expect(schedule).not.toMatch(/area_addon_scope\s*[:=]|\.area_addon_scope\s*=/);
   });
 
   test('the add-on row inserts of the schedule are the known four, and none of them reads a scope off a line', () => {
