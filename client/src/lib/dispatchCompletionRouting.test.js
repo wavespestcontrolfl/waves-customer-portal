@@ -8,7 +8,7 @@ import {
   shouldOpenSpecialtyFastComplete,
   shouldReopenCompletionAfterPayment,
 } from "./dispatchCompletionRouting";
-import { stationMapKnownOff } from "./pest-fast-complete";
+import { reportFlowFields, stationMapKnownOff } from "./pest-fast-complete";
 
 describe("post-payment completion routing", () => {
   it.each(["completed", "cancelled", "no_show", "skipped"])(
@@ -196,5 +196,26 @@ describe("stationMapKnownOff (Codex P1 on #6140)", () => {
     expect(stationMapKnownOff({ enabled: false, ready: true, known: false })).toBe(false);
     expect(stationMapKnownOff({ enabled: false, ready: true })).toBe(false);
     expect(stationMapKnownOff(undefined)).toBe(false);
+  });
+});
+
+describe("reportFlowFields (the row fields both screens pass the sheet)", () => {
+  const station = {
+    id: "svc-station", status: "on_site", propertyId: null, typedReportFlowEnabled: true,
+    completionProfile: { category: "termite", serviceKey: "termite_bait_monitoring", findingsType: "termite_bait_station" },
+    findingsSchema: { type: "termite_bait_station" },
+  };
+
+  it("a station visit is in the report flow only while the station map is known off (Codex P2 on #6140)", () => {
+    expect(reportFlowFields(station, { stationMapOff: true })).toMatchObject({ reportFlow: true, typedFlow: true, typedType: "termite_bait_station", traceEligible: false });
+    // The map turned on, or its read failed, with the sheet open: out of the
+    // report flow, so the sheet blocks and points to the full form.
+    expect(reportFlowFields(station, { stationMapOff: false })).toMatchObject({ reportFlow: false, typedFlow: false, typedType: null });
+  });
+
+  it("a plain pest visit is in the report flow with its trace step, whatever the station map says", () => {
+    const pest = { id: "svc", status: "on_site", fastCompleteReportEnabled: true, completionProfile: { category: "pest_control", findingsType: null } };
+    expect(reportFlowFields(pest)).toMatchObject({ reportFlow: true, laneFlow: false, typedFlow: false, traceEligible: true });
+    expect(reportFlowFields({ ...pest, traceEligible: false }, { stationMapOff: true })).toMatchObject({ reportFlow: true, traceEligible: false });
   });
 });

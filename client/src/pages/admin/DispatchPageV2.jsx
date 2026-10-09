@@ -2098,9 +2098,11 @@ export default function DispatchPageV2({
             recapEnabled: pestFastService.fastCompleteRecapEnabled === true,
             // The report flow, with what the sheet reads of it from the row
             // (a lane visit's lane, a typed visit's form, the trace step), as
-            // TechHomePage passes it. Every visit here is in the report flow.
+            // TechHomePage passes it. Never forced on: a station visit whose
+            // station map turns on or unread while the sheet is open drops
+            // out of the report flow, and the sheet then blocks and points
+            // to the full form (Codex P2 on #6140).
             ...reportFlowFields(pestFastService, { stationMapOff }),
-            reportFlow: true,
             noteBoxPhotosEnabled: pestFastService.noteBoxPhotosEnabled === true,
             technicianName: pestFastService.technicianName || pestFastService.technician_name || null,
             lat: pestFastService.lat ?? null,
