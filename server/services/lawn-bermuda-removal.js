@@ -443,6 +443,9 @@ async function capViolation(knex, visit, sprayed) {
   for (const product of sprayed) {
     const result = await limits.checkLimits(visit.customer_id, product.id, visit.scheduled_date, knex, {
       program: BERMUDA_GROUP, propertyId: visit.effective_property_id || null, excludeScheduledServiceId: visit.id,
+      // A write: the whole calendar year counts and the nearest spray on EITHER side sets the
+      // interval, so a backdated completion is held by a later recorded spray too.
+      wholeYear: true,
       ...(product.proposed ? { proposed: product.proposed } : {}),
     });
     if (result.blocks.length) return `${result.blocks[0].message} Bermuda removal cannot be recorded on this visit.`;

@@ -261,13 +261,27 @@ class ApplicationLimitChecker {
   // this year it reads the latest earlier one (a late-December spray still holds an early-January one).
   async bermudaLimitInputs(database, limit, ctx) {
     if (!ctx.history) ctx.history = await this.propertyHistory(database, ctx);
+    // A WRITE (ctx.wholeYear: a completion about to record the spray) is judged against the
+    // nearest spray on either side, so a backdated completion cannot land inside 42 days of a
+    // later recorded spray. A plan reads only what came before its date.
+    if (ctx.wholeYear && limit.limit_type === 'min_interval_days') {
+      return { limitHistory: ctx.history, counted: { annualCount: ctx.history.length, lastApplication: await this.propertyNearestApplication(database, ctx) } };
+    }
     const needsPrior = !ctx.history.length && limit.limit_type === 'min_interval_days';
     const lastApplication = needsPrior ? await this.propertyLastApplication(database, ctx) : (ctx.history[0] || null);
     return { limitHistory: ctx.history, counted: { annualCount: ctx.history.length, lastApplication } };
   }
 
+  // The bermuda removal spray nearest to the date judged, before or after it, or null.
+  async propertyNearestApplication(database, ctx) {
+    const query = (await this.bermudaHistoryQuery(database, ctx))();
+    return (await query.select('pah.*')
+      .orderByRaw('abs(pah.application_date - ?::date) asc', [etCalendarDayOf(ctx.proposedDate)]).first()) || null;
+  }
+
   async propertyHistory(database, ctx) {
     return (await this.bermudaHistoryQuery(database, ctx))().where('pah.application_date', '>=', ctx.yearStart)
+      .where('pah.application_date', '<=', `${String(ctx.yearStart).slice(0, 4)}-12-31`)
       .select('pah.*').orderBy('pah.application_date', 'desc');
   }
 
@@ -280,15 +294,16 @@ class ApplicationLimitChecker {
   // A builder of the query for Recognition applications (the step's marker, for both products) of
   // the treated property. It resolves to a FUNCTION: a query builder returned from an async method
   // would run when awaited.
-  async bermudaHistoryQuery(database, { customerId, productId, proposedDate, propertyId, excludeScheduledServiceId }) {
+  async bermudaHistoryQuery(database, { customerId, productId, proposedDate, propertyId, excludeScheduledServiceId, wholeYear = false }) {
     const rateRow = await database('product_limits').where({ match_value: BERMUDA_PROGRAM, limit_type: 'annual_max_rate' }).first('product_id');
     return () => {
       const query = database('property_application_history as pah')
         .where({ 'pah.customer_id': customerId, 'pah.product_id': rateRow?.product_id || productId })
-        // On or before the date judged, as the active-ingredient cap does: a plan rebuilt for
-        // April is not withheld by a June spray that had not happened yet.
-        .where('pah.application_date', '<=', etCalendarDayOf(proposedDate))
         .whereNull('pah.retracted_at');
+      // A plan reads sprays on or before the date judged, as the active-ingredient cap does: a
+      // plan rebuilt for April is not withheld by a June spray that had not happened yet. A
+      // write (wholeYear) reads both sides of its date.
+      if (!wholeYear) query.where('pah.application_date', '<=', etCalendarDayOf(proposedDate));
       scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId }, 'pah');
       return query;
     };
@@ -318,7 +333,8 @@ class ApplicationLimitChecker {
         // proposedDate may itself be a hydrated pg DATE (admin-dispatch passes
         // svc.scheduled_date) — etCalendarDayOf keeps its literal calendar day.
         const proposedDay = new Date(etCalendarDayOf(proposedDate) + 'T12:00:00Z');
-        const daysSince = Math.floor((proposedDay - lastApp) / 86400000);
+        // Whole days between the two, whichever came first (a write-time bermuda check may read a LATER spray).
+        const daysSince = Math.floor(Math.abs(proposedDay - lastApp) / 86400000);
         const minDays = limitValue;
         if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };
         if (daysSince < minDays + 7) return { approaching: true, message: `${product.name}: ${daysSince} days since last app (min ${minDays}). Just cleared.`, current: daysSince, max: minDays };

@@ -637,6 +637,19 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: february.visit.id }))).resolves.toBeUndefined();
     });
 
+    test('a backdated completion is held by LATER recorded sprays: the nearest spray on either side, and the whole year\'s count (codex r50 P2)', async () => {
+      setGates();
+      const late = await lawn({ date: '2026-04-14', bermuda: true });
+      await spray(late.customerId, late.property.id, '2026-05-01');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: late.visit.id })).toMatch(/only 17 days since last app \(min 42\)/);
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: late.visit.id })))
+        .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+      const full = await lawn({ date: '2026-04-14', bermuda: true });
+      await spray(full.customerId, full.property.id, '2026-06-20');
+      await spray(full.customerId, full.property.id, '2026-08-20');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: full.visit.id })).toMatch(/2\/2 applications this year/);
+    });
+
     test('another property\'s sprays and this visit\'s own earlier rows do not count; a retry of the visit is not judged against itself', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20', bermuda: true });
