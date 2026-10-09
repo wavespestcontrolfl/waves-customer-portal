@@ -339,6 +339,22 @@ describe('the history reader', () => {
     expect(left.byKey.bed_pre_emergent.dates).toEqual([]);
   });
 
+  test('a product deactivated in the Service Library keeps its history in the limit', async () => {
+    const catalog = CATALOG.map((row) => (row.id === 'p-snap' ? { ...row, active: false } : row));
+    const out = await load(world({ products_catalog: catalog, property_application_history: [ledger('p-snap', 25)] }));
+    expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
+  });
+
+  test('a limited add-on whose product has no catalog row is an unreadable history, never an empty one', async () => {
+    const catalog = CATALOG.filter((row) => row.id !== 'p-snap');
+    await expect(load(world({ products_catalog: catalog, property_application_history: [ledger('p-snap', 25)] })))
+      .rejects.toMatchObject({ code: 'AREA_ADDON_LIMIT_PRODUCT_UNRESOLVED' });
+    // The quote step turns that into the custom-quote line, not a pass.
+    process.env.GATE_AREA_ADDONS = 'true';
+    const quoted = await service.quoteAreaAddOnHistory(fakeDb(world({ products_catalog: catalog })), { entries: [{ key: 'bed_pre_emergent' }], customerId: CUSTOMER, propertyId: PROPERTY });
+    expect(quoted).toEqual({ available: false, reason: 'history_unavailable' });
+  });
+
   test('the customer\'s only property is used when none is named; keys with no limit read nothing', async () => {
     const db = fakeDb(world({ property_application_history: [ledger('p-snap', 25)] }));
     const out = await service.loadAreaAddOnHistory(db, { customerId: CUSTOMER, asOf: TODAY, keys: ['bed_pre_emergent'] });

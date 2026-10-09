@@ -47,9 +47,9 @@ const dayOf = (value) => (value ? etCalendarDayOf(value) : null);
 // resolved by the job card's matcher, so the card and the check name the same row.
 async function productIdsByKey(database, keys) {
   const { matchCatalogProduct } = require('./waveguard-plan-engine');
-  const products = await database('products_catalog')
-    .where(function activeOrUnknown() { this.where({ active: true }).orWhereNull('active'); })
-    .select('id', 'name');
+  // Every catalog row, active or not: a product deactivated in the Service Library keeps its ledger history, and
+  // filtering it out here would make those applications invisible to the limit.
+  const products = await database('products_catalog').select('id', 'name');
   const aliases = products.length
     ? await database('product_aliases').whereIn('product_id', products.map((p) => p.id)).select('product_id', 'alias_name')
     : [];
@@ -172,6 +172,14 @@ async function loadAreaAddOnHistory(database, { customerId, propertyId = null, k
   // No customer yet (a new lead): the ledger is keyed by customer and has nothing; only the holds of the same person count.
   const property = known ? await resolvePropertyId(database, customerId, propertyId) : (isUuid(propertyId) ? propertyId : null);
   const productByKey = known ? await productIdsByKey(database, wanted) : new Map();
+  // A limited add-on whose governed product has no catalog row has no readable ledger: that is an unreadable
+  // history (the callers answer it with the custom-quote line or the history-unavailable refusal), never an empty one.
+  const unresolved = known ? wanted.filter((key) => !productByKey.has(key)) : [];
+  if (unresolved.length) {
+    const err = new Error(`No catalog product for the limit of: ${unresolved.join(', ')}`);
+    err.code = 'AREA_ADDON_LIMIT_PRODUCT_UNRESOLVED';
+    throw err;
+  }
   const [ledger, booked] = await Promise.all([
     known ? ledgerDates(database, { customerId, propertyId: property, productByKey, asOf, excludeVisitId }) : new Map(),
     bookedDates(database, { customerId, propertyId: property, keys: wanted, excludeVisitIds: [...excludeVisitIds, excludeVisitId], prospect }),

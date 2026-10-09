@@ -1672,6 +1672,13 @@ const AREA_ADDON_PRICING_DEFAULTS = Object.freeze({
   })]))),
 });
 
+// The frozen defaults are exported through a function, never as an object: db-bridge snapshots and restores every object
+// export in place, and these must never be touched by that. (A plain export, so the public-route scanner can trust
+// module.exports.)
+function areaAddOnPricingDefaults() {
+  return AREA_ADDON_PRICING_DEFAULTS;
+}
+
 // The AREA_ADDONS item a priced or mapped row stands for, or null. Rows are
 // identified by their add-on key, never by display name: "Fire Ant Yard
 // Treatment" reads as a pest job to every name matcher. Own-property lookup
@@ -2573,12 +2580,9 @@ module.exports = {
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
-  ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
+  ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, areaAddOnPricingDefaults, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,
 };
 
-// Not an enumerable export on purpose: db-bridge snapshots and restores every enumerable export in place, and the frozen
-// defaults must never be touched by that.
-Object.defineProperty(module.exports, 'AREA_ADDON_PRICING_DEFAULTS', { value: AREA_ADDON_PRICING_DEFAULTS, enumerable: false });

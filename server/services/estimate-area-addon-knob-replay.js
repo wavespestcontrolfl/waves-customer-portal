@@ -15,7 +15,7 @@
  *  - an estimate with no priced add-on row returns null (inject nothing), so fresh quotes resolve the live config.
  * Only the keys the estimate actually sold are in the signal: an add-on added later prices off the live row.
  */
-const { AREA_ADDON_PRICING_DEFAULTS: DEFAULTS } = require('./pricing-engine/constants');
+const DEFAULTS = require('./pricing-engine/constants').areaAddOnPricingDefaults();
 const { areaAddOnKnobsFor } = require('./pricing-engine/area-addon-config');
 
 function parse(estData) {

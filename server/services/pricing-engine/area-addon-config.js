@@ -20,7 +20,9 @@
  * code defaults stand (never a half-applied row). Every sync rebases AREA_ADDONS onto the defaults first, so a deleted
  * or invalid row restores them on the next sync, never the previous edit.
  */
-const { AREA_ADDONS, AREA_ADDON_PRICING_DEFAULTS: DEFAULTS } = require('./constants');
+const { AREA_ADDONS, areaAddOnPricingDefaults } = require('./constants');
+
+const DEFAULTS = areaAddOnPricingDefaults();
 
 const BOUNDS = Object.freeze({
   targetMargin: [0.25, 0.85],

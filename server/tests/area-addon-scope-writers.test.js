@@ -349,3 +349,27 @@ describe('4. the staff "Create Appointment" from a linked estimate writes the so
     expect(read('services/area-addon-visit-rows.js')).toContain('return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });');
   });
 });
+
+describe('a staff booking resolves an area add-on line by its frozen catalog key', () => {
+  // jest.mock calls at the top of this file already stub the database and logger.
+  const { serviceCatalogMatch, indexServicesForSchedule } = require('../routes/admin-customers')._private;
+  const index = indexServicesForSchedule([
+    { id: 'svc-fire-addon', service_key: 'area_addon_fire_ant_yard', name: 'Yard Fire Ant Broadcast (renamed)' },
+    { id: 'svc-fire', service_key: 'fire_ant', name: 'Fire Ant Yard Treatment' },
+    { id: 'svc-lawn', service_key: 'lawn_care_one_time', name: 'One-Time Lawn Care Service' },
+  ]);
+
+  test('the catalog key wins after a rename, even when another service now carries the old name', () => {
+    const line = { service: 'area_addon', name: 'Fire Ant Yard Treatment', addOnKey: 'fire_ant_yard', catalogServiceKey: 'area_addon_fire_ant_yard' };
+    expect(serviceCatalogMatch(line, index).id).toBe('svc-fire-addon');
+  });
+
+  test('no row for the key is unmatched, never a name guess', () => {
+    expect(serviceCatalogMatch({ service: 'area_addon', name: 'Fire Ant Yard Treatment', catalogServiceKey: 'area_addon_bed_pre_emergent' }, index)).toBeNull();
+    expect(serviceCatalogMatch({ service: 'area_addon', name: 'Fire Ant Yard Treatment' }, index)).toBeNull();
+  });
+
+  test('an ordinary line still matches by name', () => {
+    expect(serviceCatalogMatch({ service: 'fire_ant', name: 'Fire Ant Yard Treatment' }, index).id).toBe('svc-fire');
+  });
+});

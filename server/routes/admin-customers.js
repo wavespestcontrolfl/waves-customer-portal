@@ -476,6 +476,15 @@ function serviceCatalogMatch(line, serviceIndex) {
   // fail-closed palm contradiction guards.
   const explicitKey = normalizeServiceKey(line?.serviceKey || line?.service_key || line?.key || '');
   const rawKey = normalizeServiceKey(line?.service || '');
+  // An area add-on line names its catalog row by the key frozen on the estimate
+  // (area_addon_<key>), never by its display name: the name is admin-editable,
+  // one engine key serves six rows, and "Fire Ant Yard Treatment" reads as the
+  // generic fire ant or lawn service to a name matcher. No row for the key
+  // means unmatched, not a guess (the visit then carries no add-on identity
+  // and the job card withholds its governed rate).
+  if (rawKey === 'area_addon') {
+    return serviceIndex.byKey.get(normalizeServiceKey(line?.catalogServiceKey || '')) || null;
+  }
   const labelKey = normalizeServiceKey(line?.name || line?.label || line?.displayName || '');
   const candidates = [
     explicitKey,

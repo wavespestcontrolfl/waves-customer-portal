@@ -54,10 +54,12 @@ describe('the seed row is the code table, and the code table is the default', ()
   });
 
   test('the frozen defaults are the table as written, not a view of the live one', () => {
-    expect(constants.AREA_ADDON_PRICING_DEFAULTS.items.bed_pre_emergent).toEqual({ materialPer1000: 10.32, setupMin: 6, minPer1000: 8, tiers: [1000, 2000, 3500] });
-    expect(Object.isFrozen(constants.AREA_ADDON_PRICING_DEFAULTS)).toBe(true);
-    // not an enumerable export: db-bridge snapshots and restores every enumerable one in place
-    expect(Object.keys(constants)).not.toContain('AREA_ADDON_PRICING_DEFAULTS');
+    const defaults = constants.areaAddOnPricingDefaults();
+    expect(defaults.items.bed_pre_emergent).toEqual({ materialPer1000: 10.32, setupMin: 6, minPer1000: 8, tiers: [1000, 2000, 3500] });
+    expect(Object.isFrozen(defaults)).toBe(true);
+    // exported through a function, never as an object: db-bridge snapshots and restores every object export in place
+    expect(typeof constants.areaAddOnPricingDefaults).toBe('function');
+    expect(Object.values(constants)).not.toContain(defaults);
   });
 
   test('up inserts the row once (category one_time, so it lists on the One-time tab), never overwrites; down removes it only while unedited', async () => {
