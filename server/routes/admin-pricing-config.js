@@ -532,6 +532,14 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     }
     // The optional spray-cost block (margin reporting for GATE_LAWN_BERMUDA_REMOVAL): every
     // key a positive number, and no unknown key, so a typo never reads as a silent default.
+    // Nested drop protection, as for pest_base.initial_roach: PUT replaces the whole blob and the
+    // top-level drop check cannot see inside bermudaSuppression, so a payload that omits a stored
+    // cost block would silently delete tuned spray costs (db-bridge then prices margins from the
+    // code defaults). A row that never carried the block may still be saved without it.
+    const storedCost = parseConfigData(oldConfig?.data)?.bermudaSuppression?.cost;
+    if (bs.cost === undefined && storedCost && typeof storedCost === 'object') {
+      return fail('lawn_pricing_v2.bermudaSuppression drops the stored cost block: include bermudaSuppression.cost with every stored key');
+    }
     if (bs.cost !== undefined) {
       const cost = bs.cost;
       const costKeys = ['recognitionPer1000', 'fusiladePer1000', 'surfactantPer1000', 'mixMinutes', 'minutesPer1000'];

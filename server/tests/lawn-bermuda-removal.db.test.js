@@ -959,8 +959,13 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await check([entry(rec, { areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.3 }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
       expect(await check([entry(rec, { areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.3, amountUnit: 'fl_oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
       expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
-      // A wrong-unit rate with a countable amount and area beside it is counted from the amount.
-      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.15, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBeNull();
+      // Every stated unit must be of the product's own dimension (codex r54 P2): a wrong-unit rate
+      // is refused even beside a countable amount, and Fusilade II (a liquid) is never by weight.
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.15, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'lb' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { areaValue: 5000, totalAmount: 5.5, amountUnit: 'lb' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz', areaValue: 5000, totalAmount: 0.3, amountUnit: 'oz' })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl oz/1000sf' })])).toBeNull();
       // An upper-case spelling of the product ids is the same products (codex r44 P2): still refused.
       expect(await check([entry({ id: String(rec.id).toUpperCase() }), entry({ id: String(fus.id).toUpperCase() })])).toBe(MESSAGE);
       // Not a step visit, no step product, nothing submitted, or the gate off: never refused.

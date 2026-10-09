@@ -98,6 +98,16 @@ describe('lawn bermuda removal pricing', () => {
       expect(validatePricingConfigData('lawn_pricing_v2', { bermudaSuppression: knobs }, null).ok).toBe(true);
     });
 
+    test('a payload that omits a STORED cost block is refused; a row that never had one may still be saved without it (codex r54 P2)', () => {
+      const stored = (data) => ({ category: 'lawn', data: JSON.stringify(data) });
+      const withCost = stored({ bermudaSuppression: { ...knobs, cost: full } });
+      const dropped = validatePricingConfigData('lawn_pricing_v2', { bermudaSuppression: knobs }, withCost);
+      expect(dropped.ok).toBe(false);
+      expect(dropped.error).toMatch(/drops the stored cost block/);
+      expect(validatePricingConfigData('lawn_pricing_v2', { bermudaSuppression: { ...knobs, cost: full } }, withCost).ok).toBe(true);
+      expect(validatePricingConfigData('lawn_pricing_v2', { bermudaSuppression: knobs }, stored({ bermudaSuppression: knobs })).ok).toBe(true);
+    });
+
     test.each([
       ['a numeric string', { ...full, mixMinutes: '10' }],
       ['zero', { ...full, fusiladePer1000: 0 }],

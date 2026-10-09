@@ -716,3 +716,5 @@ module.exports = new ApplicationLimitChecker();
 // What one bermuda removal row counts toward the label-rate cap (0 = nothing): the completion
 // check asks it before the row is written (lawn-bermuda-removal.js bermudaAreaViolation).
 module.exports.bermudaRowRate = bermudaRowRate;
+// 'weight', 'volume' or null for a unit, its per-1,000 sq ft basis ('oz/1000sf') set aside.
+module.exports.measureFamily = (unit) => unitFamily(String(unit || '').replace(/\s*\/\s*1000\s*(sf|sq\.?\s*ft)?$/i, '').replace(/_/g, ' '));

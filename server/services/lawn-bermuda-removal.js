@@ -425,7 +425,21 @@ async function bermudaAreaViolation(knex, submittedEntries, { serviceId } = {}) 
       area_treated_sqft: String(p.areaUnit || '').toLowerCase() === 'sqft' ? p.areaValue : null,
     }, capRow) > 0;
   };
-  const missing = products.some((p) => stepIds.includes(String(p?.productId)) && (!sized(p) || !countable(p)));
+  // Each herbicide is measured in its own dimension: the catalog row's rate unit says which
+  // (Recognition is a dry product, by weight; Fusilade II a liquid, by volume). Every unit the
+  // entry states, for its rate and for its amount, must be of that family, so the application and
+  // inventory records describe what was really used. A product whose catalog unit names no
+  // family is not judged here.
+  const { measureFamily } = require('./application-limits');
+  const catalogUnits = await knex('products_catalog').whereIn('id', stepIds).select('id', 'rate_unit');
+  const familyOf = new Map(catalogUnits.map((row) => [String(row.id).toLowerCase(), measureFamily(row.rate_unit)]));
+  const rightDimension = (p) => {
+    const expected = familyOf.get(String(p.productId));
+    if (!expected) return true;
+    const stated = [positive(p.rate) ? p.rateUnit : null, positive(p.totalAmount) ? amountUnit(p) : null].filter(Boolean);
+    return stated.every((unit) => measureFamily(unit) === expected);
+  };
+  const missing = products.some((p) => stepIds.includes(String(p?.productId)) && (!sized(p) || !countable(p) || !rightDimension(p)));
   return missing ? AREA_REQUIRED_MESSAGE : null;
 }
 
