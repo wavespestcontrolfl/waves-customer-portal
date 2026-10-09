@@ -23,7 +23,7 @@ const block = (reentry) => JSON.stringify({
 const DRY = { rule: 'dry', source: 'facts', products: [{ id: 'a', rule: 'dry', source: 'facts' }] };
 const WET = { rule: 'watered_in_and_dry', source: 'facts', products: [{ id: 'a', rule: 'watered_in_and_dry', source: 'facts' }] };
 const DEFAULTED = { rule: 'default', source: 'default', products: [{ id: 'a', rule: null, source: 'default' }] };
-const TIMED = { rule: 'timed', source: 'label', hours: 12, base: 'dry', products: [{ id: 'a', rule: 'timed', source: 'label', hours: 12, base: 'dry' }] };
+const TIMED = { rule: 'timed', source: 'label', hours: 12, base: 'dry', products: [{ id: 'a', rule: 'dry', source: 'facts' }] };
 
 // A lawn visit as the dynamic context loads it: a spray application at 8:05 PM ET, line default 30 minutes.
 const lawnRecord = (notes, extra = {}) => ({
@@ -62,10 +62,10 @@ describe('the re-entry context (the one source every surface reads)', () => {
     expect(ctx.condition.statusLabel).toBe('After watering in');
   });
 
-  test('a timed rule states its stored label hours as a time in the property\'s zone', () => {
+  test('there is no timed rule: a stored "timed" block is no rule, and the record keeps today\'s clock', () => {
     const ctx = buildReentryContextFromRecord(lawnRecord(block(TIMED)), NOW);
-    expect(ctx.targets).toEqual([]);
-    expect(ctx.customerSummary).toBe('Ready to walk on after 4:05 AM, once the spray has dried.');
+    expect(ctx).not.toHaveProperty('condition');
+    expect(ctx.targets[0]).toMatchObject({ key: 'exterior', durationMin: 30 });
   });
 
   test('the condition does not depend on the clock or on any gate', () => {

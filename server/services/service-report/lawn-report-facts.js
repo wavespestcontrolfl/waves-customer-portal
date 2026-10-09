@@ -19,9 +19,8 @@
  *
  * structured_notes.lawnReportFacts = {
  *   v: 1, frozenAt,
- *   reentry: { rule: 'dry' | 'watered_in_and_dry' | 'timed' | 'default', source: 'facts' | 'label' | 'default',
- *              hours?, base?,                    // timed only: the label hours, and the condition under them
- *              products: [{ id, rule, source, hours? }] },
+ *   reentry: { rule: 'dry' | 'watered_in_and_dry' | 'default', source: 'facts' | 'default',
+ *              products: [{ id, rule, source }] },
  *   productUse: { [service_products.id]: { sqft: number | null } },   // spot rows only
  *   ties: { assessmentId, items: [...] },       // see cleanTies
  * }
@@ -35,7 +34,6 @@
 const crypto = require('crypto');
 const logger = require('../logger');
 const { CONDITION_LABEL_VALUES } = require('../lawn-diagnostic-report');
-const { formatReadyTime, normalizeDate } = require('./time-format');
 
 const FREEZE_KEY = 'lawnReportFacts';
 const FREEZE_VERSION = 1;
@@ -55,20 +53,14 @@ const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
 // ── 1. Re-entry: the closed tables ──────────────────────────────────────────
 
-// Strictest last. A timed rule (label hours) is stricter than any condition.
-const RULES = Object.freeze(['dry', 'watered_in_and_dry', 'timed']);
-const BASE_RULES = Object.freeze(['dry', 'watered_in_and_dry']);
-const RANK = Object.freeze({ dry: 1, watered_in_and_dry: 2, timed: 3 });
-const SOURCES = Object.freeze(['facts', 'label', 'default']);
-const MAX_LABEL_HOURS = 168;
+// Strictest last. Only two conditions exist; anything else is the marked 'default' (today's behavior).
+const RULES = Object.freeze(['dry', 'watered_in_and_dry']);
+const RANK = Object.freeze({ dry: 1, watered_in_and_dry: 2 });
+const SOURCES = Object.freeze(['facts', 'default']);
 
 const REENTRY_TEXT = Object.freeze({
   dry: 'Ready to walk on once the spray has dried.',
   watered_in_and_dry: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.',
-});
-const REENTRY_TIMED = Object.freeze({
-  dry: (time) => `Ready to walk on after ${time}, once the spray has dried.`,
-  watered_in_and_dry: (time) => `Ready to walk on after ${time}, once today’s treatment has dried and, after you water it in, the grass is dry again.`,
 });
 const REENTRY_PETS = 'Keep people and pets off the lawn until then.';
 const REENTRY_STATUS = Object.freeze({ dry: 'Once dry', watered_in_and_dry: 'After watering in' });
@@ -82,84 +74,73 @@ function methodOf(row) {
 const isGranular = (method) => method.includes('granular');
 const isBait = (method) => method.includes('bait') || method === 'station_check';
 
-// The label hours a product states: null when it states none, the number of hours when a stored positive
-// figure stands, or false when a figure exists but cannot be confirmed (a re-entry text that disagrees or
-// cannot be read), which the caller treats as no usable fact. Only a figure the product's own re-entry text
-// does not contradict counts (sms-label-facts.js reentryLevelHours): 0 is the residential "until dry"
-// sentinel and a null catalog value is frozen as 0, so neither is a figure.
-function labelHoursOf(facts) {
+// Whether the product's own frozen label says plain "until dry" and nothing longer. The label floor of a
+// product is what the report shows today (the label re-entry line, and a fixed hours figure when it states
+// one); our condition may never be weaker than it. So the condition stands only on positive evidence:
+// the frozen re-entry text reads as a plain until-dry sentence and no positive figure is stored. A stored
+// positive rei_hours, a text that states hours, a text we cannot read, and NO text at all (the snapshot
+// freezes a catalog NULL as 0, indistinguishable from the residential "until dry" 0, sms-label-facts.js
+// frozenReiHours) are all "not plain until dry".
+function labelIsPlainUntilDry(facts) {
   const hours = Number(facts && facts.reentryHours);
+  if (Number.isFinite(hours) && hours > 0) return false;
   const text = facts && facts.reentrySummary;
+  if (!text) return false;
   try {
     const { parseReentryText } = require('../sms-label-facts');
-    const parsed = text ? parseReentryText(text) : null;
-    if (!(Number.isFinite(hours) && hours > 0)) return parsed && parsed.kind === 'hours' ? false : null;
-    if (hours > MAX_LABEL_HOURS) return false;
-    const stated = text ? parsed : { kind: 'hours', hours };
-    return stated && stated.kind === 'hours' && Math.abs(stated.hours - hours) <= 1e-9 ? hours : false;
+    const parsed = parseReentryText(text);
+    return !!parsed && parsed.kind === 'until_dry';
   } catch { return false; }
 }
 
-// One applied product's re-entry rule, from facts the visit already froze: the recorded application
-// method, the product's frozen watering rule, and its stored label hours. Never from a name.
-//   water-in rule                         watered_in_and_dry
-//   a granule that is not watered in      dry (its rule is hold or none; a bait is placed, not watered)
-//   a spray, a spot spray, a bait         dry
-//   a granule with no frozen rule, or no recorded method   no usable fact: { rule: null, source: 'default' }
+// One applied product's re-entry rule, from facts the visit already froze: the product's approved frozen
+// facts (label floor, watering rule) and the recorded application method. Never from a name, and never from
+// the method alone. Every branch below must be at least as strict as what the report shows today.
+//   no approved frozen facts                              default (the label floor is unknown)
+//   label is not plain until-dry (hours, unreadable, none) default (today's line or figure is the floor)
+//   frozen water-in rule                                  watered_in_and_dry
+//   a granule whose rule is hold or none, a bait          dry (not watered in)
+//   a granule with no frozen watering rule                default (cannot tell whether it is watered in)
+//   a spray or spot spray                                 dry
+//   no recorded method                                    default
 function productReentry(row) {
+  const id = String(row && row.id);
   const facts = isPlain(row && row.approved_report_product_facts) ? row.approved_report_product_facts : null;
+  const unusable = { id, rule: null, source: 'default' };
+  if (!facts || !labelIsPlainUntilDry(facts)) return unusable;
   const method = methodOf(row);
-  const mode = facts && isPlain(facts.wateringRule) ? facts.wateringRule.mode : null;
-  let base = null;
-  if (mode === 'water_in') base = 'watered_in_and_dry';
-  else if (isBait(method)) base = 'dry';
-  else if (isGranular(method)) base = mode === 'hold' || mode === 'none' ? 'dry' : null;
-  else if (method) base = 'dry';
-  const hours = base ? labelHoursOf(facts) : null;
-  if (!base || hours === false) return { id: String(row && row.id), rule: null, source: 'default' };
-  if (hours) return { id: String(row.id), rule: 'timed', source: 'label', hours, base };
-  return { id: String(row.id), rule: base, source: 'facts' };
+  const mode = isPlain(facts.wateringRule) ? facts.wateringRule.mode : null;
+  let rule = null;
+  if (mode === 'water_in') rule = 'watered_in_and_dry';
+  else if (isBait(method)) rule = 'dry';
+  else if (isGranular(method)) rule = mode === 'hold' || mode === 'none' ? 'dry' : null;
+  else if (method) rule = 'dry';
+  return rule ? { id, rule, source: 'facts' } : unusable;
 }
 
 // The visit's rule is the strictest of its products. One product with no usable fact fails closed:
 // the visit keeps today's line default (rule 'default', marked), because a clean "once the spray has
-// dried" could be wrong for the product we know nothing about.
+// dried" could be weaker than what the product's label already says.
 function visitReentry(rows) {
   const products = (Array.isArray(rows) ? rows : []).map(productReentry);
   if (!products.length) return null;
   if (products.some((p) => p.rule === null)) return { rule: 'default', source: 'default', products };
   const strictest = products.reduce((top, p) => (RANK[p.rule] > RANK[top.rule] ? p : top));
-  if (strictest.rule !== 'timed') return { rule: strictest.rule, source: 'facts', products };
-  const base = products.reduce((top, p) => {
-    const rule = p.rule === 'timed' ? p.base : p.rule;
-    return RANK[rule] > RANK[top] ? rule : top;
-  }, 'dry');
-  const hours = Math.max(...products.filter((p) => p.rule === 'timed').map((p) => p.hours));
-  return { rule: 'timed', source: 'label', hours, base, products };
+  return { rule: strictest.rule, source: 'facts', products };
 }
 
 function cleanReentryProduct(raw) {
   if (!isPlain(raw) || typeof raw.id !== 'string' || !raw.id || raw.id.length > 64) return null;
   const rule = raw.rule === null || RULES.includes(raw.rule) ? raw.rule : undefined;
   if (rule === undefined || !SOURCES.includes(raw.source)) return null;
-  const out = { id: raw.id, rule, source: raw.source };
-  if (rule === 'timed') {
-    if (!(Number.isFinite(raw.hours) && raw.hours > 0 && raw.hours <= MAX_LABEL_HOURS) || !BASE_RULES.includes(raw.base)) return null;
-    out.hours = raw.hours;
-    out.base = raw.base;
-  }
-  return out;
+  return { id: raw.id, rule, source: raw.source };
 }
 
-// A stored reentry block, shape-checked; null when anything is off.
+// A stored reentry block, shape-checked; null when anything is off (a rule this code does not know is none).
 function cleanReentry(raw) {
   if (!isPlain(raw) || !(raw.rule === 'default' || RULES.includes(raw.rule)) || !SOURCES.includes(raw.source)) return null;
   const products = (Array.isArray(raw.products) ? raw.products : []).map(cleanReentryProduct);
   if (!products.length || products.some((p) => !p)) return null;
-  if (raw.rule === 'timed') {
-    if (!(Number.isFinite(raw.hours) && raw.hours > 0 && raw.hours <= MAX_LABEL_HOURS) || !BASE_RULES.includes(raw.base)) return null;
-    return { rule: 'timed', source: raw.source, hours: raw.hours, base: raw.base, products };
-  }
   return { rule: raw.rule, source: raw.source, products };
 }
 
@@ -403,32 +384,17 @@ function frozenReportFactsStamp(structuredNotes) {
     || Object.keys(facts.productUse).length > 0
     || (facts.ties && facts.ties.items.length > 0);
   if (!hasDecision) return '';
-  const reentry = facts.reentry && facts.reentry.rule !== 'default'
-    ? { rule: facts.reentry.rule, hours: facts.reentry.hours || null, base: facts.reentry.base || null }
-    : null;
+  const reentry = facts.reentry && facts.reentry.rule !== 'default' ? { rule: facts.reentry.rule } : null;
   const body = JSON.stringify({ reentry, productUse: facts.productUse, ties: facts.ties });
   return `:rf=${crypto.createHash('sha1').update(body).digest('hex').slice(0, 8)}`;
 }
 
 // ── The re-entry condition a render prints ──────────────────────────────────
 
-/**
- * The customer wording for a frozen re-entry rule: { rule, text, pets, statusLabel }, chosen by code.
- * A timed rule needs the application time (`anchor`) and the display zone; without a real anchor it
- * states its base condition only.
- */
-function reentryCondition(reentry, { anchor = null, timeZone } = {}) {
-  if (!reentry || reentry.rule === 'default' || !RULES.includes(reentry.rule)) return null;
-  const date = normalizeDate(anchor);
-  if (reentry.rule === 'timed' && date) {
-    const readyAt = new Date(date.getTime() + Math.round(reentry.hours * 60) * 60 * 1000);
-    const time = formatReadyTime(readyAt, timeZone);
-    if (time) {
-      return { rule: 'timed', text: REENTRY_TIMED[reentry.base](time), pets: REENTRY_PETS, statusLabel: `After ${time}` };
-    }
-  }
-  const base = reentry.rule === 'timed' ? reentry.base : reentry.rule;
-  return { rule: reentry.rule, text: REENTRY_TEXT[base], pets: REENTRY_PETS, statusLabel: REENTRY_STATUS[base] };
+/** The customer wording for a frozen re-entry rule: { rule, text, pets, statusLabel }, chosen by code. */
+function reentryCondition(reentry) {
+  if (!reentry || !RULES.includes(reentry.rule)) return null;
+  return { rule: reentry.rule, text: REENTRY_TEXT[reentry.rule], pets: REENTRY_PETS, statusLabel: REENTRY_STATUS[reentry.rule] };
 }
 
 // ── Freeze ──────────────────────────────────────────────────────────────────
@@ -460,7 +426,7 @@ async function freezeReportFacts({ knex, serviceRecordId, facts }) {
   }
 }
 
-// The lawn rows with their frozen product facts (watering rule, label hours), or null when any read
+// The lawn rows with their frozen product facts (label floor, watering rule), or null when any read
 // failed: a freeze made from a partial product picture could never be repaired (first writer wins).
 async function loadRows(record, knex) {
   const { attachApprovedReportProductFacts } = require('./report-data');
@@ -531,5 +497,5 @@ module.exports = {
   freezeReportFacts,
   gatherAndFreezeReportFacts,
   cleanTies,
-  _test: { methodOf, labelHoursOf, roundedSqft, photoFindingsByKind, productKinds },
+  _test: { methodOf, labelIsPlainUntilDry, roundedSqft, photoFindingsByKind, productKinds },
 };

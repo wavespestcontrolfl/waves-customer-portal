@@ -6,6 +6,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const facts = require('../services/service-report/lawn-report-facts');
 
 const rule = (mode, extra = {}) => ({ mode, source: 'label', ...extra });
+// An approved product's frozen facts: the plain residential label ("until dry") plus its watering rule.
+const UNTIL_DRY = 'Keep people and pets off treated areas until dry.';
+const approved = (wateringRule, extra = {}) => ({ wateringRule, reentryHours: 0, reentrySummary: UNTIL_DRY, ...extra });
 const row = (id, method, product = {}) => ({
   id,
   product_name: product.name || `Product ${id}`,
@@ -13,11 +16,11 @@ const row = (id, method, product = {}) => ({
   application_method: method,
   area_value: product.areaValue ?? null,
   area_unit: product.areaUnit ?? null,
-  approved_report_product_facts: product.facts === undefined ? { wateringRule: rule('none') } : product.facts,
+  approved_report_product_facts: product.facts === undefined ? approved(rule('none')) : product.facts,
 });
 
-const SPRAY = row('p-spray', 'broadcast_spray', { category: 'herbicide', facts: { wateringRule: rule('hold', { hold_hours: 24 }) } });
-const GRANULE = row('p-granule', 'granular_broadcast', { category: 'fertilizer', facts: { wateringRule: rule('water_in', { water_in_inches: 0.25 }) } });
+const SPRAY = row('p-spray', 'broadcast_spray', { category: 'herbicide', facts: approved(rule('hold', { hold_hours: 24 })) });
+const GRANULE = row('p-granule', 'granular_broadcast', { category: 'fertilizer', facts: approved(rule('water_in', { water_in_inches: 0.25 })) });
 const SPOT_HERBICIDE = row('p-spot', 'spot_treatment', { category: 'herbicide', areaValue: 250, areaUnit: 'sqft' });
 const FUNGICIDE = row('p-fung', 'spot_treatment', { category: 'fungicide', areaValue: 500, areaUnit: 'sqft' });
 
@@ -30,47 +33,63 @@ describe('one product\'s re-entry rule', () => {
 
   test('a frozen water-in rule is watered_in_and_dry, even on a spray', () => {
     expect(facts.productReentry(GRANULE)).toEqual({ id: 'p-granule', rule: 'watered_in_and_dry', source: 'facts' });
-    expect(facts.productReentry(row('y', 'broadcast_spray', { facts: { wateringRule: rule('water_in') } })).rule).toBe('watered_in_and_dry');
+    expect(facts.productReentry(row('y', 'broadcast_spray', { facts: approved(rule('water_in')) })).rule).toBe('watered_in_and_dry');
   });
 
   test('a granule that is NOT watered in (its rule is hold or none) is dry', () => {
-    expect(facts.productReentry(row('g', 'granular_broadcast', { facts: { wateringRule: rule('none') } })).rule).toBe('dry');
-    expect(facts.productReentry(row('g', 'granular_broadcast', { facts: { wateringRule: rule('hold', { hold_hours: 24 }) } })).rule).toBe('dry');
+    expect(facts.productReentry(row('g', 'granular_broadcast', { facts: approved(rule('none')) })).rule).toBe('dry');
+    expect(facts.productReentry(row('g', 'granular_broadcast', { facts: approved(rule('hold', { hold_hours: 24 })) })).rule).toBe('dry');
   });
 
-  test('no usable fact fails closed to the default and is marked: a granule with no rule, no method, no facts', () => {
+  test('no usable fact fails closed to the default and is marked: a granule with no frozen rule, no method, no facts', () => {
     const marked = { rule: null, source: 'default' };
-    expect(facts.productReentry(row('a', 'granular_broadcast', { facts: { wateringRule: null } }))).toMatchObject(marked);
+    expect(facts.productReentry(row('a', 'granular_broadcast', { facts: approved(null) }))).toMatchObject(marked);
     expect(facts.productReentry(row('b', 'granular_broadcast', { facts: null }))).toMatchObject(marked);
-    expect(facts.productReentry(row('c', '', { facts: { wateringRule: rule('none') } }))).toMatchObject(marked);
+    expect(facts.productReentry(row('c', '', { facts: approved(rule('none')) }))).toMatchObject(marked);
     expect(facts.productReentry(row('d', null, { facts: null }))).toMatchObject(marked);
   });
 
-  test('the method is read the way the report normalizes it', () => {
-    expect(facts._test.methodOf({ application_method: 'Spot Treatment' })).toBe('spot_treatment');
-    expect(facts._test.methodOf({ method: 'granular-broadcast' })).toBe('granular_broadcast');
-    expect(facts._test.methodOf({ application_method: 'null' })).toBe('');
-  });
+  describe('never weaker than the label floor the report shows today (Codex: the method alone is not a fact)', () => {
+    const marked = { rule: null, source: 'default' };
 
-  describe('timed: only from a stored label figure', () => {
-    const withLabel = (reentryHours, reentrySummary) => row('t', 'broadcast_spray', { facts: { wateringRule: rule('none'), reentryHours, reentrySummary } });
-
-    test('a positive stored figure the text agrees with is timed, over the base condition', () => {
-      expect(facts.productReentry(withLabel(12, 'Keep people and pets off treated areas for 12 hours.')))
-        .toEqual({ id: 't', rule: 'timed', source: 'label', hours: 12, base: 'dry' });
-      expect(facts.productReentry(withLabel(12, undefined)).rule).toBe('timed');
+    test('a product with NO approved frozen facts is default, whatever its method (spray, spot, bait, granule)', () => {
+      for (const method of ['broadcast_spray', 'spot_treatment', 'foliar_spray', 'bait_placement', 'granular_broadcast']) {
+        expect(facts.productReentry(row('u', method, { facts: null }))).toMatchObject(marked);
+      }
     });
 
-    test('0 (the "until dry" sentinel) and a null figure are no figure', () => {
-      expect(facts.productReentry(withLabel(0, 'Keep people and pets off treated areas until dry.')).rule).toBe('dry');
-      expect(facts.productReentry(withLabel(null, undefined)).rule).toBe('dry');
+    test('an approved spray with frozen facts is dry; a frozen water-in rule is watered_in_and_dry; a granule with a hold or none rule is dry', () => {
+      expect(facts.productReentry(row('s', 'broadcast_spray', { facts: approved(rule('none')) }))).toEqual({ id: 's', rule: 'dry', source: 'facts' });
+      expect(facts.productReentry(row('s', 'spot_treatment', { facts: approved(null) }))).toEqual({ id: 's', rule: 'dry', source: 'facts' });
+      expect(facts.productReentry(row('w', 'granular_broadcast', { facts: approved(rule('water_in')) })).rule).toBe('watered_in_and_dry');
+      expect(facts.productReentry(row('g', 'granular_broadcast', { facts: approved(rule('hold', { hold_hours: 24 })) })).rule).toBe('dry');
     });
 
-    test('a figure its own text contradicts, or a text that states hours with no stored figure, is no usable fact', () => {
-      expect(facts.productReentry(withLabel(12, 'Keep off until dry.'))).toMatchObject({ rule: null, source: 'default' });
-      expect(facts.productReentry(withLabel(12, 'Keep people and pets off treated areas for 24 hours.'))).toMatchObject({ rule: null, source: 'default' });
-      expect(facts.productReentry(withLabel(0, 'Keep people and pets off treated areas for 12 hours.'))).toMatchObject({ rule: null, source: 'default' });
-      expect(facts.productReentry(withLabel(9999, undefined))).toMatchObject({ rule: null, source: 'default' });
+    test('a granule with approved facts but NO frozen watering rule is default (we cannot tell whether it is watered in)', () => {
+      expect(facts.productReentry(row('g', 'granular_broadcast', { facts: approved(null) }))).toMatchObject(marked);
+      expect(facts.productReentry(row('g', 'granular_broadcast', { facts: approved({ mode: 'sideways' }) }))).toMatchObject(marked);
+    });
+
+    test('a label that is not plainly "until dry" is default: a stored hours figure, a text that states hours, an unreadable text, no text', () => {
+      const withLabel = (reentryHours, reentrySummary) => row('t', 'broadcast_spray', { facts: approved(rule('none'), { reentryHours, reentrySummary }) });
+      expect(facts.productReentry(withLabel(12, 'Keep people and pets off treated areas for 12 hours.'))).toMatchObject(marked);
+      expect(facts.productReentry(withLabel(12, undefined))).toMatchObject(marked);
+      expect(facts.productReentry(withLabel(12, UNTIL_DRY))).toMatchObject(marked);
+      expect(facts.productReentry(withLabel(0, 'Keep people and pets off treated areas for 12 hours.'))).toMatchObject(marked);
+      expect(facts.productReentry(withLabel(0, 'Wait a day.'))).toMatchObject(marked);
+      expect(facts.productReentry(withLabel(0, undefined))).toMatchObject(marked);
+      expect(facts.productReentry(withLabel(null, undefined))).toMatchObject(marked);
+    });
+
+    test('a plain until-dry label (0 or null figure) is usable', () => {
+      expect(facts.productReentry(row('t', 'broadcast_spray', { facts: approved(rule('none'), { reentryHours: 0 }) })).rule).toBe('dry');
+      expect(facts.productReentry(row('t', 'broadcast_spray', { facts: approved(rule('none'), { reentryHours: null }) })).rule).toBe('dry');
+    });
+
+    test('there is no timed rule: a product that carries label hours defaults and writes no hours', () => {
+      const out = facts.productReentry(row('t', 'broadcast_spray', { facts: approved(rule('none'), { reentryHours: 12, reentrySummary: 'Keep people and pets off treated areas for 12 hours.' }) }));
+      expect(out).toEqual({ id: 't', rule: null, source: 'default' });
+      expect(facts._test.labelIsPlainUntilDry({ reentryHours: 12, reentrySummary: UNTIL_DRY })).toBe(false);
     });
   });
 });
@@ -93,11 +112,18 @@ describe('the visit\'s rule is the strictest of its products', () => {
     expect(facts.visitReentry([SPRAY, bait])).toMatchObject({ rule: 'dry' });
   });
 
-  test('a timed product beats both conditions, keeps the stricter condition under it, and takes the longest hours', () => {
-    const timed = (id, hours) => row(id, 'broadcast_spray', { facts: { wateringRule: rule('none'), reentryHours: hours } });
-    const visit = facts.visitReentry([timed('t1', 4), timed('t2', 12), GRANULE]);
-    expect(visit).toMatchObject({ rule: 'timed', source: 'label', hours: 12, base: 'watered_in_and_dry' });
-    expect(facts.visitReentry([timed('t1', 4), SPRAY])).toMatchObject({ rule: 'timed', hours: 4, base: 'dry' });
+  test('label hours default the whole visit: 4 h + 12 h products, alone or beside a spray or granule', () => {
+    const hours = (id, h) => row(id, 'broadcast_spray', { facts: approved(rule('none'), { reentryHours: h, reentrySummary: `Keep people and pets off treated areas for ${h} hours.` }) });
+    for (const rows of [[hours('t1', 4), hours('t2', 12), GRANULE], [hours('t1', 4), SPRAY], [hours('t2', 12)]]) {
+      const visit = facts.visitReentry(rows);
+      expect(visit).toMatchObject({ rule: 'default', source: 'default' });
+      expect(visit).not.toHaveProperty('hours');
+      expect(visit).not.toHaveProperty('base');
+    }
+  });
+
+  test('an unapproved product beside an approved spray defaults the visit', () => {
+    expect(facts.visitReentry([SPRAY, row('u', 'broadcast_spray', { facts: null })])).toMatchObject({ rule: 'default' });
   });
 
   test('one product with no usable fact marks the whole visit default (today\'s clock), and the record names it', () => {
@@ -138,28 +164,15 @@ describe('the customer wording is fixed and chosen by code', () => {
 
   test('no clock time and no countdown in a condition', () => {
     for (const r of [dry, wet]) {
-      const c = facts.reentryCondition(r, { anchor: new Date('2026-10-08T20:05:00Z'), timeZone: 'America/New_York' });
+      const c = facts.reentryCondition(r);
       expect(`${c.text} ${c.pets}`).not.toMatch(/\d|min|sec|\bPM\b|\bAM\b/);
     }
-  });
-
-  test('timed states the label hours as a time in the property\'s zone, over its base condition', () => {
-    const timed = { rule: 'timed', source: 'label', hours: 12, base: 'dry', products: [{ id: 'a', rule: 'timed', source: 'label', hours: 12, base: 'dry' }] };
-    const c = facts.reentryCondition(timed, { anchor: '2026-10-08T20:05:00Z', timeZone: 'America/New_York' });
-    expect(c.text).toBe('Ready to walk on after 4:05 AM, once the spray has dried.');
-    expect(c.statusLabel).toBe('After 4:05 AM');
-    const wetTimed = facts.reentryCondition({ ...timed, base: 'watered_in_and_dry' }, { anchor: '2026-10-08T20:05:00Z', timeZone: 'America/New_York' });
-    expect(wetTimed.text).toBe('Ready to walk on after 4:05 AM, once today’s treatment has dried and, after you water it in, the grass is dry again.');
-  });
-
-  test('timed with no real application time states its base condition only (never a made-up time)', () => {
-    const timed = { rule: 'timed', source: 'label', hours: 12, base: 'dry', products: [{ id: 'a', rule: 'timed', source: 'label', hours: 12, base: 'dry' }] };
-    expect(facts.reentryCondition(timed, {}).text).toBe('Ready to walk on once the spray has dried.');
   });
 
   test('the marked default, and an unknown rule, have no condition', () => {
     expect(facts.reentryCondition({ rule: 'default', source: 'default', products: [] })).toBeNull();
     expect(facts.reentryCondition({ rule: 'mystery' })).toBeNull();
+    expect(facts.reentryCondition({ rule: 'timed', hours: 12, base: 'dry' })).toBeNull();
     expect(facts.reentryCondition(null)).toBeNull();
   });
 });
@@ -340,8 +353,8 @@ describe('the frozen block is read strictly, and only from the record', () => {
       { rule: 'dry', source: 'facts', products: [] },
       { rule: 'whenever', source: 'facts', products: [{ id: 'a', rule: 'dry', source: 'facts' }] },
       { rule: 'dry', source: 'guess', products: [{ id: 'a', rule: 'dry', source: 'facts' }] },
-      { rule: 'timed', source: 'label', products: [{ id: 'a', rule: 'timed', source: 'label', hours: 12, base: 'dry' }] },
-      { rule: 'timed', source: 'label', hours: 12, base: 'timed', products: [{ id: 'a', rule: 'timed', source: 'label', hours: 12, base: 'dry' }] },
+      { rule: 'timed', source: 'label', hours: 12, base: 'dry', products: [{ id: 'a', rule: 'dry', source: 'facts' }] },
+      { rule: 'dry', source: 'label', products: [{ id: 'a', rule: 'dry', source: 'facts' }] },
       'dry',
     ]) {
       expect(facts.frozenReentryRule(notes(block({ reentry: bad })))).toBeNull();

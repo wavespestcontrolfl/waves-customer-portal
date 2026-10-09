@@ -2511,14 +2511,12 @@ writer wins, before the first report build; nothing is stored when the product o
 render reads only that block, never the gate. New or changed public fields, each present only for a lawn
 record that carries the frozen block (every other record is byte-identical): (1)
 `dynamicContext.reentry.condition = { rule, text, pets, statusLabel }` with `rule` one of `dry`,
-`watered_in_and_dry`, `timed`, `text` and `pets` fixed sentences chosen by code ("Ready to walk on once the
+`watered_in_and_dry`, `text` and `pets` fixed sentences chosen by code ("Ready to walk on once the
 spray has dried." / "... once today's treatment has dried and, after you water it in, the grass is dry again."
 and "Keep people and pets off the lawn until then."), `statusLabel` a short word ("Once dry", "After watering
 in"); for such a record `dynamicContext.reentry.targets` is `[]` (no ready-at time, no countdown), and
-`customerSummary` / `petAdvisory` carry the same two sentences. A `timed` rule (a stored label figure) names its
-hours as a clock time in the live view; every non-live render strips it to the approved once-dry wording, like
-every other fixed figure. A record whose rule is marked `default` (a product with no usable fact), or one an
-admin corrected afterwards, keeps the timed targets. `reportV2.aftercare.reentry` carries the same
+`customerSummary` / `petAdvisory` carry the same two sentences. A record whose rule is marked `default` (a product with no approved frozen facts or no plain until-dry label), or one an
+admin corrected afterwards, keeps the clock targets. `reportV2.aftercare.reentry` carries the same
 condition `text` for such a record. (2) `applications[].areaUse`, a string ("Spot treatment, about 250 sq ft"
 or "Spot treatment"), present only on a spot-treatment product row of such a record; the report prints it in
 place of the zone text ("Your whole lawn"). (3) The Visit Summary (`reportV2.lead` / recap text, already public)

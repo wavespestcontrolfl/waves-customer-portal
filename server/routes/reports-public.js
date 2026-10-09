@@ -744,16 +744,6 @@ async function buildServiceReportV1ResponseData(service, token, {
     if (dynamicContext.reentry.petAdvisory) {
       dynamicContext.reentry.petAdvisory = strip(dynamicContext.reentry.petAdvisory);
     }
-    // A lawn visit's frozen re-entry condition (GATE_LAWN_REPORT_FACTS) carries the same two lines; a timed rule's
-    // label hours are a fixed figure, so the printed record gets the safe wording for it like every other source.
-    if (dynamicContext.reentry.condition) {
-      const { text, pets } = dynamicContext.reentry.condition;
-      dynamicContext.reentry.condition = {
-        ...dynamicContext.reentry.condition,
-        text: text ? strip(text) : text,
-        pets: pets ? strip(pets) : pets,
-      };
-    }
   }
 
   if (suppressedTypedReport(service)) {

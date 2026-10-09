@@ -83,7 +83,7 @@ function frozenConditionContext(record, anchorDate, now) {
   const rule = frozenReentryForRecord(record);
   if (!rule) return undefined;
   const displayTimezone = record?.timezone || record?.property_timezone || DEFAULT_TIME_ZONE;
-  const condition = reentryCondition(rule, { anchor: anchorDate, timeZone: displayTimezone });
+  const condition = reentryCondition(rule);
   if (!condition) return undefined;
   return {
     ...(anchorDate ? { anchorAppliedAt: anchorDate.toISOString() } : {}),

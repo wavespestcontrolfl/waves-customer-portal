@@ -15,7 +15,8 @@ const RUN = {
 };
 
 const catalog = (n, extra) => ({
-  id: UUID(n), name: `Catalog ${n}`, category: 'herbicide', epa_reg_number: '12345-67', approved_for_service_report: true, ...extra,
+  id: UUID(n), name: `Catalog ${n}`, category: 'herbicide', epa_reg_number: '12345-67', approved_for_service_report: true,
+  rei_hours: 0, reentry_summary: 'Keep people and pets off treated areas until dry.', ...extra,
 });
 const CATALOG = [
   catalog(1, { category: 'herbicide' }),
@@ -115,11 +116,14 @@ describe('gatherAndFreezeReportFacts', () => {
     expect(out.reentry.products.find((p) => p.id === 'sp-2')).toEqual({ id: 'sp-2', rule: null, source: 'default' });
   });
 
-  test('a stored label figure the text agrees with is timed', async () => {
+  test('label hours default the visit (there is no timed rule); an unapproved product defaults it too', async () => {
     const catalogWithRei = [{ ...CATALOG[0], rei_hours: 12, reentry_summary: 'Keep people and pets off treated areas for 12 hours.' }, ...CATALOG.slice(1)];
-    const { knex } = fakeKnex({ ...tables([productRow(1, 1, 'broadcast_spray')]), products_catalog: catalogWithRei });
-    const out = await facts.gatherAndFreezeReportFacts({ record: record(), knex });
-    expect(out.reentry).toMatchObject({ rule: 'timed', source: 'label', hours: 12, base: 'dry' });
+    const hours = fakeKnex({ ...tables([productRow(1, 1, 'broadcast_spray')]), products_catalog: catalogWithRei });
+    const out = await facts.gatherAndFreezeReportFacts({ record: record(), knex: hours.knex });
+    expect(out.reentry).toMatchObject({ rule: 'default', source: 'default' });
+    expect(out.reentry).not.toHaveProperty('hours');
+    const unapproved = fakeKnex({ ...tables([productRow(1, 1, 'broadcast_spray')]), products_catalog: [{ ...CATALOG[0], approved_for_service_report: false }] });
+    expect((await facts.gatherAndFreezeReportFacts({ record: record(), knex: unapproved.knex })).reentry).toMatchObject({ rule: 'default' });
   });
 
   test('already frozen: no rebuild, no second write', async () => {
