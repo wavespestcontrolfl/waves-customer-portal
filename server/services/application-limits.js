@@ -594,7 +594,10 @@ class ApplicationLimitChecker {
     const limits = (await applyV13CountCaps(database, product, await database('product_limits')
       .where({ product_id: productId, match_type: 'product' })
       .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']), productId))
-      .filter((limit) => limit.severity === 'hard_block');
+      // A bermuda removal row is the step's own limit (judged by the step's check, on the step's
+      // history): the generic closeout audit never reads it, so Fusilade II used alone for bed or
+      // border work is not reported against the step's 2 a year or 42 days.
+      .filter((limit) => limit.severity === 'hard_block' && !isBermudaProgramRow(limit));
     if (!limits.length) return [];
     const day = etCalendarDayOf(serviceDate);
     const others = () => scopeHistoryToTreatment(database('property_application_history')

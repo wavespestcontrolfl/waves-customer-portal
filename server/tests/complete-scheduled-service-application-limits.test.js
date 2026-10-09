@@ -46,6 +46,7 @@ let checkLimits;
 // hard product-level count limit. `queried` records every table the closeout's limit check touched.
 let catalogRows;
 let limitedIds;
+let programTaggedIds;
 let queried;
 
 const celsiusViolation = { type: 'annual_max_apps', message: 'Celsius WG: 2/2 other applications in the year — LIMIT REACHED.', current: 2, max: 2 };
@@ -83,10 +84,11 @@ beforeEach(() => {
   };
   catalogRows = [{ id: CELSIUS_ID, name: 'Celsius WG' }, { id: DEFAULT_ID, name: 'Default fixture' }];
   limitedIds = new Set([CELSIUS_ID]);
+  programTaggedIds = new Set();
   queried = [];
   db.mockImplementation((table) => {
     if (table === 'products_catalog') return batched(table, (ids) => catalogRows.filter((row) => ids.includes(row.id)));
-    if (table === 'product_limits') return batched(table, (ids) => ids.filter((id) => limitedIds.has(id)).map((id) => ({ product_id: id })));
+    if (table === 'product_limits') return batched(table, (ids) => ids.filter((id) => limitedIds.has(id)).map((id) => ({ product_id: id, match_value: programTaggedIds.has(id) ? 'bermuda_removal' : null })));
     return builder;
   });
   attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
@@ -139,6 +141,13 @@ describe('closeout: hard count limits flag, they never refuse', () => {
     // Only product-level hard count limits are audited (the audit method returns nothing else).
     checkLimits.mockResolvedValue([]);
     expect(await findings([CELSIUS_ID])).toEqual([]);
+  });
+
+  test('a product whose only hard rows are the bermuda removal step\'s own (program-tagged) is never asked of the audit (codex #6035 r45 P2)', async () => {
+    limitedIds.add(DEFAULT_ID);
+    programTaggedIds.add(DEFAULT_ID);
+    expect(await findings([DEFAULT_ID])).toEqual([]);
+    expect(checkLimits).not.toHaveBeenCalled();
   });
 
   test('EVERY violated hard limit of a product is its own finding (yearly count and minimum interval), each worded for its limit', async () => {

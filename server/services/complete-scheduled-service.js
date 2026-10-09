@@ -1983,8 +1983,9 @@ async function hardLimitedProductNames(database, ids) {
     .whereIn('product_id', known)
     .where({ match_type: 'product', severity: 'hard_block' })
     .whereIn('limit_type', Object.keys(HARD_COUNT_LIMIT_LABELS))
-    .select('product_id'));
-  const limited = new Set((limitRows || []).map((row) => String(row.product_id)));
+    .select('product_id', 'match_value'));
+  // The bermuda removal step's own rows (program-tagged) are not generic limits: see auditHardCountLimits.
+  const limited = new Set((limitRows || []).filter((row) => row.match_value !== 'bermuda_removal').map((row) => String(row.product_id)));
   // The v13 count caps (Arena, Certainty, Blindside, Celsius) live in code, not in a stored row.
   const { v13CapEntryFor } = require('../config/lawn-v13-count-caps');
   const found = new Map();
