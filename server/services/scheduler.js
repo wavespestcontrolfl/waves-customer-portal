@@ -4127,6 +4127,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :30, 5AM-6PM — Auto-dispatch rain pass. The 4:10 run above
+  // cannot see rain (it never moves a visit inside 72 hours; the hourly
+  // forecast is good for 3 dates), so this reads the booked outdoor visits
+  // on those dates and tells the office which sit in rain and which hour
+  // that day is dry and open. Each visit rings once; the hourly run keeps
+  // the notice's advice current and closes it when the visit is no longer
+  // wet at that time. Notify-only: never moves a visit, never texts a
+  // customer. Dark behind GATE_AUTO_DISPATCH_RAIN_PASS, read inside the
+  // pass. runExclusive because overlapping deploy instances would read the
+  // forecast twice.
+  // =========================================================================
+  cron.schedule('30 5-18 * * *', async () => {
+    try {
+      await runExclusive('auto-dispatch-rain-pass', async () => {
+        const { runRainPass } = require('./auto-dispatch/rain-pass');
+        const result = await runRainPass();
+        // The pass never rejects; a run that could not finish must still
+        // fail job health instead of reading as a green run with no notices.
+        if (result.reason === 'error') throw new Error(result.error || 'run did not finish');
+      });
+    } catch (err) {
+      logger.error(`Auto-dispatch rain pass failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Storm watch. Probes the NWS hourly forecast at the
   // CUSTOMER coordinates of each tech's upcoming stops and nudges the
   // tech (tech_notifications, same channel as geofence prompts) when
