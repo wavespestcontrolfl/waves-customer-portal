@@ -19,8 +19,8 @@
  * Idempotent: a second run finds no empty catalog field and no figure of 2 and writes nothing.
  *
  * down(): not at all while a scheduled visit or a completion references a v13 protocol (the facts that visit was planned and
- * reported against stay), as 20261007189700 does. Otherwise it restores a catalog field only while it still holds the value
- * written here, and a staged figure to 2 only while it still reads 1, then deletes the audit rows. A row somebody has edited
+ * reported against stay), as 20261007189700 does. Otherwise it restores the catalog rate and unit together, only while every field
+ * written here still holds the value written (an edit of either leaves both, and logs it), and a staged figure to 2 only while it still reads 1, then deletes the audit rows. A row somebody has edited
  * since, or deleted, is left alone.
  *
  * How the older downs behave after part 2 (migrations roll back newest first, so this down() runs before all of them; the lines
@@ -111,12 +111,16 @@ async function catalogDown(knex) {
   for (const log of await knex('lawn_protocol_audit_log').where({ action: ACTION_CATALOG }).select('id', 'after_snapshot')) {
     const after = asObject(log.after_snapshot);
     const row = after.id ? await knex('products_catalog').where({ id: after.id }).first('id', 'default_rate_per_1000', 'rate_unit') : null;
-    const update = {};
-    for (const [column, change] of Object.entries(after.fields || {})) {
-      const same = column === 'rate_unit' ? row && row.rate_unit === change.after : row && isRate(row[column], change.after);
-      if (same) update[column] = change.before;
+    // The rate and its unit are one fact: restore the fields written here only while ALL of them still hold what was written. If an
+    // admin has edited either one since, both stay (a rate left with a null unit would be unreadable).
+    const written = Object.entries(after.fields || {});
+    const untouched = row && written.length > 0 && written.every(([column, change]) => (column === 'rate_unit' ? row.rate_unit === change.after : isRate(row[column], change.after)));
+    if (untouched) {
+      const update = Object.fromEntries(written.map(([column, change]) => [column, change.before]));
+      await knex('products_catalog').where({ id: row.id }).update({ ...update, updated_at: knex.fn.now() });
+    } else if (row) {
+      console.log(`${LOG} ${after.name || BLINDSIDE}: the catalog rate or unit was edited since; both stay`);
     }
-    if (Object.keys(update).length) await knex('products_catalog').where({ id: row.id }).update({ ...update, updated_at: knex.fn.now() });
     await knex('lawn_protocol_audit_log').where({ id: log.id }).del();
   }
 }

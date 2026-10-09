@@ -236,13 +236,38 @@ describeDb('v13 final pass part 2 (Blindside catalog + one application a year) t
       expect((await catalogRow()).rate_unit).toBeNull();
     });
 
-    test('down restores a catalog field only while it still holds the written value', async () => {
+    test('down treats the rate and unit as one fact: an edit of the rate alone leaves BOTH (never a rate with a null unit)', async () => {
       await reset();
       await migration.up(knex);
       await knex('products_catalog').where({ id: ids.blindside }).update({ default_rate_per_1000: 0.2 });
       await migration.down(knex);
       const row = await catalogRow();
-      expect([row.rate_unit, Number(row.default_rate_per_1000)]).toEqual([null, 0.2]);
+      expect([row.rate_unit, Number(row.default_rate_per_1000)]).toEqual(['oz', 0.2]);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('the catalog rate or unit was edited since; both stay'));
+      expect(await audits(migration.ACTION_CATALOG)).toEqual([]);
+    });
+
+    test('an edit of the unit alone leaves both too, and untouched fields go back together', async () => {
+      await reset();
+      await migration.up(knex);
+      await knex('products_catalog').where({ id: ids.blindside }).update({ rate_unit: 'fl oz' });
+      await migration.down(knex);
+      const edited = await catalogRow();
+      expect([edited.rate_unit, Number(edited.default_rate_per_1000)]).toEqual(['fl oz', 0.149]);
+      await reset();
+      await migration.up(knex);
+      await migration.down(knex);
+      const back = await catalogRow();
+      expect([back.rate_unit, back.default_rate_per_1000]).toEqual([null, null]);
+    });
+
+    test('when only the rate was written (the unit was already oz) and it is edited, it stays', async () => {
+      await reset({ catalog: { default_rate_per_1000: null, rate_unit: 'oz' } });
+      await migration.up(knex);
+      await knex('products_catalog').where({ id: ids.blindside }).update({ default_rate_per_1000: 0.18 });
+      await migration.down(knex);
+      const row = await catalogRow();
+      expect([row.rate_unit, Number(row.default_rate_per_1000)]).toEqual(['oz', 0.18]);
     });
 
     test('a database without the staged tables only gets the catalog write', async () => {

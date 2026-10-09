@@ -34,7 +34,6 @@
  * Entries that carry no yearly count (v13 final pass, 2026-10-09; V13_MORE_LIMITS below). An entry may carry
  * any of: a count `cap`, a `minIntervalDays`, an `annualAmount`; the module adds only the synthetic rows an
  * entry asks for.
- *   Dylox 6.2 G Granular      3   count cap (label: "limit applications to 3 per calendar year").
  *   Velista                       yearly amount 2.2 oz per 1,000 sq ft (label EPA 100-1534).
  *   Artavia 2 SC (Azoxy)          yearly amount 7.1 fl oz per 1,000 sq ft (label: 9.6 quarts per acre per year).
  *
@@ -103,11 +102,6 @@ const V13_COUNT_CAPS = Object.freeze([
 // `minIntervalDays`, an `annualAmount`. Kept out of V13_COUNT_CAPS (see the header).
 const V13_MORE_LIMITS = Object.freeze([
   {
-    name: 'Dylox 6.2 G Granular Insecticide',
-    cap: 3,
-    description: `Dylox 6.2 G Granular Insecticide: max 3 applications per lawn per year under the v13 lawn program (label: "limit applications to 3 per calendar year"; ${FINAL_PASS}).`,
-  },
-  {
     name: 'Velista',
     // Velista label (EPA 100-1534): "Do not apply more than 2.2 oz of Velista per 1,000 sq ft per year or 6 lb ... per acre per year" and
     // "Do not apply more than 0.7 oz ... per application". An application the ledger cannot size counts at the single-application maximum.
@@ -163,7 +157,7 @@ async function resolveCapIds(database) {
     if (productId && entry) ids.set(String(productId), entry);
   };
   // (1) the staged protocol rows: their product_id is the stable identity (a row keeps its own product_name when the
-  // catalog row is renamed). The rows that carry a cap, and the rows named as a limit entry: Dylox, Velista and
+  // catalog row is renamed). The rows that carry a cap, and the rows named as a limit entry: Velista and
   // Artavia rows carry no gates.annualMaxApps, and a catalog rename must not drop their limit.
   const names = V13_LIMITS.map((entry) => entry.name);
   for (const row of await read(database, (k) => k('lawn_protocol_products').whereRaw("gates->>'annualMaxApps' is not null").orWhereIn('product_name', names).distinct('product_id', 'product_name'))) {

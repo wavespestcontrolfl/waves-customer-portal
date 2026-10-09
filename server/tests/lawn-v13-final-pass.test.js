@@ -67,7 +67,7 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
   test('V13_COUNT_CAPS keeps exactly the four names that pushed migrations 20261007175000 and 20261007177000 read when they run', () => {
     expect(caps.V13_COUNT_CAPS.map((e) => e.name)).toEqual(['Celsius WG', 'Arena 50 WDG', 'Certainty Turf Herbicide', 'Blindside Herbicide']);
     expect(caps.V13_COUNT_CAPS.every((e) => e.cap === 2)).toBe(true);
-    expect(caps.V13_LIMITS.map((e) => e.name)).toEqual([...caps.V13_COUNT_CAPS.map((e) => e.name), 'Dylox 6.2 G Granular Insecticide', 'Velista', 'Artavia 2 SC (Azoxy)']);
+    expect(caps.V13_LIMITS.map((e) => e.name)).toEqual([...caps.V13_COUNT_CAPS.map((e) => e.name), 'Velista', 'Artavia 2 SC (Azoxy)']);
     expect(Object.isFrozen(caps.V13_COUNT_CAPS) && Object.isFrozen(caps.V13_MORE_LIMITS) && Object.isFrozen(caps.V13_LIMITS)).toBe(true);
   });
 
@@ -115,11 +115,11 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
     expect(caps.CELSIUS_YTD_CAP).toBe(2);
   });
 
-  test('Certainty keeps its count of 2 and gains a 28 day interval; Dylox is a count of 3; Velista and Artavia carry only a yearly amount', () => {
+  test('Certainty keeps its count of 2 and gains a 28 day interval; Velista and Artavia carry only a yearly amount', () => {
     expect(entry('Certainty Turf Herbicide')).toMatchObject({ cap: 2, minIntervalDays: 28 });
     expect(entry('Certainty Turf Herbicide').intervalDescription).toContain('4 or more weeks');
-    expect(entry('Dylox 6.2 G Granular Insecticide')).toMatchObject({ cap: 3 });
-    expect(entry('Dylox 6.2 G Granular Insecticide').description).toContain('limit applications to 3 per calendar year');
+    // Dylox 6.2 G is not an entry: its staged October row carries no cap metadata yet, so the limit ships with its staged rows.
+    expect(entry('Dylox 6.2 G Granular Insecticide')).toBeUndefined();
     expect(entry('Velista')).toMatchObject({ annualAmount: { cap: 2.2, unit: 'oz/1000sf/year', fallbackRate: 0.7 } });
     expect(entry('Velista').cap).toBeUndefined();
     expect(entry('Artavia 2 SC (Azoxy)')).toMatchObject({ annualAmount: { cap: 7.1, unit: 'fl oz/1000sf/year', fallbackRate: 0.77 } });
@@ -138,7 +138,6 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
     ['Arena 50 WDG', ['annual_max_apps', 'min_interval_days', 'annual_max_rate']],
     ['Certainty Turf Herbicide', ['annual_max_apps', 'min_interval_days']],
     ['Blindside Herbicide', ['annual_max_apps', 'annual_max_rate']],
-    ['Dylox 6.2 G Granular Insecticide', ['annual_max_apps']],
     ['Velista', ['annual_max_rate']],
     ['Artavia 2 SC (Azoxy)', ['annual_max_rate']],
   ])('%s: the synthetic rows an empty product gets are exactly %j, all hard blocks', (name, types) => {
@@ -156,7 +155,7 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
       [7, 'annual_max_apps', 9, 'warning'], [null, 'annual_max_rate', 2.2, 'hard_block'],
     ]);
     // A counted entry still lowers a stored row and makes it hard.
-    expect(caps.withEntryCaps(entry('Dylox 6.2 G Granular Insecticide'), [stored], 'p1')).toEqual([{ ...stored, limit_value: 3, severity: 'hard_block' }]);
+    expect(caps.withEntryCaps(entry('Celsius WG'), [stored], 'p1')).toEqual([{ ...stored, limit_value: 2, severity: 'hard_block' }]);
     expect(caps.withEntryCaps(entry('Certainty Turf Herbicide'), [{ ...stored, limit_value: 3 }], 'p1').map((r) => [r.limit_type, Number(r.limit_value)])).toEqual([['annual_max_apps', 2], ['min_interval_days', 28]]);
     expect(caps.withEntryCaps(null, [stored])).toEqual([stored]);
   });
@@ -168,7 +167,6 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
     expect(caps.withEntryCapMetadata(null, product)).toBe(product);
     const clamped = caps.withEntryCapMetadata(entry('Celsius WG'), product);
     expect([clamped.gates.annualMaxApps, clamped.annual_counter.maxApplications]).toEqual([2, 2]);
-    expect(caps.withEntryCapMetadata(entry('Dylox 6.2 G Granular Insecticide'), product).gates.annualMaxApps).toBe(3);
     const stale = caps.withEntryCapMetadata(entry('Certainty Turf Herbicide'), { gates: { minIntervalDays: 14, annualMaxApps: 2 }, annual_counter: { maxApplications: 2 } });
     expect(stale.gates).toEqual({ minIntervalDays: 28, annualMaxApps: 2 });
     expect(caps.withEntryCapMetadata(entry('Arena 50 WDG'), { gates: { minIntervalDays: 56, annualMaxApps: 2 } }).gates).toEqual({ minIntervalDays: 56, annualMaxApps: 2 });
@@ -181,7 +179,6 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
   test('every name resolves by the exact catalog name the staged migration uses (the cap entries are keyed by what the recipe and catalog call them)', () => {
     expect(entry('Velista').name).toBe(N.VEL);
     expect(entry('Artavia 2 SC (Azoxy)').name).toBe(N.ART);
-    expect(entry('Dylox 6.2 G Granular Insecticide').name).toBe(N.DYL);
     expect(entry('Certainty Turf Herbicide').name).toBe(N.CER);
     for (const name of caps.V13_LIMITS.map((e) => e.name)) expect(caps.v13CountCapFor(name)).toBe(entry(name));
   });
