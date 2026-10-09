@@ -4,7 +4,6 @@ const v13 = require('../config/lawn-protocol-v13.json');
 const migration = require('../models/migrations/20261009175000_lawn_v13_groups_and_large_patch_n');
 
 const PYTHIUM = 'The app warns on the second Artavia application for Pythium; the label allows two in a row, and nothing else in the program controls Pythium, so do not make a third: fix the watering or drainage.';
-const LARGE_PATCH = 'Active large patch mapped this month: use the 0.5 lb N setting (2.1 lb of 24-0-11 per 1,000 sq ft) and keep the spreader 7 ft off the patch.';
 const TRACKS = Object.keys(v13);
 const spotDiseaseLines = (track) => v13[track].notes.filter((line) => line.startsWith('Other spot diseases (secondary lines): Pythium root rot with Artavia'));
 const november = (track) => v13[track].visits.filter((visit) => visit.month === 'Nov');
@@ -17,17 +16,18 @@ describe('the recipe: Pythium and November large patch', () => {
     expect(lines[0].split(PYTHIUM)).toHaveLength(2);
   });
 
-  test.each(TRACKS)('%s: the November visit notes end with the large patch sentence, after the existing 0.75 lb N text', (track) => {
+  test.each(TRACKS)('%s: the November visit notes keep the 0.75 lb N text and carry no large patch nitrogen sentence yet', (track) => {
     const [visit] = november(track);
     expect(november(track)).toHaveLength(1);
     expect(visit.notes.startsWith('N rate: 0.75 lb N. Spreader visit.')).toBe(true);
-    expect(visit.notes.endsWith(` ${LARGE_PATCH}`)).toBe(true);
+    // The 0.5 lb N sentence waits for the plan matcher to read the staged key (Codex r1 on #6233): no recipe text yet.
+    expect(visit.notes).not.toContain('Active large patch mapped this month');
     expect(visit.primary).toContain('3.1 lb per 1,000 sq ft (0.75 lb N)');
   });
 
   test('no other month carries the large patch sentence, and no text sends Pythium to Velista, Headway or Gravex', () => {
     for (const track of TRACKS) {
-      for (const visit of v13[track].visits.filter((v) => v.month !== 'Nov')) expect(visit.notes).not.toContain('Active large patch mapped this month');
+      for (const visit of v13[track].visits) expect(visit.notes).not.toContain('Active large patch mapped this month');
       const text = JSON.stringify(v13[track]);
       for (const part of text.split(/;|:|\\n|\.\s/).filter((segment) => /Pythium/.test(segment))) expect(part).not.toMatch(/Velista|Headway|Gravex/);
     }

@@ -42,14 +42,13 @@ describe('the recipe file', () => {
 
   // Recipe wording stays behind the data it needs (AGENTS.md "Lawn protocol data fan-out"): the wording below has no staged or
   // field-exec data yet, so this file keeps the text it had before the final pass. Each later PR that adds the data adds the wording.
-  test.each(TRACKS)('%s: wording with no data behind it is not in the recipe (Pythium exception, Topchoice scrub-jay, Acelepryn rounding, fungicide rates)', (track) => {
+  test.each(TRACKS)('%s: wording with no data behind it is not in the recipe (Pythium exception, Topchoice scrub-jay, Acelepryn rounding, large-patch N, fungicide rates)', (track) => {
     const text = JSON.stringify(v13[track]);
     expect(text).not.toMatch(/named exception|Three exceptions|Pythium pair/);
     expect(text).not.toMatch(/scrub[- ]jay|mole skink|sand skink/);
     expect(text).not.toMatch(/0\.05 to 0\.09/);
     expect(text).toContain('0.046 to 0.092 fl oz per 1,000 sq ft');
-    // November's large patch figure now has its data (20261009175000 stages gates.activeLargePatchTargetN); December has none.
-    expect(visit(11, track).notes).toMatch(/Active large patch mapped this month: use the 0\.5 lb N setting/);
+    expect(visit(11, track).notes).not.toMatch(/large patch mapped this month/);
     expect(visit(12, track).notes).not.toMatch(/large patch mapped this month/);
     expect(lineFor(7, N.ART, track)[0]).toContain('Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most');
     expect(v13[track].notes.join('\n')).toContain('twice in a row. Two exceptions: Group 3 pre-emergents');
