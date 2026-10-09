@@ -622,10 +622,13 @@ describe('requireEveryChemicalAddOnRecorded', () => {
     await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([['p-1|x', FIRE]]))).rejects.toMatchObject({ addOnKey: 'area_addon_bed_pre_emergent' });
   });
 
-  test('an incomplete outcome, a replay, and a set that could not be read are not judged', async () => {
+  test('an incomplete outcome and a replay are not judged; a set that could not be read is a retryable refusal for a fresh completed visit', async () => {
     await expect(ask(FIRE, tags([]), { incomplete: true })).resolves.toBeUndefined();
     await expect(ask(FIRE, tags([]), { fresh: false })).resolves.toBeUndefined();
-    await expect(ask(null, tags([]))).resolves.toBeUndefined();
+    // Codex round 46: unknown is not "no add-on".
+    await expect(ask(null, tags([]))).rejects.toMatchObject({ statusCode: 503, code: expect.any(String) });
+    await expect(ask(null, tags([]), { incomplete: true })).resolves.toBeUndefined();
+    await expect(ask(null, tags([]), { fresh: false })).resolves.toBeUndefined();
   });
 
   test('the completion asks it before the transaction, with the outcome (source)', () => {

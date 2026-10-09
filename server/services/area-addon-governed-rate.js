@@ -458,7 +458,7 @@ async function requireAddOnActuals(knex, products, tags, { fresh = true } = {}) 
 /**
  * A fresh COMPLETED visit records an application for every chemical add-on it carries (Codex round 45). The add-on rows are
  * invoiced from the visit, so a completion with no product row for one would bill a treatment that has no application
- * record. `carriedKeySet` is visitAreaAddOnKeySet's string for the visit (null = it could not be read: not judged);
+ * record. `carriedKeySet` is visitAreaAddOnKeySet's string for the visit (null = it could not be read: a retryable 503, as for an unreadable tag map);
  * `tags` is resolveApplicationAddOnTags' map (its values are the add-ons that have a row).
  * An incomplete outcome, a replay or a resume is not judged. The web sweep records no product and is never required.
  * A treatment that was not applied is taken off the visit by the office (Update Details) before the visit is completed.
@@ -466,9 +466,11 @@ async function requireAddOnActuals(knex, products, tags, { fresh = true } = {}) 
 const APPLICATION_REQUIRED_CODE = 'area_addon_application_required';
 async function requireEveryChemicalAddOnRecorded(knex, carriedKeySet, tags, { fresh = true, incomplete = false } = {}) {
   if (!fresh || incomplete) return;
-  // The set could not be read: nothing is known, and nothing is refused. This check runs on EVERY completion in the app
-  // (most visits carry no add-on), so a failed row read must never stop them; the closeout still reports a missing record.
-  if (carriedKeySet === null || carriedKeySet === undefined) return;
+  // The set could not be read: whether the visit carries a chemical add-on is unknown, so a fresh completed visit is not
+  // committed blind. The same retryable refusal an unreadable tag map answers (503): the technician submits again.
+  if (carriedKeySet === null || carriedKeySet === undefined) {
+    throw Object.assign(new Error(ADDONS_UNREADABLE_SENTENCE), { statusCode: 503, isOperational: true, code: ADDONS_UNREADABLE_CODE });
+  }
   const carried = String(carriedKeySet).split(',').filter((key) => key && isGoverned(key));
   if (!carried.length) return;
   const recorded = new Set(tags ? [...tags.values()] : []);
