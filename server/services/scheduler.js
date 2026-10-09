@@ -962,6 +962,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — archive draft estimates a later SENT estimate replaced
+  // (owner 2026-10-06). Gate read per tick, so a flip needs no restart.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').estimateDraftRetireOnSendLive()) return;
+    try {
+      await runExclusive('estimate-draft-retire', async () => {
+        const { retireDraftsReplacedBySentEstimate } = require('./estimate-draft-retire');
+        const result = await retireDraftsReplacedBySentEstimate();
+        if (result.retired > 0) logger.info(`[estimate-draft-retire] archived ${result.retired} replaced draft(s)`);
+      });
+    } catch (err) {
+      logger.error(`[estimate-draft-retire] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
