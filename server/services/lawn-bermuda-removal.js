@@ -485,6 +485,24 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   if (message) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
 }
 
+// The pest recap is not a place to record the bermuda removal spray: it takes no treated area
+// or amount, so a Recognition row written there cannot be sized for the label-rate cap, and it
+// has no step visit to judge the pair, the 2 a year or the 42 days against. Called inside the
+// recap's transaction AFTER its ledger write, so it reads what was really written (a product
+// resolved from an id or from a legacy name alike). A live Recognition ledger row for this
+// record throws a 400 and the transaction rolls back. Gate off, or no tagged label-rate row to
+// name Recognition by: nothing.
+const RECAP_REFUSAL_MESSAGE = 'Recognition is recorded on the lawn visit that carries the bermuda removal step. Take it off this recap.';
+async function refuseStepSprayOnRecap(trx, recordId) {
+  if (!bermudaRemovalLive() || !recordId) return;
+  const ids = await stepProductIds(trx);
+  if (!ids.recognition) return;
+  const written = await trx('property_application_history')
+    .where({ service_record_id: recordId, product_id: ids.recognition }).whereNull('retracted_at').first('id');
+  if (!written) return;
+  throw Object.assign(new Error(RECAP_REFUSAL_MESSAGE), { code: 'lawn_bermuda_recap_not_allowed', isOperational: true, statusCode: 400 });
+}
+
 // After a completion ledgered its sprays: the label-rate WARNING for Recognition (its yearly
 // maximum, judged on the history as it now stands, this spray included), as advisory messages
 // for the completion response. Never a block, never a refusal: gate off, no Recognition
@@ -723,9 +741,19 @@ const once = (load) => {
 //   stage.mixOrderField(..)  the backpack step's own mixing order (or nothing).
 async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey, strict = false }) {
   const live = enabled && bermudaRemovalLive() && BERMUDA_REMOVAL_TRACKS.includes(calendarTrackKey);
-  const wanted = live
-    ? await accountWantsBermudaRemoval(knex, { customerId: service.customer_id, profile, trackKey: calendarTrackKey, propertyId: service.property_id || null, strict })
-    : { requested: false, source: null };
+  // The account is always read STRICTLY. A caller that asked for strict gets the read error; the
+  // plan panel (not strict) gets an explicit unavailable state: no step lines and a warning on a
+  // step-month visit, never a silently ineligible one.
+  let wanted = { requested: false, source: null };
+  let unavailable = false;
+  if (live) {
+    try {
+      wanted = await accountWantsBermudaRemoval(knex, { customerId: service.customer_id, profile, trackKey: calendarTrackKey, propertyId: service.property_id || null, strict: true });
+    } catch (err) {
+      if (strict) throw err;
+      unavailable = true;
+    }
+  }
   const readsRows = wanted.requested && cultivarState(calendarTrackKey, profile?.cultivar) !== 'excluded';
   return {
     protocolOptions: readsRows ? { includeBermudaRemoval: true } : {},
@@ -737,7 +765,12 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
       const cultivar = cultivarState(trackKey, profile?.cultivar);
       const addOn = visit ? stepAddOn(trackKey, month) : null;
       const active = !!addOn && cultivar !== 'excluded';
-      const excludedWarnings = visit && cultivar === 'excluded' ? [EXCLUDED_CULTIVAR_WARNING] : [];
+      const unreadVisit = unavailable && structuredProtocol?.version === LAWN_V13_VERSION
+        && bermudaRemovalVisit({ trackKey, month }) && visitMonthOf({ scheduled_date: service.scheduled_date }) === month;
+      const excludedWarnings = [
+        ...(visit && cultivar === 'excluded' ? [EXCLUDED_CULTIVAR_WARNING] : []),
+        ...(unreadVisit ? [ELIGIBILITY_UNAVAILABLE_WARNING] : []),
+      ];
       return {
         lines: active ? markStepLines(parseLines(addOn.secondary)) : [],
         select: (items) => (active ? selectStepAtomically(items) : items),
@@ -817,6 +850,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
 module.exports = {
   bermudaAreaViolation, stepOffered, trackForVisit, once,
   openPlanStep,
+  refuseStepSprayOnRecap,
   visitMonthOf,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
