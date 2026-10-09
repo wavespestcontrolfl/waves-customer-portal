@@ -98,3 +98,23 @@ test('without the correction the same draft is used as written', async () => {
   expect(res.statusCode).toBe(200);
   expect(res.json.mock.calls[0][0].report).toMatch(/swept the cobwebs/);
 });
+
+// Codex round 7 on #6147.
+test('a split particle still claims the sweep ("knocked the cobwebs down")', async () => {
+  mockProvider
+    .mockResolvedValueOnce({ ok: true, text: 'WHAT WE DID\n\nWe knocked the cobwebs down around the porch and treated the perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' })
+    .mockResolvedValue({ ok: true, text: 'WHAT WE DID\n\nTreated the exterior perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' });
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: NOTE, actionsCompleted: [], sweepNotDone: true, fresh: true }), res);
+  expect(res.statusCode).toBe(200);
+  expect(res.json.mock.calls[0][0].report).not.toMatch(/cobwebs/i);
+});
+
+test('other work at the eaves is not a sweep claim: a wasp nest removed there stays on the report', async () => {
+  mockProvider.mockResolvedValue({ ok: true, text: 'WHAT WE DID\n\nRemoved a wasp nest from the eaves and treated the perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' });
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Removed a wasp nest from the eaves and sprayed the perimeter.', actionsCompleted: [], sweepNotDone: true, fresh: true }), res);
+  expect(res.statusCode).toBe(200);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(res.json.mock.calls[0][0].report).toMatch(/Removed a wasp nest from the eaves/);
+});

@@ -25703,13 +25703,25 @@ function buildTypedFindingsPromptBlock({
 // so; every other request's prompt is as it was.
 const SWEEP_NOT_DONE_LINE = 'Technician correction: the eaves and webs were NOT swept on this visit. Do not say that eaves, webs or cobwebs were swept, brushed, knocked down or removed, whatever the note says.';
 // A draft that still claims the sweep after that correction is refused like any
-// other wording the report may not carry (Codex P2 on #6147): a removal word
-// and a web or eave in one sentence, either order, or "web sweep" / "web
-// removal" by name. Linear: one pass per sentence.
-const SWEEP_CLAIM_ACTION_RE = /\b(?:swe(?:ep|pt|eping)|brush(?:ed|ing)?|knock(?:ed|ing)?\s+(?:down|off|out)|remov(?:ed|ing|al)|clear(?:ed|ing)|clean(?:ed|ing)|wip(?:ed|ing)|took\s+down|de-?webb?(?:ed|ing)?)\b/i;
-const SWEEP_CLAIM_THING_RE = /\b(?:spider\s?webs?|cobwebs?|webs?|webbing|eaves?|soffits?)\b/i;
+// other wording the report may not carry (Codex P2 on #6147), judged one
+// sentence at a time (linear).
+// A web takes any removal word, the particle next to its verb or after the
+// web ("knocked the cobwebs down"). An eave alone is a claim only with a
+// sweeping word and no nest or wasp in the sentence: other work at the eaves
+// ("removed a wasp nest from the eaves") stays on the report.
+const SWEEP_CLAIM_BRUSH = String.raw`swe(?:ep|pt|eping)|brush(?:ed|ing)?|knock(?:ed|ing)?\s+(?:\S+\s+){0,4}?(?:down|off|out)|de-?webb?(?:ed|ing)?`;
+const SWEEP_CLAIM_BRUSH_RE = new RegExp(String.raw`\b(?:${SWEEP_CLAIM_BRUSH})\b`, 'i');
+const SWEEP_CLAIM_REMOVAL_RE = new RegExp(String.raw`\b(?:${SWEEP_CLAIM_BRUSH}|remov(?:ed|ing|al)|clear(?:ed|ing)|clean(?:ed|ing)|wip(?:ed|ing)|took\s+(?:\S+\s+){0,4}?down)\b`, 'i');
+const SWEEP_CLAIM_WEB_RE = /\b(?:spider\s?webs?|cobwebs?|webs?|webbing)\b/i;
+const SWEEP_CLAIM_EAVE_RE = /\b(?:eaves?|soffits?)\b/i;
+const SWEEP_CLAIM_NEST_RE = /\b(?:nests?|hives?|wasps?|hornets?|bees?|daubers?)\b/i;
+function sentenceClaimsSweep(sentence) {
+  if (SWEEP_CLAIM_WEB_RE.test(sentence)) return SWEEP_CLAIM_REMOVAL_RE.test(sentence) || /\bde-?webb?(?:ed|ing)?\b/i.test(sentence);
+  if (/\bde-?webb?(?:ed|ing)?\b/i.test(sentence)) return true;
+  return SWEEP_CLAIM_EAVE_RE.test(sentence) && SWEEP_CLAIM_BRUSH_RE.test(sentence) && !SWEEP_CLAIM_NEST_RE.test(sentence);
+}
 function reportClaimsSweep(text) {
-  return String(text || '').split(/[.!?\n]+/).some((sentence) => SWEEP_CLAIM_ACTION_RE.test(sentence) && SWEEP_CLAIM_THING_RE.test(sentence));
+  return String(text || '').split(/[.!?\n]+/).some(sentenceClaimsSweep);
 }
 
 router.post('/generate-report', async (req, res) => {
