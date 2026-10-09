@@ -138,6 +138,7 @@ export const INSTRUCTION_SOURCES = Object.freeze({
 // page also shows most of them on a clean visit, so counting them would remove the sentence from nearly every report.
 export const INVITATIONS = Object.freeze({
   waterScheduleCta: 'the "Add your watering schedule" call to action (WaterIntakeBar, scheduleOnFile false): optional account setup that makes the reading more exact; no treatment depends on it',
+  longerCyclesAdvice: 'the longer-cycles sentence on the water card (water.longerCycles, GATE_LAWN_REPORT_POLISH): advice about the customer\'s standing sprinkler schedule, printed only when no banner, weekly plan or after-visit watering note is on the visit; it is not a step after this visit',
   bannerSetupLink: 'the sprinkler-setup link under an amount-only water-in (banner.setupLine): the amount to water is already printed; the link only offers minutes per zone',
   reviewAsk: 'the review ask',
   referralCard: 'the referral card',
