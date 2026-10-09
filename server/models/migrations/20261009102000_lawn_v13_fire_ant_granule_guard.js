@@ -31,11 +31,20 @@
  *      ownPass and all, and keeps the protocol whole for any row staff edited.
  *    Rows 20261009100000 did not insert (finding 1) are not in its snapshots and are never deleted by it.
  *
- * down() reverts the limit work exactly (a normalized row only while it is still normalized as written, an inserted row only
- * while unchanged, a tightened row only while it holds the written values). It does NOT undo the ownership change, on purpose:
- * giving the frozen downs back their reads of ownPass would let a later `down` of 20261009101000 strip the note from rows
- * that stay, or let 20261009100000's down keep protocols for the sake of a gate. Its audit rows go; the neutralized and rewritten
- * audit entries stay as the state that keeps ownPass tied to its rows. See the truth table in the PR.
+ * down() never weakens a limit and never undoes the ownership change. The product-matched hard limits (1 application a year, 365
+ * days) are what the Topchoice label says whether or not the program rows exist, and the closeout audit reads only product-matched
+ * rows. A rollback that put a normalized row back to a null match type would run BEFORE the earlier downs decide to keep a pinned or
+ * staff-edited protocol, and those protocols would then be closed out with no count or interval enforcement. So the limit rows this
+ * normalized, tightened or inserted stay as they are, and so does the audit row that records them ('v13_fire_ant_granule_guard_limits').
+ * (A row it inserted could go once no active Topchoice protocol row remains in any v13 protocol, but this down cannot know what the
+ * later downs will keep, so the default is to leave it.) The ownership change stays for the reason above: giving the frozen downs
+ * back their reads of ownPass would let a later `down` of 20261009101000 strip the note from rows that stay, or let 20261009100000's
+ * down keep protocols for the sake of a gate. Only the ownership audit row goes; the neutralized and rewritten audit entries stay as
+ * the state that keeps ownPass tied to its rows. The frozen downs touch only the limit rows their own audit rows list, and
+ * only while those read exactly as written; a row this normalized is not in either list, and a row either of them inserted or
+ * tightened is already an explicit product limit, which this never touches. A full in-order rollback is
+ * byte for byte the state before the first migration, except that the Topchoice limits stay strict (and, with them, the audit row
+ * recording a normalization, tightening or insert).
  *
  * Idempotent: a second run writes nothing. Nothing is written without a v13 protocol or a Topchoice row.
  */
@@ -240,28 +249,12 @@ exports.up = async function up(knex) {
 
 // ── Down ─────────────────────────────────────────────────────────────────────
 
-async function revertLimits(knex, limits) {
-  for (const change of limits.normalized || []) {
-    const row = await knex('product_limits').where({ id: change.id }).first();
-    if (row && row.match_type === change.after) await knex('product_limits').where({ id: change.id }).update({ match_type: change.before, updated_at: knex.fn.now() });
-  }
-  for (const { id, ...fields } of limits.inserted || []) {
-    const row = await knex('product_limits').where({ id }).first();
-    if (row && Object.entries(fields).every(([field, value]) => same(row[field], value))) await knex('product_limits').where({ id }).del();
-  }
-  for (const change of limits.updated || []) {
-    const row = await knex('product_limits').where({ id: change.id }).first();
-    if (row && Object.entries(change.after).every(([field, value]) => same(row[field], value))) {
-      await knex('product_limits').where({ id: change.id }).update({ ...change.before, updated_at: knex.fn.now() });
-    }
-  }
-}
-
+// No limit is restored here, on purpose (see the header): the strict, product-matched Topchoice limits stay.
 exports.down = async function down(knex) {
   if (!(await hasAll(knex))) return;
-  for (const log of await knex('lawn_protocol_audit_log').where({ action: ACTION_LIMITS }).select('id', 'after_snapshot')) {
-    await revertLimits(knex, asObject(log.after_snapshot).limits || {});
-    await knex('lawn_protocol_audit_log').where({ id: log.id }).del();
+  const limitRows = await knex('lawn_protocol_audit_log').where({ action: ACTION_LIMITS }).select('id');
+  if (limitRows.length) {
+    console.log('[lawn-v13-fire-ant-granule-guard] the Topchoice count and interval limits stay product-matched hard blocks (the closeout audit reads only those, and a protocol a rollback keeps must still be enforced); their audit row stays');
   }
   const owned = await knex('lawn_protocol_audit_log').where({ action: ACTION_OWNPASS }).select('id');
   if (owned.length) {

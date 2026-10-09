@@ -255,18 +255,90 @@ describeDb('v13 Topchoice guard migration through PostgreSQL', () => {
       ]);
     });
 
-    test('down puts the match type back only while it is still what this wrote, and removes what it inserted', async () => {
+    test('down never weakens a limit: the normalized and the inserted rows stay strict, and the audit row that records them stays', async () => {
       await upAll();
+      const before = clean(await limitsOf());
       await guard.down(knex);
-      expect((await limitsOf()).map((row) => [row.limit_type, row.match_type])).toEqual([['annual_max_apps', null], ['min_interval_days', null]]);
-      await upAll();
-      await knex('product_limits').where({ product_id: ids.top, limit_type: 'min_interval_days' }).update({ match_type: 'moa_group' });
-      await guard.down(knex);
-      expect((await limitsOf('min_interval_days'))[0].match_type).toBe('moa_group');
-      expect((await limitsOf('annual_max_apps'))[0].match_type).toBeNull();
+      expect(clean(await limitsOf())).toBe(before);
+      expect((await limitsOf()).map((row) => [row.limit_type, row.match_type, row.severity, Number(row.limit_value)])).toEqual([
+        ['annual_max_apps', 'product', 'hard_block', 1], ['min_interval_days', 'product', 'hard_block', 365],
+      ]);
+      expect(await knex('lawn_protocol_audit_log').where({ action: guard.ACTION_LIMITS })).toHaveLength(1);
+      // Run again after its own down: nothing to write, nothing duplicated.
+      await guard.up(knex);
+      expect(clean(await limitsOf())).toBe(before);
+      expect(await knex('lawn_protocol_audit_log').where({ action: guard.ACTION_LIMITS })).toHaveLength(1);
     });
 
-    test('the first two migrations\' own limit rollback is unaffected (their rows are explicit already)', async () => {
+    test('a limit the guard inserted stays through every down; a row it tightened back to the first migration\'s own write is that migration\'s to delete', async () => {
+      await reset();
+      await first.up(knex); await followup.up(knex);
+      await knex('product_limits').where({ product_id: ids.top, limit_type: 'min_interval_days' }).del();
+      await knex('product_limits').where({ product_id: ids.top, limit_type: 'annual_max_apps' }).update({ limit_value: 3, severity: 'warning' });
+      await guard.up(knex);
+      const strict = clean(await limitsOf());
+      await guard.down(knex); await followup.down(knex); await first.down(knex);
+      // The interval row the guard inserted stays. The count row is the first migration's own row (the guard only tightened it back to what
+      // that migration wrote), so the first migration's down deletes it, exactly as it would have: nothing is weakened that the guard added.
+      expect((await limitsOf()).map((row) => [row.limit_type, row.match_type, row.severity, Number(row.limit_value)])).toEqual([
+        ['min_interval_days', 'product', 'hard_block', 365],
+      ]);
+      expect(strict).toBeTruthy();
+    });
+
+    test('a full in-order rollback with null-match limits: nothing throws, the rows go with their gate, and both limits stay product-matched hard blocks (the closeout audit still enforces them)', async () => {
+      await upAll();
+      await seedHistory('2026-10-15');
+      await guard.down(knex); await followup.down(knex); await first.down(knex);
+      expect(await topRows()).toEqual([]);
+      expect((await limitsOf()).map((row) => [row.limit_type, row.match_type, row.severity, Number(row.limit_value)])).toEqual([
+        ['annual_max_apps', 'product', 'hard_block', 1], ['min_interval_days', 'product', 'hard_block', 365],
+      ]);
+      expect((await limitChecker.auditHardCountLimits(customerId, ids.top, '2027-04-15', knex)).map((v) => v.type)).toEqual(['min_interval_days']);
+      expect((await limitChecker.auditHardCountLimits(customerId, ids.top, '2026-12-01', knex)).map((v) => v.type).sort()).toEqual(['annual_max_apps', 'min_interval_days']);
+    });
+
+    test('null-match limits and a pinned protocol: after every partial rollback and the full one, the pinned protocol keeps its rows, and the planner and the closeout audit still enforce both limits', async () => {
+      await upAll();
+      await seedHistory('2026-10-15');
+      const f = await fixture(knex);
+      const pinned = await f.visit(0, { lawn_protocol_key: KEYS[0], lawn_protocol_version: V13 });
+      const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const expectEnforced = async () => {
+        expect((await limitsOf()).map((row) => [row.limit_type, row.match_type])).toEqual([['annual_max_apps', 'product'], ['min_interval_days', 'product']]);
+        expect((await plan('2027-04-15')).blocks.map((b) => b.type)).toEqual(['min_interval_days']);
+        expect((await limitChecker.auditHardCountLimits(customerId, ids.top, '2027-04-15', knex)).map((v) => v.type)).toEqual(['min_interval_days']);
+        expect((await limitChecker.auditHardCountLimits(customerId, ids.top, '2026-12-01', knex)).map((v) => v.type).sort()).toEqual(['annual_max_apps', 'min_interval_days']);
+      };
+      try {
+        await guard.down(knex);
+        await expectEnforced();
+        await followup.down(knex);
+        await expectEnforced();
+        await first.down(knex);
+        await expectEnforced();
+        const rows = await byProtocol();
+        expect(Object.keys(rows)).toEqual([KEYS[0]]);
+        for (const row of rows[KEYS[0]]) expect(row.gates).toEqual(OWN_PASS_GATES);
+      } finally {
+        log.mockRestore();
+        await knex('scheduled_services').where({ id: pinned.id }).update({ lawn_protocol_key: null, lawn_protocol_version: null });
+      }
+    });
+
+    test('null-match limits and a staff-edited Topchoice row: the same, the edited protocol stays whole and enforced', async () => {
+      await upAll();
+      await seedHistory('2026-10-15');
+      const [row] = await topRows();
+      await knex('lawn_protocol_products').where({ id: row.id }).update({ rate_per_1000: 1.5 });
+      const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+      try { await guard.down(knex); await followup.down(knex); await first.down(knex); } finally { log.mockRestore(); }
+      expect(Object.keys(await byProtocol())).toEqual([row.protocol_key]);
+      expect((await limitsOf()).map((r) => [r.limit_type, r.match_type])).toEqual([['annual_max_apps', 'product'], ['min_interval_days', 'product']]);
+      expect((await limitChecker.auditHardCountLimits(customerId, ids.top, '2027-04-15', knex)).map((v) => v.type)).toEqual(['min_interval_days']);
+    });
+
+    test('without null-match limits the guard writes no limit work, so the first two migrations\' own limit rollback leaves the exact starting state', async () => {
       await reset();
       const before = await snapshot();
       await upAll();
@@ -297,7 +369,7 @@ describeDb('v13 Topchoice guard migration through PostgreSQL', () => {
       expect(own.after_snapshot.neutralized).toHaveLength(1);
     });
 
-    test('state 1 - guard down only: every Topchoice row keeps ownPass, the neutralized state stays, the limits go back', async () => {
+    test('state 1 - guard down only: every Topchoice row keeps ownPass, the neutralized state stays', async () => {
       await upAll();
       await guard.down(knex);
       await expectEveryRowCarriesOwnPass();
