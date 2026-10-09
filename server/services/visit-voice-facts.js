@@ -771,16 +771,25 @@ function sweepTie(quote, action, thing) {
   const offset = Math.min(action.index, thing.index);
   return { offset, length: Math.max(action.index + action[0].length, thing.index + thing[0].length) - offset };
 }
+// An eave with no web is a sweep only when its own words (the action through
+// the eave) name no nest or wasp: "knocked down a wasp nest from the eaves" is
+// not one, while a nest elsewhere in the quote takes nothing away ("swept the
+// eaves and removed a wasp nest from the entry", Codex P2 on #6147).
+function eaveTie(quote, action, eave) {
+  const span = sweepTie(quote, action, eave);
+  return span && !SWEEP_NEST_RE.test(quote.slice(span.offset, span.offset + span.length)) ? span : null;
+}
 // Every sweep a quote asserts, each the words from its removal action to the
 // web or eave it removes (either order). A web takes any removal action; an
-// eave with no web needs a sweeping word and a quote with no nest or wasp in
-// it; "dewebbed" says its own web.
+// eave with no web needs a sweeping word (eaveTie); "dewebbed" says its own web.
 function sweepAssertions(quote) {
   const webs = all(SWEEP_WEB_RE, quote);
-  const eaves = SWEEP_NEST_RE.test(quote) ? [] : all(SWEEP_EAVE_RE, quote);
+  const eaves = all(SWEEP_EAVE_RE, quote);
   return all(SWEEP_ACTION_RE, quote).flatMap((action) => {
-    const things = [...webs, ...(SWEEP_BRUSH_RE.test(action[0]) ? eaves : [])];
-    const spans = things.map((thing) => sweepTie(quote, action, thing)).filter(Boolean);
+    const spans = [
+      ...webs.map((web) => sweepTie(quote, action, web)),
+      ...(SWEEP_BRUSH_RE.test(action[0]) ? eaves.map((eave) => eaveTie(quote, action, eave)) : []),
+    ].filter(Boolean);
     return SWEEP_DEWEB_RE.test(action[0]) ? [spanOf(action), ...spans] : spans;
   });
 }
@@ -814,17 +823,48 @@ function sweepNotToday(text, start, end) {
 // completed", "web sweep was not performed"), or called undone in its clause.
 const SWEEP_TRAILING_DENIAL_RE = trailingDenial('swept|completed|performed|finished|done|needed|necessary|required|possible|today');
 const SWEEP_UNDONE_RE = /\b(?:incomplete|skipped|omitted|unfinished|not\s+(?:completed|performed|finished|done|possible))\b/;
+// The sweep is the technician's own work (Codex P2 on #6147). Someone else
+// named as the doer nearest before it ("the homeowner removed the cobwebs";
+// not "customer was not home and I swept", where "I" stands nearer, nor a
+// possessive, "the customer's eaves"), or "by" someone after it, is not.
+const SWEEP_OTHER_DOER = String.raw`customers?|home\s*owners?|owners?|clients?|tenants?|residents?|renters?|husband|wife|landlord|landscapers?|gardeners?|housekeepers?|cleaners?|maids?|neighbou?rs?|builders?|painters?|someone|somebody|they|he|she`;
+const SWEEP_OTHER_DOER_RE = new RegExp(String.raw`\b(?:${SWEEP_OTHER_DOER})\b(?!['’]s|s['’])`, 'g');
+const SWEEP_OWN_DOER_RE = /\b(?:i|we|tech|technician)\b/g;
+const SWEEP_DONE_BY_OTHER_RE = new RegExp(String.raw`^\s*(?:\S+\s+){0,4}?by\s+(?:the\s+|their\s+|a\s+)?(?:${SWEEP_OTHER_DOER})\b`);
+const lastAt = (re, text) => Math.max(-1, ...all(re, text).map((m) => m.index));
+function sweptByAnother(before, after) {
+  return lastAt(SWEEP_OTHER_DOER_RE, before) > lastAt(SWEEP_OWN_DOER_RE, before) || SWEEP_DONE_BY_OTHER_RE.test(after);
+}
+// The sweep on the record is the outside one (eaves, window and door frames,
+// lanai): webs taken down inside ("removed cobwebs from the kitchen ceiling")
+// are not it, unless the same words name an eave or the outside (Codex P2 on
+// #6147). Judged over the sweep's own words, out to the next action or look.
+const SWEEP_INSIDE_RE = /\b(?:inside|interior|indoors?|kitchen|bath(?:room)?s?|bed(?:room)?s?|living\s+room|dining\s+room|ceilings?|closets?|pantry|attic|basement|laundry|hallways?|cabinets?|baseboards?|office|garage)\b/;
+const SWEEP_OUTSIDE_RE = /\b(?:outside|exterior|outdoors?|eaves?|soffits?|fascia|lanai|porch|patio|entry|entryway|pool\s+cage|garage\s+door)\b/;
+function sweptInsideOnly(words) {
+  return SWEEP_INSIDE_RE.test(words) && !SWEEP_OUTSIDE_RE.test(words);
+}
 // One sweep stands when, somewhere the quote appears in the note, nothing
-// denies it, undoes it or puts it on another day.
+// denies it, undoes it, puts it on another day, gives it to someone else or
+// puts it inside the home.
 function sweepStands(quote, note, span) {
   for (let at = note.indexOf(quote); at >= 0; at = note.indexOf(quote, at + 1)) {
     const start = at + span.offset;
     const end = start + span.length;
     const { from, to } = clauseBounds(note, start);
+    // The sweep's own words: from the action or look before it to the next one.
+    const others = [
+      ...governingWords(note, from, to).map((word) => word.at),
+      ...all(SWEEP_ACTION_RE, note.slice(from, to)).map((m) => from + m.index),
+    ].filter((wordAt) => wordAt < start || wordAt >= end);
+    const ownFrom = Math.max(from, ...others.filter((wordAt) => wordAt < start));
+    const ownTo = Math.min(to, ...others.filter((wordAt) => wordAt >= end));
     const denied = SWEEP_DENIAL_BEFORE_RE.test(note.slice(0, start))
       || SWEEP_TRAILING_DENIAL_RE.test(note.slice(end))
       || SWEEP_UNDONE_RE.test(note.slice(from, to))
-      || sweepNotToday(note, start, end);
+      || sweepNotToday(note, start, end)
+      || sweptByAnother(note.slice(from, start), note.slice(end, to))
+      || sweptInsideOnly(note.slice(ownFrom, ownTo));
     if (!denied) return true;
   }
   return false;

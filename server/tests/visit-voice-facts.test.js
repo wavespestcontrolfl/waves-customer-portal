@@ -843,6 +843,29 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
   });
 
+  // Codex round 3 on #6147.
+  test.each([
+    ['the homeowner did it', 'The homeowner removed cobwebs from the front entry.'],
+    ['the customer did it', 'Customer swept the eaves before I got there.'],
+    ['it was done by someone else', 'Webs were knocked down by the landscaper.'],
+    ['the webs were inside', 'Removed cobwebs from the kitchen ceiling.'],
+    ['the webs were in the garage', 'Knocked down webs inside the garage.'],
+    ['a nest knocked off the eaves', 'Knocked down a wasp nest from the eaves.'],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+
+  test.each([
+    ['a nest removed elsewhere in the same sentence', 'Swept the eaves and removed a wasp nest from the entry.'],
+    ['a customer named before the technician', 'Customer was not home and I swept the eaves.'],
+    ['a possessive customer', "Swept the customer's eaves and lanai."],
+    ['webs outside after work inside', 'Sprayed inside and knocked down the webs outside.'],
+    ['webs on the eaves and in the garage', 'Swept webs from the eaves and the garage.'],
+    ['the sweep done for the customer', 'Knocked down the cobwebs for the customer.'],
+  ])('a sweep stands with %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
+  });
+
   test('webs only seen are not a sweep', () => {
     const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
     expect(said(note, 'Saw webs on the eaves')).toBeNull();
