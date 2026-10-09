@@ -340,6 +340,20 @@ describe('reschedule-public wiring', () => {
     expect(body.slice(recheck, recheck + 300)).toMatch(/code: 'SCOPE_CHANGED'/);
   });
 
+  test('a failed whole-range build inside a limit is a retry (503), not "no limit"', async () => {
+    const { fullRangeForLimit } = router._test;
+    // No coordinates and a db mock that returns nothing: the build gives no list.
+    const svc = { id: 'svc-1', customer_id: 'c-1', scheduled_date: '2026-10-15', window_start: '09:00:00' };
+    await expect(fullRangeForLimit(svc, limit, range, {})).rejects.toMatchObject({
+      statusCode: 503, isOperational: true, code: 'LIMIT_UNAVAILABLE',
+    });
+    // A limit at or past the end of the range drops nothing: no refusal.
+    await expect(fullRangeForLimit(svc, { ...limit, lastDate: '2026-11-10' }, range, {})).resolves.toBeNull();
+    await expect(fullRangeForLimit(svc, { ...limit, lastDate: null }, range, {})).resolves.toBeNull();
+    // No limit: nothing is built.
+    await expect(fullRangeForLimit(svc, null, range, {})).resolves.toBeNull();
+  });
+
   test('visitChangedSince: another date, start or status, or an unreadable visit, is a change', async () => {
     const { visitChangedSince } = router._test;
     const svc = { id: 'svc-1', scheduled_date: '2026-10-15', window_start: '09:00:00', status: 'confirmed' };

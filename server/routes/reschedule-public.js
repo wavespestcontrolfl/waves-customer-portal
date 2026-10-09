@@ -177,16 +177,26 @@ async function pageEligibilityWithLimit(svc) {
 // The whole booking range, built with the arguments GET uses (the range also
 // decides mid-route offers, so a narrower build could count other times).
 // The search and Confirm use it to reach GET's answer on whether the
-// late-move limit applies. Null when there is no limit to decide, or when
-// the build fails (no limit is then applied).
+// late-move limit applies. Null when there is no limit to decide. A failed
+// build is not "no limit": when the limit's date is inside the range the
+// answer is unknown, so the request fails with a retry (503) and neither
+// shows nor commits a date the limit may hold back. A limit at or past the
+// end of the range drops nothing, so a failed build there applies none.
 async function fullRangeForLimit(svc, limit, range, config) {
   if (!limit) return null;
+  let full = null;
   try {
-    return await buildAvailabilityForService(svc, { ...range, config });
+    full = await buildAvailabilityForService(svc, { ...range, config });
   } catch (err) {
     logger.warn(`[reschedule-public] move-limit availability failed for ${svc.id}: ${err.message}`);
-    return null;
   }
+  // No list (the build threw, or the address did not resolve this time).
+  if (!full && limit.lastDate && limit.lastDate < String(range.rangeTo).slice(0, 10)) {
+    throw Object.assign(new Error('Scheduling is unavailable right now. Please try again in a moment.'), {
+      statusCode: 503, isOperational: true, code: 'LIMIT_UNAVAILABLE',
+    });
+  }
+  return full;
 }
 
 // { availability, payload } for a list this page returns: the days the limit
@@ -1301,6 +1311,7 @@ router._test = {
   nextVisitDisclosureMismatch,
   applyMoveLimit,
   moveLimitRefuses,
+  fullRangeForLimit,
   visitChangedSince,
   cadenceChangedSince,
   pageEligibilityWithLimit,
