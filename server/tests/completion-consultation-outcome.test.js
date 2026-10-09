@@ -110,12 +110,14 @@ describe('wiring in completeScheduledService', () => {
     return i;
   };
 
-  test('the outcome is recorded on the completion transaction after the visit lock and the expectedVisit check', () => {
+  test('the outcome is recorded on the completion transaction after the visit lock, the expectedVisit check and the lawn visit-type check', () => {
     const lock = at("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
     const identity = at("{ code: 'visit_identity_changed' }");
+    const lawn = at('assertLawnFastVisitTypeUnderLock({ trx,');
     const record = at('recordConsultationOutcomeInCompletion({');
     expect(lock).toBeLessThan(identity);
-    expect(identity).toBeLessThan(record);
+    expect(identity).toBeLessThan(lawn);
+    expect(lawn).toBeLessThan(record);
     expect(source.slice(record, record + 200)).toContain('trx,');
   });
 
@@ -126,10 +128,20 @@ describe('wiring in completeScheduledService', () => {
     at('consultationOutcomeRefusalResponse(err)');
   });
 
-  test('the customer read before the visit lock is FOR NO KEY UPDATE when the completion carries the read', () => {
-    const read = at("const customerForSnapshot = trx('customers').where({ id: svc.customer_id });");
+  test('the customer read before the visit lock keeps its FOR SHARE default and is strengthened to FOR NO KEY UPDATE when the completion carries the read', () => {
+    const read = at("const snapshotCustomerRow = await trx('customers')");
     const lock = at("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
     expect(read).toBeLessThan(lock);
-    expect(source.slice(read, read + 400)).toContain('consultationOutcome != null ? customerForSnapshot.forNoKeyUpdate() : customerForSnapshot.forShare()');
+    const statement = source.slice(read, lock);
+    expect(statement.indexOf('.forShare()')).toBeGreaterThan(-1);
+    expect(statement.indexOf('.forShare()')).toBeLessThan(statement.indexOf('q.forNoKeyUpdate()'));
+    expect(statement).toContain('.modify((q) => consultationOutcome != null && q.forNoKeyUpdate())');
+  });
+
+  test('the strengthened read compiles to FOR NO KEY UPDATE only when the read is present (the last lock call wins)', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const sql = (carries) => knex('customers').where({ id: 1 }).forShare().modify((q) => carries && q.forNoKeyUpdate()).first('id').toSQL().sql;
+    expect(sql(true)).toContain('for no key update');
+    expect(sql(false)).toContain('for share');
   });
 });

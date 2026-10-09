@@ -6123,13 +6123,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // (customers locked first, then the loser's scheduled visits
           // updated), so a merge racing a completion cannot form a lock
           // cycle (codex P1 #3742 r4). Feeds the report identity snapshot.
-          // A completion that records the assessment's read (consultationOutcome)
-          // takes the customer FOR NO KEY UPDATE here instead, the mode
-          // recordOutcome needs (lockCustomerRow): the same customer -> visit
-          // order the office route has, and no FOR SHARE -> FOR NO KEY UPDATE
-          // upgrade that two such completions for one customer would deadlock on.
-          const customerForSnapshot = trx('customers').where({ id: svc.customer_id });
-          const snapshotCustomerRow = await (consultationOutcome != null ? customerForSnapshot.forNoKeyUpdate() : customerForSnapshot.forShare())
+          const snapshotCustomerRow = await trx('customers')
+            .where({ id: svc.customer_id })
+            .forShare()
+            // A completion that records the assessment's read (consultationOutcome) takes
+            // the customer FOR NO KEY UPDATE instead (the last lock call wins), the mode
+            // recordOutcome needs: the same customer -> visit order as the office route,
+            // and no FOR SHARE -> FOR NO KEY UPDATE upgrade that two such completions
+            // for one customer would deadlock on.
+            .modify((q) => consultationOutcome != null && q.forNoKeyUpdate())
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', ...(billingModeColumnsExist ? ['billing_mode'] : []));
           if (completionPricingPlan) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
@@ -6159,16 +6161,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
           }
-          // The assessment sheet's read of the visit, written under this lock so it
-          // commits or rolls back with the completion.
-          await require('./completion-consultation-outcome').recordConsultationOutcomeInCompletion({
-            trx, serviceId: svc.id, consultationOutcome, actor: completionInput.actor,
-          });
           servicePhotoVisit = require('./service-photos').servicePhotoVisitSnapshot(lockedSvcRow);
           // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
           if (lawnFast != null && !isIncompleteVisit) {
             await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
           }
+          // The assessment sheet's read of the visit, written under this lock so it
+          // commits or rolls back with the completion.
+          await require('./completion-consultation-outcome').recordConsultationOutcomeInCompletion({
+            trx, serviceId: svc.id, consultationOutcome, actor: completionInput.actor,
+          });
           // The trace the report flow judged (Codex #5538): a trace saved or
           // replaced since from another tab or device would publish a map the
           // record was never judged against (a perimeter over spot
