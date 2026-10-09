@@ -344,7 +344,9 @@ describe('4. the staff "Create Appointment" from a linked estimate writes the so
     const groups = src.indexOf("maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' })", rowsInsert);
     expect(stamp).toBeGreaterThan(rowsInsert);
     expect(groups).toBeGreaterThan(stamp);
-    expect(src.slice(stamp, stamp + 220)).toContain('estimate: linkedEstimate');
+    // the estimate row this transaction locked (Codex round 14), never the pre-lock copy
+    expect(src.slice(stamp, stamp + 220)).toContain('estimate: lockedLinkedEstimate');
+    expect(src.slice(stamp, stamp + 220)).not.toContain('estimate: linkedEstimate,');
     // the shared writer, not a second one
     expect(read('services/area-addon-visit-rows.js')).toContain('return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });');
   });
