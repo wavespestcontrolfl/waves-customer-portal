@@ -59,3 +59,53 @@ export function tipsCalledForByNote(tips, note) {
   return scored.sort((a, b) => b.hits - a.hits).map((entry) => entry.tip.id);
 }
 
+
+// Tips the customer has not had lately lead: a tip sent to this customer in
+// the picker's window (`lastSent`, id -> day) moves behind the rest, so a
+// recurring visit's short list changes from visit to visit. Order is otherwise
+// kept; nothing is hidden.
+export function unsentTipsFirst(tips, lastSent) {
+  if (!lastSent) return tips;
+  return [...tips.filter((tip) => !lastSent[tip.id]), ...tips.filter((tip) => lastSent[tip.id])];
+}
+
+// The pest sheet's chips as a note names them (the note is read here only to
+// rank tips; the server's own read fills the record).
+const NOTE_PESTS = [
+  ["Ants", /\bants?\b/],
+  ["Roaches", /\b(cock)?roach(es)?\b|\bpalmetto bugs?\b/],
+  ["Spiders", /\bspiders?\b|\bwebs?\b/],
+  ["Silverfish", /\bsilverfish\b/],
+  ["Wasps", /\bwasps?\b|\bhornets?\b|\byellow ?jackets?\b|\bmud daubers?\b/],
+  ["Earwigs", /\bearwigs?\b/],
+  ["Fleas", /\bfleas?\b/],
+  ["Crickets", /\bcrickets?\b/],
+  ["Centipedes", /\bcentipedes?\b/],
+];
+
+export function pestsInNote(note) {
+  const text = String(note || "").toLowerCase();
+  return NOTE_PESTS.filter(([, re]) => re.test(text)).map(([pest]) => pest);
+}
+
+const PEST_TIP_LIFT_MAX = 4;
+
+// The tips the pest sheet lifts under "For what you saw today": advice tagged
+// for a pest the tech tapped or the note names (from the whole library, so a
+// recurring visit reaches roach or flea advice), then the visit's own tips
+// whose keywords the note names. Tips for more of the pests lead; tips this
+// customer had lately go last. A short list, and never a pick.
+export function pestSheetTipIds(library, { pests = [], note = "" } = {}) {
+  const listed = (library?.groups || []).flatMap((group) => group.tips || []);
+  const every = [...listed, ...(library?.more || [])];
+  const seen = new Set([...pests, ...pestsInNote(note)]);
+  const forPests = every
+    .map((tip) => ({ tip, hits: (tip.pests || []).filter((pest) => seen.has(pest)).length }))
+    .filter((entry) => entry.hits > 0)
+    .sort((a, b) => b.hits - a.hits)
+    .map((entry) => entry.tip);
+  const byId = new Map(every.map((tip) => [tip.id, tip]));
+  const forNote = tipsCalledForByNote(listed, note).map((id) => byId.get(id));
+  const lifted = [...new Set([...forPests, ...forNote])];
+  return unsentTipsFirst(lifted, library?.lastSent).slice(0, PEST_TIP_LIFT_MAX).map((tip) => tip.id);
+}

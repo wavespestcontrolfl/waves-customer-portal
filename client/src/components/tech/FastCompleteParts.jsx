@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
-import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
+import { rankTechTips, techTipSubtext, techTipSentLabel, unsentTipsFirst } from '../../lib/tech-tips';
 import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
 import { isMlUnit } from '../../lib/measure-units';
 import RATE_UNITS from '../../../../shared/rate-units.json';
@@ -695,10 +695,12 @@ function tipMark(tip, library) {
 
 // The tips on screen: search results, the whole list, or the short list,
 // with the pick always kept in view. `noMatch` is about the search alone, so
-// a pinned pick never hides that a search found nothing.
-function visibleTips(allTips, { query, showAll, tipId }) {
-  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
-  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
+// a pinned pick never hides that a search found nothing. A search reads
+// `searchable` (the whole library, owner 2026-10-09); `pinnable` is where a
+// pick that is off the list is found.
+function visibleTips(allTips, { query, showAll, tipId, searchable = allTips, pinnable = allTips }) {
+  const listed = query ? rankTechTips(searchable, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
+  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? pinnable.find((tip) => tip.id === tipId) : null;
   return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
 }
 
@@ -726,7 +728,9 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // resolves and freezes the copy. `priorityTipIds` (optional, the tree & shrub
 // sheet's seen watch items) lifts those tips above the list under their own
 // heading, in library order; a search ignores it, and nothing is ever picked
-// for the tech.
+// for the tech. A lifted tip may come from the whole library (`library.more`),
+// which a search also reads. Tips this customer had lately (`library.lastSent`)
+// go last in each list.
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
@@ -738,18 +742,25 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
     () => (library?.groups || []).flatMap((group) => group.tips || []),
     [library],
   );
+  const everyTip = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
+  const lastSent = library?.lastSent;
   const q = query.trim().toLowerCase();
   const priority = useMemo(() => {
     if (!priorityTipIds?.length) return [];
     const ids = new Set(priorityTipIds);
-    const lifted = allTips.filter((tip) => ids.has(tip.id));
+    const lifted = everyTip.filter((tip) => ids.has(tip.id));
     // Library order by default (the tree & shrub Seen list); `priorityOrdered`
     // keeps the caller's own ranking (the lawn sheet's note matches, best first).
-    return priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted;
-  }, [allTips, priorityTipIds, priorityOrdered]);
+    return unsentTipsFirst(priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted, lastSent);
+  }, [everyTip, priorityTipIds, priorityOrdered, lastSent]);
   const lifted = !q && priority.length > 0;
-  const rest = lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips;
-  const { tips: visible, noMatch } = visibleTips(rest, { query: q, showAll, tipId });
+  const rest = useMemo(
+    () => unsentTipsFirst(lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips, lastSent),
+    [allTips, lifted, priority, lastSent],
+  );
+  const { tips: visible, noMatch } = visibleTips(rest, {
+    query: q, showAll, tipId, searchable: everyTip, pinnable: lifted ? everyTip.filter((tip) => !priority.includes(tip)) : everyTip,
+  });
   const hasPick = !!tipId || !!customTip.trim();
   const writingOwn = writing || !!customTip;
   return (

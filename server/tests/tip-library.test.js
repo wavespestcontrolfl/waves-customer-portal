@@ -584,3 +584,44 @@ describe('lawn tip library', () => {
     });
   });
 });
+
+describe('open search and pest tags (owner 2026-10-09)', () => {
+  const { TIP_PESTS } = require('../services/service-report/tip-library');
+
+  test('more holds every tip the list leaves out, and nothing twice', () => {
+    for (const [serviceLine, serviceKey] of [['pest', 'pest_general_quarterly'], ['pest', 'german_roach'], ['lawn', null], ['termite', 'termite_bait']]) {
+      const visit = tipsForVisit({ serviceLine, serviceKey, date: '2026-10-09' });
+      const listed = visit.groups.flatMap((group) => group.tips).map((tip) => tip.id);
+      const more = visit.more.map((tip) => tip.id);
+      expect([...listed, ...more].sort()).toEqual(TIPS.map((tip) => tip.id).sort());
+      expect(new Set([...listed, ...more]).size).toBe(TIPS.length);
+    }
+  });
+
+  test('a recurring pest visit can reach roach and flea advice, but never lists it unasked', () => {
+    const visit = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-09' });
+    const listed = visit.groups.flatMap((group) => group.tips).map((tip) => tip.id);
+    const more = visit.more.map((tip) => tip.id);
+    for (const id of ['gr_hitchhikers', 'flea_shady_spots', 'fa_leave_mounds']) {
+      expect(listed).not.toContain(id);
+      expect(more).toContain(id);
+    }
+  });
+
+  test('every pest tag is a pest chip, with no repeats', () => {
+    const tagged = TIPS.filter((tip) => tip.pests);
+    expect(tagged.length).toBeGreaterThan(0);
+    for (const tip of tagged) {
+      expect(tip.pests.length).toBeGreaterThan(0);
+      expect(new Set(tip.pests).size).toBe(tip.pests.length);
+      for (const pest of tip.pests) expect(TIP_PESTS).toContain(pest);
+    }
+    for (const pest of TIP_PESTS) expect(tagged.some((tip) => tip.pests.includes(pest))).toBe(true);
+  });
+
+  test('a pest-tagged tip claims no work, so it is true on a visit that did none of it', () => {
+    for (const tip of TIPS.filter((t) => t.pests)) {
+      expect(tip.copy).not.toMatch(/\b(bait|traps|stations?|treated soil)\b/i);
+    }
+  });
+});
