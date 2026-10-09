@@ -741,9 +741,10 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // The same blocking states the checks above refuse, re-judged on the LOCKED row inside the service
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
-        revalidateEstimate: async (row, trx) => {
+        // The add-on yearly limits are judged on the SELECTED slot's day (`date`), not on today.
+        revalidateEstimate: async (row, trx, { date } = {}) => {
           return (await lockedContactReviewRefusal(row, trx))
-            || require('../services/area-addon-limits').areaAddOnLimitRefusal(trx, { estimate: row, resolveCustomer: () => phoneMatchedCustomerId(row, trx) });
+            || require('../services/area-addon-limits').areaAddOnLimitRefusal(trx, { estimate: row, appliedOn: date, resolveCustomer: () => phoneMatchedCustomerId(row, trx) });
         },
       });
       return res.status(201).json({

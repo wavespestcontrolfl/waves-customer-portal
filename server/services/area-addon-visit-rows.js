@@ -184,16 +184,32 @@ async function clearOwnAreaAddOnScopeOnServiceChange(trx, visitId, updates = {})
   return true;
 }
 
+// A staff booking owns its rows (the office chose the lines): the sold scope goes onto the row of the same
+// catalog service, and no row is added or removed. Returns the number stamped.
+async function stampExistingRowScopes(trx, scheduledServiceId, wanted) {
+  if (!(await hasScopeColumn(trx, 'scheduled_service_addons'))) return 0;
+  let stamped = 0;
+  for (const row of wanted) {
+    if (!row.catalogServiceKey) continue;
+    stamped += await trx('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduledServiceId, service_key_snapshot: row.catalogServiceKey })
+      .whereNull('area_addon_scope')
+      .update({ area_addon_scope: JSON.stringify(soldScope(row)) });
+  }
+  return stamped;
+}
+
 /**
  * Write one add-on row per sold area add-on that the appointment does not
  * already carry. `trx` is the booking transaction. Returns the number written.
  * A priced add-on with no catalog key (or no price) cannot be a structured row:
  * it throws, rolling the booking back, rather than dropping a sold add-on.
  */
-async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null }) {
+async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null, addMissingRows = true }) {
   await stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey });
   const wanted = secondaryAreaAddOns(serviceProfile, ownServiceKey);
   if (!scheduledServiceId || wanted.length === 0) return 0;
+  if (!addMissingRows) return stampExistingRowScopes(trx, scheduledServiceId, wanted);
   for (const row of wanted) {
     if (!row.catalogServiceKey || !(Number(row.addOnPrice) > 0)) throw unresolvedError(row);
   }
@@ -260,6 +276,18 @@ async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownSe
   const booked = bookedVisitMinutes(adoptedRow);
   if (!(booked >= needed)) throw needsNewSlotError(needed, booked);
   return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey });
+}
+
+/**
+ * The staff "Create Appointment" from a linked estimate (admin schedule): the posted lines carry identity, price and
+ * duration, never what was sold, so the SERVER rebuilds the profile from the linked estimate and writes the sold scope
+ * through the same writer the accept uses, onto the visit's own add-on and onto each add-on row the office kept. The
+ * office keeps its own rows (`addMissingRows: false`): nothing is added or removed. No sold add-on: no query.
+ */
+async function writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId, estimate, ownServiceKey = null }) {
+  if (!estimate || require('./area-addon-limits').soldAddOnKeys(estimate.estimate_data).length === 0) return 0;
+  const profile = require('./estimate-slot-availability').resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+  return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });
 }
 
 // The attached area add-on rows of these visits (a `scheduled_service_addons` row
@@ -336,6 +364,7 @@ module.exports = {
   areaAddOnProfileRows,
   secondaryAreaAddOns,
   writeAreaAddOnVisitRows,
+  writeStaffBookedAreaAddOnScopes,
   readAreaAddOnScopesToCarry,
   restoreCarriedAreaAddOnScopes,
   clearOwnAreaAddOnScopeOnServiceChange,

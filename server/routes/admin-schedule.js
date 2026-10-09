@@ -8764,6 +8764,12 @@ async function scheduleCreateHandler(req, res, next) {
             && String(freshLinkedEstimate.property_id) !== String(bookingProperty.property_id)) {
             throw Object.assign(httpError(422, 'This estimate was quoted for a different property. Choose that address or book without the estimate.'), { code: 'ESTIMATE_PROPERTY_MISMATCH' });
           }
+          // The add-ons' yearly limits again, UNDER the customer lock taken above: the preflight read ran before it, so two staff
+          // bookings (or a booking and the customer's own accept) of this customer could each pass it. Nothing is left out: an
+          // accepted estimate booked a second time counts its first booking.
+          await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
+            estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,
+          });
         }
       }
       // Global lock order for recurring creators: CUSTOMER ROW first, series
@@ -8960,6 +8966,11 @@ async function scheduleCreateHandler(req, res, next) {
         });
       }
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
+      // The sold area (scope) of the linked estimate's area add-ons, rebuilt from the estimate on the server (never from the
+      // posted lines) and written by the same writer the customer's accept uses: without it the job card withholds the rate.
+      await require('../services/area-addon-visit-rows').writeStaffBookedAreaAddOnScopes(trx, {
+        scheduledServiceId: svc.id, estimate: linkedEstimate, ownServiceKey: svc.service_key_snapshot,
+      });
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.
       await require('../services/visit-groups').maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' });

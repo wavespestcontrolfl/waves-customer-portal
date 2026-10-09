@@ -639,6 +639,23 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
   return verdict;
 }
 
+// The ids of these rows (null and id-less rows skipped).
+function rowIds(...rows) {
+  return rows.map((row) => row && row.id).filter(Boolean);
+}
+
+// The customer the add-on limit recheck reads for an accept with no customer named yet: the phone match the account step below
+// makes (authoritative, in the accept transaction). The customer it finds is fenced by the same non-blocking take the account
+// step makes (a blocking one could deadlock against a merge-undo, which locks the customer and then the estimate this
+// transaction holds); a busy account is the accept's own retryable 409.
+async function resolveAcceptLimitCustomer(trx, estimate, preLockedCustomerId) {
+  const { match } = await matchAcceptCustomerByPhone(estimate, trx, { authoritative: true, afterSiblingResolution: true });
+  if (match && match.id !== preLockedCustomerId && !(await tryLockCustomerComms(trx, match.id))) {
+    throw Object.assign(new Error('This account is being updated right now — please retry your acceptance in a moment.'), { status: 409, isOperational: true, code: 'CUSTOMER_BUSY_RETRY' });
+  }
+  return match ? match.id : null;
+}
+
 // B18 park: the accept cannot complete self-serve when the estimate's phone belongs to another customer, so
 // nothing is created, taken or captured; the office is told and the person sees the page's EXISTING
 // review-before-booking state ("A Waves specialist reviews this quote with you ..."), whose sentence is reused
@@ -11791,10 +11808,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       }
 
-      // The add-ons' yearly limits, rechecked HERE: the customer lock above serializes accepts of this customer, so two
-      // estimates cannot each book "the one allowed" application, and history may have changed since the quote.
-      await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, { estimate, customerId: acceptPreLockedCommsId, appliedOn: acceptPreLockedDate });
-
       const acceptedUpdates = {
         status: 'accepted',
         accepted_at: trx.fn.now(),
@@ -12032,6 +12045,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         err.status = 409;
         throw err;
       }
+      // The add-ons' yearly limits, rechecked HERE: after the estimate row lock above (the order the reserve takes its locks in)
+      // and under the lock that serializes this person's bookings: the customer lock taken at the top of this transaction, else,
+      // for a customer who does not exist yet, the prospective-identity lock the recheck takes itself. Two accepts by one brand-new
+      // customer cannot both read an empty history, and history may have changed since the quote. The customer it resolves to
+      // under that lock is the phone match the account step below makes. Left out: only the hold this accept graduates and the
+      // appointment it adopts, never the estimate's other bookings.
+      await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
+        estimate,
+        customerId: acceptPreLockedCommsId,
+        appliedOn: acceptPreLockedDate,
+        excludeVisitIds: rowIds(capacityHold, existingAppointmentRow),
+        resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate, acceptPreLockedCommsId),
+      });
       // Bind the accept to the SetupIntent it verified (Codex #3723 r2 P1):
       // the setup_intent.succeeded backstop enrolls ONLY this intent — a
       // superseded capture (e.g. a bank intent refused by the kill switch,

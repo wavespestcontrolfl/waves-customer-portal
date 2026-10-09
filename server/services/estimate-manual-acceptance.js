@@ -572,7 +572,9 @@ async function markEstimateManuallyAccepted({
     const addOnRefusal = persistedAddOnRefusal(estimate, { action: 'accepting', billingTerm: normalizedBillingTerm });
     if (addOnRefusal) throw Object.assign(httpError(addOnRefusal.message, 409), { code: addOnRefusal.code });
     // An add-on whose yearly limit is now reached (or whose history cannot be read) is not marked won either.
-    await require('./area-addon-limits').assertAreaAddOnLimitsOpen(trx, { estimate, staff: true });
+    // The visits this call books (the staff booking's own rows) ARE this acceptance: left out of the count, and their day is the
+    // day judged. Any other booking of the estimate counts.
+    await require('./area-addon-limits').assertAreaAddOnLimitsOpen(trx, { estimate, staff: true, excludeVisitIds: bookedAppointmentIds });
     if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }

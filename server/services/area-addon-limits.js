@@ -12,7 +12,10 @@
  * property the way application-limits scopes it; program applications and add-on applications
  * both land there) PLUS the add-on visits already booked and not yet done (a visit whose own
  * service is the add-on, or a `scheduled_service_addons` row for it, on a visit that is not
- * completed or cancelled). The booked rows of the estimate being accepted are left out.
+ * completed or cancelled), PLUS the live holds of other estimates that share the customer, the phone or (no phone) the
+ * address (a hold is unowned until its accept, so it names no customer of its own). Only the visit rows the caller names
+ * (the hold being graduated, the appointment being adopted, the rows a staff booking just made) and the estimate's own
+ * unowned hold are left out: an accepted estimate booked a second time counts its first booking.
  *
  * No known customer (a new lead) has no history: the add-on prices normally.
  * Every query here takes uuid ids only and reads tables that exist from the first migrations of
@@ -90,26 +93,68 @@ async function ledgerDates(database, { customerId, propertyId, productByKey, asO
   return out;
 }
 
-// Add-on visits already booked and not done, at this property, other than the estimate being accepted.
-async function bookedDates(database, { customerId, propertyId, keys, excludeEstimateId, excludeVisitId }) {
+// Add-on visits already booked and not done, at this property. `excludeVisitIds` are the rows the caller is
+// committing right now (never "every row of the estimate": a second booking from an accepted estimate must see
+// the first). Holds of other estimates that share the customer, phone or address count too (see heldDates).
+async function bookedDates(database, { customerId, propertyId, keys, excludeVisitIds = [], prospect = null }) {
   const serviceKeys = keys.map((key) => configOf(key).serviceKey);
   const keyOfService = new Map(keys.map((key) => [configOf(key).serviceKey, key]));
-  const scope = (query, table) => {
-    query.where(`${table}.customer_id`, customerId).whereNotIn(`${table}.status`, NOT_BOOKED_STATUSES);
-    if (propertyId) query.where(function placedHereOrUnplaced() { this.whereNull(`${table}.property_id`).orWhere(`${table}.property_id`, propertyId); });
-    if (isUuid(excludeVisitId)) query.whereNot(`${table}.id`, excludeVisitId);
-    if (isUuid(excludeEstimateId)) query.where(function notThisEstimate() { this.whereNull(`${table}.source_estimate_id`).orWhereNot(`${table}.source_estimate_id`, excludeEstimateId); });
+  const skip = excludeVisitIds.filter(isUuid);
+  const place = (query) => {
+    if (propertyId) query.where(function placedHereOrUnplaced() { this.whereNull('s.property_id').orWhere('s.property_id', propertyId); });
+    if (skip.length) query.whereNotIn('s.id', skip);
     return query;
   };
-  const [own, rows] = await Promise.all([
-    scope(database('scheduled_services as s').whereIn('s.service_key_snapshot', serviceKeys), 's').select('s.service_key_snapshot as service_key', 's.scheduled_date'),
-    scope(database('scheduled_service_addons as a').join('scheduled_services as s', 's.id', 'a.scheduled_service_id').whereIn('a.service_key_snapshot', serviceKeys), 's')
-      .select('a.service_key_snapshot as service_key', 's.scheduled_date'),
+  const scope = (query) => place(query.where('s.customer_id', customerId).whereNotIn('s.status', NOT_BOOKED_STATUSES));
+  const [own, rows, held] = await Promise.all([
+    isUuid(customerId) ? scope(database('scheduled_services as s').whereIn('s.service_key_snapshot', serviceKeys)).select('s.service_key_snapshot as service_key', 's.scheduled_date') : [],
+    isUuid(customerId) ? scope(database('scheduled_service_addons as a').join('scheduled_services as s', 's.id', 'a.scheduled_service_id').whereIn('a.service_key_snapshot', serviceKeys))
+      .select('a.service_key_snapshot as service_key', 's.scheduled_date') : [],
+    heldDates(database, { customerId, keys, place, prospect }),
   ]);
   const out = new Map();
   for (const row of [...own, ...rows]) {
     const key = keyOfService.get(row.service_key);
     if (key && row.scheduled_date) out.set(key, [...(out.get(key) || []), dayOf(row.scheduled_date)]);
+  }
+  for (const [key, dates] of held) out.set(key, [...(out.get(key) || []), ...dates]);
+  return out;
+}
+
+// The two forms one person's contact takes in the estimates table, comparable in SQL and in JS: the last 10 digits of
+// the phone, and the address with everything but letters and digits dropped.
+const phoneKey = (value) => { const digits = String(value || '').replace(/\D/g, ''); return digits.length >= 10 ? digits.slice(-10) : ''; };
+const addressKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const prospectOf = (estimate) => ({ estimateId: estimate && estimate.id, phone: phoneKey(estimate && estimate.customer_phone), address: addressKey(estimate && estimate.address) });
+
+// Live holds (customer-less rows with an expiry) of OTHER estimates of the same person: a hold names no customer of its
+// own until its accept, and the add-ons it will book are on its estimate, not on the hold row. Same person = the known
+// customer's estimate, the same phone, or, when the estimate has no phone, the same address. The estimate's own hold is
+// the one being replaced or graduated, so it never counts against itself.
+async function heldDates(database, { customerId, keys, place, prospect }) {
+  const { estimateId = null, phone = '', address = '' } = prospect || {};
+  if (!isUuid(customerId) && !phone && !address) return new Map();
+  const grace = require('./slot-reservation').commitGraceMinutes();
+  const holds = await place(database('scheduled_services as s')
+    .whereNull('s.customer_id').whereNotNull('s.source_estimate_id').whereNotNull('s.reservation_expires_at')
+    .whereNotIn('s.status', NOT_BOOKED_STATUSES)
+    .whereRaw('s.reservation_expires_at >= NOW() - make_interval(mins => ?)', [grace]))
+    .modify((query) => { if (isUuid(estimateId)) query.whereNot('s.source_estimate_id', estimateId); })
+    .select('s.source_estimate_id', 's.scheduled_date');
+  const out = new Map();
+  if (!holds.length) return out;
+  const estimates = await database('estimates').whereIn('id', [...new Set(holds.map((hold) => hold.source_estimate_id))])
+    .where(function sameContact() {
+      if (isUuid(customerId)) this.orWhere('customer_id', customerId);
+      if (phone) this.orWhereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone]);
+      else if (address) this.orWhereRaw("regexp_replace(lower(COALESCE(address, '')), '[^a-z0-9]', '', 'g') = ?", [address]);
+    })
+    .select('id', 'estimate_data');
+  const soldBy = new Map(estimates.map((row) => [String(row.id), soldAddOnKeys(row.estimate_data)]));
+  for (const hold of holds) {
+    for (const key of (soldBy.get(String(hold.source_estimate_id)) || []).filter((k) => keys.includes(k))) {
+      if (hold.scheduled_date) out.set(key, [...(out.get(key) || []), dayOf(hold.scheduled_date)]);
+    }
   }
   return out;
 }
@@ -119,15 +164,17 @@ async function bookedDates(database, { customerId, propertyId, keys, excludeEsti
  * read fails (the caller decides what a failed read means). { available: true, asOf, byKey }.
  * Keys with no limit (the web sweep) are not read. No known customer: no reads, an empty summary.
  */
-async function loadAreaAddOnHistory(database, { customerId, propertyId = null, keys = [], asOf = etDateString(), excludeEstimateId = null, excludeVisitId = null } = {}) {
+async function loadAreaAddOnHistory(database, { customerId, propertyId = null, keys = [], asOf = etDateString(), excludeVisitId = null, excludeVisitIds = [], prospect = null } = {}) {
   const wanted = limitedKeys(keys);
   const empty = { available: true, asOf, byKey: {} };
-  if (!wanted.length || !isUuid(customerId)) return empty;
-  const property = await resolvePropertyId(database, customerId, propertyId);
-  const productByKey = await productIdsByKey(database, wanted);
+  const known = isUuid(customerId);
+  if (!wanted.length || !(known || (prospect && (prospect.phone || prospect.address)))) return empty;
+  // No customer yet (a new lead): the ledger is keyed by customer and has nothing; only the holds of the same person count.
+  const property = known ? await resolvePropertyId(database, customerId, propertyId) : (isUuid(propertyId) ? propertyId : null);
+  const productByKey = known ? await productIdsByKey(database, wanted) : new Map();
   const [ledger, booked] = await Promise.all([
-    ledgerDates(database, { customerId, propertyId: property, productByKey, asOf, excludeVisitId }),
-    bookedDates(database, { customerId, propertyId: property, keys: wanted, excludeEstimateId, excludeVisitId }),
+    known ? ledgerDates(database, { customerId, propertyId: property, productByKey, asOf, excludeVisitId }) : new Map(),
+    bookedDates(database, { customerId, propertyId: property, keys: wanted, excludeVisitIds: [...excludeVisitIds, excludeVisitId], prospect }),
   ]);
   const byKey = {};
   for (const key of wanted) byKey[key] = { dates: [...(ledger.get(key) || []), ...(booked.get(key) || [])].filter(Boolean).sort() };
@@ -238,6 +285,25 @@ async function unownedEstimateCustomer(database, estimate, resolveCustomer) {
   return isUuid(resolved) ? resolved : null;
 }
 
+// One transaction-scoped advisory lock per prospective identity: the phone's last 10 digits, then (also) the address. The
+// namespace is this check's own, so no other writer waits on it; take it AFTER the estimate row lock, the order the
+// reserve and the accept both already run in. Outside a transaction it fences nothing, so it does nothing.
+async function lockProspectIdentity(database, estimate) {
+  if (!database.isTransaction) return;
+  const { phone, address } = prospectOf(estimate);
+  for (const key of [phone && `phone:${phone}`, address && `address:${address}`].filter(Boolean)) {
+    await database.raw("SELECT pg_advisory_xact_lock(hashtext('area-addon-identity'), hashtext(?::text))", [key]);
+  }
+}
+
+// The earliest day of these visits (the rows a caller is committing), or null when none is named or found.
+async function visitsFirstDay(database, ids) {
+  const list = (ids || []).filter(isUuid);
+  if (!list.length) return null;
+  const rows = await database('scheduled_services as s').whereIn('s.id', list).select('s.scheduled_date');
+  return rows.map((row) => dayOf(row.scheduled_date)).filter(Boolean).sort()[0] || null;
+}
+
 const HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not be read, so the add-on yearly limits cannot be confirmed. Try again, or book the add-on by hand.';
 
 /**
@@ -248,26 +314,34 @@ const HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not
  * known at all (limitSubject). `customerId` and `property` ({ property_id }) are what the caller has verified (the
  * booking's customer and property); `resolveCustomer` is the caller's last resort for an unowned estimate
  * (the phone match), called only when nothing else names a customer. `appliedOn` is the day the add-on will
- * be applied (the booked visit); default today. `database` should be the accept transaction. Staff get the
+ * be applied (the booked visit); default the earliest day of `excludeVisitIds` (the rows being committed), else today. `database` should be the accept transaction. Staff get the
  * dates; the customer gets the office hand-off.
  */
-async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null, property = null, resolveCustomer = null, appliedOn = null, staff = false } = {}) {
+async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null, property = null, resolveCustomer = null, appliedOn = null, staff = false, excludeVisitIds = [] } = {}) {
   const keys = recheckKeys(estimate);
   if (!keys.length) return;
   let history;
+  let day = appliedOn;
   try {
+    // The caller named the visits it is committing but no day: the day is theirs (the earliest).
+    day = appliedOn || await visitsFirstDay(database, excludeVisitIds);
+    // No customer named yet (a new lead accepting): two accepts by the same person would each read an empty history and both
+    // commit. Serialize on who they are (phone, else address) BEFORE the read; a named customer is already serialized by the
+    // customer lock every booking of that customer takes.
+    if (![customerId, estimate.customer_id].some(isUuid)) await lockProspectIdentity(database, estimate);
     const subject = await limitSubject(database, estimate, { customerId, propertyId: property && property.property_id, resolveCustomer });
-    if (!subject.customerId) return;
     // In a savepoint: a failed read must not poison the transaction it runs inside (the 409 below is the answer).
     history = await savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
-      customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeEstimateId: estimate.id,
+      customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeVisitIds, prospect: prospectOf(estimate),
     }));
   } catch (err) {
+    // The caller's own retryable answer (the customer is being updated right now) is not a history failure.
+    if (err && err.code === 'CUSTOMER_BUSY_RETRY') throw err;
     logger.warn(`[area-addon-limits] accept recheck history unavailable for estimate ${estimate.id}: ${err.code || err.name}: ${err.message}`);
     throw limitError(409, HISTORY_CODE, staff ? HISTORY_STAFF_MESSAGE : HISTORY_CUSTOMER_MESSAGE);
   }
   const reached = keys
-    .map((key) => ({ key, verdict: areaAddOnLimitVerdict(key, history, { day: appliedOn }) }))
+    .map((key) => ({ key, verdict: areaAddOnLimitVerdict(key, history, { day: dayOf(day) }) }))
     .find(({ verdict }) => verdict && verdict.reason === LIMIT_REACHED_REASON);
   if (reached) throw limitError(409, LIMIT_CODE, staff ? reached.verdict.detail : LIMIT_CUSTOMER_MESSAGE, { addOnKey: reached.key, limit: reached.verdict });
 }
@@ -333,4 +407,6 @@ module.exports = {
   areaAddOnLimitRefusal,
   attachLimitUse,
   limitSubject,
+  phoneKey,
+  addressKey,
 };

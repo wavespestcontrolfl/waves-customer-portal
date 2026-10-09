@@ -54,7 +54,7 @@ function fakeTrx({ visits = [], addons = [], hasScopeColumn = true } = {}) {
       match() { return list.filter((r) => preds.every((p) => p(r))); },
       async select(...cols) { return q.match().map((r) => Object.fromEntries(cols.map((c) => [c, r[c]]))); },
       async first(...cols) { const r = q.match()[0]; return r ? Object.fromEntries(cols.map((c) => [c, r[c]])) : undefined; },
-      async update(data) { for (const r of q.match()) Object.assign(r, data.area_addon_scope === undefined ? data : { ...data, area_addon_scope: data.area_addon_scope === null ? null : stored(data.area_addon_scope) }); },
+      async update(data) { const hit = q.match(); for (const r of hit) Object.assign(r, data.area_addon_scope === undefined ? data : { ...data, area_addon_scope: data.area_addon_scope === null ? null : stored(data.area_addon_scope) }); return hit.length; },
       async del() { for (const r of q.match()) list.splice(list.indexOf(r), 1); },
       async insert(data) {
         const row = { id: `new-${state.nextId++}`, ...data, area_addon_scope: data.area_addon_scope === undefined ? null : stored(data.area_addon_scope) };
@@ -288,5 +288,64 @@ describe('3. the schedule feed lists each attached add-on with what it was sold 
     const never = () => { throw new Error('no query expected'); };
     never.schema = { hasColumn: never };
     expect((await rows.areaAddOnSoldByVisit(never, ['x'])).size).toBe(0);
+  });
+});
+
+describe('4. the staff "Create Appointment" from a linked estimate writes the sold scope itself (Codex round 9)', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const savedGate = process.env.GATE_AREA_ADDONS;
+  beforeAll(() => { process.env.GATE_AREA_ADDONS = 'true'; });
+  afterAll(() => { if (savedGate === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = savedGate; });
+  const estimateWith = (areaAddOns) => {
+    const v1Input = translateV2CallToV1Input({ homeSqFt: 2000, lotSqFt: 7500 }, ['OT_PEST'], { grassType: 'A', areaAddOns, areaAddOnVisit: 'sameTripAddOn' });
+    return { id: 'e-1', service_interest: 'One-time service', estimate_data: { result: mapV1ToLegacyShape(generateEstimate(v1Input)) } };
+  };
+  const SPOT_ENTRY = { key: 'lawn_insect_spot', areaSqFt: 1200, grassType: 'st_augustine' };
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  test('the scope is rebuilt from the linked estimate and written on each kept row, never from the posted line', async () => {
+    const trx = fakeTrx({ visits: [{ id: 'v-1', service_key_snapshot: 'one_time_pest' }], addons: [
+      { id: 'a-1', scheduled_service_id: 'v-1', service_key_snapshot: SPOT, service_name: 'Lawn Insect Spot Treatment', area_addon_scope: null },
+      { id: 'a-2', scheduled_service_id: 'v-1', service_key_snapshot: SWEEP, service_name: 'Web Sweep', area_addon_scope: null },
+    ] });
+    const estimate = estimateWith([SPOT_ENTRY, { key: 'web_sweep' }]);
+    expect(await rows.writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId: 'v-1', estimate, ownServiceKey: 'one_time_pest' })).toBe(2);
+    const spot = trx.state.addons.find((r) => r.id === 'a-1').area_addon_scope;
+    expect(spot).toEqual({ v: 1, addOnKey: 'lawn_insect_spot', catalogServiceKey: SPOT, areaSqFt: 1200, tierSqFt: 2000, grassType: 'st_augustine' });
+    expect(trx.state.addons.find((r) => r.id === 'a-2').area_addon_scope).toMatchObject({ addOnKey: 'web_sweep', catalogServiceKey: SWEEP });
+  });
+
+  test('the visit\'s own add-on gets its scope on the visit; a row the office removed is not added back; a row of another service takes nothing', async () => {
+    const trx = fakeTrx({ visits: [{ id: 'v-1', service_key_snapshot: SPOT, area_addon_scope: null }], addons: [
+      { id: 'a-3', scheduled_service_id: 'v-1', service_key_snapshot: 'pest_general_quarterly', service_name: 'Pest', area_addon_scope: null },
+    ] });
+    const estimate = estimateWith([SPOT_ENTRY, { key: 'web_sweep' }]);
+    await rows.writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId: 'v-1', estimate, ownServiceKey: SPOT });
+    expect(trx.state.visits[0].area_addon_scope).toMatchObject({ addOnKey: 'lawn_insect_spot', areaSqFt: 1200, tierSqFt: 2000, grassType: 'st_augustine' });
+    // the web sweep was not among the kept lines: nothing is inserted (the office's lines are the office's)
+    expect(trx.state.addons.map((r) => r.id)).toEqual(['a-3']);
+    expect(trx.state.addons[0].area_addon_scope).toBeNull();
+  });
+
+  test('an estimate with no sold add-on, or none at all, runs no query', async () => {
+    const never = () => { throw new Error('no query expected'); };
+    never.schema = { hasColumn: never };
+    for (const estimate of [null, { id: 'e', estimate_data: { result: { oneTime: { items: [{ service: 'one_time_pest', price: 150 }] } } } }]) {
+      expect(await rows.writeStaffBookedAreaAddOnScopes(never, { scheduledServiceId: 'v-1', estimate })).toBe(0);
+    }
+  });
+
+  test('the staff create runs it in the booking transaction, right after the add-on rows, from the linked estimate', () => {
+    const src = read('routes/admin-schedule.js');
+    const rowsInsert = src.indexOf('await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);');
+    const stamp = src.indexOf('writeStaffBookedAreaAddOnScopes(trx, {', rowsInsert);
+    const groups = src.indexOf("maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' })", rowsInsert);
+    expect(stamp).toBeGreaterThan(rowsInsert);
+    expect(groups).toBeGreaterThan(stamp);
+    expect(src.slice(stamp, stamp + 220)).toContain('estimate: linkedEstimate');
+    // the shared writer, not a second one
+    expect(read('services/area-addon-visit-rows.js')).toContain('return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });');
   });
 });
