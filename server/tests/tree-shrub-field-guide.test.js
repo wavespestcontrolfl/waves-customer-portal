@@ -162,8 +162,12 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
         expect(row.key === 'mainspring' && /caterpillar/i.test(row.where)).toBe(false);
       }
     }
-    for (const month of ['Mar', 'Apr', 'May', 'Jul', 'Aug']) {
-      expect(conditional(month)).toContainEqual({ key: 'acelepryn', where: 'Caterpillars, live finds' });
+    // The structured guide replaces the card text when it is on, so every card that names
+    // Acelepryn in its text must also carry the guide row.
+    for (const visit of visits) {
+      const named = /^Acelepryn /m.test(visit.secondary);
+      expect(visit.fieldGuide.conditional.some((row) => row.key === 'acelepryn')).toBe(named);
+      if (named) expect(visit.fieldGuide.conditional).toContainEqual({ key: 'acelepryn', where: 'Caterpillars, live finds' });
     }
   });
 
