@@ -19,6 +19,8 @@
  * extraction writes, passes through untouched.
  */
 
+const { counterpartServiceName } = require('../config/service-name-aliases');
+
 const ASSESSMENT = 'Waves Assessment';
 
 // What a part is ABOUT. First match wins, so the specific topics sit above
@@ -114,7 +116,11 @@ function catalogMatch(part, catalogNames) {
   if (NOT_CATALOG.has(lower)) return null;
   if (catalogNames) {
     // The quote wizard names the priced line without the catalog's ending.
-    return catalogNames.get(lower) || catalogNames.get(`${lower} service`) || null;
+    // ...and a lead saved before the 2026-08-29 cadence renames carries the
+    // old catalog name.
+    const renamed = counterpartServiceName(part);
+    return catalogNames.get(lower) || catalogNames.get(`${lower} service`)
+      || (renamed && catalogNames.get(renamed.toLowerCase())) || null;
   }
   return /\bService(?: \([^)]*\))?$/.test(part) ? part : null;
 }
@@ -129,8 +135,11 @@ function classify(part, catalogNames) {
   if (KEPT_LABELS.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
   const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
   if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: null };
-  const frequency = statesRecurring(part) ? 'recurring' : ONE_TIME_RE.test(part) ? 'one_time' : null;
   const catalogName = catalogMatch(part, catalogNames);
+  // The catalog's own name states the cadence even when the stored text
+  // (an old catalog name) does not.
+  const said = catalogName ? `${part} ${catalogName}` : part;
+  const frequency = statesRecurring(said) ? 'recurring' : ONE_TIME_RE.test(said) ? 'one_time' : null;
   const topics = topicsFor(part);
   if (catalogName) return { kind: 'catalog', name: catalogName, frequency, topic: topics[0] || null };
   if (!topics.length) return { kind: 'other', name: part, frequency };
@@ -149,7 +158,7 @@ const CADENCES = [
   ['Every 6 Weeks', /\bevery\s+(?:6|six)\s+weeks?\b/i],
   ['Monthly', /(?<!\bbi[-\s]?)\bmonthly\b|\bevery\s+month\b|\bper\s+month\b/i],
   ['Quarterly', /\bquarterly\b|\bevery\s+quarter\b|\bper\s+quarter\b/i],
-  ['Semiannual', /\bsemi[-\s]?annual(?:ly)?\b|\btwice\s+a\s+year\b/i],
+  ['Semiannual', /\bsemi[-\s]?annual(?:ly)?\b|\btwice\s+a\s+year\b|\bevery\s+(?:6|six)\s+months\b/i],
 ];
 const CADENCE_PREFIX_RE = new RegExp(`^(?:${CADENCES.map(([word]) => word).join('|')}) `);
 
@@ -193,14 +202,16 @@ function splitParts(text, catalogNames) {
   return parts;
 }
 
-// Where one part of the text goes: a name of its own, or into the
+// Where a part of each kind goes: a name of its own, or into the
 // assessment's brackets.
-function placePart(part, plan, name, toAssessment) {
-  if (part.kind === 'assessment') {
+const PLACE = {
+  assessment(part, plan, name, toAssessment) {
     if (plan.assess) toAssessment(null);
-  } else if (part.kind === 'other') {
+  },
+  other(part, plan, name) {
     name(part.name);
-  } else if (part.kind === 'catalog') {
+  },
+  catalog(part, plan, name, toAssessment) {
     // Beside a booked assessment only the recurring work it will look at
     // (or a termite inspection, which is the visit) joins the brackets; a
     // one-job catalog pick such as Rodent Trapping Service keeps its name.
@@ -210,7 +221,8 @@ function placePart(part, plan, name, toAssessment) {
     // recurring request reads as that topic's recurring service.
     else if (plan.recurring && part.frequency === 'one_time' && part.topic?.recurring) name(part.topic.recurring);
     else name(part.name);
-  } else {
+  },
+  topic(part, plan, name, toAssessment) {
     for (const topic of part.topics) {
       if (part.assess && !plan.oneTime) toAssessment(topic.short);
       else if (topic.fixed) name(topic.fixed);
@@ -220,8 +232,8 @@ function placePart(part, plan, name, toAssessment) {
       else if (plan.assess || !topic.recurring) toAssessment(topic.short);
       else name(recurringName(topic, part.text, plan.catalogNames));
     }
-  }
-}
+  },
+};
 
 function leadServiceDisplay(serviceInterest, { catalogNames = null } = {}) {
   const text = clean(serviceInterest);
@@ -242,7 +254,7 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null } = {}) {
     if (assessmentAt < 0) { assessmentAt = out.length; out.push(null); }
     if (short) shorts.push(short);
   };
-  for (const part of parts) placePart(part, plan, (label) => out.push(label), toAssessment);
+  for (const part of parts) PLACE[part.kind](part, plan, (label) => out.push(label), toAssessment);
   if (assessmentAt >= 0) out[assessmentAt] = assessmentLabel(shorts);
 
   return [...new Set(out.filter(Boolean))].join(' + ') || null;

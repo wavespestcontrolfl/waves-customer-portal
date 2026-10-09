@@ -102,6 +102,8 @@ describe('leadServiceDisplay', () => {
     ['Bi-monthly pest control for ants', 'Bi-Monthly Pest Control Service'],
     ['Quarterly Pest Control Service + monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
     ['Pest control twice a year', 'Semiannual Pest Control Service'],
+    ['Pest control every six months', 'Semiannual Pest Control Service'],
+    ['Lawn Care Program — Monthly', 'Monthly Lawn Care Service'], // catalog name before the 2026-08-29 rename
     ['Lawn care every six weeks', 'Every 6 Weeks Lawn Care Service'],
     ['Pest control every two months', 'Bi-Monthly Pest Control Service'],
     ['Quarterly pest control and monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
