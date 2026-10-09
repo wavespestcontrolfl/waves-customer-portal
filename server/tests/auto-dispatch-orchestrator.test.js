@@ -8,6 +8,8 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
   heldOutOfAutoDispatch: jest.requireActual('../services/auto-dispatch/eligibility').heldOutOfAutoDispatch,
+  lapsedPlanKeys: jest.fn(async () => new Set()),
+  planKey: jest.requireActual('../services/auto-dispatch/eligibility').planKey,
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -323,6 +325,24 @@ test('a lapsed plan on a visit with a divergent stamped address closes its stand
   await runAutoDispatch({ mode: 'dry_run' });
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// Pass 1 makes no plan read for a visit with no answer yet; the run's end
+// reads every collected series in one query (Codex #6208 r27 P2).
+test('pin notice candidates get one bulk plan read at the run\'s end, and a lapsed series closes', async () => {
+  servicesResult = [
+    svc({ id: 's1', recurring_parent_id: 'p1', service_address_line1: '1 Test Rd', customer_address_line1: '9 Sample Ave' }),
+    svc({ id: 's2', recurring_parent_id: 'p2', service_address_line1: '2 Test Rd', customer_address_line1: '9 Sample Ave' }),
+  ];
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.lapsedPlanKeys.mockImplementationOnce(async (rows) => new Set(rows.filter((r) => r.id === 's1').map(eligibility.planKey)));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(eligibility.lapsedPlanKeys).toHaveBeenCalledTimes(1);
+  expect(eligibility.lapsedPlanKeys.mock.calls[0][0].map((r) => r.id)).toEqual(['s1', 's2']);
+  // One single-visit read: just before the one NEW notice (s2).
+  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(1);
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
   expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
 });
 

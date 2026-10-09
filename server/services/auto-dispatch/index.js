@@ -15,7 +15,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
+const {
+  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit,
+} = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
 const { resolveGeo } = require('./geo');
@@ -729,11 +731,8 @@ async function flagMissingGeo(service) {
 
 // The missing-pin notice is for a visit on a live plan only: a lapsed plan's
 // visit is not placed anyway. Fails open, like isRecurringPlanActive itself.
-// `planCheck` is the answer eligibilityWithGeoHeal already read for this
-// visit; only the divergent-address path, which skips that read, looks the
-// plan up here (Codex #6208 r8 P2).
-async function missingGeoNoticeWanted(service, planCheck) {
-  if (planCheck) return planCheck.active;
+// The single-visit read, used only just before a NEW notice is raised.
+async function missingGeoNoticeWanted(service) {
   try {
     return (await isRecurringPlanActive(service, db)).active;
   } catch (err) {
@@ -749,7 +748,11 @@ async function noticeMissingGeo(run, service, planCheck) {
   // standing notice for it closes at the run's end. This is the path for a
   // visit eligibility stopped before its own plan check (a stamped address
   // that differs from the customer's; Codex #6208 r6 P2).
-  if (!(await missingGeoNoticeWanted(service, planCheck))) { run.pinOkIds.add(String(service.id)); return; }
+  // `planCheck` is the answer eligibilityWithGeoHeal already read. A visit
+  // with no answer yet (the divergent-address path, or past the geocode cap)
+  // is NOT read here, one query per visit: the run's end reads every
+  // collected series in one query (raiseMissingGeoNotices; r27 P2).
+  if (planCheck && !planCheck.active) { run.pinOkIds.add(String(service.id)); return; }
   const date = toDateStr(service.scheduled_date);
   run.missingGeoWanted.push({ id: service.id, customer_id: service.customer_id, recurring_parent_id: service.recurring_parent_id, scheduled_date: date, date });
 }
@@ -813,16 +816,26 @@ async function raiseMissingGeoNotices(run) {
   try {
     // Re-read every wanted visit BEFORE the budget picks, so a visit fixed
     // since pass 1 does not hold a slot a later visit needs (Codex #6208 r9 P2).
-    const waiting = await stillMissingPin(run, run.missingGeoWanted);
+    const stillOff = await stillMissingPin(run, run.missingGeoWanted);
+    // One plan read for every collected series: a lapsed plan's visit raises
+    // nothing and joins the close list (r6, r27 P2).
+    const lapsed = await lapsedPlanKeys(stillOff, db);
+    const waiting = stillOff.filter((row) => {
+      if (!lapsed.has(planKey(row))) return true;
+      run.pinOkIds.add(String(row.id));
+      return false;
+    });
     const standing = await audit.standingMissingGeoKeys();
     let left = await audit.ringsLeft();
     // Date order; a slot is spent only by a NEW notice that is raised. The
-    // plan is read again just before each notice: one that lapsed since pass 1
-    // raises nothing, joins the close list and leaves its slot (r11 P2).
+    // plan is read once more just before a NEW notice (at most the allowance
+    // plus the dropped rows): one that lapsed in between raises nothing,
+    // joins the close list and leaves its slot (r11 P2). A standing notice is
+    // covered by the bulk read above.
     for (const row of audit.withinRingBudget(waiting, standing, Infinity, audit.missingGeoKey)) {
       // Allowance spent: nothing more is raised, a standing notice included.
       if (left <= 0) break;
-      if (!(await missingGeoNoticeWanted(row))) { run.pinOkIds.add(String(row.id)); continue; }
+      if (!standing.has(audit.missingGeoKey(row)) && !(await missingGeoNoticeWanted(row))) { run.pinOkIds.add(String(row.id)); continue; }
       // Only a write that rang spends a slot (r13, r14, r16 P2).
       if (await flagMissingGeo(row)) left -= 1;
     }
