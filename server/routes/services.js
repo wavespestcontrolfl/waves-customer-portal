@@ -20,6 +20,7 @@ const CUSTOMER_PRODUCT_COLUMNS = [
 ];
 const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
 const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
+const applicationLimits = require('../services/application-limits');
 const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
 router.use(authenticate);
@@ -160,16 +161,21 @@ router.get('/stats/summary', async (req, res, next) => {
       .select('thatch_measurement', 'service_date')
       .first();
 
-    // Celsius applications this year (cap tracking), per lawn like the cap itself: the selected
-    // property's when the session is scoped to one, else the busiest lawn's.
+    // Celsius applications in the cap's window (cap tracking): the last 365 days under the v13 program, the calendar year before it
+    // (application-limits windowForName, the one window the cap itself counts). Per lawn like the cap: the selected property's
+    // when the session is scoped to one, else the busiest lawn's.
     const scope = await resolveSessionScope(req);
-    const celsiusCount = await celsiusApplicationsThisYear(req.customerId, etYearStart, {
+    const celsiusWindow = applicationLimits.windowForName('Celsius WG', etDateString());
+    const celsiusCount = await celsiusApplicationsThisYear(req.customerId, celsiusWindow.start, {
       propertyId: scope && scope.scoped && scope.property ? scope.property.id : null,
     });
 
     res.json({
       servicesYTD: parseInt(servicesYTD.count),
       celsiusApplicationsThisYear: celsiusCount,
+      // The window that count used, from the same windowForName call: 'rolling365' (the last 365 days, v13) or 'calendar_year'. The
+      // portal words the line from it, so the text and the count cannot disagree.
+      celsiusWindow: celsiusWindow.rolling ? 'rolling365' : 'calendar_year',
       // The one canonical reader: 2 under the v13 lawn program, 3 before it (GATE_LAWN_V13 off).
       celsiusMaxPerYear: celsiusYtdCap(),
       thatch: {
