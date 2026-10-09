@@ -11,10 +11,11 @@
 // (or listed here and gone), so a section added to the page cannot silently drop out of the lawn layout.
 
 export const STANDARD_BODY_COVERAGE = Object.freeze({
-  ServiceStatusCard: { how: 'slot', key: 'status' },
+  LawnStatusCard: { how: 'slot', key: 'status', note: 'the status card (GATE_LAWN_REPORT_POLISH wrapper): the layout slot is the same wrapper' },
   LawnWateringBanner: { how: 'yourPart', note: 'printed once inside the Your part card' },
   LawnLeadCard: { how: 'split', note: 'next visit, Your part, what we did, score, what to expect, watching' },
   ReserviceReportCard: { how: 'slot', key: 'reservice' },
+  LawnNewSodCard: { how: 'slot', key: 'newSod', note: 'the New sod card (GATE_LAWN_NEW_SOD_REPORT_CARD): same component after the yourPart section' },
   PlanSummaryCard: { how: 'slot', key: 'plan' },
   NearYouCard: { how: 'slot', key: 'nearYou' },
   ReviewRequestCard: { how: 'slot', key: 'review', note: 'the bottom mount needs !reviewAskOnTop, false whenever reportV2 exists' },

@@ -29,6 +29,7 @@ const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
+const moveRules = require('./move-rules');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -134,20 +135,6 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
     .limit(5000);
 }
 
-// Whether an improvement clears the move bar for THIS visit — the ONE rule
-// governing both the top-level move/no_change decision on `best` and which
-// candidates may ever reach apply.js as a SLOT_TAKEN fallback candidate
-// (GATE_AUTO_DISPATCH_SHARED_MODEL). An unplaced recurring due-date visit
-// (a due date with no window_start yet) accepts ANY placement over none;
-// every other visit needs its own improvement over the current placement to
-// clear `threshold`. Factored out (Codex pre-push P1) so a fallback
-// candidate is filtered by EXACTLY the rule `best` was — a below-threshold,
-// or literally worse-than-current, placement must never reach apply.js.
-function visitClearsMoveThreshold(service, improvement, threshold) {
-  if (service.recurring_dispatch_due_date && !service.window_start) return true;
-  return improvement >= threshold;
-}
-
 /**
  * The audit fields (`newPlacement`, `scores`, `routeMetrics`, `constraints`)
  * and rounded improvement for ONE candidate scored against ONE current
@@ -160,11 +147,17 @@ function visitClearsMoveThreshold(service, improvement, threshold) {
 function buildPlacementAudit({
   current, currentScore, candidate, candidateScore, service, prefs, lockBoundary, ctx, threshold,
 }) {
-  const improvement = Math.round((candidateScore.total_score - currentScore.total_score) * 100) / 100;
+  // The gain move-rules.js judged the candidate on: the raw score difference,
+  // less the default-time credit when the candidate is a day move.
+  const improvement = moveRules.moveGain({
+    service, current, currentScore, cand: candidate, candScore: candidateScore,
+  });
   const scores = { old: currentScore.total_score, new: candidateScore.total_score, improvement };
   const routeMetrics = {
     current_detour_minutes: current.detour_minutes,
     candidate_detour_minutes: candidate.detour_minutes,
+    day_move: moveRules.isDayMove(current, candidate),
+    drive_saving_minutes: moveRules.driveSavingMinutes(current, candidate),
     candidate_total_drive_minutes: candidate.total_drive_minutes,
     stops_that_day: candidate.stops_that_day,
     current_score_breakdown: currentScore,
@@ -186,6 +179,8 @@ function buildPlacementAudit({
     preferred_days: prefs.preferred_days,
     effective_time_window: prefs.effective_time_window && prefs.effective_time_window.key,
     ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}),
+    // Ids and codes only: why this visit cannot stay in its slot.
+    ...(current.conflict ? { conflict: current.conflict } : {}),
   };
   return {
     improvement, newPlacement, scores, routeMetrics, constraints,
@@ -245,6 +240,12 @@ function staleAnchorReason(reason, tierMeta) {
   };
 }
 
+// Ids and codes only: the overlap or closed day a visit sits in, for an audit
+// row with no candidate (a person must place it; Codex #6207 r14 P2).
+function conflictOf(current) {
+  return current && current.conflict ? { conflict: current.conflict } : {};
+}
+
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
     current, candidates, drops, skipped,
@@ -257,26 +258,17 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       kind: 'no_change',
       reason_code: reason.code,
       reason_description: reason.description,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
     };
   }
 
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
   const currentScore = scoreAppointmentPlacement(current, prefs, scoreCtx);
-  let best = null;
-  let bestScore = null;
   // Every candidate's score, in encounter order — kept (not just the single
   // best) so a SLOT_TAKEN apply-time refusal (GATE_AUTO_DISPATCH_SHARED_MODEL)
   // can fall back to the next-best still-scored candidate rather than giving
-  // up. Does not change which candidate wins `best`/`bestScore` below (still
-  // the first strictly-greater score encountered) — this is additional
-  // bookkeeping only.
-  const scored = [];
-  for (const cand of candidates) {
-    const sc = scoreAppointmentPlacement(cand, prefs, scoreCtx);
-    scored.push({ cand, sc });
-    if (!bestScore || sc.total_score > bestScore.total_score) { best = cand; bestScore = sc; }
-  }
+  // up.
+  const scored = candidates.map((cand) => ({ cand, sc: scoreAppointmentPlacement(cand, prefs, scoreCtx) }));
 
   // Already-moved visits must clear a higher bar (defeats the stability penalty)
   // so the job never thrashes the same customer day to day.
@@ -284,38 +276,129 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     ? Math.max(config.minScoreImprovement, config.removeStabilityFloor)
     : config.minScoreImprovement;
 
+  // move-rules.js is the ONE rule for which candidate may move this visit:
+  // `ranked.best` and every entry of `ranked.ranked` (apply.js's SLOT_TAKEN
+  // fallback list, Codex pre-push P1) passed the same drive floor and score
+  // bar — a below-bar or worse-than-current placement never reaches apply.js.
+  // Ties keep encounter order.
+  const ranked = moveRules.rankCandidates({
+    service, current, currentScore, scored, threshold, config,
+  });
+  const { best } = ranked;
+
   const {
     improvement, newPlacement, scores, routeMetrics, constraints,
   } = buildPlacementAudit({
-    current, currentScore, candidate: best, candidateScore: bestScore, service, prefs, lockBoundary, ctx, threshold,
+    current, currentScore, candidate: best, candidateScore: ranked.bestScore, service, prefs, lockBoundary, ctx, threshold,
   });
 
-  // Stable sort (Node/V8 Array#sort is stable): ties keep candidates' original
-  // encounter order, matching the strict `>` tie-break above — rankedCandidates[0]
-  // is always the SAME object as `best` whenever `best` itself qualifies.
-  // Filtered to candidates that themselves clear the SAME move threshold
-  // (Codex pre-push P1): apply.js's SLOT_TAKEN fallback must never be
-  // offered a placement that would not have qualified as `best` on its own.
-  // Capped by TOTAL SCORE (Codex r1): with the gate on, findValidCandidateSlots
+  // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
   // returns every survivor and each was scored above before this cap.
-  const rankedCandidates = scored.slice()
-    .sort((a, b) => b.sc.total_score - a.sc.total_score)
-    .filter((s) => visitClearsMoveThreshold(
-      service, Math.round((s.sc.total_score - currentScore.total_score) * 100) / 100, threshold,
-    ))
-    .slice(0, ctx.scoreCap || SCORE_CAP)
-    .map((s) => s.cand);
+  const rankedCandidates = ranked.ranked.slice(0, ctx.scoreCap || SCORE_CAP);
 
   const auditCtx = {
     newPlacement, scores, prefsSnapshot, routeMetrics, constraints,
   };
 
-  if (!visitClearsMoveThreshold(service, improvement, threshold)) {
-    return { kind: 'no_change', reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}`, audit: auditCtx };
-  }
+  if (!ranked.qualifies) return { kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), audit: auditCtx };
   return {
     kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
+    withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
   };
+}
+
+// For a visit in conflict that an ordinary optimization would move anyway:
+// the move apply mode makes once the overlapping partner has left, when the
+// visit is evaluated with no conflict — its own slot, gain and audit numbers
+// (Codex #6207 r10 P2). Null for every other visit.
+function ordinaryMoveOf(ranked, { current, prefsSnapshot, ...rest }) {
+  if (!ranked.normalBest) return null;
+  const { conflict: _conflict, conflict_unit_ids: _unit, ...clear } = current;
+  const {
+    improvement, newPlacement, scores, routeMetrics, constraints,
+  } = buildPlacementAudit({ ...rest, current: clear, candidate: ranked.normalBest, candidateScore: ranked.normalBestScore });
+  return { improvement, best: ranked.normalBest, current: clear, audit: { newPlacement, scores, prefsSnapshot, routeMetrics, constraints } };
+}
+
+function overlapOf(evalResult) {
+  const conflict = evalResult.current && evalResult.current.conflict;
+  return conflict && conflict.kind === 'overlap' ? conflict : null;
+}
+
+function logDryRunRecommendation(run, service, evalResult, note = '') {
+  run.totals.recommended++;
+  return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: `${wouldMoveDescription(evalResult)}${note}`, ...evalResult.audit, appliedBy: 'auto_dispatch' });
+}
+
+// Dry run only: one recommendation per overlapping pair, in the order apply
+// mode uses (byDueThenImprovement: the cheaper fix first). In apply mode
+// pass 2 re-evaluates each visit against the live schedule, so once one
+// visit of a pair has moved the other is no longer in conflict; a dry run
+// moves nothing, so a visit whose every overlapping partner is already
+// recommended is logged as staying (Codex #6207 r6 P2) — unless an ordinary
+// optimization would move it anyway, as apply mode then does (r8 P2).
+// The rows a recommended conflict fix moves: the visit and its group.
+function unitIdsOf(pm) {
+  const ids = pm.result.current && pm.result.current.conflict_unit_ids;
+  return ids && ids.length ? ids.map(String) : [String(pm.service.id)];
+}
+
+async function recommendOverlapFixes(run) {
+  // `movers`: rows a conflict fix moves for certain; only these clear a
+  // partner's overlap. `estimated`: rows of an ordinary-rules estimate, which
+  // apply mode may not make, so they clear nothing downstream (r14 P2).
+  const movers = new Set();
+  const estimated = new Set();
+  for (const pm of run.dryRunOverlaps.sort(byDueThenImprovement)) {
+    const partners = (overlapOf(pm.result).with || []).map(String);
+    // A visit whose own unit is already recommended moves with it: one
+    // recommendation for the unit, as apply mode makes one move (r9 P2).
+    if (movers.has(String(pm.service.id)) || estimated.has(String(pm.service.id))) {
+      await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'This visit moves with its group, which is already recommended to move', ...pm.result.audit });
+      continue;
+    }
+    const cleared = partners.length && partners.every((id) => movers.has(id));
+    if (cleared && pm.result.withoutConflict) {
+      // The partner's move clears the overlap; this visit then moves on the
+      // ordinary rules, to the slot those rules pick.
+      // An ESTIMATE: a dry run moves nothing, so this slot is scored on the
+      // schedule before the partner's move; apply mode evaluates the visit
+      // again after that move and may pick another slot or none. The row
+      // says so (Codex #6207 r12 P2).
+      for (const id of unitIdsOf(pm)) estimated.add(id);
+      await logDryRunRecommendation(run, pm.service, pm.result.withoutConflict, ' after the overlapping visit moves (estimate: scored before that move)');
+    } else if (cleared) {
+      await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });
+    } else {
+      for (const id of unitIdsOf(pm)) movers.add(id);
+      await logDryRunRecommendation(run, pm.service, pm.result);
+    }
+  }
+}
+
+function signed(n) { return n >= 0 ? `+${n}` : String(n); }
+
+function wouldMoveDescription(evalResult) {
+  const conflict = evalResult.current && evalResult.current.conflict;
+  return `Would move${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(evalResult.improvement)})`;
+}
+
+// Why the nearest candidate did not move the visit: a day move that cleared
+// the score bar and saved too little drive, or a gain under the bar.
+function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
+  if (ranked.ceilingFailed) {
+    return {
+      reason_code: 'CONFLICT_NO_NEAR_SLOT',
+      reason_description: `In conflict, but the nearest free slot adds ${-routeMetrics.drive_saving_minutes} drive minutes > ${config.conflictMaxAddedDriveMinutes} allowed; a person must place it`,
+    };
+  }
+  if (ranked.floorFailed) {
+    return {
+      reason_code: 'NO_DRIVE_SAVING',
+      reason_description: `Best day move saves ${routeMetrics.drive_saving_minutes} drive minutes < ${config.minDayMoveDriveSavingMinutes} required`,
+    };
+  }
+  return { reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}` };
 }
 
 // The audit fields for whichever candidate apply.js ACTUALLY applied
@@ -834,6 +917,8 @@ async function evaluateServiceForRun(service, run) {
     dateToleranceDays: config.dateToleranceDays,
     capabilityFor: run.capabilityFor,
     topN: 60,
+    // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
+    conflictMoves: config.conflictMovesEnabled === true,
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
@@ -861,21 +946,54 @@ async function evaluateServiceForRun(service, run) {
   // so the per-run change cap spends its budget on the highest-value
   // moves rather than whichever happened to come first by scheduled_date.
   if (config.mode === 'dry_run') {
-    totals.recommended++;
-    return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: `Would move (+${evalResult.improvement})`, ...evalResult.audit, appliedBy: 'auto_dispatch' });
+    // An overlap is recommended at the end of the pass, in apply's own order
+    // (recommendOverlapFixes), so the dry run names the visit apply would move.
+    if (overlapOf(evalResult)) {
+      run.dryRunOverlaps.push({ service, result: evalResult });
+      return undefined;
+    }
+    return logDryRunRecommendation(run, service, evalResult);
   }
   run.plannedMoves.push({ service, prefs, ctx, result: evalResult });
   return undefined;
 }
 
 // Pass-2 order: due deadlines first (the earliest unplaced due date before
-// its placement window closes), then descending route gain.
+// its placement window closes), then visits in conflict (an overlap or a
+// closed day: they cannot stay where they are; cheapest fix first), then
+// descending route gain.
 function byDueThenImprovement(a, b) {
   const aDue = !a.service.window_start ? toDateStr(a.service.recurring_dispatch_due_date) : null;
   const bDue = !b.service.window_start ? toDateStr(b.service.recurring_dispatch_due_date) : null;
   return Number(!!bDue) - Number(!!aDue)
     || (aDue && bDue ? aDue.localeCompare(bDue) : 0)
+    || Number(inConflict(b)) - Number(inConflict(a))
+    || cheaperConflictFix(a, b)
     || b.result.improvement - a.result.improvement;
+}
+
+// Of two visits in conflict, the one with the cheaper fix goes first: a
+// same-day re-time before a day move, then the least added drive. When the
+// two overlap each other, the first to move clears the conflict for both
+// (the second re-evaluates live and stays), so the cheaper fix is the one
+// applied (replay 2026-10-09: load order moved a visit to another day when
+// its partner had a free hour the same day).
+function cheaperConflictFix(a, b) {
+  if (!inConflict(a) || !inConflict(b)) return 0;
+  const m = (pm) => (pm.result.audit && pm.result.audit.routeMetrics) || {};
+  return Number(!!m(a).day_move) - Number(!!m(b).day_move)
+    || (Number(m(b).drive_saving_minutes) || 0) - (Number(m(a).drive_saving_minutes) || 0);
+}
+
+function inConflict(pm) {
+  return !!(pm.result.current && pm.result.current.conflict);
+}
+
+// "Moved (+12.5)", naming the conflict the move cleared when there was one.
+const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day' };
+function movedDescription(appliedAudit) {
+  const conflict = appliedAudit.constraints && appliedAudit.constraints.conflict;
+  return `Moved${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(appliedAudit.improvement)})`;
 }
 
 // Re-check the active day-move guard right before applying — pass 1 read it
@@ -948,6 +1066,9 @@ async function applyPlannedMove(pm, run, attempt) {
   const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, {
     ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary,
     alternateCandidates: fresh.rankedCandidates,
+    // The conflict that lifted the bar for this move; the move guard re-reads
+    // it on the move transaction and refuses when it is gone.
+    sourceConflict: (fresh.current && fresh.current.conflict) || null,
     rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
   });
   totals.changed += result.movedCount || 1;
@@ -961,7 +1082,7 @@ async function applyPlannedMove(pm, run, attempt) {
     action: 'changed',
     service: pm.service,
     reason_code: 'CHANGE_APPLIED',
-    reason_description: `Moved (+${appliedAudit.improvement})`,
+    reason_description: movedDescription(appliedAudit),
     oldPlacement: { date: toDateStr(pm.service.scheduled_date), window_start: pm.service.window_start, window_end: pm.service.window_end, technician_id: pm.service.technician_id, status: result.pre_status },
     newPlacement: { ...appliedAudit.newPlacement, status: result.post_status },
     scores: appliedAudit.scores,
@@ -1062,6 +1183,7 @@ async function runAutoDispatch(opts = {}) {
     // Apply-mode only: qualifying moves found in the pass-1 sweep, applied
     // best-improvement-first in pass 2 so the change cap funds the largest gains.
     plannedMoves: [],
+    dryRunOverlaps: [],
     quarantinedIds: new Set(),
     guardReadDegraded: false, // a failed guard read must not report a green run
     // Visits skipped for a missing pin on a live plan this run, and whether
@@ -1097,7 +1219,8 @@ async function runAutoDispatch(opts = {}) {
 
     run.pass1Complete = totals.failed === 0;
 
-    if (config.mode !== 'dry_run') await runPassTwo(run);
+    if (config.mode === 'dry_run') await recommendOverlapFixes(run);
+    else await runPassTwo(run);
 
     if (totals.failed > 0 || run.guardReadDegraded) runStatus = 'completed_with_errors';
   } catch (fatal) {

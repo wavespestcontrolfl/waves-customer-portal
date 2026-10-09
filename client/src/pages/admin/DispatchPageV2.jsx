@@ -90,16 +90,20 @@ import {
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
-import { reportFlowFields, stationMapKnownOff } from "../../lib/pest-fast-complete";
+import { reportFlowFields, stationMapKnownOff, stationMapKnownOn } from "../../lib/pest-fast-complete";
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
+import FastCompleteComboSheet from '../../components/tech/FastCompleteComboSheet';
+import { comboMembersFor } from '../../lib/combo-fast-complete';
 import {
   mergePostPaymentService,
   fastCompleteSheetFor,
+  invoicedSheetResponse,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
 import FastCompleteTreeShrubSheet from "../../components/tech/FastCompleteTreeShrubSheet";
 import FastCompleteLawnSheet from "../../components/tech/FastCompleteLawnSheet";
+import FastCompleteAssessmentSheet from "../../components/tech/FastCompleteAssessmentSheet";
 import FastCompleteLawnReserviceSheet from "../../components/tech/FastCompleteLawnReserviceSheet";
 import FastCompleteSheet from "../../components/tech/FastCompleteSheet";
 import { shortAddress } from "../tech/visitBrief";
@@ -395,6 +399,9 @@ function lawnReserviceSheetService(row) {
     routedScheduledDate: row.scheduledDate || row.scheduled_date || null,
     routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
     routedAddress: typeof row.address === "string" ? row.address : null,
+    // Already invoiced from the payment flow: the sheet posts the full form's
+    // invoiceAlreadySent (lib/completion-invoice-fields.js).
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
   };
 }
 
@@ -477,6 +484,8 @@ export default function DispatchPageV2({
   // an eligible visit opens instead of CompletionPanel.
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnFastService, setLawnFastService] = useState(null);
+  // The Waves Assessment's one-screen sheet (GATE_ASSESSMENT_FAST_COMPLETE).
+  const [assessmentFastService, setAssessmentFastService] = useState(null);
   // The lawn re-service's own sheet (GATE_LAWN_RESERVICE_FAST_COMPLETE, owner
   // 2026-10-08), as the technician home opens it.
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
@@ -488,8 +497,13 @@ export default function DispatchPageV2({
   // said the flag is off (isTypedReportEligible), as on the technician home.
   const stationMap = useFeatureFlagReady("station-map-v1");
   const stationMapOff = stationMapKnownOff(stationMap);
+  // GATE_STATION_FAST_COMPLETE: with the map known ON, a termite or rodent bait
+  // station visit also opens the sheet, which carries the station checks.
+  const stationSheetOn = stationMapKnownOn(stationMap);
   const fastCompleteOperatorId = fastCompleteOperatorOf(useOutletContext());
   const [closingVisitId, setClosingVisitId] = useState(null);
+  // A stop of one regular pest visit and one lawn visit, on the one-screen container (GATE_COMBO_FAST_COMPLETE).
+  const [comboStop, setComboStop] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
   // report opens right here in the schedule — the same interaction as the
@@ -919,6 +933,68 @@ export default function DispatchPageV2({
       void fetchSchedule(date, { silent: true });
     }
   };
+  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet, shared by the sheet opened
+  // on its own and by the same sheet as a part of a pest + lawn stop (FastCompleteComboSheet).
+  // `a || b` over a row's snake_case and camelCase spellings, as the sheets were always given them.
+  const pickOf = (row, ...keys) => keys.reduce((found, key) => found || row[key], undefined);
+  const lawnSheetService = (row) => ({
+    id: row.id,
+    customerName: pickOf(row, 'customer_name', 'customerName'),
+    serviceType: pickOf(row, 'service_type', 'serviceType'),
+    address: shortAddress(row.address) || row.address || "",
+    // The customer block under the title (name link, directions, call).
+    customerId: pickOf(row, 'customerId', 'customer_id') || null,
+    fullAddress: typeof row.address === "string" ? row.address : "",
+    customerPhone: pickOf(row, 'customerPhone', 'customer_phone') || "",
+    // When the technician checked in (the Time on-site clock), by the full
+    // form's own rule: the on-site status-log entry, else checkInTime.
+    onSiteAt: onSiteTimeOf(row) || null,
+    timeLabel: serviceWindowLabel(row) || "",
+    // Server-computed (GATE_TRACE_ELIGIBILITY): false hides the
+    // treatment-zone row, since the save route would refuse the trace.
+    traceEligible: row.traceEligible,
+    // Decides whether a zero stock holds Complete (WaveGuard lawn visits may go negative).
+    waveguardTier: row.waveguardTier || null,
+    // The visit the user opened, checked against the live context.
+    routedCustomerId: pickOf(row, 'customerId', 'customer_id') || null,
+    routedScheduledDate: pickOf(row, 'scheduledDate', 'scheduled_date') || null,
+    routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
+    routedAddress: typeof row.address === "string" ? row.address : null,
+    // Checked against the live visit: the office may have changed the service since.
+    routedServiceType: row.serviceTypeRaw || null,
+    routedCatalogServiceId: row.catalogServiceId || null,
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
+  });
+  const pestSheetService = (row) => ({
+    id: row.id,
+    customerName: pickOf(row, 'customer_name', 'customerName'),
+    serviceType: pickOf(row, 'service_type', 'serviceType'),
+    address: shortAddress(row.address) || row.address || "",
+    timeLabel: serviceWindowLabel(row) || "",
+    // The visit the user opened, checked against the live context
+    // (same fields TechHomePage routes the sheet with).
+    routedCustomerId: pickOf(row, 'customerId', 'customer_id') || null,
+    routedScheduledDate: pickOf(row, 'scheduledDate', 'scheduled_date') || null,
+    routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
+    routedAddress: typeof row.address === "string" ? row.address : null,
+    routedServiceType: row.serviceTypeRaw ?? null,
+    routedServiceKey: row.completionProfile?.serviceKey || null,
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
+    // Only an exact true turns the customer recap on (see the sheet).
+    recapEnabled: row.fastCompleteRecapEnabled === true,
+    // The report flow, with what the sheet reads of it from the row
+    // (a lane visit's lane, a typed visit's form, the trace step), as
+    // TechHomePage passes it. Never forced on: a station visit whose
+    // station map turns on or unread while the sheet is open drops
+    // out of the report flow, and the sheet then blocks and points
+    // to the full form (Codex P2 on #6140).
+    ...reportFlowFields(row, { stationMapOff, stationSheetOn }),
+    noteBoxPhotosEnabled: row.noteBoxPhotosEnabled === true,
+    technicianName: pickOf(row, 'technicianName', 'technician_name') || null,
+    lat: row.lat ?? null,
+    lng: row.lng ?? null,
+  });
+
   const handleComplete = useCallback((service, { fullForm = false } = {}) => {
     // A durable resume marker means CompletionPanel already committed this
     // closeout and owes a replay — it bypasses the project-backed guard (a
@@ -926,6 +1002,13 @@ export default function DispatchPageV2({
     // the guard would otherwise strand the committed side effects).
     if (completionResumeMarked(service)) {
       setCompletingService(service);
+      return;
+    }
+    // A grouped stop that is exactly one regular pest visit and one lawn visit (the gate rides the row): the short screen,
+    // before the long visit closeout below. Anything else, or the sheet's own "Full form", falls through unchanged.
+    const comboPair = comboMembersFor(service, fullForm ? null : data?.services);
+    if (comboPair) {
+      setComboStop({ visitId: service.visitId, ...comboPair });
       return;
     }
     if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
@@ -951,14 +1034,15 @@ export default function DispatchPageV2({
       lawn_reservice: setLawnReserviceFastService,
       tree_shrub: setTreeShrubFastService,
       lawn: setLawnFastService,
+      assessment: setAssessmentFastService,
       pest: setPestFastService,
-    }[fastCompleteSheetFor(service, { stationMapOff })];
+    }[fastCompleteSheetFor(service, { stationMapOff, stationSheetOn })];
     if (openSheet) {
       openSheet(service);
       return;
     }
     setCompletingService(service);
-  }, [data?.visitCloseout, stationMapOff]);
+  }, [data?.visitCloseout, data?.services, stationMapOff, stationSheetOn]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -1022,9 +1106,12 @@ export default function DispatchPageV2({
         ["service_complete_with_invoice", "service_report_v1_with_invoice"].includes(r?.completionSmsType) &&
         r?.completionSmsStatus === "sent";
       const invoiceWasAlreadyPaid = r?.invoiceStatus === "paid";
+      // A Fast Complete sheet passes the visit it completed as fallbackService
+      // (and no body): its invoice was already sent on the same terms.
       const invoiceWasAlreadySent =
         !!body?.invoiceAlreadySent ||
-        !!completingService?.completionInvoiceAlreadySent;
+        !!completingService?.completionInvoiceAlreadySent ||
+        !!fallbackService?.completionInvoiceAlreadySent;
       if (
         isMobile &&
         r?.invoiceId &&
@@ -1909,6 +1996,25 @@ export default function DispatchPageV2({
           void fetchSchedule(date, { silent: true });
         }}
       />}
+      {comboStop && <FastCompleteComboSheet
+        key={comboStop.visitId}
+        visitId={comboStop.visitId}
+        pest={{ service: pestSheetService(comboStop.pest), voiceFillEnabled: comboStop.pest.fastCompleteVoiceFillEnabled === true }}
+        lawn={{ service: lawnSheetService(comboStop.lawn) }}
+        request={adminFetch}
+        operatorId={fastCompleteOperatorId}
+        catalog={products}
+        onClose={() => setComboStop(null)}
+        onSaved={() => {
+          setScheduleRefreshKey((value) => value + 1);
+          void fetchSchedule(date, { silent: true });
+        }}
+        onFullForm={() => {
+          const visitId = comboStop.visitId;
+          setComboStop(null);
+          setClosingVisitId(visitId);
+        }}
+      />}
       {completingService && (
         <CompletionPanel
           service={completingService}
@@ -1976,6 +2082,7 @@ export default function DispatchPageV2({
             routedScheduledDate: treeShrubFastService.scheduledDate || treeShrubFastService.scheduled_date || null,
             routedPropertyId: "propertyId" in treeShrubFastService ? treeShrubFastService.propertyId : undefined,
             routedAddress: typeof treeShrubFastService.address === "string" ? treeShrubFastService.address : null,
+            completionInvoiceAlreadySent: !!treeShrubFastService.completionInvoiceAlreadySent,
           }}
           request={adminFetch}
           operatorId={fastCompleteOperatorId}
@@ -2004,12 +2111,13 @@ export default function DispatchPageV2({
           operatorId={fastCompleteOperatorId}
           voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
           onClose={closeFastSheet(setLawnReserviceFastService)}
-          onCompleted={() => {
-            // As the pest sheet below: flip the row to completed, invalidate
-            // the mobile week cache, refetch.
+          onCompleted={(response) => {
+            // As the lawn sheet below: flip the row to completed, invalidate
+            // the mobile week cache, stage the payment handoff for an unpaid
+            // invoice, refetch.
             const service = lawnReserviceFastService;
             setLawnReserviceFastService(null);
-            applyCompletionResult(service.id, null, null, service);
+            applyCompletionResult(service.id, invoicedSheetResponse(service, response), null, service);
             void fetchSchedule(date, { silent: true });
           }}
           // The sheet's "Full form" button: the long form for this visit.
@@ -2023,33 +2131,7 @@ export default function DispatchPageV2({
       {lawnFastService && (
         <FastCompleteLawnSheet
           key={lawnFastService.id}
-          service={{
-            id: lawnFastService.id,
-            customerName: lawnFastService.customer_name || lawnFastService.customerName,
-            serviceType: lawnFastService.service_type || lawnFastService.serviceType,
-            address: shortAddress(lawnFastService.address) || lawnFastService.address || "",
-            // The customer block under the title (name link, directions, call).
-            customerId: lawnFastService.customerId || lawnFastService.customer_id || null,
-            fullAddress: typeof lawnFastService.address === "string" ? lawnFastService.address : "",
-            customerPhone: lawnFastService.customerPhone || lawnFastService.customer_phone || "",
-            // When the technician checked in (the Time on-site clock), by the full
-            // form's own rule: the on-site status-log entry, else checkInTime.
-            onSiteAt: onSiteTimeOf(lawnFastService) || null,
-            timeLabel: serviceWindowLabel(lawnFastService) || "",
-            // Server-computed (GATE_TRACE_ELIGIBILITY): false hides the
-            // treatment-zone row, since the save route would refuse the trace.
-            traceEligible: lawnFastService.traceEligible,
-            // Decides whether a zero stock holds Complete (WaveGuard lawn visits may go negative).
-            waveguardTier: lawnFastService.waveguardTier || null,
-            // The visit the user opened, checked against the live context.
-            routedCustomerId: lawnFastService.customerId || lawnFastService.customer_id || null,
-            routedScheduledDate: lawnFastService.scheduledDate || lawnFastService.scheduled_date || null,
-            routedPropertyId: "propertyId" in lawnFastService ? lawnFastService.propertyId : undefined,
-            routedAddress: typeof lawnFastService.address === "string" ? lawnFastService.address : null,
-            // Checked against the live visit: the office may have changed the service since.
-            routedServiceType: lawnFastService.serviceTypeRaw || null,
-            routedCatalogServiceId: lawnFastService.catalogServiceId || null,
-          }}
+          service={lawnSheetService(lawnFastService)}
           request={adminFetch}
           operatorId={fastCompleteOperatorId}
           catalog={products}
@@ -2077,48 +2159,61 @@ export default function DispatchPageV2({
           }}
         />
       )}
+      {assessmentFastService && (
+        <FastCompleteAssessmentSheet
+          key={assessmentFastService.id}
+          service={{
+            id: assessmentFastService.id,
+            customerName: assessmentFastService.customer_name || assessmentFastService.customerName,
+            serviceType: assessmentFastService.service_type || assessmentFastService.serviceType,
+            address: shortAddress(assessmentFastService.address) || assessmentFastService.address || "",
+            // The whole address, for the "Create estimate" prefill (the line above is display only).
+            fullAddress: assessmentFastService.address || "",
+            timeLabel: serviceWindowLabel(assessmentFastService) || "",
+            // The visit the user opened. The sheet sends it with the completion
+            // for the server to check against the live visit.
+            routedCustomerId: assessmentFastService.customerId || assessmentFastService.customer_id || null,
+            routedScheduledDate: assessmentFastService.scheduledDate || assessmentFastService.scheduled_date || null,
+            routedPropertyId: "propertyId" in assessmentFastService ? assessmentFastService.propertyId : undefined,
+            routedServiceType: assessmentFastService.serviceTypeRaw || null,
+            // What decides whether the sheet shows the inspection credit.
+            completionProfile: assessmentFastService.completionProfile || null,
+            inspectionCreditAvailable: assessmentFastService.inspectionCreditAvailable === true,
+          }}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          onClose={closeFastSheet(setAssessmentFastService)}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, refetch.
+            const service = assessmentFastService;
+            setAssessmentFastService(null);
+            applyCompletionResult(service.id, response, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          onFullForm={() => {
+            const service = assessmentFastService;
+            setAssessmentFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
+        />
+      )}
       {pestFastService && (
         <FastCompleteSheet
           key={pestFastService.id}
-          service={{
-            id: pestFastService.id,
-            customerName: pestFastService.customer_name || pestFastService.customerName,
-            serviceType: pestFastService.service_type || pestFastService.serviceType,
-            address: shortAddress(pestFastService.address) || pestFastService.address || "",
-            timeLabel: serviceWindowLabel(pestFastService) || "",
-            // The visit the user opened, checked against the live context
-            // (same fields TechHomePage routes the sheet with).
-            routedCustomerId: pestFastService.customerId || pestFastService.customer_id || null,
-            routedScheduledDate: pestFastService.scheduledDate || pestFastService.scheduled_date || null,
-            routedPropertyId: "propertyId" in pestFastService ? pestFastService.propertyId : undefined,
-            routedAddress: typeof pestFastService.address === "string" ? pestFastService.address : null,
-            routedServiceType: pestFastService.serviceTypeRaw ?? null,
-            routedServiceKey: pestFastService.completionProfile?.serviceKey || null,
-            // Only an exact true turns the customer recap on (see the sheet).
-            recapEnabled: pestFastService.fastCompleteRecapEnabled === true,
-            // The report flow, with what the sheet reads of it from the row
-            // (a lane visit's lane, a typed visit's form, the trace step), as
-            // TechHomePage passes it. Never forced on: a station visit whose
-            // station map turns on or unread while the sheet is open drops
-            // out of the report flow, and the sheet then blocks and points
-            // to the full form (Codex P2 on #6140).
-            ...reportFlowFields(pestFastService, { stationMapOff }),
-            noteBoxPhotosEnabled: pestFastService.noteBoxPhotosEnabled === true,
-            technicianName: pestFastService.technicianName || pestFastService.technician_name || null,
-            lat: pestFastService.lat ?? null,
-            lng: pestFastService.lng ?? null,
-          }}
+          service={pestSheetService(pestFastService)}
           request={adminFetch}
           operatorId={fastCompleteOperatorId}
           voiceFillEnabled={pestFastService.fastCompleteVoiceFillEnabled === true}
           onClose={closeFastSheet(setPestFastService)}
-          onCompleted={() => {
-            // The sheet sends the response nowhere, so only the bookkeeping
-            // that needs none runs: flip the row to completed, invalidate the
-            // mobile week cache, refetch.
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the row
+            // to completed, invalidate the mobile week cache, stage the payment
+            // handoff for an unpaid invoice (the lane and typed flows too),
+            // refetch.
             const service = pestFastService;
             setPestFastService(null);
-            applyCompletionResult(service.id, null, null, service);
+            applyCompletionResult(service.id, invoicedSheetResponse(service, response), null, service);
             void fetchSchedule(date, { silent: true });
           }}
           // The sheet's "Full form" button: the long form for this visit.

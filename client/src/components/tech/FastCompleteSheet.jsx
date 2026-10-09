@@ -78,7 +78,9 @@ import {
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import { pestSweepActions, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
-import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import useFastCompleteSubmit, { PREPARE_REFUSAL } from '../../hooks/useFastCompleteSubmit';
+import { isReserviceVisit } from '../../lib/pest-fast-complete';
+import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
@@ -87,9 +89,10 @@ import {
   TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
   typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
-  useVisitPhotos, useVisitPromises, useVisitTrace,
+  useTraceReuse, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
+import { NO_STATION_GATE, NO_STATION_READ, StationCard, useStationChecks } from './FastCompleteStations';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
 import AREA_SCOPES from '../../../../shared/treatment-area-scopes.json';
 import {
@@ -97,10 +100,11 @@ import {
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from '../../lib/typed-findings-rules';
 import {
-  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
-  SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
-  useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
+  SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
+  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
+import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
 // Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
 export { isSendableRateUnit };
@@ -191,6 +195,8 @@ const routedLaneOf = (service) => (service?.reportFlow === true && service.laneF
 // the form the live visit must still read as, and whose record the sheet
 // reads.
 const routedTypedOf = (service) => (service?.reportFlow === true && service.typedFlow === true ? service.typedType || null : null);
+// Whether the visit was routed with the station checks on the sheet (GATE_STATION_FAST_COMPLETE).
+const routedStationsOf = (service) => !!routedTypedOf(service) && service.stationsFlow === true;
 
 // Whether the live visit is still one this sheet takes as it was routed: a
 // lane visit its lane, a typed visit its form, any other one the short form.
@@ -495,24 +501,40 @@ const SHEET_TITLES = {
 const INERT = { 'aria-hidden': true, inert: '' };
 // A re-service: the pest re-service itself, or a free callback booked under
 // a regular service key. Neither gets a pay link or a review ask.
-const isReserviceVisit = (visit) => visit?.serviceKey === 'pest_re_service' || visit?.isCallback === true;
 function sheetTitle(reportFlow, visit, done) {
   return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
 }
 
 // Whether the header shows Full form: always on the older short form (a
 // re-service outside the report flow); in the report flow only while the form
-// says the visit needs it or the sheet could not open the visit.
-function fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx }) {
-  if (!reportFlow || fullFormNeeded) return true;
+// says the visit needs it or the sheet could not open the visit. A bait station
+// visit (`stationsFlow`, GATE_STATION_FAST_COMPLETE) always offers it: adding,
+// moving or retiring a station and the inspection-only outcome are the full
+// form's alone, and the visit routes here whenever it is eligible.
+function fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow = false }) {
+  if (!reportFlow || fullFormNeeded || stationsFlow) return true;
   return !!(ctx.loadError || ctx.blockedReason);
 }
 
-export default function FastCompleteSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
+// Prepare mode (GATE_COMBO_FAST_COMPLETE; a part of a grouped stop): the final action hands the body to
+// `onPrepared(serviceId, body)` instead of posting /complete, and `sharedNote` is the stop's one note,
+// which drives this sheet's note. Only the plain pest report flow can be a part: a lane, typed or
+// re-service sheet refuses to prepare, so it can never post a completion for a stop member.
+function prepareFor(service, onPrepared) {
+  if (typeof onPrepared !== 'function') return null;
+  const plain = service?.reportFlow === true && !routedLaneOf(service) && !routedTypedOf(service);
+  return plain ? onPrepared : () => { throw new Error(PREPARE_REFUSAL); };
+}
+
+export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
-  useLockBodyScroll(true);
+  // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
+  const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
+  useLockBodyScroll(!embedded);
+  const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
+  // As a part of a stop, every write the sheet sends is counted as work in flight (see useWriteTracking).
+  const request = useWriteTracking(plainRequest, embedded === true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const reportFlow = service?.reportFlow === true;
@@ -532,7 +554,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   });
   // Only the report flow renders the confirmable prompts (the edited-report
   // heads-up, a promise changed since the report was written).
-  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow, invoiceFields: completionInvoiceFields(service), onPrepared: prepareFor(service, onPrepared) });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
   // Another dialog a sheet opens over itself (the report flow's spray
@@ -551,8 +573,9 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   // so Full form and Close wait on it too).
   const [voiceBusy, setVoiceBusy] = useState(false);
   // The form's own word that this visit needs the full form (see the header).
+  usePartBusy('pest', [submitting, voiceBusy, dictationPending, photoBusy].some(Boolean));
   const [fullFormNeeded, setFullFormNeeded] = useState(false);
-  const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx });
+  const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow: routedStationsOf(service) });
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -564,7 +587,9 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
     // Voice still recording, transcribing or filling: closing (×, backdrop or
     // Escape all come through here) would drop those words and the sheet's edits.
     if (submitting || voiceBusy) return;
-    if (done) onCompleted?.();
+    // The completion response rides along: admin Dispatch reads its invoice
+    // fields to stage the payment handoff.
+    if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, voiceBusy, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
@@ -575,7 +600,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   const locked = submissionHolds(submission) || !!submission.prompt;
 
   return (
-    <FastCompleteFrame
+    <Frame
       isMobile={isMobile}
       dialogRef={dialogRef}
       titleId={titleId}
@@ -586,18 +611,18 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
       )) || sheetOverlay}
     >
       <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onClose={close} fullFormOffered={fullFormOffered} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} />
-    </FastCompleteFrame>
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} />
+    </Frame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy, sharedNote }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
   if (submission.done && (!reportFlow || submission.restored)) {
     return (
-      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         {reportFlow ? <>
           <SentSummary result={submission.done.response} base={`/admin/dispatch/${service.id}`} request={request} followupBooking={ctx.followupBooking} />
           <CollectPayment result={submission.done.response} />
@@ -613,7 +638,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   if (reportFlow) {
-    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} sharedNote={sharedNote} />;
   }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} />;
 }
@@ -691,6 +716,11 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   }, []);
   const tips = useTipLibrary({ base: `/admin/dispatch/${service?.id}`, request });
   const tipsAvailable = !!tips;
+  const dictating = useDictationSources(onDictationPending);
+  const serviceId = service?.id;
+  const setCustomTip = useCallback((value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId })), []);
+  // What the tech tapped or said lifts the advice for it; never a pick.
+  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { pests: [...form.pests], note: form.note }), [tips, form.pests, form.note]);
 
   const chooseMethod = useCallback((next) => {
     setField('method', next);
@@ -775,7 +805,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             (now or added later) can end the speech session early. */}
         <fieldset className="tech-visit-form" disabled={formLocked}>
           <VoiceFillReview voice={voice} locked={formLocked} />
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={formLocked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={serviceId} locked={formLocked} />
           <OfficeNote voice={voice} locked={formLocked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
@@ -819,8 +849,11 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               tipId={form.tipId}
               customTip={form.customTip}
               locked={formLocked}
+              priorityTipIds={liftedTipIds}
+              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
-              onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+              onCustom={setCustomTip}
+              mic={{ serviceId, onPendingChange: dictating.tip }}
             />
           )}
         </fieldset>
@@ -1082,7 +1115,7 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // `productsFromNote` (voice fill, a note not yet read for products): Generate
 // reads the products out of the note first, so neither an empty list nor a row
 // still missing its amount holds it; both are judged again once the note is read.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, stationHold = '', ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
@@ -1093,6 +1126,10 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
     [!photosLoaded, 'Loading photos…'],
     [photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
+    // A station visit's stations (GATE_STATION_FAST_COMPLETE): the first report
+    // is never written without them, and one that cannot be judged goes to the
+    // Full form.
+    [stationHold, stationHold],
     [!active.length && noProduct, noProduct],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
@@ -1216,7 +1253,7 @@ function typedScoreOf(schema, record) {
   return Number.isInteger(derived) ? derived : null;
 }
 
-function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true }) {
+function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true, stationSendHold = '' }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const values = record.values;
   const missing = typedCardFields(typedSchema).find((field) => typedFieldRequiredNow(field, values) && !String(values[field.key] ?? '').trim());
@@ -1244,6 +1281,10 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
     : typedFormTakesPlaces(typedSchema.type, { sprayed }));
   return [
     ...ready.report,
+    // The stations not known yet (never "all OK" before the note was read), or a
+    // consumption mark beside "None" (the completion refuses it); it holds
+    // before the count fields read as missing.
+    [stationSendHold, stationSendHold],
     [missing, missing && (typedIn ? `Fill in ${missing.label}.` : `Pick ${missing.label}: tap Change beside it.`)],
     [setupConflict, setupConflict],
     [placesMissing, areaField
@@ -1371,7 +1412,16 @@ function pestFactsOf(heard, { houseMix = false } = {}) {
 // unclear. A record that already holds every field the note could fill is
 // answered without a read (nothing new, nothing failed). Anything else is a
 // read that failed: nothing fills.
+// The answer carries TWO reads that run side by side on the server, the form's
+// fields and (GATE_STATION_FAST_COMPLETE) the stations, each with its own
+// verdict. They are independent in both directions: the typed part is decided
+// by `status` alone, the station part by `stationRead` alone, and no branch of
+// the typed part may drop the station part (Codex P2 on #6205).
 function typedFactsOf(heard) {
+  return { ...typedPartOf(heard), ...stationPartOf(heard) };
+}
+
+function typedPartOf(heard) {
   if (heard?.available === true && heard.status === 'nothing_to_fill') {
     return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
   }
@@ -1390,6 +1440,29 @@ function typedFactsOf(heard) {
   };
 }
 
+function stationPartOf(heard) {
+  return { stationExceptions: stationExceptionsOf(heard), stationRead: stationReadOf(heard), stationReadDetail: heard?.stationReadDetail };
+}
+
+// The station exceptions the note named (GATE_STATION_FAST_COMPLETE): the
+// server verified each (an active station of the visit's program, a status the
+// sheet reads, words in the note); undefined when the request carried no
+// stations or the station read did not answer, which leaves the marks as they
+// are. The sheet's own marks judge them again by the stations it shows.
+function stationExceptionsOf(heard) {
+  // A clean read, or an unresolved one (part of what was said could not be pinned
+  // down): the exceptions that verified come either way.
+  const brought = heard?.stationRead === 'read' || heard?.stationReadDetail === 'unresolved';
+  if (!brought || !Array.isArray(heard.stationExceptions)) return undefined;
+  return heard.stationExceptions.filter((item) => item && typeof item.id === 'string' && typeof item.status === 'string' && typeof item.quote === 'string');
+}
+
+// Whether the note's station read is KNOWN to have succeeded: only the server's
+// explicit 'read'. A missing key (a read that never ran, an answer that never
+// came) is never an empty list: it is 'failed'. A typed read that failed says
+// nothing about it: the stations have their own verdict.
+const stationReadOf = (heard) => (heard?.available === true && heard.stationRead === 'read' ? 'read' : 'failed');
+
 // Each record mode's reader and the facts it answers.
 const READS = {
   lane: { endpoint: 'lane-facts', factsOf: laneFactsOf },
@@ -1402,14 +1475,17 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
-  const write = useCallback(async ({ buildPayload, note, current, scoreSet, signature, fresh, extraRead = null }) => {
+  const write = useCallback(async ({ buildPayload, note, current, scoreSet, stationRead = NO_STATION_READ, signature, fresh, extraRead = null }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
     setWriteError('');
     const read = READS[mode] || PEST_READ;
     // A typed read is judged beside the record's present values (never
     // stored on the server).
-    const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true } : { note };
+    // A station visit's read also carries the stations the sheet shows
+    // (GATE_STATION_FAST_COMPLETE), for the server to read their exceptions.
+    const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true, ...stationRead.body() } : { note };
+    stationRead.begin(note);
     // `extraRead` (voice fill): the note's products, read beside its facts; the
     // answer goes to `signature` and `buildPayload`, which land it on the rows.
     const [heard, extra] = await Promise.all([
@@ -1418,6 +1494,15 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     ]);
     const facts = read.factsOf(heard, { houseMix });
     if (sequence !== sequenceRef.current) return;
+    // A station visit's report is never written without the station read: a
+    // read that did not succeed leaves the stations unknown, and unknown is
+    // never "all OK" (the station module settles the read and says why not).
+    const stationError = stationRead.check(facts, note);
+    if (stationError) {
+      setWriting(false);
+      setWriteError(stationError);
+      return;
+    }
     // The signature of what the report is written from, read included (a
     // lane visit's record fills from the read).
     const draftSignature = signature(facts, extra);
@@ -1456,6 +1541,10 @@ function useLaneRecord(service) {
   const recordFor = (facts) => (lane ? mergeLaneRecord(ref.current, facts, preset) : null);
   return {
     lane,
+    // A lane visit has no stations.
+    stationRead: NO_STATION_READ,
+    stationGate: NO_STATION_GATE,
+    stationsChanged: () => {},
     mode: lane ? 'lane' : null,
     record: lane ? laneRecord : null,
     // What the report is written from, for its stale check.
@@ -1471,7 +1560,8 @@ function useLaneRecord(service) {
       }
       return filled;
     },
-    card: ({ draft, locked, writing }) => (lane ? (
+    // The report step renders this unconditionally: the record shows with the report.
+    card: ({ draft, locked, writing }) => (lane && draft && !writing ? (
       <LaneRecordCard
         lane={lane}
         preset={preset}
@@ -1489,7 +1579,7 @@ function useLaneRecord(service) {
 // visit's own record (its typed form's values and, when the tech sets it,
 // the activity score) in place of the pest facts. With no typed form every
 // part answers as absent.
-function useTypedRecord(service) {
+function useTypedRecord(service, request, note = '') {
   const typed = routedTypedOf(service);
   const schema = typed && service.typedSchema?.type === typed ? service.typedSchema : null;
   const [typedRecord, setTypedRecord] = useState(EMPTY_TYPED_RECORD);
@@ -1499,58 +1589,127 @@ function useTypedRecord(service) {
   // toggle), on unless the tech turns it off; sent only where it is offered.
   const creditOffered = !!schema && service.inspectionCredit === true;
   const [offerCredit, setOfferCredit] = useState(true);
+  // A bait station visit routed with the station map on (GATE_STATION_FAST_COMPLETE):
+  // the stations load, the note names exceptions and the station counts come
+  // from the stations, as the full form's map fills them. Inert otherwise.
+  const stations = useStationChecks({ service, request, enabled: !!schema && service.stationsFlow === true, note });
+  // The record with the station counts the stations give (they replace anything
+  // typed for those fields, which the card hides).
+  // Their per-station statuses ride on it for the draft's signature, sorted so
+  // the same marks always read the same.
+  const withCounts = (record, counts, statuses = {}) => (record && counts
+    ? {
+      ...record,
+      values: { ...record.values, ...counts },
+      stationStatuses: Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)),
+      // What the stations stand on: the note's read, or the tech's hand check.
+      stationBasis: stations.byHand ? 'hand' : 'note',
+      // The roster changed under the sheet since: the report is written again.
+      stationEpoch: stations.rosterEpoch,
+    }
+    : record);
   // The record a read lands on: only fields still empty that nobody picked,
   // and only from an answer for this form.
   const recordFor = (facts) => {
     if (!schema) return null;
-    return facts?.type === schema.type ? mergeTypedRecord(ref.current, facts) : ref.current;
+    const merged = facts?.type === schema.type ? mergeTypedRecord(ref.current, facts) : ref.current;
+    if (!stations.active) return merged;
+    const heardMarks = stations.heardMarks(facts?.stationExceptions);
+    return withCounts(merged, stations.countsFor(heardMarks), heardMarks.statuses);
   };
+  const shown = withCounts(schema ? typedRecord : null, stations.counts, stations.marks.statuses);
+  // The card hides the count fields the stations fill.
+  const cardSchema = schema && stations.active && stations.counts
+    ? { ...schema, fields: schema.fields.filter((field) => !Object.hasOwn(stations.counts, field.key)) }
+    : schema;
   return {
     lane: null,
     mode: schema ? 'typed' : null,
     schema,
-    record: schema ? typedRecord : null,
+    record: shown,
     // What the read is judged beside (the server never fills over it), and
     // whether the tech's rating is already set.
-    current: typedRecord.values,
+    current: shown ? shown.values : typedRecord.values,
     scoreSet: typedRecord.score != null,
-    signaturePart: (record) => (record ? { typed: [record.values, record.score] } : null),
+    // A station visit's per-station statuses are part of what the report says
+    // (a chip tap makes the draft stale even when the counts do not move).
+    signaturePart: (record) => (record
+      ? { typed: record.stationStatuses ? [record.values, record.score, record.stationStatuses, record.stationBasis, record.stationEpoch] : [record.values, record.score] }
+      : null),
+    // How the report write reads the stations from the note (a no-op when not to).
+    stationRead: stations.stationRead,
+    // The server refused the completion: the stations changed since they were read.
+    stationsChanged: stations.rosterChanged,
+    // What the stations allow now: Generate waits on the registry (a registry the
+    // sheet cannot judge goes to the full form); Complete on the stations being
+    // known (the note's read, or the tech's hand check), then on a consumption
+    // mark beside "None".
+    stationGate: { generate: stations.gate.generate, complete: stations.gate.complete || stations.gate.conflict(shown?.values) },
     inputs: (record, facts) => {
       const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
-      return creditOffered ? { ...fields, completionExtras: { ...fields.completionExtras, offerInspectionCredit: offerCredit } } : fields;
+      const entries = stations.entries();
+      // The tech's station statuses go to the report writer as theirs, over
+      // what the note says (the writer's correction, as the sweep chip's).
+      const stationChecks = stations.currentChecks();
+      return creditOffered || entries.length || stationChecks
+        ? {
+          ...fields,
+          ...(stationChecks ? { writerExtras: { ...fields.writerExtras, stationChecks } } : {}),
+          completionExtras: {
+            ...fields.completionExtras,
+            ...(creditOffered ? { offerInspectionCredit: offerCredit } : {}),
+            // The full form's own body field: a check for every pinned station.
+            ...(entries.length ? { termiteStations: entries, stationRosterSeen: entries.map((entry) => entry.id) } : {}),
+          },
+        }
+        : fields;
     },
     recordFor,
     settle: (facts) => {
+      // The exceptions the note named land first, so the filled record carries
+      // their counts.
+      if (stations.active && facts?.stationExceptions !== undefined) stations.applyHeard(facts.stationExceptions);
       const filled = recordFor(facts);
       if (filled) {
-        ref.current = filled;
-        setTypedRecord(filled);
+        // The raw record is kept; the counts are derived from the marks.
+        const raw = facts?.type === schema?.type ? mergeTypedRecord(ref.current, facts) : ref.current;
+        ref.current = raw;
+        setTypedRecord(raw);
       }
       return filled;
     },
-    card: ({ draft, locked, writing }) => (schema ? (
-      <>
-        <TypedRecordCard
-          schema={schema}
-          record={typedRecord}
-          unclear={draft?.facts?.unclearFields || []}
-          scoreUnclear={draft?.facts?.scoreUnclear === true}
-          readFailed={draft?.facts?.status === 'failed'}
-          locked={locked || writing}
-          onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
-          onScore={(score) => setTypedRecord((prev) => scoreTypedRecord(prev, score))}
-        />
-        {creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
-      </>
-    ) : null),
+    // The report step renders this unconditionally. The record shows with the
+    // report; the stations card also shows before one when its read failed.
+    card: ({ draft, locked, writing }) => {
+      if (!schema) return null;
+      const reportOn = !!draft && !writing;
+      return (
+        <>
+          <StationCard checks={stations} locked={locked || writing} shown={reportOn} />
+          {reportOn && (
+            <TypedRecordCard
+              schema={cardSchema}
+              record={typedRecord}
+              unclear={draft?.facts?.unclearFields || []}
+              scoreUnclear={draft?.facts?.scoreUnclear === true}
+              readFailed={draft?.facts?.status === 'failed'}
+              locked={locked || writing}
+              onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
+              onScore={(score) => setTypedRecord((prev) => scoreTypedRecord(prev, score))}
+            />
+          )}
+          {reportOn && creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
+        </>
+      );
+    },
   };
 }
 
 // The record a report-flow visit keeps: a lane visit's, a typed visit's, or
 // none (a pest visit, whose facts the note gives).
-function useVisitRecord(service) {
+function useVisitRecord(service, request, note = '') {
   const laneState = useLaneRecord(service);
-  const typedState = useTypedRecord(service);
+  const typedState = useTypedRecord(service, request, note);
   return laneState.lane ? laneState : typedState;
 }
 
@@ -1564,7 +1723,7 @@ function productLaneOf(service) {
 
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
-  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled = false,
+  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled = false, sharedNote,
 }) {
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
@@ -1573,7 +1732,7 @@ function ReportFlowForm({
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
   const isReservice = isReserviceVisit(ctx.visit);
-  const [form, setForm] = useState(() => ({
+  const [ownForm, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
     // The sweep chip (owner 2026-10-08): null until the tech taps it, then
@@ -1586,6 +1745,9 @@ function ReportFlowForm({
     promiseMarks: {},
     blogPost: null,
   }));
+  // A stop's one note (sharedNote, prepare mode) stands in for this sheet's own: every read of the
+  // note below (voice fill, typed facts, Generate, the body) sees it, and the sheet's note box hides.
+  const form = useSharedNoteForm(ownForm, sharedNote);
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
   const visitPromises = useVisitPromises({ base, request });
@@ -1602,10 +1764,30 @@ function ReportFlowForm({
   const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
   const trace = useVisitTrace({ serviceId: service.id, request });
   // A lane or typed visit's own record (or none: a pest visit).
-  const recordState = useVisitRecord(service);
+  const recordState = useVisitRecord(service, request, form.note);
   const { lane, mode, record } = recordState;
+  // The server refused the completion because the property's stations changed
+  // since they were read: the sheet loads them again and reads the note again.
+  const { errorCode: submitCode } = submission;
+  useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
+  usePartBusy('pest-report', !!writing);
+  // After the note's read: the best tip for the pests the reader heard and the
+  // words of the note. Offered only while the tech has no tip of their own
+  // choosing (or has taken this one); never picked for them.
+  const tipOffer = useMemo(() => {
+    const readPests = draft?.facts?.pests;
+    if (!tips || !draft || form.customTip.trim()) return null;
+    const id = pestSheetTipIds(tips, { // The reader names pests in its own words ("ghost ants"): read as a note is.
+      pests: pestsInNote(Array.isArray(readPests) ? readPests.join('. ') : ''), note: form.note })[0];
+    if (!id || (form.tipId && form.tipId !== id)) return null;
+    const tip = [...(tips.groups || []).flatMap((group) => group.tips || []), ...(tips.more || [])].find((entry) => entry.id === id);
+    return tip ? {
+      library: tips, tip, pressed: form.tipId === id,
+      onPick: () => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' })),
+    } : null;
+  }, [tips, draft, form.note, form.tipId, form.customTip]);
   const [step, setStep] = useState('visit');
   // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL): the products the note names are
   // read when the report is written and land as rows the tech confirms. On a
@@ -1639,6 +1821,7 @@ function ReportFlowForm({
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
     form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
+    stationHold: recordState.stationGate.generate,
   };
   const noteText = form.note.trim();
   const generateMissing = reportFlowMissing({
@@ -1646,6 +1829,7 @@ function ReportFlowForm({
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
+    stationSendHold: recordState.stationGate.complete,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
   // The header's Full form button: a hold that sends the tech to the full
@@ -1714,6 +1898,8 @@ function ReportFlowForm({
       // A typed read is judged beside the record's present values.
       current: recordState.current,
       scoreSet: recordState.scoreSet,
+      // A station visit's read also names the stations the sheet shows.
+      stationRead: recordState.stationRead,
       signature: (facts, productFill) => writerSignature(form, rowsFor(facts, productFill), promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
       extraRead: productVoice.read && !preFilled ? () => productVoice.read(form.note) : null,
       fresh,
@@ -1725,18 +1911,23 @@ function ReportFlowForm({
     const areas = where ? where() : (draft?.facts?.areas || []);
     return [active.map((row) => row.name).join(', '), areas.join(', ')].filter(Boolean).join(' · ');
   };
+  const buildBody = () => reportCompletionBody({
+    form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
+    recordFields: recordState.inputs(record, draft?.facts),
+    traceOnReport: ctx.traceOnReport,
+    photos: visitPhotos.photos,
+  });
+  // Prepare mode: a part is prepared only while it could be prepared right now. Exactly when the Complete button is
+  // there and enabled: the report is fresh for the current note and inputs (no write action), nothing is waiting on
+  // a prompt or a hold, and the visit is the plain pest report flow (no re-service, callback, lane or typed record).
+  const canPrepare = [!action, !submission.prompt, !completeMissing.reason, !mode, !isReserviceVisit(ctx.visit)].every(Boolean);
   const submit = () => {
     if (completeMissing.reason && !submission.hasPendingBody()) return;
-    submission.submit(
-      () => reportCompletionBody({
-        form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
-        recordFields: recordState.inputs(record, draft?.facts),
-        traceOnReport: ctx.traceOnReport,
-        photos: visitPhotos.photos,
-      }),
-      summary(),
-    );
+    submission.submit(buildBody, summary(), { valid: canPrepare });
   };
+  // A part of a stop (prepare mode): a change behind the handed-over body, or a part that can no longer be prepared
+  // (a stale report, a hold), revokes it.
+  useEffect(() => { submission.revokeIfChanged(buildBody, { valid: canPrepare }); });
   // The tracer opens over the sheet, the way the photo manager does.
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal
@@ -1757,6 +1948,10 @@ function ReportFlowForm({
   // completed elsewhere) is shown and the hold stays.
   const [removingTrace, setRemovingTrace] = useState(false);
   const [traceError, setTraceError] = useState('');
+  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
+  const reuse = useTraceReuse({
+    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
+  });
   const removeTrace = async () => {
     setRemovingTrace(true);
     setTraceError('');
@@ -1776,7 +1971,7 @@ function ReportFlowForm({
       description: visitPromises.promises.find((promise) => promise.id === mark.id)?.description || '',
     }));
     return (
-      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
         <CollectPayment result={submission.done.response} />
       </SavedView>
@@ -1803,11 +1998,13 @@ function ReportFlowForm({
         trace={stepTrace}
         traced={!!(mode ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
         pestHeard={!mode}
+        tipOffer={tipOffer}
         productVoice={productVoice}
         laneCard={recordState.card({ draft, locked, writing })}
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
+        reuse={reuse}
         traceError={traceError}
         sources={writerSources({
           productCount: active.length,
@@ -1833,6 +2030,7 @@ function ReportFlowForm({
   }
   return (
     <VisitStep
+      sharedNote={sharedNote}
       service={service}
       ctx={ctx}
       form={form}
@@ -1872,13 +2070,38 @@ function ReportFlowForm({
   );
 }
 
+// The report footer's trace buttons: read the trace again, remove it, or
+// "Same as last visit" (a one-tap copy of the customer's last trace at this place).
+// No copy offered (a lane or typed visit, a spot visit, a trace already saved).
+const NO_REUSE = { offer: null, reusing: false, feet: null };
+
+// `traceStep`: the report step has a perimeter spray to trace (the hold the
+// copy clears); with none, the last trace is not offered.
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep }) {
+  return (
+    <>
+      {onRetryTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
+      )}
+      {onRemoveTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
+      )}
+      {traceStep && reuse.offer && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={reuse.reusing} disabled={locked} onClick={reuse.offer}>
+          {reuse.feet ? `Same as last visit · ${reuse.feet} ft` : 'Same as last visit'}
+        </Button>
+      )}
+    </>
+  );
+}
+
 // The report step: the report being written, or the report to read (edit,
 // write again), the trace, and the footer that fits: answer a completion
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, sweep = null,
+  onBackFromPrompt, sweep = null, tipOffer, reuse = NO_REUSE,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1886,12 +2109,14 @@ function ReportStep({
   let footer = (
     <CompleteFooter submission={submission} missingReason={completeMissing.reason} warn={!!completeMissing.stockRow} label="Complete & send" onSubmit={onSubmit}>
       {stockButton}
-      {onRetryTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
-      )}
-      {onRemoveTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
-      )}
+      <TraceFooterButtons
+        locked={locked}
+        onRetryTrace={onRetryTrace}
+        onRemoveTrace={onRemoveTrace}
+        removingTrace={removingTrace}
+        reuse={reuse}
+        traceStep={!!trace}
+      />
     </CompleteFooter>
   );
   if (submission.prompt) {
@@ -1932,8 +2157,10 @@ function ReportStep({
         {/* Voice fill: the product rows the note filled, each waiting on the tech's
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
-        {showDraft && laneCard}
-        {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
+        {/* The note has been read: one tip for what it heard, a tap to add. */}
+        {showDraft && <TipSuggestion {...tipOffer} locked={locked} />}
+        {laneCard}
+        {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       {footer}
@@ -1947,11 +2174,15 @@ function VisitStep({
   service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
   noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
-  productVoice, noteClipEnabled = false,
+  productVoice, noteClipEnabled = false, sharedNote,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
   const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  const dictating = useDictationSources(onDictationPending);
+  const setCustomTip = useCallback((value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId })), [setForm]);
+  // The pests the note names lift the advice for them; never a pick.
+  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { note: form.note }), [tips, form.note]);
   // Each dictated chunk joins what is already in the box (stable for the mic).
   const appendNote = useCallback(
     (text) => setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text })),
@@ -1960,6 +2191,11 @@ function VisitStep({
   // Voice fill: the note's mic records and our own transcriber answers the words
   // (heard with the sheet's product names). Off, the mic is as it was.
   const noteClip = useNoteClip({ enabled: noteClipEnabled, request, serviceId: service?.id, onText: appendNote });
+  // The tip's own line is heard by the same transcriber as the note.
+  const ownTipRef = useRef(form.customTip);
+  ownTipRef.current = form.customTip;
+  const appendOwnTip = useCallback((text) => setCustomTip(ownTipRef.current.trim() ? `${ownTipRef.current.trimEnd()} ${text}` : text), [setCustomTip]);
+  const tipClip = useNoteClip({ enabled: noteClipEnabled, request, serviceId: service?.id, onText: appendOwnTip });
   // The house mix is always on the sheet, so "Used most" lists the rest.
   const pickerCommonProducts = useMemo(() => {
     const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
@@ -1983,7 +2219,7 @@ function VisitStep({
           {/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the note's mic
               waits while a photo's description is open or a change is
               saving, so one microphone records at a time. */}
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || !!photoHold} onClip={noteClip.onClip}>
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked || !!photoHold} onClip={noteClip.onClip} shared={sharedNote != null}>
             {noteBoxPhotos ? (
               <TechNoteBoxPhotos
                 serviceId={service.id}
@@ -2035,8 +2271,11 @@ function VisitStep({
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
+              priorityTipIds={liftedTipIds}
+              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
-              onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+              onCustom={setCustomTip}
+              mic={{ serviceId: service?.id, onPendingChange: dictating.tip, onClip: tipClip.onClip, error: tipClip.error }}
             />
           )}
           {blog.available && (

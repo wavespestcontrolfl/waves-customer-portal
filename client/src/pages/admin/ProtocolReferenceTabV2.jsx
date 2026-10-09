@@ -890,6 +890,29 @@ export function ProtocolMixCard({
           )}
         </div>{" "}
       </Card>{" "}
+      {plan.bermudaMixingOrder?.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="px-4 py-3 border-b border-hairline border-zinc-200 bg-zinc-50">
+            <div className="text-14 font-medium text-zinc-900">Bermuda backpack mix</div>
+          </div>
+          <div className="p-4 space-y-2">
+            {plan.bermudaMixingOrder.map((step) => (
+              <div
+                key={`${step.step}-${step.productId}`}
+                className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
+              >
+                <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
+                  {step.step}
+                </div>
+                <div>
+                  <div className="text-14 font-medium text-zinc-900">{step.productName}</div>
+                  <div className="text-14 text-ink-secondary leading-normal mt-1">{step.instruction}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
       <ProductLabelsCard items={plan.items} />{" "}
     </div>
   );

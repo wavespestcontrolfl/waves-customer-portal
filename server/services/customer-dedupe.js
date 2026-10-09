@@ -1754,7 +1754,31 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
   return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}${carried ? `, carried ${carried} fallback hold(s) into the surviving dispute` : ''}`;
 }
 
+// customer_pin_suggestions: one OPEN row per customer (partial unique index). The loser's open suggestion is
+// retired (superseded, its bell closed) and its closed history moves to the winner; the winner's open row stays.
+// executeMerge retires it before the sweep, so this handler is the backstop for a row opened in between.
+async function retirePinSuggestionsBeforeSweep(trx, loserId) {
+  const pins = require('./customer-pin-suggestions');
+  try {
+    await trx.transaction((sp) => pins.retireOnMerge(sp, loserId));
+  } catch (err) {
+    // The full retire failed (in its own savepoint, so the merge transaction is intact). Fall back, still inside
+    // this merge, to the minimal safe state: the open suggestion superseded and its bell closed. If even that
+    // fails the error propagates and the merge aborts: a failed merge can be retried, a half-reconciled one cannot.
+    logger.warn('[customer-dedupe] retiring the loser pin suggestion failed; using the minimal fallback', { error: err.code || err.name });
+    await trx.transaction((sp) => pins.retireOnMergeMinimal(sp, loserId));
+  }
+}
+
+// Registered for customer_pin_suggestions only, whose one customer FK is
+// customer_id: a literal table and column, so this is not a dynamic writer.
+async function repointPinSuggestions(trx, _table, _column, winnerId, loserId) {
+  await require('./customer-pin-suggestions').retireOnMerge(trx, loserId);
+  return trx('customer_pin_suggestions').where({ customer_id: loserId }).update({ customer_id: winnerId });
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
+  customer_pin_suggestions: repointPinSuggestions,
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
   customer_properties: repointCustomerProperties,
@@ -3345,6 +3369,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // the withdrawal after the sweep reads them, and must not wait on a payer row while holding invoices.
     await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id }, null, { lock: true });
     await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
+    // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
+    await retirePinSuggestionsBeforeSweep(trx, loser.id);
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -7216,6 +7242,7 @@ module.exports = {
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
+    retirePinSuggestionsBeforeSweep,
     stableStringify,
     normalizeDisclosedTimestamps,
     resetFkCache: () => { fkColumnsCache = null; },

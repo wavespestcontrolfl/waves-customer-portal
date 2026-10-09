@@ -7,10 +7,10 @@
 // /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
-import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
+import { rankTechTips, techTipSubtext, techTipSentLabel, unsentTipsFirst } from '../../lib/tech-tips';
 import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
 import { isMlUnit } from '../../lib/measure-units';
 import RATE_UNITS from '../../../../shared/rate-units.json';
@@ -152,6 +152,48 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
     {overlay}
     </>,
     document.body,
+  );
+}
+
+// Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
+// reads it so it never closes or unmounts a part mid-request. Outside a container the default context is a no-op.
+export const PartBusyContext = createContext(() => {});
+// Every call reports under its OWN key (this hook instance + its source), so two parts, or two sources of one part, can
+// never clear each other's entry however their work overlaps.
+export function usePartBusy(source, busy) {
+  const report = useContext(PartBusyContext);
+  const instance = useId();
+  useEffect(() => {
+    const key = `${instance}:${source}`;
+    report(key, busy);
+    return () => report(key, false);
+  }, [report, instance, source, busy]);
+}
+
+// A part's requests, with every write counted: while any non-GET request is in flight the part reports busy (so the
+// container cannot close or unmount it mid-write). One place covers every present and future write of the sheet,
+// whichever control sends it. Outside a container (`enabled` false) the request is returned as it is.
+export function useWriteTracking(request, enabled) {
+  const [writes, setWrites] = useState(0);
+  usePartBusy('writes', writes > 0);
+  return useMemo(() => (enabled ? async (path, options) => {
+    if (String(options?.method || 'GET').toUpperCase() === 'GET') return request(path, options);
+    setWrites((n) => n + 1);
+    try { return await request(path, options); } finally { setWrites((n) => n - 1); }
+  } : request), [request, enabled]);
+}
+
+// A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no
+// dialog of its own. The container owns the one frame, the one scroll and the header; the part's header is hidden, its
+// body flows with the page and its footer (its own action button) stays at the end of the part (tech-workflow.css).
+export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, dialogClassName, children }) {
+  return (
+    <>
+      <section ref={dialogRef} aria-labelledby={titleId} className={cn('tech-visit-embedded-part', dialogClassName)} {...hiddenProps}>
+        {children}
+      </section>
+      {overlay}
+    </>
   );
 }
 
@@ -482,7 +524,14 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
 // a phone or beside an extra action (`children`, e.g. "Check stock").
 // `reasonInButton` (the lawn sheet): a short reason is the disabled button's
 // own label instead of a line above it.
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false }) {
+// Prepare mode (a part of a grouped stop): the action saves the part for the
+// stop instead of completing the visit.
+const preparedLabel = (submission, label) => {
+  if (!submission.preparing) return label;
+  return submission.prepared ? 'Update for this stop' : 'Save for this stop';
+};
+
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
@@ -490,6 +539,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
       {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
+      {submission.prepared && <p className="tech-visit-muted" role="status">Saved for this stop</p>}
       <div className="tech-visit-actions">
         {children}
         <Button
@@ -498,7 +548,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           loading={submission.submitting}
           disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : (isAction ? label : preparedLabel(submission, label))}
         </Button>
       </div>
     </footer>
@@ -616,11 +666,20 @@ function noteMaxHeight(el) {
   return Math.ceil(line * NOTE_MAX_LINES + px(style.paddingTop) + px(style.paddingBottom) + px(style.borderTopWidth) + px(style.borderBottomWidth));
 }
 
-export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false }) {
+// A part of a grouped stop (GATE_COMBO_FAST_COMPLETE) reads the stop's one note in place of its own: the form with
+// its `note` replaced by `sharedNote`. Without a shared note (undefined or null) the form is returned as it is.
+export function useSharedNoteForm(ownForm, sharedNote) {
+  return useMemo(() => (sharedNote == null ? ownForm : { ...ownForm, note: String(sharedNote) }), [ownForm, sharedNote]);
+}
+
+// `shared` (a part of a grouped stop): the stop's one note box lives in the container, so this one
+// shows neither its text box nor its mic, only what sits inside it (the note-box photos).
+export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false, shared = false }) {
   const noteId = useId();
   const noteRef = useRef(null);
   const maxHeight = useCallback(() => noteMaxHeight(noteRef.current), []);
   useAutoGrowTextarea(noteRef, note, maxHeight);
+  if (shared) return children ? <section className="tech-visit-choice-section">{children}</section> : null;
   const text = (
     <Textarea
       ref={noteRef}
@@ -695,10 +754,12 @@ function tipMark(tip, library) {
 
 // The tips on screen: search results, the whole list, or the short list,
 // with the pick always kept in view. `noMatch` is about the search alone, so
-// a pinned pick never hides that a search found nothing.
-function visibleTips(allTips, { query, showAll, tipId }) {
-  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
-  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
+// a pinned pick never hides that a search found nothing. A search reads
+// `searchable` (the whole library, owner 2026-10-09); `pinnable` is where a
+// pick that is off the list is found.
+function visibleTips(allTips, { query, showAll, tipId, searchable = allTips, pinnable = allTips }) {
+  const listed = query ? rankTechTips(searchable, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
+  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? pinnable.find((tip) => tip.id === tipId) : null;
   return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
 }
 
@@ -726,30 +787,119 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // resolves and freezes the copy. `priorityTipIds` (optional, the tree & shrub
 // sheet's seen watch items) lifts those tips above the list under their own
 // heading, in library order; a search ignores it, and nothing is ever picked
-// for the tech.
+// for the tech. A lifted tip may come from the whole library (`library.more`),
+// which a search also reads. Tips this customer had lately (`library.lastSent`)
+// go last in each list, so a recurring visit's short list changes; `sentLast`
+// off (the lawn sheet) keeps the server's order, which ranks by today's findings.
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false }) {
-  const [query, setQuery] = useState('');
-  const [showAll, setShowAll] = useState(false);
-  const [writing, setWriting] = useState(false);
+// Two mics on one sheet (the note's and the tip's own line) report one
+// "dictating" state up: the sheet holds Complete while either records. Each
+// source has its own setter, so one mic stopping never clears the other.
+export function useDictationSources(onDictationPending) {
+  const pending = useRef({ note: false, tip: false });
+  const report = useCallback((key, on) => {
+    pending.current[key] = !!on;
+    onDictationPending?.(pending.current.note || pending.current.tip);
+  }, [onDictationPending]);
+  const note = useCallback((on) => report('note', on), [report]);
+  const tip = useCallback((on) => report('tip', on), [report]);
+  return { note, tip };
+}
+
+// One suggested tip, offered where the sheet has read the note (the report
+// step). One tap adds it; it is never picked for the tech.
+export function TipSuggestion({ library, tip, pressed, locked, onPick }) {
+  if (!tip) return null;
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Tip for the customer</h3>
+        <span className="tech-visit-muted">{pressed ? '1 picked' : 'Suggested from your note'}</span>
+      </div>
+      <div className="tech-visit-tip-list">
+        <TipOption tip={tip} library={library} pressed={pressed} locked={locked} onPick={onPick} />
+      </div>
+    </section>
+  );
+}
+
+// The picker's lists for one render: the lifted tips, the tips under them, and
+// the row set on screen (a search reads the whole library).
+function useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast, q, showAll }) {
   const allTips = useMemo(
     () => (library?.groups || []).flatMap((group) => group.tips || []),
     [library],
   );
-  const q = query.trim().toLowerCase();
+  const everyTip = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
+  const lastSent = sentLast ? library?.lastSent : null;
   const priority = useMemo(() => {
     if (!priorityTipIds?.length) return [];
     const ids = new Set(priorityTipIds);
-    const lifted = allTips.filter((tip) => ids.has(tip.id));
+    const lifted = everyTip.filter((tip) => ids.has(tip.id));
     // Library order by default (the tree & shrub Seen list); `priorityOrdered`
     // keeps the caller's own ranking (the lawn sheet's note matches, best first).
-    return priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted;
-  }, [allTips, priorityTipIds, priorityOrdered]);
+    return unsentTipsFirst(priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted, lastSent);
+  }, [everyTip, priorityTipIds, priorityOrdered, lastSent]);
   const lifted = !q && priority.length > 0;
-  const rest = lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips;
-  const { tips: visible, noMatch } = visibleTips(rest, { query: q, showAll, tipId });
+  const rest = useMemo(
+    () => unsentTipsFirst(lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips, lastSent),
+    [allTips, lifted, priority, lastSent],
+  );
+  const { tips: visible, noMatch } = visibleTips(rest, {
+    query: q, showAll, tipId, searchable: everyTip, pinnable: lifted ? everyTip.filter((tip) => !priority.includes(tip)) : everyTip,
+  });
+  return { priority, lifted, rest, visible, noMatch };
+}
+
+// The tech's own line. With `mic`, the note's microphone sits beside it and
+// each dictated chunk joins what is already on the line.
+function OwnTipField({ customTip, onCustom, locked, mic }) {
+  const ownRef = useRef({ customTip, onCustom });
+  ownRef.current = { customTip, onCustom };
+  // Stable for the mic.
+  const appendOwn = useCallback((text) => {
+    const said = String(text || '').trim();
+    const own = ownRef.current;
+    if (said) own.onCustom(own.customTip.trim() ? `${own.customTip.trimEnd()} ${said}` : said);
+  }, []);
+  const ownId = useId();
+  const field = (
+    <Input id={ownId} className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
+  );
+  return (
+    <>
+      {mic ? (
+        // Field labels its one child; here the label must name the box, not the row.
+        <div className="ui-field tech-visit-field">
+          <label className="ui-label" htmlFor={ownId}>Your own tip (one sentence)</label>
+          <div className="tech-visit-note-row tech-visit-tip-own-row">
+            <DictationButton onAppend={appendOwn} onPendingChange={mic.onPendingChange} palette={MIC_PALETTE} size={48} title="Say your own tip" disabled={locked} uploadServiceId={mic.serviceId} clipHandler={mic.onClip} />
+            {field}
+          </div>
+        </div>
+      ) : (
+        <Field label="Your own tip (one sentence)" className="tech-visit-field">{field}</Field>
+      )}
+      {customTip.length > CUSTOM_TIP_MAX_CHARS && (
+        <p className="tech-visit-muted tech-visit-status--warn" role="status">Too long. Keep it to one sentence, {CUSTOM_TIP_MAX_CHARS} characters.</p>
+      )}
+      {mic?.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{mic.error}</p>}
+    </>
+  );
+}
+
+// `mic` (optional): the note's own microphone on the tech's own line, so the
+// line is spoken the way the visit note is (owner 2026-10-09): `serviceId`,
+// `onClip` (our own transcriber, where the sheet's note uses it),
+// `onPendingChange`, `error`.
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false, sentLast = true, mic = null }) {
+  const [query, setQuery] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const q = query.trim().toLowerCase();
+  const { priority, lifted, rest, visible, noMatch } = useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast, q, showAll });
   const hasPick = !!tipId || !!customTip.trim();
   const writingOwn = writing || !!customTip;
   return (
@@ -790,11 +940,7 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
         )}
         {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
       </div>
-      {writingOwn && (
-        <Field label="Your own tip (one sentence)" className="tech-visit-field">
-          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
-        </Field>
-      )}
+      {writingOwn && <OwnTipField customTip={customTip} onCustom={onCustom} locked={locked} mic={mic} />}
     </section>
   );
 }

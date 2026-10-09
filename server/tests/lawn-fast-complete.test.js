@@ -291,6 +291,52 @@ describe('buildLawnFastContext', () => {
     expect(ctx.plannedProducts.month).toBe(10);
   });
 
+  describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
+    const removal = require('../services/lawn-bermuda-removal');
+    let offered;
+    beforeEach(() => { offered = jest.spyOn(removal, 'stepOffered'); });
+    afterEach(() => offered.mockRestore());
+    const ctxFor = (profile, billingMode) => {
+      resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
+      return buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ customers: { billing_mode: billingMode }, products_catalog: [herbicide, granular] })) });
+    };
+
+    test.each([
+      ['defaults gate on, property history on, recurring', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE(), 'monthly_membership'],
+      ['completion defaults gate OFF', { GATE_LAWN_COMPLETION_DEFAULTS: undefined, GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE(), 'monthly_membership'],
+      ['property history gate OFF', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: undefined }, PROFILE(), 'monthly_membership'],
+      ['both gates off', { GATE_LAWN_COMPLETION_DEFAULTS: undefined, GATE_LAWN_PROPERTY_HISTORY: undefined }, PROFILE(), 'monthly_membership'],
+      ['a one-time visit', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), 'monthly_membership'],
+      ['a per-application visit', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE(), 'per_application'],
+    ])('%s: offered step gives the bermuda_removal handoff with no plan read', async (_label, env, profile, billingMode) => {
+      for (const [name, value] of Object.entries(env)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+      offered.mockResolvedValue(true);
+      buildPlanForService.mockClear();
+      const ctx = await ctxFor(profile, billingMode);
+      expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'bermuda_removal', needsFullForm: 'Bermuda removal mix this visit: use the full form' });
+      expect(ctx.plannedProducts).toBeUndefined();
+      expect(buildPlanForService).not.toHaveBeenCalled();
+    });
+
+    test('a read error while checking the step fails closed to the full form, never an eligible sheet', async () => {
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      offered.mockRejectedValue(Object.assign(new Error('boom'), { code: 'ECONN' }));
+      const ctx = await ctxFor(PROFILE(), 'monthly_membership');
+      expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'bermuda_removal' });
+    });
+
+    test('no step offered: the sheet works as before, with no needsFullForm anywhere', async () => {
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      offered.mockResolvedValue(false);
+      buildPlanForService.mockResolvedValue({ completionDefaults: { items: [], options: [{ product: { id: P_GRAN, name: 'x' } }] } });
+      const plain = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+      expect(plain.eligible).toBe(true);
+      expect(JSON.stringify(plain)).not.toMatch(/needsFullForm/);
+    });
+  });
+
   describe('program defaults only on a recurring program appointment', () => {
     const PLAN = {
       completionDefaults: {
@@ -637,6 +683,8 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       process.env.GATE_LAWN_SPOT_RULES = 'true';
       const ctx = await context(tablesFor());
       expect('treatmentGuide' in ctx).toBe(false);
+      expect('spotTargets' in ctx).toBe(false);
+      expect('mixHelp' in ctx.plannedProducts).toBe(false);
       expect('chinch' in ctx.plannedProducts).toBe(false);
       expect(v13VisitLimits).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.arrayContaining([expect.objectContaining({ product: expect.objectContaining({ id: P_ARENA }) })]), expect.anything(), expect.anything());
     });
@@ -661,6 +709,12 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       live();
       const ctx = await context(tablesFor());
       expect(ctx.treatmentGuide).toBe(true);
+      // GATE_LAWN_SPOT_TARGET is its own gate: the guide alone carries no spotTargets key.
+      expect('spotTargets' in ctx).toBe(false);
+      process.env.GATE_LAWN_SPOT_TARGET = 'true';
+      const withTargets = await context(tablesFor());
+      expect(withTargets.spotTargets).toMatchObject({ v: 1, chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' });
+      delete process.env.GATE_LAWN_SPOT_TARGET;
       expect(ctx.plannedProducts.chinch).toEqual({
         item: expect.objectContaining({
           productId: P_ARENA, name: 'Test Arena', applicationMethod: 'spot_treatment', amount: null, treatedSqft: null, ratePer1000: null, rateUnit: null, line: null, gateNotes: [],
@@ -1350,22 +1404,26 @@ describe('buildLawnFastWateringPreview', () => {
     products_catalog: rows,
     property_preferences: prefs,
   });
-  // What the report does for the same products: frozen facts, then its own
+  // What the report does for the same products at completion (the build that
+  // gets frozen, which the preview mirrors): frozen facts, then its own
   // instruction builder and banner.
   async function reportBanner(rows, knex) {
     const products = rows.map((row) => ({ product_name: row.name, approved_report_product_facts: reportData.approvedReportProductFacts(row) }));
     const instruction = await reportData.buildReportWateringInstruction({
-      products, service: { customer_id: 'cust-1' }, completionTime: now, lawnAssessment: null, knex,
+      products, service: { customer_id: 'cust-1' }, completionTime: now, lawnAssessment: null, knex, forCompletion: true,
     });
     return reportData.buildWateringBanner(instruction, null);
   }
 
-  test('a hold that reaches the water-in deadline makes no claim, as the report does', async () => {
+  test('a hold that reaches the water-in deadline is followed by the water-in from the hold end, as the report does', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
     const rows = [herbicide, granular];
     const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: rows.map((r) => r.id), knex: knexFor(rows), now });
-    expect(await reportBanner(rows, knexFor(rows))).toBeNull();
-    expect(preview.sentence).toBeNull();
+    const banner = await reportBanner(rows, knexFor(rows));
+    expect(banner).toMatchObject({ state: 'hold_then_water_in' });
+    expect(preview.lines).toEqual(banner.lines);
+    expect(preview.lines[0]).toMatch(/^Skip your turf watering until /);
+    expect(preview.lines[1]).toMatch(/^After that, water in today’s treatment /);
   });
 
   test('a product with no rule on file makes no claim, as the report does', async () => {

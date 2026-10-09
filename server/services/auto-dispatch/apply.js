@@ -75,8 +75,8 @@ async function revalidatePlacement(service) {
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
   }
-  if (fresh.recurring_dispatch_due_date && fresh.customer_confirmed === true) {
-    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this recurring occurrence after scoring' };
+  if (fresh.customer_confirmed === true) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -262,19 +262,83 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
   await assertFlexWindows(trx, [row], best, etDateString(new Date()), refuse);
 }
 
+// A move that skipped the score bar and the drive floor because the visit
+// was in conflict (move-rules.js mustMove) is only still that move while the
+// conflict stands. The other stop can move or cancel, or the owner can reopen
+// the day, between the evaluation and this transaction; the row's own CAS
+// cannot see either. Re-read the conflict here, on the move transaction, with
+// the reader the evaluation used; gone means refuse, and the next run scores
+// the visit on the normal bar (Codex #6207 r1 P2). A read failure refuses too.
+// Hold what the conflict is made of until this move commits: the rebooker
+// locks only the DESTINATION date, so without this the other stop could be
+// moved or cancelled, or the closed day reopened, right after the re-read
+// below (Codex #6207 r3 P2). A closed day takes the shared closure-state
+// fence (blackout-dates.js lockClosureState, the counterpart of the admin
+// endpoints' exclusive lock; it covers one-off dates and weekly days off).
+// An overlap takes FOR SHARE on the other stops' rows, and on the
+// job_applications row behind a booked interview (`interview:<id>`), which
+// blocks their update or delete (r4).
+const INTERVIEW_ID = /^interview:(.+)$/;
+async function fenceSourceConflict(trx, sourceConflict) {
+  if (sourceConflict.kind === 'closed_day') {
+    await require('../scheduling/blackout-dates').lockClosureState(trx);
+    return;
+  }
+  const ids = (sourceConflict.with || []).map(String);
+  const interviews = ids.map((id) => (INTERVIEW_ID.exec(id) || [])[1]).filter(Boolean);
+  const stops = ids.filter((id) => !INTERVIEW_ID.test(id));
+  if (stops.length) await trx('scheduled_services').whereIn('id', stops).forShare().select('id');
+  if (interviews.length) await trx('job_applications').whereIn('id', interviews).forShare().select('id');
+}
+
+// Read ONCE per move, before the first row is written: the unit mover runs
+// this guard for each member in turn, and after the first member has left,
+// the rest of the unit no longer shows the conflict it is moving away from
+// (pre-push P1). `check.heldBy` carries the first answer to the later members.
+async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, check) {
+  // Held for THIS transaction only: the rebooker retries the move on a
+  // deadlock with the same guard, and the aborted transaction's locks are
+  // gone, so the retry fences and reads again (Codex #6207 r10 P2).
+  if (!sourceConflict || check.heldBy === trx) return;
+  const { _internals: { readCurrentConflict } } = require('./candidate-slots');
+  // Fence, then re-read. The re-read may name a DIFFERENT conflict than the
+  // one fenced (the first stop left and another now overlaps): that one is
+  // not held yet, so fence it and read once more. A conflict that is gone,
+  // or still not the fenced one after the second read, refuses the move.
+  let fenced = sourceConflict;
+  for (let round = 0; round < 2; round += 1) {
+    await fenceSourceConflict(trx, fenced);
+    const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
+    if (!still) break;
+    if (coveredBy(still, fenced)) { check.heldBy = trx; return; }
+    fenced = still;
+  }
+  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
+}
+
+// Every row the re-read conflict rests on is already held by the fence.
+function coveredBy(still, fenced) {
+  if (still.kind !== fenced.kind) return false;
+  if (still.kind === 'closed_day') return true;
+  const held = new Set((fenced.with || []).map(String));
+  return (still.with || []).every((id) => held.has(String(id)));
+}
+
 function makeMoveGuard({ service, best, config = {} }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
     { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
   );
+  const sourceCheck = { heldBy: null };
   return async ({
     trx, technicianId, service: movingRow, destination,
   }) => {
     const row = movingRow || service;
-    if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
+    if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
+    await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
     // A person may have placed this visit since pass 1 (even back onto the
@@ -688,7 +752,9 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
     recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
-    ...(fresh.recurring_dispatch_due_date ? { customer_confirmed: fresh.customer_confirmed ?? null } : {}),
+    // Pinned for every visit (owner 2026-10-09): a confirmation that lands
+    // between the read above and the move fails the atomic match.
+    customer_confirmed: fresh.customer_confirmed ?? null,
     ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
   };
 
@@ -852,6 +918,16 @@ async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, a
   }
 }
 
+// The config for one attempt. A fallback candidate was authorized by a fresh
+// evaluation, so its move guard re-reads THAT evaluation's conflict: a
+// conflict found only on the rescore is fenced too, and a conflict that had
+// cleared by the rescore does not refuse a move that passed the normal bar
+// (pre-push P1).
+function attemptConfig(config, evaluation) {
+  if (!evaluation) return config;
+  return { ...config, sourceConflict: (evaluation.current && evaluation.current.conflict) || null };
+}
+
 /**
  * Apply an auto-dispatch move, with a bounded next-best fallback on a
  * SLOT_TAKEN refusal (GATE_AUTO_DISPATCH_SHARED_MODEL, owner-approved
@@ -909,7 +985,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     try {
       // Bounded (MAX_APPLY_ATTEMPTS): each attempt must complete or fail
       // before trying the next, so a sequential await here is intentional.
-      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], check.fresh, runId, config);
+      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], check.fresh, runId, attemptConfig(config, authorizedBy.get(attempts[i])));
       // attempts (ids/numbers only): how many candidates were tried before
       // this one landed — 1 when the first attempt succeeded, so a caller
       // never has to infer it from `applied === best`.

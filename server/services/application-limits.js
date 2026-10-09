@@ -89,6 +89,41 @@ function capShare(row) {
   return rate == null ? null : { share: rate / cap, estimated: true };
 }
 
+const WEIGHT_UNITS = new Set(['oz', 'ounce', 'ounces', 'lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'mg']);
+const VOLUME_UNITS = new Set(['fl oz', 'floz', 'fl_oz', 'gal', 'gallon', 'gallons', 'qt', 'pt', 'ml', 'l', 'liter', 'liters', 'tsp', 'tbsp']);
+function unitFamily(unit) {
+  const key = String(unit || '').trim().toLowerCase().replace(/\./g, '');
+  if (WEIGHT_UNITS.has(key)) return 'weight';
+  return VOLUME_UNITS.has(key) ? 'volume' : null;
+}
+
+// A bermuda removal history row's rate per 1,000 sq ft in the cap's own unit: its recorded
+// rate converted from the unit it was recorded in (0.01 lb counts as 0.16 oz); when that
+// cannot convert, its quantity over the treated area. A rate or quantity that does not
+// convert (another basis, another dimension, no unit, no area) is not counted as it stands:
+// it counts for nothing.
+// Other rows keep counting only a recorded rate, as recorded.
+function bermudaRowRate(row, limit) {
+  const capUnit = capUnitOf(limit.limit_unit);
+  const recorded = parseFloat(row.application_rate);
+  // An explicit rate that converts is used; one that cannot (oz/acre, an unknown unit) falls
+  // back to the quantity over the treated area, with the same unit-family checks.
+  const converted = recorded > 0 ? familyConvert(recorded, row.rate_unit, capUnit) : 0;
+  if (converted > 0) return converted;
+  const area = Number(row.area_treated_sqft);
+  if (!(area > 0)) return 0;
+  return familyConvert(Number(row.quantity_applied) / (area / 1000), row.quantity_unit, capUnit);
+}
+
+// Convert within a unit family only: a weight against a weight cap, a volume against a
+// volume cap (a gallon amount never reads as ounces of dry product).
+function familyConvert(amount, unit, capUnit) {
+  // A recorded rate may carry its basis ('oz/1000sf'): the family is the unit before it.
+  const family = unitFamily(String(unit || '').replace(/\s*\/\s*1000\s*(sf|sq\.?\s*ft)?$/i, ''));
+  if (family == null || family !== unitFamily(capUnit)) return 0;
+  return rateInUnit(amount, unit, capUnit) || 0;
+}
+
 // One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
 // the ledger's own reading only (the recorded rate, else the quantity over the treated area), and when the
 // ledger cannot size it the row's FIXED fallback rate (Arena: the old 0.29 oz, the whole year) - never the
@@ -99,6 +134,33 @@ function v13AmountShare(row, limit) {
   return { share: Number(limit.fallback_rate) / Number(limit.limit_value), estimated: true };
 }
 
+// The year's total against an annual_max_rate row, and the note its message carries.
+// An ordinary row judges recorded history only, each row's rate as recorded. The bermuda removal
+// row counts each row in the cap's own unit (bermudaRowRate) and warns on the PROJECTED year, as
+// the active-ingredient cap does: earlier sprays plus the one being planned (the staged rate) or
+// recorded (the submitted rate).
+function yearRateTotal(limit, history, ctx) {
+  if (!isBermudaProgramRow(limit)) {
+    return { totalApplied: history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0), note: '' };
+  }
+  const applied = history.reduce((sum, h) => sum + bermudaRowRate(h, limit), 0);
+  const proposed = ctx.proposed ? rateInUnit(ctx.proposed.ratePer1000, ctx.proposed.unit, capUnitOf(limit.limit_unit)) : null;
+  const adds = Number.isFinite(proposed) && proposed > 0 ? proposed : 0;
+  return { totalApplied: applied + adds, note: adds ? ` (${applied.toFixed(3)} recorded plus ${adds.toFixed(3)} for this application)` : '' };
+}
+
+// The refusal for a spray inside the minimum interval. The usual anchor is the LAST application,
+// and the message says when the next one is allowed. A write-time bermuda check can anchor on a
+// LATER recorded application (a backdated completion): then the message names that one and gives
+// the latest day this spray could have been, never a forward date.
+function intervalViolationMessage(product, { daysSince, minDays, lastApp, proposedDay }) {
+  const day = (ms) => new Date(ms).toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+  if (lastApp > proposedDay) {
+    return `${product.name}: only ${daysSince} days before the next recorded app on ${day(lastApp.getTime())} (min ${minDays}). Latest allowed before it: ${day(lastApp.getTime() - minDays * 86400000)}.`;
+  }
+  return `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${day(lastApp.getTime() + minDays * 86400000)}.`;
+}
+
 // What could not be counted exactly, for the end of a cap message.
 function sizingNote(unsized, estimated) {
   const notes = [
@@ -107,6 +169,22 @@ function sizingNote(unsized, estimated) {
   ].filter(Boolean);
   return notes.length ? ` (${notes.join('; ')})` : '';
 }
+
+// product_limits rows written for the lawn bermuda removal step (migration
+// 20261006190300) carry this program tag in match_value (unused on product rows). They
+// apply ONLY to a caller that passes opts.program === 'bermuda_removal' (the plan's and
+// the tank sheet's bermuda step check) while GATE_LAWN_BERMUDA_REMOVAL is on; every
+// other caller (compliance, previsit, other plan lines, Fusilade II used elsewhere)
+// ignores them. They count the treated property's history, and only the applications
+// recorded as part of the step: the history ledger carries no group, and Recognition is
+// always in the mix and never used elsewhere in v13, so BOTH products' annual and
+// interval limits count Recognition applications.
+const BERMUDA_PROGRAM = 'bermuda_removal';
+// The counted product is Recognition, found by its catalog ID, never its display name:
+// the id of the product on the program's tagged annual_max_rate row (the label rate
+// belongs to Recognition alone), read once per call. A program with no such row counts
+// the product being judged itself.
+const isBermudaProgramRow = (limit) => limit.match_value === BERMUDA_PROGRAM;
 
 // Narrows a property_application_history query to the treated property and leaves one
 // visit's own ledger rows out. `table` is the history table or its alias in the query.
@@ -208,21 +286,31 @@ class ApplicationLimitChecker {
           this.whereNull('jurisdiction').orWhereIn('jurisdiction', [...counties, 'all']);
         }) : [];
 
-    const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits];
+    // Bermuda removal rows: inert unless the gate is on (gate off, every result is the
+    // one before the rows existed); when on, their history is the treated property's.
+    const bermudaLive = require('../config/feature-gates').lawnBermudaRemovalLive?.() === true;
+    const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits]
+      .filter((limit) => !isBermudaProgramRow(limit) || (bermudaLive && opts.program === BERMUDA_PROGRAM));
+    // The rows judged on the product's own history (every row but a bermuda removal row).
+    const ownLimits = allLimits.filter((limit) => !isBermudaProgramRow(limit));
     // A minimum interval spans the new year (a December application and a February one are 50
     // days apart): it reads the latest earlier application whatever its calendar year. This
     // year's newest row is that application when there is one; only an empty year looks back.
-    const needsInterval = allLimits.some((limit) => limit.limit_type === 'min_interval_days');
+    const needsInterval = ownLimits.some((limit) => limit.limit_type === 'min_interval_days');
     const lastApplication = history[0] || (needsInterval ? await priorApplications().first() : null);
 
     // A yearly count is per lawn. With a treated property the history is already that property's; a
     // caller with none (the compliance page, the legacy check-limits route) is judged on the busiest
     // property of the customer, never on the sum across properties.
-    const needsAnnual = allLimits.some((limit) => limit.limit_type === 'annual_max_apps');
+    const needsAnnual = ownLimits.some((limit) => limit.limit_type === 'annual_max_apps');
     const annualCount = needsAnnual ? await this.annualCountFor(database, countHistory, opts) : history.length;
 
+    const own = { limitHistory: history, counted: { lastApplication, annualCount } };
+    const bermudaCtx = { customerId, productId, yearStart, proposedDate, ...opts };
     for (const limit of allLimits) {
-      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, window, lastApplication, annualCount, ...opts });
+      // A bermuda removal row is judged on the step's own history, never the product's own rows.
+      const { limitHistory, counted } = isBermudaProgramRow(limit) ? await this.bermudaLimitInputs(database, limit, bermudaCtx) : own;
+      const check = await this.evaluateLimit(limit, limitHistory, moaHistory, proposedDate, product, database, { customerId, yearStart, window, ...counted, ...opts });
 
       if (check.violated) {
         const entry = { type: limit.limit_type, matchType: limit.match_type || null, matchValue: limit.match_value || null, message: check.message, description: limit.description, current: check.current, max: check.max };
@@ -238,6 +326,64 @@ class ApplicationLimitChecker {
     }
 
     return results;
+  }
+
+  // The season history for a bermuda removal limit: Recognition applications (the step's
+  // marker, for both products), the treated property's rows plus rows with an unknown
+  // property (no property: the whole customer), leaving out the visit being planned or
+  // rebuilt.
+  // What one bermuda removal limit row is judged on: the step's own history this year (read once
+  // per check, kept on `ctx`), its length as the yearly count, and its newest row as the last
+  // application. The interval spans the new year like every other interval: with no spray yet
+  // this year it reads the latest earlier one (a late-December spray still holds an early-January one).
+  async bermudaLimitInputs(database, limit, ctx) {
+    if (!ctx.history) ctx.history = await this.propertyHistory(database, ctx);
+    // A WRITE (ctx.wholeYear: a completion about to record the spray) is judged against the
+    // nearest spray on either side, so a backdated completion cannot land inside 42 days of a
+    // later recorded spray. A plan reads only what came before its date.
+    if (ctx.wholeYear && limit.limit_type === 'min_interval_days') {
+      return { limitHistory: ctx.history, counted: { annualCount: ctx.history.length, lastApplication: await this.propertyNearestApplication(database, ctx) } };
+    }
+    const needsPrior = !ctx.history.length && limit.limit_type === 'min_interval_days';
+    const lastApplication = needsPrior ? await this.propertyLastApplication(database, ctx) : (ctx.history[0] || null);
+    return { limitHistory: ctx.history, counted: { annualCount: ctx.history.length, lastApplication } };
+  }
+
+  // The bermuda removal spray nearest to the date judged, before or after it, or null.
+  async propertyNearestApplication(database, ctx) {
+    const query = (await this.bermudaHistoryQuery(database, ctx))();
+    return (await query.select('pah.*')
+      .orderByRaw('abs(pah.application_date - ?::date) asc', [etCalendarDayOf(ctx.proposedDate)]).first()) || null;
+  }
+
+  async propertyHistory(database, ctx) {
+    return (await this.bermudaHistoryQuery(database, ctx))().where('pah.application_date', '>=', ctx.yearStart)
+      .where('pah.application_date', '<=', `${String(ctx.yearStart).slice(0, 4)}-12-31`)
+      .select('pah.*').orderBy('pah.application_date', 'desc');
+  }
+
+  // The latest bermuda removal spray on or before the date judged, whatever its calendar year (the
+  // minimum interval spans the new year), or null.
+  async propertyLastApplication(database, ctx) {
+    return (await (await this.bermudaHistoryQuery(database, ctx))().select('pah.*').orderBy('pah.application_date', 'desc').first()) || null;
+  }
+
+  // A builder of the query for Recognition applications (the step's marker, for both products) of
+  // the treated property. It resolves to a FUNCTION: a query builder returned from an async method
+  // would run when awaited.
+  async bermudaHistoryQuery(database, { customerId, productId, proposedDate, propertyId, excludeScheduledServiceId, wholeYear = false }) {
+    const rateRow = await database('product_limits').where({ match_value: BERMUDA_PROGRAM, limit_type: 'annual_max_rate' }).first('product_id');
+    return () => {
+      const query = database('property_application_history as pah')
+        .where({ 'pah.customer_id': customerId, 'pah.product_id': rateRow?.product_id || productId })
+        .whereNull('pah.retracted_at');
+      // A plan reads sprays on or before the date judged, as the active-ingredient cap does: a
+      // plan rebuilt for April is not withheld by a June spray that had not happened yet. A
+      // write (wholeYear) reads both sides of its date.
+      if (!wholeYear) query.where('pah.application_date', '<=', etCalendarDayOf(proposedDate));
+      scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId }, 'pah');
+      return query;
+    };
   }
 
   async evaluateLimit(limit, history, moaHistory, proposedDate, product, database = db, ctx = {}) {
@@ -258,9 +404,10 @@ class ApplicationLimitChecker {
         // proposedDate may itself be a hydrated pg DATE (admin-dispatch passes
         // svc.scheduled_date) — etCalendarDayOf keeps its literal calendar day.
         const proposedDay = new Date(etCalendarDayOf(proposedDate) + 'T12:00:00Z');
-        const daysSince = Math.floor((proposedDay - lastApp) / 86400000);
+        // Whole days between the two, whichever came first (a write-time bermuda check may read a LATER spray).
+        const daysSince = Math.floor(Math.abs(proposedDay - lastApp) / 86400000);
         const minDays = limitValue;
-        if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };
+        if (daysSince < minDays) return { violated: true, message: intervalViolationMessage(product, { daysSince, minDays, lastApp, proposedDay }), current: daysSince, max: minDays };
         if (daysSince < minDays + 7) return { approaching: true, message: `${product.name}: ${daysSince} days since last app (min ${minDays}). Just cleared.`, current: daysSince, max: minDays };
         return { violated: false, current: daysSince, max: minDays };
       }
@@ -268,9 +415,11 @@ class ApplicationLimitChecker {
       case 'annual_max_rate': {
         if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, { ...ctx, proposedDate }, database);
         if (limit.match_type === V13_AMOUNT) return this.evaluateV13AmountCap(limit, product, { ...ctx, proposedDate }, database);
-        const totalApplied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
+        const { totalApplied, note } = yearRateTotal(limit, history, ctx);
         const maxRate = limitValue;
-        if (totalApplied >= maxRate * 0.95) return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
+        if (totalApplied >= maxRate * 0.95) {
+          return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit}${note} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
+        }
         return { violated: false, current: totalApplied, max: maxRate };
       }
 
@@ -629,7 +778,10 @@ class ApplicationLimitChecker {
     const limits = (await applyV13CountCaps(database, product, await database('product_limits')
       .where({ product_id: productId, match_type: 'product' })
       .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']), productId))
-      .filter((limit) => limit.severity === 'hard_block');
+      // A bermuda removal row is the step's own limit (judged by the step's check, on the step's
+      // history): the generic closeout audit never reads it, so Fusilade II used alone for bed or
+      // border work is not reported against the step's 2 a year or 42 days.
+      .filter((limit) => limit.severity === 'hard_block' && !isBermudaProgramRow(limit));
     if (!limits.length) return [];
     const day = etCalendarDayOf(serviceDate);
     const others = () => scopeHistoryToTreatment(database('property_application_history')
@@ -701,4 +853,10 @@ class ApplicationLimitChecker {
 }
 
 module.exports = new ApplicationLimitChecker();
+// What one bermuda removal row counts toward the label-rate cap (0 = nothing): the completion
+// check asks it before the row is written (lawn-bermuda-removal.js bermudaAreaViolation).
+module.exports.bermudaRowRate = bermudaRowRate;
+// 'weight', 'volume' or null for a unit, its per-1,000 sq ft basis ('oz/1000sf') set aside.
+module.exports.measureFamily = (unit) => unitFamily(String(unit || '').replace(/\s*\/\s*1000\s*(sf|sq\.?\s*ft)?$/i, '').replace(/_/g, ' '));
 module.exports.assertRollingIsCountOnly = assertRollingIsCountOnly;
+module.exports.scopeHistoryToTreatment = scopeHistoryToTreatment;

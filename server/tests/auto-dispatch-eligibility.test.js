@@ -207,7 +207,8 @@ describe('isPersonPlacedVisit', () => {
     const slotChanged = (r) => r.original_date !== r.new_date || r.original_window !== r.new_window;
     return (table) => {
       if (table === 'scheduled_services') {
-        return { where: () => ({ first: async () => { if (fail) throw new Error('connection reset'); return row; } }) };
+        const read = { forShare: () => read, first: async () => { if (fail) throw new Error('connection reset'); return row; } };
+        return { where: () => read };
       }
       if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
       const preds = [];
@@ -342,6 +343,12 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(visit, stamped, { refresh: true })).toMatchObject({ placed: true, reason_description: 'Date chosen by staff (date edit)' });
   });
 
+  test('refresh sees a confirmation that landed after the snapshot (Codex #6207 r3 P2)', async () => {
+    const confirmed = fakeDb({ log: [], row: { auto_dispatch_locked: false, customer_confirmed: true } });
+    expect(await isPersonPlacedVisit(visit, confirmed)).toEqual({ placed: false }); // snapshot only
+    expect(await isPersonPlacedVisit(visit, confirmed, { refresh: true })).toMatchObject({ placed: true, reason_code: 'CUSTOMER_CONFIRMED' });
+  });
+
   test('refresh fails closed and degraded on a read error', async () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }), { refresh: true })).toMatchObject({ placed: true, degraded: true });
   });
@@ -349,6 +356,13 @@ describe('isPersonPlacedVisit', () => {
   test('fails closed and degraded on a read error', async () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }))).toMatchObject({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
   });
+});
+
+test('a visit the customer confirmed is never eligible, with or without a due date (owner 2026-10-09)', () => {
+  expect(isEligibleForAutoDispatch(svc({ status: 'confirmed', customer_confirmed: true }), CTX))
+    .toMatchObject({ eligible: false, reason_code: 'CUSTOMER_CONFIRMED' });
+  expect(isEligibleForAutoDispatch(svc({ status: 'confirmed', customer_confirmed: false }), CTX))
+    .toMatchObject({ eligible: true });
 });
 
 // One read for many series (Codex #6208 r21 P2).

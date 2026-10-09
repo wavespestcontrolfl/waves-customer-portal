@@ -19,11 +19,16 @@
 //      force a direction over it.
 //   B. until-dry + timed hold -> ONE hold keeping both conditions (the clock
 //      time, and not before the treatment has dried).
-//   C. hold + water-in -> the water-in deadline is always completion + the
-//      rule's window (never re-anchored to the hold end). A hold that reaches
-//      it cannot be satisfied together with the water-in -> no claim, for
-//      review; otherwise hold then water in. Hold end = completion + longest
-//      timed hold rounded UP to the clock hour in ET.
+//   C. hold + water-in -> hold, then water in. The water-in deadline is
+//      completion + the rule's window while the hold ends before it. When a
+//      TIMED hold reaches that deadline (owner 2026-10-09: every post-emergent
+//      herbicide holds 24 hours, and the pre-emergents it rides with water in
+//      within 24), the water-in follows the hold: the deadline is re-anchored
+//      to the printed hold end + the window ("Skip ... until Sat 10 AM. After
+//      that, water in ... by Sun 10 AM"). An until-dry hold with no recorded
+//      hours has no printed end, so its synthetic floor never anchors a
+//      deadline: a window it reaches is still no claim, for review. Hold end
+//      = completion + longest timed hold rounded UP to the clock hour in ET.
 //
 // Minutes ladder for a water-in (NEVER assumes there is no sprinkler system):
 //   1. customer's measured rate (typed inches per week + run minutes + days
@@ -38,11 +43,13 @@
 // true) are ignored here.
 // Generic copy prints minutes only, never "about a quarter inch": at the UF
 // rates the runtime uses those minutes are really 0.33-0.38 inch.
-// GATE_LAWN_REPORT_CLARITY (owner 2026-10-08), for the "generic" basis only
-// (step 3, no head type on file): the rule-of-thumb figures are not the
-// customer's system, so a completion built with `plainWhenNoSetup` states the
-// AMOUNT and no minutes, and records instruction.amountOnly. The caller decides
-// at completion (the instruction is then FROZEN); this module reads no gate.
+// For the "generic" basis only (step 3, no head type on file): the rule-of-thumb
+// figures are not the customer's system, so a completion built with
+// `plainWhenNoSetup` states the AMOUNT and no minutes ("with about ½ inch by
+// ..."), and records instruction.amountOnly (owner 2026-10-08, permanent and
+// ungated since 2026-10-09: minutes only when the customer's portal setup gives
+// them). The caller passes it at completion (the instruction is then FROZEN);
+// an unfrozen re-render passes nothing. This module reads no gate.
 //
 // Mowing is a SEPARATE result (instruction.mowHold, never part of `lines`: the
 // watering text sends `lines` verbatim). It exists only when an applied product
@@ -56,7 +63,7 @@
 // hours or minutes figure (the banned re-entry pattern). Water-in copy is
 // allowed on a non-permitted county day and says so.
 
-const { resolveApplicationRate, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
+const { resolveApplicationRate, normalizeRuntimeInputs, OWNER_MINUTES_PER_QUARTER_INCH } = require('@waves/irrigation-runtime');
 // ET wall-clock extraction lives in the one shared module; only the deadline
 // rounding below is specific to this writer.
 const { etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
@@ -70,7 +77,8 @@ const SAME_DAY_MIN_LEAD_MS = 3 * HOUR_MS;
 
 // Owner table: minutes per zone for a quarter inch. Scaled linearly (rounded
 // to 5) for any other rule depth.
-const GENERIC_MINUTES_PER_QUARTER_INCH = Object.freeze({ spray: 15, rotor: 40 });
+// One table, in the irrigation package: the lawn report's card derives weekly inches from the same constant.
+const GENERIC_MINUTES_PER_QUARTER_INCH = OWNER_MINUTES_PER_QUARTER_INCH;
 const BASE_INCHES = 0.25;
 
 const HOLD_SECOND_LINE = 'That gives today’s treatment time to work.';
@@ -273,8 +281,9 @@ function minutesFor(runtime, inches, plainWhenNoSetup = false) {
   if (onFile) {
     return { minutes: { ...empty, unknown: true }, basis: 'unknown_heads', clause: FULL_CYCLE };
   }
-  // No head type on file: never assume no sprinklers. Both generic figures,
-  // unless the caller asked for the amount alone (GATE_LAWN_REPORT_CLARITY).
+  // No head type on file: never assume no sprinklers. The amount alone when the
+  // caller is a completion build (plainWhenNoSetup); both generic figures on an
+  // unfrozen re-render.
   if (plainWhenNoSetup) {
     return { minutes: { ...empty }, basis: 'generic', clause: null, amountOnly: true, amount: formatInches(inches) };
   }
@@ -312,15 +321,23 @@ function emptyInstruction() {
  * @returns {object}
  */
 // The water-in deadline, or null when no honest one exists.
-// C. It is ALWAYS completion + the rule's window. A hold that reaches it cannot
-// be honoured together with the water-in: no claim, for review, never a
-// manufactured later deadline. A same-day rule (label: water in "the same
-// day") also caps it at SAME_DAY_CUTOFF on the completion's ET day, and when
-// the later of completion and the hold's end leaves less than
-// SAME_DAY_MIN_LEAD before the cutoff, the watering run cannot fit: no claim, never a next-day or impossible deadline.
-function waterInDeadline(at, waterIns, byHours, holdEnd) {
+// C. Completion + the rule's window while the hold ends before it. A hold that
+// reaches it: when the effective hold end is a TIMED end (a printed clock
+// time), the water-in follows the hold and the deadline becomes that hold end
+// + the window (owner 2026-10-09). When the effective end is the until-dry
+// floor (synthetic, never printed) the pair cannot be honoured together: no
+// claim, for review, never a deadline anchored to an invented figure. A
+// same-day rule (label: water in "the same day") also caps it at
+// SAME_DAY_CUTOFF on the completion's ET day, and when the later of completion
+// and the hold's end leaves less than SAME_DAY_MIN_LEAD before the cutoff, the
+// watering run cannot fit: no claim, never a next-day or impossible deadline
+// (so a 24-hour hold beside Dylox stays no claim).
+function waterInDeadline(at, waterIns, byHours, holdEnd, timedEnd = null) {
   let by = deadlineAfter(at, byHours);
-  if (holdEnd && holdEnd.getTime() >= by.getTime()) return null;
+  if (holdEnd && holdEnd.getTime() >= by.getTime()) {
+    if (!timedEnd || timedEnd.getTime() < holdEnd.getTime()) return null;
+    by = deadlineAfter(timedEnd, byHours);
+  }
   if (!waterIns.some((r) => r.water_in_same_day === true)) return by;
   // The run can start only once completion AND any hold are behind it.
   const start = Math.max(at.getTime(), holdEnd ? holdEnd.getTime() : 0);
@@ -333,11 +350,11 @@ function waterInDeadline(at, waterIns, byHours, holdEnd) {
 // The water-in half of the instruction: amount, deadline and minutes. Fills the
 // water-in fields of `out` and returns the detail the lines are written from,
 // or null when no honest deadline exists (C. see waterInDeadline).
-function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd }) {
+function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, timedEnd }) {
   const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
   const byHours = Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24)));
   const detail = { inches, byHours, ...minutesFor(runtime, inches, plainWhenNoSetup) };
-  const by = waterInDeadline(at, waterIns, byHours, holdEnd);
+  const by = waterInDeadline(at, waterIns, byHours, holdEnd, timedEnd);
   if (!by) return null;
   out.minutes = detail.minutes;
   out.waterInInches = inches;
@@ -414,7 +431,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
 
   let waterInDetail = null;
   if (waterIns.length) {
-    waterInDetail = applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: effectiveHoldEnd });
+    waterInDetail = applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: effectiveHoldEnd, timedEnd });
     if (!waterInDetail) return out;
   }
   out.ruleSource = ruleSourceOf([...holds, ...waterIns]);

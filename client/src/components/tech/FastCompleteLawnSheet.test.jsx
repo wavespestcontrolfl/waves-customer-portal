@@ -126,7 +126,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
   return vi.fn(async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path, options, body });
-    if (path.endsWith('/lawn-fast/context')) {
+    if (path.split('?')[0].endsWith('/lawn-fast/context')) {
       if (contextError) throw contextError;
       return ctx;
     }
@@ -260,6 +260,14 @@ async function analyzeAndComplete() {
 }
 
 describe('opening the sheet', () => {
+  test('a visit whose plan offers the bermuda removal mix (the server answers ineligible, bermuda_removal) opens the full form once', async () => {
+    const request = makeRequest({ ctx: context({ eligible: false, reason: 'bermuda_removal', needsFullForm: 'Bermuda removal mix this visit: use the full form' }) });
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+  });
+
   test('a visit the server calls ineligible is handed to the parent once, with no button on the sheet', async () => {
     const request = makeRequest({ ctx: context({ eligible: false, reason: 'has_companions' }) });
     const onFullForm = vi.fn();
@@ -283,7 +291,7 @@ describe('opening the sheet', () => {
     expect(onFullForm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
   test('a visit that changed since the schedule loaded is named, not completed', async () => {
@@ -1756,7 +1764,7 @@ describe('a visit type that could not be read', () => {
     expect(onFullForm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
   test.each(['photo_status', 'turf_height_flag', 'planned_products', 'assessment'])('an advisory %s failure still opens the sheet', async (failure) => {
@@ -2664,6 +2672,27 @@ describe('suggested from this lawn', () => {
         await submit();
         expect(chinchEntry()).toEqual([{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA] }]);
         expect(completeCalls()[0].body.products.filter((p) => p.productId === P_ARENA)).toHaveLength(1);
+      });
+
+      test('with GATE_LAWN_SPOT_TARGET lists in the context, the standing Found tap carries the chinch find into the row (no new row, so no guided marker); before the tap it sends none', async () => {
+        const SPOT_TARGETS = { v: 1, fungicide: ['Dollar spot'], insecticide: ['Southern chinch bugs', 'Fall armyworms'], chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' };
+        await putArenaOnSheet(guideContext({ lawnReportTies: true, spotTargets: SPOT_TARGETS }));
+        const mark = within(addons()).getByRole('button', { name: 'Chinch bugs found: mark the treatment on the sheet' });
+        const row = () => within(editorFor('Arena 50 WDG'));
+        expect(row().queryByText('Recorded for: Southern chinch bugs.')).toBeNull();
+        fireEvent.click(mark);
+        expect(row().getByText('Recorded for: Southern chinch bugs.')).toBeTruthy();
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        const sentArena = completeCalls()[0].body.products.find((p) => p.productId === P_ARENA);
+        expect(sentArena).toMatchObject({ targets: [], targetFind: 'chinch' });
+      });
+
+      test('with the lists but no tap, the product on the sheet sends no chinch find', async () => {
+        await putArenaOnSheet(guideContext({ lawnReportTies: true, spotTargets: { v: 1, fungicide: ['Dollar spot'], insecticide: ['Fall armyworms'], chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' } }));
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        expect(completeCalls()[0].body.products.find((p) => p.productId === P_ARENA)).not.toHaveProperty('targetFind');
       });
 
       test('product present, no tap: no chinch find (a product on the sheet is not a find)', async () => {
@@ -3705,5 +3734,215 @@ describe('suggested from this lawn', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(screen.queryByTestId('lawn-close-up-prompt')).toBeNull();
     });
+  });
+});
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): Dispatch opens this
+// sheet for a visit already invoiced from the payment flow, and the completion
+// posts the invoice field the full form posts for it.
+describe('a visit already invoiced from the payment flow', () => {
+  const complete = async (service) => {
+    await openSheet({ props: { service } });
+    await analyzeAndComplete();
+    expect(completeCalls()).toHaveLength(1);
+    return completeCalls()[0].body;
+  };
+
+  test('posts invoiceAlreadySent: true with the rest of the body unchanged', async () => {
+    const plain = await complete(SERVICE);
+    cleanup();
+    requests.length = 0;
+    const body = await complete({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    const { invoiceAlreadySent: _sent, idempotencyKey: _k1, ...rest } = body;
+    const { idempotencyKey: _k2, ...plainRest } = plain;
+    expect(rest).toEqual(plainRest);
+    expect(plain).not.toHaveProperty('invoiceAlreadySent');
+  });
+
+  test('a visit with only a door-charge marker posts no invoice field, as the full form does', async () => {
+    const body = await complete({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' });
+    expect(body).not.toHaveProperty('invoiceAlreadySent');
+  });
+});
+
+// GATE_COMBO_FAST_COMPLETE (PR 1): the sheet as one part of a grouped stop.
+describe('prepare mode (a part of a grouped stop)', () => {
+  const withoutKey = ({ idempotencyKey: _key, ...rest }) => rest;
+  const NOTE = 'Synthetic stop note';
+
+  async function fill() {
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  }
+
+  test('hands over the exact body a normal completion posts, posts nothing and stores no saved completion', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', sharedNote: NOTE, onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(onPrepared.mock.calls[0][0]).toBe('svc-lawn');
+    expect(completeCalls()).toHaveLength(0);
+
+    cleanup();
+    requests.length = 0;
+    await openSheet({ props: { operatorId: 'op-1', sharedNote: NOTE } });
+    await fill();
+    await submit();
+    const posted = completeCalls()[0].body;
+    expect(withoutKey(onPrepared.mock.calls[0][1])).toEqual(withoutKey(posted));
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe(NOTE);
+    expect(onPrepared.mock.calls[0][1].lawnFast).toEqual({ visitType: 'recurring' });
+  });
+
+  test('preparing again after an edit hands over a new body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'First words' } });
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Second words' } });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(onPrepared.mock.calls.filter(([, body]) => body).length).toBe(2));
+    const bodies = onPrepared.mock.calls.map(([, body]) => body).filter(Boolean);
+    expect(bodies[0].technicianNotes).toBe('First words');
+    expect(bodies[1].technicianNotes).toBe('Second words');
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a shared note replaces the sheet\'s own note box and reaches the body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared, sharedNote: NOTE } });
+    expect(screen.queryByLabelText('Tell me about the visit')).toBeNull();
+    await fill();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(onPrepared).toHaveBeenCalled());
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe(NOTE);
+  });
+
+  test('Analyze reads the stop\'s shared note, as it reads the sheet\'s own', async () => {
+    await openSheet({ props: { operatorId: 'op-1', onPrepared: vi.fn(), sharedNote: NOTE } });
+    await analyzeOnly();
+    const assess = requests.find((r) => r.path.endsWith('/lawn-assessment/assess'));
+    expect(JSON.stringify(assess.body)).toContain(NOTE);
+  });
+
+  test('every lawn-fast read says it is part of a combined stop; a normal sheet sends no such header', async () => {
+    await openSheet({ props: { operatorId: 'op-1', onPrepared: vi.fn() } });
+    const reads = requests.filter((r) => r.path.includes('/lawn-fast/'));
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((r) => r.options.headers?.['X-Combo-Stop'] === '1')).toBe(true);
+    expect(requests.filter((r) => !r.path.includes('/lawn-fast/')).every((r) => !r.options.headers?.['X-Combo-Stop'])).toBe(true);
+    cleanup();
+    requests.length = 0;
+    await openSheet();
+    expect(requests.some((r) => r.options.headers?.['X-Combo-Stop'])).toBe(false);
+  });
+
+  test('a change after the handoff revokes it and tells the container; preparing again hands over the new body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Changed words' } });
+    await waitFor(() => expect(screen.queryByText('Saved for this stop')).toBeNull());
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null, expect.any(Number));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared.mock.calls.at(-1)[1].technicianNotes).toBe('Changed words');
+  });
+
+  test('a container that passes a new inline onPrepared on every render keeps the form, reloads nothing and revokes nothing', async () => {
+    const calls = [];
+    const request = makeRequest();
+    const { rerender } = render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Typed before the re-render' } });
+    const contextReads = () => requests.filter((r) => r.path.endsWith('/lawn-fast/context')).length;
+    const before = contextReads();
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('Typed before the re-render');
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(calls).toHaveLength(1);
+    // After the handoff the parent re-renders with another inline callback.
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} operatorId="op-1" onClose={() => {}} onPrepared={(...args) => calls.push(args)} />);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText('Saved for this stop')).toBeTruthy();
+    expect(calls).toHaveLength(1);
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('Typed before the re-render');
+    expect(contextReads()).toBe(before);
+  });
+
+  test('retaking the photos after the handoff (the assessment no longer confirmed) revokes the part', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+    await waitFor(() => expect(screen.queryByText('Saved for this stop')).toBeNull());
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null, expect.any(Number));
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a part that cannot be prepared at mount is never prepared', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    // The footer asks for the next missing step (photos), not for a save.
+    expect(completeButton().textContent).not.toMatch(/this stop/);
+    fireEvent.click(completeButton());
+    expect(onPrepared).not.toHaveBeenCalled();
+    expect(screen.queryByText('Saved for this stop')).toBeNull();
+  });
+
+  test('embedded: no dialog, no portal; the part renders in place and still prepares', async () => {
+    const onPrepared = vi.fn();
+    const { container } = render(<div id="host"><FastCompleteLawnSheet service={SERVICE} request={makeRequest()} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={onPrepared} /></div>);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(container.querySelector('#host .tech-visit-embedded-part')).not.toBeNull();
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+  });
+
+  test('embedded: a write in flight (Analyze) reports busy through the part guard; the reads do not', async () => {
+    const { PartBusyContext } = await import('./FastCompleteParts');
+    const reports = [];
+    let release;
+    const request = makeRequest();
+    const slow = vi.fn(async (path, options) => {
+      if (path.endsWith('/lawn-assessment/assess')) await new Promise((resolve) => { release = resolve; });
+      return request(path, options);
+    });
+    render(<PartBusyContext.Provider value={(source, busy) => reports.push([source, busy])}><FastCompleteLawnSheet service={SERVICE} request={slow} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={vi.fn()} /></PartBusyContext.Provider>);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    expect(reports.some(([source, busy]) => source.endsWith(':writes') && busy)).toBe(false);
+    await addPhoto();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await waitFor(() => expect(reports.some(([source, busy]) => source.endsWith(':writes') && busy)).toBe(true));
+    release();
+    await screen.findByLabelText('Density score');
+    await waitFor(() => expect(reports.filter(([source]) => source.endsWith(':writes')).at(-1)[1]).toBe(false));
+  });
+
+  test('a refused hand-over shows its message and leaves the sheet editable', async () => {
+    const onPrepared = vi.fn(async () => { throw new Error('Could not save this on the device'); });
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Could not save this on the device');
+    expect(screen.queryByText('Saved for this stop')).toBeNull();
+    expect(completeCalls()).toHaveLength(0);
   });
 });

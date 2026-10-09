@@ -596,8 +596,8 @@ describe('the extraction prompt reads the agent-proposed shape only under the ga
     expect(extractionPromptVersion([], {})).toBe(PROMPT_HASH);
     // both stamps (the extractor's and the processor's per-call one) pass the block's own switch
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    expect(src).toContain('promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true })');
-    expect(src).toContain('const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });');
+    expect(src).toContain('promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout })');
+    expect(src).toContain('const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout });');
   });
 });
 
@@ -644,7 +644,7 @@ describe('codex #6046 round 2', () => {
     expect(src.match(/const assessmentLaneActive = commercialAssessmentBookingActive\(call\);/g)).toHaveLength(1);
     expect(src).not.toMatch(/agentProposedSlotCommitment: commercialAssessmentBookingActive\(call\)/);
     expect(src).not.toMatch(/\.\.\.\(commercialAssessmentBookingActive\(call\) \? \{ agentProposedSlotCommitment/);
-    expect(src).toContain('extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive })');
+    expect(src).toContain('extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout })');
     expect(src).toContain('...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),');
     expect(src.match(/\}\), \{ captured: assessmentLaneActive \}, \[extracted, preAdoptionExtracted\]\),/g)).toHaveLength(2);
     // every ai_extraction_prompt_version stamp in the pass uses the const's version
@@ -1331,7 +1331,7 @@ describe('codex #6046 round 11', () => {
 
     test('schema field: optional nullable boolean in both schemas, version 1.24.0, mirrored flat, in the prompt and the replay watch lists', () => {
       const { SCHEMA_VERSION } = require('../schemas/validate-extraction');
-      expect(SCHEMA_VERSION).toBe('1.25.0');
+      expect(SCHEMA_VERSION).toBe('1.27.0');
       for (const f of ['model-output', 'persisted']) {
         const schema = JSON.parse(fs.readFileSync(path.join(__dirname, `../schemas/call-extraction.${f}.schema.json`), 'utf8'));
         const field = schema.properties.service_request.properties.price_discussed;

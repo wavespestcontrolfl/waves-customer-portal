@@ -633,6 +633,84 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(isPersonPlacedVisit).toHaveBeenCalledWith(expect.objectContaining({ id: SERVICE.id }), trx, { refresh: true });
   });
 
+  test('a conflict-forced move re-reads the conflict on the move transaction (Codex #6207 r1 P2)', async () => {
+    const slots = require('../services/auto-dispatch/candidate-slots');
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const read = jest.spyOn(slots._internals, 'readCurrentConflict');
+    const trx = fakeTrx();
+    const sourceConflict = { kind: 'overlap', date: '2026-12-07', with: ['o1'] };
+    try {
+      // Still in conflict: the guard passes.
+      read.mockResolvedValueOnce(sourceConflict);
+      await makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE });
+      expect(read).toHaveBeenCalledWith(expect.objectContaining({ id: SERVICE.id }), { db: trx, conflictMoves: true });
+      // The other stop moved away since the evaluation: refuse.
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      // The conflict's own rows are held (FOR SHARE) before the re-read, so
+      // the other stop cannot move away before this move commits (r3 P2).
+      const locked = [];
+      const lockTrx = jest.fn((table) => {
+        const q = { whereIn: (c, ids) => { locked.push([table, ids]); return q; }, where: (w) => { locked.push([table, w]); return q; }, forShare: () => q, select: async () => [] };
+        return q;
+      });
+      const blackoutDates = require('../services/scheduling/blackout-dates');
+      jest.spyOn(blackoutDates, 'lockClosureState').mockResolvedValue();
+      const UUID1 = '11111111-1111-4111-8111-111111111111';
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1, 'interview:a1'] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'closed_day', date: '2026-11-26' } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      expect(locked).toEqual([['scheduled_services', [UUID1]], ['job_applications', ['a1']]]);
+      expect(blackoutDates.lockClosureState).toHaveBeenCalledWith(lockTrx);
+      // The re-read names a DIFFERENT stop than the one fenced: that stop is
+      // fenced too and the conflict is read again before the move goes on
+      // (pre-push P1). Gone on the second read = refuse.
+      const UUID2 = '22222222-2222-4222-8222-222222222222';
+      const other = { kind: 'overlap', date: '2026-12-07', with: [UUID2] };
+      locked.length = 0;
+      read.mockClear();
+      read.mockResolvedValueOnce(other).mockResolvedValueOnce(other);
+      // lockTrx only models the fence, so the guard stops at its next check;
+      // what matters is that it got past the conflict read.
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.not.toMatchObject({ statusCode: 409 });
+      expect(locked.slice(0, 2)).toEqual([['scheduled_services', [UUID1]], ['scheduled_services', [UUID2]]]);
+      expect(read).toHaveBeenCalledTimes(2);
+      read.mockResolvedValueOnce(other).mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      // A grouped move runs the guard for each member in turn. The conflict
+      // is read once, before the first member moves: afterwards the rest of
+      // the unit no longer overlaps, and must still be allowed to follow.
+      read.mockClear();
+      read.mockResolvedValueOnce(sourceConflict).mockResolvedValue(null);
+      const unitGuard = makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } });
+      await unitGuard({ trx, technicianId: 't1', service: SERVICE });
+      await unitGuard({ trx, technicianId: 't1', service: { ...SERVICE, id: 's1-sibling' } });
+      expect(read).toHaveBeenCalledTimes(1);
+      // The rebooker retries a deadlocked move with the SAME guard on a new
+      // transaction: the first one's locks are gone, so the conflict is
+      // fenced and read again (Codex #6207 r10 P2).
+      read.mockClear();
+      read.mockResolvedValueOnce(sourceConflict).mockResolvedValueOnce(null);
+      const retried = makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } });
+      await retried({ trx, technicianId: 't1', service: SERVICE });
+      await expect(retried({ trx: fakeTrx(), technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      expect(read).toHaveBeenCalledTimes(2);
+      // A move that cleared the normal bar reads nothing.
+      read.mockClear();
+      await makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1', service: SERVICE });
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('a sibling a person placed refuses the whole grouped move (Codex #6055 r1 P1)', async () => {
     const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
     isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });
@@ -904,6 +982,34 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
 
   // Codex r1: after a SLOT_TAKEN the remaining alternates are re-evaluated
   // against the now-current schedule before the next attempt.
+  test('a fallback candidate\'s guard re-reads the conflict of the evaluation that authorized it (pre-push P1)', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const slots = require('../services/auto-dispatch/candidate-slots');
+    const read = jest.spyOn(slots._internals, 'readCurrentConflict').mockResolvedValue(null);
+    const FRESH = { date: '2026-08-13', start_time: '10:00', end_time: '12:00', technician_id: 't1' };
+    const conflict = { kind: 'overlap', date: '2026-08-04', with: ['o1'] };
+    // The first evaluation saw no conflict; the rescore after SLOT_TAKEN does.
+    const rescore = jest.fn().mockResolvedValue({ kind: 'move', rankedCandidates: [FRESH], current: { conflict } });
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    const queue = [readRow(CONFIRMED_ROW), readRow(CONFIRMED_ROW), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+    db.mockImplementation(() => queue.shift());
+    try {
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore, sourceConflict: null });
+      const guardOf = (call) => call.find((arg) => arg && typeof arg.moveGuard === 'function').moveGuard;
+      // The conflict re-read comes before any read on the transaction.
+      const trx = jest.fn(() => { throw new Error('stop here'); });
+      // First attempt: authorized with no conflict, so nothing is re-read.
+      await expect(guardOf(SmartRebooker.reschedule.mock.calls[0])({ trx, technicianId: 't1', service: SERVICE })).rejects.toThrow('stop here');
+      expect(read).not.toHaveBeenCalled();
+      // Fallback: authorized by the rescore's conflict, which is now gone.
+      const fence = { whereIn: () => fence, forShare: () => fence, select: async () => [] };
+      await expect(guardOf(SmartRebooker.reschedule.mock.calls[1])({ trx: jest.fn(() => fence), technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('gate on: after a SLOT_TAKEN the next attempt comes from the re-evaluation, not the stale alternates', async () => {
     process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
     const STALE = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
@@ -1013,4 +1119,22 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
     expect({ code: first.code, message: first.message }).toEqual({ code: err.code, message: err.message });
   });
 
+});
+
+test('a confirmation after scoring stops the move of any visit, due date or not (owner 2026-10-09)', async () => {
+  const scored = { ...SERVICE, customer_confirmed: false };
+  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
+  await expect(applyAutoDispatchMove(scored, BEST, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('every move pins customer_confirmed in the atomic write and its guard refuses a confirmed row', async () => {
+  const scored = { ...SERVICE, customer_confirmed: false };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, BEST, 'run1');
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ customer_confirmed: false });
+  await expect(options.moveGuard({ trx: jest.fn(), service: { ...scored, customer_confirmed: true } }))
+    .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
 });

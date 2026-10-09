@@ -17,7 +17,8 @@ describe('recipe text', () => {
   test.each(TRACKS)('%s: Dismiss is retired and the jug note replaces it', (grass) => {
     const track = v13[grass];
     for (const v of track.visits) expect({ month: v.month, dismiss: /dismiss/i.test(v.primary + v.secondary + v.notes) }).toEqual({ month: v.month, dismiss: false });
-    const note = 'Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.';
+    // The 24-hour hold rides on the jug note (owner 2026-10-09: every post-emergent herbicide holds 24 hours).
+    const note = 'Dismiss: use up the jug on green kyllinga under 85°F, no rain or irrigation for 24 hours after (owner 2026-10-09: every post-emergent herbicide holds 24 hours); do not reorder.';
     expect(track.safety_rules).toContain(note);
     expect(track.notes.some((line) => line.endsWith(note))).toBe(true);
     expect(everything(grass)).not.toMatch(/November to March/);
@@ -91,7 +92,8 @@ describe('recipe text', () => {
   });
 
   test('the tracks stay one program (identical but for the name)', () => {
-    const body = ({ name, ...rest }) => JSON.stringify(rest);
+    // The bermuda removal add-on (visit.addOns, St. Augustine and Zoysia only) is set aside.
+    const body = ({ name, visits, ...rest }) => JSON.stringify({ ...rest, visits: visits.map(({ addOns, ...visit }) => visit) });
     for (const grass of TRACKS) expect(body(v13[grass])).toBe(body(v13.st_augustine));
   });
 });

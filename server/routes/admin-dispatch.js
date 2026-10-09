@@ -39,6 +39,7 @@ const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
+const { lawnFastGroupedAsk } = require('../services/combo-fast-complete');
 const TermiteStations = require('../services/termite-stations');
 const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-drift');
 
@@ -975,6 +976,58 @@ router.post('/:serviceId/standard-wording', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// Station exceptions for the typed-facts route (GATE_STATION_FAST_COMPLETE): only
+// for a termite or rodent bait station visit with no companion form, the program
+// the completion itself syncs (stationProgramForProfile), and only the stations
+// the sheet showed that are still ACTIVE in this customer's registry for that
+// program. The registry is read here, never taken from the client; the reader
+// verifies every number, status and quote (services/visit-station-facts.js).
+// Gate off, no stations carried or another kind of visit: null.
+async function loadAndReadStationFacts({ svc, profile, note, requested }) {
+  if (!Array.isArray(requested) || !requested.length) return null;
+  if (!require('../config/feature-gates').stationFastCompleteLive()) return null;
+  const { readStationExceptions, stationSheetProgramFor, stationRosterMatches } = require('../services/visit-station-facts');
+  const program = stationSheetProgramFor(profile);
+  if (!program || !svc.customer_id) return null;
+  const sent = new Set(requested.map((station) => String(station?.id)));
+  let rows;
+  try {
+    rows = await db('termite_stations')
+      .where({ customer_id: svc.customer_id, is_active: true })
+      .select('id', 'station_number', 'program', 'is_active');
+  } catch {
+    return { status: 'failed', exceptions: [] };
+  }
+  const stations = (Array.isArray(rows) ? rows : [])
+    .filter((row) => (row.program || 'termite') === program)
+    .map((row) => ({ id: row.id, number: row.station_number, program, is_active: row.is_active }));
+  // The sheet's roster must be the registry's: a station retired since the
+  // sheet loaded, or added, means the sheet would assert and count stations that
+  // are not the property's. No read; the sheet loads the registry again.
+  if (!stationRosterMatches(stations.map((station) => station.id), [...sent])) return { status: 'roster_changed', exceptions: [] };
+  return readStationExceptions({ note, stations, program });
+}
+
+// The answer the sheet takes from that read: `stationRead` is 'read' only when
+// the note was read (or had nothing to read) and everything the model returned
+// verified; else 'failed' with a detail (`unresolved`: part of what was said could
+// not be pinned down, the verified exceptions come beside it).
+// A throw, a timeout, a registry error or a roster that came to nothing is
+// 'failed', never an empty list the sheet could take for "all stations OK".
+async function readStationFactsForVisit(args) {
+  const { stationReadVerdict } = require('../services/visit-station-facts');
+  try {
+    const facts = await loadAndReadStationFacts(args);
+    if (!facts) return null;
+    const verdict = stationReadVerdict(facts.status);
+    // The exceptions that verified ride along even with an 'unresolved' verdict,
+    // for the sheet to pre-mark; every other failure carries none.
+    return { status: verdict, detail: facts.status, exceptions: facts.exceptions || [] };
+  } catch {
+    return { status: 'failed', detail: 'error', exceptions: [] };
+  }
+}
+
 // POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast
 // Complete step 3, GATE_TYPED_VOICE_FILL): a typed visit's own findings read
 // from the note, each pick field's values from the form's own options, each
@@ -995,7 +1048,7 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit, while it is a
     // current assignment; admins keep office-wide reach (the lane fill's
@@ -1019,10 +1072,23 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     // The form as served for the visit's own service key; a score the
     // client already holds (scoreSet) leaves nothing to read for when every
     // field is set too.
-    const facts = await readTypedFacts({
-      note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
+    // GATE_STATION_FAST_COMPLETE: a request that carries the sheet's stations
+    // also reads the station exceptions the note names, beside the fields
+    // (a separate read; null leaves the answer exactly as it was).
+    const [facts, stationFacts] = await Promise.all([
+      // The two reads are independent: a typed read that throws is a failed
+      // typed read, and the station read keeps its own verdict (and the other
+      // way round: readStationFactsForVisit never throws).
+      readTypedFacts({
+        note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
+      }).catch(() => ({ status: 'failed', type: findingsType, values: {}, heard: {}, unclearFields: [] })),
+      readStationFactsForVisit({ svc, profile, note, requested: req.body?.stations }),
+    ]);
+    res.json({
+      available: true,
+      ...facts,
+      ...(stationFacts ? { stationExceptions: stationFacts.exceptions, stationRead: stationFacts.status, stationReadDetail: stationFacts.detail } : {}),
     });
-    res.json({ available: true, ...facts });
   } catch (err) { next(err); }
 });
 
@@ -4652,6 +4718,9 @@ function lawnFastProductIds(req) {
   return ids.length ? [...new Set(ids)].slice(0, 20) : undefined;
 }
 
+// GATE_LAWN_NEW_SOD_NOTE capability signal: a sheet that understands the context's `newSod` sends `sodAware=1` (query string).
+const sodAwareRequest = (req) => req.query?.sodAware === '1';
+
 // GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
 // What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
 // lawn visit type is eligible, recurring program visits first): the eligibility
@@ -4666,7 +4735,8 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
-    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(productIds ? { productIds } : {}) });
+    // GATE_LAWN_NEW_SOD_NOTE: the new-sod holds go only to a sheet that sends `sodAware=1` (it understands `newSod`).
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...lawnFastGroupedAsk(req), ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
     res.json({ enabled: true, ...body });
@@ -4708,7 +4778,7 @@ router.get('/:lawnFastServiceId/lawn-fast/treatment-guide', async (req, res, nex
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
-    const result = await require('../services/lawn-fast-complete').buildLawnTreatmentGuide({ serviceId, assessmentId: req.query.assessmentId, ...(productIds ? { productIds } : {}) });
+    const result = await require('../services/lawn-fast-complete').buildLawnTreatmentGuide({ serviceId, assessmentId: req.query.assessmentId, ...lawnFastGroupedAsk(req), ...(productIds ? { productIds } : {}) });
     if (!result.ok) {
       const status = TREATMENT_GUIDE_STATUS[result.reason] || recapStatusForReason(result.reason);
       return res.status(status).json({ error: result.reason, code: result.reason });
@@ -4734,7 +4804,7 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
     // lawn visit with no re-service, assessment, project, companion or grouped-stop lane, and not closed) may clear a lawn's trouble area.
     const outcome = await db.transaction(async (trx) => {
       await lockOwnedLiveVisit(trx, req, serviceId, ['id']);
-      const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false });
+      const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false, ...lawnFastGroupedAsk(req) });
       if (!eligibility.ok) return { status: recapStatusForReason(eligibility.reason), body: { error: eligibility.reason, code: eligibility.reason } };
       if (eligibility.reason) return { status: 409, body: { error: 'This visit cannot be completed on the quick sheet.', code: 'lawn_fast_not_eligible', reason: eligibility.reason } };
       const cleared = await require('../services/lawn-trouble-areas').clearArea(trx, {
@@ -4747,6 +4817,43 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
       return { status: 200, body: { enabled: true, cleared: { id: cleared.id, place: cleared.place, type: cleared.type } } };
     });
     return res.status(outcome.status).json(outcome.body);
+  } catch (err) {
+    if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+// POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/sod-rooted
+// body: { sodLaidOn: 'YYYY-MM-DD' } (the sod date the sheet rendered)
+// The technician's "Sod mowed twice and does not lift" tick on a home with new sod (GATE_LAWN_NEW_SOD_NOTE, 404
+// {enabled:false} while off, nothing read or written). Saves property_preferences.sod_rooted_on = the visit's ET day, from
+// day 31 of the record whose sod date the sheet rendered (a changed record is 409 sod_record_changed), and never for a
+// visit on a later day than today (409 sod_rooted_future_visit). Idempotent; never moves or clears a saved day. Sent only by a
+// sod-aware sheet (`?sodAware=1`; without it 404 {enabled:false}). Lock order: the customer's property-preferences advisory
+// lock, the customer row (FOR SHARE), the visit row (lockOwnedLiveVisit, as the clear route above), then the preferences row
+// FOR UPDATE: the customer before its visits, as the review-reply runner and publisher take them.
+// Technician and office only; no customer text, no report change. See services/lawn-sod-sheet.js.
+router.post('/:lawnFastServiceId/lawn-fast/sod-rooted', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').lawnNewSodNoteLive() || !sodAwareRequest(req)) return res.status(404).json({ enabled: false });
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const owner = await db('scheduled_services').where({ id: serviceId }).first('customer_id');
+    if (!owner?.customer_id) return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    const outcome = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(owner.customer_id)]);
+      // The customer row before its visit row.
+      const customer = await trx('customers').where({ id: owner.customer_id }).whereNull('deleted_at').forShare().first('id');
+      if (!customer) return { status: 404, body: { error: 'Customer not found.', code: 'not_found' } };
+      await lockOwnedLiveVisit(trx, req, serviceId, ['id']);
+      const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false, ...lawnFastGroupedAsk(req) });
+      if (!eligibility.ok) return { status: recapStatusForReason(eligibility.reason), body: { error: eligibility.reason, code: eligibility.reason } };
+      if (eligibility.reason) return { status: 409, body: { error: 'This visit cannot be completed on the quick sheet.', code: 'lawn_fast_not_eligible', reason: eligibility.reason } };
+      // The customer changed since the lock was taken: the lock covers another customer, so write nothing.
+      if (String(eligibility.svc.customer_id) !== String(owner.customer_id)) return { status: 409, body: { error: 'This visit changed. Close the sheet and open it again.', code: 'visit_identity_changed' } };
+      return require('../services/lawn-sod-sheet').confirmSodRooted(trx, { svc: eligibility.svc, expectedLaidOn: req.body?.sodLaidOn });
+    });
+    return res.status(outcome.status).json(outcome.status === 200 ? { enabled: true, ...outcome.body } : outcome.body);
   } catch (err) {
     if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
     next(err);

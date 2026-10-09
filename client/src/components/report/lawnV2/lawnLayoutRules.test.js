@@ -523,6 +523,24 @@ describe('invitations never count as after-visit instructions', () => {
     expect(pageCarriesInstruction(data, Date.now())).toBe(false);
   });
 
+  it('the longer-cycles sentence is an invitation: it never removes "Nothing for you to do after this visit."', () => {
+    const data = clean();
+    data.reportV2.water = { scheduleOnFile: true, scheduleKind: 'inches', irrigationInches: 1, longerCycles: true };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+    expect(INVITATIONS).toHaveProperty('longerCyclesAdvice');
+    expect(Object.keys(INSTRUCTION_SOURCES)).not.toContain('longerCyclesAdvice');
+  });
+
+  it('the rain card sentences are invitations: a rain-covered week still allows "Nothing for you to do after this visit."', () => {
+    const data = clean();
+    data.reportV2.water = { scheduleOnFile: false, status: 'rain_covered', rainCard: true, rainSensorLine: true, explanation: 'Rain alone covered your lawn this week.' };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+    data.reportV2.water = { scheduleOnFile: true, status: 'low', rainCard: true, explanation: 'Your weekly water is below about 1.25"/wk.' };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+    expect(INVITATIONS).toHaveProperty('rainCardAdvice');
+    expect(Object.keys(INSTRUCTION_SOURCES)).not.toContain('rainCardAdvice');
+  });
+
   it('the closed lists name the invitations the brief lists', () => {
     expect(Object.keys(INVITATIONS)).toEqual(expect.arrayContaining(['waterScheduleCta', 'bannerSetupLink', 'reviewAsk', 'referralCard', 'crossSellCard', 'reschedule', 'textUs']));
   });

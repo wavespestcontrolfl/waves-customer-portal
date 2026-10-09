@@ -321,7 +321,7 @@ function Products({ slots }) {
 //   i  products (collapsed)          products
 export const LAYOUT_ORDER = [
   'status', 'reservice', 'plan', 'upcoming', 'nextVisit',
-  'yourPart',
+  'yourPart', 'newSod',
   'whatWeDid',
   'photos', 'recap', 'treatmentMap',
   'score',
@@ -337,6 +337,7 @@ const SECTIONS = {
   plan: ({ slots }) => slots.plan,
   upcoming: ({ slots }) => slots.upcoming,
   nextVisit: (props) => <NextVisit {...props} />,
+  newSod: ({ slots }) => slots.newSod,
   yourPart: ({ data, slots, nowMs, printing }) => cloneElement(slots.yourPart, { othersCarryInstruction: pageCarriesInstruction(data, nowMs, printing) }),
   whatWeDid: (props) => <WhatWeDid {...props} />,
   photos: (props) => <PhotosAndFindings {...props} />,

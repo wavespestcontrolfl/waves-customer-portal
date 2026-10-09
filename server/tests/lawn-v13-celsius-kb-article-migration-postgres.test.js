@@ -22,10 +22,12 @@ const seedScript = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', '
 // The seed script's article as 20261007173000 left it: 20261007176000 refines two of its lines later,
 // so those are put back first.
 const afterCap = require('../models/migrations/20261007176000_lawn_v13_celsius_kb_after_cap');
+const oneAYear = require('../models/migrations/20261009152000_lawn_v13_celsius_kb_blindside_one_a_year');
 function seededArticleContent() {
   const start = seedScript.indexOf(`slug: '${SLUG}'`);
   const open = seedScript.indexOf('content: `', start) + 'content: `'.length;
-  const current = seedScript.slice(open, seedScript.indexOf('`,', open));
+  // 20261009152000 later changed the Blindside statement inside one of those lines: put it back too.
+  const current = seedScript.slice(open, seedScript.indexOf('`,', open)).replace(oneAYear._NEXT, () => oneAYear._OLD);
   return afterCap._REPLACEMENTS.reduce((content, row) => content.replace(row.next, () => row.old), current);
 }
 // The article as 20260808000001 left it live: the OLD seeded lines (the new seed, reversed line by line).
