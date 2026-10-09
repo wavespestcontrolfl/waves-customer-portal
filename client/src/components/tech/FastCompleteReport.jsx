@@ -508,7 +508,12 @@ export function useTraceReuse({ serviceId, request, propertyId, trace, mode, tra
       if (data?.treatmentZone) trace.saved(data.treatmentZone);
       else trace.reload();
     } catch (err) {
-      setError(err?.message || 'Couldn’t copy the last trace. Trace it by hand.');
+      // Another device traced this visit since the offer was read: the visit
+      // HAS a trace now, so it is read again and no error stays on the sheet
+      // (the hand-trace button must not open on an empty state over it;
+      // Codex P2 r3 on #6175).
+      if (err?.code === 'trace_exists') trace.reload();
+      else setError(err?.message || 'Couldn’t copy the last trace. Trace it by hand.');
     }
     setReusing(false);
   };

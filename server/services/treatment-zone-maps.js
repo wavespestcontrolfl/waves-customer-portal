@@ -461,12 +461,15 @@ const REUSE_CAPTURE_MODE = 'perimeter';
 // property-less visit's address is judged per row below.
 const REUSE_CANDIDATE_LIMIT = 200;
 
+// One property identity for the whole app: the canonical key the customer
+// property records use (customer-property-address-keys.js: street suffixes,
+// punctuation, ZIP+4 and unit designators all normalized, the unit kept), so
+// "123 Main St." and "123 Main Street", "Apt 4" and "Unit 4" are one place and
+// two units are two (Codex P1 r3 on #6175). No street line is no place.
 function addressKey(parts) {
-  const clean = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
-  const line1 = clean(parts.line1);
-  if (!line1) return null;
-  // The unit is part of the place: two units at one street address are two homes.
-  return [line1, clean(parts.line2), clean(parts.city), clean(parts.state), clean(parts.zip).slice(0, 5)].join('|');
+  if (!String(parts.line1 ?? '').trim()) return null;
+  const { addressKey: canonicalAddressKey } = require('./customer-property-address-keys');
+  return canonicalAddressKey({ address_line1: parts.line1, address_line2: parts.line2, city: parts.city, zip: parts.zip }) || null;
 }
 
 // The address STAMPED on the visit only, never the customer's current one: a
@@ -516,6 +519,9 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     .where('ss.scheduled_date', '<', visitDate)
     .where('tz.capture_mode', REUSE_CAPTURE_MODE)
     .where('tz.linear_ft', '>', 0)
+    // The report draws a trace only from its picture: one with none would
+    // clear the sheet's hold and show nothing (Codex P2 r3 on #6175).
+    .whereNotNull('tz.snapshot_s3_key')
     .modify((q) => (propertyId ? q.where('ss.property_id', propertyId) : q.whereNull('ss.property_id')))
     .orderBy('ss.scheduled_date', 'desc')
     .orderBy('tz.updated_at', 'desc')
@@ -534,9 +540,34 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     // another service the report hides the map for is never copied onto a
     // visit that would show it (Codex P1 on #6175).
     if (await traceCaptureBlockPayload(sourceVisitOf(row), knex, { captureMode: row.capture_mode })) continue;
+    if (!(await sourceTraceWasShown(row, knex))) continue;
     return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date), addressKey: hereAddress };
   }
   return null;
+}
+
+// The source trace was one its own report could show (Codex P1 r3 on #6175):
+// the render-side verdict, read from the source visit's frozen service record
+// (its completion facts and areas, which the capture-side check never sees),
+// did not suppress it, and a report-flow record was judged against this very
+// trace (traceJudgedAllows). No record, or any error, is not shown: the copy
+// would put the trace on a report, so this fails closed.
+async function sourceTraceWasShown(row, knex) {
+  try {
+    const record = await knex('service_records')
+      .where({ scheduled_service_id: row.source_service_id })
+      .orderBy('created_at', 'desc')
+      .first();
+    if (!record) return false;
+    const { resolveTraceRenderVerdict } = require('./service-report/trace-eligibility');
+    const verdict = await resolveTraceRenderVerdict(record, knex);
+    if (!verdict || verdict.suppressed) return false;
+    const notes = typeof record.structured_notes === 'string' ? JSON.parse(record.structured_notes || '{}') : record.structured_notes;
+    return traceJudgedAllows(notes, row);
+  } catch (err) {
+    logger.warn(`[treatment-zone] source trace verdict failed service=${row.source_service_id}: ${err.message}`);
+    return false;
+  }
 }
 
 // The source visit as the eligibility check reads a scheduled service.
@@ -562,8 +593,9 @@ function reuseRowMatches(row, visit, visitDate, hereAddress) {
     || row.source_status !== 'completed'
     || !sourceDate || sourceDate >= visitDate
     || row.capture_mode !== REUSE_CAPTURE_MODE
-    // The sheet's hold clears on a length, so a trace with none is no help.
-    || !(Number(row.linear_ft) > 0)) return false;
+    // The sheet's hold clears on a length, so a trace with none is no help;
+    // the report draws only a trace that has its picture.
+    || !(Number(row.linear_ft) > 0) || !row.snapshot_s3_key) return false;
   if (visit.property_id) return String(row.source_property_id ?? '') === String(visit.property_id);
   return !row.source_property_id
     && addressKey({ line1: row.addr_line1, line2: row.addr_line2, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) === hereAddress;

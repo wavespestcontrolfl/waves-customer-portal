@@ -1033,6 +1033,24 @@ describe('complete and send', () => {
       await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
     });
 
+    // Codex P2 r3 on #6175: another device traced the visit after the offer was read.
+    test('a copy refused because the visit already has a trace reads that trace, with no error left on the sheet', async () => {
+      let zone = null;
+      const request = reusableRequest({
+        trace: () => ({ enabled: true, treatmentZone: zone }),
+        reuse: () => {
+          zone = { linear_ft: 305, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' };
+          throw Object.assign(new Error('This visit already has a trace. Remove it first to use the last visit’s.'), { status: 409, code: 'trace_exists' });
+        },
+      });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('Perimeter traced · 305 ft')).toBeTruthy();
+      expect(screen.queryByText(/already has a trace/)).toBeNull();
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+    });
+
     test('a reused trace can still be removed or traced again by hand', async () => {
       const request = reusableRequest();
       await openSheet(request);

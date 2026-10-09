@@ -49,7 +49,7 @@ const ZONE = {
 
 // A table-aware fake: the candidates query resolves to `candidates`, the
 // visit's own address to `here`, the visit's own trace to `own`.
-function makeKnex({ candidates = [ZONE], own = null, here = { addr_line1: '1 Example Ln', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' }, lock = { property_id: 'prop-1', status: 'confirmed' } } = {}) {
+function makeKnex({ candidates = [ZONE], own = null, record = { id: 'rec-0', structured_notes: null }, here = { addr_line1: '1 Example Ln', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' }, lock = { property_id: 'prop-1', status: 'confirmed' } } = {}) {
   const state = { inserted: null, wheres: [], columns: [] };
   const knex = jest.fn((table) => {
     const c = {
@@ -59,6 +59,7 @@ function makeKnex({ candidates = [ZONE], own = null, here = { addr_line1: '1 Exa
       where: (...a) => { state.wheres.push([table, ...a]); return c; },
       whereNot: (...a) => { state.wheres.push([table, 'not', ...a]); return c; },
       whereNull: (...a) => { state.wheres.push([table, 'null', ...a]); return c; },
+      whereNotNull: (...a) => { state.wheres.push([table, 'notnull', ...a]); return c; },
       modify: (fn) => { fn(c); return c; },
       orderBy: () => c,
       limit: () => c,
@@ -68,6 +69,7 @@ function makeKnex({ candidates = [ZONE], own = null, here = { addr_line1: '1 Exa
         state.columns.push(...columns.map(String));
         if (table === 'scheduled_services' && c._lock) return Promise.resolve(lock);
         if (table === 'scheduled_services as ss') return Promise.resolve(here);
+        if (table === 'service_records') return Promise.resolve(record);
         return Promise.resolve(own);
       },
       insert: (record) => {
@@ -91,6 +93,7 @@ beforeEach(() => {
     ? { Body: { transformToByteArray: async () => new Uint8Array([1, 2, 3]) } }
     : {}));
   jest.spyOn(traceEligibility, 'traceCaptureBlockPayload').mockResolvedValue(null);
+  jest.spyOn(traceEligibility, 'resolveTraceRenderVerdict').mockResolvedValue({ suppressed: false, eligibility: null });
 });
 afterEach(() => jest.restoreAllMocks());
 
@@ -247,6 +250,48 @@ describe('findReusableTreatmentZone: the source visit (Codex P1 on #6175)', () =
   });
 });
 
+// Codex r3 on #6175: the source trace must be one its own report could show,
+// with its picture, and the address is keyed the app's one way.
+describe('findReusableTreatmentZone: a trace its own report showed', () => {
+  test('a source the render verdict suppressed is never offered; an older shown one is', async () => {
+    traceEligibility.resolveTraceRenderVerdict.mockResolvedValue({ suppressed: true });
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex() })).toBeNull();
+    expect(traceEligibility.resolveTraceRenderVerdict).toHaveBeenCalledWith(expect.objectContaining({ id: 'rec-0' }), expect.anything());
+  });
+
+  test('a source visit with no service record is never offered', async () => {
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ record: null }) })).toBeNull();
+  });
+
+  test('a verdict that fails is not a yes', async () => {
+    traceEligibility.resolveTraceRenderVerdict.mockRejectedValue(new Error('profile read failed'));
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex() })).toBeNull();
+  });
+
+  test('a report-flow record judged against another trace does not give this one', async () => {
+    const judgedElsewhere = { id: 'rec-0', structured_notes: { traceJudged: { seen: '2026-07-01T10:00:00.000Z' } } };
+    const zone = { ...ZONE, updated_at: '2026-07-02T10:00:00.000Z' };
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ candidates: [zone], record: judgedElsewhere }) })).toBeNull();
+    const judgedThis = { id: 'rec-0', structured_notes: JSON.stringify({ traceJudged: { seen: '2026-07-02T10:00:00.000Z' } }) };
+    expect((await findReusableTreatmentZone(VISIT, { knex: makeKnex({ candidates: [zone], record: judgedThis }) }))?.sourceServiceId).toBe('svc-0');
+  });
+
+  test('a trace with no picture is never offered, and the query asks for one', async () => {
+    const knex = makeKnex({ candidates: [{ ...ZONE, snapshot_s3_key: null }] });
+    expect(await findReusableTreatmentZone(VISIT, { knex })).toBeNull();
+    expect(knex.state.wheres).toEqual(expect.arrayContaining([['scheduled_services as ss', 'notnull', 'tz.snapshot_s3_key']]));
+  });
+
+  test('a property-less address is keyed the canonical way: suffix, punctuation and unit word spellings are one place', async () => {
+    const NO_PROP = { ...VISIT, property_id: null };
+    const source = { ...ZONE, source_property_id: null, addr_line1: '123 Main Street', addr_line2: 'Unit 4', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200-1234' };
+    const here = { addr_line1: '123 Main St.', addr_line2: 'Apt 4', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' };
+    expect((await findReusableTreatmentZone(NO_PROP, { knex: makeKnex({ candidates: [source], here }) }))?.sourceServiceId).toBe('svc-0');
+    const otherUnit = { ...source, addr_line2: 'Unit 5' };
+    expect(await findReusableTreatmentZone(NO_PROP, { knex: makeKnex({ candidates: [otherUnit], here }) })).toBeNull();
+  });
+});
+
 // Codex P1 on #6175: the write reads the visit again under its lock, inside
 // the caller's own scope and against the row the request read.
 describe('reuseLastTreatmentZone: the locked recheck', () => {
@@ -341,10 +386,10 @@ describe('reuseLastTreatmentZone', () => {
     expect(knex.state.inserted.mask_s3_key).toMatch(/-mask\.png$/);
   });
 
-  test('a source with no snapshot still copies (the save path allows a trace without a picture)', async () => {
+  test('a source with no snapshot is not copied: the report would draw nothing from it (Codex P2 r3 on #6175)', async () => {
     const knex = makeKnex({ candidates: [{ ...ZONE, snapshot_s3_key: null }] });
-    await reuseLastTreatmentZone({ visit: VISIT, knex });
-    expect(knex.state.inserted.snapshot_s3_key).toBeNull();
+    await expect(reuseLastTreatmentZone({ visit: VISIT, knex })).rejects.toMatchObject({ code: 'no_reusable_trace' });
+    expect(knex.state.inserted).toBeNull();
     expect(mockS3Send).not.toHaveBeenCalled();
   });
 
