@@ -702,7 +702,10 @@ async function logIneligible(run, service, elig, planCheck) {
 // the conditions the run's own eligibility read applies (Codex #6208 r7 P2).
 function stillLiveOn(row, date) {
   return !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === date
-    && row.customer_active !== false && !row.customer_deleted_at;
+    && row.customer_active !== false && !row.customer_deleted_at
+    // Locked or excluded after pass 1: eligibility denies it outright, so it
+    // is no longer skipped for its pin (Codex #6208 r21 P2).
+    && row.auto_dispatch_locked !== true && row.auto_dispatch_excluded !== true;
 }
 
 async function stillMissingPin(run, picked) {

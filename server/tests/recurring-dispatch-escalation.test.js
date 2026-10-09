@@ -8,6 +8,8 @@ jest.mock('../services/notification-service', () => ({
 
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
+  lapsedPlanKeys: jest.fn(async () => new Set()),
+  planKey: jest.requireActual('../services/auto-dispatch/eligibility').planKey,
 }));
 
 const db = require('../models/db');
@@ -43,6 +45,7 @@ beforeEach(() => {
   budgetWhere.length = 0;
   retire.mockResolvedValue(1);
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
+  eligibility.lapsedPlanKeys.mockResolvedValue(new Set());
   db.raw = jest.fn((sql) => sql);
   for (const method of ['join', 'whereNotNull', 'whereNull', 'whereIn', 'where', 'whereRaw', 'whereNotExists', 'forNoKeyUpdate']) {
     query[method] = jest.fn(() => query);
@@ -237,8 +240,10 @@ describe('recurring visit with no arrival time and no due date', () => {
   // no notice (Codex #6208 r9 P2).
   test('a plan that lapses before the locked recheck raises nothing', async () => {
     query.select = jest.fn().mockResolvedValueOnce([{ id: 'n1', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20' }]).mockResolvedValue([]);
-    eligibility.isRecurringPlanActive.mockResolvedValueOnce({ active: true }).mockResolvedValueOnce({ active: false });
+    eligibility.isRecurringPlanActive.mockResolvedValueOnce({ active: false });
     expect(await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'))).toBe(0);
+    // The scan reads every series' plan in one call (Codex #6208 r21 P2).
+    expect(eligibility.lapsedPlanKeys).toHaveBeenCalledTimes(1);
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -375,7 +380,7 @@ describe('recurring visit with no arrival time and no due date', () => {
 
   test('a lapsed plan raises nothing, spends no budget, and its standing notice closes', async () => {
     scanFindsOnlyWindowless();
-    eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE' });
+    eligibility.lapsedPlanKeys.mockImplementation(async (rows) => new Set(rows.map(eligibility.planKey)));
     expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(0);
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
     const { sql, bindings } = retireStatements[1];
@@ -437,20 +442,21 @@ test('missing-pin upkeep closes a standing notice whose visit now has a pin', as
   expect(retireSql.sql).toContain('c.active IS NOT FALSE');
 });
 
-// A lapsed plan gets no placement, so its pin needs no fix (Codex #6208 r18 P2).
-test('missing-pin upkeep closes a standing notice whose plan lapsed; an unreadable plan keeps it', async () => {
+// A lapsed plan gets no placement, and a locked or excluded visit is out of
+// auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2).
+test('missing-pin upkeep closes a standing notice whose plan lapsed or whose visit staff locked or excluded', async () => {
   const audit = require('../services/auto-dispatch/audit');
-  existingNoticeKeys = ['auto-dispatch-missing-geo:v1:2026-08-20', 'auto-dispatch-missing-geo:v2:2026-08-21', 'auto-dispatch-missing-geo:v3:2026-08-22'];
-  query.select = jest.fn().mockResolvedValue(['v1', 'v2', 'v3'].map((id) => ({ id, customer_latitude: null, customer_longitude: null })));
+  existingNoticeKeys = ['v1', 'v2', 'v3', 'v4'].map((id) => `auto-dispatch-missing-geo:${id}:2026-08-20`);
+  query.select = jest.fn().mockResolvedValue([
+    { id: 'v1', customer_id: 'c1', recurring_parent_id: 'p1' },
+    { id: 'v2', customer_id: 'c2', recurring_parent_id: 'p2' },
+    { id: 'v3', customer_id: 'c3', recurring_parent_id: 'p3', auto_dispatch_locked: true },
+    { id: 'v4', customer_id: 'c4', recurring_parent_id: 'p4', auto_dispatch_excluded: true },
+  ]);
   query.leftJoin = jest.fn(() => query);
-  eligibility.isRecurringPlanActive
-    .mockResolvedValueOnce({ active: false })
-    .mockResolvedValueOnce({ active: true })
-    .mockRejectedValueOnce(new Error('read failed'));
+  eligibility.lapsedPlanKeys.mockResolvedValue(new Set(['c1:p1']));
   await audit.maintainMissingGeoNotices(new Date('2026-08-01T16:00:00Z'));
   const retireSql = retireStatements[retireStatements.length - 1];
-  expect(retireSql.bindings).toContain('v1');
+  expect(retireSql.bindings).toEqual(expect.arrayContaining(['v1', 'v3', 'v4']));
   expect(retireSql.bindings).not.toContain('v2');
-  expect(retireSql.bindings).not.toContain('v3');
 });
-

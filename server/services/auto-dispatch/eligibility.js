@@ -143,6 +143,29 @@ async function isRecurringPlanActive(service, db) {
   return { active: true, reason_code: null, reason_description: null };
 }
 
+// The same signal for MANY visits in one read: the `customer:series` keys
+// that carry an unresolved plan_lapsed alert (planKey of each). A scan over a
+// long horizon must not make one round trip per series (Codex #6208 r21 P2).
+// Fails open like the single check: an unreadable table lapses nothing.
+function planKey(service) {
+  return `${service.customer_id}:${service.recurring_parent_id || service.id}`;
+}
+
+async function lapsedPlanKeys(services, db) {
+  const parentIds = [...new Set(services.map((s) => s.recurring_parent_id || s.id).filter(Boolean))];
+  if (!parentIds.length) return new Set();
+  try {
+    const alerts = await db('recurring_plan_alerts')
+      .whereIn('recurring_parent_id', parentIds)
+      .where('alert_type', 'plan_lapsed')
+      .whereNull('resolved_at')
+      .select('recurring_parent_id', 'customer_id');
+    return new Set(alerts.map((a) => `${a.customer_id}:${a.recurring_parent_id}`));
+  } catch (_) {
+    return new Set();
+  }
+}
+
 /**
  * Did a person put this visit on its current date? The series-move text says
  * "visits already on your calendar won't change unless we talk with you
@@ -235,4 +258,4 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
   }
 }
 
-module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit, VALID_STATUSES };
+module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES };

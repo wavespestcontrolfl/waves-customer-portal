@@ -382,6 +382,9 @@ test('a pin fixed after pass 1 raises no missing-geo notice and the visit joins 
 test.each([
   ['archived', { customer_deleted_at: '2026-08-01T10:00:00Z' }],
   ['deactivated', { customer_active: false }],
+  // Staff took the visit out of auto-dispatch after pass 1 (r21 P2).
+  ['with a visit locked', { auto_dispatch_locked: true }],
+  ['with a visit excluded', { auto_dispatch_excluded: true }],
 ])('a customer %s after pass 1 raises no missing-geo notice', async (_label, change) => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });

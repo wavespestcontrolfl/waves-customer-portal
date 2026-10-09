@@ -264,7 +264,7 @@ function noWindowVisits(conn, from, to) {
 // The windowless visits staff can act on now: plan not lapsed (a lapsed plan's
 // visit is not placed, so asking for a time is noise). One plan read per plan.
 async function actionableNoWindowRows(today, to) {
-  const { isRecurringPlanActive } = require('./eligibility');
+  const { lapsedPlanKeys, planKey } = require('./eligibility');
   const rows = await noWindowVisits(db, today, to)
     .select('s.id', 's.customer_id', 's.scheduled_date', 's.recurring_parent_id', 's.source_estimate_id',
       db.raw('(select p.source_estimate_id from scheduled_services as p where p.id = s.recurring_parent_id) as parent_estimate_id'),
@@ -288,15 +288,11 @@ async function actionableNoWindowRows(today, to) {
   const notRoutableYet = (row) => row.root_service_key === 'mosquito_seasonal' && rolled(row) && toDateStr(row.scheduled_date) > routingHorizon;
   const estimateOf = (row) => row.source_estimate_id || row.parent_estimate_id || null;
   const covered = await combinedBookingEstimateIds(rows.map(estimateOf));
-  const plans = new Map();
-  const actionable = [];
-  for (const row of rows) {
-    if (covered.has(String(estimateOf(row))) || notRoutableYet(row)) continue;
-    const planKey = `${row.customer_id}:${row.recurring_parent_id}`;
-    if (!plans.has(planKey)) plans.set(planKey, (await isRecurringPlanActive(row, db)).active);
-    if (plans.get(planKey)) actionable.push({ ...row, date: toDateStr(row.scheduled_date) });
-  }
-  return actionable;
+  // One read for every series in the scan (r21 P2).
+  const lapsed = await lapsedPlanKeys(rows, db);
+  return rows
+    .filter((row) => !covered.has(String(estimateOf(row))) && !notRoutableYet(row) && !lapsed.has(planKey(row)))
+    .map((row) => ({ ...row, date: toDateStr(row.scheduled_date) }));
 }
 
 async function retireNoWindowNotices(nowDate, today, actionableIds) {
@@ -476,15 +472,16 @@ async function maintainMissingGeoNotices(nowDate = new Date()) {
     .whereIn('scheduled_services.id', ids)
     .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
       'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip');
-  const { isRecurringPlanActive } = require('./eligibility');
-  const close = new Set();
-  for (const row of rows) {
-    // A pin that resolves, or a plan that lapsed: nobody needs to fix this
-    // pin (the run applies the same two tests; r18 P2). An unreadable plan
-    // keeps the notice.
-    const lapsed = async () => { try { return !(await isRecurringPlanActive(row, db)).active; } catch (_) { return false; } };
-    if (resolveGeo(row) || await lapsed()) close.add(String(row.id));
-  }
+  const { lapsedPlanKeys, planKey } = require('./eligibility');
+  // A pin that resolves, a plan that lapsed, or a visit staff took out of
+  // auto-dispatch (locked or excluded): the visit is no longer skipped for
+  // its pin, so the notice closes (the run applies the same tests; r18, r21
+  // P2). One plan read for all; an unreadable plan keeps the notice.
+  const lapsed = await lapsedPlanKeys(rows, db);
+  const optedOut = (row) => row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true;
+  const close = new Set(rows
+    .filter((row) => resolveGeo(row) || lapsed.has(planKey(row)) || optedOut(row))
+    .map((row) => String(row.id)));
   await retireMissingGeoNotices(close, nowDate);
 }
 

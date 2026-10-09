@@ -350,3 +350,31 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }))).toMatchObject({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
   });
 });
+
+// One read for many series (Codex #6208 r21 P2).
+describe('lapsedPlanKeys', () => {
+  const { lapsedPlanKeys, planKey } = require('../services/auto-dispatch/eligibility');
+  const rows = [{ id: 'a', customer_id: 'c1', recurring_parent_id: 'p1' }, { id: 'b', customer_id: 'c2', recurring_parent_id: 'p2' }, { id: 'c', customer_id: 'c1', recurring_parent_id: 'p1' }];
+  const dbWith = (select) => {
+    const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), whereNull: jest.fn(() => q), select };
+    const db = jest.fn(() => q);
+    db.q = q;
+    return db;
+  };
+
+  test('reads every series once and keys a lapse by customer and series', async () => {
+    const db = dbWith(jest.fn(async () => [{ recurring_parent_id: 'p1', customer_id: 'c1' }, { recurring_parent_id: 'p2', customer_id: 'other' }]));
+    const lapsed = await lapsedPlanKeys(rows, db);
+    expect(db).toHaveBeenCalledTimes(1);
+    expect(db.q.whereIn).toHaveBeenCalledWith('recurring_parent_id', ['p1', 'p2']);
+    expect(db.q.where).toHaveBeenCalledWith('alert_type', 'plan_lapsed');
+    expect(rows.map((r) => lapsed.has(planKey(r)))).toEqual([true, false, true]);
+  });
+
+  test('an unreadable table lapses nothing, and no rows reads nothing', async () => {
+    expect((await lapsedPlanKeys(rows, dbWith(jest.fn(async () => { throw new Error('no table'); })))).size).toBe(0);
+    const db = dbWith(jest.fn());
+    expect((await lapsedPlanKeys([], db)).size).toBe(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+});
