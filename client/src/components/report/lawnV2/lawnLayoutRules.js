@@ -139,6 +139,7 @@ export const INSTRUCTION_SOURCES = Object.freeze({
 export const INVITATIONS = Object.freeze({
   waterScheduleCta: 'the "Add your watering schedule" call to action (WaterIntakeBar, scheduleOnFile false): optional account setup that makes the reading more exact; no treatment depends on it',
   longerCyclesAdvice: 'the longer-cycles sentence on the water card (water.longerCycles, GATE_LAWN_REPORT_POLISH): advice about the customer\'s standing sprinkler schedule, printed only when no banner, weekly plan or after-visit watering note is on the visit; it is not a step after this visit',
+  rainCardAdvice: 'the rain card\'s sentence on the water card (water.rainCard, GATE_LAWN_WATER_RAIN: "Rain alone covered your lawn this week. Leave the sprinklers off until the grass shows…", and the new deficit and surplus sentences): the explanation of the week that ended and advice about the standing schedule, like every water-card explanation today; "leave the sprinklers off" is not an after-visit task, and a visit that carries a real watering instruction (hold / water-in) never shows it',
   bannerSetupLink: 'the sprinkler-setup link under an amount-only water-in (banner.setupLine): the amount to water is already printed; the link only offers minutes per zone',
   reviewAsk: 'the review ask',
   referralCard: 'the referral card',

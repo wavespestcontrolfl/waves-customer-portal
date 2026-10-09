@@ -268,9 +268,9 @@ test('the bermuda removal step options share one group id in the completion proj
     product: { id, name, active: true, labelVerifiedAt: '2026-01-01' }, mix: null,
   });
   plan.protocol.structured.products.push(
-    { productId: 'rec', defaultInPlan: false, applicationMode: 'spot', gates: {} },
-    { productId: 'fus', defaultInPlan: false, applicationMode: 'spot', gates: {} },
-    { productId: 'nis', defaultInPlan: false, applicationMode: 'spot', gates: {} },
+    { productId: 'rec', defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } },
+    { productId: 'fus', defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } },
+    { productId: 'nis', defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } },
   );
   plan.mixCalculator.conditionalOptions = [step('rec', 'Recognition'), step('fus', 'Fusilade'), step('nis', 'Surfactant')];
   const { options, items } = buildLawnCompletionDefaults(plan, context);
@@ -284,6 +284,31 @@ test('the bermuda removal step options share one group id in the completion proj
   expect(items.map((i) => i.product.id)).toEqual(['product']);
 });
 
+// A visit whose assigned window is May (the ordinary Celsius weed mix, LESCO 90/10 as its surfactant) and
+// whose appointment is in June: the plan's product list holds May's rows and the June step's three tagged
+// rows (lawn-bermuda-removal.js withStepProducts). The completion defaults must offer all three step
+// lines, each on its June row, and the ordinary surfactant line must keep its May row (codex #6229 r2 P2).
+test('May window, June appointment: all three step lines are offered as one group on their June rows; the ordinary surfactant keeps its May row', () => {
+  const { plan, context } = fixture();
+  const may = (productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { weedMix: true } });
+  const june = (productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } });
+  plan.protocol.structured.products.push(may('nis'), june('rec'), june('fus'), june('nis'));
+  const line = (id, extra = {}) => ({ role: 'conditional', selected: false, product: { id, name: id, active: true }, ...extra });
+  plan.mixCalculator.conditionalOptions = [line('nis'), line('rec', { bermudaStep: true }), line('fus', { bermudaStep: true }), line('nis', { bermudaStep: true })];
+  const { options, addOns } = buildLawnCompletionDefaults(plan, context);
+  expect(options.filter((o) => o.group === 'bermuda_removal').map((o) => o.product.id).sort()).toEqual(['fus', 'nis', 'rec']);
+  // The ordinary surfactant line is a plain option and an ordinary add-on (its May row), outside the group.
+  expect(options.filter((o) => o.product.id === 'nis' && !o.group)).toHaveLength(1);
+  expect(addOns.map((item) => item.product.id)).toEqual(['nis']);
+});
+
+test('a step line whose product has only an ordinary row in the plan\'s product list is not offered (the step is withheld, never read on May\'s row)', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'nis', defaultInPlan: false, applicationMode: 'spot', gates: { weedMix: true } });
+  plan.mixCalculator.conditionalOptions = [{ role: 'conditional', selected: false, bermudaStep: true, product: { id: 'nis', name: 'nis', active: true } }];
+  expect(buildLawnCompletionDefaults(plan, context).options.filter((o) => o.group === 'bermuda_removal')).toEqual([]);
+});
+
 // A CitraBlue or unconfirmed cultivar: the step lines carry the hard test-patch note, and it
 // rides each bermuda option through the completion projection (the same { key, text } shape).
 test('the spray conditions and the test-patch note ride each bermuda option; other notes and other options carry none', () => {
@@ -294,7 +319,7 @@ test('the spray conditions and the test-patch note ride each bermuda option; oth
     gateNotes: [note, { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow.' }, { key: 'bermudaRemoval', severity: 'note', text: 'Recipe.' }, { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip the Celsius weed spot in the bermuda area today.' }, { key: 'morningUnderF', severity: 'required', text: 'Morning.' }, { key: 'zoysia2eeOnHand', severity: 'required', text: 'Zoysia: 2(ee) on hand.' }],
     product: { id, name: id, active: true, labelVerifiedAt: '2026-01-01' }, mix: null,
   });
-  plan.protocol.structured.products.push(...['rec', 'fus', 'nis'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: {} })));
+  plan.protocol.structured.products.push(...['rec', 'fus', 'nis'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } })));
   plan.mixCalculator.conditionalOptions = [step('rec'), step('fus'), step('nis')];
   const { options } = buildLawnCompletionDefaults(plan, context);
   for (const option of options.filter((o) => o.group === 'bermuda_removal')) expect(option.gateNotes.map((n) => n.key)).toEqual(['morningUnderF', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea', 'zoysia2eeOnHand', 'testPatchFirst']);
@@ -328,7 +353,8 @@ test('addOns are the window\'s opt-in products as the plan built them: substitut
 test('the bermuda removal step lines are grouped options, never ordinary add-ons', () => {
   const { plan, context } = fixture();
   plan.protocol.structured.products.push(
-    ...['rec', 'fus', 'nis', 'celsius'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: {} })),
+    ...['rec', 'fus', 'nis'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } })),
+    { productId: 'celsius', defaultInPlan: false, applicationMode: 'spot', gates: {} },
   );
   const line = (id, extra = {}) => ({ role: 'conditional', selected: false, product: { id, name: id, active: true }, ...extra });
   plan.mixCalculator.conditionalOptions = [line('rec', { bermudaStep: true }), line('fus', { bermudaStep: true }), line('nis', { bermudaStep: true }), line('celsius')];

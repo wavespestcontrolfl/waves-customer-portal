@@ -367,3 +367,95 @@ describe('GATE_LAWN_REPORT_POLISH: the one-label-line decision rides the same fr
     expect(facts.frozenLabelDropsFor('lawn', JSON.stringify({ lawnReportFacts: block }))).toEqual({});
   });
 });
+
+describe('GATE_LAWN_WATER_RAIN: the rain card\'s permission rides the same freeze (the real write gate)', () => {
+  const RAIN = 'GATE_LAWN_WATER_RAIN';
+  const POLISH = 'GATE_LAWN_REPORT_POLISH';
+  const prefsRow = (extra) => ({
+    customer_id: 'c-1', irrigation_system: true, watering_days: ['Mon'], rain_sensor: false,
+    sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null, ...extra,
+  });
+  afterEach(() => { delete process.env[RAIN]; delete process.env[POLISH]; });
+
+  async function freeze({ prefs = [prefsRow()], products = [], rain = true, polish = false, down = new Set() } = {}) {
+    live();
+    if (rain) process.env[RAIN] = 'true';
+    if (polish) process.env[POLISH] = 'true'; else delete process.env[POLISH];
+    loadServiceRecordForPdf.mockResolvedValue({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', service_date: '2026-10-08', structured_notes: '{}' });
+    const { knex, state } = store({ service_products: products, products_catalog: [], lawn_assessments: [], lawn_assessment_runs: [], lawn_protocol_products: [], property_preferences: prefs }, down);
+    await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    return state.notes.lawnReportFacts;
+  }
+  const rainAdviceOf = (block) => facts.frozenRainAdvice('lawn', JSON.stringify({ lawnReportFacts: block }));
+
+  test('the freeze needs BOTH gates (the named dependency); either dark freezes no permission', async () => {
+    const gates = require('../config/feature-gates');
+    process.env[RAIN] = 'true';
+    expect(gates.lawnWaterRainFreezeLive()).toBe(false); // facts dark
+    live();
+    expect(gates.lawnWaterRainFreezeLive()).toBe(true);
+    delete process.env[RAIN];
+    expect(gates.lawnWaterRainFreezeLive()).toBe(false);
+    process.env[RAIN] = '1';
+    expect(gates.lawnWaterRainLive()).toBe(false);
+    expect(await freeze({ rain: false })).toBeUndefined(); // no products, no polish, no rain: nothing frozen, as before
+  });
+
+  test('a customer with no schedule and no sod record: version 2, the card allowed, the sensor line wanted (a productless visit too)', async () => {
+    const block = await freeze();
+    expect(block).toMatchObject({ v: 1, productUse: {}, waterAdvice: { v: 2, longerCycles: false, rainCard: true, rainSensorLine: true } });
+    expect(rainAdviceOf(block)).toEqual({ rainCard: true, sensorLine: true });
+  });
+
+  test('no prefs row at all (never opened the portal) is a real answer: allowed', async () => {
+    expect(rainAdviceOf(await freeze({ prefs: [] }))).toEqual({ rainCard: true, sensorLine: true });
+  });
+
+  test('a failed prefs read fails closed (not allowed), and never fails the freeze', async () => {
+    const block = await freeze({ down: new Set(['property_preferences']) });
+    expect(block.waterAdvice).toEqual({ v: 2, longerCycles: false, rainCard: false, rainSensorLine: false });
+    expect(rainAdviceOf(block)).toBeNull();
+  });
+
+  test('new sod still establishing, or a schedule left unconfirmed after a move: not allowed; rooted sod: allowed', async () => {
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow({ sod_laid_on: '2026-09-28', sod_covers: 'whole' })] }))).toBeNull();
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow({ sod_laid_on: '2026-08-01', sod_covers: 'whole' })] }))).toBeNull();
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow({ sod_laid_on: '2026-08-01', sod_covers: 'whole', sod_rooted_on: '2026-09-10' })] }))).toEqual({ rainCard: true, sensorLine: true });
+    const moved = { irrigation_home_changed_at: '2026-09-20T12:00:00Z', irrigation_run_minutes: 30, irrigation_confirmed_fields: '[]' };
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow(moved)] }))).toBeNull();
+    // a prefs row without the sod columns (migration not applied) fails closed
+    expect(rainAdviceOf(await freeze({ prefs: [{ customer_id: 'c-1', rain_sensor: false }] }))).toBeNull();
+  });
+
+  test('the sensor line: wanted unless the rain sensor field is true (true or "t"); a true sensor after an unconfirmed move is wanted again', async () => {
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow({ rain_sensor: true })] }))).toEqual({ rainCard: true, sensorLine: false });
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow({ rain_sensor: 't' })] }))).toEqual({ rainCard: true, sensorLine: false });
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow({ rain_sensor: false })] }))).toEqual({ rainCard: true, sensorLine: true });
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow({ rain_sensor: null })] }))).toEqual({ rainCard: true, sensorLine: true });
+    const movedConfirmedSchedule = { irrigation_home_changed_at: '2026-09-20T12:00:00Z', irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes', 'watering_days', 'irrigation_system_type']), irrigation_run_minutes: 30, rain_sensor: true };
+    expect(rainAdviceOf(await freeze({ prefs: [prefsRow(movedConfirmedSchedule)] }))).toEqual({ rainCard: true, sensorLine: true });
+  });
+
+  test('polish alone is the version 1 block it always was; both gates give one version 2 block with both decisions', async () => {
+    const polishOnly = await freeze({ rain: false, polish: true, prefs: [prefsRow({ watering_days: ['Mon', 'Wed', 'Fri'] })] });
+    expect(polishOnly.waterAdvice).toEqual({ v: 1, longerCycles: true });
+    expect(rainAdviceOf(polishOnly)).toBeNull();
+    const both = await freeze({ polish: true, prefs: [prefsRow({ watering_days: ['Mon', 'Wed', 'Fri'] })] });
+    expect(both.waterAdvice).toEqual({ v: 2, longerCycles: true, rainCard: true, rainSensorLine: true });
+    expect(facts.frozenLongerCycles('lawn', JSON.stringify({ lawnReportFacts: both }))).toBe(true);
+    // rain alone does not freeze the longer-cycles decision (it is the polish gate's)
+    expect((await freeze({ prefs: [prefsRow({ watering_days: ['Mon', 'Wed', 'Fri'] })] })).waterAdvice.longerCycles).toBe(false);
+  });
+
+  test('readers: a version 1 block, a hand-edited block and a non-lawn record give no permission; the PDF key follows the permission', async () => {
+    const block = await freeze();
+    const notes = (waterAdvice) => JSON.stringify({ lawnReportFacts: { ...block, waterAdvice } });
+    expect(facts.frozenRainAdvice('lawn', notes({ v: 1, longerCycles: false, rainCard: true }))).toBeNull();
+    [{ v: 2, rainCard: 'true' }, { v: 3, rainCard: true }, { v: 2 }, 'yes', null].forEach((bad) => expect(facts.frozenRainAdvice('lawn', notes(bad))).toBeNull());
+    expect(facts.frozenRainAdvice('pest', notes(block.waterAdvice))).toBeNull();
+    expect(facts.frozenRainAdvice('lawn', '{}')).toBeNull();
+    const stamp = (waterAdvice) => facts.frozenReportFactsStamp(notes(waterAdvice));
+    expect(stamp({ v: 2, longerCycles: false, rainCard: true, rainSensorLine: true })).not.toBe(stamp({ v: 2, longerCycles: false, rainCard: false, rainSensorLine: false }));
+    expect(stamp({ v: 2, longerCycles: false, rainCard: true, rainSensorLine: true })).not.toBe(stamp({ v: 2, longerCycles: false, rainCard: true, rainSensorLine: false }));
+  });
+});

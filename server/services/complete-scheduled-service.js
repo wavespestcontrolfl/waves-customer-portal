@@ -2215,6 +2215,12 @@ const REFUSED_WORDS_LABEL = 'Words the report can\'t publish (it would show the 
 // Unchanged means the same sentence in the same section.
 const sectionSentenceKey = (entry) => `${entry.key}|${normalizeSentence(entry.sentence)}`;
 
+// The application-limit advisory with `blocks` appended (a list of { code, message }): the advisory
+// unchanged when there are none, so a completion with no finding carries no advisory.
+function withLimitAdvisoryBlocks(current, blocks) {
+  return blocks.length ? { advisory: true, blocks: [...(current?.blocks || []), ...blocks] } : current;
+}
+
 // Edit heads-up for the four-section report (owner 2026-10-01: "it
 // shouldn't stop us, but we should rerun it if I or a tech edits it";
 // Codex #5500). The writer rules run again on every sentence that differs
@@ -9286,22 +9292,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // The bermuda removal label-rate warning (Recognition's yearly maximum), read after the
         // spray is ledgered: an advisory line in the same list, never a block.
         const bermudaRate = await require('./lawn-bermuda-removal').rateAdvisories(connection, svc.id, ledgered.map((row) => row.product_id));
-        if (bermudaRate.length) {
-          applicationLimitAdvisory = {
-            advisory: true,
-            blocks: [...(applicationLimitAdvisory?.blocks || []), ...bermudaRate.map((message) => ({ code: 'application_limit_bermuda_annual_rate', message }))],
-          };
-        }
+        applicationLimitAdvisory = withLimitAdvisoryBlocks(applicationLimitAdvisory, bermudaRate.map((message) => ({ code: 'application_limit_bermuda_annual_rate', message })));
         const reported = new Set();
         for (const { product_id: productId } of ledgered) {
           const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection, { propertyId: svc.property_id || null });
           for (const v of blocks.filter((b) => b.type === 'annual_max_rate' && b.matchType === 'active_ingredient')) {
             if (reported.has(v.matchValue)) continue;
             reported.add(v.matchValue);
-            applicationLimitAdvisory = {
-              advisory: true,
-              blocks: [...(applicationLimitAdvisory?.blocks || []), { code: 'application_limit_active_ingredient', message: v.message }],
-            };
+            applicationLimitAdvisory = withLimitAdvisoryBlocks(applicationLimitAdvisory, [{ code: 'application_limit_active_ingredient', message: v.message }]);
             if (await connection('dispatch_alerts').where({ type: 'application_limit', job_id: svc.id })
               .whereRaw("payload->>'active_ingredient' = ?", [v.matchValue]).first('id')) continue;
             const capProduct = await connection('products_catalog').where({ id: productId }).first();
@@ -9335,10 +9333,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (record?.id && !issuedInvoiceCloseout) {
       const limitFindings = await recordedProductLimitFindings({ svc, record, database: db });
       if (limitFindings.length) {
-        applicationLimitAdvisory = {
-          advisory: true,
-          blocks: [...(applicationLimitAdvisory?.blocks || []), ...limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId }))],
-        };
+        applicationLimitAdvisory = withLimitAdvisoryBlocks(applicationLimitAdvisory, limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId })));
         await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
       }
     }
