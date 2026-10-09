@@ -894,6 +894,11 @@ function sweptOf(form, facts) {
   return typeof form?.sweepPick === 'boolean' ? form.sweepPick : facts?.sweptEaves === true;
 }
 
+// What the writer is told when the chip is tapped off (keyed by `sweepPick`;
+// tapped on or untouched adds nothing): a note that says "swept the eaves"
+// must not put the sweep back on the report.
+const SWEEP_WRITER_CORRECTION = { false: { sweepNotDone: true } };
+
 // The chip's state for the report card, or null where no sweep is recorded.
 function sweepChipFor(ctx, form, draft, setForm) {
   if (ctx.houseMix !== true) return null;
@@ -967,8 +972,6 @@ function writerPayload({ service, visit, form, rows, facts, sweptEaves, ratingAl
     // The full form's own writer field, sent as it sends it: the sweep heard in
     // the note (owner 2026-10-08), or an empty list.
     actionsCompleted: pestSweepActions(sweptEaves),
-    // The chip tapped off: the tech's word over the note for the writer too.
-    ...(form.sweepPick === false ? { sweepNotDone: true } : {}),
     // The first-visit 5 is a scoring default, not something the technician
     // saw: the writer gets a rating only once they choose one (codex local
     // r28 on #5538), as the completion recap leaves the default out.
@@ -1704,7 +1707,8 @@ function ReportFlowForm({
       buildPayload: (facts, productFill) => {
         const { heard, writerExtras } = recordState.inputs(recordState.settle(facts), facts);
         const payload = writerPayload({ service, visit: ctx.visit, form, rows: rowsFor(facts, productFill), facts: heard, sweptEaves: sweptOf(form, heard), ratingAllowed, photos: visitPhotos.photos, promiseMarks });
-        return { ...payload, ...writerExtras };
+        // The chip tapped off: the tech's word over the note for the writer too.
+        return { ...payload, ...writerExtras, ...SWEEP_WRITER_CORRECTION[form.sweepPick] };
       },
       note: form.note,
       // A typed read is judged beside the record's present values.

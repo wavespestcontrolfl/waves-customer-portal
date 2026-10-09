@@ -805,8 +805,8 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(readSweep(note, { done: true, quote: note })).toBeNull();
     expect(readSweep('Swept the lanai and noticed webs on the eaves.', { done: true, quote: 'Swept the lanai and noticed webs on the eaves' })).toBeNull();
     expect(readSweep('Removed the trash. Webs are on the eaves.', { done: true, quote: 'Removed the trash. Webs are on the eaves' })).toBeNull();
-    // The webs before their action still count.
-    expect(readSweep('Webs on the eaves were knocked down.', { done: true, quote: 'Webs on the eaves were knocked down' })).toEqual({ quote: 'webs on the eaves were knocked down' });
+    // A passive is not a plain statement of the tech's own work: the chip adds it.
+    expect(readSweep('Webs on the eaves were knocked down.', { done: true, quote: 'Webs on the eaves were knocked down' })).toBeNull();
   });
 
   test('another day said of another action leaves today\'s sweep standing (Codex P2 on #6147)', () => {
@@ -880,6 +880,28 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(readSweep(note, { done: true, quote: 'Swept the eaves and left the garage treatment incomplete' })).not.toBeNull();
   });
 
+  // Codex round 5 on #6147: the read takes a plain statement of the tech's
+  // own work on the webs or eaves outside, and nothing else.
+  test.each([
+    ['another direct object', 'Removed bait stations below cobwebs.'],
+    ['rain did it', 'Rain knocked down the webs on the eaves.'],
+    ['maintenance did it', 'Maintenance removed the webs outside.'],
+    ['a room that is not outside', 'Removed cobwebs from the foyer wall.'],
+    ['a place that is not the home', 'Knocked down webs in the shed.'],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+
+  test('a long quote is not scanned, and a note of repeated sweep words costs little (Codex security P2 on #6147)', () => {
+    const long = `${'swept the webs and the eaves '.repeat(40)}today`;
+    expect(long.length).toBeGreaterThan(600);
+    expect(readSweep(`${long}.`, { done: true, quote: long })).toBeNull();
+    const noisy = `${'webs eaves swept brushed removed '.repeat(120)}. Swept the eaves.`;
+    const started = process.hrtime.bigint();
+    expect(readSweep(noisy, { done: true, quote: 'Swept the eaves' })).not.toBeNull();
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(250);
+  });
+
   test('webs only seen are not a sweep', () => {
     const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
     expect(said(note, 'Saw webs on the eaves')).toBeNull();
@@ -890,7 +912,9 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(said('Swept the lanai floor. Sprayed the perimeter.', 'Swept the lanai floor')).toBeNull();
     expect(said('Removed the ant bait stations. Sprayed the perimeter.', 'Removed the ant bait stations')).toBeNull();
     expect(said('Removed a wasp nest from the eaves.', 'Removed a wasp nest from the eaves')).toBeNull();
-    expect(said('Removed a wasp nest and webs from the eaves.', 'Removed a wasp nest and webs from the eaves')).not.toBeNull();
+    // The read takes a plain statement only; this one is the chip's to add.
+    expect(said('Removed a wasp nest and webs from the eaves.', 'Removed a wasp nest and webs from the eaves')).toBeNull();
+    expect(said('Removed the webs from the eaves.', 'Removed the webs from the eaves')).not.toBeNull();
   });
 
   test('a quote the note does not hold, a done:false answer and a missing answer are no sweep', () => {
@@ -903,8 +927,10 @@ describe('validateVoiceFacts: the web sweep', () => {
   });
 
   test('a sweep said twice stands when one saying is not denied', () => {
-    const note = "Didn't sweep the eaves out back, but did sweep the eaves out front.";
-    expect(said(note, 'sweep the eaves')).toEqual({ quote: 'sweep the eaves' });
+    const note = "Didn't sweep the eaves out back, but swept the eaves out front.";
+    expect(said(note, 'swept the eaves out front')).toEqual({ quote: 'swept the eaves out front' });
+    // The quote as the whole sentence: its second part stands.
+    expect(said(note, "Didn't sweep the eaves out back, but swept the eaves out front")).not.toBeNull();
   });
 
   test('a reading with no sweep keeps the facts it always had', () => {
