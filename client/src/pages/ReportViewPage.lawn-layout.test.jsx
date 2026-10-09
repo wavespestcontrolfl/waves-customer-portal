@@ -259,6 +259,21 @@ describe('gate on: the phone order', () => {
     expect(text(third.container)).toContain('Friday, October 23');
   });
 
+  it('the plan-only fallback (upcoming-visits gate off): the date prints once, in Your plan, not again under Next visit', async () => {
+    const payload = clone(spotOn);
+    delete payload.upcomingVisitsCard;
+    payload.nextAppointment = { serviceType: 'Lawn Care', scheduledDate: '2026-10-23' };
+    const { container } = renderReport(payload, '', 'tok-planonly');
+    await waitForReport();
+    expect(text(container)).toContain('Your next Lawn Care visit is Fri, Oct 23.');
+    expect(text(container)).not.toContain('Friday, October 23');
+    cleanup();
+    payload.nextAppointment = { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-23' };
+    const second = renderReport(payload, '', 'tok-planonly-pest');
+    await waitForReport();
+    expect(text(second.container)).toContain('Friday, October 23');
+  });
+
   it('a finished re-entry keeps its pet advisory in Your part', async () => {
     const payload = clone(cleanOn);
     payload.dynamicContext.reentry.petAdvisory = 'Keep pets off treated turf until it is fully dry.';

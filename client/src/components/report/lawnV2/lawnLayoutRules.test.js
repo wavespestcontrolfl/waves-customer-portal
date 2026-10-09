@@ -452,3 +452,51 @@ describe('the banner decision while the page is printing', () => {
     expect(pageCarriesInstruction(data, after, true)).toBe(false);
   });
 });
+
+describe('planShowsNextVisit: every way the plan area can print a next-visit date', () => {
+  const TODAY = '2026-10-09';
+  const label = { label: 'Friday, October 23', source: 'scheduled' };
+  const lawn = (scheduledDate = '2026-10-23', extra = {}) => ({ serviceType: 'Lawn Care Treatment Program', scheduledDate, ...extra });
+  const pest = (scheduledDate = '2026-10-23') => ({ serviceType: 'Quarterly Pest Control', scheduledDate });
+  const plan = { visitsThisYear: 8, tier: 'Gold' };
+  // gate state -> payload shape: upcoming gate OFF = no upcomingVisitsCard key (the plan prints nextAppointment);
+  // upcoming ON + reschedule gate OFF = { visits } (standalone card); ON + reschedule ON = { visits, merged: true };
+  // clarity ON lists one lawn visit; clarity OFF lists every service line.
+  const build = ({ card, planSummary, nextAppointment, nextVisit = label }) => ({
+    reportV2: { snapshot: { nextVisit } },
+    ...(planSummary ? { planSummary } : {}),
+    ...(nextAppointment ? { nextAppointment } : {}),
+    ...(card ? { upcomingVisitsCard: card } : {}),
+  });
+
+  const rows = [
+    // [name, payload, expected]
+    ['upcoming gate off, plan, nextAppointment = the lawn visit', build({ planSummary: plan, nextAppointment: lawn() }), true],
+    ['upcoming gate off, plan, nextAppointment = a pest visit the same day', build({ planSummary: plan, nextAppointment: pest() }), false],
+    ['upcoming gate off, plan, nextAppointment = a lawn visit on another day', build({ planSummary: plan, nextAppointment: lawn('2026-10-30') }), false],
+    ['upcoming gate off, plan, nextAppointment already past (the card prints no date)', build({ planSummary: plan, nextAppointment: lawn('2026-10-01'), nextVisit: { label: 'Thursday, October 1', source: 'scheduled' } }), false],
+    ['upcoming gate off, plan, nextAppointment today still prints', build({ planSummary: plan, nextAppointment: lawn('2026-10-09'), nextVisit: { label: 'Friday, October 9', source: 'scheduled' } }), true],
+    ['upcoming gate off, plan, nextAppointment is a full timestamp (the card parses no date)', build({ planSummary: plan, nextAppointment: lawn('2026-10-23T14:00:00.000Z') }), false],
+    ['upcoming gate off, plan, nextAppointment has no service type (the card prints no line)', build({ planSummary: plan, nextAppointment: { scheduledDate: '2026-10-23' } }), false],
+    ['upcoming gate off, NO plan (non-member or no completed visits): the card prints no next-visit line', build({ nextAppointment: lawn() }), false],
+    ['upcoming gate off, plan with zero visits this year', build({ planSummary: { visitsThisYear: 0 }, nextAppointment: lawn() }), false],
+    ['upcoming gate off, plan, no nextAppointment', build({ planSummary: plan }), false],
+    ['upcoming ON, standalone card (reschedule off), clarity ON: one lawn visit', build({ card: { visits: [lawn()] } }), true],
+    ['upcoming ON, standalone card, clarity OFF: every line, the lawn visit among them', build({ card: { visits: [pest('2026-10-20'), lawn(), pest()] } }), true],
+    ['upcoming ON, standalone card, clarity OFF: only other lines', build({ card: { visits: [pest('2026-10-20'), pest()] } }), false],
+    ['upcoming ON, merged card (reschedule on), clarity ON', build({ planSummary: plan, card: { visits: [lawn()], merged: true } }), true],
+    ['upcoming ON, merged card without a plan summary prints its list', build({ card: { visits: [lawn()], merged: true } }), true],
+    ['upcoming ON, merged card, clarity OFF, lawn visit among other lines', build({ planSummary: plan, card: { visits: [pest('2026-10-20'), lawn()], merged: true } }), true],
+    ['upcoming ON, merged card, lawn visit on another day', build({ planSummary: plan, card: { visits: [lawn('2026-10-30')], merged: true } }), false],
+    ['upcoming ON, empty list: no fallback to nextAppointment (the card key is present)', build({ planSummary: plan, nextAppointment: lawn(), card: { visits: [], merged: true } }), false],
+    ['upcoming ON, standalone empty list: no fallback either', build({ planSummary: plan, nextAppointment: lawn(), card: { visits: [] } }), false],
+    ['upcoming ON, list holds a lawn visit with an unparsable date', build({ card: { visits: [lawn('soon')] } }), false],
+    ['upcoming ON, list holds a full-timestamp date (the card prints none)', build({ card: { visits: [lawn('2026-10-23T14:00:00.000Z')] } }), false],
+    ['the lead\'s date is only an estimate, whatever the plan area prints', build({ planSummary: plan, nextAppointment: lawn(), nextVisit: { label: 'Friday, October 23', source: 'estimated' } }), false],
+    ['no lead date at all', build({ planSummary: plan, nextAppointment: lawn(), nextVisit: null }), false],
+  ];
+
+  it.each(rows)('%s', (_name, payload, expected) => {
+    expect(planShowsNextVisit(payload, TODAY)).toBe(expected);
+  });
+});

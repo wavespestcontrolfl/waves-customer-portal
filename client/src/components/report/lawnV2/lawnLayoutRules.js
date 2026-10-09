@@ -6,6 +6,7 @@
 
 import COPY from '../../../../../shared/lawn-report-layout-copy.json';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../../../constants/business';
+import { etDateString } from '../../../lib/timezone';
 
 export const LAYOUT_COPY = COPY;
 
@@ -249,22 +250,40 @@ const longDay = (ymd, withYear) => new Date(`${ymd}T12:00:00Z`).toLocaleDateStri
   weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC', ...(withYear ? { year: 'numeric' } : {}),
 });
 
+// The calendar day the plan area parses a scheduledDate to ('YYYY-MM-DD' only; a full timestamp parses to
+// nothing and the card prints no date), mirroring calendarDateFromDateOnlyValue in ReportViewPage.jsx.
+const dateOnly = (value) => {
+  const found = /^(\d{4}-\d{2}-\d{2})(?:T00:00:00(?:\.000)?(?:Z|\+00:00)?)?$/.exec(String(value || ''));
+  return found ? found[1] : null;
+};
+const isLawnVisit = (serviceType) => /lawn|turf/i.test(String(serviceType || ''));
+
 /**
- * True only when "Your plan" (or the standalone visits card) PRINTS the visit the lead's date names: the
- * lead's next visit is a scheduled booking, and the card lists a lawn visit on that same calendar day.
- * A pest visit, a visit on another day, a cadence estimate or an empty list keeps the lead's own date.
- * (The server scopes the card to this report's property.)
+ * True only when the plan area PRINTS the visit the lead's date names: the lead's next visit is a scheduled
+ * booking, and one of the two ways the area prints a next-visit date prints a lawn visit on that same day.
+ *   - a visits list (data.upcomingVisitsCard.visits): the merged "Your plan" section (merged: true) or the standalone
+ *     "Your upcoming visits" card print each visit's date (clarity on lists one lawn visit; clarity off lists every line);
+ *   - with NO upcomingVisitsCard key at all (the upcoming-visits gate off), "Your plan" prints
+ *     "Your next <service> visit is <date>." from data.nextAppointment, but only with a plan (visitsThisYear > 0) and
+ *     only for a date that has not passed (ET).
+ * A pest visit, another day, an unparsable date, a cadence estimate or a card that does not print it keeps the
+ * lead's date. (The server scopes the list to this report's property.)
  */
-export function planShowsNextVisit(data) {
+export function planShowsNextVisit(data, todayEt = etDateString()) {
   const next = data?.reportV2?.snapshot?.nextVisit;
-  const visits = data?.upcomingVisitsCard?.visits;
-  if (!next || next.source !== 'scheduled' || !isText(next.label) || !Array.isArray(visits)) return false;
+  if (!next || next.source !== 'scheduled' || !isText(next.label)) return false;
   const label = norm(next.label);
-  return visits.some((visit) => {
-    const ymd = /^\d{4}-\d{2}-\d{2}/.exec(String(visit?.scheduledDate || ''));
-    if (!ymd || !/lawn|turf/i.test(String(visit.serviceType || ''))) return false;
-    return [longDay(ymd[0], false), longDay(ymd[0], true)].some((day) => norm(day) === label);
-  });
+  const sameDay = (visit) => {
+    const ymd = dateOnly(visit?.scheduledDate);
+    return Boolean(ymd) && isLawnVisit(visit.serviceType) && [longDay(ymd, false), longDay(ymd, true)].some((day) => norm(day) === label);
+  };
+  if (data.upcomingVisitsCard) {
+    const visits = data.upcomingVisitsCard.visits;
+    return Array.isArray(visits) && visits.some(sameDay);
+  }
+  const visitsThisYear = Number(data.planSummary?.visitsThisYear) || 0;
+  const appointment = data.nextAppointment;
+  return visitsThisYear > 0 && sameDay(appointment) && dateOnly(appointment.scheduledDate) >= todayEt;
 }
 
 // ── Mowing height ───────────────────────────────────────────────────────────
