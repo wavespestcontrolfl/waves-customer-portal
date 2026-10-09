@@ -260,6 +260,14 @@ async function analyzeAndComplete() {
 }
 
 describe('opening the sheet', () => {
+  test('a visit whose plan offers the bermuda removal mix (the server answers ineligible, bermuda_removal) opens the full form once', async () => {
+    const request = makeRequest({ ctx: context({ eligible: false, reason: 'bermuda_removal', needsFullForm: 'Bermuda removal mix this visit: use the full form' }) });
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+  });
+
   test('a visit the server calls ineligible is handed to the parent once, with no button on the sheet', async () => {
     const request = makeRequest({ ctx: context({ eligible: false, reason: 'has_companions' }) });
     const onFullForm = vi.fn();
@@ -3705,5 +3713,34 @@ describe('suggested from this lawn', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(screen.queryByTestId('lawn-close-up-prompt')).toBeNull();
     });
+  });
+});
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): Dispatch opens this
+// sheet for a visit already invoiced from the payment flow, and the completion
+// posts the invoice field the full form posts for it.
+describe('a visit already invoiced from the payment flow', () => {
+  const complete = async (service) => {
+    await openSheet({ props: { service } });
+    await analyzeAndComplete();
+    expect(completeCalls()).toHaveLength(1);
+    return completeCalls()[0].body;
+  };
+
+  test('posts invoiceAlreadySent: true with the rest of the body unchanged', async () => {
+    const plain = await complete(SERVICE);
+    cleanup();
+    requests.length = 0;
+    const body = await complete({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    const { invoiceAlreadySent: _sent, idempotencyKey: _k1, ...rest } = body;
+    const { idempotencyKey: _k2, ...plainRest } = plain;
+    expect(rest).toEqual(plainRest);
+    expect(plain).not.toHaveProperty('invoiceAlreadySent');
+  });
+
+  test('a visit with only a door-charge marker posts no invoice field, as the full form does', async () => {
+    const body = await complete({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' });
+    expect(body).not.toHaveProperty('invoiceAlreadySent');
   });
 });

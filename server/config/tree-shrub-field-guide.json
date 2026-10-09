@@ -453,7 +453,7 @@
       "kind": "Insects · foliar spray or soil drench",
       "targetTitle": "Pest targets",
       "targets": "Listed soft and armored scales, whiteflies, mealybugs, lace bugs, and other ornamental insects. Aphids and certain thrips: suppression only.",
-      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height (see Label rates). Pull back mulch, rock or gravel first so the mix pools at the base. Mix the dose in at least 1 quart of water per foot of plant height and pour it evenly on the soil around the base, on moist soil. With less water, irrigate 1/2 inch right after. Keep the soil moist for 7 days. Bark applications have separate instructions.",
+      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height (see Label rates), never by the tank amount. The label directs soil applications early in the plant's growing cycle for best control: drench at the spring flush, and treat a later drench as a rescue. Pull back mulch, rock or gravel first so the mix pools at the base. Mix the dose in at least 1 quart of water per foot of plant height and pour it evenly on the soil around the base, on moist soil. With less water, irrigate 1/2 inch right after. Keep the soil moist for 7 days. Bark applications have separate instructions.",
       "rates": [
         [
           "7.25–16 fl oz / 100 gal",
@@ -485,7 +485,8 @@
         0.0725,
         0.16
       ],
-      "summary": ""
+      "summary": "",
+      "mixLabel": "Foliar spray only"
     },
     "tritek15": {
       "kind": "Insects, mites & diseases · contact oil",

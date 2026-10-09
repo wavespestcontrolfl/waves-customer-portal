@@ -727,3 +727,38 @@ describe('the lawn screen rulings', () => {
     expect(screen.getByText('Areas treated')).toBeTruthy();
   });
 });
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): Dispatch opens this
+// sheet for a visit already invoiced from the payment flow, and the completion
+// posts the invoice field the full form posts for it.
+describe('a visit already invoiced from the payment flow', () => {
+  const complete = async (service) => {
+    const request = makeRequest();
+    render(<FastCompleteTreeShrubSheet service={service} request={request} onClose={() => {}} />);
+    await screen.findByRole('button', { name: /^Merit 2F/ });
+    await addBothPhotos();
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    fireEvent.click(tile('Merit 2F'));
+    fireEvent.click(screen.getByRole('button', { name: 'No blooms or no bees' }));
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Treated the ixora hedge.' } });
+    const body = await completeBody(request);
+    expect(request.calls.filter((c) => c.path.endsWith('/complete'))).toHaveLength(1);
+    return body;
+  };
+
+  test('posts invoiceAlreadySent: true with the rest of the body unchanged', async () => {
+    const plain = await complete(SERVICE);
+    cleanup();
+    const body = await complete({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    const { invoiceAlreadySent: _sent, idempotencyKey: _k1, ...rest } = body;
+    const { idempotencyKey: _k2, ...plainRest } = plain;
+    expect(rest).toEqual(plainRest);
+    expect(plain).not.toHaveProperty('invoiceAlreadySent');
+  }, 20000);
+
+  test('a visit with only a door-charge marker posts no invoice field, as the full form does', async () => {
+    const body = await complete({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' });
+    expect(body).not.toHaveProperty('invoiceAlreadySent');
+  }, 20000);
+});

@@ -319,6 +319,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | DELETE | `/api/tech/services/:id/treatment-zone` | tech-track |
 | GET | `/api/tech/services/:id/treatment-zone` | tech-track |
 | POST | `/api/tech/services/:id/treatment-zone` | tech-track |
+| GET | `/api/tech/services/:id/treatment-zone/last` | tech-track |
+| POST | `/api/tech/services/:id/treatment-zone/reuse` | tech-track |
 | POST | `/api/tech/services/:id/treatment-zone/suggest` | tech-track |
 | POST | `/api/tech/social/generate` | tech-social |
 | GET | `/api/tech/social/locations` | tech-social |

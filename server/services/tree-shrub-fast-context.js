@@ -24,7 +24,7 @@ const {
   isInjectionProduct,
   deriveTreeShrubTreatments,
 } = require('./tree-shrub-closeout');
-const { etCalendarDayOf } = require('../utils/datetime-et');
+const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 const { loadLiveRecurringObligationRows, ownershipKeysForRow } = require('./waveguard-existing-services');
 const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
 // ADDON_LINE_IS_PLAN_SQL names this table unaliased.
@@ -34,6 +34,7 @@ const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slot
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
+const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
 const ROTATION_WINDOW_DAYS = 60;
@@ -432,10 +433,13 @@ async function loadJointMosquitoAccount(svc, knex, serviceId) {
       .filter((row) => !svc.property_id || !row.property_id || String(row.property_id) === String(svc.property_id));
     const isMosquito = (row) => ownershipKeysForRow(row).includes('mosquito');
     if (here.some((row) => String(row.id) !== String(svc.id) && isMosquito(row))) return true;
-    if (!here.length) return false;
+    // This visit's own add-on lines count even when the lifecycle loader left the visit out (an
+    // overdue pending or confirmed visit is not a forward obligation, but this sheet still opens it).
+    const visitIds = [...new Set([...here.map((row) => row.id), svc.id].filter(Boolean).map(String))];
+    if (!visitIds.length) return false;
     const addons = await knex(ADDONS)
       .leftJoin('services as addon_service', 'addon_service.id', `${ADDONS}.service_id`)
-      .whereIn(`${ADDONS}.scheduled_service_id`, here.map((row) => row.id))
+      .whereIn(`${ADDONS}.scheduled_service_id`, visitIds)
       .whereRaw(ADDON_LINE_IS_PLAN_SQL)
       .select(`${ADDONS}.service_name as addon_name`, `${ADDONS}.service_key_snapshot`, 'addon_service.service_key', 'addon_service.name as catalog_name');
     return addons.some((line) => isMosquito({
@@ -527,7 +531,16 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // GATE_TS_PEST_CHECK: the "Live insects found?" block and its insect types.
     // Gate off = no key at all.
     ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
+    ...await neonicCapKey(svc, catalog, knex),
   };
+}
+
+// GATE_TS_NEONIC_CAP: what is left of each capped product at this property this year. Gate off = no
+// read and no key. The year is today's (ET), the day an ordinary completion records and /complete
+// judges, not the scheduled day: a December visit closed in January spends January's allowance. A
+// backfill is chosen at submit, after this read; /complete judges that one on its backfilled day.
+async function neonicCapKey(svc, catalog, knex) {
+  return tsNeonicCapLive() ? { neonicCap: await buildNeonicCapContext(svc, etDateString(), catalog, knex) } : {};
 }
 
 // The sheet's watch list for the visit month: key, label, signal, referOnly.

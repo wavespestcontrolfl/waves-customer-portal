@@ -356,9 +356,34 @@ describe('v2 extraction function (extractCallDataV2)', () => {
   });
 });
 
+// Every model in the 2026-10-08 test set is_spam true on a wrong number: the
+// schema description said "wrong number" while the prompt rule said it is not spam.
+describe('meta.is_spam: a wrong number is not spam (schema 1.26.0)', () => {
+  const describedIn = (file) => require(`../schemas/${file}`)
+    .properties.meta.properties.is_spam.description;
+
+  test.each([
+    'call-extraction.model-output.schema.json',
+    'call-extraction.persisted.schema.json',
+  ])('%s keeps a wrong number out of spam and lists no spam kinds beyond the old two', (file) => {
+    const description = describedIn(file);
+    expect(description).toMatch(/^Solicitation or robocall\. /);
+    // A longer list (vendor cold call, collections…) raised false spam on a reviewed call.
+    expect(description).not.toMatch(/vendor|collections|scam|sales pitch/i);
+    expect(description).toMatch(/A wrong number is not spam: set false/);
+    expect(description).toMatch(/lead_quality "wrong_number"/);
+  });
+
+  test('the persisted schema carries the model-output text and names the older rows', () => {
+    const persisted = describedIn('call-extraction.persisted.schema.json');
+    expect(persisted.startsWith(describedIn('call-extraction.model-output.schema.json'))).toBe(true);
+    expect(persisted).toMatch(/before schema 1\.26\.0 may hold true for a wrong number/);
+  });
+});
+
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.25.0');
+    expect(SCHEMA_VERSION).toBe('1.26.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

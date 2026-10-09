@@ -184,8 +184,14 @@ export function lawnPlanActionOptions(items = []) {
   return items.filter(item => item.product?.id).map(item => ({
     id: `lawn-plan-${item.product.id}`,
     label: item.product.name, note: item.product.name,
-    product: { id: item.product.id, name: item.product.name, ...(item.applicationMethod ? { applicationMethod: item.applicationMethod } : {}) },
+    product: { id: item.product.id, name: item.product.name, ...(item.applicationMethod ? { applicationMethod: item.applicationMethod } : {}), ...(item.prefillAmount === false ? { prefillAmount: false } : {}) },
     scope: 'exterior', treatmentApplied: true,
+    // Options that go on together (the bermuda removal mix) share one group id.
+    ...(item.group ? { group: item.group } : {}),
+    // A spot line carries no catalog-derived amount: the tech enters the area and the amount.
+    ...(item.prefillAmount === false ? { prefillAmount: false } : {}),
+    // The spray conditions of the bermuda removal mix (the server's own gate notes).
+    ...(item.gateNotes?.length ? { gateNotes: item.gateNotes } : {}),
   }));
 }
 

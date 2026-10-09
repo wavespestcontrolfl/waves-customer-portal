@@ -22,6 +22,7 @@ const {
   _test: { buildAdjudicatorPrompt, parseAdjudicatorResponse, sanitizeFacts, judgeSafety },
 } = require('../services/sms-pathology-ledger');
 const { renderCompanyFactsSection } = require('../services/sms-company-facts');
+const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
 const { DISPOSITIONS: MIGRATION_DISPOSITIONS } = require('../models/migrations/20261002170000_ai_incidents');
 
 const FACTS = 'UPCOMING: Quarterly Pest 2026-10-06 (Tue) window 14:00-16:00\nLAST VISIT: 2026-07-07';
@@ -233,7 +234,9 @@ describe('parseAdjudicatorResponse / prompt framing', () => {
       'CUSTOMER: synthetic',
       filler,
       renderCompanyFactsSection().replace(/\n$/, ''),
-      'LABEL FACTS: none on file',
+      // the real none-on-file section, so the static company + label part is exempt from the size
+      // budget exactly as it is in a live block (a made-up label line put it back under the cap)
+      LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''),
       'BILLING:',
       '- balance: none',
       'RECENT PHONE CALLS:',

@@ -62,7 +62,37 @@ describe('gate and loader', () => {
 
   test('gate off hands every reader protocols.json lawn itself; on hands v13', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
-    expect(withGate('true', () => lawnProtocols())).toBe(v13);
+    // Gate on, bermuda removal gate off: v13 without the per-visit addOns blocks.
+    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, ...visit }) => visit) }]));
+    expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
+    expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+  });
+
+  test('the bermuda removal addOns reach the shared reader only while GATE_LAWN_BERMUDA_REMOVAL is on', () => {
+    const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
+    try {
+      process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('addOns');
+      // The removal gate cannot surface the add-on while v13 itself is off.
+      expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
+      delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+    }
+  });
+
+  test('gate off: the protocol reader and the engine see no addOns anywhere', () => {
+    withGate('true', () => {
+      expect(JSON.stringify(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }))).not.toContain('addOns');
+      for (const grass of V13_GRASSES) { // bahia has no v13 program at all
+        for (const month of [4, 6]) {
+          const got = engine.selectProtocolVisit({ track_key: grass }, new Date(Date.UTC(2026, month - 1, 15, 16)));
+          expect(got.visit).not.toHaveProperty('addOns');
+        }
+      }
+    });
   });
 
   test('a feature-gates mock without the reader reads as off', () => {
@@ -125,7 +155,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toBe(v13.zoysia);
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, ...visit }) => visit) });
     });
   });
 
@@ -182,8 +212,10 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
   const date = new Date(Date.UTC(2026, 9, 6, 16));
   const knexFor = (rows) => (table) => ({ where() { return this; }, first: async () => rows[table] ?? null });
 
-  test('the three v13 copies are one program, so any key serves any grass', () => {
-    const body = ({ name, ...rest }) => JSON.stringify(rest);
+  test('the v13 copies are one program, so any key serves any grass', () => {
+    // The bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL) exists only on the St. Augustine and
+    // Zoysia copies, by design; the base program is compared without it.
+    const body = ({ name, ...rest }) => JSON.stringify({ ...rest, visits: rest.visits.map(({ addOns, ...visit }) => visit) });
     for (const grass of V13_GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
   });
 
@@ -834,8 +866,9 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
 
 describe('Blindside in the recipe', () => {
   // Owner 2026-10-08: Blindside is a November-through-March product, and February is Celsius alone
-  // (20261008130000 retires the staged rows): of the Celsius windows only January, March and December list it.
-  const BLINDSIDE_MONTHS = [1, 3, 12];
+  // (20261008130000 retires the staged rows): of the Celsius windows only January, March and December list it. The v13 final pass
+  // (20261009150000) gives November the December weed lines, so November lists it too.
+  const BLINDSIDE_MONTHS = [1, 3, 11, 12];
 
   test('every Celsius spot window lists Blindside by its exact catalog name, after the Celsius lines, and the line stays a spot line; none in February or April through October', () => {
     for (const month of MONTHS) {
@@ -867,8 +900,19 @@ describe('Blindside in the recipe', () => {
     }
   });
 
-  test('November has no weed lines (none added)', () => {
-    expect(lines(visitFor(11).secondary).filter((l) => /Celsius|Certainty|Blindside|Nonionic/.test(l))).toEqual([]);
+  test('November carries the same four weed lines as December (v13 final pass), Blindside at 0.149 oz', () => {
+    const weed = (month) => lines(visitFor(month).secondary).filter((l) => /^(Celsius|Certainty|Blindside|LESCO 90\/10 Nonionic)/.test(l));
+    expect(weed(11)).toHaveLength(4);
+    expect(weed(11)).toEqual(weed(12));
+    expect(weed(11).find((l) => l.startsWith(BLINDSIDE))).toContain('0.149 oz per 1,000 sq ft');
+  });
+
+  test('every Blindside line states 0.149 oz per 1,000 sq ft, one application per lawn per year (the label\'s warm-season rate; 0.23 oz is the yearly limit)', () => {
+    for (const grass of V13_GRASSES) {
+      const blind = v13[grass].visits.flatMap((visit) => lines(visit.secondary)).filter((l) => l.startsWith(`${BLINDSIDE} — `));
+      expect(blind).toHaveLength(4);
+      for (const line of blind) expect(line).toContain('0.149 oz per 1,000 sq ft, one application per lawn per year');
+    }
   });
 });
 

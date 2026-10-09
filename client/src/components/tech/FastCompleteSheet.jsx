@@ -79,6 +79,7 @@ import {
 import { submittedAmount } from '../../lib/measure-units';
 import { pestSweepActions, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
@@ -87,7 +88,7 @@ import {
   TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
   typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
-  useVisitPhotos, useVisitPromises, useVisitTrace,
+  useTraceReuse, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
@@ -101,6 +102,7 @@ import {
   SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
   useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
+import { pestSheetTipIds } from '../../lib/tech-tips';
 
 // Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
 export { isSendableRateUnit };
@@ -532,7 +534,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   });
   // Only the report flow renders the confirmable prompts (the edited-report
   // heads-up, a promise changed since the report was written).
-  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow, invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
   // Another dialog a sheet opens over itself (the report flow's spray
@@ -564,7 +566,9 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
     // Voice still recording, transcribing or filling: closing (×, backdrop or
     // Escape all come through here) would drop those words and the sheet's edits.
     if (submitting || voiceBusy) return;
-    if (done) onCompleted?.();
+    // The completion response rides along: admin Dispatch reads its invoice
+    // fields to stage the payment handoff.
+    if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, voiceBusy, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
@@ -597,7 +601,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   // tech marked shows there.
   if (submission.done && (!reportFlow || submission.restored)) {
     return (
-      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         {reportFlow ? <>
           <SentSummary result={submission.done.response} base={`/admin/dispatch/${service.id}`} request={request} followupBooking={ctx.followupBooking} />
           <CollectPayment result={submission.done.response} />
@@ -691,6 +695,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   }, []);
   const tips = useTipLibrary({ base: `/admin/dispatch/${service?.id}`, request });
   const tipsAvailable = !!tips;
+  // What the tech tapped or said lifts the advice for it; never a pick.
+  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { pests: [...form.pests], note: form.note }), [tips, form.pests, form.note]);
 
   const chooseMethod = useCallback((next) => {
     setField('method', next);
@@ -819,6 +825,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               tipId={form.tipId}
               customTip={form.customTip}
               locked={formLocked}
+              priorityTipIds={liftedTipIds}
+              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />
@@ -1757,6 +1765,10 @@ function ReportFlowForm({
   // completed elsewhere) is shown and the hold stays.
   const [removingTrace, setRemovingTrace] = useState(false);
   const [traceError, setTraceError] = useState('');
+  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
+  const reuse = useTraceReuse({
+    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
+  });
   const removeTrace = async () => {
     setRemovingTrace(true);
     setTraceError('');
@@ -1776,7 +1788,7 @@ function ReportFlowForm({
       description: visitPromises.promises.find((promise) => promise.id === mark.id)?.description || '',
     }));
     return (
-      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
         <CollectPayment result={submission.done.response} />
       </SavedView>
@@ -1808,6 +1820,7 @@ function ReportFlowForm({
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
+        reuse={reuse}
         traceError={traceError}
         sources={writerSources({
           productCount: active.length,
@@ -1872,13 +1885,38 @@ function ReportFlowForm({
   );
 }
 
+// The report footer's trace buttons: read the trace again, remove it, or
+// "Same as last visit" (a one-tap copy of the customer's last trace at this place).
+// No copy offered (a lane or typed visit, a spot visit, a trace already saved).
+const NO_REUSE = { offer: null, reusing: false, feet: null };
+
+// `traceStep`: the report step has a perimeter spray to trace (the hold the
+// copy clears); with none, the last trace is not offered.
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep }) {
+  return (
+    <>
+      {onRetryTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
+      )}
+      {onRemoveTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
+      )}
+      {traceStep && reuse.offer && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={reuse.reusing} disabled={locked} onClick={reuse.offer}>
+          {reuse.feet ? `Same as last visit · ${reuse.feet} ft` : 'Same as last visit'}
+        </Button>
+      )}
+    </>
+  );
+}
+
 // The report step: the report being written, or the report to read (edit,
 // write again), the trace, and the footer that fits: answer a completion
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, sweep = null,
+  onBackFromPrompt, sweep = null, reuse = NO_REUSE,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1886,12 +1924,14 @@ function ReportStep({
   let footer = (
     <CompleteFooter submission={submission} missingReason={completeMissing.reason} warn={!!completeMissing.stockRow} label="Complete & send" onSubmit={onSubmit}>
       {stockButton}
-      {onRetryTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
-      )}
-      {onRemoveTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
-      )}
+      <TraceFooterButtons
+        locked={locked}
+        onRetryTrace={onRetryTrace}
+        onRemoveTrace={onRemoveTrace}
+        removingTrace={removingTrace}
+        reuse={reuse}
+        traceStep={!!trace}
+      />
     </CompleteFooter>
   );
   if (submission.prompt) {
@@ -1933,7 +1973,7 @@ function ReportStep({
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
         {showDraft && laneCard}
-        {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
+        {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       {footer}
@@ -1952,6 +1992,8 @@ function VisitStep({
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
   const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  // The pests the note names lift the advice for them; never a pick.
+  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { note: form.note }), [tips, form.note]);
   // Each dictated chunk joins what is already in the box (stable for the mic).
   const appendNote = useCallback(
     (text) => setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text })),
@@ -2035,6 +2077,8 @@ function VisitStep({
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
+              priorityTipIds={liftedTipIds}
+              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />

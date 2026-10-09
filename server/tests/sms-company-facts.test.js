@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers7_m');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers7_m');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers11_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers11_n');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -115,7 +115,30 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(16);
+    expect(COMPANY_FACTS).toHaveLength(19);
+  });
+  test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
+    const section = renderCompanyFactsSection();
+    const aftercare = [
+      'After a pest treatment it is normal to see some activity for up to two weeks as the treatment flushes pests out, and it fades as the products keep working. This is true of pest treatments only, not of other services. If it has not slowed down after two weeks, tell us.',
+      'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
+      'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
+    ];
+    for (const line of aftercare) expect(section).toContain(`\n- ${line}\n`);
+    // a return visit is the FREE RE-SERVICE fact's job: no line may read as a come-back or coverage promise
+    expect(aftercare.join(' ')).not.toMatch(/we(?:'ll| will)? come back|come back out|free|covered|no charge|damage/i);
+    // Codex #6197 r2: no wet cleaning of treated areas; the activity line is pest-only; drain flies are
+    // identified, not assumed; lawn treatment follows the technician's check.
+    // cleaning after a treatment is deliberately NOT a company fact (it depends on dry surfaces and the treatment type)
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/mop|wip(e|ing)|clean as usual|water only|vacuum/i);
+    expect(aftercare[0]).toMatch(/pest treatments only, not of other services/);
+    expect(aftercare[1]).toMatch(/fuzzy, moth-shaped/);
+    expect(aftercare[1]).toMatch(/fungus gnats/);
+    expect(aftercare[2]).toMatch(/where the technician confirms them/);
+    // the whole section must stay inside the judge's cap for it, with room to spare, or its tail is cut
+    const { _test: judgeTest } = require('../services/sms-shadow-judge');
+    expect(judgeTest.COMPANY_FACTS_JUDGE_CAP).toBe(4000);
+    expect(section.length).toBeLessThan(judgeTest.COMPANY_FACTS_JUDGE_CAP - 100);
   });
   test('the two termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
     expect(COMPANY_FACTS.join(' ')).not.toMatch(/termite|WDO|warranty|guarantee/i);
@@ -317,5 +340,54 @@ describe('gratitude qualification pins the company facts source', () => {
   test('sms-company-facts.js is in the pinned source list', () => {
     expect(pinnedSourceFiles()).toContain('server/services/sms-company-facts.js');
     expect(pinnedSourceFiles()).toContain('server/constants/business.js'); // the address/brand constants the facts render
+  });
+});
+
+// Codex #6197 r1 P0: a block drafted before a facts change keeps its OLD company render.
+// The readers of stored blocks must still recognize it; the sealed contract must not.
+describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
+  const facts = require('../services/sms-company-facts');
+  const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
+  const { exactLabelFactsSection: labelSectionOf } = facts;
+  const oldRender = facts.knownCompanyFactsRenders()[1];
+  // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
+  const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
+  const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
+  const blockWith = (render) => `${head}${render}${LABEL_FACTS_NONE_SECTION}${tail}`;
+
+  test('every earlier render is the first N lines of today\'s list, pinned by its sha256', () => {
+    expect(facts.PRIOR_COMPANY_FACTS_RENDERS.length).toBeGreaterThan(0);
+    const renders = facts.knownCompanyFactsRenders();
+    expect(renders[0]).toBe(facts.renderCompanyFactsSection());
+    facts.PRIOR_COMPANY_FACTS_RENDERS.forEach((prior, i) => {
+      expect(prior.lines).toBeLessThan(COMPANY_FACTS.length);
+      expect(crypto.createHash('sha256').update(renders[i + 1]).digest('hex')).toBe(prior.sha256);
+    });
+    expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(16);
+  });
+
+  test('the judge keeps the size exemption for a block with the earlier render: the thread survives', () => {
+    const oldBlock = blockWith(oldRender);
+    expect(oldBlock.length).toBeGreaterThan(6000);
+    const out = sanitizeFactsForJudge(oldBlock);
+    expect(out).toContain('THREAD_SENTINEL');
+    expect(out).toContain('- 2026-10-01: caller was told the tech arrives Thursday');
+    expect(out).toContain(oldRender.trim().split('\n').pop()); // the old section itself is still shown, whole
+    // today's render behaves the same
+    expect(sanitizeFactsForJudge(blockWith(facts.renderCompanyFactsSection()))).toContain('THREAD_SENTINEL');
+    // an UNKNOWN company section gets no exemption (the exact match is still the rule)
+    const unknown = blockWith(oldRender.replace('Arrival windows are two hours', 'Arrival windows are three hours'));
+    expect(sanitizeFactsForJudge(unknown)).not.toContain('THREAD_SENTINEL');
+  });
+
+  test('the label-facts reader finds the section behind an earlier render; the sealed contract does not accept it', () => {
+    const oldBlock = blockWith(oldRender);
+    expect(labelSectionOf(oldBlock)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(facts.renderCompanyFactsSection()))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    // contract: today's exact render only, so an old item never grades the new identity
+    expect(hasExactCompanyFacts(oldBlock)).toBe(false);
+    expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
+    expect(facts.hasExactLabelFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
   });
 });
