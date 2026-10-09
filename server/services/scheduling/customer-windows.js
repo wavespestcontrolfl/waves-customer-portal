@@ -57,6 +57,23 @@ function lunchBlockEnabled() {
   return gateEnvValue('GATE_BOOKING_LUNCH_BLOCK');
 }
 
+/**
+ * Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+ * 2026-10-09: "last start 16"). A 17:00 start quotes a 5-7 PM arrival window.
+ * While the gate is on, no customer-facing surface offers or commits a start
+ * after 16:00; the grid, the day close and booking_config are unchanged, so
+ * unsetting the gate restores the 17:00 hour. Staff, optimizer and voice
+ * callers never read this module's admission rule and keep 17:00. Read at
+ * call time.
+ */
+const CUSTOMER_LAST_START_MINUTES = 16 * 60;
+function customerLastStart16Enabled() {
+  return gateEnvValue('GATE_CUSTOMER_LAST_START_16');
+}
+function pastCustomerLastStart(startMin) {
+  return customerLastStart16Enabled() && startMin > CUSTOMER_LAST_START_MINUTES;
+}
+
 // ---------- one booking_config authority for the lunch interval + day end ----------
 //
 // Codex r1 P2s on #4663: booking.js (bookingSlotWindow) and the assistant's
@@ -186,10 +203,10 @@ function currentDayEndMinutes() {
  * anyway, hiding real capacity a 30-minute service could have used.
  */
 function customerOfferGrid(durationMinutes = 60) {
-  if (!lunchBlockEnabled()) return CUSTOMER_HOUR_GRID;
+  if (!lunchBlockEnabled() && !customerLastStart16Enabled()) return CUSTOMER_HOUR_GRID;
   return CUSTOMER_HOUR_GRID.filter((t) => {
     const startMin = parseHHMMMinutes(t);
-    return !overlapsLunch(startMin, startMin + durationMinutes);
+    return !pastCustomerLastStart(startMin) && !overlapsLunch(startMin, startMin + durationMinutes);
   });
 }
 
@@ -220,6 +237,7 @@ const CUSTOMER_GRID_MINUTES = new Set(CUSTOMER_HOUR_GRID.map(parseHHMMMinutes));
  *    never before 09:00 or after 17:00, regardless of what a caller's own
  *    shift bound (scheduling/policy.js SHIFT, 08:00-18:00) would otherwise
  *    admit;
+ *  - startMin is not after 16:00 while GATE_CUSTOMER_LAST_START_16 is on;
  *  - endMin does not run past the customer close (dayEndMinutes — defaults
  *    to currentDayEndMinutes(), which honors a preserved, non-18:00
  *    booking_config.day_end override; a caller that already resolved the
@@ -239,6 +257,7 @@ const CUSTOMER_GRID_MINUTES = new Set(CUSTOMER_HOUR_GRID.map(parseHHMMMinutes));
 function customerWindowAdmits({ startMin, endMin, dayEndMinutes = currentDayEndMinutes(), lunchGateOn = lunchBlockEnabled() } = {}) {
   if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return false;
   if (!CUSTOMER_GRID_MINUTES.has(startMin)) return false;
+  if (pastCustomerLastStart(startMin)) return false;
   if (endMin > dayEndMinutes) return false;
   if (lunchGateOn) {
     const { startMinutes, endMinutes } = currentLunchInterval();
@@ -255,6 +274,8 @@ module.exports = {
   CUSTOMER_LUNCH_START_MINUTES,
   CUSTOMER_LUNCH_END_MINUTES,
   lunchBlockEnabled,
+  customerLastStart16Enabled,
+  pastCustomerLastStart,
   customerOfferGrid,
   overlapsLunch,
   customerWindowAdmits,

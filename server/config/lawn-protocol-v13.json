@@ -96,6 +96,15 @@
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
           }
+        },
+        "addOns": {
+          "bermudaRemoval": {
+            "gate": "GATE_LAWN_BERMUDA_REMOVAL",
+            "appliesTo": "Lawns whose accepted estimate carries the bermuda suppression add-on, or that staff switched on. Never listed for any other lawn.",
+            "summary": "Bermuda removal mix — Recognition 0.03 oz + Fusilade II 0.55 fl oz + nonionic surfactant 0.25% per gal per 1,000 sq ft, mapped bermuda areas plus a 3 ft border",
+            "secondary": "Recognition Post Emergent Herbicide — bermuda removal mix, 0.03 oz per 1,000 sq ft, backpack spot on mapped bermuda areas plus a 3 ft border\nFusilade II Post Emergent Liquid Herbicide — bermuda removal mix, 0.55 fl oz per 1,000 sq ft, only together with Recognition\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the bermuda removal mix",
+            "notes": "Three backpack spot lines, one mix: the tech selects all three or none. Fusilade II is never applied without Recognition. At most 2 sprays a calendar year, at least 42 days apart. Spray in the morning under 85 F (June), bermuda actively growing, no rain or irrigation for 3 hours after, no mowing 2 days before or after. Skip the Celsius weed spot in the bermuda area that day. St. Augustine: ProVista, Captiva and Seville never get the step; CitraBlue or an unknown cultivar gets a test patch first (3x3 ft, watched 3 to 4 weeks)."
+          }
         }
       },
       {
@@ -122,7 +131,16 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port: skip Nutra-TECH on this visit until the city confirms.",
+        "addOns": {
+          "bermudaRemoval": {
+            "gate": "GATE_LAWN_BERMUDA_REMOVAL",
+            "appliesTo": "Lawns whose accepted estimate carries the bermuda suppression add-on, or that staff switched on. Never listed for any other lawn.",
+            "summary": "Bermuda removal mix — Recognition 0.03 oz + Fusilade II 0.55 fl oz + nonionic surfactant 0.25% per gal per 1,000 sq ft, mapped bermuda areas plus a 3 ft border",
+            "secondary": "Recognition Post Emergent Herbicide — bermuda removal mix, 0.03 oz per 1,000 sq ft, backpack spot on mapped bermuda areas plus a 3 ft border\nFusilade II Post Emergent Liquid Herbicide — bermuda removal mix, 0.55 fl oz per 1,000 sq ft, only together with Recognition\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the bermuda removal mix",
+            "notes": "Three backpack spot lines, one mix: the tech selects all three or none. Fusilade II is never applied without Recognition. At most 2 sprays a calendar year, at least 42 days apart. Spray in the morning under 85 F (June), bermuda actively growing, no rain or irrigation for 3 hours after, no mowing 2 days before or after. Skip the Celsius weed spot in the bermuda area that day. St. Augustine: ProVista, Captiva and Seville never get the step; CitraBlue or an unknown cultivar gets a test patch first (3x3 ft, watched 3 to 4 weeks)."
+          }
+        }
       },
       {
         "visit": 7,
@@ -506,6 +524,15 @@
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
           }
+        },
+        "addOns": {
+          "bermudaRemoval": {
+            "gate": "GATE_LAWN_BERMUDA_REMOVAL",
+            "appliesTo": "Lawns whose accepted estimate carries the bermuda suppression add-on, or that staff switched on. Never listed for any other lawn.",
+            "summary": "Bermuda removal mix — Recognition 0.03 oz + Fusilade II 0.55 fl oz + nonionic surfactant 0.25% per gal per 1,000 sq ft, mapped bermuda areas plus a 3 ft border",
+            "secondary": "Recognition Post Emergent Herbicide — bermuda removal mix, 0.03 oz per 1,000 sq ft, backpack spot on mapped bermuda areas plus a 3 ft border\nFusilade II Post Emergent Liquid Herbicide — bermuda removal mix, 0.55 fl oz per 1,000 sq ft, only together with Recognition\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the bermuda removal mix",
+            "notes": "Three backpack spot lines, one mix: the tech selects all three or none. Fusilade II is never applied without Recognition. At most 2 sprays a calendar year, at least 42 days apart. Spray in the morning under 85 F (June), bermuda actively growing, no rain or irrigation for 3 hours after, no mowing 2 days before or after. Skip the Celsius weed spot in the bermuda area that day. Zoysia: this mix is a Syngenta FIFRA 2(ee) recommendation (2023-03-28), not the printed label — keep the 2(ee) on hand when applying."
+          }
         }
       },
       {
@@ -532,7 +559,16 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port: skip Nutra-TECH on this visit until the city confirms."
+        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port: skip Nutra-TECH on this visit until the city confirms.",
+        "addOns": {
+          "bermudaRemoval": {
+            "gate": "GATE_LAWN_BERMUDA_REMOVAL",
+            "appliesTo": "Lawns whose accepted estimate carries the bermuda suppression add-on, or that staff switched on. Never listed for any other lawn.",
+            "summary": "Bermuda removal mix — Recognition 0.03 oz + Fusilade II 0.55 fl oz + nonionic surfactant 0.25% per gal per 1,000 sq ft, mapped bermuda areas plus a 3 ft border",
+            "secondary": "Recognition Post Emergent Herbicide — bermuda removal mix, 0.03 oz per 1,000 sq ft, backpack spot on mapped bermuda areas plus a 3 ft border\nFusilade II Post Emergent Liquid Herbicide — bermuda removal mix, 0.55 fl oz per 1,000 sq ft, only together with Recognition\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the bermuda removal mix",
+            "notes": "Three backpack spot lines, one mix: the tech selects all three or none. Fusilade II is never applied without Recognition. At most 2 sprays a calendar year, at least 42 days apart. Spray in the morning under 85 F (June), bermuda actively growing, no rain or irrigation for 3 hours after, no mowing 2 days before or after. Skip the Celsius weed spot in the bermuda area that day. Zoysia: this mix is a Syngenta FIFRA 2(ee) recommendation (2023-03-28), not the printed label — keep the 2(ee) on hand when applying."
+          }
+        }
       },
       {
         "visit": 7,

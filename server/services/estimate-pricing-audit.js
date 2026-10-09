@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { costLineFromUsage } = require('./product-costing');
 const { matchServiceProtocol } = require('./protocol-matcher');
 const { lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
+const { resolveEstimateLines, containerPricesAnything } = require('./estimate-result-container');
 
 const SERVICE_MAP = {
   pest_control: {
@@ -702,6 +703,40 @@ async function inventoryCostFor(serviceKey, dimensions) {
   return inventoryCostFromRows(serviceKey, dimensions, await loadInventoryCostRows());
 }
 
+// A legacy estimate whose result carries the bermuda suppression marker but no stored removal
+// cost (it was priced before the cost existed): the cost the engine would state, from the
+// marker and the lawn area in that result, by the engine's own calculation. No marker or no
+// area: nothing (the caller has already applied the gate).
+function derivedBermudaCost(result, lawnSqFt) {
+  if (!(Number(lawnSqFt) > 0) || !require('./pricing-engine/v1-legacy-mapper').estimateResultCarriesBermudaSuppression({ result })) return undefined;
+  return require('./pricing-engine/service-pricing').calcBermudaRemovalAnnualCost(Number(lawnSqFt));
+}
+
+// The bermuda removal cost a raw lawn line states itself, as a line field ({} for any other line).
+const storedBermudaCost = (serviceKey, item) => (serviceKey === 'lawn_care' && item.costs?.annualBermudaRemoval != null
+  ? { bermudaRemovalStored: item.costs.annualBermudaRemoval } : {});
+
+// The bermuda removal cost on a raw lawn line of THE result the audit settled on (an unpriced
+// witness line the line merge skips still states its cost there).
+function rawLawnBermudaCost(result) {
+  const lines = Array.isArray(result?.lineItems) ? result.lineItems : [];
+  const lawn = lines.find((item) => item?.service === 'lawn_care' && item?.costs?.annualBermudaRemoval != null);
+  return lawn ? lawn.costs.annualBermudaRemoval : undefined;
+}
+
+// The bermuda removal cost the audit adds to a lawn line. A line's OWN stored cost always counts.
+// The result-wide sources (the result's lawnMeta cost, a raw lawn line of the result, the cost
+// derived from the marker and the lawn area) speak for THE lawn line only when the audit has exactly
+// one: with several lawn lines a line with no cost of its own is 0, never another line's cost. The
+// WHOLE lookup is gated on GATE_LAWN_BERMUDA_REMOVAL (off = 0 whatever is stored), and an authored
+// proposal, which is the accepted quote, takes none from the retained result.
+function bermudaRemovalCostOf(raw, result, dimensions, { proposalAuthoritative, lawnLineCount }) {
+  if (proposalAuthoritative || require('../config/feature-gates').lawnBermudaRemovalLive?.() !== true) return 0;
+  if (lawnLineCount !== 1) return Number(raw.bermudaRemovalStored) || 0;
+  return Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
+    ?? raw.bermudaRemovalStored ?? rawLawnBermudaCost(result) ?? derivedBermudaCost(result, dimensions.lawnSqFt)) || 0;
+}
+
 function visitsFor(line, result) {
   // A one-time row can still cover N units of service (multi-treatment
   // packages persisting visits:3, authored quantity>1 lines) — its COGS
@@ -934,6 +969,9 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
         cogsServiceTypeFixedMultipliers: mosquitoExtras.serviceTypeFixedMultipliers,
       } : {}),
       ...(quoted ? { quoted } : {}),
+      // The bermuda removal cost this raw lawn line states itself: it travels with the line, so a lawn line
+      // merged in from another container is costed from its own source.
+      ...storedBermudaCost(serviceKey, item),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: isRecurring ? 'recurring' : 'one_time',
@@ -1055,15 +1093,27 @@ function normalizeProposalLines(estimate) {
   return lines;
 }
 
+// How the audit reads a persisted result container's lines (the collectors the container module
+// merges): the structured recurring and one-time lines, and the raw engine line items.
+const LINE_COLLECTORS = {
+  mapped: (container, setupOpts) => [...normalizeRecurringLines(container), ...normalizeOneTimeLines(container, setupOpts)],
+  raw: (container, setupOpts) => normalizeEngineLineItems(container, setupOpts),
+  engineIdAliases: ENGINE_ID_ALIASES,
+};
+
+// Does a persisted result container price anything (a mapped recurring or one-time line, or a
+// raw engine line item)? The detector the shared container pick uses for an ancillary result.
+function hasPricedLines(container, setupOpts = {}) {
+  return containerPricesAnything(container, LINE_COLLECTORS, setupOpts);
+}
+
 async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
-  let result = data.result || data.engineResult || {};
   // Branch on the OUTCOME, not the raw flag: a stored {enabled:true}
   // whose canonical normalization yields no itemization (synthesized/
   // disabled fallback) must fall through to the engine lines instead of
   // freezing an empty audit (codex pre-push P1).
   const proposalLines = data.proposal?.enabled === true ? normalizeProposalLines(estimate) : [];
-  const proposalAuthoritative = proposalLines.length > 0;
   // The FROZEN setup-fee decision gates EVERY membership emission — the
   // raw initialFee path and the mapped oneTime.membershipFee row alike
   // (GH codex P1: the mapped row escaped a frozen $49 discount): a
@@ -1093,145 +1143,17 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     : null;
   const initialFeeGross = Number.isFinite(frozenSetupGross) && frozenSetupGross > 0 ? frozenSetupGross : null;
   const setupOpts = { emitInitialFee, initialFeeOverride, initialFeeGross };
-  let rawLines = proposalAuthoritative
-    ? proposalLines
-    : [
-      ...normalizeRecurringLines(result),
-      ...normalizeOneTimeLines(result, setupOpts),
-    ];
-  // Quote-wizard rows persist their priced services ONLY at
-  // engineResult.lineItems (no recurring/oneTime blocks) — without this
-  // fallback such snapshots had empty lines, zero cost, and a falsely
-  // perfect margin (GH codex P1). An ancillary data.result can shadow
-  // the priced engineResult in the alias — when the alternate object is
-  // the one with priced lines, it becomes THE result for the whole audit
-  // (dimensions, visit counts, provenance), not just the lines (codex
-  // pre-push P1).
-  if (!proposalAuthoritative) {
-    // Real rows can MIX shapes: mapped recurring/oneTime blocks plus
-    // additional priced rows only in (engine)result.lineItems — merge and
-    // dedupe by service+cadence so no priced line is silently omitted
-    // (codex pre-push P1). When the alternate container is the only one
-    // with lines, it becomes THE result for the whole audit.
-    // Duplicate = the SAME priced charge represented in TWO CONTAINERS:
-    // same service, cadence, and net price — and each remembered charge is
-    // CONSUMED by at most one match, so two equal-priced buildings in one
-    // container both survive, and one mapped counterpart absorbs exactly
-    // one equal-priced engine row (codex pre-push P1 x2).
-    const covered = new Map();
-    // Commercial engine ids and their residential label-mapped twins are
-    // the SAME charge in two spellings — canonicalize for the dedupe key
-    // only; each line keeps its own serviceKey (GH codex P1).
-    const DEDUPE_FAMILY = {
-      commercial_pest: 'pest_control',
-      commercial_lawn: 'lawn_care',
-      commercial_tree_shrub: 'tree_shrub',
-      commercial_mosquito: 'mosquito',
-      commercial_termite_bait: 'termite_bait',
-      commercial_rodent_bait: 'rodent_bait',
-      // Termite SPECIALTY twins (GH codex P1): the mapped normalizer only
-      // has names ("Recurring Termite Foam Service", "Termite Bond") and
-      // keyFromName lands them on termite_bait, while the raw rows keep
-      // their canonical engine ids — same charge, two spellings again.
-      foam_recurring: 'termite_bait',
-      termite_station_rental: 'termite_bait',
-      termite_bond: 'termite_bait',
-    };
-    const priceKey = (l) => {
-      const key = String(l.serviceKey || '');
-      // termite_bond persists with its term baked in (termite_bond_5yr).
-      const family = DEDUPE_FAMILY[key]
-        || ENGINE_ID_ALIASES[key]
-        || (key.startsWith('termite_bond') ? 'termite_bait' : key);
-      return `${family}|${l.cadence}`;
-    };
-    const remember = (l) => {
-      const key = priceKey(l);
-      if (!covered.has(key)) covered.set(key, []);
-      covered.get(key).push({ price: Number(l.price) || 0, line: l });
-    };
-    rawLines.forEach(remember);
-    // Stale-revision guard (GH codex P1): a revised draft rewrites
-    // data.result but leaves the OLD engineResult behind. The guard is
-    // scoped by SERVICE IDENTITY (family|cadence), not whole cadence
-    // classes — a service the mapped result already priced is consume-only
-    // (an engine row either price-matches and enriches, or is a stale
-    // revision of that same service and drops), while a service the mapped
-    // result never priced is the legitimate mixed shape and merges even
-    // when its cadence class exists elsewhere (codex pre-push P1: a
-    // cadence-wide guard silently dropped a valid recurring service stored
-    // only in engineResult.lineItems).
-    const mappedServiceKeys = new Set(rawLines.map(priceKey));
-    // A SERVER-authoritative reprice rewrote data.result WHOLESALE
-    // (admin-estimate-persistence: estimateData.result = serverResult)
-    // and left the earlier engineResult behind — there, an unmatched
-    // engine row is a removed or re-priced service, never a mixed-shape
-    // extra, so the whole container is consume-only (GH codex P1: a
-    // service the operator removed was still recorded and costed).
-    const serverRepriced = String(estimate.pricing_authority || '').toUpperCase() === 'SERVER'
-      && !!data.result && data.result !== data.engineResult;
-    const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false } = {}) => {
-      const survivors = [];
-      for (const line of extra) {
-        const entries = covered.get(priceKey(line)) || [];
-        const matchIdx = entries.findIndex((prev) => Math.abs(prev.price - (Number(line.price) || 0)) < 0.01);
-        if (matchIdx < 0 && (consumeOnly || (consumeOnlyMappedServices && mappedServiceKeys.has(priceKey(line))))) continue;
-        if (matchIdx >= 0) {
-          // Consumed — but the discarded raw row may be the ONLY carrier of
-          // cost/provenance metadata (explicitCogsCost, mosquito overrides,
-          // quoted fields) — transfer what the retained row lacks (GH
-          // codex P1).
-          const [{ line: retained }] = entries.splice(matchIdx, 1);
-          if (retained.explicitCogsCost === undefined && line.explicitCogsCost !== undefined) retained.explicitCogsCost = line.explicitCogsCost;
-          if (!retained.cogsServiceTypes && line.cogsServiceTypes) {
-            retained.cogsServiceTypes = line.cogsServiceTypes;
-            retained.cogsServiceTypeFixedMultipliers = line.cogsServiceTypeFixedMultipliers;
-          }
-          if (retained.visitsPerYear === undefined && line.visitsPerYear !== undefined) retained.visitsPerYear = line.visitsPerYear;
-          if (line.quoted) retained.quoted = { ...line.quoted, ...(retained.quoted || {}) };
-          continue;
-        }
-        survivors.push(line);
-        rawLines.push(line);
-      }
-      // Intra-container siblings never dedupe against each other — they
-      // join the covered set only for LATER containers.
-      survivors.forEach(remember);
-    };
-    const hadMappedLines = rawLines.length > 0;
-    const fromResult = normalizeEngineLineItems(result, setupOpts);
-    if (!hadMappedLines && !fromResult.length && data.engineResult && data.engineResult !== result) {
-      // The alternate container gets EVERY canonical collector, not just
-      // the lineItems scan — a structured engineResult.oneTime/recurring
-      // block is a supported shape there too (GH codex P1: a $500
-      // one-time charge in engineResult.oneTime.items was dropped).
-      // Structured first, then lineItems, so cross-shape duplicates
-      // (membership fee in both) dedupe exactly as they do on `result`.
-      const altMapped = [
-        ...normalizeRecurringLines(data.engineResult),
-        ...normalizeOneTimeLines(data.engineResult, setupOpts),
-      ];
-      const altRaw = normalizeEngineLineItems(data.engineResult, setupOpts);
-      if (altMapped.length || altRaw.length) {
-        result = data.engineResult;
-        merge(altMapped);
-        merge(altRaw);
-      }
-    } else {
-      merge(fromResult);
-      if (data.engineResult && data.engineResult !== result) {
-        merge([
-          ...normalizeRecurringLines(data.engineResult),
-          ...normalizeOneTimeLines(data.engineResult, setupOpts),
-        ], { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
-        merge(normalizeEngineLineItems(data.engineResult, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
-      }
-    }
-  }
+  // The CURRENT priced result's container and the priced lines, in one call
+  // (estimate-result-container.js resolveEstimateLines): the container pick shared with the bermuda
+  // removal reader, then the structured lines, the raw engine lines and the cross-container dedupe.
+  const { result, rawLines } = resolveEstimateLines(data, {
+    pricingAuthority: estimate.pricing_authority, collectors: LINE_COLLECTORS, setupOpts, proposalLines,
+  });
   const dimensions = dimensionsFrom(data, result);
   const inventory = context.inventory || await loadInventoryCostRows();
   const lines = [];
 
+  const lawnLineCount = rawLines.filter((line) => line.serviceKey === 'lawn_care').length;
   for (const raw of rawLines) {
     const protocol = raw.skipCogs ? null : protocolFor(raw);
     const cogs = raw.skipCogs
@@ -1242,7 +1164,11 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
         ? { status: 'explicit', totalPerVisit: 0, lines: [], warnings: [], fixedCost: raw.explicitCogsCost }
         : inventoryCostFromRows(raw.serviceKey, dimensions, inventory, raw.cogsServiceTypes, raw.cogsServiceTypeFixedMultipliers));
     const visits = visitsFor(raw, result);
-    const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0));
+    // Bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL): its two yearly sprays are
+    // not in the lawn inventory registry, so the quote's own cost line joins the
+    // lawn COGS. Absent (gate off, no add-on) = 0.
+    const bermudaRemovalCost = raw.serviceKey === 'lawn_care' ? bermudaRemovalCostOf(raw, result, dimensions, { proposalAuthoritative: proposalLines.length > 0, lawnLineCount }) : 0;
+    const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);
     const margin = raw.price > 0 ? Math.round((grossProfit / raw.price) * 1000) / 1000 : null;
     const warnings = [
@@ -1253,7 +1179,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     lines.push({
       ...raw,
       protocol,
-      cogs: { ...cogs, visitsPerYear: visits, estimatedCost },
+      cogs: { ...cogs, visitsPerYear: visits, estimatedCost, ...(bermudaRemovalCost > 0 ? { bermudaRemovalCost } : {}) },
       grossProfit,
       margin,
       status: warnings.length ? 'warning' : 'ok',
@@ -1386,6 +1312,7 @@ module.exports = {
   quoteProvenanceFrom,
   quotedFieldsFrom,
   buildEstimatePricingAudit,
+  hasPricedLines,
   buildEstimatePricingRisk,
   buildEstimatePricingRiskBatch,
   getLatestEstimatePricingAuditSnapshot,

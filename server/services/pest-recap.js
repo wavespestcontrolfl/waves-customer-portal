@@ -1194,6 +1194,10 @@ async function submitRecap({
       && Array.isArray(products)
       && !createdRecord;
     if (productRows.length || confirmedEmptyReplace) {
+      // GATE_LAWN_BERMUDA_REMOVAL: a record that already carries Recognition (recorded through
+      // /complete) cannot have its products replaced here: the replace would retract the row the
+      // bermuda removal caps count. Checked BEFORE anything is deleted or retracted.
+      await require('./lawn-bermuda-removal').refuseStepSprayOnRecap(trx, recordId, { existing: true });
       // Resolve each submitted catalog id to a REAL catalog row before
       // anything is persisted (codex P1 r9): the exact id keys the
       // compliance ledger identity, so a name-pattern fallback ("Advion
@@ -1496,6 +1500,11 @@ async function submitRecap({
       if (productRows.length) {
         const ComplianceService = require('./compliance');
         await ComplianceService.createComplianceRecords(recordId, { trx });
+        // GATE_LAWN_BERMUDA_REMOVAL: the pest recap never records Recognition, the bermuda removal
+        // step's counted herbicide. It is judged on the ledger rows just written, so a product sent
+        // by id, by a legacy name or with no rate is caught the same way; the refusal rolls the
+        // whole recap back. Gate off, or no Recognition row: nothing.
+        await require('./lawn-bermuda-removal').refuseStepSprayOnRecap(trx, recordId);
       }
     }
 
