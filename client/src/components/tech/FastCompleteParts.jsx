@@ -7,7 +7,7 @@
 // /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel, unsentTipsFirst } from '../../lib/tech-tips';
@@ -129,12 +129,16 @@ export function customerNameOf(visit, service) {
 // dialog (a photo manager opened over the sheet); `hiddenProps` makes the
 // dialog inert while it is up.
 // `dialogClassName` (the lawn sheet): a class on the dialog, for its scoped look.
-export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, children }) {
+// `suspended` (owner 2026-10-09): the appointment details sheet is open over
+// this visit. The sheet stays mounted, so everything entered is kept, but it is
+// hidden and inert until Details closes.
+export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, suspended = false, children }) {
   const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
     <UiSurface
       density="touch"
+      {...(suspended ? { style: { display: 'none' }, 'aria-hidden': true, inert: '' } : {})}
       className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onDismiss(); }}
     >
@@ -155,21 +159,87 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
+// Details opens the appointment details sheet on the schedule row the sheet was
+// opened from. That row is trusted only once the live visit has loaded and
+// matches it: while the context is loading or failed to load, the row is
+// unverified, and when the visit drifted (customer, date, property, service or
+// status: the sheet's blockedReason) it is stale. A cancel or move there would
+// act on the current visit by id while showing the old one, so Details is
+// withheld in all three cases.
+export function detailsHandler(ctx, onViewDetails) {
+  return ctx?.loading || ctx?.loadError || ctx?.blockedReason ? undefined : onViewDetails;
+}
+
+// Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
+// reads it so it never closes or unmounts a part mid-request. Outside a container the default context is a no-op.
+export const PartBusyContext = createContext(() => {});
+// Every call reports under its OWN key (this hook instance + its source), so two parts, or two sources of one part, can
+// never clear each other's entry however their work overlaps.
+export function usePartBusy(source, busy) {
+  const report = useContext(PartBusyContext);
+  const instance = useId();
+  useEffect(() => {
+    const key = `${instance}:${source}`;
+    report(key, busy);
+    return () => report(key, false);
+  }, [report, instance, source, busy]);
+}
+
+// A part's requests, with every write counted: while any non-GET request is in flight the part reports busy (so the
+// container cannot close or unmount it mid-write). One place covers every present and future write of the sheet,
+// whichever control sends it. Outside a container (`enabled` false) the request is returned as it is.
+export function useWriteTracking(request, enabled) {
+  const [writes, setWrites] = useState(0);
+  usePartBusy('writes', writes > 0);
+  return useMemo(() => (enabled ? async (path, options) => {
+    if (String(options?.method || 'GET').toUpperCase() === 'GET') return request(path, options);
+    setWrites((n) => n + 1);
+    try { return await request(path, options); } finally { setWrites((n) => n - 1); }
+  } : request), [request, enabled]);
+}
+
+// A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no
+// dialog of its own. The container owns the one frame, the one scroll and the header; the part's header is hidden, its
+// body flows with the page and its footer (its own action button) stays at the end of the part (tech-workflow.css).
+export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, dialogClassName, children }) {
+  return (
+    <>
+      <section ref={dialogRef} aria-labelledby={titleId} className={cn('tech-visit-embedded-part', dialogClassName)} {...hiddenProps}>
+        {children}
+      </section>
+      {overlay}
+    </>
+  );
+}
+
 // `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
 // form button until the sheet itself says the visit needs the full form.
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose, fullFormOffered = true }) {
+// `onViewDetails` (owner 2026-10-09): a Details pill, shown while the visit is
+// open, that opens the appointment details sheet (quick move, cancel,
+// reschedule, price edit) — the same one the full form's Details pill and the
+// lawn sheet open. Absent (the tech portal mounts no such sheet) = no pill.
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
-      <div>
+      <div className="tech-visit-header-text">
         <h2 id={titleId} className="tech-visit-title">{title}</h2>
         <p className="tech-visit-muted">
           {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && fullFormOffered && (
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+      {/* Details and Full form share one group that wraps (stacks) on a narrow
+          phone, so neither is clipped beside the title and the close button. */}
+      {!done && (onViewDetails || fullFormOffered) && (
+        <div className="tech-visit-header-actions">
+          {onViewDetails && (
+            <Button variant="ghost" className="tech-visit-action" onClick={() => onViewDetails()} disabled={locked || dictationPending}>Details</Button>
+          )}
+          {fullFormOffered && (
+            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+          )}
+        </div>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
     </header>
@@ -482,7 +552,14 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
 // a phone or beside an extra action (`children`, e.g. "Check stock").
 // `reasonInButton` (the lawn sheet): a short reason is the disabled button's
 // own label instead of a line above it.
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false }) {
+// Prepare mode (a part of a grouped stop): the action saves the part for the
+// stop instead of completing the visit.
+const preparedLabel = (submission, label) => {
+  if (!submission.preparing) return label;
+  return submission.prepared ? 'Update for this stop' : 'Save for this stop';
+};
+
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
@@ -490,6 +567,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
       {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
+      {submission.prepared && <p className="tech-visit-muted" role="status">Saved for this stop</p>}
       <div className="tech-visit-actions">
         {children}
         <Button
@@ -498,7 +576,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           loading={submission.submitting}
           disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : (isAction ? label : preparedLabel(submission, label))}
         </Button>
       </div>
     </footer>
@@ -616,11 +694,20 @@ function noteMaxHeight(el) {
   return Math.ceil(line * NOTE_MAX_LINES + px(style.paddingTop) + px(style.paddingBottom) + px(style.borderTopWidth) + px(style.borderBottomWidth));
 }
 
-export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false }) {
+// A part of a grouped stop (GATE_COMBO_FAST_COMPLETE) reads the stop's one note in place of its own: the form with
+// its `note` replaced by `sharedNote`. Without a shared note (undefined or null) the form is returned as it is.
+export function useSharedNoteForm(ownForm, sharedNote) {
+  return useMemo(() => (sharedNote == null ? ownForm : { ...ownForm, note: String(sharedNote) }), [ownForm, sharedNote]);
+}
+
+// `shared` (a part of a grouped stop): the stop's one note box lives in the container, so this one
+// shows neither its text box nor its mic, only what sits inside it (the note-box photos).
+export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false, shared = false }) {
   const noteId = useId();
   const noteRef = useRef(null);
   const maxHeight = useCallback(() => noteMaxHeight(noteRef.current), []);
   useAutoGrowTextarea(noteRef, note, maxHeight);
+  if (shared) return children ? <section className="tech-visit-choice-section">{children}</section> : null;
   const text = (
     <Textarea
       ref={noteRef}

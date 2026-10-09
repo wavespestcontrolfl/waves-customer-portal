@@ -46,6 +46,9 @@ import {
   termiteRecordFromVisit, trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow,
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
+// The station labels and the typed station counts are shared with the Fast Complete
+// sheet (lib/station-checks.js): one copy of each rule.
+import { STATION_PROGRAM_UI, STATION_STATUS_UI, stationAutoCounts, stationStatusLabel } from "../../lib/station-checks";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
 // here for existing importers.
@@ -11615,37 +11618,6 @@ function clampStationView(view) {
     y: round(Math.min(Math.max(0, view.y), STATION_FRAME_H - view.h)),
   };
 }
-const STATION_STATUS_UI = {
-  ok: { color: "#10b981", label: "OK" },
-  activity: { color: "#ef4444", label: "Activity" },
-  serviced: { color: "#f59e0b", label: "Serviced" },
-  inaccessible: { color: "#94a3b8", label: "No access" },
-};
-const STATION_PROGRAM_UI = {
-  termite: {
-    title: "Bait station map",
-    hint: "Every station starts as OK — tap a pin to flag activity, service, or no access.",
-    activityLabel: "Activity",
-    activityCounter: "with activity",
-  },
-  rodent: {
-    title: "Rodent bait station map",
-    hint: "Every station starts as OK — tap a pin to flag consumption, service, or no access.",
-    activityLabel: "Consumption",
-    activityCounter: "with consumption",
-  },
-  trapping: {
-    title: "Rodent trap map",
-    hint: "Every trap starts as OK — tap a pin to record a capture, service, or no access.",
-    activityLabel: "Capture",
-    activityCounter: "with captures",
-  },
-};
-function stationStatusLabel(status, program) {
-  if (status === "activity") return STATION_PROGRAM_UI[program]?.activityLabel || "Activity";
-  return STATION_STATUS_UI[status]?.label || status;
-}
-
 export function StationMarkingStep({
   map,
   stations, // [{ key, id?, number, label?, shape: {cx,cy,r}|null, stale }]
@@ -13057,40 +13029,17 @@ export function CompletionPanel({
     // let the termite report (which falls back to the typed counts when a
     // visit has no check rows) tell the declined customer every station
     // was inspected (codex round-2 P1).
-    const isInspectionOnly = visitOutcome === "inspection_only";
-    const isCustomerDeclined = visitOutcome === "customer_declined";
-    const checkedKeys = isCustomerDeclined
-      ? []
-      : isInspectionOnly
-        ? activeKeys.filter((key) => stationMoves[key]
-          || stationNew.some((station) => station.key === key)
-          || Object.prototype.hasOwnProperty.call(stationStatuses, key))
-        : activeKeys;
-    const statusOf = (key) => stationStatuses[key] || "ok";
-    const inaccessible = checkedKeys.filter((key) => statusOf(key) === "inaccessible").length;
-    // Each program maps to ITS schema's count keys — never auto-write a key
-    // the schema doesn't own, or submit validation rejects the unknown
-    // field. Trapping owns traps_checked only: captures is a tech-judgment
-    // count (one trap can hold multiple captures), and the schema has no
-    // total/inaccessible keys.
-    const counts = stationProgram === "trapping"
-      ? { traps_checked: String(checkedKeys.length - inaccessible) }
-      : {
-        // total_stations is termite-only since 2026-07-23: the rodent
-        // schema retired it (the map's pins ARE the roster), and writing it
-        // there would trip the unknown-field rejection at submit
-        // (codex P1 on #2963).
-        ...(stationProgram === "termite"
-          ? { total_stations: String(activeKeys.length) }
-          : {}),
-        stations_checked: String(checkedKeys.length - inaccessible),
-        stations_inaccessible: String(inaccessible),
-        // Only the termite schema carries a per-station activity COUNT; the
-        // rodent flow records consumption as a select (tech judgment).
-        ...(stationProgram === "termite"
-          ? { stations_with_activity: String(checkedKeys.filter((key) => statusOf(key) === "activity").length) }
-          : {}),
-      };
+    // The counts rule (and why an inspection_only or declined visit counts only
+    // what was explicitly checked) lives in lib/station-checks.js.
+    const counts = stationAutoCounts({
+      program: stationProgram,
+      activeKeys,
+      statuses: stationStatuses,
+      visitOutcome,
+      isExplicit: (key) => stationMoves[key]
+        || stationNew.some((station) => station.key === key)
+        || Object.prototype.hasOwnProperty.call(stationStatuses, key),
+    });
     // Snapshot the last auto-written values BEFORE scheduling the state
     // updates: the updater callbacks run after this effect finishes, so
     // reading the ref inside them would see the values we're about to

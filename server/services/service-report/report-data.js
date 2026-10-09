@@ -1,6 +1,7 @@
 const { lawnScoreValue, resolveStressDamage, calculateLawnOverallScore } = require('../../../shared/lawn-scores.cjs');
 const crypto = require('crypto');
 const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
+const { irrigationRateOptions, storedRateTable, liveRateTable } = require('../irrigation-rates');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
@@ -23,6 +24,7 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
+const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
@@ -626,17 +628,19 @@ function portalIrrigationInches(propertyPrefs) {
     runMinutes: propertyPrefs.irrigation_run_minutes,
     wateringDays: propertyPrefs.watering_days,
     systemType: propertyPrefs.irrigation_system_type,
-  }).inchesPerWeek;
+  }, irrigationRateOptions()).inchesPerWeek;
 }
 
 // Every irrigation source the card would size from, checked against the
-// move guard the weekly email applies (one shared resolver).
+// move guard the weekly email applies (one shared resolver). LIVE by design: the report's water card derives its own
+// figure from today's preferences with today's table (irrigationRateOptions above), so the guard asks the same table.
+// Nothing here is compared with a stored plan; the stored week-plan card renders from the snapshot's own table.
 function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
   return scheduleUnconfirmedAfterMove({
     ...(propertyPrefs || {}),
     turf_irrigation_inches_per_week: turfProfile?.irrigation_inches_per_week ?? null,
     assessment_irrigation_inches_per_week: assessment?.irrigation_inches_per_week ?? null,
-  });
+  }, liveRateTable());
 }
 
 // The week-plan card the report renders from the current week's snapshot: ONE
@@ -645,7 +649,9 @@ function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
 // plan renders no card.
 function buildReportWeekPlan(snapshot, assessmentServiceDate) {
   // Compare against the runtime Monday's decision saw, never today's prefs.
-  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+  // The head rate table is the one the snapshot was decided on (decisionInputs.rateTable), never today's gate.
+  const rateTable = storedRateTable(snapshot.decisionInputs);
+  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null, rateTable });
   // The card credits a REQUIRED watering-in against the plan only when
   // this visit sits inside the plan week — a reopened older report
   // loads the current week's snapshot and must not count a treatment
@@ -660,7 +666,7 @@ function buildReportWeekPlan(snapshot, assessmentServiceDate) {
   // force. The literal token is filled (or the key dropped) by
   // applyAfterHoldOverlay once the visit's instruction is known.
   const afterHold = featureGates.lawnWateringRuleLive()
-    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null, rateTable })
     : null;
   return rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessmentServiceDate), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
 }
@@ -2224,8 +2230,8 @@ function stripLiveOnlyScheduleFields(data) {
   if (data.reportV2?.banner && typeof data.reportV2.banner === 'object') {
     delete data.reportV2.banner.forecastLine;
     delete data.reportV2.banner.observedRain;
-    // GATE_LAWN_REPORT_CLARITY: the sprinkler-setup invitation is a link to the
-    // portal, so it is live-only too.
+    // The sprinkler-setup invitation is a link to the portal, so it is
+    // live-only too.
     delete data.reportV2.banner.setupLine;
   }
   // The lawn v6 copy's by-next-visit sentences are schedule content too: a
@@ -3863,10 +3869,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
 // (scheduleUnconfirmed: the entries describe the former home).
 //
 // forCompletion (the completion build that gets frozen, and the Fast Complete
-// preview of it): with GATE_LAWN_REPORT_CLARITY on, a water-in with no sprinkler
-// head type on file states the amount and no minutes. A later render that has to
-// regenerate (nothing frozen) passes nothing and never reads the gate, so a gate
-// flip cannot change what an unfrozen render prints or what its PDF key covers.
+// preview of it): a water-in with no sprinkler head type on file states the
+// amount and no minutes (owner 2026-10-09, permanent: minutes only when the
+// customer's portal setup gives them). A later render that has to regenerate
+// (nothing frozen) passes nothing, so what an unfrozen render prints and what
+// its PDF key covers are unchanged.
 async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion = false }) {
   const waterContext = lawnAssessment?.waterContext || {};
   let runtime = null;
@@ -3894,7 +3901,7 @@ async function buildReportWateringInstruction({ products, service, completionTim
     })),
     completedAt: completionTime,
     runtime,
-    plainWhenNoSetup: forCompletion && lawnReportClarityLive(),
+    plainWhenNoSetup: forCompletion,
   });
 }
 
@@ -3937,15 +3944,13 @@ function bannerForecastExtras(instruction) {
   return forecastLine ? { forecastLine } : {};
 }
 
-// GATE_LAWN_REPORT_CLARITY: the invitation under an amount-only water-in (the
-// instruction was frozen without minutes because no sprinkler setup was on file).
-// Live view only, like the forecast sentence: stripLiveOnlyScheduleFields drops it
-// and it is never part of `lines`. Read at call time; only a frozen amountOnly
-// instruction can carry it, and the gate-off render has no key.
+// The invitation under an amount-only water-in (the instruction was frozen
+// without minutes because no sprinkler setup was on file). Live view only, like
+// the forecast sentence: stripLiveOnlyScheduleFields drops it and it is never
+// part of `lines`. Only a frozen amountOnly instruction can carry it.
 function bannerSetupExtras(instruction) {
   const waterIn = ['water_in', 'hold_then_water_in'].includes(instruction.state);
-  return instruction.amountOnly === true && waterIn && lawnReportClarityLive()
-    ? { setupLine: SETUP_INVITE_LINE } : {};
+  return instruction.amountOnly === true && waterIn ? { setupLine: SETUP_INVITE_LINE } : {};
 }
 
 // The banner payload: one server-built object the client, PDF and (later)
@@ -5747,6 +5752,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         customerConcern: structuredCustomerConcern(structured),
         // GATE_LAWN_REPORT_FACTS: the frozen re-entry condition, from the record only (null = the label text as before).
         reentryText: reportFacts.frozenReentryText(service),
+        // GATE_LAWN_WATER_RAIN: the rain card's permission, frozen at completion (null = today's card).
+        rainAdvice: reportFacts.frozenRainAdvice('lawn', service.structured_notes),
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,
@@ -7482,6 +7489,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight }),
     // GATE_LAWN_REPORT_POLISH (lawn only): the key the page reads for the status card and the hero. Absent = byte-identical payload.
     ...lawnPolishPayload({ serviceLine, reportV2 }),
+    // GATE_LAWN_NEW_SOD_REPORT_CARD (lawn only): the New sod card, built from the block frozen at completion. Absent = byte-identical payload.
+    ...lawnNewSodPayload({ serviceLine, structuredNotes: service.structured_notes }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {

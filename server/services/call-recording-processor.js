@@ -11579,7 +11579,7 @@ const CallRecordingProcessor = {
           // canonical record. It must be consulted for the unit ask: the
           // adoption retains a V1 unit V2 dropped, so the AV verdict can
           // report a missing subpremise the record already has.
-          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted });
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted, transcript: transcription });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           // The same model-flag suppression canAutoRoute applies (codex #4890
@@ -11969,7 +11969,7 @@ const CallRecordingProcessor = {
           try {
             bridgeTriageFlags = mergeTriageFlags(
               bridgeTriageFlags,
-              computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation })
+              computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation, transcript: transcription })
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
@@ -21958,6 +21958,7 @@ const CallRecordingProcessor = {
         const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(v2ExtractionForAudit.triage_flags, v2ExtractionForAudit), v2AddressValidation);
         const deterministicFlags = computeDeterministicTriageFlags(v2ExtractionForAudit, {
           contactPhone,
+          transcript: transcription,
           addressValidation: v2AddressValidation,
           // Same merged record the live lane consulted — the reconstruction
           // must agree with it, or the shadow metrics count a unit ask the

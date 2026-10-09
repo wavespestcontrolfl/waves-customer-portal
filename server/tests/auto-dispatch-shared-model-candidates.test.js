@@ -981,3 +981,47 @@ test('route_minutes charges the owner planning table: a planning-table change mo
     if (ORIGINAL_CAPACITY === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = ORIGINAL_CAPACITY;
   }
 });
+
+// Legacy model (shared-model gate off), grouped visit in an overlap: find-time
+// sized each opening for the tapped row only. A gap that holds the tapped row
+// and not its sibling is dropped before the ranking; legacy apply makes one
+// attempt (Codex #6207 r14 P1).
+describe('legacy conflict candidates fit the whole moving unit', () => {
+  const { _internals: { dropSlotsTheUnitCannotTake } } = require('../services/auto-dispatch/candidate-slots');
+  const service = { id: 's1', visit_id: 'v1', scheduled_date: '2026-08-04', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 };
+  const groupContext = {
+    excludeIds: new Set(['s1', 'sib1']),
+    siblings: [{ id: 'sib1', scheduled_date: '2026-08-04', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }],
+    visitWindowStart: '09:00',
+  };
+  const overlap = { kind: 'overlap', date: '2026-08-04', with: ['o1'] };
+  const oneHourGap = { technician_id: 't1', date: '2026-08-04', start_time: '13:00', end_time: '14:00' };
+  const twoHourGap = { technician_id: 't1', date: '2026-08-04', start_time: '15:00', end_time: '16:00' };
+
+  test('a one-hour gap before another stop is dropped for a two-hour unit; a two-hour gap stays', async () => {
+    probeMoveConflicts.mockResolvedValue({ rows: [conflictRow('14:00', '15:00')], snapshot: [] });
+    const drops = { slot_taken: 0 };
+    const kept = await dropSlotsTheUnitCannotTake(service, [oneHourGap, twoHourGap], { db: jest.fn(), evalConflict: overlap, groupContext }, drops);
+    expect(kept).toEqual([twoHourGap]);
+    expect(drops.slot_taken).toBe(1);
+    expect(new Set(probeMoveConflicts.mock.calls[0][0].excludeServiceIds)).toEqual(new Set(['s1', 'sib1']));
+  });
+
+  // A grouped visit forced off a closed day moves as a unit too (r15 P1).
+  test('a closed-day conflict gets the same whole-unit fit check', async () => {
+    probeMoveConflicts.mockResolvedValue({ rows: [conflictRow('14:00', '15:00')], snapshot: [] });
+    const next = (c) => ({ ...c, date: '2026-08-05' });
+    const drops = { slot_taken: 0 };
+    const kept = await dropSlotsTheUnitCannotTake(service, [next(oneHourGap), next(twoHourGap)], { db: jest.fn(), evalConflict: { kind: 'closed_day', date: '2026-08-04' }, groupContext }, drops);
+    expect(kept).toEqual([next(twoHourGap)]);
+    expect(drops.slot_taken).toBe(1);
+  });
+
+  test('no conflict, or a standalone visit: the candidates pass through and nothing is read', async () => {
+    const cands = [oneHourGap, twoHourGap];
+    expect(await dropSlotsTheUnitCannotTake(service, cands, { db: jest.fn(), evalConflict: null, groupContext }, {})).toBe(cands);
+    const alone = { excludeIds: new Set(['s1']), siblings: [], visitWindowStart: null };
+    expect(await dropSlotsTheUnitCannotTake(service, cands, { db: jest.fn(), evalConflict: overlap, groupContext: alone }, {})).toBe(cands);
+    expect(probeMoveConflicts).not.toHaveBeenCalled();
+  });
+});

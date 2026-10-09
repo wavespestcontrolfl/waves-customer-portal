@@ -13,20 +13,26 @@ import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import ReportViewPage from '../pages/ReportViewPage';
 import WavesShell from '../components/brand/WavesShell';
+import NEW_SOD_CARDS from './new-sod-cards.json';
 
 const FIXTURES = import.meta.glob('../pages/__fixtures__/lawn-layout/*.json', { eager: true, import: 'default' });
 const LAYOUT_SCENARIOS = ['spot', 'granular', 'clean'];
 // GATE_LAWN_REPORT_POLISH scenarios: a mixed-head system, a single-head system, 15 minutes on four days, and nothing on file; gate off ("base") and on.
-const POLISH_SCENARIOS = ['mixed', 'single', 'fourday', 'nothing'];
-const SCENARIOS = [...LAYOUT_SCENARIOS, ...POLISH_SCENARIOS];
+const POLISH_SCENARIOS = ['mixed', 'single', 'fourday', 'nothing', 'rainwet', 'raindry', 'rainnone'];
+// GATE_LAWN_NEW_SOD_REPORT_CARD scenarios: the clean visit with the New sod card the server builds from a frozen block
+// (new-sod-cards.json, kept equal to the server's words by server/tests/lawn-sod-report-card.test.js). Synthetic data.
+const SOD_SCENARIOS = ['sod-whole', 'sod-swap', 'sod-part'];
+const SCENARIOS = [...LAYOUT_SCENARIOS, ...POLISH_SCENARIOS, ...SOD_SCENARIOS];
 
 const params = new URLSearchParams(window.location.search);
 const scenario = SCENARIOS.includes(params.get('scenario')) ? params.get('scenario') : 'spot';
 const layout = params.get('layout') === 'on' ? 'on' : 'off';
 const polish = params.get('polish') === 'on' ? 'on' : 'off';
 const isPolishScenario = POLISH_SCENARIOS.includes(scenario);
-const fixtureName = isPolishScenario ? `${scenario}-${polish === 'on' ? 'polish' : 'base'}` : `${scenario}-${layout}`;
-const payload = FIXTURES[`../pages/__fixtures__/lawn-layout/${fixtureName}.json`];
+const isSodScenario = SOD_SCENARIOS.includes(scenario);
+const fixtureName = isPolishScenario ? `${scenario}-${polish === 'on' ? 'polish' : 'base'}` : `${isSodScenario ? 'clean' : scenario}-${layout}`;
+const fixture = FIXTURES[`../pages/__fixtures__/lawn-layout/${fixtureName}.json`];
+const payload = isSodScenario ? { ...fixture, lawnNewSod: NEW_SOD_CARDS.cards[scenario.slice('sod-'.length)] } : fixture;
 
 const realFetch = window.fetch.bind(window);
 window.fetch = async (url, opts) => {

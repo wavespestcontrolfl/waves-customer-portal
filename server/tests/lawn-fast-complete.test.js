@@ -724,6 +724,8 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         rungIds: [P_ARENA, P_TALAK],
         blockedIds: [],
         unreadableIds: [],
+        // No rung's own limit forbids it: the sheet's search lists both.
+        limitedIds: [],
       });
       expect(ctx.plannedProducts.addOns.map((a) => a.productId)).toEqual([P_LEAD, P_CERT, P_ART, P_ACE, P_DISP]);
     });
@@ -804,7 +806,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
     test('both at their cap: a line and no product', async () => {
       live();
       capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: YEARLY });
-      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK], unreadableIds: [] });
+      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK], unreadableIds: [], limitedIds: [P_ARENA, P_TALAK] });
     });
 
     test('a product the month\'s plan holds is the plan\'s own add-on', async () => {
@@ -1404,22 +1406,26 @@ describe('buildLawnFastWateringPreview', () => {
     products_catalog: rows,
     property_preferences: prefs,
   });
-  // What the report does for the same products: frozen facts, then its own
+  // What the report does for the same products at completion (the build that
+  // gets frozen, which the preview mirrors): frozen facts, then its own
   // instruction builder and banner.
   async function reportBanner(rows, knex) {
     const products = rows.map((row) => ({ product_name: row.name, approved_report_product_facts: reportData.approvedReportProductFacts(row) }));
     const instruction = await reportData.buildReportWateringInstruction({
-      products, service: { customer_id: 'cust-1' }, completionTime: now, lawnAssessment: null, knex,
+      products, service: { customer_id: 'cust-1' }, completionTime: now, lawnAssessment: null, knex, forCompletion: true,
     });
     return reportData.buildWateringBanner(instruction, null);
   }
 
-  test('a hold that reaches the water-in deadline makes no claim, as the report does', async () => {
+  test('a hold that reaches the water-in deadline is followed by the water-in from the hold end, as the report does', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
     const rows = [herbicide, granular];
     const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: rows.map((r) => r.id), knex: knexFor(rows), now });
-    expect(await reportBanner(rows, knexFor(rows))).toBeNull();
-    expect(preview.sentence).toBeNull();
+    const banner = await reportBanner(rows, knexFor(rows));
+    expect(banner).toMatchObject({ state: 'hold_then_water_in' });
+    expect(preview.lines).toEqual(banner.lines);
+    expect(preview.lines[0]).toMatch(/^Skip your turf watering until /);
+    expect(preview.lines[1]).toMatch(/^After that, water in today’s treatment /);
   });
 
   test('a product with no rule on file makes no claim, as the report does', async () => {

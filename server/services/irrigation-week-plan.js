@@ -24,7 +24,8 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const WATERING_COPY = require('../../shared/watering-copy.json');
-const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
+const { buildWeekPlan, defaultEventMinutes, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
+const { resolveRateTable, ratesForTable, rateTableInputs } = require('./irrigation-rates');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
@@ -115,8 +116,13 @@ function decideWeekPlan({
   // Unconfirmed schedule after a move: carryover from observed RAIN only
   // (the former home's programmed irrigation is withheld).
   rainOnlyCarryover = false,
+  // Head rate table ('owner' | 'package') this decision uses. Omitted = a NEW decision: the live
+  // GATE_IRRIGATION_OWNER_RATES picks it. The snapshot freezes the choice (decisionInputs.rateTable, owner only), and a
+  // replay passes the stored table back in, so the gate never re-decides a stored row.
+  rateTable = undefined,
   now = new Date(),
 } = {}) {
+  const table = resolveRateTable(rateTable);
   const restriction = currentRestrictionPolicy(now, { county, horizonEnd: planWeekEnd });
   const planMonth = etParts(now).month;
   // The week AHEAD's demand: forecast ET₀ when the forecast carried it, else
@@ -175,6 +181,8 @@ function decideWeekPlan({
     rainKnown,
     priorWeekEvents,
     rainOnlyCarryover,
+    // One head rate table for every reader (GATE_IRRIGATION_OWNER_RATES); off = the package table.
+    rates: ratesForTable(table),
   });
   const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
   // Everything the decision was made from, for the snapshot (the report
@@ -211,6 +219,9 @@ function decideWeekPlan({
       latitude: home.latitude ?? null,
       longitude: home.longitude ?? null,
     } : null,
+    // The head rate table behind this decision, frozen with it (key only for the owner table, so a package-table
+    // snapshot is byte-identical to before).
+    ...rateTableInputs(table),
   };
   return { plan, restriction, decisionInputs };
 }
@@ -234,15 +245,23 @@ function comparisonClause(plan, runMinutes) {
   return diff < 0 ? ` — ${Math.abs(diff)} minutes less than you run now` : ` — ${diff} minutes more than you run now`;
 }
 
-function eventsOnlyClause() {
-  return `run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 20 minutes on spray zones and 60 on rotor zones`;
+// The generic default-dose sentences name the minutes a ½" run takes on each head type: computed from the rate table
+// in force (20 and 60 on the package table, 30 and 80 on the owner table), never typed.
+function eventsOnlyClause(rateTable) {
+  const m = defaultEventMinutes(ratesForTable(rateTable));
+  return `run one full cycle on each turf zone — ½ to ¾ inch of water, which is about ${m.spray} minutes on spray zones and ${m.rotor} on rotor zones`;
+}
+
+function fullCycleClause(rateTable) {
+  const m = defaultEventMinutes(ratesForTable(rateTable));
+  return `one full cycle on each turf zone (½ to ¾ inch — about ${m.spray} minutes on spray zones, ${m.rotor} on rotor zones)`;
 }
 
 /**
  * Email copy for a decision. Returns null for an 'unavailable' plan so the
  * sender keeps its pre-plan template.
  */
-function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false, scheduleUnconfirmed = false } = {}) {
+function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false, scheduleUnconfirmed = false, rateTable = undefined } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   const name = String(firstName || '').trim() || 'there';
   const notes = [];
@@ -254,7 +273,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     : null;
   const fallbackCycle = fallbackMinutes
     ? `one cycle of ${fallbackMinutes} per turf zone`
-    : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
+    : fullCycleClause(rateTable);
 
   let subject;
   let heading;
@@ -303,7 +322,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     const depth = fmtInches(plan.depthInches);
     actionLine = minutes
       ? `This week: run each turf zone ${minutes}${dayClause}${comparisonClause(plan, runMinutes)}. That's about ${depth} of water per run — the deep-and-infrequent pattern UF/IFAS recommends.`
-      : `This week: ${eventsOnlyClause()}${dayClause}.`;
+      : `This week: ${eventsOnlyClause(rateTable)}${dayClause}.`;
     if (cool) {
       actionLine += ` It's the cool season, so after that leave the system off until the grass shows ${WILT_CUES} — every 10–14 days if needed is plenty.`;
     }
@@ -320,7 +339,8 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   } else if (plan.action !== 'hold' && plan.minutesPerEvent == null) {
     notes.push('Add your sprinkler head type (spray or rotor) under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
   } else if (plan.action !== 'hold' && plan.rateSource === 'system_type_default' && !omitRateNote) {
-    notes.push(`Minutes assume typical ${HEAD_LABELS[plan.headType] || 'sprinkler'} rates from University of Florida turf guidance. If you know your system's actual weekly output, enter Weekly Inches in your portal and we'll tighten this to your numbers.`);
+    // The owner table is not UF's: with the gate on the note says "typical rates" and stops there.
+    notes.push(`Minutes assume typical ${HEAD_LABELS[plan.headType] || 'sprinkler'} rates${rateTable === 'owner' ? '' : ' from University of Florida turf guidance'}. If you know your system's actual weekly output, enter Weekly Inches in your portal and we'll tighten this to your numbers.`);
   }
   if (plan.rainSensor && !omitSensorNote) {
     notes.push('Your rain sensor will skip a run on its own if we get a soaking.');
@@ -349,7 +369,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
  * One callout for the lawn report's Water This Week card. Null when there is
  * no plan (the card keeps its current advice copy).
  */
-function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = {}) {
+function renderWeekPlanReport(plan, { runMinutes = null, restriction = null, rateTable = undefined } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   // Every card carries the plan's ACTION so downstream prose (the report's
   // root cause) can agree with what the card below actually says — a
@@ -367,7 +387,7 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     // from the stored fallback (never the customer's own longer cycle).
     const fallback = plan.fallbackMinutesPerEvent != null
       ? `one cycle of ${plan.rateSource === 'measured' ? '' : 'about '}${plan.fallbackMinutesPerEvent} minutes per turf zone`
-      : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
+      : fullCycleClause(rateTable);
     if (plan.reasons.includes('cool_season_cadence')) {
       return card({
         title: 'This week: skip if you watered last week',
@@ -385,7 +405,7 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     // read as the whole controller program.
     const cycle = minutes
       ? `one cycle of ${minutes} per turf zone`
-      : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
+      : fullCycleClause(rateTable);
     return card({
       title: 'This week: check the rain before you water',
       detail: plan.events > 1
@@ -456,9 +476,9 @@ const NOT_BEFORE_SENTENCE = `Not before ${HOLD_UNTIL_TOKEN}: if your permitted w
  * The detail carries a literal {holdUntil} token — the caller replaces it
  * with the hold's end time.
  */
-function renderWeekPlanNotBefore(plan, { restriction = null, runMinutes = null } = {}) {
+function renderWeekPlanNotBefore(plan, { restriction = null, runMinutes = null, rateTable = undefined } = {}) {
   if (!plan || plan.action !== 'run') return null;
-  const card = renderWeekPlanReport(plan, { runMinutes, restriction });
+  const card = renderWeekPlanReport(plan, { runMinutes, restriction, rateTable });
   if (!card) return null;
   return { title: card.title, detail: `${card.detail} ${NOT_BEFORE_SENTENCE}` };
 }
