@@ -306,6 +306,7 @@ const SERVICE_KEY_BINDINGS = Object.freeze({
   cockroach_control: ['cockroach', 'cockroach'],
   german_roach: ['cockroach', 'cockroach'],
   german_roach_initial: ['cockroach', 'cockroach'],
+  vehicle_german_roach: ['cockroach', 'cockroach'],
   pest_initial_german_knockdown: ['cockroach', 'german_roach_knockdown'],
   pest_initial_palmetto_knockdown: ['cockroach', 'palmetto_roach_knockdown'],
   flea_tick: ['flea', 'flea'],
