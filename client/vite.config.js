@@ -64,6 +64,8 @@ export default defineConfig({
       // render tests do not justify a low, misleading repo-wide percentage.
       // Split that page before adding it here; lowering this floor to include
       // thousands of unexercised lines would turn the gate into theatre.
+      // CI checks this floor with `npm run test:coverage-floor`, which names
+      // the same files: change both lists together.
       include: [
         'src/components/BiometricGate.jsx',
         'src/components/InstallPrompt.jsx',
