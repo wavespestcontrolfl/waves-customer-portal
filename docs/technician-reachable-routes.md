@@ -44,6 +44,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/communications/send-prep` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
 | POST | `/api/admin/communications/sms` | admin-communications |
+| GET | `/api/admin/consultations/:scheduledServiceId/estimate` | admin-consultations |
 | GET | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
 | POST | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
 | GET | `/api/admin/customers` | admin-customers |
