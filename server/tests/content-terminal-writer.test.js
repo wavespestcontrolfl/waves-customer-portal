@@ -201,6 +201,9 @@ describe('terminal writer hand-off', () => {
     expect(category).toBe('content');
     expect(spec.action).toBe('write 1 website post in the terminal');
     expect(opts.dedupeKey).toBe('content-terminal-due:2026-10-09');
+    // a later pass with a different list rewrites the same item and does not ring again
+    expect(opts.refreshOnDedupe).toBe(true);
+    expect(opts.ringOnRefresh()).toBe(false);
     expect(opts.detail).toContain('ants in the kitchen b');
   });
 

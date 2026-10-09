@@ -223,6 +223,10 @@ async function handOffToTerminal({ now = new Date(), deps = {} } = {}) {
       who: 'claude',
     }, {
       dedupeKey: todayKey,
+      // A later pass the same day (the 1pm retry) rewrites the item when the
+      // due list changed, without ringing a second time.
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
       detail: [
         'Run blog-run in the terminal. Due today:',
         ...due.map((r) => `- ${describe(r)}`),
