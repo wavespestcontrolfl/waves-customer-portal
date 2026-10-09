@@ -710,6 +710,33 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
 
   // Codex r1: after a SLOT_TAKEN the remaining alternates are re-evaluated
   // against the now-current schedule before the next attempt.
+  test('a fallback candidate\'s guard re-reads the conflict of the evaluation that authorized it (pre-push P1)', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const slots = require('../services/auto-dispatch/candidate-slots');
+    const read = jest.spyOn(slots._internals, 'readCurrentConflict').mockResolvedValue(null);
+    const FRESH = { date: '2026-08-13', start_time: '10:00', end_time: '12:00', technician_id: 't1' };
+    const conflict = { kind: 'overlap', date: '2026-08-04', with: ['o1'] };
+    // The first evaluation saw no conflict; the rescore after SLOT_TAKEN does.
+    const rescore = jest.fn().mockResolvedValue({ kind: 'move', rankedCandidates: [FRESH], current: { conflict } });
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    const queue = [readRow(CONFIRMED_ROW), readRow(CONFIRMED_ROW), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+    db.mockImplementation(() => queue.shift());
+    try {
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore, sourceConflict: null });
+      const guardOf = (call) => call.find((arg) => arg && typeof arg.moveGuard === 'function').moveGuard;
+      // The conflict re-read comes before any read on the transaction.
+      const trx = jest.fn(() => { throw new Error('stop here'); });
+      // First attempt: authorized with no conflict, so nothing is re-read.
+      await expect(guardOf(SmartRebooker.reschedule.mock.calls[0])({ trx, technicianId: 't1', service: SERVICE })).rejects.toThrow('stop here');
+      expect(read).not.toHaveBeenCalled();
+      // Fallback: authorized by the rescore's conflict, which is now gone.
+      await expect(guardOf(SmartRebooker.reschedule.mock.calls[1])({ trx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('gate on: after a SLOT_TAKEN the next attempt comes from the re-evaluation, not the stale alternates', async () => {
     process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
     const STALE = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };

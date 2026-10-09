@@ -713,6 +713,16 @@ async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, a
   }
 }
 
+// The config for one attempt. A fallback candidate was authorized by a fresh
+// evaluation, so its move guard re-reads THAT evaluation's conflict: a
+// conflict found only on the rescore is fenced too, and a conflict that had
+// cleared by the rescore does not refuse a move that passed the normal bar
+// (pre-push P1).
+function attemptConfig(config, evaluation) {
+  if (!evaluation) return config;
+  return { ...config, sourceConflict: (evaluation.current && evaluation.current.conflict) || null };
+}
+
 /**
  * Apply an auto-dispatch move, with a bounded next-best fallback on a
  * SLOT_TAKEN refusal (GATE_AUTO_DISPATCH_SHARED_MODEL, owner-approved
@@ -770,7 +780,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     try {
       // Bounded (MAX_APPLY_ATTEMPTS): each attempt must complete or fail
       // before trying the next, so a sequential await here is intentional.
-      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], check.fresh, runId, config);
+      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], check.fresh, runId, attemptConfig(config, authorizedBy.get(attempts[i])));
       // attempts (ids/numbers only): how many candidates were tried before
       // this one landed — 1 when the first attempt succeeded, so a caller
       // never has to infer it from `applied === best`.
