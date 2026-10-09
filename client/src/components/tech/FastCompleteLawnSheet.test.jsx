@@ -3395,65 +3395,108 @@ describe('suggested from this lawn', () => {
       expect(within(group).queryAllByRole('button')).toHaveLength(0);
       expect(within(group).getByText('Take-all is treated on known trouble areas only. None is on file for this lawn.')).toBeTruthy();
     });
+
+    test('a take-all row whose limit could not be read shows the unreadable-limit warning first, then the take-all note', async () => {
+      answer([], WEED_MIX, { unreadableProductIds: [P_HEAD], unreadableNote: UNREAD_NOTE });
+      await openTa(10, MONTHS[3][1], false);
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await addProductByName('Head Fungicide');
+      expect(within(editorFor('Head Fungicide')).getByText(`${UNREAD_NOTE} ${HEAD_NOTE}`)).toBeTruthy();
+    });
+
+    test('the fresh guide answer\'s take-all ids replace the context\'s once it settles', async () => {
+      // The context (read at open) knows no take-all row; the fresh answer (the plan as read now) names Head Fungicide.
+      answer([], WEED_MIX, { takeAllProductIds: [P_HEAD] });
+      await openSheet({ request: makeRequest({ ctx: guideContext({ plannedProducts: { ...taContext(10, MONTHS[3][1], false).plannedProducts, takeAllProductIds: [] } }) }), props: { catalog: TA_CATALOG } });
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(inList(10)).toBe(false));
+      expect(await inSearch()).toBe(true);
+    });
+
+    test('a fresh answer with no take-all row releases what the context named', async () => {
+      answer([], WEED_MIX, { takeAllProductIds: [] });
+      await openTa(10, MONTHS[3][1], false);
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(inList(10)).toBe(true));
+    });
   });
   // ── one soft prompt for a blade-and-crown close-up when the photos include a problem area ──
   describe('the close-up prompt', () => {
-    const PROMPT = 'Add one close-up of the blades and crown at the edge of the damaged spot so the insect check can read it.';
-    const tagFirstAsProblem = () => fireEvent.change(screen.getByLabelText('Slot for photo 1'), { target: { value: 'trouble' } });
-    const addAnother = async () => {
-      fireEvent.change(screen.getByLabelText('Add turf photos'), { target: { files: [new File(['b'], 'b.jpg', { type: 'image/jpeg' })] } });
-      await screen.findByLabelText('Slot for photo 2');
+    const PROMPT = 'Add one close-up of the blades and crown at the edge of the damaged spot and set its slot to Blade and crown, so the insect check can read it.';
+    const tagPhoto = (n, zone) => fireEvent.change(screen.getByLabelText(`Slot for photo ${n}`), { target: { value: zone } });
+    const addAnother = async (n) => {
+      fireEvent.change(screen.getByLabelText('Add turf photos'), { target: { files: [new File(['b'], `b${n}.jpg`, { type: 'image/jpeg' })] } });
+      await screen.findByLabelText(`Slot for photo ${n}`);
     };
 
-    test('a photo tagged Problem area shows the prompt once; it never blocks Analyze or Complete', async () => {
+    test('a photo tagged Problem area shows the prompt once; it never blocks Analyze', async () => {
       await open();
       await addPhoto();
       expect(screen.queryByText(PROMPT)).toBeNull();
-      tagFirstAsProblem();
+      tagPhoto(1, 'trouble');
       expect(await screen.findByText(PROMPT)).toBeTruthy();
       expect(screen.getAllByText(PROMPT)).toHaveLength(1);
       expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
     });
 
-    test('a photo added after the prompt takes it away for the rest of the visit', async () => {
+    test('another overview photo does not take it away; a photo tagged Blade and crown does, for the rest of the visit', async () => {
       await open();
       await addPhoto();
-      tagFirstAsProblem();
+      tagPhoto(1, 'trouble');
       await screen.findByText(PROMPT);
-      await addAnother();
+      await addAnother(2);
+      tagPhoto(2, 'front');
+      expect(screen.getByText(PROMPT)).toBeTruthy();
+      tagPhoto(2, 'blade_crown');
       await waitFor(() => expect(screen.queryByText(PROMPT)).toBeNull());
-      // Untagging and tagging again does not bring it back.
-      fireEvent.change(screen.getByLabelText('Slot for photo 1'), { target: { value: 'front' } });
-      tagFirstAsProblem();
+      // Taking the Blade and crown tag away again does not bring it back.
+      tagPhoto(2, 'back');
+      expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
+    test('a Blade and crown photo already on the sheet means no prompt', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'blade_crown');
+      await addAnother(2);
+      tagPhoto(2, 'trouble');
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(screen.queryByText(PROMPT)).toBeNull();
     });
 
     test('Dismiss takes it away', async () => {
       await open();
       await addPhoto();
-      tagFirstAsProblem();
+      tagPhoto(1, 'trouble');
       await screen.findByText(PROMPT);
       fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
       expect(screen.queryByText(PROMPT)).toBeNull();
     });
 
-    test('no problem-area photo, no prompt; after Analyze it is gone', async () => {
+    test('Analyze then Retake: a new Problem area photo does not show it a second time', async () => {
       await open();
       await addPhoto();
-      expect(screen.queryByText(PROMPT)).toBeNull();
-      tagFirstAsProblem();
+      tagPhoto(1, 'trouble');
       await screen.findByText(PROMPT);
       fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
       await screen.findByLabelText('Density score');
+      expect(screen.queryByText(PROMPT)).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+      await screen.findByTestId('lawn-shot-list');
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(screen.queryByText(PROMPT)).toBeNull();
     });
 
     test('guide off: the sheet shows no prompt', async () => {
       await open(guideContext({ treatmentGuide: false }, null));
       await addPhoto();
-      tagFirstAsProblem();
+      tagPhoto(1, 'trouble');
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(screen.queryByText(PROMPT)).toBeNull();
       expect(screen.queryByTestId('lawn-close-up-prompt')).toBeNull();
     });
   });

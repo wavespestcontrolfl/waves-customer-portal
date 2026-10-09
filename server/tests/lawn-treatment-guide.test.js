@@ -331,7 +331,7 @@ describe('take-all fungicide rows are governed in every month they are staged (t
       const hit = rows.find((row) => row.name === update.guard.product_name && row.trigger === update.guard.trigger);
       if (hit) { if (update.columns.product_name) hit.name = update.columns.product_name; if (update.gates.trigger) hit.trigger = update.gates.trigger; }
     }
-    for (const [window, name, from, to] of round2.TRIGGERS.filter(([window]) => window === windowKey)) {
+    for (const [, name, from, to] of round2.TRIGGERS.filter(([window]) => window === windowKey)) {
       const hit = rows.find((row) => row.name === name && row.trigger === from);
       if (hit) hit.trigger = to;
     }
