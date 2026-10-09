@@ -424,7 +424,8 @@ function answerAppliedToday({ data = {} } = {}) {
     const insight = insightFor(app);
     const name = productName(app);
     const method = cleanText(app.methodLabel || reportEnumLabel(app.method));
-    const area = cleanText(app.applicationArea || app.area);
+    // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS) is what the card says; the answer says it too.
+    const area = cleanText(app.areaUse || app.applicationArea || app.area);
     const targets = Array.isArray(app.targets) && app.targets.length
       ? `targets ${app.targets.map(reportEnumLabel).join(', ')}`
       : '';
@@ -509,7 +510,7 @@ function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
     pickRecommendedFinding(listOf(data.findings))?.recommendation,
   ].find(answerable);
   const recommendations = recommendationList(data).filter(answerable);
-  const reentry = dynamic.reentry?.customerSummary;
+  const reentry = reentryAnswerText(dynamic.reentry);
   // Built where it is used, so the required lines keep the answer's order.
   const reentryLine = () => (reentry ? `Re-entry: ${need(reentry, 'system')}` : '');
 
@@ -540,6 +541,15 @@ function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
   );
 }
 
+// The re-entry sentence(s) a fixed answer states. A lawn visit's frozen condition (GATE_LAWN_REPORT_FACTS) keeps its
+// keep-off precaution in a line of its own, so the fixed answers (which skip the model on purpose) add it here.
+function reentryAnswerText(reentry) {
+  const summary = reentry?.customerSummary;
+  if (!summary) return '';
+  const pets = reentry.condition && reentry.petAdvisory;
+  return pets ? `${summary} ${pets}` : summary;
+}
+
 function answerReentry({ data = {}, required } = {}) {
   const need = requiredCollector(required);
   const dynamic = data.dynamicContext || {};
@@ -548,7 +558,7 @@ function answerReentry({ data = {}, required } = {}) {
   // AI answer must carry it word for word even where the rule answer states
   // only the ready-at summary.
   need(dynamic.reentry?.petAdvisory || advisory.pet_advisory, 'system');
-  if (dynamic.reentry?.customerSummary) return need(dynamic.reentry.customerSummary, 'system');
+  if (dynamic.reentry?.customerSummary) return need(reentryAnswerText(dynamic.reentry), 'system');
   // Owner rule (site-compliance): customer surfaces never phrase re-entry as
   // a minute count. Ready-at times come from dynamic.reentry above; without
   // that anchor this fallback speaks in "once dry" terms only, matching
