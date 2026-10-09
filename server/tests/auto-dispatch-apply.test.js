@@ -465,6 +465,16 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       await unitGuard({ trx, technicianId: 't1', service: SERVICE });
       await unitGuard({ trx, technicianId: 't1', service: { ...SERVICE, id: 's1-sibling' } });
       expect(read).toHaveBeenCalledTimes(1);
+      // The rebooker retries a deadlocked move with the SAME guard on a new
+      // transaction: the first one's locks are gone, so the conflict is
+      // fenced and read again (Codex #6207 r10 P2).
+      read.mockClear();
+      read.mockResolvedValueOnce(sourceConflict).mockResolvedValueOnce(null);
+      const retried = makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } });
+      await retried({ trx, technicianId: 't1', service: SERVICE });
+      await expect(retried({ trx: fakeTrx(), technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      expect(read).toHaveBeenCalledTimes(2);
       // A move that cleared the normal bar reads nothing.
       read.mockClear();
       await makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1', service: SERVICE });

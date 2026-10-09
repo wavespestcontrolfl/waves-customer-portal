@@ -284,8 +284,22 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 
   if (!ranked.qualifies) return { kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), audit: auditCtx };
   return {
-    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx, movesWithoutConflict: ranked.movesWithoutConflict === true,
+    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
+    withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
   };
+}
+
+// For a visit in conflict that an ordinary optimization would move anyway:
+// the move apply mode makes once the overlapping partner has left, when the
+// visit is evaluated with no conflict — its own slot, gain and audit numbers
+// (Codex #6207 r10 P2). Null for every other visit.
+function ordinaryMoveOf(ranked, { current, prefsSnapshot, ...rest }) {
+  if (!ranked.normalBest) return null;
+  const { conflict: _conflict, conflict_unit_ids: _unit, ...clear } = current;
+  const {
+    improvement, newPlacement, scores, routeMetrics, constraints,
+  } = buildPlacementAudit({ ...rest, current: clear, candidate: ranked.normalBest, candidateScore: ranked.normalBestScore });
+  return { improvement, best: ranked.normalBest, current: clear, audit: { newPlacement, scores, prefsSnapshot, routeMetrics, constraints } };
 }
 
 function overlapOf(evalResult) {
@@ -321,7 +335,13 @@ async function recommendOverlapFixes(run) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'This visit moves with its group, which is already recommended to move', ...pm.result.audit });
       continue;
     }
-    if (partners.length && partners.every((id) => movers.has(id)) && !pm.result.movesWithoutConflict) {
+    const cleared = partners.length && partners.every((id) => movers.has(id));
+    if (cleared && pm.result.withoutConflict) {
+      // The partner's move clears the overlap; this visit then moves on the
+      // ordinary rules, to the slot those rules pick.
+      for (const id of unitIdsOf(pm)) movers.add(id);
+      await logDryRunRecommendation(run, pm.service, pm.result.withoutConflict);
+    } else if (cleared) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });
     } else {
       for (const id of unitIdsOf(pm)) movers.add(id);

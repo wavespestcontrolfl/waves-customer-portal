@@ -294,9 +294,12 @@ async function fenceSourceConflict(trx, sourceConflict) {
 // Read ONCE per move, before the first row is written: the unit mover runs
 // this guard for each member in turn, and after the first member has left,
 // the rest of the unit no longer shows the conflict it is moving away from
-// (pre-push P1). `check.held` carries the first answer to the later members.
+// (pre-push P1). `check.heldBy` carries the first answer to the later members.
 async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, check) {
-  if (!sourceConflict || check.held) return;
+  // Held for THIS transaction only: the rebooker retries the move on a
+  // deadlock with the same guard, and the aborted transaction's locks are
+  // gone, so the retry fences and reads again (Codex #6207 r10 P2).
+  if (!sourceConflict || check.heldBy === trx) return;
   const { _internals: { readCurrentConflict } } = require('./candidate-slots');
   // Fence, then re-read. The re-read may name a DIFFERENT conflict than the
   // one fenced (the first stop left and another now overlaps): that one is
@@ -307,7 +310,7 @@ async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, c
     await fenceSourceConflict(trx, fenced);
     const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
     if (!still) break;
-    if (coveredBy(still, fenced)) { check.held = true; return; }
+    if (coveredBy(still, fenced)) { check.heldBy = trx; return; }
     fenced = still;
   }
   throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
@@ -326,7 +329,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
     { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
   );
-  const sourceCheck = { held: false };
+  const sourceCheck = { heldBy: null };
   return async ({
     trx, technicianId, service: movingRow, destination,
   }) => {

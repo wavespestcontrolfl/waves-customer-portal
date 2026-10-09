@@ -814,6 +814,24 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     expect(res).toMatchObject({ recommended: 2 });
   });
 
+  // While in conflict the same-day slot ranks first. Once the partner has
+  // left, apply mode evaluates this visit with no conflict and takes the
+  // higher-gain day move: the dry run shows that slot (Codex #6207 r10 P2).
+  test('dry run: the partner that moves anyway shows its ordinary slot, not the conflict-ranked one', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+    const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: { ...CURRENT, conflict: { ...OVERLAP, with: [service.id === 'a1' ? 'b1' : 'a1'] } },
+      candidates: service.id === 'a1' ? [SAME_DAY] : [SAME_DAY, CAND_BIG],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 2 });
+    const recs = audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action === 'recommended');
+    const b = recs.find((d) => d.service.id === 'b1');
+    expect(b.newPlacement).toMatchObject({ date: CAND_BIG.date, window_start: CAND_BIG.start_time });
+    expect(b.reason_description).toMatch(/^Would move \(/);
+  });
+
   // Apply moves a grouped visit as one unit. The partner overlaps two of its
   // members: one recommendation for the unit, and the partner stays (r9 P2).
   test('dry run: a recommended grouped visit counts every member as moved', async () => {
