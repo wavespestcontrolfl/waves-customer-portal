@@ -58,6 +58,14 @@
 //     live on the server; the sheet only renders the cards and performs their taps, and
 //     the completion carries which cards showed and what the tech did (`lawnFast.
 //     treatmentGuide`). Nothing is added by itself.
+//     With the context's `newSod` (GATE_LAWN_NEW_SOD_NOTE, owner 2026-10-09) the sheet opens with
+//     a "New sod, day N" banner (LawnSodParts.jsx) and applies the server's new-sod holds: a line a
+//     hold covers is not pre-selected but listed greyed under "Held for new sod" with its reason
+//     (the technician can still add it by hand, with a warning on the row), a part-of-lawn record
+//     keeps the lines on with a "Skip the new sod" note, the October pre-emergent bag is replaced by
+//     the server's LESCO 24-0-11 line, and the banner's "Sod mowed twice and does not lift" tick
+//     saves the rooted day and reads the holds again. Every rule and word is the server's
+//     (lib/lawn-sod-sheet.js only reads them); what is logged is still whatever rows are selected.
 //  4. Customer home (the pest sheet's three choices, preset to not home, full
 //     access), then Tips from your tech (optional, one tip);
 //  5. Blog post for the customer (optional, GATE_REPORT_BLOG_POST);
@@ -120,6 +128,8 @@ import {
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
+import { HeldLines, SodBanner } from './LawnSodParts';
+import { newSodOf, sodLineOf, sodRowNote, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
 import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
@@ -224,7 +234,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null,
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -267,6 +277,8 @@ const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.pla
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
+// The tick saved, but the holds could not be read again.
+const SOD_REREAD_MESSAGE = 'Saved. The sheet could not reload the holds. Tap the box again.';
 
 // What each entry of the context's `readFailures` means for the sheet:
 //  - billing_mode: the visit type could not be read (`visitType: 'unknown'`). No
@@ -280,6 +292,8 @@ const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 //  - planned_products: the planned list is empty and `plannedProductsUnavailable`
 //    says so; the sheet shows a note and the technician adds what was applied.
 //  - photo_status and turf_height_flag: advisory only, and the sheet shows neither.
+//  - new_sod: the home's sod record could not be read; the context then carries `newSod: { unavailable }` and the
+//    banner says so (never silently no holds).
 //  - trouble_areas (the known areas could not be read: the line says so) and trouble_area_limits (what a limit closes
 //    at a place could not be read: no place is shown closed, and /complete judges the place); neither holds the sheet.
 // Every other failure is a thrown read (HTTP 500) and is a load error already.
@@ -313,6 +327,8 @@ const optionalContextFields = (data) => ({
   // GATE_LAWN_TROUBLE_AREAS: the closed list of places, the known trouble areas and what a limit closes where; null otherwise.
   troubleAreas: troubleAreasOf(data),
   takeAllProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.takeAllProductIds) ? data.plannedProducts.takeAllProductIds : [],
+  // GATE_LAWN_NEW_SOD_NOTE: the banner, the held lines and the rooted tick; null while the gate is off or the home has no hold today.
+  newSod: newSodOf(data),
 });
 
 const sameText = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -660,6 +676,8 @@ function productRow(product, { planned = null, added = false, weedGroup = false,
     // A protocol add-on the tech tapped: seeded from its plan item like a
     // planned row, labelled for where it came from.
     fromProtocol: added && !!planned,
+    // GATE_LAWN_NEW_SOD_NOTE: the server's swap bag line (LESCO 24-0-11 in place of the pre-emergent bag) carries its own rate and reason.
+    sodSwap: planned?.sodSwap || null,
     // One of the Weed spots entry's rows: they share one area (weedArea).
     weedGroup,
     ...guideRowFields(planned, guided),
@@ -791,7 +809,7 @@ function figuringRate(row) {
   // A spot row under the spot rules figures from the rate the program approved (the server
   // sends it on the plan item when the plan gave none); only a row whose protocol line has
   // none falls back to the catalog's. A unit the row cannot express still figures nothing.
-  const program = row.spotRule && onPlannedMethod(row) && row.plannedRatePer1000 ? { rate: row.plannedRatePer1000, rateUnit: row.plannedRateUnit } : null;
+  const program = (row.spotRule || row.sodSwap) && onPlannedMethod(row) && row.plannedRatePer1000 ? { rate: row.plannedRatePer1000, rateUnit: row.plannedRateUnit } : null;
   const source = program || resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
   const rate = Number(source?.rate);
   const rateUnit = String(source?.rateUnit || '').trim();
@@ -909,7 +927,8 @@ export function uniquePlanned(items) {
 
 function plannedRows(ctx, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
-  return uniquePlanned(ctx.planned).map((item) => productRow(
+  // GATE_LAWN_NEW_SOD_NOTE: a line a new-sod hold covers is not pre-selected (it is listed under "Held for new sod").
+  return splitHeldPlanned(uniquePlanned(ctx.planned), ctx.newSod).start.map((item) => productRow(
     byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
     { planned: item, spotRules: !!ctx.spotRules },
   ));
@@ -1005,7 +1024,17 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
 // The place a row sits at, in the closed list's own words (the label rides the row's chips; the id is the fallback).
 const areaLabelOf = (row) => row.placeLabels?.[row.place] || row.place;
 
-function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+// GATE_LAWN_NEW_SOD_NOTE: the server flags a visit whose planned products are ALL held by the new sod; only then may the
+// sheet complete with no product (the server re-derives it at completion). Everything else Complete asks for still applies.
+const noProductOkOf = (newSod) => newSod?.noProductAllowed === true && typeof newSod.noProductNote === 'string' && !!newSod.noProductNote;
+// With no product on the sheet in that state the record says why, in the server's own sentence, after the technician's note.
+const noProductNoteJoined = (note, rows, newSod) => {
+  const text = String(note ?? '').trim();
+  if (rows.length || !noProductOkOf(newSod)) return text;
+  return text.includes(newSod.noProductNote) ? text : [text, newSod.noProductNote].filter(Boolean).join(' ');
+};
+
+function missingRequirement({ noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
@@ -1020,7 +1049,8 @@ function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHe
     [!assessmentId && !assessed && photos === 0, ADD_PHOTO],
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
-    [!rows.length, ADD_PRODUCTS],
+    // GATE_LAWN_NEW_SOD_NOTE: the server says the new sod holds every planned product, so an empty list is honest.
+    [!rows.length && !noProductOk, ADD_PRODUCTS],
     // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
     [guideHold, guideHold],
     [areaHold, areaHold],
@@ -1057,7 +1087,7 @@ function guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap = 
   return [...cards.filter((card) => card.kind !== 'chinch'), chinch];
 }
 
-function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null }) {
+function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
@@ -1116,7 +1146,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
       : {}),
     ...(ctx.turfHeightCapture ? { manualHeightIn: gaugeHeightIn } : {}),
     ...(typed ? { structuredFindings: { type: LAWN_FINDINGS_TYPE, values: { lawn_condition: form.condition } } } : {}),
-    technicianNotes: form.note.trim(),
+    technicianNotes: noProductNoteJoined(form.note, rows, newSod),
     // Who was home, as the pest sheet sends it (the same field, the same values).
     customerInteraction: form.customerHome,
     techTips: techTipsOf(form, tipsAvailable),
@@ -1415,6 +1445,20 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
+  // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads them again (`undefined` = the context's own).
+  const [sodFresh, setSodFresh] = useState(undefined);
+  const newSod = sodFresh !== undefined ? sodFresh : ctx.newSod;
+  const confirmSodRooted = useCallback(async (sodLaidOn) => {
+    await request(`${base}/lawn-fast/sod-rooted`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
+    // The weed lines un-hold on this re-read: the server's own words, not a guess here.
+    let data;
+    try {
+      data = await request(`${base}/lawn-fast/context`);
+    } catch {
+      throw new Error(SOD_REREAD_MESSAGE);
+    }
+    setSodFresh(newSodOf(data));
+  }, [request, base]);
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
@@ -1532,13 +1576,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   });
 
   const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
-  const missingReason = missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap }),
+      () => completionBody({ newSod, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap }),
       [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
     );
   };
@@ -1565,6 +1609,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
       <div className="tech-visit-body" {...picker.coverProps}>
         <CustomerContact service={service} visit={ctx.visit} request={request} />
         <TimeOnSite since={service?.onSiteAt} />
+        <SodBanner newSod={newSod} onRooted={confirmSodRooted} locked={locked || dictationPending} />
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked} micInside />
           <section className="tech-visit-choice-section">
@@ -1587,7 +1632,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
-          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1659,7 +1704,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWeedPlace, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1672,6 +1717,7 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
       {ctx.plannedUnavailable && !rows.some((row) => row.planned) && (
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>
       )}
+      {newSod?.noWholeLawn && <p className="tech-visit-muted" role="status">{newSod.noWholeLawn}</p>}
       {rows.map((row) => (
         <React.Fragment key={row.productId}>
           <ProductEditor
@@ -1679,7 +1725,11 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
             methods={ctx.methods}
             lawnSqft={lawnSqft}
             locked={locked}
-            note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : takeAllRowNote(gov, row.productId)}
+            note={[
+              surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : takeAllRowNote(gov, row.productId),
+              row.sodSwap?.reason,
+              sodRowNote(newSod, row.productId),
+            ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
           >
@@ -1692,7 +1742,8 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
       {areas && <KnownTroubleAreas known={areas.known} unavailable={areas.knownUnavailable} locked={locked} clear={onClearArea} />}
       <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} areas={areas} onWeedPlace={onWeedPlace} />
       {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
-      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} areas={areas} onWeedPlace={onWeedPlace} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} markChinch={ctx.lawnReportTies ? { tapped: chinchTap, onTap: onChinchTap } : null} />
+      <HeldLines items={splitHeldPlanned(uniquePlanned(ctx.planned), newSod).held} newSod={newSod} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      <ProtocolAddOns newSod={newSod} addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} areas={areas} onWeedPlace={onWeedPlace} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} markChinch={ctx.lawnReportTies ? { tapped: chinchTap, onTap: onChinchTap } : null} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
@@ -1766,7 +1817,7 @@ function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, cat
   };
 }
 
-function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, areas = null, onWeedPlace, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd, markChinch = null }) {
+function ProtocolAddOns({ newSod = null, addOns, month, weedMix = null, chinch = null, areas = null, onWeedPlace, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd, markChinch = null }) {
   const titleId = useId();
   const { items, weedEntry, showWeed, showChinch, weedPlaces, chinchPlaces } = addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog, areas });
   const placeLabels = areas ? Object.fromEntries(areas.places.map((place) => [place.id, place.label])) : {};
@@ -1780,13 +1831,14 @@ function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, areas = 
         <p className="tech-visit-muted">Tap what you applied.</p>
       </div>
       {showWeed && (
-        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} places={weedPlaces} labels={placeLabels} onPlace={onWeedPlace} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />
+        <WeedSpotsEntry newSod={newSod} weedMix={weedMix} items={weedEntry || []} places={weedPlaces} labels={placeLabels} onPlace={onWeedPlace} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />
       )}
-      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} places={chinchPlaces} labels={placeLabels} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} markChinch={markChinch} />}
+      {showChinch && <ChinchFoundEntry newSod={newSod} chinch={chinch} catalog={catalog} places={chinchPlaces} labels={placeLabels} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} markChinch={markChinch} />}
       {items.map((item) => (
         <AddOnLine
           key={item.productId}
           item={item}
+          sod={sodLineOf(newSod, item.productId)}
           onSheet={on.has(String(item.productId).toLowerCase())}
           // A product a guide card may own waits for the card (the fresh guide), then follows it.
           waiting={gov.locked && gov.governed.has(String(item.productId).toLowerCase())}
@@ -1800,9 +1852,11 @@ function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, areas = 
 }
 
 // One opt-in product of the month: its name, the protocol's own words for it, and its tap.
-function AddOnLine({ item, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
+function AddOnLine({ item, sod = null, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
   const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
   const why = [
+    // GATE_LAWN_NEW_SOD_NOTE: the hold's reason (or the part-of-lawn skip note) leads the line.
+    sod?.held ? sod.reason : sod?.note || '',
     item.substituteFor ? `In place of ${item.substituteFor}` : '',
     item.line || '',
     ...(item.gateNotes || []),
@@ -1812,7 +1866,7 @@ function AddOnLine({ item, onSheet, waiting, unreadableNote = '', locked, onAdd 
     unreadableNote,
   ].filter(Boolean).join(' · ');
   return (
-    <div className="tech-protocol-addon">
+    <div className={sod?.held ? 'tech-protocol-addon tech-sod-held-line' : 'tech-protocol-addon'}>
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">{item.product.name}</span>
         <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : why}</span>
@@ -1822,11 +1876,11 @@ function AddOnLine({ item, onSheet, waiting, unreadableNote = '', locked, onAdd 
           type="button"
           variant="secondary"
           className="tech-visit-action tech-protocol-addon-add"
-          aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}`}
+          aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}${sod?.held ? ' anyway' : ''}`}
           disabled={locked || onSheet}
           onClick={() => onAdd(item.product, { planned: item })}
         >
-          {onSheet ? '✓' : 'Add'}
+          {onSheet ? '✓' : (sod?.held ? 'Add anyway' : 'Add')}
         </Button>
       )}
     </div>
@@ -1839,7 +1893,7 @@ const CONFIRM_FIRST = 'Confirm the assessment first.';
 // "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
 // opens the rows it names (each seeded from its own plan item, as a single add-on is) and
 // they share one area. With nothing to add (the yearly limit is reached) it is a line only.
-function WeedSpotsEntry({ weedMix, items, places = null, labels = {}, onPlace, on, locked, waiting = false, onAdd }) {
+function WeedSpotsEntry({ newSod = null, weedMix, items, places = null, labels = {}, onPlace, on, locked, waiting = false, onAdd }) {
   // What a tap adds: with places (GATE_LAWN_TROUBLE_AREAS) one set per place, each tap naming its place; else the one set.
   const options = places || (items.length ? [{ id: '', items }] : []);
   const onSheet = (ids) => ids.some((id) => on.has(String(id).toLowerCase()));
@@ -1848,13 +1902,15 @@ function WeedSpotsEntry({ weedMix, items, places = null, labels = {}, onPlace, o
   const names = items.map((item) => item.product.name).join(', ');
   // What differs by place (a place at its limit, a place that takes the replacement) is said by place.
   const byPlace = places ? Object.entries(weedMix.byPlace || {}).filter(([, d]) => d.note && d.note !== weedMix.note) : [];
-  const line = [done ? 'On the sheet' : names, weedMix.note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  // GATE_LAWN_NEW_SOD_NOTE: the entry's products are one weed killer class, so one hold line speaks for them.
+  const sod = items.map((item) => sodLineOf(newSod, item.productId)).find(Boolean) || null;
+  const line = [done ? 'On the sheet' : names, sod?.held ? sod.reason : sod?.note, weedMix.note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
   const add = (option) => {
     option.items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds', ...(places ? { source: 'tech_tap' } : {}) }));
     if (places) onPlace(option.id);
   };
   return (
-    <div className="tech-protocol-addon">
+    <div className={sod?.held ? 'tech-protocol-addon tech-sod-held-line' : 'tech-protocol-addon'}>
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">Weed spots</span>
         <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : line.filter(Boolean).join(' · ')}</span>
@@ -1862,8 +1918,8 @@ function WeedSpotsEntry({ weedMix, items, places = null, labels = {}, onPlace, o
       {options.length > 0 && !waiting && (places && !done
         ? <PlaceAddButtons choices={places} locked={locked} ariaPrefix="Add weed spots" onPick={(placeId) => add(places.find((choice) => choice.id === placeId))} />
         : (
-          <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={done ? 'Weed spots are on the sheet' : 'Add weed spots'} disabled={locked || done} onClick={() => add(options[0])}>
-            {done ? '✓' : 'Add'}
+          <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={done ? 'Weed spots are on the sheet' : `Add weed spots${sod?.held ? ' anyway' : ''}`} disabled={locked || done} onClick={() => add(options[0])}>
+            {done ? '✓' : (sod?.held ? 'Add anyway' : 'Add')}
           </Button>
         ))}
     </div>
@@ -2011,7 +2067,7 @@ const CHINCH_BUTTON = {
   done: { aria: 'Chinch bug treatment is on the sheet', text: '✓', disabled: true },
 };
 
-function ChinchFoundEntry({ chinch, catalog, places, labels, on, locked, waiting, onAdd, markChinch }) {
+function ChinchFoundEntry({ newSod = null, chinch, catalog, places, labels, on, locked, waiting, onAdd, markChinch }) {
   const { item, note } = chinch;
   // What a tap can add: with places (GATE_LAWN_TROUBLE_AREAS) one product per place, each tap naming its place; else the one product.
   const options = places || (item ? [{ id: '', item }] : []);
@@ -2025,7 +2081,9 @@ function ChinchFoundEntry({ chinch, catalog, places, labels, on, locked, waiting
   const names = [...new Set(options.map((option) => option.item.name))];
   // What differs by place (a place at its limit, a place that takes the second product) is said by place.
   const byPlace = Object.entries(chinch.byPlace || {}).filter(([, d]) => d.note && d.note !== note);
-  const line = [names.length ? `${names.join(' or ')}, spot treatment` : null, ...(item?.gateNotes || []), note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  // GATE_LAWN_NEW_SOD_NOTE: a chinch product a hold covers (Dylox at the end of the ladder) says so; the tap still works.
+  const sod = options.map((option) => sodLineOf(newSod, option.item.productId)).find(Boolean) || null;
+  const line = [names.length ? `${names.join(' or ')}, spot treatment` : null, sod?.held ? sod.reason : sod?.note, ...(item?.gateNotes || []), note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
   const add = (option) => {
     onAdd(catalogProductFor(option.item, catalog), { planned: option.item, guided: 'chinch', ...(places ? { source: 'tech_tap', place: option.id } : {}) });
     if (markChinch) markChinch.onTap(option.item.productId);
