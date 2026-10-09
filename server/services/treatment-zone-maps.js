@@ -149,8 +149,9 @@ function noReusableTraceError() {
 //    deletes its zone row (appointment-address.js), which ends the offer here.
 // The source rows are locked in the order that address correction takes them
 // (visit, then zone), so the two cannot deadlock.
-async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, source, targetDate }) {
+async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, source, targetDate, targetVisit }) {
   await recheckReuseTarget(conn, scheduledServiceId, { locationKey, targetDate, sourceDate: source.scheduledDate });
+  await recheckTargetCapture(conn, scheduledServiceId, targetVisit);
   await recheckReuseSource(conn, source);
 }
 
@@ -163,6 +164,17 @@ async function recheckReuseTarget(conn, scheduledServiceId, { locationKey, targe
   const target = await conn('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
   const lockedDate = dateOnlyOrNull(target?.scheduled_date);
   if (!lockedDate || lockedDate !== targetDate || !(sourceDate < lockedDate)) throw visitChangedError();
+}
+
+// The target may still take a perimeter trace (Codex P1 r13 on #6175): a visit
+// traceable only through a spray add-on can have its add-ons replaced while
+// the picture is copied. The office writer locks the visit and then rewrites
+// the add-on rows, so with the visit locked here those rows are held and the
+// same capture check the save route runs is asked again.
+async function recheckTargetCapture(conn, scheduledServiceId, targetVisit) {
+  await conn('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId }).forShare().select('id');
+  const { traceCaptureBlockPayload } = require('./service-report/trace-eligibility');
+  if (await traceCaptureBlockPayload(targetVisit, conn, { captureMode: REUSE_CAPTURE_MODE })) throw visitChangedError();
 }
 
 // The source, locked visit first and then its trace row: every field it was
@@ -872,6 +884,7 @@ async function copyLastTreatmentZone({ visit, actor = null, technicianId = null,
     reuseGuard: {
       locationKey,
       targetDate: dateOnlyOrNull(visit.scheduled_date),
+      targetVisit: visit,
       source: { zoneId: zone.id, serviceId: sourceServiceId, customerId: visit.customer_id, updatedAt: zone.updated_at, ...found.sourceFacts },
     },
     knex,

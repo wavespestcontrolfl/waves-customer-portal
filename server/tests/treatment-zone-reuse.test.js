@@ -548,6 +548,19 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
       expect(knex.state.inserted).toBeNull();
     });
 
+    // Codex P1 r13 on #6175: the target's own capture check is asked again.
+    test('a target that may no longer take a perimeter trace by the time of the write is refused', async () => {
+      let targetAsks = 0;
+      traceEligibility.traceCaptureBlockPayload.mockImplementation(async (visit) => {
+        if (visit.id !== VISIT.id) return null;
+        targetAsks += 1;
+        return targetAsks > 1 ? { status: 400, payload: { code: 'trace_not_eligible' } } : null;
+      });
+      const knex = makeKnex({ lock: locked() });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'visit_changed' });
+      expect(knex.state.inserted).toBeNull();
+    });
+
     test('a verdict that fails under the lock is not a yes', async () => {
       traceEligibility.resolveTraceRenderVerdict
         .mockResolvedValueOnce({ suppressed: false, eligibility: null })
@@ -578,6 +591,8 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
       expect(knex.state.locks).toEqual([
         'customers [{"id":"cust-1"}] share',
         'scheduled_services ["scheduled_services.id","svc-1"]',
+        // The target's add-on rows, then its capture check again.
+        'scheduled_service_addons [{"scheduled_service_id":"svc-1"}] share',
         'scheduled_services [{"id":"svc-0"}]',
         'treatment_zone_maps [{"id":"zone-0"}]',
         // The source's live add-on rows, which a legacy record's verdict reads.
