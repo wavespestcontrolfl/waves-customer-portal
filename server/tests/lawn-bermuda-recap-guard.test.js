@@ -103,3 +103,26 @@ describe('direct readers of the staged protocol rows', () => {
     expect(read('lawn-bermuda-removal.js')).toMatch(/mix: addOn\.summary, month: stepMonth/);
   });
 });
+
+// A product with an ordinary row and a step row on one visit (the surfactant): the completion
+// matches it to the step row only when the visit recorded the step's own herbicide (codex #6229 r3 P2).
+describe('rowsInMatchingOrder', () => {
+  const { rowsInMatchingOrder } = require('../services/lawn-protocol-completion');
+  const weedNis = { id: 'may-nis', product_id: 'nis', gates: {} };
+  const stepNis = { id: 'jun-nis', product_id: 'nis', gates: { bermudaRemoval: true } };
+  const stepRec = { id: 'jun-rec', product_id: 'rec', gates: JSON.stringify({ bermudaRemoval: true }) };
+  const rows = [weedNis, stepNis, stepRec];
+  const first = (applied) => rowsInMatchingOrder(rows, applied.map((id) => ({ product_id: id }))).find((row) => row.product_id === 'nis');
+
+  test('the step was sprayed (Recognition recorded): the shared product is the step\'s', () => {
+    expect(first(['rec', 'nis'])).toBe(stepNis);
+  });
+  test('the step was not sprayed: the shared product keeps its ordinary row', () => {
+    expect(first(['nis'])).toBe(weedNis);
+    expect(first([])).toBe(weedNis);
+  });
+  test('no step rows on the visit: the list is returned as it is', () => {
+    const plain = [weedNis];
+    expect(rowsInMatchingOrder(plain, [{ product_id: 'nis' }])).toBe(plain);
+  });
+});

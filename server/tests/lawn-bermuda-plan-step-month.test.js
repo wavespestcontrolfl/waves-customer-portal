@@ -165,3 +165,11 @@ describe('May window, June appointment: distinct rows for one catalog product', 
     expect(productRowFor(products, 'nis', true)).toBeNull();
   });
 });
+
+test('no protocol resolved (a grass with no v13 program, a missing staged protocol): no step and no throw (codex #6229 r3 P1)', async () => {
+  const step = await openPlanStep(fakeKnex(), { enabled: true, service: service('2026-06-02'), profile, calendarTrackKey: 'st_augustine' });
+  const result = await step.resolve({ structuredProtocol: null, trackKey: 'st_augustine', parseLines: (text) => [{ raw: text }] });
+  expect(result.lines).toEqual([]);
+  expect(result.field).toEqual({});
+  expect(mockLoadRows).not.toHaveBeenCalled();
+});

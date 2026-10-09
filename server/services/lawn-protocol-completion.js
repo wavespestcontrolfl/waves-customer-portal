@@ -121,6 +121,25 @@ function normalizeSkippedProducts(input) {
   }));
 }
 
+// A product can have an ordinary row and a bermuda removal step row on one visit (LESCO 90/10 is
+// in the weed mix and in the step). The ledger carries no line identity, so the visit decides:
+// when it recorded the step's own herbicide (a product that has ONLY a step row, Recognition),
+// the shared product was the step's and its step row is matched first; otherwise the ordinary row
+// is, as before. Returns the rows in matching order.
+const isStepRow = (row) => {
+  const gates = typeof row?.gates === 'string' ? (() => { try { return JSON.parse(row.gates); } catch { return null; } })() : row?.gates;
+  return gates?.bermudaRemoval === true;
+};
+function rowsInMatchingOrder(protocolProducts, serviceProducts) {
+  const stepRows = protocolProducts.filter(isStepRow);
+  if (!stepRows.length) return protocolProducts;
+  const ordinary = protocolProducts.filter((row) => !isStepRow(row));
+  const ordinaryIds = new Set(ordinary.map((row) => String(row.product_id || '')));
+  const applied = new Set((serviceProducts || []).map((p) => String(p.product_id || '')));
+  const stepSprayed = stepRows.some((row) => !ordinaryIds.has(String(row.product_id || '')) && applied.has(String(row.product_id || '')));
+  return stepSprayed ? [...stepRows, ...ordinary] : protocolProducts;
+}
+
 // Both actual-row kinds (applied, skipped) resolve their protocol row the
 // same way: an approved substitute maps back to the protocol row of the
 // product it replaced; anything else matches by product id, then name.
@@ -566,9 +585,10 @@ async function recordLawnProtocolCompletion(trx, {
   // after the delete rolls the old rows back with it.
   await trx('lawn_protocol_product_actuals').where({ lawn_protocol_service_completion_id: completion.id }).del();
 
+  const matchRows = rowsInMatchingOrder(rows.protocolProducts, serviceProducts);
   for (const serviceProduct of serviceProducts) {
     const substitution = bySubstituteProductId.get(String(serviceProduct.product_id)) || null;
-    const protocolProduct = resolveProtocolProduct(rows.protocolProducts, substitution, serviceProduct);
+    const protocolProduct = resolveProtocolProduct(matchRows, substitution, serviceProduct);
     await trx('lawn_protocol_product_actuals').insert(buildAppliedActual({
       completionId: completion.id, serviceProduct, substitution, protocolProduct, attributed: attribution.attributed,
     }));
@@ -576,7 +596,7 @@ async function recordLawnProtocolCompletion(trx, {
 
   for (const skipped of skips.skipped) {
     const substitution = bySubstituteProductId.get(String(skipped.productId)) || null;
-    const protocolProduct = resolveProtocolProduct(rows.protocolProducts, substitution, skipped);
+    const protocolProduct = resolveProtocolProduct(matchRows, substitution, skipped);
     await trx('lawn_protocol_product_actuals').insert(buildSkippedActual({
       completionId: completion.id, skipped, substitution, protocolProduct,
     }));
@@ -599,6 +619,7 @@ function normalizeCompletionForStructuredNotes(completion) {
 }
 
 module.exports = {
+  rowsInMatchingOrder,
   lawnActualsLedgerEnabled,
   loadProtocolRows,
   recordLawnProtocolCompletion,
