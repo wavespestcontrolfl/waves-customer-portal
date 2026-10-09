@@ -137,7 +137,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers11_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers13_n');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -225,6 +225,19 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(bullet).toContain('When that line reads "not available" or is missing, NEVER mention cancelling in the portal.');
     expect(bullet).toContain('Never say the plan is cancelled, and never point a one-visit request at the portal plan cancellation.');
     expect(PORTAL_CANCEL_UNAVAILABLE_LINE).toBe('PORTAL SELF-CANCEL: not available');
+  });
+
+  test('behavior rules (part 3, 2026-10-09): pest report asks where and how many AND still sends the link; three attention rules; gate-off prompt has none', () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("say CONCRETELY that you're sending their free re-service booking link now, ALSO ask in the same reply where they are seeing the activity and about how many (so the technician treats the right place — ask AND send the link, never ask instead of sending it), and add {\"type\":\"escalate\",\"note\":\"send_reservice_link\"}");
+    expect(prompt).toContain('- A text with MORE THAN ONE question or request gets an answer to EACH one.');
+    expect(prompt).toContain('- When part of the text needs a person, still answer the parts the facts DO answer in the same reply.');
+    expect(prompt).toContain('- When two facts give DIFFERENT dates or times for what looks like the same visit, do not pick one and do not tell the customer our records disagree: say you will confirm the exact time, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}.');
+    const prior = process.env.GATE_SMS_REAL_ANSWERS;
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      expect(buildSystemPrompt()).not.toMatch(/MORE THAN ONE question|DIFFERENT dates or times/);
+    } finally { if (prior !== undefined) process.env.GATE_SMS_REAL_ANSWERS = prior; }
   });
 
   test('each category gate removes exactly that category from HELD and adds its own instruction', () => {
@@ -953,7 +966,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers11_n');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers13_n');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1447,7 +1460,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers11_n');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers13_n');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1456,7 +1469,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers11_n'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers13_n'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 

@@ -56,7 +56,7 @@
 // hours or minutes figure (the banned re-entry pattern). Water-in copy is
 // allowed on a non-permitted county day and says so.
 
-const { resolveApplicationRate, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
+const { resolveApplicationRate, normalizeRuntimeInputs, OWNER_MINUTES_PER_QUARTER_INCH } = require('@waves/irrigation-runtime');
 // ET wall-clock extraction lives in the one shared module; only the deadline
 // rounding below is specific to this writer.
 const { etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
@@ -70,7 +70,8 @@ const SAME_DAY_MIN_LEAD_MS = 3 * HOUR_MS;
 
 // Owner table: minutes per zone for a quarter inch. Scaled linearly (rounded
 // to 5) for any other rule depth.
-const GENERIC_MINUTES_PER_QUARTER_INCH = Object.freeze({ spray: 15, rotor: 40 });
+// One table, in the irrigation package: the lawn report's card derives weekly inches from the same constant.
+const GENERIC_MINUTES_PER_QUARTER_INCH = OWNER_MINUTES_PER_QUARTER_INCH;
 const BASE_INCHES = 0.25;
 
 const HOLD_SECOND_LINE = 'That gives today’s treatment time to work.';
