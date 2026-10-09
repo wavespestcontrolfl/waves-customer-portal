@@ -150,13 +150,18 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null }) {
   if (!chosen.length) return offers;
   const wide = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
   if (!wide) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
-  const capped = places?.length ? await openSomewhere({ chosen, wide, rows, svc, knex, places }) : wide;
+  // GATE_LAWN_TROUBLE_AREAS: what this read found closed at each place, `{ [productId]: { [place]: message } }` for every product it
+  // read (an empty entry = open at every place), in the shape of the context's troubleAreas.blocked: the sheet prefers it once the
+  // answer settles, so a limit that changed since the sheet opened is never judged by the older map.
+  const placeBlocked = places?.length ? Object.fromEntries(chosen.map(([, c]) => [idOf(c.raw.product.id), {}])) : null;
+  const capped = places?.length ? await openSomewhere({ chosen, wide, rows, svc, knex, places, placeBlocked }) : wide;
   for (const [kind, candidate] of chosen) {
     const id = idOf(candidate.raw.product.id);
     if (kind !== TAKE_ALL_KIND) offers[kind] = offerFor(kind, candidate, { capped, rows });
     if (isBlocked(candidate, capped)) offers.blocked.push(id);
     else if (isUnreadable(candidate, capped)) offers.unreadable.push(id);
   }
+  if (placeBlocked) offers.placeBlocked = placeBlocked;
   return offers;
 }
 
@@ -166,7 +171,7 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null }) {
 // NO place permits it, with the lawn-wide answer's own entry; a place whose read fails permits nothing (fail closed). A place can
 // only be more open than the lawn, so only the picks capped lawn-wide are read again, once per place. A city hold is no limit
 // and is judged by isBlocked as before.
-async function openSomewhere({ chosen, wide, rows, svc, knex, places }) {
+async function openSomewhere({ chosen, wide, rows, svc, knex, places, placeBlocked }) {
   const closed = chosen.filter(([, c]) => limitBlocks(c, wide).length > 0 && !heldByCity(c.raw));
   if (!closed.length) return wide;
   const open = new Set();
@@ -176,6 +181,8 @@ async function openSomewhere({ chosen, wide, rows, svc, knex, places }) {
     for (const [, c] of closed) {
       const id = idOf(c.raw.product.id);
       const blocks = here ? here.get(id) || [] : null;
+      const typed = blocks?.find((block) => block.type);
+      if (typed) placeBlocked[id][place] = typed.message || 'A yearly limit is reached for this place.';
       if (blocks && !blocks.length) open.add(id);
       // A place whose read failed (the whole call, or this product's own typeless block) is UNKNOWN there, not closed: a product
       // unreadable at ANY place stays reachable by the search with the unreadable note, and a place that read as capped stays closed.

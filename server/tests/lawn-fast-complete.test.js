@@ -848,6 +848,23 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         expect(result.cards.map((card) => card.kind)).not.toContain('fungus');
       });
 
+      test('gate off: the guide answer has no placeBlocked key', async () => {
+        live();
+        cappedAt(P_ART, 'front');
+        expect(await guide(fungusTables())).not.toHaveProperty('placeBlocked');
+      });
+
+      test('gate on: the answer carries the per-place blocks it just read, for every product it read, so the sheet can drop the opening map', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        cappedAt(P_ART, 'front');
+        const result = await guide(fungusTables());
+        expect(result.placeBlocked[P_ART]).toEqual({ front: 'limit' });
+        // Products the read found open everywhere are empty entries, not absent: "no longer closed" is an answer.
+        expect(result.placeBlocked[P_ACE]).toEqual({});
+        expect(result.placeBlocked[P_DISP]).toEqual({});
+      });
+
       test('gate on: capped at the front only, the fungus card is offered and the pick is not blocked', async () => {
         live();
         process.env.GATE_LAWN_TROUBLE_AREAS = 'true';

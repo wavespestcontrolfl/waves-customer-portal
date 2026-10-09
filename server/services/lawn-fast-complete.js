@@ -928,6 +928,8 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds: ids.blocked || [], unreadableProductIds: ids.unreadable || [], unreadableNote: guide.UNREADABLE_NOTE,
     // The take-all fungicide rows of the plan as read now (an assignment or a substitution may have changed them since the sheet opened).
     takeAllProductIds: ids.takeAll || [],
+    // GATE_LAWN_TROUBLE_AREAS: the per-place blocks this read found (the key exists only while the gate is live).
+    ...(ids.placeBlocked ? { placeBlocked: ids.placeBlocked } : {}),
   });
   // Only a recurring program visit has a plan, and so any product to suggest.
   const loaded = visitType === 'recurring' ? await loadPlan(svc, knex) : null;
@@ -954,7 +956,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // No trouble-area store exists yet, so take-all stays the check only.
     troubleAreas: [],
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId) });
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId), placeBlocked: offers.placeBlocked });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

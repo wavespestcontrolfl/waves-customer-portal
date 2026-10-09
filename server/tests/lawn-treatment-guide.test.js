@@ -481,6 +481,35 @@ describe('per-place offers: a product is held back only when NO place permits it
     expect(offers.unreadable).toEqual([P_ART]);
   });
 
+  test('the per-place blocks this read found ride the offers, in the context\'s shape, for every product read (empty = open everywhere)', async () => {
+    cappedAt(P_ART, 'front', 'left_side');
+    const offers = await run();
+    expect(offers.placeBlocked).toEqual({
+      [P_ART]: { front: 'Artavia: 2/2 — LIMIT REACHED.', left_side: 'Artavia: 2/2 — LIMIT REACHED.' },
+      [P_ACE]: {},
+    });
+  });
+
+  test('a newly open product is an empty entry; a newly capped place is named; an unreadable place is not a block; nothing capped reads once', async () => {
+    cappedAt(P_ART);
+    expect((await run()).placeBlocked).toEqual({ [P_ART]: {}, [P_ACE]: {} });
+    engine.v13VisitLimits.mockReset();
+    noLimits();
+    expect((await run()).placeBlocked).toEqual({ [P_ART]: {}, [P_ACE]: {} });
+    expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      if (options?.place === 'back') throw new Error('db down');
+      return { capped: new Map([[P_ART, CAP]]), warnings: [], blocks: [] };
+    });
+    expect((await run()).placeBlocked[P_ART]).toEqual({ front: 'Artavia: 2/2 — LIMIT REACHED.', left_side: 'Artavia: 2/2 — LIMIT REACHED.', right_side: 'Artavia: 2/2 — LIMIT REACHED.' });
+  });
+
+  test('no places asked: the offers carry no placeBlocked key (byte-identical)', async () => {
+    cappedAt(P_ART, 'front');
+    const offers = await addOnOffers({ candidates: both(), rows: ROWS, svc, knex: {} });
+    expect(offers).not.toHaveProperty('placeBlocked');
+  });
+
   test('nothing capped: one read, as before; a city hold is blocked at every place', async () => {
     const offers = await run();
     expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);

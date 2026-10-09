@@ -788,3 +788,102 @@ describe('a planned Arena or Celsius row is judged by the per-place decision', (
   });
 });
 
+
+// ── the place maps are read again: with the guide's answer, and after /complete refuses a place ──────────────────
+describe('the guide answer carries the fresh per-place blocks; a refused place refreshes them', () => {
+  const FUNG_ITEM = ADD_ONS[4];
+  const fungusCard = () => ({ kind: 'fungus', title: 'Fungus', finding: 'Finding for fungus.', check: null, detail: null, note: null, productIds: [P_FUNG], items: [FUNG_ITEM], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found' });
+  const closedFront = { [P_FUNG]: { front: 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.' } };
+  const ctxWith = (blocked) => placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: areasBlock({ blocked }) });
+  const guideWith = (placeBlocked) => ({ enabled: true, v: 1, assessmentId: 'assessment-1', cards: [fungusCard()], ...(placeBlocked ? { placeBlocked } : {}) });
+  const chipsOf = () => within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
+  const openAndTake = async (ctx) => {
+    await open(ctx);
+    await analyze();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+  };
+
+  test('a limit that changed since the sheet opened: a place the guide read open is open, though the opening map had it closed', async () => {
+    guideAnswer = guideWith({ [P_FUNG]: {} });
+    await openAndTake(ctxWith(closedFront));
+    expect(chipOf(chipsOf(), 'Front').disabled).toBe(false);
+  });
+
+  test('a place newly capped: the guide\'s map closes it though the opening map had it open', async () => {
+    guideAnswer = guideWith(closedFront);
+    await openAndTake(ctxWith({}));
+    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    expect(chipOf(chipsOf(), 'Back').disabled).toBe(false);
+  });
+
+  test('an answer without the map, and a guide read that fails, leave the opening map standing', async () => {
+    guideAnswer = guideWith(null);
+    await openAndTake(ctxWith(closedFront));
+    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    cleanup();
+    guideAnswer = refusal(500, 'boom', 'Internal error');
+    await open(ctxWith(closedFront));
+    await analyze();
+    await waitFor(() => expect(within(addons()).getByRole('button', { name: 'Add Spot Fungicide' })).toBeTruthy());
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Spot Fungicide' }));
+    expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+  });
+
+  test('/complete refuses a place (400 lawn_place_limit): the context and the guide are read again, the chip closes, and the tech picks another place without reloading', async () => {
+    let contextReads = 0;
+    let guideReads = 0;
+    const base = makeRequest({ ctx: ctxWith({}) });
+    const request = vi.fn(async (path, options) => {
+      if (path.endsWith('/lawn-fast/context')) { contextReads += 1; return contextReads === 1 ? ctxWith({}) : ctxWith(closedFront); }
+      return base(path, options);
+    });
+    guideAnswer = () => { guideReads += 1; return guideWith(guideReads === 1 ? {} : closedFront); };
+    await openSheet({ request, props: { catalog: CAT } });
+    await analyze();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(chipsOf(), 'Front'));
+    expect(contextReads).toBe(1);
+    expect(guideReads).toBe(1);
+    completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED. Choose another place, or take it off the sheet.'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await screen.findByText(/Choose another place, or take it off the sheet\./);
+    await waitFor(() => expect(contextReads).toBe(2));
+    await waitFor(() => expect(guideReads).toBe(2));
+    await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
+    // The row still sits on Front (closed now): Complete says so; another place completes.
+    await waitFor(() => expect(footerNote() + completeButton().textContent).toMatch(/Spot Fungicide cannot go on Front/));
+    fireEvent.click(chipOf(chipsOf(), 'Back'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    expect(completeCalls()[1].body.products.find((p) => p.productId === P_FUNG).areaPlace).toBe('back');
+  });
+
+  test('other refusals do not re-read the place maps; a failed refresh changes nothing', async () => {
+    let contextReads = 0;
+    const base = makeRequest({ ctx: ctxWith({}) });
+    const request = vi.fn(async (path, options) => {
+      if (path.endsWith('/lawn-fast/context')) { contextReads += 1; if (contextReads > 1) throw new Error('offline'); return ctxWith({}); }
+      return base(path, options);
+    });
+    guideAnswer = guideWith({});
+    await openSheet({ request, props: { catalog: CAT } });
+    await analyze();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(chipsOf(), 'Front'));
+    completeErrors.push(refusal(400, 'lawn_place_required', 'Pick where on the lawn Spot Fungicide went.'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await screen.findByText(/Pick where on the lawn/);
+    expect(contextReads).toBe(1);
+    completeErrors.push(refusal(400, 'lawn_place_limit', 'closed'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(contextReads).toBe(2));
+    // The refresh failed: the chips stand as they were and the sheet is still usable.
+    expect(chipOf(chipsOf(), 'Front').disabled).toBe(false);
+  });
+});

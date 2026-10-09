@@ -200,7 +200,7 @@ export function plainRefusalMessage(err) {
 // A completion refused because the property's areas changed under the sheet
 // (`property_service_area_changed`) also reads the areas again, once, through
 // `onAreaChanged`, so the next tap sends the current version.
-function plainErrors(request, onAreaChanged) {
+function plainErrors(request, onAreaChanged, onPlaceRefused) {
   return async (path, options) => {
     try {
       return await request(path, options);
@@ -208,6 +208,8 @@ function plainErrors(request, onAreaChanged) {
       const message = plainRefusalMessage(err);
       if (message && err) err.message = message;
       if (err?.code === 'property_service_area_changed') onAreaChanged?.current?.();
+      // GATE_LAWN_TROUBLE_AREAS: a place the limits close refreshes the place maps, so the chip closes without a reload.
+      if (err?.code === 'lawn_place_limit') onPlaceRefused?.current?.();
       throw err;
     }
   };
@@ -379,6 +381,10 @@ function freshWeedMix(data) {
   return mix && Array.isArray(mix.productIds) && Array.isArray(mix.groupProductIds) ? mix : undefined;
 }
 
+// GATE_LAWN_TROUBLE_AREAS: what the guide's read found closed at each place, `{ [productId]: { [place]: message } }` (an empty entry =
+// open everywhere), or undefined when the answer carries none (then the context's map stands).
+const freshPlaceBlocked = (data) => (data.placeBlocked && typeof data.placeBlocked === 'object' && !Array.isArray(data.placeBlocked) ? data.placeBlocked : undefined);
+
 // The standing chinch tap's decision the guide read fresh (the limits are read again after Confirm):
 // the offer, null when there is nothing to offer or say, or undefined when the answer carries none.
 function freshChinch(data) {
@@ -406,7 +412,7 @@ const GUIDE_KINDS = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'];
 const cardPlaceEntries = (card) => (card.byPlace && typeof card.byPlace === 'object' ? Object.entries(card.byPlace).filter(([, entry]) => Array.isArray(entry?.items) && entry.items.length) : []);
 const cardAllIds = (card) => [...card.productIds, ...cardPlaceEntries(card).flatMap(([, entry]) => entry.items.map((item) => item.productId))];
 const guideCardOk = (card) => !!card && GUIDE_KINDS.includes(card.kind) && typeof card.title === 'string' && Array.isArray(card.productIds) && Array.isArray(card.items);
-function useTreatmentGuide({ base, request, enabled, assessmentId }) {
+function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 0 }) {
   const [state, setState] = useState({ for: null, status: 'idle', guide: null });
   useEffect(() => {
     if (!enabled || !assessmentId) return undefined;
@@ -415,19 +421,20 @@ function useTreatmentGuide({ base, request, enabled, assessmentId }) {
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
-        } else setState({ for: assessmentId, status: 'failed', guide: null });
+          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
+        } else if (!refreshKey) setState({ for: assessmentId, status: 'failed', guide: null });
       })
-      .catch(() => { if (active) setState({ for: assessmentId, status: 'failed', guide: null }); });
+      // A refresh (after /complete refused a place) that fails keeps the answer the sheet has.
+      .catch(() => { if (active && !refreshKey) setState({ for: assessmentId, status: 'failed', guide: null }); });
     return () => { active = false; };
-  }, [base, request, enabled, assessmentId]);
+  }, [base, request, enabled, assessmentId, refreshKey]);
   if (!enabled || !assessmentId) return { guide: null, status: 'idle' };
   return state.for === assessmentId ? { guide: state.guide, status: state.status } : { guide: null, status: 'pending' };
 }
 
 // The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
-function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable }) {
-  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId });
+function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable, refreshKey }) {
+  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId, refreshKey });
   const [checkedState, setCheckedState] = useState({ for: null, map: {} });
   const forId = guide?.assessmentId ?? null;
   const onGuideCheck = useCallback((kind, value) => setCheckedState((prev) => ({
@@ -1175,7 +1182,8 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const propertyAreas = usePropertyAreaLifecycle();
   const reloadAreas = useRef(null);
   reloadAreas.current = propertyAreas.refresh;
-  const submitRequest = useMemo(() => plainErrors(request, reloadAreas), [request]);
+  const refreshPlaces = useRef(null);
+  const submitRequest = useMemo(() => plainErrors(request, reloadAreas, refreshPlaces), [request]);
   // `sheet` tags a saved attempt as this sheet's: its findings type matches the
   // lawn re-service sheet's, and Tech Home cannot open this one.
   const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit' });
@@ -1215,12 +1223,12 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
-      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile }) {
+function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
@@ -1239,7 +1247,7 @@ function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, 
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} />;
+  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} />;
 }
 
 // The photo step's report of the confirmed assessment, plus the context's own
@@ -1299,8 +1307,35 @@ function useStockHold({ ctx, service, rows, products, request }) {
   return { stockRow, checkingStock, checkStock };
 }
 
-function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile }) {
+// GATE_LAWN_TROUBLE_AREAS: reads the place maps again after /complete refused a place (400 lawn_place_limit). The context is read aside
+// (the sheet is never reset): its troubleAreas, weed mix and chinch decision replace the opening ones where it carries them, and
+// `tick` makes the treatment guide read again. A read that fails changes nothing. `slot` is the ref the submit's error handler calls.
+function usePlaceRefresh({ base, request, ctx, slot }) {
+  const [tick, setTick] = useState(0);
+  const [fresh, setFresh] = useState(null);
+  const refresh = useCallback(() => {
+    setTick((n) => n + 1);
+    request(`${base}/lawn-fast/context`)
+      .then((data) => setFresh({ troubleAreas: troubleAreasOf(data), weedMix: weedMixOf(data), chinch: chinchOf(data) }))
+      .catch(() => {});
+  }, [base, request]);
+  slot.current = refresh;
+  const placeCtx = useMemo(() => ({ ...ctx, ...Object.fromEntries(Object.entries(fresh || {}).filter(([, value]) => value)) }), [ctx, fresh]);
+  return { tick, placeCtx };
+}
+
+// The sheet's places: the context's closed list and known areas (less the ones cleared here), with what is closed where taken from the
+// guide's fresh read once it has answered, else the context's.
+function useSheetAreas({ placeCtx, guide, cleared }) {
+  const base = placeCtx.troubleAreas;
+  const fresh = guide?.placeBlocked;
+  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh } } : null), [base, fresh, cleared]);
+}
+
+function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
   const base = `/admin/dispatch/${service?.id}`;
+  // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
+  const { tick: placeTick, placeCtx } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces });
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
@@ -1312,11 +1347,11 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
   // The treatment guide's cards for the confirmed assessment (not one the report would reject), and
   // what the tech checked on each.
-  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable });
+  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick });
   // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
-  const { gov, removed: removedByGuide } = useGuideGovernance({ ctx, guide, status: guideStatus, checks: guideChecks, products });
+  const { gov, removed: removedByGuide } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks, products });
   // The one Weed spots decision on screen (the guide's fresh read once it has answered).
-  const weedMix = effectiveWeedMix(guide, ctx);
+  const weedMix = effectiveWeedMix(guide, placeCtx);
   // The whole-lawn area: this visit property's recorded lawn area (or the area
   // the technician set when none is recorded), never a planned product's own
   // (possibly partial) area and never the customer-wide turf profile (at a
@@ -1329,12 +1364,12 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlace, setWeedPlace] = useState('');
   const [clearedAreas, setClearedAreas] = useState([]);
-  const areas = useMemo(() => (ctx.troubleAreas ? { ...ctx.troubleAreas, known: ctx.troubleAreas.known.filter((area) => !clearedAreas.includes(area.id)) } : null), [ctx.troubleAreas, clearedAreas]);
+  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
     setClearedAreas((prev) => [...prev, id]);
   }, [request, base]);
-  const chinchDecision = effectiveChinch(guide, ctx);
+  const chinchDecision = effectiveChinch(guide, placeCtx);
   const rows = useMemo(
     () => {
       const spotted = products.rows.map((row) => withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }));
