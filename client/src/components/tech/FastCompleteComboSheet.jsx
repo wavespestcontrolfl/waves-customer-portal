@@ -96,10 +96,13 @@ function ComboPart({ kind, part, shared }) {
   const id = part.service.id;
   const label = LABELS[kind];
   const showSaved = readiness.ready(id) && readiness.restored.includes(id);
-  // A null after a body marks the part as changed; a body clears it.
+  // A null after a body marks the part as changed; a body clears it. Only the latest call settles the flag: an earlier
+  // save whose write lands after a later null must not flip the part back to "Not saved yet".
+  const latestSeq = useRef(0);
   const onPrepared = (serviceId, bodyOrNull, seq) => {
+    latestSeq.current = Math.max(latestSeq.current, seq);
     if (!bodyOrNull) markChanged(kind, true);
-    return readiness.apply(serviceId, bodyOrNull, seq).then(() => markChanged(kind, !bodyOrNull));
+    return readiness.apply(serviceId, bodyOrNull, seq).then(() => { if (seq === latestSeq.current) markChanged(kind, !bodyOrNull); });
   };
   return (
     <PartCard title={`${label} · ${part.service.serviceType || ''}`.trim()} status={partStatus(readiness, id, label, changed[kind]).status}>
