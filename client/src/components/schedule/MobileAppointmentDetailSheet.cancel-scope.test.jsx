@@ -68,6 +68,16 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(statusCall().scope).toBe('this_only');
   });
 
+  it('a technician login gets no Edit or Book next (both save through admin-only routes)', () => {
+    const { unmount } = render(<MobileAppointmentDetailSheet service={baseService} onClose={() => {}} />);
+    expect(screen.getByLabelText('Edit appointment')).toBeTruthy();
+    expect(screen.getByText('Book next appointment')).toBeTruthy();
+    unmount();
+    render(<MobileAppointmentDetailSheet service={baseService} adminActions={false} onClose={() => {}} />);
+    expect(screen.queryByLabelText('Edit appointment')).toBeNull();
+    expect(screen.queryByText('Book next appointment')).toBeNull();
+  });
+
   it('offers the three scopes on a recurring visit and defaults to this_only', async () => {
     render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} onClose={() => {}} />);
     fireEvent.click(screen.getByText('Cancel appointment'));

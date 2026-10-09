@@ -142,10 +142,11 @@ export default function MobileAppointmentDetailSheet({
   // (today: the annual-prepay switch) so the caller can refetch the row —
   // its billing lane and attached invoice both moved.
   onBillingChanged,
-  // False for a login the server refuses office actions (the tech portal's
-  // technician role): hides series cancellation, Quick Move's whole-route
-  // scope and the card-request send, which /admin/dispatch/:id/status,
-  // /rain-out and POST /card-request answer with 403 for a non-admin.
+  // False for a login the server refuses office actions (a technician role):
+  // hides series cancellation, Quick Move's whole-route scope, the
+  // card-request send, Edit and Book next, which /admin/dispatch/:id/status,
+  // /rain-out, POST /card-request, PUT /update-details and POST
+  // /admin/schedule answer with 403 for a non-admin.
   adminActions = true,
 }) {
   const [note, setNote] = useState(service?.notes || '');
@@ -553,15 +554,17 @@ export default function MobileAppointmentDetailSheet({
           <span style={{ fontSize: 18, lineHeight: 1 }}>✕</span>
           <span>Close</span>
         </button>
-        <button
-          type="button"
-          onClick={() => onEdit?.(service)}
-          aria-label="Edit appointment"
-          className="rounded-sm bg-zinc-900 text-white font-medium u-focus-ring"
-          style={{ height: 44, padding: '0 26px', fontSize: 15 }}
-        >
-          Edit
-        </button>
+        {adminActions && (
+          <button
+            type="button"
+            onClick={() => onEdit?.(service)}
+            aria-label="Edit appointment"
+            className="rounded-sm bg-zinc-900 text-white font-medium u-focus-ring"
+            style={{ height: 44, padding: '0 26px', fontSize: 15 }}
+          >
+            Edit
+          </button>
+        )}
       </div>
 
       <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 560 }}>
@@ -1080,14 +1083,16 @@ export default function MobileAppointmentDetailSheet({
               Quick Move Appointment
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => onBookNext?.(service)}
-            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring"
-            style={{ padding: '14px 20px', fontSize: 16 }}
-          >
-            Book next appointment
-          </button>
+          {adminActions && (
+            <button
+              type="button"
+              onClick={() => onBookNext?.(service)}
+              className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring"
+              style={{ padding: '14px 20px', fontSize: 16 }}
+            >
+              Book next appointment
+            </button>
+          )}
         </section>
       </div>
 

@@ -2470,6 +2470,9 @@ export default function DispatchPageV2({
       {detailService && (
         <MobileAppointmentDetailSheet
           service={detailService}
+          // A technician login (the tech portal's Edit / Book next hand-off
+          // lands here too) sees no office-only controls the server refuses.
+          adminActions={getAdminUser()?.role === "admin"}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => {
             setDetailService(null);
