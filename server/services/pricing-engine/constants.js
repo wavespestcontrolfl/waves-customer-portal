@@ -2499,6 +2499,12 @@ const ACH_DISCOUNT = {
   percentage: 0,
   paymentMethod: 'us_bank_account',
   exemptFromCompositeCap: true,
+    // Area add-on treatments (owner ruling 2026-10-08): a priced one-time job with its own cost-plus margin, never cut by a
+    // percentage. The engine line says so itself (`discountable: false`), but the catalog rows carry no engine_keys, so the
+    // scheduler, the completion pricing and the invoice paths judge them by THESE keys: the engine key and each add-on's catalog
+    // service_key, taken from the one AREA_ADDONS table (a new add-on cannot be added without being excluded).
+    area_addon: true,
+    ...Object.fromEntries(Object.values(AREA_ADDONS.items).map((item) => [item.serviceKey, true])),
 };
 
 // ── Estimate acceptance deposit ───────────────────────────────
