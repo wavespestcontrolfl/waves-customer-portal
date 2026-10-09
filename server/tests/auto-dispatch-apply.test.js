@@ -179,6 +179,8 @@ describe('reminder sync failure after a committed move', () => {
         bell: true,
         link: '/admin/dispatch?tab=schedule&date=2026-08-11&appointment=s1',
         dedupeKey: 'auto-dispatch-reminder-sync:s1:2026-08-11:08:00',
+        // A repeat failure on the same slot reopens a closed notice (r11 P2).
+        refreshOnDedupe: true,
         metadata: expect.objectContaining({ scheduledServiceId: 's1' }),
       }),
     );

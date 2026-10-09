@@ -521,6 +521,9 @@ async function flagReminderSyncFailed(service, best) {
     }, {
       bell: true,
       dedupeKey,
+      // A visit can leave this slot and come back to it: a new failure there
+      // reopens the notice staff already closed (Codex #6208 r11 P2).
+      refreshOnDedupe: true,
       metadata: { scheduledServiceId: service.id, customerId: service.customer_id, newDate: best.date },
     });
   } catch (err) {

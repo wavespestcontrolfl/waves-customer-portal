@@ -369,14 +369,24 @@ test.each([
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
 });
 
-// The geo self-heal already read the plan for this visit: the notice reuses
-// that answer, one read per visit (Codex #6208 r8 P2).
-test('a missing-geo visit reads its plan once, not again for the notice', async () => {
+// Pass 1 reuses the plan answer the geo self-heal read (no second read per
+// skipped visit, r8 P2). The plan is read once more only just before a
+// notice is raised, at most once per notice (r11 P2).
+test('a missing-geo visit reads its plan once in pass 1 and once before its notice', async () => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
   await runAutoDispatch({ mode: 'dry_run' });
-  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(1);
+  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(2);
   expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+});
+
+test('a plan that lapses between pass 1 and the notice raises nothing and joins the close list (Codex #6208 r11 P2)', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValueOnce({ active: true }).mockResolvedValueOnce({ active: false });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
 });
 
 // notifyAdmin writes no row for an internal test customer, so its visit takes

@@ -661,7 +661,7 @@ async function noticeMissingGeo(run, service, planCheck) {
   // that differs from the customer's; Codex #6208 r6 P2).
   if (!(await missingGeoNoticeWanted(service, planCheck))) { run.pinOkIds.add(String(service.id)); return; }
   const date = toDateStr(service.scheduled_date);
-  run.missingGeoWanted.push({ id: service.id, customer_id: service.customer_id, scheduled_date: date, date });
+  run.missingGeoWanted.push({ id: service.id, customer_id: service.customer_id, recurring_parent_id: service.recurring_parent_id, scheduled_date: date, date });
 }
 
 // A visit that passed eligibility has a usable pin: the run's end closes a
@@ -721,8 +721,18 @@ async function raiseMissingGeoNotices(run) {
     // Re-read every wanted visit BEFORE the budget picks, so a visit fixed
     // since pass 1 does not hold a slot a later visit needs (Codex #6208 r9 P2).
     const waiting = await stillMissingPin(run, run.missingGeoWanted);
-    const picked = audit.withinRingBudget(waiting, await audit.standingMissingGeoKeys(), await audit.ringsLeft(), audit.missingGeoKey);
-    for (const row of picked) await flagMissingGeo(row);
+    const standing = await audit.standingMissingGeoKeys();
+    let left = await audit.ringsLeft();
+    // Date order; a slot is spent only by a NEW notice that is raised. The
+    // plan is read again just before each notice: one that lapsed since pass 1
+    // raises nothing, joins the close list and leaves its slot (r11 P2).
+    for (const row of audit.withinRingBudget(waiting, standing, Infinity, audit.missingGeoKey)) {
+      const isStanding = standing.has(audit.missingGeoKey(row));
+      if (!isStanding && left <= 0) continue;
+      if (!(await missingGeoNoticeWanted(row))) { run.pinOkIds.add(String(row.id)); continue; }
+      await flagMissingGeo(row);
+      if (!isStanding) left -= 1;
+    }
   } catch (err) {
     logger.error(`[auto-dispatch] missing-geo notices failed: ${err.message}`);
   }
