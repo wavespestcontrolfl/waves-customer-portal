@@ -6890,14 +6890,8 @@ const EstimateConverter = {
           reservation_service_mix: {
             ...combinedCapacity,
             scheduledDate: scheduledDateOnly(reservedStart.scheduled_date),
-            // Two stop groups (owner ruling 2026-10-05): each group has its own
-            // arrival hour, so a stopGroups hold stamps no arrivalWindowStart and
-            // each member's own window_start is its arrival. A hold stamped
-            // before the change keeps its shared arrival and member order.
-            ...(combinedCapacity.stopGroups === true ? {}
-              : { arrivalWindowStart: String(reservedStart.window_start).slice(0, 5) }),
-            allocatedServiceIds: VisitCapacity.orderMembersByStopGroup(reservedStart, capacityMembers, combinedCapacity)
-              .map((row) => row.id),
+            arrivalWindowStart: String(reservedStart.window_start).slice(0, 5),
+            allocatedServiceIds: capacityMembers.map((row) => row.id),
           },
         };
         await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)
