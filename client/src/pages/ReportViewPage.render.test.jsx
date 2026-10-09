@@ -1623,6 +1623,50 @@ describe('ReportViewPage — merged "Your plan" + upcoming visits section (GATE_
   });
 });
 
+// GATE_LAWN_REPORT_CLARITY: the server sends a lawn report's card with ONE visit,
+// or none; the page renders exactly what it is given.
+describe('ReportViewPage — lawn "Your plan" card with one visit or none (GATE_LAWN_REPORT_CLARITY)', () => {
+  function lawnPlanPayload(visits) {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 3, reservicesThisYear: 0, tier: 'Gold' };
+    payload.upcomingVisitsCard = { merged: true, visits };
+    // The report's cross-line next visit: a pest visit must not be named when the card is empty.
+    payload.nextAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-12-01', windowStart: '09:00:00' };
+    return payload;
+  }
+
+  it('one lawn visit: one row and its Reschedule button', async () => {
+    const { container } = renderReport(lawnPlanPayload([
+      { serviceType: 'Every 6 Weeks Lawn Care Service', scheduledDate: '2099-11-02', windowStart: '15:00:00', rescheduleUrl: 'https://wavespestcontrol.com/l/abc123' },
+    ]));
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(section.querySelectorAll('.plan-visit-row')).toHaveLength(1);
+    expect(within(section).getAllByRole('link', { name: /^Reschedule/ })).toHaveLength(1);
+    expect(section.textContent).not.toContain('Pest');
+  });
+
+  it('no lawn visit: the plan section keeps its plan lines, no visit rows and no other line\'s next visit', async () => {
+    const { container } = renderReport(lawnPlanPayload([]));
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(section.querySelector('.plan-visit-row')).toBeNull();
+    expect(within(section).queryByText('Dates and windows are subject to change')).toBeNull();
+    expect(section.textContent).toContain("We've completed 3 visits for you this year.");
+    expect(section.textContent).not.toMatch(/Your next .* visit is/);
+    expect(container.querySelector('.report-card[data-section="upcoming-visits"]')).toBeNull();
+  });
+
+  it('no lawn visit and no plan summary: neither the plan nor the upcoming-visits card shows', async () => {
+    const payload = lawnPlanPayload([]);
+    delete payload.planSummary;
+    const { container } = renderReport(payload);
+    await screen.findByText('Report Tools');
+    expect(container.querySelector('#your-plan')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Your upcoming visits' })).toBeNull();
+  });
+});
+
 // "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
 // re-service COUNTS for this year (never a price — prices only ever live on
 // estimate pages, and no "at no charge" money claim), live mode only.
