@@ -41,10 +41,14 @@ export function spotTargetOffer(row, { config, chinch = null, takeAll = null }) 
 }
 
 /**
- * The /complete row's target fields: the tag the tech picked (one tag; the server checks it against the row's type and stores it, or
- * drops it) and, for a chinch find, the hint that the chinch entry opened the row. Always carries `targets` (an empty list when none).
+ * The /complete row's target fields, decided AT PAYLOAD TIME from what the row is now: the tag the tech picked goes only while the row
+ * is still a spot fungicide / insecticide row and the tag is on that product family's closed list (a row moved to a whole-lawn method,
+ * or to a product of another family, sends none); the chinch-find hint goes only for a spot insecticide row the chinch entry opened.
+ * Always carries `targets` (an empty list when none), exactly `[]` while the context has no `spotTargets`. The server checks it again.
  */
-export function targetBodyFields(row) {
-  const picked = typeof row?.spotTarget === 'string' && row.spotTarget ? [row.spotTarget] : [];
-  return { targets: picked, ...(row?.guided === 'chinch' ? { targetFind: 'chinch' } : {}) };
+export function targetBodyFields(row, config = null) {
+  const category = categoryOf(row);
+  const live = !!config && !!row && isSpot(row) && ['fungicide', 'insecticide'].includes(category);
+  const picked = live && typeof row.spotTarget === 'string' && config[category].includes(row.spotTarget) ? [row.spotTarget] : [];
+  return { targets: picked, ...(live && category === 'insecticide' && row.guided === 'chinch' ? { targetFind: 'chinch' } : {}) };
 }

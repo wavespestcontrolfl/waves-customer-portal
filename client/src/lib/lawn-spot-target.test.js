@@ -37,10 +37,24 @@ describe('spotTargetOffer', () => {
   });
 });
 
-describe('targetBodyFields', () => {
-  test('always carries targets; the chinch hint only for a row the chinch entry opened', () => {
-    expect(targetBodyFields(row('fungicide'))).toEqual({ targets: [] });
-    expect(targetBodyFields(row('fungicide', { spotTarget: 'Dollar spot' }))).toEqual({ targets: ['Dollar spot'] });
-    expect(targetBodyFields(row('insecticide', { guided: 'chinch' }))).toEqual({ targets: [], targetFind: 'chinch' });
+describe('targetBodyFields (decided at payload time)', () => {
+  test('always carries targets; the chinch hint only for a spot insecticide row the chinch entry opened', () => {
+    expect(targetBodyFields(row('fungicide'), config)).toEqual({ targets: [] });
+    expect(targetBodyFields(row('fungicide', { spotTarget: 'Dollar spot' }), config)).toEqual({ targets: ['Dollar spot'] });
+    expect(targetBodyFields(row('insecticide', { guided: 'chinch' }), config)).toEqual({ targets: [], targetFind: 'chinch' });
+  });
+  test('a row that is no longer a spot row sends no target and no chinch hint', () => {
+    expect(targetBodyFields(row('fungicide', { spotTarget: 'Dollar spot', method: 'broadcast_spray' }), config)).toEqual({ targets: [] });
+    expect(targetBodyFields(row('insecticide', { guided: 'chinch', method: 'granular_broadcast' }), config)).toEqual({ targets: [] });
+  });
+  test('a target of another family than the row\'s product (a product changed under the pick) is not sent', () => {
+    expect(targetBodyFields(row('insecticide', { spotTarget: 'Dollar spot' }), config)).toEqual({ targets: [] });
+    expect(targetBodyFields(row('fungicide', { spotTarget: 'White grubs' }), config)).toEqual({ targets: [] });
+    expect(targetBodyFields(row('herbicide', { spotTarget: 'Dollar spot' }), config)).toEqual({ targets: [] });
+  });
+  test('a fungicide row never sends the chinch hint, and with no lists in the context nothing is sent', () => {
+    expect(targetBodyFields(row('fungicide', { guided: 'chinch' }), config)).toEqual({ targets: [] });
+    expect(targetBodyFields(row('fungicide', { spotTarget: 'Dollar spot' }), null)).toEqual({ targets: [] });
+    expect(targetBodyFields(row('insecticide', { guided: 'chinch' }))).toEqual({ targets: [] });
   });
 });

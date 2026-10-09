@@ -1354,6 +1354,36 @@ describe('a target on a spot fungicide or insecticide row', () => {
     expect(sent(P_FUNG).targets).toEqual(['Large patch']);
   });
 
+  test('a target picked on a spot row is not sent once the row is moved to a whole-lawn method, and is sent again when it is back on spot', async () => {
+    await open(withTargets(placeContext()));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.click(chipOf(targetGroup('Spot Fungicide'), 'Dollar spot'));
+    const method = within(row).getByRole('combobox', { name: /^Method for / });
+    const pick = (label) => fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === label).value } });
+    pick('Broadcast spray');
+    expect(targetGroup('Spot Fungicide')).toBeNull();
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ applicationMethod: 'broadcast_spray', targets: [] });
+    expect(sent(P_FUNG)).not.toHaveProperty('targetFind');
+  });
+
+  test('moved off spot and back: the pick it still shows is the one it sends', async () => {
+    await open(withTargets(placeContext()));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.click(chipOf(targetGroup('Spot Fungicide'), 'Dollar spot'));
+    const method = within(row).getByRole('combobox', { name: /^Method for / });
+    const pick = (label) => fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === label).value } });
+    pick('Broadcast spray');
+    pick('Spot treatment');
+    expect(pressed(targetGroup('Spot Fungicide'))).toEqual(['Dollar spot']);
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ targets: ['Dollar spot'] });
+  });
+
   test('with nothing picked the row completes and sends no target', async () => {
     await open(withTargets(placeContext()));
     addFungicide();

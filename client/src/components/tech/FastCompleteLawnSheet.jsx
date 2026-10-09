@@ -1112,7 +1112,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
         // GATE_LAWN_TROUBLE_AREAS: where the spot went, and what the row was opened for (the server writes the lawn's trouble area from it).
         ...(row.placeRule && row.place ? { areaPlace: row.place, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
         // A spot fungicide / insecticide row's optional target (the server checks it against the row's type), and the chinch-find hint.
-        ...targetBodyFields(row),
+        ...targetBodyFields(row, ctx.spotTargets),
         // Gallons sprayed in place of an area: the server converts them with the product's staged carrier and records the area.
         ...gallonsBodyFields(row),
       };

@@ -123,13 +123,39 @@ describe('resolveForCompletion', () => {
     expect((await resolve([row(TAKE_ALL, { targets: ['Take-all root rot'] })])).of(row(TAKE_ALL))).toEqual(['Take-all root rot']);
   });
 
-  test('a whole-lawn row never carries a target the sheet sent; another category is left to the main flow', async () => {
+  test('a whole-lawn row never carries a target; another category is left to the main flow', async () => {
     const broadcast = row(ARTAVIA, { method: 'broadcast_spray', targets: ['Dollar spot'] });
-    expect((await resolve([broadcast])).of(broadcast)).toEqual(['Dollar spot']);
+    expect((await resolve([broadcast])).of(broadcast)).toEqual([]);
     const herb = row(CELSIUS, { targets: ['Crabgrass'] });
     expect((await resolve([herb])).of(herb)).toEqual(['Crabgrass']);
     const iron = row(IRON, { targets: [] });
     expect((await resolve([iron])).of(iron)).toEqual([]);
+  });
+
+  test('a fungicide or insecticide row the SERVER does not resolve as a spot row stores no target, whatever the sheet sent', async () => {
+    const moved = row(ARTAVIA, { method: 'broadcast_spray', targets: ['Dollar spot'], targetFind: 'chinch', troubleType: 'chinch' });
+    const movedInsect = row(ARENA, { method: 'granular_broadcast', targets: ['Southern chinch bugs'], targetFind: 'chinch' });
+    const spot = row(TALAK, { targets: ['Fall armyworms'] });
+    const out = await resolve([moved, movedInsect, spot]);
+    expect(out.of(moved)).toEqual([]);
+    expect(out.of(movedInsect)).toEqual([]);
+    expect(out.of(spot)).toEqual(['Fall armyworms']);
+  });
+
+  test('the method is the one persistence resolves (the completion\'s own inference), not the sheet\'s word', async () => {
+    const seen = [];
+    const out = await resolve([row(ARTAVIA, { method: 'spot_treatment', applicationMethod: 'broadcast_spray', targets: ['Dollar spot'] })], {
+      inferMethod: (product, r, line) => { seen.push([product.name, line]); return r.applicationMethod; },
+    });
+    expect(out.of({ productId: ARTAVIA })).toEqual([]);
+    expect(seen).toEqual([['Artavia 2 SC (Azoxy)', 'lawn']]);
+  });
+
+  test('a target of another family than the row\'s product (the product changed under the pick) is dropped', async () => {
+    const swapped = row(ARTAVIA, { targets: ['White grubs'] });
+    expect((await resolve([swapped])).of(swapped)).toEqual([]);
+    const swapped2 = row(TALAK, { targets: ['Dollar spot'] });
+    expect((await resolve([swapped2])).of(swapped2)).toEqual([]);
   });
 
   test('no lawnFast block, or the guide off: the row keeps its own tags', async () => {

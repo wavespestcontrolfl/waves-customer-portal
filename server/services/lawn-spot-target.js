@@ -76,7 +76,7 @@ const ownTags = (row) => (Array.isArray(row?.targets) ? row.targets : []);
 /**
  * The stored targets for a completion's rows: `{ of(row) }`, where `of` answers the tags a row is stored with. For a spot fungicide
  * or insecticide row of a Lawn Fast Complete completion (a `lawnFast` block, GATE_LAWN_SPOT_TARGET live) that is the server's verdict
- * (`[]` or `[name]`); for every other row it is the row's own tags, exactly as before. The staged sets are read once, only when a
+ * (`[]` or `[name]`; always `[]` for a row the server does not resolve as a spot row); for every other row it is the row's own tags, exactly as before. The staged sets are read once, only when a
  * candidate row exists. The sheet's `troubleType` / `targetFind` are hints: the server's `confirm()` sets decide (troubleTypeFor).
  * `catalog` is the completion's catalog map, `canonicalId` and `inferMethod` the completion's own functions.
  */
@@ -85,8 +85,11 @@ async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, infe
   const result = { of: (row) => verdict.get(lowerId(row?.productId)) || ownTags(row) };
   if (lawnFast == null || !live()) return result;
   const product = (row) => catalog.get(canonicalId(row.productId)) || {};
-  const candidates = (Array.isArray(rows) ? rows : []).filter((row) => row && row.productId
-    && isTargetCategory(categoryOf(product(row).category)) && inferMethod(product(row), row, serviceLine) === 'spot_treatment');
+  const targetRows = (Array.isArray(rows) ? rows : []).filter((row) => row && row.productId && isTargetCategory(categoryOf(product(row).category)));
+  // A target belongs to a SPOT treatment only, as the server itself resolves the method (the persistence rule, as preflightPlaces does):
+  // a fungicide or insecticide row that is not a spot row stores no target, whatever the sheet sent (a row moved to a whole-lawn method).
+  const candidates = targetRows.filter((row) => inferMethod(product(row), row, serviceLine) === 'spot_treatment');
+  for (const row of targetRows) if (!candidates.includes(row)) verdict.set(lowerId(row.productId), []);
   if (!candidates.length) return result;
   let sets = null;
   try {
