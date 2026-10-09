@@ -184,6 +184,35 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('a save that rejects one sod field keeps every sod field unsaved, so the retry sends them all', async () => {
+    const message = 'Say where the new sod is.';
+    let puts = 0;
+    const fetchMock = stubFetch({
+      prefs: { sod_laid_on: '2026-09-20', sod_covers: 'whole', access_notes: 'old' },
+      onPut: () => {
+        puts += 1;
+        return puts === 1
+          ? response({ success: true, saved: true, rejected: [{ field: 'sodArea', message }], preferences: BASE_PREFS })
+          : response({ success: true, saved: true, preferences: BASE_PREFS });
+      },
+    });
+    await openEditor();
+
+    const notes = screen.getByText('Access Notes').closest('label').querySelector('textarea');
+    fireEvent.change(notes, { target: { value: 'new' } });
+    fireEvent.click(screen.getByLabelText('Part of lawn'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+    await screen.findAllByText(message);
+
+    const where = screen.getByText('Where').closest('label').querySelector('input');
+    fireEvent.change(where, { target: { value: 'back lawn' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
+    // The first save stored the notes only: the retry carries Covers again with Where.
+    expect(putCalls(fetchMock)[1]).toEqual({ sodCovers: 'part', sodArea: 'back lawn', confirmedAsOf: MOVED_AT });
+  });
+
   describe('partial payloads on a saved record: only the sod fields changed in this edit are sent', () => {
     const saved = (extra = {}) => ({ sod_laid_on: '2026-09-20', sod_covers: 'whole', sod_area: null, ...extra });
     const saveWith = async (prefs, edit) => {
