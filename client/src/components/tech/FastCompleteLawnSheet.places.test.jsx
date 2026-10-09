@@ -941,6 +941,53 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
     expect(chipOf(chipsOf(), 'Back').disabled).toBe(false);
   });
 
+  // A refusal of the yearly AMOUNT depends on the dose entered; a count or interval refusal does not.
+  describe('what ends a refusal', () => {
+    const refuseAt = async (limitType) => {
+      const base = makeRequest({ ctx: ctxWith({}) });
+      guideAnswer = guideWith({ [P_FUNG]: {} });
+      await openSheet({ request: base, props: { catalog: CAT } });
+      await analyze();
+      fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+      typeArea(placeGroup('Spot Fungicide'), '100');
+      fireEvent.click(chipOf(chipsOf(), 'Front'));
+      completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: refused.', { productId: P_FUNG, place: 'front', limitType }));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
+    };
+    const amountBox = () => within(placeGroup('Spot Fungicide')).getByLabelText('Spot Fungicide');
+
+    test('an amount refusal ends when the area changes (the figured amount changes with it)', async () => {
+      await refuseAt('annual_max_rate');
+      typeArea(placeGroup('Spot Fungicide'), '250');
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
+    });
+
+    test('an amount refusal ends when the tech types a different amount', async () => {
+      await refuseAt('annual_max_rate');
+      fireEvent.change(amountBox(), { target: { value: '0.5' } });
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
+    });
+
+    test('an amount refusal stays while the dose is unchanged, though the maps it reads again say open', async () => {
+      await refuseAt('annual_max_rate');
+      // A re-read already happened after the refusal and said open (guideWith({[P_FUNG]: {}})): the refusal still holds.
+      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+      // Picking another place and back does not change the dose either.
+      fireEvent.click(chipOf(chipsOf(), 'Back'));
+      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    });
+
+    test.each(['annual_max_apps', 'min_interval_days'])('a %s refusal does not end when the area or the amount changes', async (limitType) => {
+      await refuseAt(limitType);
+      typeArea(placeGroup('Spot Fungicide'), '250');
+      fireEvent.change(amountBox(), { target: { value: '0.5' } });
+      typeArea(placeGroup('Spot Fungicide'), '500');
+      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    });
+  });
+
   test('other refusals do not re-read the place maps; a failed refresh changes nothing', async () => {
     let contextReads = 0;
     const base = makeRequest({ ctx: ctxWith({}) });

@@ -1343,14 +1343,18 @@ function useStockHold({ ctx, service, rows, products, request }) {
 // GATE_LAWN_TROUBLE_AREAS: reads the place maps again after /complete refused a place (400 lawn_place_limit). The context is read aside
 // (the sheet is never reset): its troubleAreas, weed mix and chinch decision replace the opening ones where it carries them, and
 // `tick` makes the treatment guide read again. A read that fails changes nothing. `slot` is the ref the submit's error handler calls.
-function usePlaceRefresh({ base, request, ctx, slot, idsRef }) {
+function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
   const [tick, setTick] = useState(0);
   const [fresh, setFresh] = useState(null);
-  // What /complete refused, `{ [productId]: { [place]: message } }`: authoritative, merged into the blocked map at once and kept.
+  // What /complete refused, `{ [productId]: { [place]: { message, dose } } }`: authoritative, merged into the blocked map at once and kept.
+  // A refusal of the yearly AMOUNT depends on the dose the tech entered (`dose`: that row's amount, unit, area and rate then); a count or an
+  // interval refusal does not (`dose` null), so only the amount kind is dropped when the dose changes (pruneRefused).
   const [refused, setRefused] = useState({});
   const refresh = useCallback((err) => {
-    const { productId, place, error } = err?.details || {};
-    if (productId && place) setRefused((prev) => ({ ...prev, [String(productId).toLowerCase()]: { ...prev[String(productId).toLowerCase()], [place]: error || err.message } }));
+    const { productId, place, error, limitType } = err?.details || {};
+    const id = String(productId || '').toLowerCase();
+    const entry = { message: error || err?.message, dose: limitType === 'annual_max_rate' ? (dosesRef?.current?.[id] ?? '') : null };
+    if (productId && place) setRefused((prev) => ({ ...prev, [id]: { ...prev[id], [place]: entry } }));
     setTick((n) => n + 1);
     request(`${base}/lawn-fast/context${searchedIdsQuery(1, idsRef, '?')}`)
       .then((data) => setFresh({ troubleAreas: troubleAreasOf(data), weedMix: weedMixOf(data), chinch: chinchOf(data) }))
@@ -1358,7 +1362,13 @@ function usePlaceRefresh({ base, request, ctx, slot, idsRef }) {
   }, [base, request]);
   slot.current = refresh;
   const placeCtx = useMemo(() => ({ ...ctx, ...Object.fromEntries(Object.entries(fresh || {}).filter(([, value]) => value)) }), [ctx, fresh]);
-  return { tick, placeCtx, refused };
+  // Drops the amount refusals whose row's dose is not the dose it was refused at; never touches a count or interval refusal.
+  const pruneRefused = useCallback((doses) => setRefused((prev) => {
+    const kept = Object.fromEntries(Object.entries(prev).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).filter(([, e]) => e.dose === null || e.dose === doses[id]))]).filter(([, byPlace]) => Object.keys(byPlace).length));
+    return JSON.stringify(kept) === JSON.stringify(prev) ? prev : kept;
+  }), []);
+  const messages = useMemo(() => Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).map(([place, e]) => [place, e.message]))])), [refused]);
+  return { tick, placeCtx, refused: messages, pruneRefused };
 }
 
 // The sheet's places: the context's closed list and known areas (less the ones cleared here), with what is closed where taken from the
@@ -1373,7 +1383,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const base = `/admin/dispatch/${service?.id}`;
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
   const searchedIds = useRef([]);
-  const { tick: placeTick, placeCtx, refused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds });
+  const dosesRef = useRef({});
+  const { tick: placeTick, placeCtx, refused, pruneRefused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
@@ -1422,6 +1433,10 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   );
   // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
   searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));
+  // Each spot row's dose (what the yearly amount depends on); an amount refusal ends when its row's dose changes.
+  dosesRef.current = Object.fromEntries(rows.filter((row) => row.placeRule).map((row) => [String(row.productId).toLowerCase(), JSON.stringify([row.totalAmount, row.amountUnit, row.spotArea ?? null, row.derivedRate?.rate ?? null])]));
+  const doseKey = JSON.stringify(dosesRef.current);
+  useEffect(() => { pruneRefused(JSON.parse(doseKey)); }, [doseKey, pruneRefused]);
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).
