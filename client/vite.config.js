@@ -124,7 +124,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@estimate-copy-claims', '@proposal-bid', '@estimate-purchased-warranty', '@estimate-termite-scope', '@lawn-scores', '@legacy-visit-money-submission', '@pricing-regime-marker', '@kpi-targets', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
+    include: ['@estimate-copy-claims', '@proposal-bid', '@estimate-purchased-warranty', '@estimate-termite-scope', '@lawn-scores', '@lawn-water-card', '@legacy-visit-money-submission', '@pricing-regime-marker', '@kpi-targets', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',
@@ -136,7 +136,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/shared\/estimate-copy-claims\.cjs$/, /shared\/proposal-bid\.cjs$/, /shared\/estimate-purchased-warranty\.cjs$/, /shared\/estimate-termite-scope\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /shared\/pricing-regime-marker\.cjs$/, /shared\/kpi-targets\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
+      include: [/shared\/estimate-copy-claims\.cjs$/, /shared\/proposal-bid\.cjs$/, /shared\/estimate-purchased-warranty\.cjs$/, /shared\/estimate-termite-scope\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/lawn-water-card\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /shared\/pricing-regime-marker\.cjs$/, /shared\/kpi-targets\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
     },
   },
 });
