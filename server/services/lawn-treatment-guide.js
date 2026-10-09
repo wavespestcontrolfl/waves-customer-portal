@@ -213,7 +213,9 @@ function offerFor(kind, candidate, { capped, rows }) {
  * (no finding) returns to the generic list. Pure.
  */
 function blockedProductIds({ offers, chinch, weedMix }) {
-  const weedOut = weedMix && !['lead', 'unavailable'].includes(weedMix.mode) ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [];
+  // Unavailable (a member's own read failed): only the members whose limit WAS read as forbidding stay blocked.
+  const weedOut = weedMix?.mode === 'unavailable' ? weedMix.blockedIds || []
+    : weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [];
   return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];
 }
 
@@ -224,7 +226,8 @@ function blockedProductIds({ offers, chinch, weedMix }) {
  * Pure.
  */
 function unreadableProductIds({ offers, chinch, weedMix }) {
-  const weedUnread = weedMix?.mode === 'unavailable' ? weedMix.groupProductIds || [] : [];
+  // The mix is withheld as a whole, so the members NOT read as forbidden are released to the search.
+  const weedUnread = weedMix?.mode === 'unavailable' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.blockedIds || []).includes(id)) : [];
   return [...new Set([...(offers?.unreadable || []), ...(chinch?.unreadableIds || []), ...weedUnread].map(idOf))];
 }
 
@@ -265,14 +268,13 @@ async function resolveChinch({ svc, structured, knex }) {
   return withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
 }
 
-// Every rung's product id (all of them are governed by the guide, offered or not); the rungs a READ
-// limit blocked (all of them when nothing is offered, else the ones before the offered rung); and, when
-// the limit read itself failed, the rungs that are unreadable instead (none blocked, none offered).
+// Every rung's product id (all of them are governed by the guide, offered or not). The rungs a READ limit
+// blocked and the rungs whose own read failed come per rung from chooseChinch; only a read that failed
+// as a whole (the limits call itself threw) makes every rung unreadable.
 function withRungs(result, products) {
   const rungIds = products.map((product) => product.productId);
   if (result.unreadable) return { ...result, rungIds, blockedIds: [], unreadableIds: rungIds };
-  const offered = rungIds.indexOf(result.productId);
-  return { ...result, rungIds, blockedIds: offered === -1 ? rungIds : rungIds.slice(0, offered), unreadableIds: [] };
+  return { ...result, rungIds };
 }
 
 // Nothing is offered when the limit read failed: the line says so, and the rungs are released to the search.
@@ -307,25 +309,39 @@ function chinchProducts(staged) {
   return products;
 }
 
-// Which product the tap adds, from the limit reader's blocks. v13VisitLimits fails closed per product:
-// a read that failed comes back as a block with no limit type (a real limit always names one). That
-// is not a reached cap, so nothing is offered. Only the yearly count hands the tap to the next
-// product; any other limit holds the offer with its own words.
+// Which product the tap adds, from the limit reader's blocks, PER RUNG. v13VisitLimits fails closed per
+// product: a read that failed comes back as a block with no limit type (a real limit always names one).
+// A rung is therefore blocked (a typed limit that was read), unreadable (only a typeless block) or clean.
+// The ladder is walked in the program's order:
+//   clean rung        offered (with the "used in its place" note when an earlier rung is yearly-capped)
+//   yearly-capped     skipped, the next rung is judged
+//   another limit     (a minimum interval, a blackout) holds the whole offer with the limit's words
+//   unreadable rung   nothing is offered (we cannot say it is exhausted, so the next rung is not offered
+//                     either) and it is released to the search; later rungs keep their OWN state (a
+//                     later blocked rung stays blocked, a later unreadable one is released too, a later
+//                     clean one is simply not offered)
+// Rungs after an offered rung are not reached: neither blocked nor unreadable, only not offered.
 function chooseChinch(products, capped) {
-  const none = (note) => ({ productId: null, name: null, stagedRow: null, note });
-  const blocksOf = (product) => capped.get(product.productId) || [];
-  // A rung whose read failed (a block with no limit type) is unreadable, not forbidden.
-  if (products.some((product) => blocksOf(product).some((block) => !block.type))) return unreadableChinch();
+  const none = (note, blockedIds, unreadableIds = []) => ({ productId: null, name: null, stagedRow: null, note, blockedIds, unreadableIds });
+  const typedOf = (product) => (capped.get(product.productId) || []).filter((block) => block.type);
+  const stateOf = (product) => {
+    if (typedOf(product).length) return 'blocked';
+    return (capped.get(product.productId) || []).length ? 'unreadable' : 'clean';
+  };
+  const idsOf = (list, state) => list.filter((product) => stateOf(product) === state).map((product) => product.productId);
   let skipped = null;
-  for (const product of products) {
-    const blocks = blocksOf(product);
-    if (!blocks.length) {
-      return { ...product, note: skipped ? `${shortName(skipped.name)} yearly limit reached; ${shortName(product.name)} is used in its place.` : null };
+  for (const [index, product] of products.entries()) {
+    const state = stateOf(product);
+    const earlier = products.slice(0, index).map((p) => p.productId);
+    if (state === 'clean') {
+      const note = skipped ? `${shortName(skipped.name)} yearly limit reached; ${shortName(product.name)} is used in its place.` : null;
+      return { ...product, note, blockedIds: earlier, unreadableIds: [] };
     }
-    if (!blocks.every((block) => block.type === YEARLY_CAP)) return none(blocks[0].message || CHINCH_LIMIT_REACHED);
+    if (state === 'unreadable') return none(UNREADABLE_NOTE, [...earlier, ...idsOf(products.slice(index + 1), 'blocked')], [product.productId, ...idsOf(products.slice(index + 1), 'unreadable')]);
+    if (!typedOf(product).every((block) => block.type === YEARLY_CAP)) return none(typedOf(product)[0].message || CHINCH_LIMIT_REACHED, products.map((p) => p.productId));
     skipped = skipped || product;
   }
-  return none(CHINCH_LIMIT_REACHED);
+  return none(CHINCH_LIMIT_REACHED, products.map((p) => p.productId));
 }
 
 // ── the cards ───────────────────────────────────────────────────────────────

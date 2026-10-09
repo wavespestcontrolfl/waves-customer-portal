@@ -353,6 +353,15 @@ describe('unreadableProductIds: what the fresh read could not read (not forbidde
     expect(unreadableProductIds(input).sort()).toEqual([P_ART, P_ACE, P_ARENA, P_TALAK, P_CEL, P_CERT].sort());
     expect(blockedProductIds(input)).toEqual([]);
   });
+  test('an unavailable weed mix: members read as forbidden stay blocked; the rest are released (the mix is withheld as a whole)', () => {
+    const weedMix = { mode: 'unavailable', groupProductIds: [P_CEL, P_CERT, uuid(9)], productIds: [], blockedIds: [P_CEL] };
+    expect(blockedProductIds({ weedMix })).toEqual([P_CEL]);
+    expect(unreadableProductIds({ weedMix }).sort()).toEqual([P_CERT, uuid(9)].sort());
+    // A whole-read failure names no blocked member: all are released.
+    const threw = { mode: 'unavailable', groupProductIds: [P_CEL, P_CERT], productIds: [], blockedIds: [] };
+    expect(blockedProductIds({ weedMix: threw })).toEqual([]);
+    expect(unreadableProductIds({ weedMix: threw }).sort()).toEqual([P_CEL, P_CERT].sort());
+  });
   test('a weed mix that is not unavailable adds none', () => {
     for (const mode of ['lead', 'replacement', 'none']) expect(unreadableProductIds({ weedMix: { mode, groupProductIds: [P_CEL], productIds: [] } })).toEqual([]);
   });
@@ -396,13 +405,38 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
     expect(await run()).toMatchObject({ productId: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
   });
 
-  test('a failed limit read (a block with no type) offers nothing, as the weed mix does', async () => {
-    limited([[P_ARENA, [{ message: 'application limits could not be read.' }]]]);
-    // Nothing is offered; every rung is unreadable, none is blocked (nothing forbids them that was read).
-    const unread = { productId: null, note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.', rungIds: [P_ARENA, P_TALAK], blockedIds: [], unreadableIds: [P_ARENA, P_TALAK] };
-    expect(await run()).toMatchObject(unread);
+  // The rule table, PER RUNG. A rung is blocked (a typed limit that was read), unreadable (only a block with
+  // no limit type: its own read failed) or clean; a whole-read failure (the limits call threw) makes all unreadable.
+  //   Arena          Talak          offered        blocked        unreadable (released)
+  //   clean          any            Arena          -              -   (Talak not reached: only not offered)
+  //   yearly-capped  clean          Talak (+note)  Arena          -
+  //   yearly-capped  unreadable     nothing        Arena          Talak
+  //   yearly-capped  yearly-capped  nothing        both           -
+  //   unreadable     clean          nothing        -              Arena (Talak not offered: Arena's state is unknown)
+  //   unreadable     blocked        nothing        Talak          Arena
+  //   unreadable     unreadable     nothing        -              both
+  //   other limit    any            nothing (held) both           -
+  //   read threw     read threw     nothing        -              both
+  const NOTE = 'The limits could not be checked. Use Search products for what you applied; the office will review it.';
+  const UNREAD = [{ message: 'application limits could not be read.' }];
+  const RUNGS = [P_ARENA, P_TALAK];
+  test.each([
+    ['Arena clean, Talak unreadable: Arena offered; Talak is not reached (hidden, neither blocked nor released)', [], [[P_TALAK, UNREAD]], { productId: P_ARENA, blockedIds: [], unreadableIds: [] }],
+    ['Arena capped, Talak clean: Talak offered', [], [[P_ARENA, CAP]], { productId: P_TALAK, blockedIds: [P_ARENA], unreadableIds: [] }],
+    ['Arena capped, Talak unreadable: nothing offered; Arena stays blocked, only Talak is released', [], [[P_ARENA, CAP], [P_TALAK, UNREAD]], { productId: null, note: NOTE, blockedIds: [P_ARENA], unreadableIds: [P_TALAK] }],
+    ['Arena unreadable, Talak clean: nothing offered (Arena may not be exhausted); only Arena is released', [], [[P_ARENA, UNREAD]], { productId: null, note: NOTE, blockedIds: [], unreadableIds: [P_ARENA] }],
+    ['Arena unreadable, Talak capped: Talak stays blocked, Arena is released', [], [[P_ARENA, UNREAD], [P_TALAK, CAP]], { productId: null, note: NOTE, blockedIds: [P_TALAK], unreadableIds: [P_ARENA] }],
+    ['both unreadable: both released', [], [[P_ARENA, UNREAD], [P_TALAK, UNREAD]], { productId: null, note: NOTE, blockedIds: [], unreadableIds: RUNGS }],
+    ['both capped: nothing, both blocked', [], [[P_ARENA, CAP], [P_TALAK, CAP]], { productId: null, blockedIds: RUNGS, unreadableIds: [] }],
+    ['a named limit and an unreadable one on one rung: blocked (the read forbids it)', [], [[P_ARENA, [...UNREAD, ...CAP]], [P_TALAK, UNREAD]], { productId: null, blockedIds: [P_ARENA], unreadableIds: [P_TALAK] }],
+  ])('%s', async (_name, _unused, entries, expected) => {
+    limited(entries);
+    expect(await run()).toMatchObject({ rungIds: RUNGS, ...expected });
+  });
+
+  test('the whole read threw: nothing offered, every rung unreadable, none blocked', async () => {
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
-    expect(await run()).toMatchObject(unread);
+    expect(await run()).toMatchObject({ productId: null, note: NOTE, rungIds: RUNGS, blockedIds: [], unreadableIds: RUNGS });
   });
 
   test('another limit on Arena (not the yearly count) holds the offer with the limit\'s words; it does not fall through', async () => {

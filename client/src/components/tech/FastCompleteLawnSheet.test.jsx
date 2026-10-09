@@ -3085,6 +3085,15 @@ describe('suggested from this lawn', () => {
         guideAnswer = UNREADABLE_ANSWER();
         await mxOpen(); await analyze(); await suggested();
       }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
+      // Per rung: Arena's limit was READ (blocked, stays hidden), Talak's own read failed (released to the
+      // search and the list, with the note); nothing is offered.
+      ['answered, one rung blocked and one unreadable', async () => {
+        guideAnswer = {
+          ...answerOf([], MX_WEED, { item: null, note: UNREADABLE, rungIds: RUNGS, blockedIds: [P_ARENA], unreadableIds: [P_BIF] }, [P_ARENA]),
+          unreadableProductIds: [P_BIF], unreadableNote: UNREADABLE,
+        };
+        await mxOpen(); await analyze(); await suggested();
+      }, { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'line', ...NO_CARDS }],
       ['failed on the first read, context weed mix unavailable', async () => {
         guideAnswer = refusal(500, 'boom', 'Internal error');
         await mxOpen(mxContext({ plannedProducts: mxPlanned({ weedMix: { ...MX_WEED, mode: 'unavailable', productIds: [], note: UNREADABLE }, chinch: UNREAD_CHINCH }) }));
@@ -3116,6 +3125,14 @@ describe('suggested from this lawn', () => {
       expect(lineOf('Chinch bugs found at the edge of damage').textContent).toContain('Arena 50 WDG, spot treatment');
       fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
       expect(present('Arena 50 WDG')).toBe(true);
+    });
+
+    test('weed members are judged one by one: the member read as capped stays out of the search, its sibling is released', async () => {
+      const weedMix = { ...MX_WEED, mode: 'unavailable', productIds: [], note: UNREADABLE, blockedIds: [P_LEAD] };
+      guideAnswer = { ...answerOf([], weedMix, CLEAN_CHINCH, [P_LEAD]), unreadableProductIds: [P_CERT, P_BLIND], unreadableNote: UNREADABLE };
+      await mxOpen(); await analyze(); await suggested();
+      expect(await searchState('Lead WG', /^Lead WG/)).toBe('hidden');
+      expect(await searchState('Cert Herbicide', /^Cert Herbicide/)).toBe('addable');
     });
 
     test('pending also holds Complete until the guide has answered', async () => {

@@ -812,6 +812,38 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(one.cards.find((c) => c.kind === 'fungus')).toBeUndefined();
     });
 
+    test('per product: one chinch rung blocked, the other unreadable (Arena stays blocked; only Talak is released)', async () => {
+      live();
+      capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: [{ message: 'read failed' }] });
+      const result = await guide(tablesFor());
+      expect(result.chinch).toMatchObject({ item: null, rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA], unreadableIds: [P_TALAK] });
+      expect(result.blockedProductIds).toContain(P_ARENA);
+      expect(result.blockedProductIds).not.toContain(P_TALAK);
+      expect(result.unreadableProductIds).toContain(P_TALAK);
+      expect(result.unreadableProductIds).not.toContain(P_ARENA);
+    });
+
+    test('per product: a weed member read as capped stays blocked when its sibling\'s read fails; the sibling is released', async () => {
+      live();
+      capsFor({ [P_LEAD]: YEARLY, [P_CERT]: [{ message: 'read failed' }] });
+      const result = await guide(tablesFor());
+      expect(result.weedMix).toMatchObject({ mode: 'unavailable', blockedIds: [P_LEAD] });
+      expect(result.blockedProductIds).toContain(P_LEAD);
+      expect(result.blockedProductIds).not.toContain(P_CERT);
+      expect(result.unreadableProductIds).toContain(P_CERT);
+      expect(result.unreadableProductIds).not.toContain(P_LEAD);
+    });
+
+    test('per product: picks are judged one by one (one unreadable does not release a capped one)', async () => {
+      live();
+      capsFor({ [P_ART]: YEARLY, [P_ACE]: [{ message: 'read failed' }] });
+      const result = await guide(tablesFor());
+      expect(result.blockedProductIds).toContain(P_ART);
+      expect(result.unreadableProductIds).toContain(P_ACE);
+      expect(result.unreadableProductIds).not.toContain(P_ART);
+      expect(result.blockedProductIds).not.toContain(P_ACE);
+    });
+
     test('a pick with both a named limit and an unreadable one is blocked (the read forbids it)', async () => {
       live();
       capsFor({ [P_ART]: [{ message: 'read failed' }, { type: 'annual_max_apps', message: 'limit' }] });

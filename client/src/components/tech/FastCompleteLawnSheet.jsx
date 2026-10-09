@@ -454,7 +454,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
   // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
   const unreadable = settled ? [
     ...lowerIds(answered ? guide.unreadableProductIds : []),
-    ...(weedMix?.mode === 'unavailable' ? weedGroup : []),
+    // The mix is withheld as a whole; the members not read as forbidding are released.
+    ...(weedMix?.mode === 'unavailable' ? weedGroup.filter((id) => !lowerIds(weedMix.blockedIds).includes(id)) : []),
     ...lowerIds(chinch?.unreadableIds),
   ] : [];
   const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
