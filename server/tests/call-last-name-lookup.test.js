@@ -366,6 +366,20 @@ describe('county owner record', () => {
 });
 
 describe('our own records', () => {
+  test.each(['Unknown', 'N/A', 'NA', 'Customer', 'null', 'undefined', 'None', 'Q', 'No Name'])(
+    'a record whose last name is the placeholder %p is no evidence', async (placeholder) => {
+      setupDb({ call: tenant(), customers: [{ first_name: 'Pat', last_name: placeholder }] });
+      expect(await run()).toEqual({ suggested: false, outcome: 'no_answer' });
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    },
+  );
+
+  test('a placeholder beside a real surname does not make the answer ambiguous', async () => {
+    setupDb({ call: tenant(), customers: [{ first_name: 'Pat', last_name: 'Unknown' }, { first_name: 'Pat', last_name: 'Sampleton' }] });
+    await run();
+    expect(posted().opts.metadata.suggestions).toEqual([{ surname: 'Sampleton', sources: ['records'] }]);
+  });
+
   test('an international number is matched on its exact digits', async () => {
     const intl = { ...CALL, from_phone: '+442079460958', ai_extraction_enriched: { caller: { first_name: 'Pat', last_name: null, relationship_to_property: 'tenant' } } };
     const { records } = setupDb({ call: intl, customer: { ...CUSTOMER, phone: '+44 20 7946 0958' }, customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });

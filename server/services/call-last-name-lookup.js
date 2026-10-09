@@ -150,9 +150,21 @@ async function surnameFromCounty({ customer, relationship }) {
   return surname ? { surname } : { skip: 'no_single_owner_match' };
 }
 
+// Stored values that stand in for "no last name": the placeholders
+// customer-dedupe.js treats as missing (unknown, n/a, na), the artifacts
+// estimate-contact-gaps.js names (customer, undefined, null), and the other
+// fillers a form or an import leaves. Compared on letters only. One of these
+// as the sole suggestion would also use up the customer's one notification.
+const PLACEHOLDER_SURNAMES = new Set([
+  'unknown', 'na', 'none', 'null', 'undefined', 'customer', 'client', 'test', 'tbd', 'noname', 'nolastname',
+  'lastname', 'surname', 'name', 'resident', 'homeowner', 'owner', 'tenant', 'occupant', 'business', 'company',
+]);
 function cleanSurname(value) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-  return text && /^[\p{L}][\p{L}' -]*$/u.test(text) ? text : null;
+  if (!text || !/^[\p{L}][\p{L}' -]*$/u.test(text)) return null;
+  const letters = text.toLowerCase().replace(/[^\p{L}]/gu, '');
+  // A single letter is an initial, not a surname.
+  return letters.length < 2 || PLACEHOLDER_SURNAMES.has(letters) ? null : text;
 }
 
 // Another live customer or lead on the same email or phone with the same
