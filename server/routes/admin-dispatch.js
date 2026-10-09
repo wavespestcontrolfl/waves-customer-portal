@@ -2036,12 +2036,6 @@ router.get('/:serviceId/reentry-defaults', async (req, res, next) => {
     // identity alone is no-spray — seeds return to the line defaults so the
     // steppers reappear and the tech can adjust (codex inline r6).
     const applicationsRecorded = ['1', 'true'].includes(String(req.query.applicationsRecorded || '').toLowerCase());
-    // GATE_LAWN_REPORT_FACTS (owner 2026-10-08): the lawn report reads "ready to walk on" as a condition from the
-    // products applied (frozen at completion), so the clock steppers have nothing to set for a lawn visit. Zero seeds
-    // hide both; every other line keeps its seeds.
-    if (require('../config/feature-gates').lawnReportFactsLive() && detectServiceLine(svc.service_type) === 'lawn') {
-      return res.json({ exteriorMinutes: 0, interiorMinutes: 0, lawnCondition: true });
-    }
     const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, { applicationsRecorded });
     res.json({
       exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,

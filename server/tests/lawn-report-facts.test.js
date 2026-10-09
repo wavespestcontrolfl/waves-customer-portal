@@ -94,6 +94,76 @@ describe('one product\'s re-entry rule', () => {
   });
 });
 
+// Pinned against the production catalog (read-only, 2026-10-08): the 21 products the live v13 program uses, by
+// coalesce(reentry_summary, reentry_text) and rei_hours. The rule is NOT loosened to make more rows qualify:
+// missing or unreadable text is a catalog data gap the owner fills separately.
+describe('the label floor on the real catalog strings', () => {
+  const { parseReentryText } = require('../services/sms-label-facts');
+  const STAY_OFF = 'Stay off treated areas until the application has dried.';
+  const WATER_IN = 'Water in per the visit notes; no re-entry wait once dry.';
+  const FOLLOW_LABEL = 'Follow the product label and technician service report before re-entering treated areas.';
+  const FOLLOW_REPORT = 'Follow the technician service report for any product-specific instructions.';
+
+  // [products, text, rei_hours values seen, qualifies as a plain until-dry label, parser's reading]
+  const STRINGS = [
+    ['Acelepryn, Artavia, Talak, Blindside, Celsius, Certainty, Dimension 2EW, Headway, Stonewall 4FL, Tetrino, Velista', STAY_OFF, [null, 0], true, 'until_dry'],
+    ['LESCO 24-0-11 with PolyPlus OPTI', WATER_IN, [null], false, 'unreadable (null)'],
+    ['Arena 50 WDG', FOLLOW_LABEL, [null], false, 'none'],
+    ['Dispatch Sprayable', FOLLOW_REPORT, [null], false, 'unreadable (null)'],
+    ['Advion Fire Ant Bait, Dylox 6.2 G, Gravex 20 EW, LESCO 10-0-22, LESCO 90/10 Nonionic Surfactant, LESCO Dimension 0.21% 18-0-10, LESCO Nutra-TECH', undefined, [null, 0], false, 'no text'],
+  ];
+
+  test.each(STRINGS)('%s -> label plain until-dry: %s', (_products, text, reiValues, qualifies, reading) => {
+    const read = text ? parseReentryText(text) : null;
+    expect(read ? read.kind : (reading === 'no text' ? 'no text' : 'unreadable (null)')).toBe(reading);
+    for (const reentryHours of reiValues) {
+      expect(facts._test.labelIsPlainUntilDry({ reentryHours, reentrySummary: text })).toBe(qualifies);
+    }
+  });
+
+  describe('the full per-product rule (approved facts, so only the label decides)', () => {
+    const ruleOf = (text, method, wateringRule, reentryHours = null) => facts.productReentry(row('p', method, {
+      facts: { wateringRule, reentryHours, reentrySummary: text },
+    }));
+
+    test('the "Stay off ... until the application has dried" group: a spray or spot spray is dry; with a frozen water-in rule it is watered_in_and_dry', () => {
+      for (const reentryHours of [null, 0]) {
+        expect(ruleOf(STAY_OFF, 'broadcast_spray', rule('none'), reentryHours)).toEqual({ id: 'p', rule: 'dry', source: 'facts' });
+        expect(ruleOf(STAY_OFF, 'spot_treatment', null, reentryHours).rule).toBe('dry');
+        expect(ruleOf(STAY_OFF, 'broadcast_spray', rule('water_in'), reentryHours).rule).toBe('watered_in_and_dry');
+      }
+    });
+
+    test('LESCO 24-0-11: the parser does NOT read "no re-entry wait once dry" as until-dry, so even with a frozen water-in rule the product defaults', () => {
+      expect(parseReentryText(WATER_IN)).toBeNull();
+      expect(ruleOf(WATER_IN, 'granular_broadcast', rule('water_in'))).toEqual({ id: 'p', rule: null, source: 'default' });
+    });
+
+    test('the two "Follow the ..." sentences default, for every method and rule', () => {
+      for (const text of [FOLLOW_LABEL, FOLLOW_REPORT]) {
+        for (const [method, wateringRule] of [['broadcast_spray', rule('none')], ['spot_treatment', null], ['granular_broadcast', rule('water_in')]]) {
+          expect(ruleOf(text, method, wateringRule)).toEqual({ id: 'p', rule: null, source: 'default' });
+        }
+      }
+    });
+
+    test('rows with no text at all default, whatever the figure (null or the 0 sentinel), method or rule', () => {
+      for (const reentryHours of [null, 0]) {
+        for (const [method, wateringRule] of [['broadcast_spray', rule('none')], ['granular_broadcast', rule('water_in')], ['bait_placement', null]]) {
+          expect(ruleOf(undefined, method, wateringRule, reentryHours)).toEqual({ id: 'p', rule: null, source: 'default' });
+        }
+      }
+    });
+
+    test('a visit mixing the until-dry group with one unreadable row defaults as a whole', () => {
+      const ok = row('ok', 'broadcast_spray', { facts: { wateringRule: rule('none'), reentryHours: null, reentrySummary: STAY_OFF } });
+      const gap = row('gap', 'granular_broadcast', { facts: { wateringRule: rule('water_in'), reentryHours: null, reentrySummary: undefined } });
+      expect(facts.visitReentry([ok])).toMatchObject({ rule: 'dry', source: 'facts' });
+      expect(facts.visitReentry([ok, gap])).toMatchObject({ rule: 'default', source: 'default' });
+    });
+  });
+});
+
 describe('the visit\'s rule is the strictest of its products', () => {
   test('spray only -> dry', () => {
     expect(facts.visitReentry([SPRAY, SPOT_HERBICIDE])).toMatchObject({ rule: 'dry', source: 'facts' });
@@ -390,12 +460,14 @@ describe('the frozen block is read strictly, and only from the record', () => {
     expect(facts.frozenTiedFamilies(notes(block({ ties: { assessmentId: '77', items: [] } })))).toEqual([]);
   });
 
-  test('an admin correction of the re-entry minutes keeps the clock for that record', () => {
+  test('an ADMIN correction of the re-entry minutes (structured_notes.reentryAdjusted) keeps the clock; a technician stepper never overrides the condition', () => {
     const record = { structured_notes: notes(block()) };
     expect(facts.frozenReentryForRecord(record)).toMatchObject({ rule: 'dry' });
-    expect(facts.frozenReentryForRecord({ ...record, advisory: { reentry_adjusted: { exterior: true, interior: false } } })).toBeNull();
-    expect(facts.frozenReentryForRecord({ ...record, advisory: JSON.stringify({ reentry_adjusted: true }) })).toBeNull();
-    expect(facts.frozenReentryForRecord({ ...record, advisory: { reentry_adjusted: { exterior: false, interior: true } } })).toMatchObject({ rule: 'dry' });
+    const admin = JSON.stringify({ ...JSON.parse(notes(block())), reentryAdjusted: true, reentryRev: 1 });
+    expect(facts.frozenReentryForRecord({ structured_notes: admin })).toBeNull();
+    // The technician's stepper at completion marks only advisory.reentry_adjusted: the condition wins.
+    expect(facts.frozenReentryForRecord({ ...record, advisory: { reentry_adjusted: { exterior: true, interior: false } } })).toMatchObject({ rule: 'dry' });
+    expect(facts.frozenReentryForRecord({ ...record, advisory: JSON.stringify({ reentry_adjusted: true }) })).toMatchObject({ rule: 'dry' });
   });
 
   describe('the PDF key follows the frozen decision and never a gate', () => {

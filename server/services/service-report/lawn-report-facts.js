@@ -341,15 +341,15 @@ function frozenReentryRule(structuredNotes) {
 }
 
 /**
- * The frozen rule a RENDER of this record reads: frozenReentryRule, unless an admin corrected the
- * re-entry minutes afterwards (advisory.reentry_adjusted for the exterior side), when the minutes the
- * admin typed stand and the record renders its clock as before.
+ * The frozen rule a RENDER of this record reads: frozenReentryRule, unless an ADMIN corrected the re-entry
+ * minutes afterwards (the PATCH stamps structured_notes.reentryAdjusted), when the minutes the admin typed
+ * stand and the record renders its clock as before. A technician's stepper at completion (it marks only
+ * advisory.reentry_adjusted) never overrides the condition: the condition wins.
  */
 function frozenReentryForRecord(record) {
   const rule = frozenReentryRule(record && record.structured_notes);
   if (!rule) return null;
-  const adjusted = parseJsonObject(record.advisory).reentry_adjusted;
-  return adjusted === true || (isPlain(adjusted) && adjusted.exterior === true) ? null : rule;
+  return parseJsonObject(record.structured_notes).reentryAdjusted === true ? null : rule;
 }
 
 /** { [service_products.id]: 'Spot treatment, about 250 sq ft' } for the frozen spot rows. */

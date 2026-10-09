@@ -102,8 +102,28 @@ describe('the re-entry context (the one source every surface reads)', () => {
     expect(ctx).not.toHaveProperty('condition');
   });
 
-  test('an admin correction of the minutes keeps the clock for that record', () => {
-    const ctx = buildReentryContextFromRecord(lawnRecord(block(DRY), { advisory: { exterior_reentry_min: 45, reentry_adjusted: { exterior: true, interior: false } } }), NOW);
+  describe('the technician\'s re-entry stepper (still shown, seeds unchanged)', () => {
+    const stepper = { exterior_reentry_min: 45, pet_advisory: 'Keep pets off treated turf until dry.', reentry_adjusted: { exterior: true, interior: false } };
+
+    test('on a record that carries a frozen condition the override does not change what the customer sees: the condition wins', () => {
+      const plain = buildReentryContextFromRecord(lawnRecord(block(DRY)), NOW);
+      const overridden = buildReentryContextFromRecord(lawnRecord(block(DRY), { advisory: stepper }), NOW);
+      expect(overridden).toEqual(plain);
+      expect(overridden.targets).toEqual([]);
+      expect(overridden.customerSummary).toBe(TODAY.dry);
+    });
+
+    test('on a default record the override works exactly as on a record with no block', () => {
+      const withDefault = buildReentryContextFromRecord(lawnRecord(block(DEFAULTED), { advisory: stepper }), NOW);
+      const noBlock = buildReentryContextFromRecord(lawnRecord('{}', { advisory: stepper }), NOW);
+      expect(withDefault.targets[0]).toMatchObject({ key: 'exterior', durationMin: 45 });
+      expect(withDefault).toEqual(noBlock);
+    });
+  });
+
+  test('an ADMIN correction after the fact (structured_notes.reentryAdjusted) keeps the minutes and the clock for that record', () => {
+    const notes = JSON.stringify({ ...JSON.parse(block(DRY)), reentryAdjusted: true, reentryRev: 1 });
+    const ctx = buildReentryContextFromRecord(lawnRecord(notes, { advisory: { exterior_reentry_min: 45, reentry_adjusted: { exterior: true, interior: false } } }), NOW);
     expect(ctx.targets[0]).toMatchObject({ durationMin: 45 });
     expect(ctx).not.toHaveProperty('condition');
   });
