@@ -271,6 +271,14 @@ describe('missing-geo notice budget (Codex #6208 r3)', () => {
     expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
   });
 
+  // notifyAdmin resolves null on a failed write: no notice, no slot (r14 P2).
+  test('a notice write that resolves null spends no slot', async () => {
+    visitsWithoutPin(11);
+    notifications.notifyAdmin.mockResolvedValueOnce(null);
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(11);
+  });
+
   test('a visit with a standing notice is refreshed and spends no budget', async () => {
     visitsWithoutPin(12);
     audit.standingMissingGeoKeys.mockResolvedValue(new Set(['auto-dispatch-missing-geo:g11:2026-08-21']));

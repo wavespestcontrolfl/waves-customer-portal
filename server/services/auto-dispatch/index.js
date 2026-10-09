@@ -614,7 +614,7 @@ async function flagMissingGeo(service) {
   try {
     const date = toDateStr(service.scheduled_date);
     const { shortDateET } = require('../admin-alert-names');
-    await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+    const notice = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
       area: 'Schedule',
       action: 'fix the address pin on a visit',
       why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
@@ -632,7 +632,9 @@ async function flagMissingGeo(service) {
       refreshOnDedupe: true,
       metadata: { scheduledServiceId: service.id, customerId: service.customer_id, scheduledDate: date },
     });
-    return true;
+    // notifyAdmin resolves null when the write fails and a row with no id
+    // when it suppresses: neither recorded a notice (Codex #6208 r14 P2).
+    return !!(notice && notice.id);
   } catch (err) {
     logger.warn(`[auto-dispatch] missing-geo notice failed for ${service && service.id}: ${err.message}`);
     return false;
