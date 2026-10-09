@@ -1426,7 +1426,10 @@ function stationPartOf(heard) {
 // stations or the station read did not answer, which leaves the marks as they
 // are. The sheet's own marks judge them again by the stations it shows.
 function stationExceptionsOf(heard) {
-  if (heard?.stationRead !== 'read' || !Array.isArray(heard.stationExceptions)) return undefined;
+  // A clean read, or an unresolved one (part of what was said could not be pinned
+  // down): the exceptions that verified come either way.
+  const brought = heard?.stationRead === 'read' || heard?.stationReadDetail === 'unresolved';
+  if (!brought || !Array.isArray(heard.stationExceptions)) return undefined;
   return heard.stationExceptions.filter((item) => item && typeof item.id === 'string' && typeof item.status === 'string' && typeof item.quote === 'string');
 }
 

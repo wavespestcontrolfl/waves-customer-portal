@@ -84,3 +84,18 @@ describe("the card's table", () => {
     expect(["none", "reading", "failed", "ok", "hand"].map((s) => READ_VIEW[s].undoButton)).toEqual([false, false, false, false, true]);
   });
 });
+
+describe("an unresolved read", () => {
+  it("is its own status: not known, held, offering the hand check, and the card opens", () => {
+    const state = run({ type: "readStarted", note: N }, { type: "readFailed", note: N, detail: "unresolved" });
+    expect(readStatusFor(state, N)).toBe("unresolved");
+    expect(READ_VIEW.unresolved).toMatchObject({ known: false, handButton: true, opensCard: true });
+    expect(READ_VIEW.unresolved.hold).toMatch(/Couldn’t match everything you said about the stations/);
+    expect(stationSummary({ registryState: "ready", hold: "", readStatus: "unresolved", count: 4, flagged: 1 })).toBe("4 stations. Couldn’t match everything you said about them.");
+  });
+
+  it("a later clean read of the same note replaces it", () => {
+    const state = run({ type: "readFailed", note: N, detail: "unresolved" }, { type: "readSucceeded", note: N });
+    expect(readStatusFor(state, N)).toBe("ok");
+  });
+});

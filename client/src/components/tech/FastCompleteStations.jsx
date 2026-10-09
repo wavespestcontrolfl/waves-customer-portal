@@ -38,6 +38,12 @@ import {
 // stations, or the stations checked by hand): nothing to ask, nothing to settle.
 export const NO_STATION_READ = Object.freeze({ body: () => ({}), begin: () => {}, check: () => '' });
 
+// The state machine's event for how a read ended.
+const settlement = (ok, detail, note) => {
+  if (ok) return { type: 'readSucceeded', note };
+  return detail === 'roster_changed' ? { type: 'rosterChanged', note } : { type: 'readFailed', note, detail };
+};
+
 // What a visit with no stations allows: nothing held.
 export const NO_STATION_GATE = Object.freeze({ generate: '', complete: '' });
 
@@ -66,12 +72,14 @@ export function useStationChecks({ service, request, enabled = false, note = '' 
     body: () => ({ stations: roster }),
     begin: (readNote) => read.send({ type: 'readStarted', note: readNote }),
     // Settles the read for the note it read; '' when it succeeded, else why not.
+    // An 'unresolved' read still brings the exceptions that did verify, marked on
+    // the chips for the tech to confirm or change.
     check: (facts, readNote) => {
-      const ok = facts.stationRead === 'read';
-      if (ok) read.send({ type: 'readSucceeded', note: readNote });
-      else read.send({ type: facts.stationReadDetail === 'roster_changed' ? 'rosterChanged' : 'readFailed', note: readNote });
-      if (facts.stationReadDetail === 'roster_changed') reload();
-      return ok ? '' : (READ_FAILED_MESSAGES[facts.stationReadDetail] || READ_FAILED_MESSAGES.default);
+      const { stationRead: verdict, stationReadDetail: detail } = facts;
+      read.send(settlement(verdict === 'read', detail, readNote));
+      if (detail === 'roster_changed') reload();
+      if (detail === 'unresolved' && facts.stationExceptions) marks.applyHeard(facts.stationExceptions);
+      return verdict === 'read' ? '' : (READ_FAILED_MESSAGES[detail] || READ_FAILED_MESSAGES.default);
     },
   } : NO_STATION_READ;
 

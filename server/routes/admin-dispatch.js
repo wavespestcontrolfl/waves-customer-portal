@@ -1009,7 +1009,9 @@ async function loadAndReadStationFacts({ svc, profile, note, requested }) {
 }
 
 // The answer the sheet takes from that read: `stationRead` is 'read' only when
-// the note was read (or had nothing to read), else 'failed', with no exceptions.
+// the note was read (or had nothing to read) and everything the model returned
+// verified; else 'failed' with a detail (`unresolved`: part of what was said could
+// not be pinned down, the verified exceptions come beside it).
 // A throw, a timeout, a registry error or a roster that came to nothing is
 // 'failed', never an empty list the sheet could take for "all stations OK".
 async function readStationFactsForVisit(args) {
@@ -1018,7 +1020,9 @@ async function readStationFactsForVisit(args) {
     const facts = await loadAndReadStationFacts(args);
     if (!facts) return null;
     const verdict = stationReadVerdict(facts.status);
-    return { status: verdict, detail: facts.status, exceptions: verdict === 'read' ? facts.exceptions : [] };
+    // The exceptions that verified ride along even with an 'unresolved' verdict,
+    // for the sheet to pre-mark; every other failure carries none.
+    return { status: verdict, detail: facts.status, exceptions: facts.exceptions || [] };
   } catch {
     return { status: 'failed', detail: 'error', exceptions: [] };
   }

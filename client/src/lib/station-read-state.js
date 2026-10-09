@@ -22,7 +22,9 @@ const EVENTS = {
   noteChanged: (state, { note }) => (state.attempt && state.attempt.note !== clean(note) ? { ...state, attempt: null } : state),
   readStarted: (state, { note }) => ({ ...state, attempt: { note: clean(note), status: 'reading' } }),
   readSucceeded: (state, { note }) => ({ ...state, reads: { ...state.reads, [clean(note)]: 'ok' }, attempt: null }),
-  readFailed: (state, { note }) => ({ ...state, attempt: { note: clean(note), status: 'failed' } }),
+  // `detail` 'unresolved': the note was read but part of what it said about the
+  // stations could not be pinned down, so it is not a clean read either.
+  readFailed: (state, { note, detail }) => ({ ...state, attempt: { note: clean(note), status: detail === 'unresolved' ? 'unresolved' : 'failed' } }),
   handConfirmed: (state) => ({ ...state, byHand: true }),
   handCleared: (state) => ({ ...state, byHand: false }),
   // The property's stations changed under the sheet: nothing read or checked
@@ -64,6 +66,11 @@ export const READ_VIEW = {
     summary: ({ count }) => `${plural(count, 'station')}. Couldn’t read them from your note.`,
     hold: 'Couldn’t read the stations from your note. Try again, or mark them by hand and tap “Stations checked by hand”.',
   },
+  unresolved: {
+    known: false, warn: true, opensCard: true, handButton: true, undoButton: false, retryHint: true,
+    summary: ({ count }) => `${plural(count, 'station')}. Couldn’t match everything you said about them.`,
+    hold: 'Couldn’t match everything you said about the stations. Mark them by hand and confirm.',
+  },
   ok: {
     known: true, warn: false, opensCard: false, handButton: false, undoButton: false, retryHint: false,
     summary: ({ count, flagged }) => (flagged ? `${plural(count, 'station')}, ${flaggedText(flagged)}` : `${plural(count, 'station')}, all OK`),
@@ -84,6 +91,7 @@ export function stationSummary({ registryState, hold, readStatus, count, flagged
 
 // What the sheet says when a read did not succeed, by the server's detail.
 export const READ_FAILED_MESSAGES = {
+  unresolved: 'Couldn’t match everything you said about the stations. Mark them by hand and confirm.',
   roster_changed: 'The stations on this property changed, so they are loaded again. Try again.',
   default: 'Couldn’t read the stations from your note. Try again, or mark the stations by hand and confirm.',
 };

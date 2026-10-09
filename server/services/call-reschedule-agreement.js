@@ -1170,8 +1170,12 @@ function evaluateSpokenRun(words) {
 // 20 too), or NaN for a malformed or ambiguous run. The typed visit reader
 // (visit-typed-facts.js) grounds a count on it; spokenFiguresIn keeps the
 // runs a price can be.
-function spokenNumbersIn(text) {
-  const tokens = String(text || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+// `lists`: a comma, semicolon, slash or ampersand ends a run, so a spoken list
+// ("two, three and five", "two/three") reads as its numbers and not as one
+// malformed run. Off, the text reads as it always has ("one thousand, two hundred").
+function spokenNumbersIn(text, { lists = false } = {}) {
+  const source = lists ? String(text || '').replace(/[,;/&]/g, ' listbreak ') : text;
+  const tokens = String(source || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
   const out = [];
   for (let i = 0; i < tokens.length;) {
     const aBeforeMultiplier = tokens[i] === 'a' && (tokens[i + 1] === 'hundred' || tokens[i + 1] === 'thousand');
@@ -1190,8 +1194,33 @@ function spokenNumbersIn(text) {
   return out;
 }
 
+// Every whole number a quote states, for a quote that names things by number
+// (a station, a bay): digits as written, number words (spokenNumbersIn), and
+// LISTS of either ("2,3", "2, 3 and 5", "2/3", "2 & 3", "two, three") and
+// digit ranges ("2-4", "2 through 4", "2 to 4": every number in them). A decimal
+// ("4.5") or an ordinal ("4th") states no whole number, and 1,000 is a thousand.
+// NaN stands for a malformed or ambiguous spoken run, which matches nothing.
+const NUMBER_RANGE = /\b(\d{1,3})\s*(?:-|\u2010-\u2015|to|through|thru)\s*(\d{1,3})\b/gi;
+const MAX_RANGE = 80;
+function numbersStatedIn(text) {
+  const out = [];
+  const plain = String(text || '').replace(NUMBER_RANGE, (whole, from, to) => {
+    const [a, b] = [Number(from), Number(to)];
+    // Not a range worth expanding (backwards, or too wide): the two numbers stand as written.
+    if (!(b > a && b - a <= MAX_RANGE)) return whole;
+    for (let n = a; n <= b; n += 1) out.push(n);
+    return ' ';
+  });
+  for (const [token] of plain.matchAll(/\d+(?:[.,]\d+)*(?:st|nd|rd|th)?/gi)) {
+    if (/^\d+$/.test(token)) out.push(Number(token));
+    else if (/^\d{1,3}(?:,\d{3})+$/.test(token)) out.push(Number(token.replace(/,/g, '')));
+    else if (/^\d+(?:,\d+)+$/.test(token)) out.push(...token.split(',').map(Number));
+  }
+  return [...out, ...spokenNumbersIn(text, { lists: true })];
+}
+
 function spokenFiguresIn(text) {
   return spokenNumbersIn(text).filter((value) => Number.isNaN(value) || value >= 20);
 }
 
-module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn } };
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn, numbersStatedIn } };

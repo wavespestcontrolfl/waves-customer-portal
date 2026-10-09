@@ -473,11 +473,18 @@ describe('the typed read and the station read are independent: all four combinat
   const stationsRead = { stationRead: 'read', stationExceptions: TERMITE_READ.stationExceptions };
   const stationsFailed = { stationRead: 'failed', stationExceptions: [] };
   const typedOk = { available: true, status: 'read', type: 'termite_bait_station', heard: {}, unclearFields: [], values: TERMITE_READ.values };
+  // A station read that returned something that did not verify: failed, "unresolved",
+  // with the exceptions that did verify beside it.
+  const stationsUnresolved = { stationRead: 'failed', stationReadDetail: 'unresolved', stationExceptions: [TERMITE_READ.stationExceptions[0]] };
+  const FAILED_MSG = /Couldn’t read the stations from your note\. Try again/;
+  const UNRESOLVED_MSG = /Couldn’t match everything you said about the stations\. Mark them by hand and confirm\./;
   const TABLE = [
     ['typed ok, stations read', { ...typedOk, ...stationsRead }, { report: true, typedFilled: true, stationsRead: true }],
     ['typed failed, stations read', { ...typedFailed, ...stationsRead }, { report: true, typedFilled: false, stationsRead: true }],
-    ['typed ok, stations failed', { ...typedOk, ...stationsFailed }, { report: false, typedFilled: false, stationsRead: false }],
-    ['both failed', { ...typedFailed, ...stationsFailed }, { report: false, typedFilled: false, stationsRead: false }],
+    ['typed ok, stations failed', { ...typedOk, ...stationsFailed }, { report: false, message: FAILED_MSG, summary: '4 stations. Couldn’t read them from your note.' }],
+    ['both failed', { ...typedFailed, ...stationsFailed }, { report: false, message: FAILED_MSG, summary: '4 stations. Couldn’t read them from your note.' }],
+    ['typed ok, stations unresolved', { ...typedOk, ...stationsUnresolved }, { report: false, message: UNRESOLVED_MSG, summary: '4 stations. Couldn’t match everything you said about them.' }],
+    ['typed failed, stations unresolved', { ...typedFailed, ...stationsUnresolved }, { report: false, message: UNRESOLVED_MSG, summary: '4 stations. Couldn’t match everything you said about them.' }],
   ];
 
   test.each(TABLE)('%s', async (_label, typedFacts, expected) => {
@@ -488,9 +495,9 @@ describe('the typed read and the station read are independent: all four combinat
     fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
     if (!expected.report) {
       // Stations not known: no report, nothing asserted, whatever the form read said.
-      await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+      await screen.findByText(expected.message, {}, { timeout: 10000 });
       expect(request.bodies('generate-report')).toEqual([]);
-      expect(within(stationsCard()).getByText('4 stations. Couldn’t read them from your note.')).toBeTruthy();
+      expect(within(stationsCard()).getByText(expected.summary)).toBeTruthy();
       expect(within(stationsCard()).queryByText(/all OK/)).toBeNull();
       expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
       return;
@@ -570,5 +577,60 @@ describe('a read that is refreshed or whose roster went stale', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
     expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'activity' }, { number: 3, status: 'serviced' }]);
+  }, 30000);
+});
+
+describe('part of what the note said about the stations could not be pinned down', () => {
+  const unresolved = {
+    ...TERMITE_READ,
+    stationRead: 'failed',
+    stationReadDetail: 'unresolved',
+    stationExceptions: [TERMITE_READ.stationExceptions[0]],
+  };
+
+  async function generateUnresolved(request) {
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText(/Couldn’t match everything you said about the stations/, {}, { timeout: 10000 });
+  }
+
+  test('no report, nothing asserted, Complete held; the exceptions that verified are pre-marked for the tech to see', async () => {
+    const request = makeRequest({ typedFacts: unresolved });
+    await generateUnresolved(request);
+    expect(request.bodies('generate-report')).toEqual([]);
+    expect(request.bodies('/complete')).toEqual([]);
+    const card = stationsCard();
+    expect(within(card).getByText('4 stations. Couldn’t match everything you said about them.')).toBeTruthy();
+    expect(within(card).queryByText(/all OK/)).toBeNull();
+    expect(within(card).getByRole('button', { name: 'Station 2: Activity' })).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Stations checked by hand' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+  }, 30000);
+
+  test('the hand check goes on: the hand marks (the pre-marked chip changed by the tech) are what is sent', async () => {
+    const request = makeRequest({ typedFacts: unresolved });
+    await generateUnresolved(request);
+    // Station 2 was pre-marked Activity; the tech makes it Serviced, flags station 4, and confirms.
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 2: Activity' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Flag a station' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 4' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Stations checked by hand' }));
+    expect(within(stationsCard()).getByText('4 stations, checked by hand, 2 flagged, the rest OK')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'serviced' }, { number: 4, status: 'activity' }]);
+    const body = await send(request);
+    expect(body.termiteStations.map((entry) => entry.status)).toEqual(['ok', 'serviced', 'ok', 'activity']);
+  }, 40000);
+
+  test('Try again with a note that now reads clean goes on with the exceptions it named', async () => {
+    let calls = 0;
+    const request = makeRequest({ typedFacts: () => { calls += 1; return calls === 1 ? unresolved : TERMITE_READ; } });
+    await generateUnresolved(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    expect(within(stationsCard()).getByText('4 stations, 2 flagged, the rest OK')).toBeTruthy();
   }, 30000);
 });

@@ -74,6 +74,26 @@ describe('useStationChecks', () => {
     expect(result.current.currentChecks()).toEqual([]);
   });
 
+  test('an unresolved read asserts nothing, says why, and pre-marks the exceptions that verified', async () => {
+    const { result } = await mount();
+    act(() => { result.current.stationRead.begin(N); });
+    let message;
+    act(() => {
+      message = result.current.stationRead.check({
+        stationRead: 'failed', stationReadDetail: 'unresolved', stationExceptions: [{ id: 'st-2', status: 'activity', quote: N }],
+      }, N);
+    });
+    expect(message).toMatch(/Couldn’t match everything you said about the stations/);
+    expect(result.current.readStatus).toBe('unresolved');
+    expect(result.current.currentChecks()).toBeNull();
+    expect(result.current.entries()).toEqual([]);
+    expect(result.current.gate.complete).toMatch(/Mark them by hand and confirm/);
+    expect(result.current.marks.statuses).toEqual({ 'st-2': 'activity' });
+    // The hand check then stands on the marks the tech sees.
+    act(() => { result.current.confirmByHand(); });
+    expect(result.current.currentChecks()).toEqual([{ number: 2, status: 'activity' }]);
+  });
+
   test('a roster that changed under the sheet loads the registry again and clears what was read', async () => {
     const { result, request } = await mount();
     read(result, N);
