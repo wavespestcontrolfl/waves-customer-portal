@@ -576,7 +576,9 @@ describe('booking time: an estimate with no customer_id of its own is checked fo
   test('staff booking: the route passes the booking customer and property to the recheck', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(src).toContain('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
-    expect(src).toMatch(/assertAreaAddOnLimitsOpen\(trx, \{\s+estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,\s+\}\)/);
+    // Inside the transaction the recheck reads the row that transaction locked (assertLockedEstimateAddOns), never the preflight copy.
+    expect(src).toMatch(/assertLockedEstimateAddOns\(trx, freshLinkedEstimate, \{\s+billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,\s+\}\)/);
+    expect(src).toMatch(/assertAreaAddOnLimitsOpen\(trx, \{\s+estimate, customerId, property, appliedOn, staff: true,\s+\}\)/);
   });
 
   test('Mark Won and the public accept: a booked appointment linked to the estimate names the customer and its property', async () => {
@@ -824,6 +826,10 @@ describe('where the recheck runs (source order)', () => {
     expect(lock).toBeGreaterThan(0);
     expect(rowLock).toBeGreaterThan(lock);
     expect(check).toBeGreaterThan(rowLock);
+    // The recheck reads the handler's earlier copy of the estimate; the claim UPDATE just above it (after the FOR UPDATE) is a
+    // compare-and-swap on that copy's updated_at, so a changed estimate is a 0-row 409 and the transaction rolls back before the recheck.
+    expect(src).toContain("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)");
+    expect(src.indexOf("const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate()")).toBeLessThan(src.indexOf('.update(withServedDisclosurePreserved(trx, acceptedUpdates));'));
     expect(setupIntent).toBeGreaterThan(check);
     // ... and before the account step creates the customer the recheck must have judged.
     expect(account).toBeGreaterThan(check);
@@ -837,14 +843,21 @@ describe('where the recheck runs (source order)', () => {
     expect(book).toBeGreaterThan(0);
     expect(book).toBeLessThan(schedule.indexOf('db.transaction', book));
     const customerLock = schedule.indexOf('await lockCustomerComms(trx, customerId);', book);
-    const again = schedule.indexOf("assertAreaAddOnLimitsOpen(trx, {\n            estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,", customerLock);
+    const again = schedule.indexOf('await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {', customerLock);
     const insert = schedule.indexOf("[svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');", again);
     expect(customerLock).toBeGreaterThan(book);
     expect(again).toBeGreaterThan(customerLock);
     expect(insert).toBeGreaterThan(again);
     const won = read('services/estimate-manual-acceptance.js');
     expect(won).toContain('estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer');
-    expect(won.indexOf('await lockCustomerComms(trx, estimate.customer_id);')).toBeLessThan(won.indexOf('assertAreaAddOnLimitsOpen(trx, {'));
+    // comms lock, then the estimate row FOR UPDATE, then the recheck on the locked row (Codex round 14): never the first read
+    const commsAt = won.indexOf('await lockCustomerComms(trx, estimate.customer_id);');
+    const rowLockAt = won.indexOf("const freshLinkRow = await trx('estimates').where({ id: estimateId }).forUpdate().first();");
+    const recheckAt = won.indexOf('await assertAddOnsAcceptable(trx, estimate, {');
+    expect(commsAt).toBeGreaterThan(0);
+    expect(rowLockAt).toBeGreaterThan(commsAt);
+    expect(recheckAt).toBeGreaterThan(rowLockAt);
+    expect(won.indexOf('if (freshLinkRow) estimate = { ...estimate, ...freshLinkRow };')).toBeLessThan(recheckAt);
   });
 
   test('the quote steps attach the history; the engine file never queries', () => {
@@ -913,11 +926,11 @@ describe('the booking fence: every reader of a customer\'s add-on history holds 
     // Mark Won: the estimate's own customer is locked at the top; a customer the check finds is fenced
     const markWon = read('services/estimate-manual-acceptance.js');
     expect(markWon).toContain('fenceCustomer: (id) => addOnLimits.fenceCustomerBookings(trx, id),');
-    expect(markWon.indexOf('await lockCustomerComms(trx, estimate.customer_id);')).toBeLessThan(markWon.indexOf('addOnLimits.assertAreaAddOnLimitsOpen(trx'));
+    expect(markWon.indexOf('await lockCustomerComms(trx, estimate.customer_id);')).toBeLessThan(markWon.indexOf('await assertAddOnsAcceptable(trx, estimate, {'));
     // Staff booking: the limits are read AFTER lockCustomerComms(trx, customerId) of the booking's customer
     const schedule = read('routes/admin-schedule.js');
     const lockAt = schedule.indexOf('await lockCustomerComms(trx, customerId);', schedule.indexOf('Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the'));
-    const recheckAt = schedule.indexOf("require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {");
+    const recheckAt = schedule.indexOf('await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {');
     expect(lockAt).toBeGreaterThan(0);
     expect(recheckAt).toBeGreaterThan(lockAt);
     // The extend commits no application and runs no recheck; the card intents mint a SetupIntent and read no history

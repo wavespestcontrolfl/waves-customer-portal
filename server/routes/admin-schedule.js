@@ -2008,6 +2008,27 @@ async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons, r
   }
 }
 
+// The columns of the estimate a staff booking links: read once before the booking transaction (the preflight) and again
+// FOR SHARE inside it. The locked read is the row every add-on decision of the transaction uses.
+const LINKED_ESTIMATE_COLUMNS = Object.freeze([
+  'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
+  'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id',
+]);
+
+// The add-on decisions of a staff booking made inside its transaction, on the linked estimate row that transaction holds locked:
+// a gated add-on whose gate is off, a recurring accept that would drop a sold add-on, and the add-ons' yearly limits under the
+// customer lock (the preflight read ran before it, so two bookings of one customer could each pass it). Nothing is left out of
+// the count: an accepted estimate booked a second time counts its first booking. Thrown as the same 409 the preflight returns.
+async function assertLockedEstimateAddOns(trx, estimate, { billingTerm, customerId, property, appliedOn }) {
+  const refusal = require('../services/estimate-manual-acceptance').persistedAddOnRefusal(estimate, {
+    action: 'booking from it', billingTerm, checkRecurring: estimate.status !== 'accepted',
+  });
+  if (refusal) throw Object.assign(httpError(409, refusal.message), { code: refusal.code });
+  await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
+    estimate, customerId, property, appliedOn, staff: true,
+  });
+}
+
 function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
@@ -7984,11 +8005,7 @@ async function scheduleCreateHandler(req, res, next) {
     if (linkedEstimateId) {
       linkedEstimate = await db('estimates')
         .where({ id: linkedEstimateId })
-        .first(
-          'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
-          'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option',
-          'property_id',
-        );
+        .first(...LINKED_ESTIMATE_COLUMNS);
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
       // A quote priced for one property must not book at another: the
       // estimate's own linkage would otherwise re-stamp the visit to the
@@ -8711,6 +8728,9 @@ async function scheduleCreateHandler(req, res, next) {
     // the estimate's frozen disclosure), a failed attach/accept leaves it so
     // the first completion still collects (codex #3591 r62 P1).
     let directRodentSetupStamp = 0;
+    // The linked estimate as the booking transaction read it under its lock (see assertLockedEstimateAddOns); the preflight copy
+    // until that read.
+    let lockedLinkedEstimate = linkedEstimate;
     await db.transaction(async (trx) => {
       // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
       // occupancy lock, FIRST statement of the trx, before the comms lock
@@ -8786,7 +8806,7 @@ async function scheduleCreateHandler(req, res, next) {
         // restored loser's source_estimate_id onto a kept-customer visit.
         if (linkedEstimateId) {
           const freshLinkedEstimate = await trx('estimates')
-            .where({ id: linkedEstimateId }).forShare().first('id', 'customer_id', 'property_id');
+            .where({ id: linkedEstimateId }).forShare().first(...LINKED_ESTIMATE_COLUMNS);
           if (!freshLinkedEstimate
             || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
             const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
@@ -8803,11 +8823,12 @@ async function scheduleCreateHandler(req, res, next) {
             && String(freshLinkedEstimate.property_id) !== String(bookingProperty.property_id)) {
             throw Object.assign(httpError(422, 'This estimate was quoted for a different property. Choose that address or book without the estimate.'), { code: 'ESTIMATE_PROPERTY_MISMATCH' });
           }
-          // The add-ons' yearly limits again, UNDER the customer lock taken above: the preflight read ran before it, so two staff
-          // bookings (or a booking and the customer's own accept) of this customer could each pass it. Nothing is left out: an
-          // accepted estimate booked a second time counts its first booking.
-          await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
-            estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,
+          // Every add-on decision again, on the row this transaction now holds FOR SHARE (an estimator save waits behind it),
+          // never on the preflight copy: the gated and recurring-plan refusals and the yearly limits under the customer lock.
+          // The scope writer below reads the same row.
+          lockedLinkedEstimate = freshLinkedEstimate;
+          await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {
+            billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,
           });
         }
       }
@@ -9008,7 +9029,7 @@ async function scheduleCreateHandler(req, res, next) {
       // The sold area (scope) of the linked estimate's area add-ons, rebuilt from the estimate on the server (never from the
       // posted lines) and written by the same writer the customer's accept uses: without it the job card withholds the rate.
       await require('../services/area-addon-visit-rows').writeStaffBookedAreaAddOnScopes(trx, {
-        scheduledServiceId: svc.id, estimate: linkedEstimate, ownServiceKey: svc.service_key_snapshot,
+        scheduledServiceId: svc.id, estimate: lockedLinkedEstimate, ownServiceKey: svc.service_key_snapshot,
       });
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.
@@ -28242,6 +28263,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
+  assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,
