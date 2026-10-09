@@ -110,6 +110,11 @@ const BILLING_RIDER_KEYS = [
   // schedule. Its profile ships in the enforced internal_only/disabled
   // posture directly.
   'rodent_guarantee',
+  // Vehicle roach add-on (owner ruling 2026-10-06, migration 20261008150000):
+  // the $99 car treatment added to a home German roach job. An invoice line
+  // plus a reference in the home visit's cockroach report, no report of its
+  // own; its profile ships internal_only/disabled.
+  'vehicle_roach_addon',
 ];
 
 // Recurring programs whose GENERIC Service Report V1 is the decided lane —

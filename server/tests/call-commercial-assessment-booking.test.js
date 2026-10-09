@@ -1084,7 +1084,7 @@ describe('codex #6046 round 7', () => {
     expect(apsCohortVersion(undefined)).toBe(APS_PROMPT_HASH);
     const src = fs.readFileSync(path.join(__dirname, '../scripts/v2-promotion-readiness.js'), 'utf8');
     expect(src).not.toMatch(/like.*APS_PROMPT_HASH/);
-    expect(src).toContain('loadBookableCallServices(db)');
+    expect(src).toContain('loadBookableCallServices(db, { includeVehicleRoach: true })');
   });
 
   describe('V2 quote signals and estimate words are price talk', () => {

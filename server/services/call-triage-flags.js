@@ -1072,6 +1072,36 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
   };
 }
 
+// Vehicle service unit waiver (GATE_CALL_VEHICLE_ROACH_BOOKING, owner ruling
+// 2026-10-06; caller checks the gate). A vehicle job treats the car in the lot,
+// so Google's "missing subpremise" on an apartment or condo address is not a
+// reason to hold it. Explicit service allowlist (the call must RESOLVE a
+// bookable catalog row with one of these keys). Every other address check that
+// deriveStatus applies still holds: in service area, nothing unconfirmed,
+// nothing replaced, and the unit must be the ONLY missing component. The
+// waived copy carries the shared wholeStructureUnitWaived marker with reason
+// 'vehicle_service', so reconstructWaivedAddressValidation and the offline
+// audits rebuild it (the audits carry it when the resolved service matches).
+const VEHICLE_SERVICE_UNIT_WAIVER_REASON = 'vehicle_service';
+const VEHICLE_SERVICE_KEYS = new Set(['vehicle_german_roach']);
+
+function applyVehicleServiceUnitWaiver(av, opts = {}) {
+  if (!opts.enabled) return av;
+  if (!opts.serviceKey || !VEHICLE_SERVICE_KEYS.has(String(opts.serviceKey))) return av;
+  if (!isMissingUnitNumber(av)) return av;
+  if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
+  return {
+    ...av,
+    status: 'validated_accept',
+    missingComponents: [],
+    wholeStructureUnitWaived: {
+      missingComponents: [...av.missingComponents],
+      originalStatus: av.status,
+      reason: VEHICLE_SERVICE_UNIT_WAIVER_REASON,
+    },
+  };
+}
+
 // Offline audits judge a FRESH extraction against the persisted verdict of the
 // PRIOR one. Whether the waiver stamped on that row carries to the candidate:
 //   - a business whole-building waiver is recomputed against the candidate's own
@@ -1081,7 +1111,14 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
 //   - any other waiver (whole-structure) carries when the caller-supplied
 //     scalar inputs (service and property type) match: `scalarInputsMatch`.
 // `stored` is the persisted (unwaived, marker-stamped) verdict.
-function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true, outbound = false } = {}) {
+function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true, outbound = false, requestFields = null } = {}) {
+  // A vehicle-service waiver was authorized by the PRIOR extraction's request fields: it carries
+  // only when the candidate's own request fields (its flat view) still name roaches in a vehicle
+  // and no home job. A caller that passes no request fields gets the unwaived verdict.
+  if (stored?.wholeStructureUnitWaived?.reason === VEHICLE_SERVICE_UNIT_WAIVER_REASON) {
+    return scalarInputsMatch && !!requestFields
+      && require('./call-booking-catalog').hasVehicleRoachRequest(requestFields);
+  }
   if (stored?.wholeStructureUnitWaived?.reason !== BUSINESS_WHOLE_BUILDING_WAIVER_REASON) return scalarInputsMatch;
   const property = candidate?.property || {};
   return applyBusinessWholeBuildingUnitWaiver(stored, {
@@ -3247,6 +3284,9 @@ module.exports = {
   isMissingUnitNumber,
   applyWholeStructureUnitWaiver,
   applyBusinessWholeBuildingUnitWaiver,
+  applyVehicleServiceUnitWaiver,
+  VEHICLE_SERVICE_UNIT_WAIVER_REASON,
+  VEHICLE_SERVICE_KEYS,
   orientTranscriptForOutbound,
   BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
   waiverCarriesToCandidate,

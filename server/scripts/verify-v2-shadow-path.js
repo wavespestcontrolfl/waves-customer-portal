@@ -130,6 +130,7 @@ async function main() {
         transcript: r.transcription,
         outbound: String(r.direction || '').toLowerCase().startsWith('outbound'),
         scalarInputsMatch: !(waiverInputs(priorEnriched) !== waiverInputs(e)),
+        requestFields: require('../utils/extraction-compat').flatView(e),
       });
       const rawAv = (rawAvWaived !== rawAvUnwaived && !carries) ? rawAvUnwaived : rawAvWaived;
       const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');

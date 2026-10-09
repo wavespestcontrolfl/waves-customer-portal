@@ -153,6 +153,9 @@ describe('resolveProgram — honest about what the catalog and calendar say', ()
   it('packaged keys fix the total; the calendar fills in for the severity-priced cleanout', () => {
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0, scheduledAhead: 0 });
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0, scheduledAhead: 0 });
+    // The car job (vehicle_german_roach) is a two-treatment package with no scheduled-ahead lookup (codex #6162 r1 P2).
+    expect(resolveProgram({ serviceKey: 'vehicle_german_roach', treatmentNumber: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0, scheduledAhead: 0 });
+    expect(resolveProgram({ serviceKey: 'vehicle_german_roach', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0, scheduledAhead: 0 });
     expect(resolveProgram({ serviceKey: 'german_roach_initial', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false, laterCompleted: 0, scheduledAhead: 0 });
     // german_roach: 1 upcoming roach visit → 2 total
     expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0, scheduledAhead: 1 });

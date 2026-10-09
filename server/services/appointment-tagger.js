@@ -146,6 +146,13 @@ class AppointmentTagger {
   classifyAppointmentType(serviceType) {
     const s = (serviceType || '').toLowerCase();
     if (s.includes('wdo') || s.includes('wood destroying') || s.includes('termite inspection') || s.includes('real estate inspection')) return { tag: 'wdo_inspection', label: 'WDO Inspection' };
+    // A car job (vehicle_german_roach / vehicle_roach_addon) is not household
+    // roach work: prep.cockroach tells the customer to empty kitchen cabinets,
+    // and the cockroach sequence is home advice. Its own tag has no automation
+    // case in onServiceScheduled, so the car job gets no prep email, prep text
+    // or sequence enrollment (codex #6162 r1 P1). Admin Schedule books any
+    // active catalog row, and both names carry "vehicle" and "roach".
+    if (s.includes('vehicle') && s.includes('roach')) return { tag: 'vehicle_roach', label: 'Vehicle Roach Treatment' };
     if (s.includes('german') || (s.includes('roach') && s.includes('interior'))) return { tag: 'german_roach', label: 'German Roach Treatment' };
     if (s.includes('cockroach') || s.includes('roach')) return { tag: 'cockroach', label: 'Cockroach Treatment Service' };
     if (s.includes('bed bug')) return { tag: 'bed_bug', label: 'Bed Bug Treatment Service' };

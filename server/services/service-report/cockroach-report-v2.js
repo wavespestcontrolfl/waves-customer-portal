@@ -32,12 +32,14 @@ const COCKROACH_TYPED_TYPE = 'cockroach';
 
 // Package sizes the catalog itself defines. cockroach_control is the
 // two-treatment package (TWO_TREATMENT_PACKAGE_KEYS, typed-followup-
-// obligation.js); german_roach_initial is sold as three visits
-// (migration 20260809000000). german_roach ("cleanout") is severity-priced
+// obligation.js) and so is vehicle_german_roach (migration 20261008150000:
+// the car job is the same typed report, two treatments); german_roach_initial
+// is sold as three visits (migration 20260809000000). german_roach ("cleanout") is severity-priced
 // with "the return trips needed" — its size is not a catalog fact, so the
 // calendar decides (see resolveProgram).
 const PACKAGE_TREATMENTS_BY_KEY = {
   cockroach_control: 2,
+  vehicle_german_roach: 2,
   german_roach_initial: 3,
 };
 

@@ -20,6 +20,7 @@ const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-d
  */
 
 const logger = require('./logger');
+const { isEnabled: isGateEnabled } = require('../config/feature-gates');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 const BOOKABLE_SERVICE_COLUMNS = [
@@ -87,6 +88,81 @@ function hasAffirmativeRoachMention(text) {
 // label). Most-specific first — inspection wins over trapping wins over a
 // general rodent call. A rodent mention with no specific action defaults to
 // the general "Rodent Pest Control Service".
+// Vehicle German roach job (owner ruling 2026-10-06, GATE_CALL_VEHICLE_ROACH_BOOKING):
+// roaches inside a car, truck or van book the vehicle_german_roach row, not the
+// home roach package. Judged on the extraction's own request fields only (never
+// the raw transcript, where "I'll be in my car" is small talk): ONE field must
+// name an affirmative roach problem AND roaches inside a vehicle ("in a car",
+// "inside her 2024 Jeep Grand Cherokee"). When ANY request field (summary
+// included) also names a home or a room (see HOME_WORD_RE below), it is a home
+// job (the car is the office-priced add-on), so it keeps today's resolution.
+const VEHICLE_SERVICE_KEY = 'vehicle_german_roach';
+const VEHICLE_NOUN = '(?:cars?|vehicles?|trucks?|pickups?|suvs?|vans?|minivans?|jeeps?|sedans?|campers?|rvs?|motorhomes?)';
+const VEHICLE_FILLER = "(?:(?!(?:by|near|next|beside|behind|under|from|and|or|to|garage|carport|driveway|house|home|kitchen|yard)\\b)[a-z0-9'’-]+\\s+){0,3}?";
+const VEHICLE_PHRASE = `(?:in|inside|infesting|infested|throughout)\\s+(?:of\\s+)?(?:(?:my|her|his|their|our|the|a|an|your)\\s+)?(?:(?:19|20)\\d{2}\\s+)?${VEHICLE_FILLER}${VEHICLE_NOUN}\\b`;
+const VEHICLE_PHRASE_RE = new RegExp(`\\b${VEHICLE_PHRASE}`, 'i');
+const NEGATED_VEHICLE_PHRASE_RE = new RegExp(`\\b(?:not|no|never|isn['’]?t|aren['’]?t|without)\\s+(?:[\\w'’]+\\s+){0,2}?${VEHICLE_PHRASE}`, 'gi');
+// Home veto (codex #6162 r1 P1): ANY request field that names a home or a room
+// vetoes the vehicle job, so a combined call ("roaches in my car and my house",
+// "roaches in my SUV and dining room") stays a home booking and the office adds
+// the car. The test is structural: a bare place or room word vetoes wherever it
+// sits, with no phrase list to slip past. When unsure, veto: a vetoed call keeps
+// today's resolution (the home roach row or a hold).
+const HOME_WORD_RE = /\b(?:houses?|homes?|apartments?|condos?|condominiums?|townhouses?|townhomes?|duplex(?:es)?|villas?|residences?|units?|kitchens?|bathrooms?|bedrooms?|rooms?|cabinets?|pantry|pantries|garages?|laundry|attic|basement|closets?|lanai|fridge|refrigerator|stove|oven|dishwasher|microwave|sink|toilet|shower|bathtub|restaurants?|warehouses?|stores?|shops?|business(?:es)?)\b/i;
+// The one exception: a pure LOCATION phrase that says where the car or the
+// appointment is. It is removed before the veto test and nothing else is.
+const LOCATION_POSS = '(?:(?:my|her|his|their|our|the|a|an|your)\\s+)?';
+const LOCATION_PLACE = '(?:house|home|apartment|condo|condominium|townhouse|townhome|duplex|villa|residence|building|complex)';
+const LOCATION_PHRASE = `(?:at|outside|outside\\s+of|in\\s+front\\s+of|near|by)\\s+${LOCATION_POSS}${LOCATION_PLACE}(?:\\s+address)?`;
+// "parked at her house", "the car at her home", "appointment at her home address", "the
+// technician treats the car at her home": the phrase must follow an anchor within four
+// plain words. A roach word or a joining word between them breaks the run, so "roaches at
+// her house" and "roaches in my car and at my house" keep their veto.
+const LOCATION_ANCHOR = `(?:parked|located|sitting|kept|appointment|scheduled|technician|tech|meet(?:ing)?|${VEHICLE_NOUN})`;
+const LOCATION_AFTER_ANCHOR_RE = new RegExp(`\\b${LOCATION_ANCHOR}\\b(?:\\s+(?!(?:and|or|plus|also|too|as|well|but)\\b|(?:cock)?roach)[\\w'’-]+){0,4}?\\s+${LOCATION_PHRASE}\\b`, 'gi');
+// "in the driveway of her apartment", "in the parking lot at her condo".
+const LOCATION_LOT_RE = new RegExp(`\\b(?:in|at|on)\\s+the\\s+(?:driveway|parking\\s+lot|carport|lot)\\s+(?:of|at|outside|in\\s+front\\s+of)\\s+${LOCATION_POSS}${LOCATION_PLACE}(?:\\s+address)?\\b`, 'gi');
+// An address is where, not what: "home address", "service address".
+const LOCATION_ADDRESS_RE = /\b(?:home|house|apartment|condo|residence|mailing|billing|service)\s+address\b/gi;
+
+function namesHomeOrRoom(text) {
+  const cleaned = String(text || '')
+    .replace(LOCATION_LOT_RE, ' ')
+    .replace(LOCATION_AFTER_ANCHOR_RE, ' ')
+    .replace(LOCATION_ADDRESS_RE, ' ');
+  return HOME_WORD_RE.test(cleaned);
+}
+// Clause breaks: sentence punctuation, a comma, or a joining word.
+const VEHICLE_CLAUSE_SPLIT_RE = /[.;!?\n]+|,\s+|\s+(?:and|but|while|so|then|who|she|he|they)\s+/i;
+
+function hasVehicleRoachRequest(extracted = {}) {
+  const fields = [extracted.requested_service, extracted.pain_points, extracted.call_summary]
+    .filter((v) => typeof v === 'string' && v.trim());
+  // The roaches themselves must be in the vehicle: ONE clause names both. "Roach treatment
+  // for her house and she will wait in her car" names them in two clauses, so it is no
+  // vehicle job. A call that splits them ("She has roaches. They are in her car.") is not
+  // matched either: it keeps today's resolution and the office books it.
+  const vehicleField = fields.some((text) => text.split(VEHICLE_CLAUSE_SPLIT_RE).some((clause) => clause
+    && hasAffirmativeRoachMention(clause)
+    && VEHICLE_PHRASE_RE.test(clause.replace(NEGATED_VEHICLE_PHRASE_RE, ' '))));
+  if (!vehicleField) return false;
+  return !fields.some(namesHomeOrRoom);
+}
+
+// A model pick the vehicle request may replace: nothing, a generic row, or a
+// one-time pest row (the home roach package, a one-time pest visit). A
+// recurring plan pick is a different sale and is never replaced.
+function vehicleRoachOverridesPick(pick) {
+  if (!pick) return true;
+  if (pick.service_key === VEHICLE_SERVICE_KEY) return false;
+  if (isGenericCallCatalogRow(pick)) return true;
+  return pick.category === 'pest_control' && pick.billing_type === 'one_time';
+}
+
+function vehicleRoachBookingLive() {
+  return isGateEnabled('callVehicleRoachBooking');
+}
+
 const RODENT_RE = /\b(rodents?|rats?|mouse|mice)\b/i;
 // Rodent mentions get the same affirmative-only treatment as roaches: "not
 // rats, it's ants" and "we had mice last time but now need spiders treated"
@@ -298,7 +374,11 @@ const KEYWORD_SERVICE_RULES = [
   { serviceKey: 'rodent_general_one_time', matches: (h) => hasAffirmativeRodentMention(h) },
 ];
 
-async function loadBookableCallServices(conn) {
+// `includeVehicleRoach` (the call-recording pipeline only, and only with
+// GATE_CALL_VEHICLE_ROACH_BOOKING on) adds the live vehicle_german_roach row,
+// which is booking_enabled=false on purpose: the voice agent, the SMS drafter
+// and every other caller of this loader never see it.
+async function loadBookableCallServices(conn, { includeVehicleRoach = false } = {}) {
   try {
     // Stable order matters beyond display: these rows render the prompt's
     // catalog block AND feed extractionPromptVersion's order-sensitive hash,
@@ -309,8 +389,12 @@ async function loadBookableCallServices(conn) {
     // re-selected later (codex r22 on #4786) — the same authority the public
     // menu reads.
     const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+    const bookable = includeVehicleRoach && vehicleRoachBookingLive()
+      ? (q) => q.where({ is_active: true, booking_enabled: true })
+        .orWhere((v) => v.where({ is_active: true, service_key: VEHICLE_SERVICE_KEY }).whereRaw('is_archived IS NOT TRUE'))
+      : { is_active: true, booking_enabled: true };
     const rows = await conn('services')
-      .where({ is_active: true, booking_enabled: true })
+      .where(bookable)
       .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
       .orderBy('name', 'asc')
       .orderBy('id', 'asc')
@@ -405,10 +489,22 @@ function assessmentPickHolds(pick, extracted, services) {
 // absent: the haystack drops empty parts and reServiceOverrideRow treats
 // missing lists and labels as none.
 function resolveCallBookingCatalogService({
-  extracted = {}, transcription, services = [],
+  extracted = {}, transcription, services: loadedServices = [],
   reServices, reServiceLanes, coarseServiceLabel,
 } = {}) {
-  if (!Array.isArray(services) || services.length === 0) return null;
+  if (!Array.isArray(loadedServices) || loadedServices.length === 0) return null;
+  // The vehicle row resolves only on affirmative vehicle evidence in the
+  // extraction's own request fields, whether the model picked it exactly or
+  // the override finds it (codex #6082 r1 P1). Without that evidence (gate off,
+  // or a home-only call such as "German roaches throughout my kitchen") the row
+  // is hidden from EVERY step below, so an exact pick of it can neither book
+  // the $199 car job nor carry the vehicle unit-number waiver, which reads
+  // this resolver's result.
+  const vehicleRoachAllowed = vehicleRoachBookingLive() && hasVehicleRoachRequest(extracted);
+  const services = vehicleRoachAllowed
+    ? loadedServices
+    : loadedServices.filter((s) => s.service_key !== VEHICLE_SERVICE_KEY);
+  if (services.length === 0) return null;
 
   const byModelPick = findServiceByName(services, extracted.specific_service_name)
     || findServiceByName(services, extracted.matched_service)
@@ -421,6 +517,12 @@ function resolveCallBookingCatalogService({
   // but a revisit is the plan's free between-visits callback, not an extra
   // plan visit.
   const pickPlanLane = reServiceLaneForPlanRow(byModelPick);
+  // A call whose one service pick is the Waves Assessment asked for an assessment, not a
+  // treatment: the vehicle job does not replace it (the same hold the keyword rules honor).
+  if (vehicleRoachAllowed && vehicleRoachOverridesPick(byModelPick) && !assessmentPickHolds(byModelPick, extracted, services)) {
+    const vehicleRow = services.find((s) => s.service_key === VEHICLE_SERVICE_KEY);
+    if (vehicleRow) return vehicleRow;
+  }
   if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return byModelPick;
 
   const haystack = callBookingResolutionHaystack(extracted, transcription);
@@ -945,6 +1047,8 @@ module.exports = {
   reServiceLaneForRow,
   reServiceLaneForPlanRow,
   resolveCallBookingCatalogService,
+  hasVehicleRoachRequest,
+  VEHICLE_SERVICE_KEY,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,

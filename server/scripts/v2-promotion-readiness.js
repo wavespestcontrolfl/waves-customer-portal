@@ -130,7 +130,10 @@ async function main({ aps = false, apsPass = null } = {}) {
   // way the processor does and match THAT (not a bare `-cat.%` prefix, which
   // would fold stale catalog cohorts into the current gate).
   const { loadBookableCallServices } = require('../services/call-booking-catalog');
-  const bookableCallServices = await loadBookableCallServices(db);
+  // Same options as call-recording-processor.js (includeVehicleRoach), so the catalog-derived
+  // prompt hash matches production's stamp when GATE_CALL_VEHICLE_ROACH_BOOKING is on; the gate
+  // is read inside the loader, exactly as the processor reads it (codex #6162 r1 P1).
+  const bookableCallServices = await loadBookableCallServices(db, { includeVehicleRoach: true });
   const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
   const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
   const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
