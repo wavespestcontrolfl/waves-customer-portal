@@ -380,6 +380,10 @@ function requestedAreaAddOnKeys(data) {
   return lists.filter(Array.isArray).flat().map(entryKey);
 }
 function areaAddOnLinesFromData(data, pricingAuthority) {
+  // An enabled, itemized authored proposal that sells no add-on has none, whatever engine rows it retains (the persisted
+  // detector's rule, v1-legacy-mapper estimateDataCarriesAreaAddOns): the estimate list and the follow-up copy read this.
+  if (data && data.proposal && data.proposal.enabled === true
+    && !require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(data, { pricingAuthority })) return [];
   if (!data || typeof data !== 'object') return [];
   let items;
   let rows;

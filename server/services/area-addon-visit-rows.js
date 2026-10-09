@@ -483,6 +483,12 @@ function keptOwnAddOnRepriced(plan, visit, updates, sold) {
   return references.length > 0 && !references.some((price) => samePrice(updates.primary_line_price, price));
 }
 
+function assertAddOnGateOpenForAdding(estimate) {
+  if (!estimate) return;
+  const refusal = require('./pricing-engine/v1-legacy-mapper').gatedAddOnStaffRefusal(estimate.estimate_data, 'adding it to an appointment', { pricingAuthority: estimate.pricing_authority });
+  if (refusal) throw postedRefusal(refusal.code, refusal.message);
+}
+
 const priceLocked = (key) => postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(key)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
 
 async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = null, rowLines = null } = {}) {
@@ -509,13 +515,15 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
     : null;
   // The same add-on never rides the visit twice; what the edit ADDS is sold by the estimate, at the estimate's price.
   const added = addedAddOnLines(plan, updates);
+  // The kill switch: with the gate off no NEW add-on is put on a visit (what it already carries is kept, as everywhere).
+  if (added.length) assertAddOnGateOpenForAdding(estimate);
   const repeated = plan.finalKeys.filter((key) => plan.finalKeys.indexOf(key) !== plan.finalKeys.lastIndexOf(key)).map((key) => ({ key }));
   for (const lines of [repeated, added]) {
     if (lines.length) assertPostedAreaAddOnsSold(estimate, lines, { wholeVisit: false });
   }
   // What the visit already carries keeps its price: an add-on is never repriced by hand (the rows, then the visit's own).
-  await assertKeptAddOnRowPrices(trx, visitId, plan.rowsAfter.filter((line) => !plan.added.includes(line.key) && line.price !== undefined));
   const sold = soldAreaAddOnPrices(estimate);
+  await assertKeptAddOnRowPrices(trx, visitId, plan.rowsAfter.filter((line) => !plan.added.includes(line.key) && line.price !== undefined), sold);
   if (keptOwnAddOnRepriced(plan, visit, updates, sold)) throw priceLocked(plan.ownKey);
   // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
   if (estimate) assertCostCarrierKept(estimate, plan.finalKeys.map((key) => ({ key })), sold);
@@ -523,14 +531,17 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
 }
 
 // A kept area add-on row posted at a gross price other than the one it is stored with is refused.
-async function assertKeptAddOnRowPrices(trx, visitId, keptLines) {
+// A kept key with no stored row (the add-on was the visit's own service and the edit moves it to a row) is judged at the locked
+// estimate's price (`sold`).
+async function assertKeptAddOnRowPrices(trx, visitId, keptLines, sold = new Map()) {
   if (!keptLines.length) return;
   const stored = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId })
     .whereIn('service_key_snapshot', keptLines.map((line) => line.key)).select('service_key_snapshot', 'base_price', 'estimated_price');
   const storedPrice = new Map((Array.isArray(stored) ? stored : []).map((row) => [row.service_key_snapshot, row.base_price ?? row.estimated_price]));
   for (const line of keptLines) {
-    if (!storedPrice.has(line.key) || storedPrice.get(line.key) == null) continue;
-    if (!samePrice(line.price, storedPrice.get(line.key))) {
+    const reference = storedPrice.get(line.key) ?? sold.get(line.key) ?? null;
+    if (reference == null) continue;
+    if (!samePrice(line.price, reference)) {
       throw priceLocked(line.key);
     }
   }

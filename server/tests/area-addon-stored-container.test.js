@@ -174,3 +174,15 @@ describe('an authored proposal decides whether the estimate carries an add-on', 
     expect(limits.soldAddOnKeys(retained)).toEqual(['web_sweep']);
   });
 });
+
+// Codex round 38: the estimate list and the follow-up copy read the service lines; the same proposal rule applies there.
+describe('service lines of an authored proposal', () => {
+  const lines = require('../services/estimate-service-lines');
+  const retained = { result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 89 }] } } };
+  const names = (data) => lines.inferEstimateServiceLines({ estimate_data: data }).map((line) => line.summaryLabel || line.label || line.key);
+  test('the retained add-on is a line of the plain estimate and not of a clean authored proposal', () => {
+    expect(JSON.stringify(names(retained))).toContain('Web Sweep');
+    const clean = { ...retained, proposal: { enabled: true, buildings: [{ lineItems: [{ description: 'Quarterly pest control', unitPrice: 120, frequency: 'quarterly' }] }] } };
+    expect(JSON.stringify(names(clean))).not.toContain('Web Sweep');
+  });
+});

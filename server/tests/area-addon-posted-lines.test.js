@@ -241,6 +241,22 @@ describe('Update Details: what the edit adds', () => {
       expect(calls).not.toContain('estimates');
     });
 
+    // Codex round 38.
+    test('with the gate off no new add-on is added; what the visit carries is kept', async () => {
+      process.env.GATE_AREA_ADDONS = 'false';
+      try {
+        await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: both.prices, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: BED, price: both.prices[BED] }] }))
+          .rejects.toMatchObject({ status: 409, code: 'AREA_ADDONS_GATED' });
+        await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: both.prices, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }] })).resolves.toEqual({ keys: [WEB], added: [] });
+      } finally { process.env.GATE_AREA_ADDONS = 'true'; }
+    });
+    test('an add-on moved from the visit\'s own service into a row is judged at the estimate\'s price', async () => {
+      const own = visit({ service_key_snapshot: WEB, primary_line_price: null });
+      const move = (price) => edit({ visit: own, estimate: both }, { updates: { service_key_snapshot: 'pest_control' }, rowLines: [{ key: WEB, price }] });
+      await expect(move(1)).rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_LOCKED' });
+      await expect(move(both.prices[WEB])).resolves.toEqual({ keys: [WEB], added: [] });
+    });
+
     test('the same add-on twice after the edit is refused', async () => {
       await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: both.prices, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: WEB, price: both.prices[WEB] }] }))
         .rejects.toMatchObject({ code: 'AREA_ADDON_DUPLICATE' });
