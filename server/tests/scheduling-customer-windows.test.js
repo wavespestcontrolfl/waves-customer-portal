@@ -12,6 +12,7 @@ const {
   customerOfferGrid,
   overlapsLunch,
   customerWindowAdmits,
+  customerLastStart16Enabled,
 } = require('../services/scheduling/customer-windows');
 
 describe('CUSTOMER_HOUR_GRID', () => {
@@ -326,5 +327,45 @@ describe('refreshCustomerBookingWindowConfig / currentLunchInterval / currentDay
     // No advanceTimersByTime — a cached FAILURE must not block an immediate retry.
     await customerWindows.refreshCustomerBookingWindowConfig();
     expect(dbMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Owner ruling 2026-10-09 ("last start 16"): a 17:00 start quotes a 5-7 PM
+// arrival window. One gate removes it from every customer surface.
+describe('GATE_CUSTOMER_LAST_START_16', () => {
+  const KEYS = ['GATE_CUSTOMER_LAST_START_16', 'GATE_BOOKING_LUNCH_BLOCK'];
+  const previous = {};
+  beforeEach(() => { for (const k of KEYS) { previous[k] = process.env[k]; delete process.env[k]; } });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (previous[k] === undefined) delete process.env[k]; else process.env[k] = previous[k];
+    }
+  });
+
+  test('off (default): the 17:00 start is offered and admitted, as before', () => {
+    expect(customerLastStart16Enabled()).toBe(false);
+    expect(customerOfferGrid()).toBe(CUSTOMER_HOUR_GRID);
+    expect(customerWindowAdmits({ startMin: 17 * 60, endMin: 18 * 60, dayEndMinutes: 18 * 60 })).toBe(true);
+  });
+
+  test('on: 16:00 is the last start offered and admitted; 17:00 is refused', () => {
+    process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
+    expect(customerLastStart16Enabled()).toBe(true);
+    expect(customerOfferGrid()).toEqual(['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00']);
+    expect(customerWindowAdmits({ startMin: 16 * 60, endMin: 17 * 60, dayEndMinutes: 18 * 60 })).toBe(true);
+    expect(customerWindowAdmits({ startMin: 17 * 60, endMin: 18 * 60, dayEndMinutes: 18 * 60 })).toBe(false);
+    // A short visit that would end before the close is still past the last start.
+    expect(customerWindowAdmits({ startMin: 17 * 60, endMin: 17 * 60 + 30, dayEndMinutes: 18 * 60 })).toBe(false);
+  });
+
+  test('on, with the lunch block: both rules apply to the offer grid', () => {
+    process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
+    process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
+    expect(customerOfferGrid()).toEqual(['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00']);
+  });
+
+  test('the grid constant itself is unchanged, so staff surfaces and rollback keep 17:00', () => {
+    process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
+    expect(CUSTOMER_HOUR_GRID).toContain('17:00');
   });
 });

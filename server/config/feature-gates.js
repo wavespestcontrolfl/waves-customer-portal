@@ -340,6 +340,9 @@ const gates = {
   agentSessionGuard: process.env.GATE_AGENT_SESSION_GUARD === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
+  // Customer-facing pickers stop at a 16:00 start (dark). Registered for logGateStatus only;
+  // scheduling/customer-windows.js reads the env at call time.
+  customerLastStart16: gateEnvValue('GATE_CUSTOMER_LAST_START_16'),
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
   customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
