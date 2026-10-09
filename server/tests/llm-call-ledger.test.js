@@ -339,6 +339,45 @@ describe('llm call ledger', () => {
     });
   });
 
+  // A streamed voice round is recorded after the fact from its final Message,
+  // which has the Anthropic usage shape for both providers.
+  describe('recordStreamedMessage', () => {
+    it('records an Anthropic round as it is, under its lane', async () => {
+      const { metrics } = load();
+      metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'voice-model', message: ANTHROPIC_MESSAGE, latencyMs: 812, laneId: 'voice_relay' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({
+        ok: true, provider: 'anthropic', lane_id: 'voice_relay', policy: 'voice_relay', requested_model: 'voice-model', served_model: 'anthropic-served',
+        provider_ref: 'msg_1', latency_ms: 812, input_tokens: 200, cached_input_tokens: 150, cache_write_tokens: 25, output_tokens: 40,
+      });
+    });
+
+    it('stores an OpenAI round the way OpenAI rows are priced: cached reads inside input, no cache-write count', async () => {
+      const { metrics } = load();
+      // what relay-openai-client's mapUsage returns for input 900 with 600 cached
+      const message = { id: 'resp_1', model: 'gpt-served', usage: { input_tokens: 300, cache_read_input_tokens: 600, cache_creation_input_tokens: 0, output_tokens: 70 } };
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message, laneId: 'voice_relay' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ provider: 'openai', input_tokens: 900, cached_input_tokens: 600, cache_write_tokens: null, output_tokens: 70 });
+    });
+
+    it('a round with unreadable usage is recorded with null counts, not as free', async () => {
+      const { metrics } = load();
+      const message = { id: 'resp_2', model: 'gpt-served', usage: { input_tokens: null, cache_read_input_tokens: null, cache_creation_input_tokens: null, output_tokens: null } };
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message, laneId: 'voice_relay' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ input_tokens: null, cached_input_tokens: null, output_tokens: null });
+    });
+
+    it('a replayed call is filed under the :replay policy, and a missing message never throws', async () => {
+      const { metrics } = load();
+      await metrics.runAsReplay(async () => { metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: ANTHROPIC_MESSAGE, laneId: 'voice_relay' }); });
+      expect(() => metrics.recordStreamedMessage({ provider: 'anthropic', requestedModel: 'm', message: undefined, laneId: 'voice_relay' })).not.toThrow();
+      await flush();
+      expect(callRows()[0].policy).toBe('voice_relay:replay');
+    });
+  });
+
   describe('ledgerCall', () => {
     // Codex r15 on #4884: direct calls inside a replay harness were filed
     // under the live lane label, unlike dispatch chains.

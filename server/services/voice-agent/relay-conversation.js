@@ -134,6 +134,7 @@ const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
 const { anthropicMaxTokens } = require('../llm/anthropic-wire');
+const { recordStreamedMessage } = require('../llm-dispatch-metrics');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -3468,7 +3469,12 @@ class RelayConversation {
       // policy. Only wired when this session pinned the stream renderer;
       // the block path below is otherwise untouched.
       if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
-      return { msg: await stream.finalMessage(), streamState };
+      const msg = await stream.finalMessage();
+      // Cost ledger: one row per finished model round (owner 2026-10-08: the
+      // voice agent's spend was invisible). Not awaited; a round that is
+      // aborted or times out resolves no Message and records nothing.
+      recordStreamedMessage({ provider: this._provider, requestedModel: this.model, message: msg, latencyMs: Math.round(now() - modelStartAt), laneId: 'voice_relay' });
+      return { msg, streamState };
     } catch (err) {
       return { err, streamState, timedOut };
     } finally {

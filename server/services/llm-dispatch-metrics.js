@@ -428,6 +428,41 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
   }
 }
 
+/**
+ * Record one finished round of a STREAMED call whose Message has the
+ * Anthropic usage shape. ledgerCall wraps a call that resolves once; a live
+ * voice turn streams, is aborted by barge-in as a matter of course, and must
+ * not wait on the ledger, so the voice relay records each round it finished
+ * here instead. Fire-and-forget like recordCall: never throws, never awaited.
+ *
+ * `provider` is the provider that served the round. The OpenAI relay client
+ * maps its usage to the Anthropic shape (input_tokens excludes cached reads);
+ * the ledger stores OpenAI rows with cached reads INSIDE input_tokens
+ * (extractUsage, and llm-cost's pricing), so that is restored here.
+ */
+function recordStreamedMessage({ provider, requestedModel, message, latencyMs = null, laneId }) {
+  try {
+    const usage = extractUsage('anthropic', message);
+    if (provider === 'openai' && usage.input_tokens != null) {
+      usage.input_tokens += usage.cached_input_tokens || 0;
+      usage.cache_write_tokens = null;
+    }
+    void recordCall({
+      provider,
+      requestedModel,
+      servedModel: message?.model,
+      ok: true,
+      usage,
+      latencyMs,
+      providerRef: message?.id,
+      laneId,
+      policyLabel: applyReplayLane(laneId),
+    });
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] recordStreamedMessage skipped: ${err.message}`);
+  }
+}
+
 // ledgerCall's recorded row per returned object, so a direct SDK caller whose
 // own parse or schema check rejects the answer can flip that row — the
 // adapter's rejectLedgerCall, for sites outside llm/call.js (Codex on #4884).
@@ -1171,6 +1206,7 @@ module.exports = {
   recordCall,
   failCall,
   ledgerCall,
+  recordStreamedMessage,
   ledgerCallRejected,
   recordSessionUsage,
   recordTrace,

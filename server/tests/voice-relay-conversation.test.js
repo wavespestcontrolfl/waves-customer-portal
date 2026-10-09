@@ -636,6 +636,35 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(storedAssistant.content.every((b) => b.type !== 'text')).toBe(true);
   });
 
+  // Cost ledger: each model round that finishes is recorded once, with the
+  // provider and model that served it; a round that throws records nothing.
+  test('a finished model round is recorded on the cost ledger; a failed one is not', async () => {
+    const recordStreamedMessage = jest.fn();
+    const build = (finalMessage) => {
+      let Convo;
+      jest.isolateModules(() => {
+        jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream: () => ({ finalMessage }) } }; });
+        jest.doMock('../services/voice-agent/relay-tools', () => ({
+          TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+        }));
+        jest.doMock('../services/llm-dispatch-metrics', () => ({ ...jest.requireActual('../services/llm-dispatch-metrics'), recordStreamedMessage }));
+        Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
+      });
+      return new Convo({ callSid: 'CA-ledger', from: '+19415551234', send: jest.fn() });
+    };
+    const message = { id: 'msg_v', model: 'served', content: [{ type: 'text', text: 'Hi there!' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 4 } };
+
+    const ok = build(async () => message);
+    await ok._runLoop('hi').catch(() => {});
+    expect(recordStreamedMessage).toHaveBeenCalledTimes(1);
+    expect(recordStreamedMessage).toHaveBeenCalledWith({ provider: ok._provider, requestedModel: ok.model, message, latencyMs: expect.any(Number), laneId: 'voice_relay' });
+
+    recordStreamedMessage.mockClear();
+    const failed = build(async () => { throw new Error('boom'); });
+    await failed._runLoop('hi').catch(() => {});
+    expect(recordStreamedMessage).not.toHaveBeenCalled();
+  });
+
   // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
   // prompt is frozen per call (cache-prefix stability) — a context settling
   // after the freeze rides the next user turn as an ACCOUNT CONTEXT pair.
