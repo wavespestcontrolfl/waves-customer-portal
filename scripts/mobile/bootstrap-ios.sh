@@ -86,14 +86,42 @@ npm run build
 # silently EXCLUDED from the build, and biometric.js fails open when the plugin
 # is missing, so a fresh SPM project produces an app with no Face ID lock at all.
 # Pin to CocoaPods until every plugin is SPM-compatible.
+#
+# client/ios/App/ci_scripts is the one tracked folder inside the generated
+# project (Xcode Cloud reads it from beside the workspace), so client/ios
+# exists in a clean clone and `cap add ios` refuses an existing ios folder.
+# Move the folder aside for the add and put it back on every exit. The move is
+# a rename on the same volume, so a ci_post_clone.sh that is running this
+# script keeps its open file.
+CI_SCRIPTS_HOLD="$PWD/.ios-ci-scripts-hold"
+restore_ci_scripts() {
+  if [ -d "$CI_SCRIPTS_HOLD/ci_scripts" ]; then
+    mkdir -p ios/App
+    if [ ! -e ios/App/ci_scripts ]; then mv "$CI_SCRIPTS_HOLD/ci_scripts" ios/App/ci_scripts; fi
+  fi
+  rmdir "$CI_SCRIPTS_HOLD" 2>/dev/null || true
+}
+trap restore_ci_scripts EXIT
+restore_ci_scripts
+hold_ci_scripts() {
+  if [ -d ios/App/ci_scripts ]; then
+    mkdir -p "$CI_SCRIPTS_HOLD"
+    mv ios/App/ci_scripts "$CI_SCRIPTS_HOLD/ci_scripts"
+  fi
+}
 if [ -d "ios/App/CapApp-SPM" ]; then
   echo "==> 3/5  Existing project is SPM-based (drops the Face ID plugin) — moving it to client/ios-spm-backup and regenerating with CocoaPods…"
+  hold_ci_scripts
   rm -rf ios-spm-backup
   mv ios ios-spm-backup
 fi
-if [ ! -d "ios/App" ]; then
+if [ ! -d "ios/App/App.xcodeproj" ]; then
   echo "==> 3/5  Generating native iOS project (client/ios/App)…"
+  hold_ci_scripts
+  # Only empty folders are removed: anything else in client/ios stops the add.
+  rmdir ios/App ios 2>/dev/null || true
   npx cap add ios --packagemanager Cocoapods
+  restore_ci_scripts
 else
   echo "==> 3/5  Native iOS project already exists — skipping cap add."
 fi
@@ -368,6 +396,38 @@ if (cd ios/App && xcodeproj_ruby -e '
   echo "==> UIScene life cycle: SceneDelegate in the App target, scene manifest in Info.plist ✓"
 else
   echo "ERROR: could not add SceneDelegate.swift to the App target; an iOS 27 SDK build would quit at launch." >&2
+  exit 1
+fi
+
+# Shared scheme, release version and signing team. Xcode Cloud builds only a
+# shared scheme and cannot take build settings on a command line, and the
+# generated project has neither a shared scheme nor a team. The version and
+# the team are written only when the caller names them
+# (client/ios/App/ci_scripts/ci_post_clone.sh does); a local bootstrap keeps
+# the template values and Xcode's own team choice.
+if (cd ios/App && WAVES_IOS_MARKETING_VERSION="${WAVES_IOS_MARKETING_VERSION:-}" WAVES_IOS_TEAM_ID="${WAVES_IOS_TEAM_ID:-}" xcodeproj_ruby -e '
+  require "xcodeproj"
+  project = Xcodeproj::Project.open("App.xcodeproj")
+  target = project.targets.find { |t| t.name == "App" } or abort("no App target")
+  version = ENV["WAVES_IOS_MARKETING_VERSION"].to_s
+  team = ENV["WAVES_IOS_TEAM_ID"].to_s
+  abort("WAVES_IOS_MARKETING_VERSION must look like 1.7 or 1.7.1") unless version.empty? || version.match?(/\A\d+(\.\d+){1,2}\z/)
+  abort("WAVES_IOS_TEAM_ID must be a 10-character team id") unless team.empty? || team.match?(/\A[A-Z0-9]{10}\z/)
+  target.build_configurations.each do |c|
+    c.build_settings["MARKETING_VERSION"] = version unless version.empty?
+    c.build_settings["DEVELOPMENT_TEAM"] = team unless team.empty?
+  end
+  project.save
+  scheme_file = Xcodeproj::XCScheme.shared_data_dir(project.path) + "App.xcscheme"
+  unless scheme_file.exist?
+    scheme = Xcodeproj::XCScheme.new
+    scheme.configure_with_targets(target, nil, launch_target: true)
+    scheme.save_as(project.path, "App", true)
+  end
+'); then
+  echo "==> Shared App scheme present; version ${WAVES_IOS_MARKETING_VERSION:-(template)}, team ${WAVES_IOS_TEAM_ID:-(not set)} ✓"
+else
+  echo "ERROR: could not write the shared App scheme, version or team into App.xcodeproj." >&2
   exit 1
 fi
 
