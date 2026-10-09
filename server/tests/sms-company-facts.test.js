@@ -115,12 +115,11 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(20);
+    expect(COMPANY_FACTS).toHaveLength(19);
   });
   test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
     const section = renderCompanyFactsSection();
     const aftercare = [
-      'After an inside pest treatment, dry vacuuming and normal cleanup of counters and dishes are fine. Mopping, scrubbing or wiping down the treated baseboards and edges takes the treatment off, so leave those areas alone.',
       'After a pest treatment it is normal to see some activity for up to two weeks as the treatment flushes pests out, and it fades as the products keep working. This is true of pest treatments only, not of other services. If it has not slowed down after two weeks, tell us.',
       'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
       'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
@@ -130,11 +129,12 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
     expect(aftercare.join(' ')).not.toMatch(/we(?:'ll| will)? come back|come back out|free|covered|no charge|damage/i);
     // Codex #6197 r2: no wet cleaning of treated areas; the activity line is pest-only; drain flies are
     // identified, not assumed; lawn treatment follows the technician's check.
-    expect(aftercare[0]).not.toMatch(/water only|clean as usual/i);
-    expect(aftercare[1]).toMatch(/pest treatments only, not of other services/);
-    expect(aftercare[2]).toMatch(/fuzzy, moth-shaped/);
-    expect(aftercare[2]).toMatch(/fungus gnats/);
-    expect(aftercare[3]).toMatch(/where the technician confirms them/);
+    // cleaning after a treatment is deliberately NOT a company fact (it depends on dry surfaces and the treatment type)
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/mop|wip(e|ing)|clean as usual|water only|vacuum/i);
+    expect(aftercare[0]).toMatch(/pest treatments only, not of other services/);
+    expect(aftercare[1]).toMatch(/fuzzy, moth-shaped/);
+    expect(aftercare[1]).toMatch(/fungus gnats/);
+    expect(aftercare[2]).toMatch(/where the technician confirms them/);
     // the whole section must stay inside the judge's cap for it, with room to spare, or its tail is cut
     const { _test: judgeTest } = require('../services/sms-shadow-judge');
     expect(judgeTest.COMPANY_FACTS_JUDGE_CAP).toBe(4000);

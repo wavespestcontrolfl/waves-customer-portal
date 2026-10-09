@@ -44,13 +44,13 @@ const COMPANY_FACTS = Object.freeze([
   'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
   // Aftercare and common pest answers (owner delegated the wording 2026-10-09, text agent
   // fix plan). Each line restates guidance the repo already carries, never a new claim
-  // (Codex #6197 r2): the prep guides (no wet cleaning or wiping of treated baseboards,
-  // 20260715000001), recap-visit-context LINE_EXPECTATIONS.pest (some activity for up to two
+  // (Codex #6197 r2): recap-visit-context LINE_EXPECTATIONS.pest (some activity for up to two
   // weeks, pest only), the species catalog (drain fly traits and its fungus-gnat look-alike)
   // and the lawn guide (chinch treatment only after the technician confirms it). Each holds
   // for every customer it can reach and promises no visit: a return visit is the FREE
   // RE-SERVICE fact's job, never a COMPANY FACTS line.
-  'After an inside pest treatment, dry vacuuming and normal cleanup of counters and dishes are fine. Mopping, scrubbing or wiping down the treated baseboards and edges takes the treatment off, so leave those areas alone.',
+  // NOT here: cleaning after a treatment. The prep guides tie it to dry surfaces and to the
+  // treatment type, which a static line cannot carry; the agent hands that question off.
   'After a pest treatment it is normal to see some activity for up to two weeks as the treatment flushes pests out, and it fades as the products keep working. This is true of pest treatments only, not of other services. If it has not slowed down after two weeks, tell us.',
   'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
   'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
