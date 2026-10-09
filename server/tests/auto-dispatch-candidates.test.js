@@ -392,3 +392,11 @@ test('legacy current placement marks a grouped visit: its detour is measured aga
   const standalone = await computeCurrentPlacement(SERVICE, 'general', ctx());
   expect(standalone).not.toHaveProperty('detour_group_blind');
 });
+
+test('legacy cap keeps a same-day candidate that sits beyond the cap when conflict moves are on (pre-push P1)', () => {
+  const { _internals: { legacyCap } } = require('../services/auto-dispatch/candidate-slots');
+  const other = Array.from({ length: 3 }, (_, i) => ({ date: '2026-08-06', start_time: `0${8 + i}:00` }));
+  const sameDay = { date: '2026-08-04', start_time: '14:00' };
+  expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2, conflictMoves: true })).toEqual([sameDay, other[0]]);
+  expect(legacyCap(SERVICE, [...other, sameDay], { scoreCap: 2 })).toEqual([other[0], other[1]]);
+});

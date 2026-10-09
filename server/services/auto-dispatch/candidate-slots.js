@@ -502,6 +502,17 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   return kept;
 }
 
+// The legacy pre-score cap. With conflict moves on, the visit's own date goes
+// first (stable), so a same-day repair is never cut behind cheaper other-day
+// slots before move-rules.js ranks same-day first (pre-push P1). Gate off:
+// the order is untouched.
+function legacyCap(service, candidates, ctx) {
+  const cap = ctx.scoreCap || SCORE_CAP;
+  if (!ctx.conflictMoves) return candidates.slice(0, cap);
+  const own = toDateStr(service.scheduled_date);
+  return [...candidates.filter((c) => c.date === own), ...candidates.filter((c) => c.date !== own)].slice(0, cap);
+}
+
 // Single entry point findValidCandidateSlots calls unconditionally, so the
 // gate adds no branch there. Gate off: find-time's order trimmed to the
 // SCORE_CAP survivors that get scored, exactly as before. Gate on: every
@@ -509,7 +520,7 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
 // them and caps by total score instead (Codex r1: a pre-score cap on a
 // detour proxy could drop the best-scoring candidate unscored).
 async function rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops) {
-  if (!autoDispatchSharedModelLive()) return candidates.slice(0, ctx.scoreCap || SCORE_CAP);
+  if (!autoDispatchSharedModelLive()) return legacyCap(service, candidates, ctx);
   const survivors = await filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops);
   return survivors.slice().sort((a, b) => (a.detour_minutes || 0) - (b.detour_minutes || 0));
 }
@@ -858,6 +869,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, legacyCap,
   },
 };
