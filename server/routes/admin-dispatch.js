@@ -4562,6 +4562,11 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     // contract this route does not change (its options and commit stay as they
     // were).
     if (req.techRole !== 'admin' && process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' && svc.is_recurring) {
+      // An overdue visit (dated before today): even a later-today slot is a
+      // date change, so POST refuses every option. Say so here instead.
+      if (serviceDateOnly(svc.scheduled_date) !== etDateString()) {
+        return res.status(403).json({ error: 'Moving this overdue recurring visit would shift its whole series. Ask the office to move it.', code: 'admin_required' });
+      }
       return res.json({ ...options, days: [], sameDayOnly: true });
     }
     return res.json(options);

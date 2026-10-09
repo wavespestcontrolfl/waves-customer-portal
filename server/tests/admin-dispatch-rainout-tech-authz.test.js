@@ -80,6 +80,7 @@ beforeAll(() => new Promise((resolve) => {
 afterAll(() => new Promise((r) => server.close(r)));
 
 const etToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const yesterday = (() => { const d = new Date(`${etToday}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); })();
 const tomorrow = (() => { const d = new Date(`${etToday}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
 
 beforeEach(() => {
@@ -135,7 +136,17 @@ describe('admin-dispatch rain-out options for a technician on a recurring visit'
     db.__state.scheduledServices.push(
       { id: 'svc-rec', technician_id: 'tech-1', customer_id: 'cust-1', status: 'scheduled', scheduled_date: etToday, is_recurring: true },
       { id: 'svc-once', technician_id: 'tech-1', customer_id: 'cust-1', status: 'scheduled', scheduled_date: etToday, is_recurring: false },
+      { id: 'svc-overdue', technician_id: 'tech-1', customer_id: 'cust-1', status: 'scheduled', scheduled_date: yesterday, is_recurring: true },
     );
+  });
+
+  // Every option, even later today, changes an overdue visit's date, which POST refuses: nothing is offered.
+  test('gate on, recurring and overdue: refused with the reason, no options', async () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const { status, body } = await getOptions('svc-overdue');
+    expect(status).toBe(403);
+    expect(body.code).toBe('admin_required');
+    expect(body.sameDay).toBeUndefined();
   });
 
   test('gate on, recurring: today only, flagged sameDayOnly', async () => {
