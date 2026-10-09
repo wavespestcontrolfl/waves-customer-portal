@@ -459,6 +459,45 @@ function recurringNoteCopy(data, selectedSlot) {
     : 'Only this visit will move — the rest of your regular service schedule stays the same.';
 }
 
+// The next plan visit's new date for a picked slot (payload.nextVisit, server
+// gate GATE_RESCHEDULE_NEXT_VISIT_DATE). Null when the server named none for
+// this date or the date does not change.
+function nextVisitShiftFor(data, slotDate) {
+  const from = data?.nextVisit?.currentDate;
+  const to = data?.nextVisit?.byDate?.[String(slotDate || '')];
+  return from && to && from !== to ? { from, to } : null;
+}
+
+// A search or a slot-taken refresh replaces the day list, and its response
+// is the server's current answer for those days: take its dates whole, and
+// name none when it sends none (the next visit stopped being movable).
+function withNextVisit(body) {
+  return { nextVisit: body?.nextVisit || null };
+}
+
+function shortDateLabel(dateStr) {
+  try {
+    const [y, m, d] = String(dateStr).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+function NextVisitNote({ shift, futurePlacementDays }) {
+  return (
+    <div data-glass="soft" data-testid="next-visit-note" style={{
+      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
+      padding: '10px 12px', fontSize: 14, color: '#9A3412', lineHeight: 1.5,
+    }}>
+      Your next visit moves too. It is on {shortDateLabel(shift.from)} now and will be due
+      {futurePlacementDays === 3 ? ' around ' : ' on '}{shortDateLabel(shift.to)}.
+    </div>
+  );
+}
+
 function ReanchorNote({ futurePlacementDays }) {
   return (
     <div data-glass="soft" style={{
@@ -1370,6 +1409,11 @@ const FLOWS = {
       disclosed_collective: !!data?.collectiveAnchor,
       disclosed_future_placement_days: data?.futurePlacementDays ?? null,
       disclosed_current_date: data?.current?.date || null,
+      // The next-visit date the note under Confirm named for this slot
+      // (null = none named). The server projects it again under its locks
+      // and answers SCOPE_CHANGED when the plan no longer matches.
+      disclosed_next_visit_date: data?.collectiveAnchor ? (nextVisitShiftFor(data, slot.date)?.to ?? null) : null,
+      disclosed_next_visit_current_date: data?.collectiveAnchor ? (nextVisitShiftFor(data, slot.date)?.from ?? null) : null,
     }),
     // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.
     // SELF_SERVE_NOTICE (owner ruling 2026-09-23): the visit slid inside the
@@ -1380,9 +1424,15 @@ const FLOWS = {
     stateChangedMessage: 'The scheduling details for your plan just updated — here is the latest.',
     // Inside the picked row so the heads-up sits directly under the Confirm
     // it applies to — never below the fold.
-    pickedNote: (data, slot) => (!data.collectiveAnchor && slotReanchors(data, slot.date)
-      ? <div className="wpk-picked-note"><ReanchorNote futurePlacementDays={data.futurePlacementDays} /></div>
-      : null),
+    pickedNote: (data, slot) => {
+      const shift = data.collectiveAnchor ? nextVisitShiftFor(data, slot.date) : null;
+      if (shift) {
+        return <div className="wpk-picked-note"><NextVisitNote shift={shift} futurePlacementDays={data.futurePlacementDays} /></div>;
+      }
+      return !data.collectiveAnchor && slotReanchors(data, slot.date)
+        ? <div className="wpk-picked-note"><ReanchorNote futurePlacementDays={data.futurePlacementDays} /></div>
+        : null;
+    },
   },
   reservice: {
     endpoint: 'reservice',
@@ -1735,7 +1785,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (body.availability) {
       // The pick survives when the results still offer it (see the
       // availability effect above); otherwise that effect clears it.
-      setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body) } : prev));
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -1833,7 +1883,7 @@ export default function ScheduleFlowPage({ flow }) {
           if (body.lead) mergeData({ lead: body.lead });
         }
         if (body.availability) {
-          setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body) } : prev));
         } else if (flow === 'inspection') {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper
