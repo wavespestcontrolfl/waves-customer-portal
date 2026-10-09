@@ -208,13 +208,14 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
       });
     });
 
-    test('getProductLimits lists the three rows for a customer, and only Arena is given an interval or an amount row', async () => {
+    test('getProductLimits lists the three rows for a customer, and only Arena, Certainty, Blindside, Velista and Artavia are given an interval or an amount row', async () => {
       const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
       const customerId = await customerWithTwoProperties([0], arena);
       const limits = (await withGate('true', () => ComplianceService.getProductLimits(customerId))).limits.filter((l) => l.productId === arena.id);
       expect(limits.map((l) => l.limitType).sort()).toEqual(['annual_max_apps', 'annual_max_rate', 'min_interval_days']);
       const others = (await withGate('true', () => ComplianceService.limitRowsWithV13Caps())).filter((l) => l.match_type === 'v13_amount' || (l.synthetic && l.limit_type === 'min_interval_days'));
-      expect(new Set(others.map((l) => l.product_id))).toEqual(new Set([arena.id]));
+      const named = await db('products_catalog').whereIn('name', ['Arena 50 WDG', 'Certainty Turf Herbicide', 'Blindside Herbicide', 'Velista', 'Artavia 2 SC (Azoxy)']).select('id');
+      expect(new Set(others.map((l) => l.product_id))).toEqual(new Set(named.map((r) => r.id)));
     });
   });
 
