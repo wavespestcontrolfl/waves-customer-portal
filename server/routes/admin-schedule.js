@@ -25718,7 +25718,10 @@ const SWEEP_CLAIM_NEST_RE = /\b(?:nests?|hives?|wasps?|hornets?|bees?|daubers?)\
 function sentenceClaimsSweep(sentence) {
   if (SWEEP_CLAIM_WEB_RE.test(sentence)) return SWEEP_CLAIM_REMOVAL_RE.test(sentence) || /\bde-?webb?(?:ed|ing)?\b/i.test(sentence);
   if (/\bde-?webb?(?:ed|ing)?\b/i.test(sentence)) return true;
-  return SWEEP_CLAIM_EAVE_RE.test(sentence) && SWEEP_CLAIM_BRUSH_RE.test(sentence) && !SWEEP_CLAIM_NEST_RE.test(sentence);
+  // The nest exception is each action's own: "removed a wasp nest and swept
+  // the eaves" still claims the sweep (Codex round 8 on #6147).
+  return sentence.split(/[,;]|\b(?:and|then|but)\b/i)
+    .some((part) => SWEEP_CLAIM_EAVE_RE.test(part) && SWEEP_CLAIM_BRUSH_RE.test(part) && !SWEEP_CLAIM_NEST_RE.test(part));
 }
 function reportClaimsSweep(text) {
   return String(text || '').split(/[.!?\n]+/).some(sentenceClaimsSweep);
@@ -26920,11 +26923,13 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // technician's own structured observations, which can carry a result
       // promise the pattern screen exempts (codex #5734 r1). Fails open.
       // The cheap screens first: a copy they already refuse costs no model call.
-      const fallbackScreened = report && (screenTradeNames(report) || writerRulesScreen(report) || sweepClaimRefused(report));
+      const fallbackScreened = report && (screenTradeNames(report) || writerRulesScreen(report));
       const fallbackTiming = report && !fallbackScreened && lawnTimingCheckOn
         ? await lawnDraftTimingRejection(report, { remainingMs: reportChainDeadline - Date.now() })
         : null;
-      const fallbackReport = report && (fallbackScreened || fallbackTiming) ? null : report;
+      // The sweep chip's correction screens the last-resort copy too (its own
+      // term: the line above is read as written by lawn-draft-timing-check.test.js).
+      const fallbackReport = report && (fallbackScreened || fallbackTiming || sweepClaimRefused(report)) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,

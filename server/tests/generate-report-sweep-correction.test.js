@@ -118,3 +118,15 @@ test('other work at the eaves is not a sweep claim: a wasp nest removed there st
   expect(mockProvider).toHaveBeenCalledTimes(1);
   expect(res.json.mock.calls[0][0].report).toMatch(/Removed a wasp nest from the eaves/);
 });
+
+// Codex round 8 on #6147.
+test('a nest removed and the eaves swept in one sentence still claims the sweep', async () => {
+  mockProvider
+    .mockResolvedValueOnce({ ok: true, text: 'WHAT WE DID\n\nRemoved a wasp nest and swept the eaves.\n\nWHAT WE FOUND\n\nNo activity noted.' })
+    .mockResolvedValue({ ok: true, text: 'WHAT WE DID\n\nRemoved a wasp nest from the eaves.\n\nWHAT WE FOUND\n\nNo activity noted.' });
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: NOTE, actionsCompleted: [], sweepNotDone: true, fresh: true }), res);
+  expect(res.statusCode).toBe(200);
+  expect(mockProvider.mock.calls.length).toBeGreaterThan(1);
+  expect(res.json.mock.calls[0][0].report).not.toMatch(/swept/i);
+});
