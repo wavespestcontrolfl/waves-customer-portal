@@ -77,7 +77,11 @@ const logger = require('./logger');
 const { adminAlertRelevanceLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
-const { SUGGESTION_KEY_PREFIX } = require('./call-last-name-lookup');
+// The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
+// SUGGESTION_KEY_PREFIX). Repeated here, not imported: that module pulls in
+// the county parcel lookup, and this one loads in the scheduler, the triggers
+// and Needs Me. A test pins the two together.
+const SUGGESTION_KEY_PREFIX = 'call-last-name-suggestion:';
 
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;

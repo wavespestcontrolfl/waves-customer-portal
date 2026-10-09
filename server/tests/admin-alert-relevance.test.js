@@ -995,3 +995,10 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     expect([row.read_at, row.done_at]).toEqual([null, null]);
   });
 });
+
+test('the last-name suggestion prefix here is the emitter\'s own (the two files each hold the constant)', () => {
+  const emitter = jest.requireActual('../services/call-last-name-lookup').SUGGESTION_KEY_PREFIX;
+  const src = require('fs').readFileSync(require.resolve('../services/admin-alert-relevance'), 'utf8');
+  expect(emitter).toBe('call-last-name-suggestion:');
+  expect(src).toContain(`const SUGGESTION_KEY_PREFIX = '${emitter}';`);
+});
