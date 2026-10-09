@@ -1160,6 +1160,40 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  describe('last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling 2026-10-09) — a new hold mirrors the offer filter', () => {
+    const ENV_KEY = 'GATE_CUSTOMER_LAST_START_16';
+    let previous;
+    beforeEach(() => { previous = process.env[ENV_KEY]; });
+    afterEach(() => {
+      if (previous === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = previous;
+    });
+
+    test('gate on: a 17:00 slot signed before the flip is refused as SLOT_UNAVAILABLE before any hold query', async () => {
+      process.env[ENV_KEY] = 'true';
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      try {
+        estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+          serviceMode: 'one_time', serviceLabel: 'Pest Control', durationMinutes: 60, services: [],
+        });
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Pest Control' });
+        const scheduledBuilders = [];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+
+        await expect(slotReservation.reserveSlot({
+          estimateId: 'estimate-456',
+          slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '17:00', techId: 'tech-1', durationMinutes: 60 }),
+          serviceMode: 'one_time',
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot starts after the last customer start' });
+        expect(scheduledBuilders).toHaveLength(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
   describe('lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) — commit-side mirror of the offer filter', () => {
     const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
     let previous;

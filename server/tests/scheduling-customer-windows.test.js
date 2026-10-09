@@ -13,6 +13,7 @@ const {
   overlapsLunch,
   customerWindowAdmits,
   customerLastStart16Enabled,
+  pastCustomerLastStart,
 } = require('../services/scheduling/customer-windows');
 
 describe('CUSTOMER_HOUR_GRID', () => {
@@ -362,6 +363,13 @@ describe('GATE_CUSTOMER_LAST_START_16', () => {
     process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
     process.env.GATE_BOOKING_LUNCH_BLOCK = 'true';
     expect(customerOfferGrid()).toEqual(['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00']);
+  });
+
+  test('pastCustomerLastStart is what the estimate reservation path checks: false with the gate off, true only after 16:00 with it on', () => {
+    expect(pastCustomerLastStart(17 * 60)).toBe(false);
+    process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
+    expect(pastCustomerLastStart(16 * 60)).toBe(false);
+    expect(pastCustomerLastStart(17 * 60)).toBe(true);
   });
 
   test('the grid constant itself is unchanged, so staff surfaces and rollback keep 17:00', () => {

@@ -275,6 +275,7 @@ module.exports = {
   CUSTOMER_LUNCH_END_MINUTES,
   lunchBlockEnabled,
   customerLastStart16Enabled,
+  pastCustomerLastStart,
   customerOfferGrid,
   overlapsLunch,
   customerWindowAdmits,

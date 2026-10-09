@@ -45,7 +45,7 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const {
-  overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
+  overlapsLunch, pastCustomerLastStart, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
@@ -1160,6 +1160,17 @@ async function reserveSlot({
           || slotStartMinutes + effectiveDurationMinutes > currentDayEndMinutes())
         : slotStartMinutes + effectiveDurationMinutes > currentDayEndMinutes() + ROUND_UP_GRACE_MINUTES) {
         const err = new Error('slot runs past the end of the working day');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+      // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+      // 2026-10-09): a NEW hold on a 17:00 offer signed before the gate
+      // flipped is refused here, like the offer side. No-op while unset. A
+      // hold that already exists is honored at commit: the customer was
+      // given that time.
+      if (pastCustomerLastStart(slotStartMinutes)) {
+        const err = new Error('slot starts after the last customer start');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
