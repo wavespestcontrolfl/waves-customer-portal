@@ -414,3 +414,25 @@ describe('missing-geo notice close', () => {
     expect(retireStatements[0].sql).not.toContain('"s"."id" in');
   });
 });
+
+// A gate-off night has no placement run to evaluate pins: the upkeep reads
+// the standing notices' own visits and passes the ones whose pin resolves to
+// the retire (Codex #6208 r17 P2).
+test('missing-pin upkeep closes a standing notice whose visit now has a pin', async () => {
+  const audit = require('../services/auto-dispatch/audit');
+  existingNoticeKeys = ['auto-dispatch-missing-geo:v1:2026-08-20', 'auto-dispatch-missing-geo:v2:2026-08-21'];
+  query.select = jest.fn().mockResolvedValue([
+    { id: 'v1', scheduled_date: '2026-08-20', customer_latitude: 27.4, customer_longitude: -82.5 },
+    { id: 'v2', scheduled_date: '2026-08-21', customer_latitude: null, customer_longitude: null },
+  ]);
+  query.leftJoin = jest.fn(() => query);
+  await audit.maintainMissingGeoNotices(new Date('2026-08-01T16:00:00Z'));
+  expect(query.whereIn).toHaveBeenCalledWith('scheduled_services.id', ['v1', 'v2']);
+  const retireSql = retireStatements[retireStatements.length - 1];
+  expect(retireSql.bindings).toContain('auto-dispatch-missing-geo:%');
+  expect(retireSql.bindings).toContain('v1');
+  expect(retireSql.bindings).not.toContain('v2');
+  // Only an explicit false is inactive in the retire predicate.
+  expect(retireSql.sql).toContain('c.active IS NOT FALSE');
+});
+

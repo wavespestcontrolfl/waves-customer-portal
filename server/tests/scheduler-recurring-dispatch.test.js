@@ -12,7 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
-jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn() }));
+jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn(), maintainMissingGeoNotices: jest.fn() }));
 jest.mock('../services/time-tracking-crons', () => ({ initTimeTrackingCrons: jest.fn() }));
 jest.mock('../services/equipment-crons', () => ({ initEquipmentCrons: jest.fn() }));
 jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons: jest.fn() }));
@@ -24,7 +24,7 @@ const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 const { runAutoDispatch } = require('../services/auto-dispatch');
-const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
+const { flagUnplacedVisits, maintainMissingGeoNotices } = require('../services/auto-dispatch/audit');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -46,6 +46,8 @@ test('the existing daily tick maintains handoff alerts with autoDispatch disable
   await tick();
   expect(runExclusive).toHaveBeenCalledWith('auto-dispatch-recurring', expect.any(Function));
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
+  // No placement run on a gate-off night: pin notices are still kept current (Codex #6208 r17 P2).
+  expect(maintainMissingGeoNotices).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });
 

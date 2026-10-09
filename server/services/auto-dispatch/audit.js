@@ -159,7 +159,10 @@ async function retireResolvedNotices({ keyPattern, stillOpen, resolvedTitle, res
     .whereNotExists(function stillMatches() {
       this.select('s.id').from('scheduled_services as s')
         .join('customers as c', 'c.id', 's.customer_id')
-        .where('c.active', true)
+        // Only an explicit false is inactive, as the scans and eligibility.js
+        // rule; `= true` closed a NULL-active customer's notice the moment
+        // it was raised (Codex #6208 r17 P2).
+        .whereRaw('c.active IS NOT FALSE')
         .whereNull('c.deleted_at')
         .whereRaw("s.id::text = notifications.metadata->>'scheduledServiceId'");
       stillOpen(this);
@@ -457,6 +460,23 @@ async function retireMissingGeoNotices(pinOkIds, nowDate = new Date()) {
   }, nowDate);
 }
 
+// Missing-pin notice upkeep for a night the placement run does not happen
+// (cronJobs or autoDispatch off): nothing evaluates pins then, so read the
+// standing notices' own visits and close each one whose pin now resolves,
+// or whose visit is gone (Codex #6208 r17 P2). The run does this itself
+// (index.js closeMissingGeoNotices) when it is on.
+async function maintainMissingGeoNotices(nowDate = new Date()) {
+  const { resolveGeo } = require('./geo');
+  const ids = [...await standingMissingGeoKeys()].map((key) => key.split(':')[1]).filter(Boolean);
+  if (!ids.length) return;
+  const rows = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.id', ids)
+    .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+      'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip');
+  await retireMissingGeoNotices(new Set(rows.filter((r) => resolveGeo(r)).map((r) => String(r.id))), nowDate);
+}
+
 // Include skipped/locked rows: unplaced due dates must not disappear behind
 // eligibility filters or the run cap. The existing bell dedupes repeated runs.
 async function flagUnplacedVisits(config, nowDate = new Date()) {
@@ -535,4 +555,4 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
   return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices, maintainMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN };
