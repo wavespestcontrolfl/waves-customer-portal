@@ -284,6 +284,45 @@ describe('gate on: the phone order', () => {
     expect(screen.getByTestId('lawn-your-part')).toHaveTextContent('Nothing for you to do after this visit.');
   });
 
+  it('the status card\'s "Next service" is left off when Your plan prints that appointment, and kept when it does not', async () => {
+    const payload = clone(spotOn);
+    delete payload.upcomingVisitsCard;
+    payload.nextAppointment = { serviceType: 'Lawn Care', scheduledDate: '2026-10-23' };
+    const { container } = renderReport(payload, '', 'tok-next-service-drop');
+    await waitForReport();
+    expect(text(container)).not.toContain('Next service');
+    expect(text(container)).toContain('Your next Lawn Care visit is Fri, Oct 23.');
+    expect(text(container)).not.toContain('Friday, October 23');
+    cleanup();
+    delete payload.planSummary;
+    const second = renderReport(payload, '', 'tok-next-service-keep');
+    await waitForReport();
+    expect(text(second.container)).toContain('Next service');
+    expect(text(second.container)).toContain('Lawn Care · Fri, Oct 23');
+    expect(text(second.container)).not.toContain('Friday, October 23');
+  });
+
+  it('the Visit Summary\'s "Next visit:" date is left off when the plan area prints that same visit, and printed when nothing earlier does', async () => {
+    const sections = [
+      { key: 'found', title: 'What we found', paragraphs: ['Thin turf along the driveway edge.'] },
+      { key: 'whatsNext', title: 'What\u2019s next', paragraphs: ['We will recheck the edge.'] },
+    ];
+    const payload = clone(spotOn);
+    payload.summarySource = 'technician_report';
+    payload.reportSections = sections;
+    payload.summary = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+    payload.nextSameServiceAppointment = { serviceType: 'Lawn Care', scheduledDate: '2026-10-23' };
+    const { container } = renderReport(payload, '', 'tok-whatsnext-drop');
+    await waitForReport();
+    expect(text(container)).not.toContain('Next visit: Lawn Care');
+    cleanup();
+    payload.upcomingVisitsCard = { visits: [], merged: true };
+    delete payload.planSummary;
+    const second = renderReport(payload, '', 'tok-whatsnext-keep');
+    await waitForReport();
+    expect(text(second.container)).toContain('Next visit: Lawn Care · Fri, Oct 23');
+  });
+
   it('a finished re-entry keeps its pet advisory in Your part', async () => {
     const payload = clone(cleanOn);
     payload.dynamicContext.reentry.petAdvisory = 'Keep pets off treated turf until it is fully dry.';

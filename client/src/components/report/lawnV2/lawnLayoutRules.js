@@ -52,9 +52,14 @@ export function lawnLayoutActive(data, mode) {
     && layoutDeclines(data).length === 0;
 }
 
-/** The status card's data: "Your documents" is not part of the lawn layout. */
-export function lawnLayoutStatusData(data, mode) {
-  return lawnLayoutActive(data, mode) ? { ...data, relatedDocuments: undefined } : data;
+/**
+ * The status card's data: "Your documents" is not part of the lawn layout, and "Next service" is left off when the
+ * plan area prints that same appointment (nextVisitPlacement), so the date is printed once.
+ */
+export function lawnLayoutStatusData(data, mode, todayEt) {
+  if (!lawnLayoutActive(data, mode)) return data;
+  const { statusDrops } = nextVisitPlacement(data, { todayEt });
+  return { ...data, relatedDocuments: undefined, ...(statusDrops ? { nextAppointment: undefined } : {}) };
 }
 
 /** The "Today's result" override the standard page passes to the status card. */
@@ -290,32 +295,90 @@ const dateOnly = (value) => {
 };
 const isLawnVisit = (serviceType) => /lawn|turf/i.test(String(serviceType || ''));
 
+// The visits the plan area PRINTS (what PlanSummaryCard and UpcomingVisitsCard render), each with whether the print
+// carries the arrival window:
+//   - a visits list (data.upcomingVisitsCard.visits): the merged "Your plan" section (merged: true) or the standalone
+//     "Your upcoming visits" card print each visit's service, date and window (clarity on lists one lawn visit;
+//     clarity off lists every service line). An unparsable date prints no date, so that visit does not count;
+//   - with NO upcomingVisitsCard key (the upcoming-visits gate off), "Your plan" prints "Your next <service> visit is
+//     <date>." from data.nextAppointment (no window), only with a plan (visitsThisYear > 0), a date that has not passed
+//     (ET) and a service name.
+// (The server scopes the list to this report's property.)
+function printedPlanVisits(data, todayEt) {
+  if (data.upcomingVisitsCard) {
+    const visits = Array.isArray(data.upcomingVisitsCard.visits) ? data.upcomingVisitsCard.visits : [];
+    return visits.filter((visit) => dateOnly(visit?.scheduledDate)).map((visit) => ({ visit, window: true }));
+  }
+  const appointment = data.nextAppointment;
+  const printed = (Number(data.planSummary?.visitsThisYear) || 0) > 0
+    && dateOnly(appointment?.scheduledDate) >= todayEt
+    && isText(String(appointment?.serviceType || '').replace(/\s+service$/i, ''));
+  return printed ? [{ visit: appointment, window: false }] : [];
+}
+
+// The window the card prints for a visit ("9:00 AM–11:00 AM" from windowStart), as a comparable key.
+const windowKey = (visit) => (/^(\d{1,2}):(\d{2})/.exec(String(visit?.windowStart || '')) || []).slice(1).join(':');
+const sameDayAs = (visit, ymd) => Boolean(ymd) && dateOnly(visit?.scheduledDate) === ymd;
+// The label the lead prints for its next visit, as a calendar day (the server's long form, with or without the year).
+const leadDayMatches = (label, visit) => {
+  const ymd = dateOnly(visit?.scheduledDate);
+  return Boolean(ymd) && [longDay(ymd, false), longDay(ymd, true)].some((day) => norm(day) === norm(label));
+};
+const scheduledLabel = (data) => {
+  const next = data?.reportV2?.snapshot?.nextVisit;
+  return next && next.source === 'scheduled' && isText(next.label) ? next.label : null;
+};
+// The same appointment: same day, same service, same window.
+const sameAppointment = (a, b) => sameDayAs(a, dateOnly(b?.scheduledDate)) && norm(a?.serviceType) === norm(b?.serviceType) && windowKey(a) === windowKey(b);
+
 /**
- * True only when the plan area PRINTS the visit the lead's date names: the lead's next visit is a scheduled
- * booking, and one of the two ways the area prints a next-visit date prints a lawn visit on that same day.
- *   - a visits list (data.upcomingVisitsCard.visits): the merged "Your plan" section (merged: true) or the standalone
- *     "Your upcoming visits" card print each visit's date (clarity on lists one lawn visit; clarity off lists every line);
- *   - with NO upcomingVisitsCard key at all (the upcoming-visits gate off), "Your plan" prints
- *     "Your next <service> visit is <date>." from data.nextAppointment, but only with a plan (visitsThisYear > 0) and
- *     only for a date that has not passed (ET).
- * A pest visit, another day, an unparsable date, a cadence estimate or a card that does not print it keeps the
- * lead's date. (The server scopes the list to this report's property.)
+ * True only when the plan area PRINTS the visit the lead's date names: the lead's next visit is a scheduled booking,
+ * and the plan area (printedPlanVisits) prints a lawn visit on that same day. A pest visit, another day, an
+ * unparsable date, a cadence estimate or a card that does not print it keeps the lead's date.
  */
 export function planShowsNextVisit(data, todayEt = etDateString()) {
-  const next = data?.reportV2?.snapshot?.nextVisit;
-  if (!next || next.source !== 'scheduled' || !isText(next.label)) return false;
-  const label = norm(next.label);
-  const sameDay = (visit) => {
-    const ymd = dateOnly(visit?.scheduledDate);
-    return Boolean(ymd) && isLawnVisit(visit.serviceType) && [longDay(ymd, false), longDay(ymd, true)].some((day) => norm(day) === label);
-  };
-  if (data.upcomingVisitsCard) {
-    const visits = data.upcomingVisitsCard.visits;
-    return Array.isArray(visits) && visits.some(sameDay);
-  }
-  const visitsThisYear = Number(data.planSummary?.visitsThisYear) || 0;
-  const appointment = data.nextAppointment;
-  return visitsThisYear > 0 && sameDay(appointment) && dateOnly(appointment.scheduledDate) >= todayEt;
+  const label = scheduledLabel(data);
+  return Boolean(label) && printedPlanVisits(data, todayEt).some(({ visit }) => isLawnVisit(visit.serviceType) && leadDayMatches(label, visit));
+}
+
+/**
+ * True when the plan area prints this very appointment: a list entry prints service, date and window, so all three must
+ * match; the plan-only fallback line prints service and date but no window, so the appointment must have none.
+ */
+function planPrintsAppointment(data, appointment, todayEt) {
+  if (!dateOnly(appointment?.scheduledDate)) return false;
+  return printedPlanVisits(data, todayEt).some(({ visit, window }) => {
+    const sameServiceDay = sameDayAs(visit, dateOnly(appointment.scheduledDate)) && norm(visit.serviceType) === norm(appointment.serviceType);
+    return sameServiceDay && (window ? windowKey(visit) === windowKey(appointment) : !windowKey(appointment));
+  });
+}
+
+/**
+ * Where each next-visit date prints on the lawn layout page, so none prints twice and none is lost. Printers, in the
+ * order that wins: the plan area, the status card's "Next service" (data.nextAppointment, any service line), the
+ * Visit Summary's "What's next" line (data.nextSameServiceAppointment, only inside the four-section technician
+ * report: `summaryPrintsNext`), then the lead's "Next visit" date. A later printer drops its date only when an
+ * earlier one that really prints is the SAME visit; with no proof it keeps its date.
+ */
+export function nextVisitPlacement(data, { summaryPrintsNext = false, todayEt = etDateString() } = {}) {
+  const appointment = data?.nextAppointment;
+  const statusPrintable = Boolean(dateOnly(appointment?.scheduledDate));
+  const statusDrops = statusPrintable && planPrintsAppointment(data, appointment, todayEt);
+  const statusPrints = statusPrintable && !statusDrops;
+  const summary = data?.nextSameServiceAppointment;
+  const summaryPrintable = summaryPrintsNext && Boolean(dateOnly(summary?.scheduledDate));
+  const summaryDrops = summaryPrintable && (planPrintsAppointment(data, summary, todayEt) || (statusPrints && sameAppointment(summary, appointment)));
+  const summaryPrints = summaryPrintable && !summaryDrops;
+  const leadDrops = leadDateIsPrintedElsewhere(data, todayEt, [statusPrints && appointment, summaryPrints && summary]);
+  return { statusDrops, summaryDrops, leadDrops };
+}
+
+// The lead's scheduled date is dropped when the plan area, or an earlier printer that really prints (the `printers`
+// that are appointments, not false), shows a lawn visit on that same day.
+function leadDateIsPrintedElsewhere(data, todayEt, printers) {
+  const label = scheduledLabel(data);
+  if (!label) return false;
+  return planShowsNextVisit(data, todayEt) || printers.some((visit) => visit && isLawnVisit(visit.serviceType) && leadDayMatches(label, visit));
 }
 
 // ── Mowing height ───────────────────────────────────────────────────────────

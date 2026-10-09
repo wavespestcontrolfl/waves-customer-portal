@@ -48,7 +48,7 @@ import {
   lawnLayoutActive,
   mowingLine,
   pageCarriesInstruction,
-  planShowsNextVisit,
+  nextVisitPlacement,
   treatmentMayHaveBeenApplied,
   watchingLine,
   whenToCallLines,
@@ -133,10 +133,18 @@ export function LawnYourPartCard({ banner = null, reentry = null, lines = [], ot
   );
 }
 
+// True when the Visit Summary below prints its own "Next visit: <date>" line: the four-section technician report
+// (whose "What's next" section opens with it) is on the page and the slot carries the label.
+function summaryPrintsNextVisit(slots) {
+  const summary = slots.visitSummary;
+  return Boolean(summary && summary.nextVisitLabel && reportSectionsForText(summary.sections, summary.text)
+    && summary.sections.some((section) => section.key === 'whatsNext'));
+}
+
 // ── (a) the next lawn visit's reason ────────────────────────────────────────
-function NextVisit({ data }) {
+function NextVisit({ data, slots }) {
   const { lead, snapshot } = data.reportV2;
-  const dateLine = planShowsNextVisit(data) ? null : nextVisitSentence(snapshot?.nextVisit);
+  const dateLine = nextVisitPlacement(data, { summaryPrintsNext: summaryPrintsNextVisit(slots) }).leadDrops ? null : nextVisitSentence(snapshot?.nextVisit);
   const value = [dateLine, lead.next].filter(Boolean).join(' — ');
   if (!value) return null;
   return (
@@ -158,6 +166,8 @@ function WhatWeDid({ data, slots }) {
   // whole: the lead's applied sentence is not a substitute for its sections.
   const summary = slots.visitSummary;
   const sectioned = Boolean(summary) && Boolean(reportSectionsForText(summary.sections, summary.text));
+  // The "What's next" date line prints only when no earlier printer (the plan area, the status card) printed the same visit.
+  const summaryNextLabel = summary && !nextVisitPlacement(data, { summaryPrintsNext: summaryPrintsNextVisit(slots) }).summaryDrops ? summary.nextVisitLabel : null;
   const summaryText = summary && !sectioned ? withoutRepeatedApplied(summary.text, lead.applied) : (summary && summary.text) || null;
   return (
     <>
@@ -175,7 +185,7 @@ function WhatWeDid({ data, slots }) {
       {summaryText || slots.recordedFindings ? (
         <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
           <h2>Visit Summary</h2>
-          {summaryText ? <ReportText text={summaryText} sections={summary.sections} nextVisitLabel={summary.nextVisitLabel} /> : null}
+          {summaryText ? <ReportText text={summaryText} sections={summary.sections} nextVisitLabel={summaryNextLabel} /> : null}
           {slots.recordedFindings}
         </section>
       ) : null}

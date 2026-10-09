@@ -16,6 +16,7 @@ import {
   lawnLayoutStatusData,
   mowingLine,
   planShowsNextVisit,
+  nextVisitPlacement,
   reentryIsTimed,
   reentryRow,
   withoutRepeatedApplied,
@@ -545,5 +546,81 @@ describe('invitations never count as after-visit instructions', () => {
     const data = clean();
     data.reportV2.insights = [{ priority: 1, status: 'watch', category: 'coverage', customerAction: 'Check the zone by the fence.' }];
     expect(pageCarriesInstruction(data, Date.now())).toBe(true);
+  });
+});
+
+describe('nextVisitPlacement: where each next-visit date prints, per gate combination (none twice, none lost)', () => {
+  const TODAY = '2026-10-09';
+  const lead = { label: 'Friday, October 23', source: 'scheduled' };
+  const lawn = (extra = {}) => ({ serviceType: 'Lawn Care', scheduledDate: '2026-10-23', ...extra });
+  const pest = (extra = {}) => ({ serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-23', ...extra });
+  const plan = { visitsThisYear: 8 };
+  // statusDrops: the status card's "Next service" is left off (the plan area prints that same appointment).
+  // summaryDrops: the Visit Summary's "What's next" date line is left off. leadDrops: the lead's Next visit date is left off.
+  const make = (extra) => ({ reportV2: { snapshot: { nextVisit: lead } }, ...extra });
+  const rows = [
+    ['upcoming gate OFF, plan, nextAppointment lawn visit: plan prints it, status and lead drop', make({ planSummary: plan, nextAppointment: lawn() }), {}, { statusDrops: true, summaryDrops: false, leadDrops: true }],
+    ['upcoming gate OFF, plan, nextAppointment lawn visit WITH a window: the plan line prints no window, so the status card keeps it (the lead drops: the plan prints the day)', make({ planSummary: plan, nextAppointment: lawn({ windowStart: '09:00' }) }), {}, { statusDrops: false, summaryDrops: false, leadDrops: true }],
+    ['upcoming gate OFF, plan, nextAppointment a pest visit: plan prints it, status drops, lead keeps its lawn date', make({ planSummary: plan, nextAppointment: pest() }), {}, { statusDrops: true, summaryDrops: false, leadDrops: false }],
+    ['upcoming gate OFF, NO plan: the plan prints nothing; status keeps, and prints the lawn day, so the lead drops', make({ nextAppointment: lawn() }), {}, { statusDrops: false, summaryDrops: false, leadDrops: true }],
+    ['upcoming gate OFF, NO plan, nextAppointment a pest visit: status keeps it, lead keeps its lawn date', make({ nextAppointment: pest() }), {}, { statusDrops: false, summaryDrops: false, leadDrops: false }],
+    ['upcoming gate OFF, plan, nextAppointment past: the plan prints nothing; status keeps it', make({ planSummary: plan, nextAppointment: lawn({ scheduledDate: '2026-10-01' }), reportV2: { snapshot: { nextVisit: { label: 'Thursday, October 1', source: 'scheduled' } } } }), {}, { statusDrops: false, summaryDrops: false, leadDrops: true }],
+    ['upcoming gate OFF, nextAppointment a full timestamp: nobody prints a date from it', make({ planSummary: plan, nextAppointment: lawn({ scheduledDate: '2026-10-23T14:00:00.000Z' }) }), {}, { statusDrops: false, summaryDrops: false, leadDrops: false }],
+    ['upcoming ON standalone (reschedule off), clarity ON: list prints the lawn visit, status drops, lead drops', make({ nextAppointment: lawn(), upcomingVisitsCard: { visits: [lawn()] } }), {}, { statusDrops: true, summaryDrops: false, leadDrops: true }],
+    ['upcoming ON standalone, clarity OFF: nextAppointment is a pest visit the list also holds: status drops, lead drops (the list holds the lawn visit)', make({ nextAppointment: pest({ scheduledDate: '2026-10-20' }), upcomingVisitsCard: { visits: [pest({ scheduledDate: '2026-10-20' }), lawn()] } }), {}, { statusDrops: true, summaryDrops: false, leadDrops: true }],
+    ['upcoming ON merged, clarity ON: same as standalone', make({ planSummary: plan, nextAppointment: lawn(), upcomingVisitsCard: { visits: [lawn()], merged: true } }), {}, { statusDrops: true, summaryDrops: false, leadDrops: true }],
+    ['upcoming ON merged, list holds the lawn visit with a window the nextAppointment lacks: the list line differs, status keeps it', make({ planSummary: plan, nextAppointment: lawn(), upcomingVisitsCard: { visits: [lawn({ windowStart: '09:00' })], merged: true } }), {}, { statusDrops: false, summaryDrops: false, leadDrops: true }],
+    ['upcoming ON, EMPTY list: no fallback, nothing printed by the plan; status keeps and prints the lawn day, lead drops', make({ planSummary: plan, nextAppointment: lawn(), upcomingVisitsCard: { visits: [], merged: true } }), {}, { statusDrops: false, summaryDrops: false, leadDrops: true }],
+    ['upcoming ON, list of other days only: status keeps, lead keeps', make({ nextAppointment: pest(), upcomingVisitsCard: { visits: [lawn({ scheduledDate: '2026-10-30' })] } }), {}, { statusDrops: false, summaryDrops: false, leadDrops: false }],
+    ['four-section report prints its What\'s next date; the plan area prints the same visit: summary drops', make({ planSummary: plan, nextAppointment: lawn(), nextSameServiceAppointment: lawn() }), { summaryPrintsNext: true }, { statusDrops: true, summaryDrops: true, leadDrops: true }],
+    ['four-section report, no plan area, status prints the same visit: summary drops, lead drops', make({ nextAppointment: lawn(), nextSameServiceAppointment: lawn() }), { summaryPrintsNext: true }, { statusDrops: false, summaryDrops: true, leadDrops: true }],
+    ['four-section report, nothing earlier prints the lawn visit: summary keeps its date, lead drops (it prints the day)', make({ nextSameServiceAppointment: lawn({ windowStart: '09:00' }) }), { summaryPrintsNext: true }, { statusDrops: false, summaryDrops: false, leadDrops: true }],
+    ['no four-section report: the What\'s next line does not exist, so it never drops the lead date', make({ nextSameServiceAppointment: lawn() }), { summaryPrintsNext: false }, { statusDrops: false, summaryDrops: false, leadDrops: false }],
+    ['lead date is only an estimate: kept whatever else prints', make({ planSummary: plan, nextAppointment: lawn(), reportV2: { snapshot: { nextVisit: { label: 'Friday, October 23', source: 'estimated' } } } }), {}, { statusDrops: true, summaryDrops: false, leadDrops: false }],
+  ];
+
+  it.each(rows)('%s', (_name, payload, options, expected) => {
+    expect(nextVisitPlacement(payload, { todayEt: TODAY, ...options })).toEqual(expected);
+  });
+
+  it('every date is printed by at least one place whenever one exists (none lost)', () => {
+    rows.forEach(([name, payload, options]) => {
+      const placement = nextVisitPlacement(payload, { todayEt: TODAY, ...options });
+      const printable = [payload.nextAppointment, payload.nextSameServiceAppointment, ...(payload.upcomingVisitsCard?.visits || [])]
+        .some((v) => v && /^\d{4}-\d{2}-\d{2}$/.test(String(v.scheduledDate || '')));
+      const leadHas = payload.reportV2.snapshot.nextVisit && true;
+      const printers = [
+        !placement.statusDrops && payload.nextAppointment && /^\d{4}-\d{2}-\d{2}$/.test(payload.nextAppointment.scheduledDate),
+        planShowsNextVisit(payload, TODAY) || (payload.upcomingVisitsCard?.visits || []).length > 0 || (!payload.upcomingVisitsCard && payload.planSummary && payload.nextAppointment),
+        options.summaryPrintsNext && !placement.summaryDrops,
+        leadHas && !placement.leadDrops,
+      ].some(Boolean);
+      if (printable || leadHas) expect(printers, name).toBe(true);
+    });
+  });
+});
+
+describe('lawnLayoutStatusData drops "Next service" only when the plan area prints that appointment', () => {
+  const base = { serviceLine: 'lawn', lawnLayout: {}, reportV2: { lead: {}, snapshot: { nextVisit: { label: 'Friday, October 23', source: 'scheduled' } } }, planSummary: { visitsThisYear: 8 } };
+  const TODAY = '2026-10-09';
+
+  it('a pest appointment printed by the plan area is removed from the status card (any service line)', () => {
+    const data = { ...base, nextAppointment: { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-23' } };
+    expect(lawnLayoutStatusData(data, 'live', TODAY).nextAppointment).toBeUndefined();
+  });
+
+  it('kept when the plan area does not print it (no plan, past date, window difference, empty list)', () => {
+    const appointment = { serviceType: 'Lawn Care', scheduledDate: '2026-10-23' };
+    expect(lawnLayoutStatusData({ ...base, planSummary: undefined, nextAppointment: appointment }, 'live', TODAY).nextAppointment).toBe(appointment);
+    const past = { serviceType: 'Lawn Care', scheduledDate: '2026-10-01' };
+    expect(lawnLayoutStatusData({ ...base, nextAppointment: past }, 'live', TODAY).nextAppointment).toBe(past);
+    const windowed = { serviceType: 'Lawn Care', scheduledDate: '2026-10-23', windowStart: '09:00' };
+    expect(lawnLayoutStatusData({ ...base, nextAppointment: windowed }, 'live', TODAY).nextAppointment).toBe(windowed);
+    expect(lawnLayoutStatusData({ ...base, nextAppointment: appointment, upcomingVisitsCard: { visits: [] } }, 'live', TODAY).nextAppointment).toBe(appointment);
+  });
+
+  it('a page that is not on the layout is returned untouched', () => {
+    const data = { ...base, nextAppointment: { serviceType: 'Lawn Care', scheduledDate: '2026-10-23' } };
+    expect(lawnLayoutStatusData(data, 'pdf', TODAY)).toBe(data);
   });
 });
