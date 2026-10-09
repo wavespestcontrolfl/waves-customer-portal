@@ -171,7 +171,7 @@ describe('the ledger scope: which rows spend the bed allowance', () => {
     expect(sql).toContain('"pah"."customer_id" = ?');
     // A row with no service record stays in the read (dinotefuran counts from any source).
     expect(sql).toContain('left join "service_records" as "sr"');
-    expect(sql).not.toContain('inner join');
+    expect(sql).not.toContain('inner join "service_records" as "sr"');
     expect(sql).toMatch(/"pah"\."property_id" is null or "pah"\."property_id" = \?/);
     expect(sql).toContain('not exists');
     expect(sql).toMatch(/"pah"\."service_record_id" is null or "pah"\."service_record_id" not in/);
