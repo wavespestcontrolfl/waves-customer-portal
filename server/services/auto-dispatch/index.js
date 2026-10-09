@@ -749,11 +749,18 @@ async function raiseMissingGeoNotices(run) {
 // of visits no longer live on that date). Only after a pass 1 that finished
 // with no failed visit. Best-effort.
 async function closeMissingGeoNotices(run) {
-  if (!run.pass1Complete) return;
   try {
-    await audit.retireMissingGeoNotices(run.pinOkIds, run.nowDate);
+    if (run.pass1Complete) await audit.retireMissingGeoNotices(run.pinOkIds, run.nowDate);
   } catch (err) {
     logger.error(`[auto-dispatch] missing-geo notice close failed: ${err.message}`);
+  }
+  // A visit the run no longer loads (inside the lock window, locked or
+  // excluded) never enters pinOkIds: read every standing notice's own visit
+  // too, so a pin fixed late still closes its notice (Codex #6208 r19 P2).
+  try {
+    await audit.maintainMissingGeoNotices(run.nowDate);
+  } catch (err) {
+    logger.error(`[auto-dispatch] missing-geo notice upkeep failed: ${err.message}`);
   }
 }
 

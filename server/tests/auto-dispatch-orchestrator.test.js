@@ -28,6 +28,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   completeRun: jest.fn(async () => {}),
   flagUnplacedVisits: jest.fn(async () => 0),
   retireMissingGeoNotices: jest.fn(async () => {}),
+  maintainMissingGeoNotices: jest.fn(async () => {}),
 }));
 
 jest.mock('../services/tech-visit-notifications', () => ({
@@ -347,6 +348,9 @@ describe('missing-geo notice close at the end of a run', () => {
     const res = await runAutoDispatch({ mode: 'dry_run' });
     expect(res.status).toBe('failed');
     expect(audit.retireMissingGeoNotices).not.toHaveBeenCalled();
+    // The standing-notice upkeep reads each notice's own visit, so it does
+    // not depend on pass 1 (Codex #6208 r19 P2).
+    expect(audit.maintainMissingGeoNotices).toHaveBeenCalledTimes(1);
   });
 
   test('does not close when a visit failed in pass 1 (it was not fully looked at)', async () => {
