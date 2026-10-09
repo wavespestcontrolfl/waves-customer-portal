@@ -207,13 +207,15 @@ async function treeShrubNeonicCapBlocks(database, svc, products, { serviceDate =
  * The same check INSIDE the completion's writing transaction, just before the ledger rows are
  * written. /complete's first check reads before that transaction, so two visits at one property
  * finishing together could each pass against the same allowance. This takes a transaction-scoped
- * advisory lock on the property (the customer when the visit has no property) and checks again;
+ * advisory lock on the customer (every property scope of theirs overlaps) and checks again;
  * the lock is held until the ledger rows commit, so the second visit reads the first one's rows.
  * Over the cap: throws an operational 400 that rolls the completion back. Gate off: no lock, no read.
  */
 async function recheckNeonicCapInTransaction(trx, svc, products, { serviceDate } = {}) {
   if (!tsNeonicCapLive()) return;
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['ts.neonic_cap', String(svc.property_id || svc.customer_id)]);
+  // Keyed on the CUSTOMER: a property's read includes the customer's unplaced rows and an unlinked
+  // visit's read spans every property, so one lock must cover all of them.
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['ts.neonic_cap', String(svc.customer_id)]);
   const blocks = await treeShrubNeonicCapBlocks(trx, svc, products, { serviceDate });
   if (!blocks.length) return;
   const payload = neonicCapBlockPayload(blocks);

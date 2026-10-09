@@ -662,7 +662,11 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
   test('gate on: what is left of Zylam at this property, a lawn visit\'s row left out', async () => {
     process.env.GATE_TS_NEONIC_CAP = 'true';
     const ctx = await build();
-    expect(ctx.neonicCap).toMatchObject({ available: true, year: 2026, bedSqft: 10890 });
+    // The year is today's (ET), the day a completion records, not the scheduled day.
+    const thisYear = Number(require('../utils/datetime-et').etDateString().slice(0, 4));
+    expect(ctx.neonicCap).toMatchObject({ available: true, year: thisYear, bedSqft: 10890 });
+    const lastDecember = await build({ scheduled_services: visit({ scheduled_date: `${thisYear - 1}-12-30` }) });
+    expect(lastDecember.neonicCap.year).toBe(thisYear);
     const dino = ctx.neonicCap.ingredients.find((entry) => entry.key === 'dinotefuran');
     expect(dino.usedShare).toBeCloseTo(0.5, 6);
     expect(dino.capByProduct).toEqual([{ productId: 'zylam', name: 'Zylam', unit: 'fl_oz', yearlyAmount: 19.725, remainingAmount: 9.8625 }]);

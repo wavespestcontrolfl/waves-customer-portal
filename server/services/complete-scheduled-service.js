@@ -8048,8 +8048,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Incomplete visits are included on purpose — any product logged
         // was physically applied regardless of the visit outcome.
         if (insertedServiceProducts.length) {
-          // GATE_TS_NEONIC_CAP: the yearly cap again, under a property lock held until these ledger rows
-          // commit, on the date they carry. Two visits at one property cannot both spend one allowance.
+          // GATE_TS_NEONIC_CAP: the yearly cap again, under a customer lock held until these ledger rows
+          // commit, on the date they carry. Two visits of one customer cannot both spend one allowance.
           if (!isIncompleteVisit && (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')) {
             await recheckNeonicCapInTransaction(trx, svc, products, { serviceDate: completionServiceDate });
           }

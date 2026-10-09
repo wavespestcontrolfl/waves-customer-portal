@@ -301,7 +301,7 @@ describe('treeShrubNeonicCapBlocks (the /complete check)', () => {
     await expect(treeShrubNeonicCapBlocks(fakeDb({ failLedger: true }), svc, submit([ZYLAM, 1, 'fl_oz']))).rejects.toThrow('ledger down');
   });
   // Two visits at one property finishing together: the check runs again inside the writing
-  // transaction under a property lock held until the ledger rows commit (pre-push P1 #6204).
+  // transaction under a customer lock held until the ledger rows commit (pre-push P1 #6204).
   describe('recheckNeonicCapInTransaction', () => {
     const { recheckNeonicCapInTransaction } = require('../services/tree-shrub-neonic-ledger');
     const trxOf = (options) => {
@@ -320,15 +320,15 @@ describe('treeShrubNeonicCapBlocks (the /complete check)', () => {
       expect(trx.reads).toEqual([]);
     });
 
-    test('gate on: locks the property, then passes inside the cap', async () => {
+    test('gate on: locks the customer, then passes inside the cap', async () => {
       process.env.GATE_TS_NEONIC_CAP = 'true';
       const trx = trxOf({ ledger: [row(ZYLAM, 15, 'fl_oz')] });
       await recheckNeonicCapInTransaction(trx, svc, submit([ZYLAM, 4, 'fl_oz']), { serviceDate: '2026-10-09' });
       // The first raw call is the lock; later ones are the ledger query's own raw fragments.
-      expect(trx.locks[0]).toEqual(['SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['ts.neonic_cap', 'prop-1']]);
+      expect(trx.locks[0]).toEqual(['SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['ts.neonic_cap', 'cust-1']]);
     });
 
-    test('gate on: a visit with no property locks the customer', async () => {
+    test('gate on: a visit with no property takes the same customer lock', async () => {
       process.env.GATE_TS_NEONIC_CAP = 'true';
       const trx = trxOf({});
       await recheckNeonicCapInTransaction(trx, { ...svc, property_id: null }, submit([ZYLAM, 1, 'fl_oz']), { serviceDate: '2026-10-09' });
