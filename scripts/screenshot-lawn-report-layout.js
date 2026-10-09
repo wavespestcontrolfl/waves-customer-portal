@@ -28,7 +28,7 @@ const out = arg('out', path.join(os.homedir(), 'lawn-report-layout-preview'));
 const widths = arg('widths', '390,1280').split(',').map(Number);
 const VISITS = ['spot', 'granular', 'clean'];
 // GATE_LAWN_REPORT_POLISH visits: before (gate off) and after (gate on), written as <visit>-off / <visit>-on.
-const POLISH_VISITS = ['mixed', 'single', 'fourday', 'nothing'];
+const POLISH_VISITS = ['mixed', 'single', 'fourday', 'nothing', 'rainwet', 'raindry', 'rainnone'];
 
 async function shoot(browser, visit, layout, width) {
   const query = POLISH_VISITS.includes(visit) ? `layout=on&polish=${layout}` : `layout=${layout}`;

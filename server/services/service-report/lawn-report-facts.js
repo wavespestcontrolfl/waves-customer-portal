@@ -26,6 +26,7 @@
  *   labelLines: { v: 1, items: { [service_products.id]: [dropped precaution sentence indexes] } },
  *                                                // GATE_LAWN_REPORT_POLISH: one label line per card (lawn-label-lines.js)
  *   waterAdvice: { v: 1, longerCycles: boolean },  // GATE_LAWN_REPORT_POLISH: the longer-cycles line (lawn-longer-cycles.js)
+ *   waterAdvice: { v: 2, longerCycles, rainCard, rainSensorLine },  // + GATE_LAWN_WATER_RAIN: the rain card's frozen permission (lawn-water-rain.js)
  * }
  *
  * Only structured facts are stored. Every customer sentence is chosen by code from the closed tables
@@ -39,6 +40,7 @@ const logger = require('../logger');
 const { CONDITION_LABEL_VALUES } = require('../lawn-diagnostic-report');
 const labelLines = require('./lawn-label-lines');
 const longerCycles = require('./lawn-longer-cycles');
+const waterRain = require('./lawn-water-rain');
 
 const FREEZE_KEY = 'lawnReportFacts';
 const FREEZE_VERSION = 1;
@@ -437,7 +439,14 @@ function cleanLabelLines(raw) {
 
 // A stored waterAdvice block, shape-checked: true only for { v: 1, longerCycles: true }.
 function cleanWaterAdvice(raw) {
-  return isPlain(raw) && raw.v === 1 && raw.longerCycles === true;
+  return isPlain(raw) && (raw.v === 1 || (raw.v === 2 && typeof raw.rainCard === 'boolean')) && raw.longerCycles === true;
+}
+
+// The rain card's frozen permission (version 2 only; a version 1 block, or any other shape, is no permission):
+// { rainCard, sensorLine } or null.
+function cleanRainAdvice(raw) {
+  if (!isPlain(raw) || raw.v !== 2 || raw.rainCard !== true) return null;
+  return { rainCard: true, sensorLine: raw.rainSensorLine === true };
 }
 
 function cleanTies(raw) {
@@ -472,6 +481,7 @@ function readFrozenReportFacts(structuredNotes) {
     ties: cleanTies(raw.ties),
     labelLines: cleanLabelLines(raw.labelLines),
     longerCycles: cleanWaterAdvice(raw.waterAdvice),
+    rainAdvice: cleanRainAdvice(raw.waterAdvice),
   };
 }
 
@@ -562,11 +572,12 @@ function frozenReportFactsStamp(structuredNotes) {
     || Object.keys(facts.productUse).length > 0
     || (facts.ties && facts.ties.items.length > 0)
     || Object.keys(facts.labelLines).length > 0
-    || facts.longerCycles;
+    || facts.longerCycles
+    || !!facts.rainAdvice;
   if (!hasDecision) return '';
   const reentry = facts.reentry && facts.reentry.rule !== 'default' ? { rule: facts.reentry.rule } : null;
   // labelLines joins the key body only when a card drops a sentence, so a record without one keeps its old key.
-  const body = JSON.stringify({ reentry, productUse: facts.productUse, ties: facts.ties, ...(Object.keys(facts.labelLines).length ? { labelLines: facts.labelLines } : {}), ...(facts.longerCycles ? { longerCycles: true } : {}) });
+  const body = JSON.stringify({ reentry, productUse: facts.productUse, ties: facts.ties, ...(Object.keys(facts.labelLines).length ? { labelLines: facts.labelLines } : {}), ...(facts.longerCycles ? { longerCycles: true } : {}), ...(facts.rainAdvice ? { rainAdvice: facts.rainAdvice } : {}) });
   return `:rf=${crypto.createHash('sha1').update(body).digest('hex').slice(0, 8)}`;
 }
 
@@ -601,6 +612,12 @@ function frozenLabelDropsFor(serviceLine, structuredNotes) {
 function frozenLongerCycles(serviceLine, structuredNotes) {
   const facts = serviceLine === 'lawn' ? readFrozenReportFacts(structuredNotes) : null;
   return !!facts && facts.longerCycles === true;
+}
+
+/** { rainCard: true, sensorLine } for a LAWN record whose frozen decision allows the rain card, else null. */
+function frozenRainAdvice(serviceLine, structuredNotes) {
+  const facts = serviceLine === 'lawn' ? readFrozenReportFacts(structuredNotes) : null;
+  return facts ? facts.rainAdvice : null;
 }
 
 /** The precaution text one product card prints: the catalog's, less the sentences the frozen decision dropped. */
@@ -690,7 +707,7 @@ async function loadAssessmentAndRun(record, knex) {
  * decide, freeze. Never throws; a failed read freezes nothing and the report renders as it always did.
  * Returns the frozen block (for the caller's in-memory notes) or null.
  */
-async function gatherAndFreezeReportFacts({ record, knex, withTies = false, withLabelLines = false, withWaterAdvice = false, now = new Date() }) {
+async function gatherAndFreezeReportFacts({ record, knex, withTies = false, withLabelLines = false, withWaterAdvice = false, withRainCard = false, now = new Date() }) {
   if (!record || !record.id || !knex) return null;
   // Cheap exit: a block already on the row (a resumed completion, a second run, a recorded failure) is never rebuilt.
   if (readFrozenReportFacts(record.structured_notes)) return null;
@@ -704,8 +721,8 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, with
     // A lawn visit with no product rows has no re-entry rule, spot text, label line or tie to freeze. It still has a
     // water-advice decision (GATE_LAWN_REPORT_POLISH), so a block carrying only that is frozen; without the polish
     // decision nothing is frozen, as before (a later attempt may still freeze).
-    if (!rows.length && !withWaterAdvice) return null;
-    return await gatherRows({ record, knex, rows, tiesAllowed: tiesAllowed && rows.length > 0, withLabelLines, withWaterAdvice, now });
+    if (!rows.length && !withWaterAdvice && !withRainCard) return null;
+    return await gatherRows({ record, knex, rows, tiesAllowed: tiesAllowed && rows.length > 0, withLabelLines, withWaterAdvice, withRainCard, now });
   } catch (err) {
     logger.warn(`[lawn-report-facts] gather failed for service_record ${record.id}: ${err.message}`);
     return (await recordFailedFreeze({ record, knex, now })) || UNRESOLVED_FREEZE;
@@ -714,12 +731,12 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, with
 
 // The build and the write of one freeze attempt, once the rows are known. Throws on any failed read or write (the caller
 // records the failed-freeze marker).
-async function gatherRows({ record, knex, rows, tiesAllowed, withLabelLines, withWaterAdvice, now }) {
+async function gatherRows({ record, knex, rows, tiesAllowed, withLabelLines, withWaterAdvice, withRainCard, now }) {
   const { assessment, run } = tiesAllowed ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
   const taps = tiesAllowed ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
   // A read that fails here THROWS (verifiedTechFindings): a find that could not be checked is not a find we may leave out.
   const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
-  const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, withLabelLines, waterAdvice: withWaterAdvice ? await waterAdviceFor(record, knex) : null, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
+  const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, withLabelLines, waterAdvice: (withWaterAdvice || withRainCard) ? await waterAdviceFor(record, knex, { longer: withWaterAdvice, rain: withRainCard }) : null, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
   const frozen = await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
   // freezeReportFacts swallows a write error and answers null: that is a failed attempt like any other, so the marker is
   // attempted (by the caller) before anything is allowed to render.
@@ -727,12 +744,19 @@ async function gatherRows({ record, knex, rows, tiesAllowed, withLabelLines, wit
   return frozen;
 }
 
-// The longer-cycles decision from the customer's prefs row. A failed read is "do not print", never a failed freeze.
-async function waterAdviceFor(record, knex) {
-  const prefs = record.customer_id
-    ? await knex('property_preferences').where({ customer_id: record.customer_id }).first().catch(() => null)
-    : null;
-  return longerCycles.waterAdviceBlock(prefs, record.service_date);
+// The water-advice block from the customer's prefs row: the longer-cycles decision (GATE_LAWN_REPORT_POLISH, `longer`)
+// and, when the rain card freezes (GATE_LAWN_WATER_RAIN, `rain`), its permission (version 2). With `rain` off the block
+// is exactly the version 1 shape it always was. A failed read is "do not print" (longer-cycles false, rain card not
+// allowed), never a failed freeze; a customer with no prefs row at all is a real answer (no sod record can exist).
+async function waterAdviceFor(record, knex, { longer = true, rain = false } = {}) {
+  let prefs = null;
+  if (record.customer_id) {
+    try { prefs = (await knex('property_preferences').where({ customer_id: record.customer_id }).first()) || null; } catch { prefs = undefined; }
+  }
+  const cycles = longer && prefs ? longerCycles.longerCyclesDecision(prefs, record.service_date) : false;
+  if (!rain) return { v: 1, longerCycles: cycles };
+  const decision = waterRain.rainCardDecision(prefs, record.service_date);
+  return { v: 2, longerCycles: cycles, rainCard: decision.rainCard, rainSensorLine: decision.rainSensorLine };
 }
 
 /**
@@ -789,6 +813,7 @@ module.exports = {
   frozenUseTextsFor,
   frozenLabelDropsFor,
   frozenLongerCycles,
+  frozenRainAdvice,
   precautionForCard,
   areaUseFields,
   reportFactsKeyStamp,

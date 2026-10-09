@@ -32,6 +32,7 @@ jest.mock('../models/db', () => {
 
 const router = require('../routes/admin-customers');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { formatDay } = require('../services/lawn-sod-form-summary');
 
 const daysAgo = (n) => etDateString(addETDays(new Date(), -n));
 
@@ -89,10 +90,27 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     expect(lines.find((l) => l.key === 'weedKiller')).toMatchObject({ active: false });
   });
 
-  it('part of lawn: fertilizer is not held; the other holds name the area scope', async () => {
-    mockState.prefsRow = { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'back lawn', sod_rooted_on: null };
+  it('part of lawn, inside the first 30 days: the fertilizer line is active and says it stays off the new sod until the keep-off date', async () => {
+    const laid = daysAgo(5);
+    mockState.prefsRow = { sod_laid_on: laid, sod_covers: 'part', sod_area: 'back lawn', sod_rooted_on: null };
+    const lines = (await getNewSod()).body.newSod.holdLines;
+    const until = formatDay(etDateString(addETDays(new Date(`${laid}T12:00:00Z`), 30)));
+    expect(lines.find((l) => l.key === 'fertilizer')).toEqual({
+      key: 'fertilizer', active: true, text: `Fertilizer stays off the new sod until ${until}. The rest of the lawn is fertilized as planned.`,
+    });
+    expect(lines.find((l) => l.key === 'preEmergent').text).toContain('named area only');
+  });
+
+  it('part of lawn, after day 30: the plain "not held" line, inactive, as before', async () => {
+    mockState.prefsRow = { sod_laid_on: daysAgo(50), sod_covers: 'part', sod_area: 'back lawn', sod_rooted_on: null };
     const lines = (await getNewSod()).body.newSod.holdLines;
     expect(lines.find((l) => l.key === 'fertilizer')).toEqual({ key: 'fertilizer', active: false, text: 'Fertilizer is not held. The new sod covers only part of the lawn.' });
-    expect(lines.find((l) => l.key === 'preEmergent').text).toContain('named area only');
+  });
+
+  it('part of lawn, the keep-off ends on day 30 exactly: the date the line prints is the day the sheet stops noting it', () => {
+    const { holdLinesFor } = require('../services/lawn-sod-form-summary');
+    const base = { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'back lawn', sod_rooted_on: null };
+    expect(holdLinesFor(base, '2026-10-30').find((l) => l.key === 'fertilizer')).toMatchObject({ active: true, text: 'Fertilizer stays off the new sod until Oct 31, 2026. The rest of the lawn is fertilized as planned.' });
+    expect(holdLinesFor(base, '2026-10-31').find((l) => l.key === 'fertilizer')).toMatchObject({ active: false, text: 'Fertilizer is not held. The new sod covers only part of the lawn.' });
   });
 });

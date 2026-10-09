@@ -49,7 +49,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
 import useSheetViewport from '../hooks/useSheetViewport';
 import { celsiusCapTip } from '../lib/celsiusCapCopy';
-import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
+import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES, OWNER_HEAD_RATE_IN_PER_HR } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -8058,6 +8058,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
+  // GATE_IRRIGATION_OWNER_RATES: the server says which head rate table its emails use (key present only while the gate
+  // is live), so the line under Minutes per Zone shows the number the server would use.
+  const [ownerRates, setOwnerRates] = useState(false);
   const irrigationEditRevision = useRef(0);
   const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
   const [savedWateringRevision, setSavedWateringRevision] = useState(0);
@@ -8074,6 +8077,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // Inches, so the field never renders and then drops on save.
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
+        setOwnerRates(d.irrigationOwnerRates === true);
         setLoading(false);
       })
       .catch(err => {
@@ -8487,7 +8491,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
     runMinutes: prefs.irrigationRunMinutes,
     wateringDays: prefs.wateringDays,
     systemType: prefs.irrigationSystemType,
-  });
+  }, ownerRates ? { rates: OWNER_HEAD_RATE_IN_PER_HR } : undefined);
   const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
   // Stored "off" from the retired toggle: the report and Monday email
   // suppress a prefs-only schedule — typed inches AND a derived figure alike
@@ -8501,7 +8505,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
       return explicitInchesEntered
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
-        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
+        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates${ownerRates ? '' : ' from University of Florida turf guidance'}. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
     }
     // An explicit Weekly Inches entry is already authoritative — a decline
     // prompt asking for what's filled in above would never be satisfiable.
@@ -9202,7 +9206,7 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = nul
 function WeatherPestWidget({ customer, nextService, hold = false }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
-  // Fungus / chinch / irrigation are lawn advisories — pest-only customers
+  // Fungus / chinch are lawn advisories — pest-only customers
   // see mosquito pressure only (owner ruling 2026-08-28: lawn surfaces are
   // gated on real lawn-care evidence, same predicate as the health card).
   const lawnHealth = useLawnHealth(customer?.id);
@@ -9270,11 +9274,6 @@ function WeatherPestWidget({ customer, nextService, hold = false }) {
       { label: 'Chinch Bug Risk', icon: 'bug', type: 'chinch', level: pressure.chinch?.level || 'LOW', color: pressure.chinch?.color || B.green },
     ] : []),
   ];
-  const irrigation = weather.irrigationRecommendation || {};
-  const irrigationInches = Number(irrigation.inches ?? 0);
-  const irrigationAmount = Number.isFinite(irrigationInches)
-    ? String(Number(irrigationInches.toFixed(2)))
-    : '0';
   const updatedAt = weather.updatedAt ? new Date(weather.updatedAt) : null;
   const updatedText = updatedAt && !isNaN(updatedAt)
     ? updatedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
@@ -9378,36 +9377,6 @@ function WeatherPestWidget({ customer, nextService, hold = false }) {
         })}
       </div>
 
-      {hasLawnCare && (
-      <div style={{
-        marginTop: 10,
-        padding: 14,
-        borderRadius: 8,
-        background: '#F8FCFE',
-        border: '1px solid #CFE7F5',
-        display: 'flex', alignItems: 'center', gap: 12,
-      }}>
-        <span style={{
-          width: 36,
-          height: 36,
-          borderRadius: 8,
-          background: '#fff',
-          color: B.glassNavy,
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-        }}>
-          <Icon name="droplet" size={18} strokeWidth={2} />
-        </span>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
-            Irrigation: {irrigationAmount}" recommended
-          </div>
-          <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{irrigation.note || 'Adjust watering around rainfall and local restrictions.'}</div>
-        </div>
-      </div>
-      )}
     </section>
   );
 }

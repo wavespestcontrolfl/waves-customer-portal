@@ -1012,6 +1012,8 @@ describe('buildLawnExpectations', () => {
         // P16: the prospect diagnostic prompt generates RESULT TIMING from the sourced rows; the prospect report's weed expectation reads the weed row.
         'services/lawn-diagnostic-prompt.js',
         'services/lawn-diagnostic-report.js',
+        // GATE_LAWN_SPOT_TARGET: the lawn sheet's spot target lists come from the engine's own target vocabulary (TARGET_CLASS_BY_NAME), so no target name exists outside it.
+        'services/lawn-spot-target.js',
         // P14: the v6 copy writer (GATE_LAWN_REPORT_COPY_V6, dark) offers APPROVED rows' keyed sentences for selection.
         'services/service-report/lawn-copy-v6.js',
         'services/service-report/lawn-expectations.js',

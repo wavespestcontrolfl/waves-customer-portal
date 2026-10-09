@@ -746,6 +746,9 @@ function calcChinchPressure(temp, humidity) {
   return { level: 'LOW', color: '#4CAF50', advice: 'Low chinch bug risk this period' };
 }
 
+// No current client reads irrigationRecommendation (the Local Conditions tile is gone, owner 2026-10-09). The field
+// stays in the response for portal pages and app sessions still running the older bundle, which would print
+// 0 inches without it. Remove it, with this function, in a later release.
 function calcIrrigation(temp, forecast, humidity) {
   if (/rain|storm|shower/i.test(forecast)) return { inches: '0.00', note: 'Rain expected — skip irrigation today' };
   if (temp >= 90 && humidity < 60) return { inches: '0.75', note: 'Hot and dry — water deeply in early morning' };

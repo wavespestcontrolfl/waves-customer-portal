@@ -833,6 +833,36 @@ offer window) — the customer gets the standard "pick your time again" 409
 instead of a silently mis-ordered commit. The staff save probe
 (`checkArrivalPlacement`) stays append-only too.
 
+Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
+dark, read at call time in `routes/reschedule-public.js`): `GET
+/api/public/reschedule/:token` may carry `nextVisit: { currentDate, byDate }`.
+`currentDate` is the next plan visit's date today (`YYYY-MM-DD`); `byDate` maps
+an offered date in `availability.days` to the cadence date a move to that date
+gives the next visit. Both come from `SmartRebooker.projectNextVisitDates`
+(the sibling selection and projector of `rescheduleSeries`); the client only
+looks the picked date up and never computes a shift. The key is OMITTED, never
+null, when: the gate is off; the visit is not a series visit or
+`GATE_COLLECTIVE_SERIES_ANCHOR` is off; no later visit can move; the
+customer's move would not write the date on the next visit (its stop is shared
+with another live service or its visit is frozen; under
+`GATE_CUSTOMER_RECURRING_DISPATCH` also a row that is not pending/confirmed, is
+customer-confirmed, is dispatch-locked or excluded, or has a sendable
+reminder); the projection fails. `byDate` has no entry for the visit's own
+date (a time-only move does not shift the plan). `POST .../find-slots` and
+the commit route's `SLOT_TAKEN` refresh carry the same key for the days they
+return, and the client replaces the dates it holds with that answer (no key =
+no date named); a date with no entry shows no line. Confirm pin: the commit body carries
+`disclosed_next_visit_date` and `disclosed_next_visit_current_date` (the new
+date and the current date the line named for the picked slot, or null when it
+named none). While the gate is on, the series mover hands its own verdict for
+the next visit (the date it is on and the date the move writes on it, null
+when the move keeps it in place) to `moveGuard` on its locked transaction,
+before its first write; when the page said something else (the next visit became
+customer-confirmed, dispatch-locked, reminded, shared or frozen after the page
+loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
+page reloads. A page loaded before the gate was set sends no field and gets
+the same reload when a date would be named.
+
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
 SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
@@ -2569,6 +2599,8 @@ gain a `categories` list); every older frozen entry replays unchanged. The lawn 
 signature carries `:copyfix=1` only while the gate is live, and the narrative key
 part is the `-tn0` sentinel for a lawn report.
 `GATE_LAWN_REPORT_POLISH` (dark, strict `true`, read at call time; gate off leaves the payload, the PDF and every cached PDF key byte-identical) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). New optional keys, absent while the gate is off: top-level `lawnPolish: true`; `reportV2.water.scheduleKind` (`'inches'`, `'runtime_only'` or `'none'`), `reportV2.water.scheduleText` (state `runtime_only` only: what the customer's own portal entries say, "45 min, Mondays"), `reportV2.water.scheduleParts` (state `runtime_only` only: `minutes_and_days` | `minutes_only` | `days_only`) `reportV2.water.irrigationBasis` (a figure derived from minutes and days, one fixed sentence) and `reportV2.water.longerCycles` (`true` only: the one fixed longer-cycles advice sentence prints on the Water card; set from the decision frozen at completion in `lawnReportFacts.waterAdvice`, and only when the visit has no hold or water-in banner, weekly plan or after-visit watering note); the same `scheduleKind` and, for `runtime_only`, `scheduleText` and `scheduleParts` ride `lawnAssessment.waterContext`. Changed values while the gate is live: `reportV2.water.explanation` for `runtime_only` (it no longer says no schedule is on file); `reportV2.water.irrigationInches` and `lawnAssessment.turfProfile.irrigationInchesPerWeek` for a customer whose figure is derived (one turf head type, drip ignored, the owner's rate table); `applications[].product.precaution_summary` for a record whose frozen `lawnReportFacts.labelLines` drops a sentence. The lawn PDF signature carries `:polish=1` only while the gate is live.
+
+`GATE_LAWN_WATER_RAIN` (dark, strict `true`; the freeze needs `GATE_LAWN_REPORT_FACTS` too; a render reads the record's frozen `lawnReportFacts.waterAdvice` version 2, so a record without it, or frozen before the flip, is byte-identical) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). New optional keys on `reportV2.water`, present only for a record frozen with the permission and a visit with no hold / water-in instruction: `status` may be `rain_covered` (a new value beside `low`, `high`, `balanced`, `unknown`), `rainCard` (`true`: the explanation is one of the rain card's fixed sentences), `rainSensorLine` (`true` in a rain-covered week only). Changed values for such a record: `reportV2.water.explanation` (the rain-covered, deficit and surplus sentences), the insights and root cause (they read the card's status), and the status itself (counted with each day's rain capped at 0.75 inch). `reportV2.water.rainInches` and `totalInches` stay the measured figures.
 `GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
 `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
