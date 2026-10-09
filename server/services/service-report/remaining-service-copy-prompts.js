@@ -314,6 +314,12 @@ const SERVICE_KEY_BINDINGS = Object.freeze({
   bee_wasp_removal: ['stinging_insects', null],
   mud_dauber_removal: ['stinging_insects', null],
   fire_ant: ['targeted_ant', null],
+  // Area add-ons (20261008200000): the fire-ant broadcast keeps the fire-ant
+  // module; the web sweep is physical removal of webs, which the targeted-pest
+  // module keeps apart from pesticide work. The four lawn add-ons use the lawn
+  // writer (DEDICATED_SERVICE_PROFILES in lawn-report-copy-prompt.js).
+  area_addon_fire_ant_yard: ['targeted_ant', null],
+  area_addon_web_sweep: ['other_targeted_pest', null],
   pest_inspection: ['assessment', 'pest_inspection'],
   new_customer_inspection: ['assessment', 'pest_inspection'],
   termite_inspection: ['assessment', 'termite_inspection'],

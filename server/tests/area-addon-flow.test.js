@@ -414,3 +414,34 @@ describe('gate off: every new path refuses or is absent', () => {
     expect(converter.isLawnCareOneTimeItem({ service: 'one_time_lawn', name: 'Lawn Pest Knockdown' })).toBe(true);
   });
 });
+
+describe('the admin save replays the estimator request and the stored engine inputs (nothing whitelists them)', () => {
+  const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+  const deps = { needsSync: () => false, syncConstantsFromDB: jest.fn() };
+  const request = (areaAddOns) => ({
+    engineRequest: { profile: PROFILE, selectedServices: ['PEST'], options: { grassType: 'A', areaAddOns } },
+  });
+
+  test('the save recompute prices the add-ons from engineRequest.options and stores replayable engine inputs', async () => {
+    const out = await serverRecomputeFromEstimateData(request([{ key: 'fire_ant_yard', areaSqFt: 5000 }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }]), deps);
+    expect(out.recomputed).toBe(true);
+    const rows = out.serverResult.oneTime.items.filter((i) => i.service === 'area_addon');
+    expect(rows.map((r) => [r.addOnKey, r.price, r.catalogServiceKey])).toEqual([
+      ['fire_ant_yard', 129, 'area_addon_fire_ant_yard'],
+      ['web_sweep', 59, 'area_addon_web_sweep'],
+    ]);
+    // The stored shape is detected by the kill-switch guard, and replays through the engine alone.
+    const stored = { engineRequest: request([{ key: 'web_sweep' }]).engineRequest, result: out.serverResult };
+    expect(require('../services/pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(stored)).toBe(true);
+    const replay = await serverRecomputeFromEstimateData({ engineInputs: { ...PROFILE, services: { areaAddOns: [{ key: 'web_sweep' }] } } }, deps);
+    expect(replay.serverResult.oneTime.items.find((i) => i.service === 'area_addon')).toMatchObject({ addOnKey: 'web_sweep', price: 89 });
+  });
+
+  test('gate off: the save fails closed (never the browser-priced fallback) for the request and for stored engine inputs', async () => {
+    delete process.env.GATE_AREA_ADDONS;
+    await expect(serverRecomputeFromEstimateData(request([{ key: 'web_sweep' }]), deps))
+      .rejects.toMatchObject({ statusCode: 400, code: 'AREA_ADDONS_GATED', failClosed: true });
+    await expect(serverRecomputeFromEstimateData({ engineInputs: { ...PROFILE, services: { areaAddOns: [{ key: 'web_sweep' }] } } }, deps))
+      .rejects.toMatchObject({ code: 'AREA_ADDONS_GATED', failClosed: true });
+  });
+});

@@ -161,6 +161,12 @@ const DEDICATED_SERVICE_PROFILES = new Map(Object.entries({
   lawn_care_one_time: ['lawn', 'one_time_lawn_treatment'],
   lawn_pest_knockdown: ['lawn', 'one_time_lawn_treatment'],
   lawn_tree_shrub_combo: ['lawn', null],
+  // Area add-ons (20261008200000), generic lane: the lawn writer, never a typed
+  // form. The fire-ant broadcast and the web sweep are remaining-service modules.
+  area_addon_bed_pre_emergent: ['lawn', null],
+  area_addon_lawn_insect_spot: ['lawn', null],
+  area_addon_lawn_insect_preventive: ['lawn', null],
+  area_addon_hardscape_weed: ['lawn', null],
   tree_shrub_program: ['tree_shrub', 'tree_shrub'],
   tree_shrub_quarterly: ['tree_shrub', 'tree_shrub'],
   tree_shrub_6week: ['tree_shrub', 'tree_shrub'],
