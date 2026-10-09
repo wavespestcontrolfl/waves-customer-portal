@@ -1,0 +1,215 @@
+import React, { useState } from "react";
+import { Checkbox, Field, Input, Select } from "../ui";
+import {
+  LARGER_TIER,
+  SAME_VISIT,
+  STANDALONE_VISIT,
+  countAreaAddOns,
+  knownAreaFor,
+  newAddOnEntry,
+  tierSelectValue,
+  withTierChoice,
+} from "../../lib/areaAddOns";
+
+// "Add-on treatments" on the staff estimator (GATE_AREA_ADDONS). Tier 1 admin
+// style: ui primitives plus the zinc ramp, like the dethatching and top
+// dressing blocks beside it. The catalog (names, tiers, limits) comes from the
+// server; this component never names a price. Selections live in the estimate
+// form (`value`, see lib/areaAddOns.js) and every change goes out through
+// `onChange`, so the screen's own invalidation runs.
+
+const PANEL = "ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200";
+const NOTE = "text-14 text-ink-secondary";
+const GRASS_NAMES = { st_augustine: "St. Augustine" };
+
+function areaFieldLabel(item) {
+  const label = item.areaLabel ? item.areaLabel.charAt(0).toUpperCase() + item.areaLabel.slice(1) : "Treated";
+  return `${label} area`;
+}
+
+function rowNotes(item, grassType) {
+  const notes = [];
+  if (item.tiers && item.maxPerYear) notes.push(`Label limit: ${item.maxPerYear} a year`);
+  if (item.requiresGrassTrack && grassType !== item.requiresGrassTrack) {
+    notes.push(`${GRASS_NAMES[item.requiresGrassTrack] || "One grass"} only. Other grass becomes a manual quote.`);
+  }
+  if (item.key === "hardscape_weed") {
+    notes.push("Hard surfaces and bare ground only. Keep off lawn, beds and root zones.");
+  }
+  return notes;
+}
+
+function AreaFields({ item, entry, known, onEntry }) {
+  const choice = tierSelectValue(item, entry);
+  const largest = item.tiers[item.tiers.length - 1];
+  const idBase = `estimate-areaAddOn-${item.key}`;
+  return (
+    <>
+      <Field label={areaFieldLabel(item)} id={`${idBase}-tier`} className="mb-4">
+        <Select value={choice} onChange={(e) => onEntry(withTierChoice(item, entry, e.target.value, known))}>
+          {choice === "" && <option value="">Choose an area</option>}
+          {item.tiers.map((tier) => (
+            <option key={tier} value={String(tier)}>Up to {tier.toLocaleString("en-US")} sq ft</option>
+          ))}
+          <option value={LARGER_TIER}>Larger: manual quote</option>
+        </Select>
+      </Field>
+      {choice === LARGER_TIER && (
+        <Field
+          label={`${areaFieldLabel(item)} (sq ft)`}
+          id={`${idBase}-area`}
+          help={`Enter the real area. Over ${largest.toLocaleString("en-US")} sq ft is a manual quote.`}
+          className="mb-4"
+        >
+          <Input type="number" min="1" value={entry.areaSqFt ?? ""} onChange={(e) => onEntry({ ...entry, areaSqFt: e.target.value })} />
+        </Field>
+      )}
+    </>
+  );
+}
+
+function VisitField({ item, entry, hostAvailable, onEntry }) {
+  const same = entry.visitContext === SAME_VISIT;
+  return (
+    <Field
+      label="Visit"
+      id={`estimate-areaAddOn-${item.key}-visit`}
+      help={same && !hostAvailable ? "Needs another service on this estimate" : undefined}
+      className="mb-4"
+    >
+      <Select value={same ? SAME_VISIT : STANDALONE_VISIT} onChange={(e) => onEntry({ ...entry, visitContext: e.target.value })}>
+        <option value={STANDALONE_VISIT}>Own visit</option>
+        <option value={SAME_VISIT}>Same visit as another service on this estimate</option>
+      </Select>
+    </Field>
+  );
+}
+
+function SelectedPanel({ item, entry, known, grassType, hostAvailable, onEntry }) {
+  return (
+    <div className={PANEL}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {item.tiers && <AreaFields item={item} entry={entry} known={known} onEntry={onEntry} />}
+        <VisitField item={item} entry={entry} hostAvailable={hostAvailable} onEntry={onEntry} />
+      </div>
+      {known && <div className={NOTE}>{known.source}: about {known.sqft.toLocaleString("en-US")} sq ft {known.noun}. {known.advice}</div>}
+      {rowNotes(item, grassType).map((note) => <div key={note} className={NOTE}>{note}</div>)}
+    </div>
+  );
+}
+
+function OfferedRow({ item, entry, knownAreas, grassType, otherServiceSelected, value, onChange }) {
+  const known = knownAreaFor(item.key, knownAreas);
+  const hostAvailable = otherServiceSelected
+    || Object.entries(value).some(([key, other]) => key !== item.key && other?.visitContext !== SAME_VISIT);
+  return (
+    <div>
+      <div className="mb-1">
+        <Checkbox
+          id={`estimate-areaAddOn-${item.key}`}
+          label={item.name}
+          checked={!!entry}
+          onChange={(e) => {
+            const next = { ...value };
+            if (e.target.checked) next[item.key] = newAddOnEntry(item, known);
+            else delete next[item.key];
+            onChange(next);
+          }}
+        />
+      </div>
+      {entry && (
+        <SelectedPanel
+          item={item}
+          entry={entry}
+          known={known}
+          grassType={grassType}
+          hostAvailable={hostAvailable}
+          onEntry={(nextEntry) => onChange({ ...value, [item.key]: nextEntry })}
+        />
+      )}
+    </div>
+  );
+}
+
+// A selection the screen can no longer offer (the gate is off, or the server
+// dropped the add-on). It stays visible so a saved estimate does not lose it
+// silently; the rep unchecks it to go on.
+function UnavailableRow({ addOnKey, name, enabled, value, onChange }) {
+  return (
+    <div>
+      <div className="mb-1">
+        <Checkbox
+          id={`estimate-areaAddOn-${addOnKey}`}
+          label={name}
+          checked
+          onChange={() => {
+            const next = { ...value };
+            delete next[addOnKey];
+            onChange(next);
+          }}
+        />
+      </div>
+      <div className={`${PANEL} ${NOTE}`}>
+        {enabled
+          ? "This add-on is no longer offered. Uncheck it to calculate."
+          : "Add-on treatments are currently unavailable. Uncheck this one to calculate."}
+      </div>
+    </div>
+  );
+}
+
+export default function AreaAddOnsGroup({ catalog, value, onChange, knownAreas, grassType, otherServiceSelected }) {
+  const [userOpen, setUserOpen] = useState(null);
+  const selection = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const count = countAreaAddOns(selection);
+  const offered = catalog?.enabled ? catalog.items : [];
+  if (offered.length === 0 && count === 0) return null;
+  const expanded = userOpen ?? count > 0;
+  const names = new Map((catalog?.items || []).map((item) => [item.key, item.name]));
+  const offeredKeys = new Set(offered.map((item) => item.key));
+  const unavailableKeys = Object.keys(selection).filter((key) => !offeredKeys.has(key));
+  return (
+    <div data-testid="area-addons-group">
+      <div className="mt-3 mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <h4 className="text-16 font-medium text-zinc-900 m-0">Add-on treatments</h4>
+        {count > 0 && <span className={NOTE}>{count} selected</span>}
+        <button
+          data-ui-text-action
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setUserOpen(!expanded)}
+          className="text-14 underline cursor-pointer"
+        >
+          {expanded ? "Hide" : "Show"}
+        </button>
+      </div>
+      {expanded && (
+        <>
+          <div className={`${NOTE} mb-2`}>Sold on their own visit or with another service.</div>
+          {offered.map((item) => (
+            <OfferedRow
+              key={item.key}
+              item={item}
+              entry={selection[item.key]}
+              knownAreas={knownAreas}
+              grassType={grassType}
+              otherServiceSelected={otherServiceSelected}
+              value={selection}
+              onChange={onChange}
+            />
+          ))}
+          {unavailableKeys.map((key) => (
+            <UnavailableRow
+              key={key}
+              addOnKey={key}
+              name={names.get(key) || key}
+              enabled={!!catalog?.enabled}
+              value={selection}
+              onChange={onChange}
+            />
+          ))}
+        </>
+      )}
+    </div>
+  );
+}

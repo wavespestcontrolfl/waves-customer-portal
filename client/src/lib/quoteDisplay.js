@@ -18,6 +18,10 @@ const FRIENDLY_QUOTE_REASONS = {
     "This estimate’s lawn plan uses a retired schedule — call Waves and we’ll refresh your quote with the current lawn plan options.",
   legacy_lawn_pricing_requote:
     "Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.",
+  area_addon_area_above_largest_tier:
+    "This area is larger than our standard add-on sizes — Waves will confirm the price with you before it’s finalized.",
+  area_addon_grass_not_covered_by_label_rate:
+    "This treatment is priced for St. Augustine lawns only — Waves will confirm the right option and price for your grass before it’s finalized.",
 };
 
 export function humanizeQuoteReason(value) {

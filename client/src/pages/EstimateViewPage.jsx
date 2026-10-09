@@ -1555,6 +1555,9 @@ function isNonBillableBreakdownRow(item = {}) {
 // INCLUDING its rodent-before-lawn ordering: rodent entry-point plugging
 // (service 'rodent_plugging') is exclusion work, not turf care (codex P2).
 function isLawnOneTimeBreakdownItem(item = {}) {
+  // An area add-on is classified by its catalog family, never by its name
+  // ("Fire Ant Yard Treatment" matches none of the turf words below).
+  if (item.service === 'area_addon') return item.addOnCategory === 'lawn_care';
   const raw = [item.service, item.label, item.name]
     .filter(Boolean)
     .join(' ')

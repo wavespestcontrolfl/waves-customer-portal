@@ -1248,6 +1248,15 @@ describe('oneTimePriceCopy', () => {
     expect(noGuarantee).toMatch(/break the breeding cycle/);
   });
 
+  it('classifies an area add-on row by its catalog family, not its name (no pest callback on a lawn add-on)', () => {
+    const lawnAddOn = { total: 129, items: [{ service: 'area_addon', addOnKey: 'fire_ant_yard', addOnCategory: 'lawn_care', label: 'Fire Ant Yard Treatment', amount: 129 }] };
+    expect(oneTimePriceCopy(lawnAddOn)).toMatch(/One lawn treatment/);
+    expect(oneTimePriceCopy(lawnAddOn)).not.toMatch(/30-day callback period/);
+    // The web sweep is pest control: it keeps the default one-time terms.
+    const webSweep = { total: 99, items: [{ service: 'area_addon', addOnKey: 'web_sweep', addOnCategory: 'pest_control', label: 'Web Sweep', amount: 99 }] };
+    expect(oneTimePriceCopy(webSweep)).toMatch(/30-day callback period/);
+  });
+
   it('returns Bora-Care wood-treatment copy without the pest callback line', () => {
     const copy = oneTimePriceCopy({ total: 1051, items: [{ service: 'bora_care', label: 'Bora-Care', amount: 1051 }] });
     expect(copy).toMatch(/borate wood treatment/i);
