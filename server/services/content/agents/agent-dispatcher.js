@@ -70,6 +70,9 @@ const ACTION_TO_AGENT = {
   do_not_publish: { role: 'none', reason: 'blocked by router' },
 };
 
+// Call-ledger lane of each dispatched role.
+const LANE_BY_ROLE = Object.freeze({ writer: 'agent_content', refresh: 'agent_content', meta: 'agent_meta' });
+
 // ── pure routing helpers (test-friendly) ────────────────────────────
 
 function pickAgent(brief) {
@@ -199,7 +202,7 @@ class AgentDispatcher {
 
     const t0 = Date.now();
     // The ledger lane, which also picks the session's spend cap.
-    const laneId = route.role === 'meta' ? 'agent_meta' : 'agent_content';
+    const laneId = LANE_BY_ROLE[route.role];
     let session;
     try {
       // Field is `agent`, not `agent_id`, per the live API contract
