@@ -147,7 +147,12 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // to call back; the model marked that genuine caller spam in about 1 run in 5 on every
 // prompt tested (0 of 12 with this rule). A call that ends before the caller states a
 // purpose is not spam. New instruction: a new cohort.
-const PROMPT_VERSION = 'v27';
+// v28: quote_promised also covers a promise that does not use the word "quote" (staff
+// cannot give the price and say someone will text or call back with it). Found by the
+// gate-on replay of 2026-10-09: with the rules sent first (the system layout) the model
+// missed that promise on a reviewed call in 6 of 11 runs, and in 0 of 8 with this
+// sentence, in both layouts. New instruction: a new cohort.
+const PROMPT_VERSION = 'v28';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -395,7 +400,7 @@ SERVICE REQUEST:
 - If caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, or treatment before a concrete pour: use "termite" as primary_service_category.
 - ASSESSMENT vs FORMAL INSPECTION: a caller who SUSPECTS a pest problem or wants someone to come look, diagnose, or check ("I think I have termites", "something is eating my lawn", "can someone come take a look") maps to the "Waves Assessment" catalog service — NOT a formal inspection. "WDO Inspection Service" is ONLY for an explicitly requested wood-destroying-organism REPORT: real-estate sale/closing/refinance, lender or VA requirement, "termite letter"/"clearance letter", or the caller literally asking for a WDO inspection. The pre-slab/soil-treatment rule above still wins for pre-construction requests.
 - quote_requested: true when getting a QUOTE/estimate/pricing is a reason for the call — "can I get a quote", "what would it cost for...", "send me an estimate". A caller who only booked without asking for a quote: false.
-- quote_promised: true ONLY when the AGENT commits to send a quote/estimate AFTER the call ("we'll send you a quote this afternoon", "I'll email you an estimate", "we'll text you pricing"). A price merely spoken on the call is NOT a promised quote. This field means WORK IS STILL OWED to the caller after hangup — set it even when an appointment was also booked, and set the quote_promised triage flag with it.
+- quote_promised: true ONLY when the AGENT commits to send a quote/estimate AFTER the call ("we'll send you a quote this afternoon", "I'll email you an estimate", "we'll text you pricing"). A price merely spoken on the call is NOT a promised quote. The promise does not need the word "quote": staff who cannot give the price on the call and say that someone will text, call or email the caller back WITH it ("I don't know what he charges, I'll have him text you back on that") have promised a quote. This field means WORK IS STILL OWED to the caller after hangup — set it even when an appointment was also booked, and set the quote_promised triage flag with it.
 - pests_observed_status: "observed" when caller mentions seeing specific pests, "not_observed_preventative" when they want prevention without active pests, "not_observed_inquiry" for quote/info calls, "not_discussed" for non-pest topics (billing, cancellation).
 - waveguard_tier_mentioned: Only set if the caller explicitly names a WaveGuard tier they saw on the site or an ad. Do NOT infer.
 
