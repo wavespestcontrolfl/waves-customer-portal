@@ -363,6 +363,21 @@ describe('OpenAIRelayClient.messages.stream — full SSE round trips', () => {
     });
   });
 
+  test('a failed response rejects with the usage OpenAI reported for it', async () => {
+    const fetchImpl = fetchStub([
+      { type: 'response.failed', response: { id: 'r10', model: 'gpt-6-sol', status: 'failed', error: { code: 'server_error' }, usage: { input_tokens: 300, output_tokens: 12 } } },
+    ]);
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const stream = client.messages.stream({ model: 'gpt-6-sol', max_tokens: 100, system: [], tools: [], messages: [{ role: 'user', content: 'hi' }] }, {});
+    const err = await stream.finalMessage().catch((e) => e);
+    expect(err.message).toMatch(/OpenAI Responses API error/);
+    expect(err.billedRound).toEqual({
+      id: 'r10', model: 'gpt-6-sol', errorCode: 'openai_failed',
+      usage: { input_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 12 },
+    });
+    expect(require('../services/agent-control/taxonomy').classifyFailure('openai_failed')).toBe('provider');
+  });
+
   // The ledger files a billed round under the reason the response was unusable,
   // and the taxonomy turns that into a quality class, not a plumbing fault.
   test.each([

@@ -620,6 +620,7 @@ class OpenAIRelayStream {
     }
     let finalResponse = null;
     let failure = null;
+    let failedRound = null;
     // Each item's final form (response.output_item.done) — the source of a
     // reasoning item's encrypted content should the terminal body omit it.
     const doneItems = new Map();
@@ -651,6 +652,8 @@ class OpenAIRelayStream {
             const response = evt.response || {};
             const id = safeToken(response.id);
             failure = `${safeErrorCode(response.error) || 'response_failed'}${id ? ` (${id})` : ''}`;
+            // A failed Response can still carry billable usage: keep it for the ledger.
+            failedRound = { id: response.id || null, model: response.model || params.model, usage: mapUsage(response.usage), errorCode: 'openai_failed' };
             break;
           }
           case 'error':
@@ -663,7 +666,7 @@ class OpenAIRelayStream {
     } catch (err) {
       throw normalizeAbort(err, signal);
     }
-    if (failure) throw new Error(`OpenAI Responses API error: ${failure}`);
+    if (failure) throw Object.assign(new Error(`OpenAI Responses API error: ${failure}`), failedRound ? { billedRound: failedRound } : {});
     if (!finalResponse) throw new Error('OpenAI Responses API stream ended without a completed response');
     const response = withDoneReasoning(finalResponse, doneItems);
     try {
