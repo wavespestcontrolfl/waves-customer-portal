@@ -9101,7 +9101,7 @@ const buildArticles = ({ celsiusMaxPerYear = null } = {}) => [
     id: 4, icon: 'palm', category: 'Lawn Care',
     title: 'Dollar Weed: What It Tells You',
     summary: 'Dollar weed (Hydrocotyle) is actually an indicator plant — it thrives in overwatered areas. If you see it spreading, your irrigation is probably too aggressive.',
-    tips: ['Reduce irrigation runtime by 5-10 minutes per zone', 'Water deeply but less frequently (2-3x per week max)', celsiusCapTip(celsiusMaxPerYear), 'Proper irrigation is the real long-term fix'],
+    tips: ['Water only when the grass shows folded blades, a blue-gray tint, or footprints that stay pressed in — never on a timer alone', 'Keep each run at ½ to ¾ inch and drop a watering day instead of shortening the runs', celsiusCapTip(celsiusMaxPerYear), 'Proper irrigation is the real long-term fix'],
   },
   {
     id: 5, icon: 'bug', category: 'Pests',
