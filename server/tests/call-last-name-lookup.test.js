@@ -332,6 +332,9 @@ describe('county owner record', () => {
     ['another unit at the same address', '100 SAMPLE AVE UNIT 2', { address_line1: '100 Sample Ave Unit 4' }, false],
     ['a unit parcel for a customer with no unit', '100 SAMPLE AVE UNIT 2', {}, false],
     ['the same unit, written differently', '100 SAMPLE AVE UNIT 4', { address_line1: '100 Sample Ave', address_line2: 'Apt 4' }, true],
+    ['a unit-first customer line against a parcel with no unit', '100 SAMPLE AVE', { address_line1: 'Apt 4, 100 Sample Ave' }, false],
+    ['a unit-first customer line against its own unit parcel', '100 SAMPLE AVE UNIT 4', { address_line1: 'Apt 4, 100 Sample Ave' }, true],
+    ['a building and unit against a like-digited unit', '100 SAMPLE AVE UNIT 24', { address_line1: '100 Sample Ave', address_line2: 'Bldg 2 Apt 4' }, false],
   ])('%s', async (_label, situsAddress, customerPatch, used) => {
     setupDb({ customer: { ...CUSTOMER, ...customerPatch } });
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, situsAddress });
@@ -466,6 +469,13 @@ describe('our own records', () => {
 });
 
 describe('caller email', () => {
+  test('a placeholder from the email or from Twilio is no answer either', async () => {
+    setupDb({ call: tenant(), customer: { ...CUSTOMER, email: 'pat.unknown@example.com' } });
+    global.fetch = twilioAnswers('PAT NULL');
+    expect(await run()).toEqual({ suggested: false, outcome: 'no_answer' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
   test('first.last@ gives an email answer', async () => {
     setupDb({ call: tenant(), customer: { ...CUSTOMER, email: 'pat.sampleton@example.com' } });
     await run();

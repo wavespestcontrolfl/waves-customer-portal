@@ -56,7 +56,7 @@ const { sameFirstName, normalizeNamePart } = require('../utils/name-match');
 const { surnameFromOwnerNames } = require('../utils/owner-name-parse');
 const { surnameFromEmail } = require('../utils/email-surname-parse');
 const { surnameFromCallerName } = require('../utils/caller-name-parse');
-const { splitStreetLineUnit } = require('../utils/address-normalizer');
+const { unitAnywhereOnLine, unitLineValueKey, normalizeUnitLine } = require('../utils/address-normalizer');
 
 const LOG_PREFIX = '[call-last-name-lookup]';
 // The V2 relationship values that may read the county owner record: the
@@ -150,16 +150,13 @@ async function surnameFromCounty({ customer, relationship }) {
   // sameHouseNumberStreet ignores units: a separately assessed unit at the
   // same street address is another household. When either side names a unit,
   // both must, and they must be the same one.
-  const parcelUnit = unitKey(splitStreetLineUnit(parcel.situsAddress).unit);
-  const customerUnit = unitKey(splitStreetLineUnit(customer.address_line1).unit || customer.address_line2);
-  if (parcelUnit !== customerUnit) return { skip: 'parcel_unit_mismatch' };
+  // The address normalizer's own readers: a unit in either position on the
+  // line ("Apt 4, 100 Main St" or "100 Main St Apt 4") and its comparison key,
+  // which keeps structure ("Bldg 2 Apt 4" is not "Unit 24").
+  const unitOf = (line, line2) => unitLineValueKey(normalizeUnitLine(unitAnywhereOnLine(line) || line2 || ''));
+  if (unitOf(parcel.situsAddress) !== unitOf(customer.address_line1, customer.address_line2)) return { skip: 'parcel_unit_mismatch' };
   const surname = surnameFromOwnerNames(parcel.ownerNames, customer.first_name, parcel.county);
   return surname ? { surname } : { skip: 'no_single_owner_match' };
-}
-
-// "Apt 4", "#4", "Unit 4" -> "4"; '' when there is none.
-function unitKey(value) {
-  return String(value || '').toLowerCase().replace(/\b(?:apartment|apt|unit|suite|ste|number|no)\b\.?/g, '').replace(/[^a-z0-9]/g, '');
 }
 
 // Stored values that stand in for "no last name": the placeholders
@@ -258,7 +255,10 @@ async function collectAnswers(ctx) {
   const results = await Promise.all(SOURCES.map(async ([source, find]) => {
     try {
       const found = await find(ctx);
-      return { source, surname: found.surname || null, code: found.surname ? 'answered' : found.skip };
+      // Every source's answer passes the same surname test: a placeholder
+      // ("pat.unknown@", a caller name of "PAT NULL") is no answer from any of them.
+      const surname = found.surname ? cleanSurname(found.surname) : null;
+      return { source, surname, code: surname ? 'answered' : (found.skip || 'placeholder_surname') };
     } catch (err) {
       return { source, surname: null, code: errId(err) };
     }
