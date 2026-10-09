@@ -587,20 +587,63 @@ const SWEEP_LABEL = 'Swept eaves, window frames, door frames, and lanai';
 const sweepBox = () => screen.queryByRole('checkbox', { name: 'Swept eaves and webs' });
 const SWEPT_FACTS = { ...FACTS, sweptEaves: true };
 
+// Owner 2026-10-08: the note fills the sweep and one chip corrects it.
+const sweepOn = () => screen.queryByRole('button', { name: 'Swept eaves and webs ✕' });
+const sweepOff = () => screen.queryByRole('button', { name: '+ Swept eaves' });
 describe('the swept eaves and webs, read from the note', () => {
-  test('the short sheet shows no box or section for it', async () => {
+  test('the short sheet shows no box or section for it, only a chip beside the report once it is written', async () => {
     await openSheet(makeRequest());
     expect(sweepBox()).toBeNull();
     expect(screen.queryByText('Swept eaves and webs')).toBeNull();
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(sweepOn()).toBeNull();
+    expect(sweepOff()).toBeNull();
+    await generate();
+    expect(sweepOff()).toBeTruthy();
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });
 
-  test('a sweep heard: the writer and the completion carry the label with its exterior, no-treatment scope, and the heard line names it', async () => {
+  test('a sweep the read heard wrongly comes off with one tap: the report is written again without it and none is sent', async () => {
+    const request = makeRequest({ facts: SWEPT_FACTS });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(sweepOn());
+    expect(sweepOff()).toBeTruthy();
+    // The report was written with the sweep: it must be written again.
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
+    expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([]);
+    // The read still says swept; the tech's word stands.
+    expect(sweepOff()).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body).not.toHaveProperty('protocolActionsCompleted');
+    expect(body).not.toHaveProperty('protocolActionScopesCompleted');
+  });
+
+  test('a sweep the read missed goes on with one tap: the report is written again with it and it is sent', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    fireEvent.click(sweepOff());
+    expect(sweepOn()).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
+    expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([SWEEP_LABEL]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body.protocolActionsCompleted).toEqual([SWEEP_LABEL]);
+    expect(body.protocolActionScopesCompleted).toEqual([{ label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false }]);
+  });
+
+  test('a sweep heard: the writer and the completion carry the label with its exterior, no-treatment scope, and the chip shows it', async () => {
     const request = makeRequest({ facts: SWEPT_FACTS });
     await openSheet(request);
     await generate();
     expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([SWEEP_LABEL]);
-    expect(screen.getByTestId('fast-complete-heard').textContent).toContain('swept eaves and webs');
+    expect(sweepOn().getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');
@@ -615,7 +658,7 @@ describe('the swept eaves and webs, read from the note', () => {
       await generate();
       // The full form's shape: an empty list, which the writer reads as none.
       expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
-      expect(screen.getByTestId('fast-complete-heard').textContent).not.toContain('swept');
+      expect(sweepOff().getAttribute('aria-pressed')).toBe('false');
       fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
       await screen.findByTestId('fast-complete-sent');
       const [body] = request.bodies('/complete');
@@ -644,7 +687,9 @@ describe('the swept eaves and webs, read from the note', () => {
     expect(sweepBox()).toBeNull();
     await generate();
     expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
-    expect(screen.getByTestId('fast-complete-heard').textContent).not.toContain('swept');
+    // No chip either: an initial cleanout records no sweep.
+    expect(sweepOn()).toBeNull();
+    expect(sweepOff()).toBeNull();
   });
 });
 

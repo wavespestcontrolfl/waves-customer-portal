@@ -747,8 +747,8 @@ const SWEEP_BRUSH_RE = /\b(?:swe(?:ep|pt|eping)s?|brush(?:ed|es|ing)?|knock(?:ed
 // A denial just before the action, over the few filler words a denial runs on
 // ("didn't sweep", "not to knock down", "no webs to sweep", "wasn't able to
 // brush"); words past those (not home and I swept) are another clause's.
-const SWEEP_DENIAL_FILLER = String.raw`to|us|me|them|him|her|you|able|get|got|any|the|a|an|of|be|been|need|needed|necessary|want|wanted|have|has|had|asked|told|allowed|let|manage|managed|time|chance|around|really|even|webs?|cobwebs?|spider\s*webs?|eaves?|soffits?`;
-const SWEEP_DENIAL_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|unable|asked\s+(?:us\s+)?not)\b(?:\s+(?:${SWEEP_DENIAL_FILLER})){0,6}\s+$`);
+const SWEEP_DENIAL_FILLER = String.raw`to|us|me|them|him|her|you|able|get|got|any|the|a|an|of|be|been|need|needed|necessary|want|wanted|have|has|had|asked|told|allowed|let|manage|managed|time|chance|around|really|even|or|nor|and|sweep|sweeping|brush|brushing|knock|knocking|down|off|remove|removing|clear|clearing|webs?|cobwebs?|spider\s*webs?|eaves?|soffits?`;
+const SWEEP_DENIAL_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|unable|asked\s+(?:us\s+)?not)\b(?:\s+(?:${SWEEP_DENIAL_FILLER})){0,8}\s+$`);
 const all = (re, text) => [...text.matchAll(new RegExp(re.source, 'g'))];
 // What may not stand between a removal action and the web or eave it removes:
 // the end of a clause, a look, another action (a treatment, another removal),
@@ -823,6 +823,10 @@ function sweepNotToday(text, start, end) {
 // completed", "web sweep was not performed"), or called undone in its clause.
 const SWEEP_TRAILING_DENIAL_RE = trailingDenial('swept|completed|performed|finished|done|needed|necessary|required|possible|today');
 const SWEEP_UNDONE_RE = /\b(?:incomplete|skipped|omitted|unfinished|not\s+(?:completed|performed|finished|done|possible))\b/;
+// A sweep that was already there when the technician came ("the eaves had been
+// swept before I arrived", "webs were already knocked down") is not today's
+// work (Codex P2 on #6147).
+const SWEEP_BEFORE_VISIT_RE = /\b(?:had\s+(?:already\s+)?been|(?:was|were|been)\s+already|already\s+(?:been\s+)?(?:swept|brushed|knocked|removed|cleared|cleaned|done)|before\s+(?:i|we|the\s+tech(?:nician)?)\s+(?:arrived|got|came|showed)|prior\s+to\s+(?:my|our|the)\s+(?:arrival|visit))\b/;
 // The sweep is the technician's own work (Codex P2 on #6147). Someone else
 // named as the doer nearest before it ("the homeowner removed the cobwebs";
 // not "customer was not home and I swept", where "I" stands nearer, nor a
@@ -859,9 +863,15 @@ function sweepStands(quote, note, span) {
     ].filter((wordAt) => wordAt < start || wordAt >= end);
     const ownFrom = Math.max(from, ...others.filter((wordAt) => wordAt < start));
     const ownTo = Math.min(to, ...others.filter((wordAt) => wordAt >= end));
+    // An undone word counts over the sweep's own words only, and not past an
+    // "and" that starts other work: "swept the eaves and left the garage
+    // treatment incomplete" swept (Codex P2 on #6147).
+    const nextAnd = note.slice(end, ownTo).search(/\b(?:and|then|plus)\b/);
+    const undoneTo = nextAnd < 0 ? ownTo : end + nextAnd;
     const denied = SWEEP_DENIAL_BEFORE_RE.test(note.slice(0, start))
       || SWEEP_TRAILING_DENIAL_RE.test(note.slice(end))
-      || SWEEP_UNDONE_RE.test(note.slice(from, to))
+      || SWEEP_UNDONE_RE.test(note.slice(ownFrom, undoneTo))
+      || SWEEP_BEFORE_VISIT_RE.test(note.slice(from, to))
       || sweepNotToday(note, start, end)
       || sweptByAnother(note.slice(from, start), note.slice(end, to))
       || sweptInsideOnly(note.slice(ownFrom, ownTo));

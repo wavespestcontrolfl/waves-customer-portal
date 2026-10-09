@@ -83,7 +83,7 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
   ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
-  BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, InspectionCreditToggle, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter,
+  BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, InspectionCreditToggle, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter, SweepChip,
   TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
   typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
@@ -370,6 +370,9 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     // sent only when there is one.
     ...(officeNote.trim() ? { officeNote: officeNote.trim() } : {}),
     techTips: techTipsOf(form, tipsAvailable),
+    // The sweep chip (owner 2026-10-08), as the report flow sends it. This
+    // form has no note reader, so the chip is the tech's own tap.
+    ...pestSweepCompletionFields(form.sweptEaves === true),
     // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
     // link. Gate on: the fixed re-service text; the server composes it.
     ...(recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS),
@@ -679,7 +682,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
     pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, methodPicked: false, linearFt: '', activity: '', note: '',
-    tipId: '', customTip: '',
+    tipId: '', customTip: '', sweptEaves: false,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -806,6 +809,10 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             </ChoiceSection>
           )}
           <VisitHeardLine voice={voice} />
+          {/* This form only opens for a pest re-service, always a house-mix visit. */}
+          <div className="tech-visit-tile-grid">
+            <SweepChip on={form.sweptEaves} locked={formLocked} onToggle={() => setField('sweptEaves', !form.sweptEaves)} />
+          </div>
           {tipsAvailable && (
             <TipSection
               library={tips}
@@ -880,6 +887,20 @@ function reportServiceDate(day) {
 // marks and the photos the writer reads. The tip prints as its own card on
 // the report (the writer never repeats it), so it is not part of it. Nor is
 // the trace: it only gives a perimeter spray its length.
+// Whether the visit swept the eaves and webs (owner 2026-10-08): what the
+// note's read heard, unless the tech tapped the chip, whose word then stands.
+// The chip corrects a read that heard a sweep that was not done, or missed one.
+function sweptOf(form, facts) {
+  return typeof form?.sweepPick === 'boolean' ? form.sweepPick : facts?.sweptEaves === true;
+}
+
+// The chip's state for the report card, or null where no sweep is recorded.
+function sweepChipFor(ctx, form, draft, setForm) {
+  if (ctx.houseMix !== true) return null;
+  const on = sweptOf(form, draft?.facts);
+  return { on, onToggle: () => setForm((prev) => ({ ...prev, sweepPick: !on })) };
+}
+
 function writerSignature(form, rows, promiseMarks, photos, recordPart = null) {
   return JSON.stringify({
     // A lane or typed visit's record is what the report says.
@@ -889,6 +910,8 @@ function writerSignature(form, rows, promiseMarks, photos, recordPart = null) {
       .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null, row.rateMethod ?? null])
       .sort(([a], [b]) => a.localeCompare(b)),
     customerHome: form.customerHome,
+    // The tech's own word on the sweep (the chip), when it differs from the read.
+    sweepPick: form.sweepPick ?? null,
     rating: form.rating,
     // Choosing the default's own value still changes what the writer reads.
     ratingPrefilled: !!form.ratingPrefilled,
@@ -998,7 +1021,7 @@ function reportCompletionBody({
     // The sweep heard in the note (owner 2026-10-08): the full form's protocol
     // action and its exterior / no-treatment scope, which the report's spider
     // section reads.
-    ...pestSweepCompletionFields(heard?.sweptEaves === true),
+    ...pestSweepCompletionFields(sweptOf(form, heard)),
     ...(ratingSent ? { clientPestRating: form.rating } : {}),
     // The untouched first-visit 5: the server re-checks it is still the
     // first visit (owner ruling 2026-09-24).
@@ -1548,6 +1571,9 @@ function ReportFlowForm({
   const [form, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
+    // The sweep chip (owner 2026-10-08): null until the tech taps it, then
+    // their word over what the note's read heard (sweptOf).
+    sweepPick: null,
     rating: ctx.rating.firstVisit ? FIRST_VISIT_RATING : null,
     ratingPrefilled: !!ctx.rating.firstVisit,
     tipId: '',
@@ -1675,7 +1701,7 @@ function ReportFlowForm({
     report.write({
       buildPayload: (facts, productFill) => {
         const { heard, writerExtras } = recordState.inputs(recordState.settle(facts), facts);
-        const payload = writerPayload({ service, visit: ctx.visit, form, rows: rowsFor(facts, productFill), facts: heard, sweptEaves: heard.sweptEaves === true, ratingAllowed, photos: visitPhotos.photos, promiseMarks });
+        const payload = writerPayload({ service, visit: ctx.visit, form, rows: rowsFor(facts, productFill), facts: heard, sweptEaves: sweptOf(form, heard), ratingAllowed, photos: visitPhotos.photos, promiseMarks });
         return { ...payload, ...writerExtras };
       },
       note: form.note,
@@ -1755,6 +1781,9 @@ function ReportFlowForm({
     return (
       <ReportStep
         report={report}
+        // The sweep chip, on a plain pest visit only (the house mix): an
+        // initial cleanout, a lane or a typed visit records no sweep.
+        sweep={sweepChipFor(ctx, form, draft, setForm)}
         stale={stale}
         action={action}
         locked={locked}
@@ -1843,7 +1872,7 @@ function ReportFlowForm({
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt,
+  onBackFromPrompt, sweep = null,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1887,6 +1916,7 @@ function ReportStep({
             traced={traced}
             blogPost={blogPost}
             pestHeard={pestHeard}
+            sweep={sweep}
             onEdit={() => setEditing(true)}
             onDoneEditing={() => setEditing(false)}
             onChangeText={report.editText}

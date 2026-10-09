@@ -695,14 +695,31 @@ describe('FastCompleteSheet', () => {
 });
 
 // "Swept eaves and webs" (owner 2026-10-08): the re-service sheet the report
-// gate leaves in place has no note read, so it has no box for the sweep and
-// sends none.
+// gate leaves in place has no note read, so its chip is the tech's own tap
+// (no box); untapped it sends none.
 describe('the re-service form and the swept eaves and webs', () => {
-  test('shows no box for it and the completion carries no sweep', async () => {
+  test('one tap on the chip sends the sweep with its exterior, no-treatment scope', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: '+ Swept eaves' }));
+    expect(screen.getByRole('button', { name: 'Swept eaves and webs ✕' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    await waitFor(() => expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true));
+    const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
+    expect(body.protocolActionsCompleted).toEqual(['Swept eaves, window frames, door frames, and lanai']);
+    expect(body.protocolActionScopesCompleted).toEqual([{ label: 'Swept eaves, window frames, door frames, and lanai', scope: 'exterior', treatmentApplied: false }]);
+  });
+
+  test('shows no box for it and, untapped, the completion carries no sweep', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
     await screen.findByRole('button', { name: /Taurus SC/ });
     expect(screen.queryByRole('checkbox', { name: 'Swept eaves and webs' })).toBeNull();
+    expect(screen.getByRole('button', { name: '+ Swept eaves' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
     fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));

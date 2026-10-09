@@ -866,6 +866,20 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
   });
 
+  // Codex round 4 on #6147. The sheet's chip now corrects any read; these
+  // keep the plain cases right.
+  test.each([
+    ['one denial over two actions', "Didn't sweep or knock down webs."],
+    ['a sweep done before the technician came', 'The eaves had been swept before I arrived.'],
+    ['webs already down', 'Webs were already knocked down.'],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+  test('another task left incomplete does not undo the sweep', () => {
+    const note = 'Swept the eaves and left the garage treatment incomplete.';
+    expect(readSweep(note, { done: true, quote: 'Swept the eaves and left the garage treatment incomplete' })).not.toBeNull();
+  });
+
   test('webs only seen are not a sweep', () => {
     const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
     expect(said(note, 'Saw webs on the eaves')).toBeNull();
