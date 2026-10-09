@@ -2374,7 +2374,10 @@ hold, water-in or hold-then-water-in: `reportV2.banner`
 `{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
 `hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
 finished customer sentences with absolute Eastern clock times; `holdUntil`,
-`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+`waterInBy` and `expiresAt` are ISO instants or `null`; `waterInBy` is completion
+plus the product's window, or, when a timed hold reaches that (owner 2026-10-09:
+every post-emergent herbicide holds 24 hours), the hold's printed end plus the
+window, so the water-in always follows the hold; an "until the treatment
 has dried" hold has no printed duration and `expiresAt: null` (dryness is a
 condition, so no instruction that waits for drying, including one followed by a
 water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
@@ -2472,18 +2475,19 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
-`GATE_LAWN_REPORT_CLARITY` (dark, strict `true`; also requires
-`GATE_LAWN_WATERING_RULE`; gate off leaves the payload unchanged, key for key):
-when a water-in is BUILT AT COMPLETION for a customer with no sprinkler head type
-or measured rate on file, its `lines` give the amount and no minutes ("Water in
-today’s treatment with about ½ inch by Fri 8 PM.", then "Run it even if it is not
-your usual day."; hold-then-water-in keeps its hold line and continues "After
-that, water in today’s treatment with about ½ inch by …") and the frozen
-instruction records `amountOnly: true`. The frozen instruction is replayed as
-written whatever the gate says. A LIVE-VIEW-ONLY optional string
+Amount-only water-in (owner 2026-10-08, permanent and ungated since 2026-10-09;
+requires `GATE_LAWN_WATERING_RULE`): when a water-in is BUILT AT COMPLETION for a
+customer with no sprinkler head type or measured rate on file, its `lines` give
+the amount and no minutes ("Water in today’s treatment with about ½ inch by Fri
+8 PM.", then "Run it even if it is not your usual day."; hold-then-water-in keeps
+its hold line and continues "After that, water in today’s treatment with about ½
+inch by …") and the frozen instruction records `amountOnly: true`. The frozen
+instruction is replayed as written; an unfrozen re-render prints the generic
+minutes as before. Minutes still print when the customer's portal setup gives
+them (a head type on file, or a measured rate). A LIVE-VIEW-ONLY optional string
 `reportV2.banner.setupLine` ("Add your sprinkler setup and we’ll give you minutes
 for each zone.") exists only under a frozen `amountOnly` water-in or
-hold-then-water-in while the gate is on; it is deleted from every non-live render
+hold-then-water-in; it is deleted from every non-live render
 (`stripLiveOnlyScheduleFields`), is never in `lines`, and counts toward
 `reportV2.lead`'s word budget when present. The client shows it as a link to the
 portal property tab. The watering text, PDF, hero task and Ask Waves read `lines`
