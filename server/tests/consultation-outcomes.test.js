@@ -739,64 +739,58 @@ describe('recordOutcome — success + upsert', () => {
   });
 });
 
-describe('recordOutcome — expectedVisit (the Waves Assessment Fast Complete sheet\'s visit identity)', () => {
-  const VISIT = {
-    id: 'visit-1', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1',
-    service_id: null, property_id: 'prop-1', scheduled_date: '2026-10-09',
-  };
-  const seeded = () => makeFakeDb({
-    scheduled_services: [{ ...VISIT }],
+describe('recordOutcome — duringCompletion (the Waves Assessment Fast Complete sheet records its read in /complete)', () => {
+  const today = () => etDateString(new Date());
+  const seeded = (visit = {}) => makeFakeDb({
+    scheduled_services: [{
+      id: 'visit-1', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', service_id: null,
+      status: 'on_site', scheduled_date: today(), window_start: '23:59:00', ...visit,
+    }],
     leads: [{ id: 'lead-1', customer_id: 'cust-1', deleted_at: null, created_at: '2026-01-01' }],
   });
-  const SAME = { customerId: 'cust-1', propertyId: 'prop-1', serviceType: 'Waves Assessment', scheduledDate: '2026-10-09' };
 
-  test('an unchanged visit writes the outcome', async () => {
-    const fakeDb = seeded();
-    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', expectedVisit: SAME }, { trx: fakeDb });
-    expect(saved.outcome).toBe('warm');
-    expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
+  test('a same-day visit before its arrival window: the office route is refused, the completion path records', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(parseETDateTime(`${today()}T09:00`));
+    try {
+      const refusedDb = seeded();
+      await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: refusedDb }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_IN_FUTURE' });
+      expect(refusedDb.__store.consultation_outcomes || []).toHaveLength(0);
+
+      const fakeDb = seeded();
+      const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb, duringCompletion: true });
+      expect(saved.outcome).toBe('warm');
+      expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
-  test('no expectedVisit behaves as before, whatever the visit holds', async () => {
-    const fakeDb = seeded();
-    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
-    expect(saved.outcome).toBe('warm');
-    expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
-  });
-
-  test.each([
-    ['customer', { customerId: 'cust-other' }],
-    ['property', { propertyId: 'prop-other' }],
-    ['property that was never stamped on the row', { propertyId: null }],
-    ['date', { scheduledDate: '2026-10-12' }],
-    ['service type', { serviceType: 'Quarterly Pest Control' }],
-  ])('a changed %s is refused with visit_identity_changed and nothing is written', async (_label, change) => {
-    const fakeDb = seeded();
-    await expect(recordOutcome(
-      { scheduledServiceId: 'visit-1', outcome: 'warm', expectedVisit: { ...SAME, ...change } },
-      { trx: fakeDb },
-    )).rejects.toMatchObject({ statusCode: 409, code: 'visit_identity_changed' });
+  test('the completion path still refuses a future calendar day', async () => {
+    const fakeDb = seeded({ scheduled_date: etDateString(addETDays(new Date(), 2)) });
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb, duringCompletion: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_IN_FUTURE' });
     expect(fakeDb.__store.consultation_outcomes || []).toHaveLength(0);
   });
 
-  test('a visit moved to another customer between the first read and the lock is refused, nothing written', async () => {
-    const fakeDb = seeded();
-    const spyDb = (name) => {
-      if (name === 'customers') fakeDb.__store.scheduled_services[0].customer_id = 'cust-other';
-      return fakeDb(name);
-    };
-    Object.assign(spyDb, fakeDb);
-    spyDb.transaction = async (fn) => fn(spyDb);
-    await expect(recordOutcome(
-      { scheduledServiceId: 'visit-1', outcome: 'warm', expectedVisit: SAME },
-      { trx: spyDb },
-    )).rejects.toMatchObject({ statusCode: 409, code: 'visit_identity_changed' });
-    expect(fakeDb.__store.consultation_outcomes || []).toHaveLength(0);
+  test.each(['no_show', 'cancelled', 'skipped', 'rescheduled'])('the completion path still refuses a %s visit', async (status) => {
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: seeded({ status }), duringCompletion: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_NOT_HELD' });
   });
 
-  test('an expectedVisit that is not an object is a 400', async () => {
-    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', expectedVisit: 'x' }, { trx: seeded() }))
-      .rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+  test('the completion path keeps the ownership check and the won guard', async () => {
+    await expect(recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', actingTechnicianId: 'tech-2', actingIsAdmin: false },
+      { trx: seeded(), duringCompletion: true },
+    )).rejects.toMatchObject({ statusCode: 403, code: 'NOT_ASSIGNED' });
+
+    const fakeDb = seeded();
+    fakeDb.__store.consultation_outcomes.push({ id: 'co-1', scheduled_service_id: 'visit-1', outcome: 'won', won_via: 'closeout_booking', won_at: new Date() });
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'cold' }, { trx: fakeDb, duringCompletion: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_WON' });
+    expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('won');
   });
 });
 

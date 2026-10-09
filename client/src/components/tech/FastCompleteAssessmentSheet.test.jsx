@@ -33,7 +33,7 @@ const SERVICE = {
 
 const notFound = () => Object.assign(new Error('No outcome recorded for that visit'), { status: 404 });
 
-function makeRequest({ row = null, loadError = null, outcomeError = null, completeError = null } = {}) {
+function makeRequest({ row = null, loadError = null, completeError = null } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options = {}) => {
     calls.push({ path, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
@@ -43,8 +43,8 @@ function makeRequest({ row = null, loadError = null, outcomeError = null, comple
         if (!row) throw notFound();
         return { outcome: row };
       }
-      if (outcomeError) throw outcomeError;
-      return { outcome: { id: 'out-1' } };
+      // The sheet never writes here: the read rides the completion.
+      throw new Error('unexpected outcome write');
     }
     if (path === '/tech/services/svc-a/photos') return { photos: [] };
     if (path === '/admin/dispatch/svc-a/complete') {
@@ -87,7 +87,6 @@ describe('FastCompleteAssessmentSheet', () => {
     expect(screen.getByText('Pick warm, cold or lost')).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(completeButton());
-    expect(posts(request, '/outcome')).toHaveLength(0);
     expect(posts(request, '/complete')).toHaveLength(0);
     // A lost pick needs its reason.
     fireEvent.click(screen.getByRole('button', { name: 'Lost' }));
@@ -98,7 +97,7 @@ describe('FastCompleteAssessmentSheet', () => {
     expect(completeButton().disabled).toBe(false);
   });
 
-  test('records the outcome first, then posts the complete body, and the credit rides as the explicit boolean', async () => {
+  test('makes exactly one write: the read rides the complete body, and the credit rides as the explicit boolean', async () => {
     const request = await openSheet();
     fireEvent.change(note(), { target: { value: '  Chinch bugs in the front, wants a quote.  ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
@@ -108,15 +107,8 @@ describe('FastCompleteAssessmentSheet', () => {
 
     await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
     const writes = request.calls.filter((call) => call.method === 'POST').map((call) => call.path);
-    expect(writes).toEqual(['/admin/consultations/svc-a/outcome', '/admin/dispatch/svc-a/complete']);
+    expect(writes).toEqual(['/admin/dispatch/svc-a/complete']);
 
-    // The outcome POST carries the same visit identity as the complete body.
-    const identity = { customerId: 'cust-1', propertyId: 'prop-1', serviceType: 'Waves Assessment', scheduledDate: '2026-10-09' };
-    expect(posts(request, '/outcome')[0].body).toEqual({
-      outcome: 'warm', lostReason: null, interests: ['lawn', 'mosquito'], quotedAmount: null,
-      quotedCadence: null, quoteNotes: null, followUpAt: null, expectedVisit: identity,
-    });
-    expect(posts(request, '/complete')[0].body.expectedVisit).toEqual(posts(request, '/outcome')[0].body.expectedVisit);
     const body = posts(request, '/complete')[0].body;
     const { idempotencyKey, ...rest } = body;
     expect(typeof idempotencyKey).toBe('string');
@@ -124,6 +116,10 @@ describe('FastCompleteAssessmentSheet', () => {
       visitOutcome: 'completed',
       expectedVisit: { customerId: 'cust-1', propertyId: 'prop-1', serviceType: 'Waves Assessment', scheduledDate: '2026-10-09' },
       technicianNotes: 'Chinch bugs in the front, wants a quote.',
+      consultationOutcome: {
+        outcome: 'warm', lostReason: null, interests: ['lawn', 'mosquito'], quotedAmount: null,
+        quotedCadence: null, quoteNotes: null, followUpAt: null,
+      },
       offerInspectionCredit: true,
       sendCompletionSms: false,
       requestReview: false,
@@ -160,28 +156,17 @@ describe('FastCompleteAssessmentSheet', () => {
     expect(posts(request, '/complete')[0].body).not.toHaveProperty('offerInspectionCredit');
   });
 
-  test('a failed outcome write stops before the completion and shows why; a second tap tries again', async () => {
-    const request = makeRequest({ outcomeError: Object.assign(new Error('That consultation has not started yet'), { status: 409, code: 'CONSULTATION_IN_FUTURE' }) });
-    await openSheet(request);
-    fireEvent.change(note(), { target: { value: 'Early look.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
-    fireEvent.click(completeButton());
-    expect(await screen.findByText('That consultation has not started yet')).toBeTruthy();
-    expect(posts(request, '/complete')).toHaveLength(0);
-    expect(completeButton().disabled).toBe(false);
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(posts(request, '/outcome')).toHaveLength(2));
-    expect(posts(request, '/complete')).toHaveLength(0);
-  });
-
-  test('a refusal for a changed visit stops before the completion and shows the server\'s words', async () => {
-    const request = makeRequest({ outcomeError: Object.assign(new Error('This visit changed since it was opened.'), { status: 409, code: 'visit_identity_changed' }) });
-    await openSheet(request);
+  test('a refusal of the read inside the completion shows the server\'s words, and closing refreshes the schedule', async () => {
+    const onClose = vi.fn();
+    const request = makeRequest({ completeError: Object.assign(new Error('This visit changed since it was opened.'), { status: 409, code: 'visit_identity_changed' }) });
+    await openSheet(request, SERVICE, { onClose });
     fireEvent.change(note(), { target: { value: 'Looked fine.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
     fireEvent.click(completeButton());
     expect(await screen.findByText('This visit changed since it was opened.')).toBeTruthy();
-    expect(posts(request, '/complete')).toHaveLength(0);
+    expect(request.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledWith({ refresh: true });
   });
 
   test('a recorded read starts the form, and its quote and follow-up date ride through unchanged', async () => {
@@ -197,14 +182,13 @@ describe('FastCompleteAssessmentSheet', () => {
     fireEvent.change(note(), { target: { value: 'Second look.' } });
     fireEvent.click(completeButton());
     await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
-    expect(posts(request, '/outcome')[0].body).toEqual({
+    expect(posts(request, '/complete')[0].body.consultationOutcome).toEqual({
       outcome: 'cold', lostReason: null, interests: ['termite'], quotedAmount: '129.5',
       quotedCadence: 'quarter', quoteNotes: 'Side yard ants', followUpAt: '2026-11-01T13:00:00.000Z',
-      expectedVisit: { customerId: 'cust-1', propertyId: 'prop-1', serviceType: 'Waves Assessment', scheduledDate: '2026-10-09' },
     });
   });
 
-  test('a converted (won) consultation keeps its read: no pick is asked and no outcome is written', async () => {
+  test('a converted (won) consultation keeps its read: no pick is asked and no outcome is sent', async () => {
     const request = makeRequest({ row: { outcome: 'won', won_at: '2026-10-08T15:00:00.000Z', won_via: 'estimate_accept', interests: [] } });
     render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
     expect(await screen.findByText(/This consultation converted/)).toBeTruthy();
@@ -212,18 +196,28 @@ describe('FastCompleteAssessmentSheet', () => {
     fireEvent.change(note(), { target: { value: 'Follow-up walk.' } });
     fireEvent.click(completeButton());
     await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
-    expect(posts(request, '/outcome')).toHaveLength(0);
+    expect(posts(request, '/complete')[0].body).not.toHaveProperty('consultationOutcome');
   });
 
-  test('an unreadable recorded read stops the sheet instead of writing over it', async () => {
+  test('an unreadable recorded read stops the sheet instead of writing over it, and closing refreshes the schedule', async () => {
+    const onClose = vi.fn();
     const request = makeRequest({ loadError: Object.assign(new Error('Could not load this consultation'), { status: 500 }) });
-    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
+    render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={onClose} />);
     expect(await screen.findByText(/Could not load this consultation/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Warm' })).toBeNull();
-    expect(posts(request, '/outcome')).toHaveLength(0);
+    expect(request.calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledWith({ refresh: true });
   });
 
-  test('a retry after a dropped completion resends it and does not write the outcome again', async () => {
+  test('a clean close without any failure does not ask for a refresh', async () => {
+    const onClose = vi.fn();
+    await openSheet(makeRequest(), SERVICE, { onClose });
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledWith(undefined);
+  });
+
+  test('a retry after a dropped completion resends the same body and key', async () => {
     const request = makeRequest({ completeError: Object.assign(new Error('Network down'), { status: 503 }) });
     await openSheet(request);
     fireEvent.change(note(), { target: { value: 'Looked fine.' } });
@@ -232,7 +226,6 @@ describe('FastCompleteAssessmentSheet', () => {
     const retry = await screen.findByRole('button', { name: 'Retry' });
     fireEvent.click(retry);
     await waitFor(() => expect(posts(request, '/complete')).toHaveLength(2));
-    expect(posts(request, '/outcome')).toHaveLength(1);
     // Same body, same idempotency key.
     expect(posts(request, '/complete')[1].body).toEqual(posts(request, '/complete')[0].body);
   });
@@ -245,7 +238,7 @@ describe('assessment sheet helpers', () => {
   });
 
   test('the body omits the credit unless it is a boolean and the identity unless it has keys', () => {
-    expect(assessmentCompletionBody({ note: ' x ', offerCredit: null, expectedVisit: {} })).toEqual({
+    expect(assessmentCompletionBody({ note: ' x ', offerCredit: null, expectedVisit: {}, consultationOutcome: null })).toEqual({
       visitOutcome: 'completed', technicianNotes: 'x', sendCompletionSms: false, requestReview: false,
     });
   });

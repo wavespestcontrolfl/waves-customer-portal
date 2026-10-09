@@ -129,18 +129,6 @@ describe('POST /:scheduledServiceId/outcome — a technician records their own c
     );
   });
 
-  test('the visit identity in the body reaches the service; a body without it passes undefined', async () => {
-    mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'warm' });
-    const url = '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome';
-    await call('post', url, { outcome: 'warm', expectedVisit: { customerId: 'cust-1' } });
-    expect(mockRecordOutcome).toHaveBeenLastCalledWith(
-      expect.objectContaining({ expectedVisit: { customerId: 'cust-1' } }),
-      expect.anything(),
-    );
-    await call('post', url, { outcome: 'warm' });
-    expect(mockRecordOutcome.mock.calls.at(-1)[0].expectedVisit).toBeUndefined();
-  });
-
   test('admin role is also allowed', async () => {
     mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'cold' });
     const res = await call('post', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome', { outcome: 'cold' });

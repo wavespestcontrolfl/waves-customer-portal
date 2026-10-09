@@ -30,8 +30,9 @@ import { completesOnOwnRecord } from './pest-fast-complete';
 export function isAssessmentFastCompleteEligible(service) {
   // An assessment whose outcome the server accepts: canRecordConsultationOutcome
   // is isConsultationVisit minus the statuses recordOutcome refuses (no_show,
-  // cancelled, skipped, rescheduled: CONSULTATION_NOT_HELD). The sheet's first
-  // write is that outcome, so a visit it would always refuse keeps the full form.
+  // cancelled, skipped, rescheduled: CONSULTATION_NOT_HELD). The sheet's read is
+  // recorded inside the completion, so a visit that would refuse it keeps the
+  // full form. (The arrival window is not a reason: the completion path skips it.)
   return canRecordConsultationOutcome(service)
     && service?.assessmentFastCompleteEnabled === true
     && completesOnOwnRecord(service)

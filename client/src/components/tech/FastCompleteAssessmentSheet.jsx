@@ -17,21 +17,17 @@
 //
 // Required before Complete: a note and an outcome pick. Nothing else blocks.
 //
-// Two writes, in this order, and why both are safe:
-//   1. POST /admin/consultations/:id/outcome, the outcome upsert, carrying the
-//      same expectedVisit as step 2 (the server checks it under its visit lock
-//      before it writes). It is
-//      idempotent (an upsert keyed on the visit that only a "won" row refuses)
-//      and can be recorded again any number of times, and it sends nothing to
-//      anyone. A tech who fixes a mistake and completes again just records the
-//      newer read.
-//   2. POST /admin/dispatch/:id/complete through useFastCompleteSubmit, under
-//      one idempotency key. A lost response or a dropped connection resends the
-//      SAME body under the SAME key, so the server replays or resumes it.
-// If step 1 lands and step 2 does not, the visit stays open with its read
-// recorded, which is a true state; the tech completes again. Step 2 never runs
-// before step 1 has answered, so a completed visit never lacks its read.
-// A retry of a held completion does not write the outcome again.
+// ONE write. The read of the visit rides the /complete body as
+// `consultationOutcome` (the payload ConsultationOutcomeSheet's own
+// buildOutcomePayload builds), and the server records it through recordOutcome
+// inside the completion's transaction, under the visit lock it already holds
+// (services/completion-consultation-outcome.js). So the read commits with the
+// completion and rolls back with it: a visit rescheduled or retyped by someone
+// else mid-completion leaves no outcome row behind, and every refusal (a changed
+// visit, a dead status, a reassigned visit) arrives as the completion's own
+// failure. The completion retries under one idempotency key, resending the SAME
+// body, which records the same read again. The only separate request is the
+// read of the recorded outcome that seeds the form.
 //
 // Nothing about the visit is read live: the pest, lawn and tree & shrub sheets
 // open their visit through a context route, and none of them takes an
@@ -60,11 +56,6 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 import { ActionFeedback } from '../ui';
 import '../../styles/tech-workflow.css';
 
-// The outcome write's own refusal that needs no stop: the consultation already
-// converted (the sale closed first), so its read is final and the completion
-// goes on.
-const ALREADY_WON = 'ALREADY_WON';
-
 // The visit the tech tapped, in the keys the server compares under its row
 // lock (pest-recap.js recapVisitIdentityChanged). A key the row does not carry
 // is left out, so nothing is compared that the sheet never saw; the address is
@@ -83,10 +74,12 @@ export function assessmentVisitIdentity(service) {
 // `offerCredit` is null when the toggle is not shown, and then the field is not
 // sent at all (the server's default-on applies, as for a hidden toggle on the
 // full form), so a value the tech never saw is never sent.
-export function assessmentCompletionBody({ note, offerCredit, expectedVisit }) {
+export function assessmentCompletionBody({ note, offerCredit, expectedVisit, consultationOutcome }) {
   return {
     visitOutcome: 'completed',
     ...(expectedVisit && Object.keys(expectedVisit).length ? { expectedVisit } : {}),
+    // Null for a consultation that already converted (won): its read stays.
+    ...(consultationOutcome ? { consultationOutcome } : {}),
     technicianNotes: String(note || '').trim(),
     ...(offerCredit === true || offerCredit === false ? { offerInspectionCredit: offerCredit } : {}),
     sendCompletionSms: false,
@@ -105,22 +98,22 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
   const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
-  // The outcome write in flight (step 1 above), lifted so Close and Full form wait for it.
-  const [recording, setRecording] = useState(false);
   // A recorded dictation clip still being taken or transcribed: the full form
   // carries nothing over, so Full form waits for it, like Complete.
   const [dictationPending, setDictationPending] = useState(false);
 
   const close = useCallback(() => {
-    if (submitting || recording) return;
+    if (submitting) return;
     // The completion response rides along: admin Dispatch reads it for its bookkeeping.
     if (done) onCompleted?.(done.response || null);
-    else onClose?.(submission.failure ? { refresh: true } : undefined);
-  }, [submitting, recording, done, submission.failure, onClose, onCompleted]);
+    // A refused or unknown completion, or a recorded read that could not be loaded
+    // (the visit may have been reassigned or changed), leaves the schedule row stale.
+    else onClose?.(submission.failure || recorded.error ? { refresh: true } : undefined);
+  }, [submitting, done, submission.failure, recorded.error, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form cannot resume a /complete attempt.
-  const locked = submissionHolds(submission) || recording;
+  const locked = submissionHolds(submission);
 
   return (
     <FastCompleteFrame
@@ -141,7 +134,7 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
         done={!!done}
         locked={locked}
         dictationPending={dictationPending}
-        submitting={submitting || recording}
+        submitting={submitting}
         onFullForm={onFullForm}
         onClose={close}
       />
@@ -152,8 +145,6 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
         submission={submission}
         locked={locked}
         photos={photoManager}
-        recording={recording}
-        onRecording={setRecording}
         dictationPending={dictationPending}
         onDictationPending={setDictationPending}
         onCompleted={onCompleted}
@@ -162,7 +153,7 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
   );
 }
 
-function SheetBody({ service, request, recorded, submission, locked, photos, recording, onRecording, dictationPending, onDictationPending, onCompleted }) {
+function SheetBody({ service, request, recorded, submission, locked, photos, dictationPending, onDictationPending, onCompleted }) {
   if (submission.done) {
     return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   }
@@ -183,15 +174,13 @@ function SheetBody({ service, request, recorded, submission, locked, photos, rec
       submission={submission}
       locked={locked}
       photos={photos}
-      recording={recording}
-      onRecording={onRecording}
       dictationPending={dictationPending}
       onDictationPending={onDictationPending}
     />
   );
 }
 
-function AssessmentForm({ service, request, row, submission, locked, photos, recording, onRecording, dictationPending, onDictationPending }) {
+function AssessmentForm({ service, request, row, submission, locked, photos, dictationPending, onDictationPending }) {
   // The outcome form starts from the recorded read (a tech who completes
   // again, or the office, may have recorded one already), so a soft quote or a
   // follow-up date saved earlier rides through the upsert unchanged.
@@ -201,13 +190,12 @@ function AssessmentForm({ service, request, row, submission, locked, photos, rec
   // inspection profile, the credit lane live, the profile read answered).
   const creditShown = offersInspectionCredit(service) && service?.completionProfileLookupFailed !== true;
   const [offerCredit, setOfferCredit] = useState(true);
-  const [outcomeError, setOutcomeError] = useState('');
   const visitPhotos = useVisitPhotos({ serviceId: service?.id, request, version: photos.version });
 
   // A won consultation (the sale closed first) keeps its read: the sheet shows
   // it and writes nothing.
   const locksOutcome = readOnlyReason(row);
-  const setOutcome = (patch) => { setOutcomeError(''); setOutcomeForm((prev) => ({ ...prev, ...patch })); };
+  const setOutcome = (patch) => setOutcomeForm((prev) => ({ ...prev, ...patch }));
   const appendNote = useCallback((text) => {
     setNote((prev) => (prev.trim() ? `${prev.trimEnd()} ${text}` : text));
   }, []);
@@ -218,50 +206,25 @@ function AssessmentForm({ service, request, row, submission, locked, photos, rec
     return locksOutcome ? '' : validationErrorOf(outcomeForm) || '';
   })();
 
-  const submit = async () => {
-    // A held completion (a retry) resends as it is; the read was written with it.
+  const submit = () => {
+    // A held completion (a retry) resends as it is.
     if (submission.hasPendingBody()) {
       submission.retry();
       return;
     }
-    if (missingReason || recording) return;
-    const expectedVisit = assessmentVisitIdentity(service);
-    if (!locksOutcome) {
-      onRecording(true);
-      setOutcomeError('');
-      try {
-        await request(`/admin/consultations/${encodeURIComponent(service.id)}/outcome`, {
-          method: 'POST',
-          // The same visit identity /complete carries: the server checks it under
-          // its visit lock before the upsert, so a read made on a visit that
-          // changed since the schedule loaded is never saved against it.
-          body: JSON.stringify({
-            ...buildOutcomePayload(outcomeForm, { followUpTouched: false, loadedRow: row }),
-            ...(Object.keys(expectedVisit).length ? { expectedVisit } : {}),
-          }),
-        });
-      } catch (err) {
-        if (err?.code !== ALREADY_WON) {
-          setOutcomeError(err?.message || 'Could not save how it went. Try again.');
-          onRecording(false);
-          return;
-        }
-      }
-      onRecording(false);
-    }
+    if (missingReason) return;
     submission.submit(
       () => assessmentCompletionBody({
         note,
         offerCredit: creditShown ? offerCredit : null,
-        expectedVisit,
+        expectedVisit: assessmentVisitIdentity(service),
+        consultationOutcome: locksOutcome ? null : buildOutcomePayload(outcomeForm, { followUpTouched: false, loadedRow: row }),
       }),
       `Assessment · ${locksOutcome ? 'won' : outcomeForm.outcome}`,
     );
   };
 
   const formLocked = locked || dictationPending;
-  // The footer shows the outcome write as part of the save.
-  const footerSubmission = recording ? { ...submission, submitting: true } : submission;
 
   return (
     <div className="tech-visit-form-area">
@@ -317,11 +280,10 @@ function AssessmentForm({ service, request, row, submission, locked, photos, rec
           )}
           {creditShown && <InspectionCreditToggle checked={offerCredit} locked={locked} onChange={setOfferCredit} />}
         </fieldset>
-        {outcomeError && <ActionFeedback error className="tech-visit-feedback">{outcomeError}</ActionFeedback>}
-        {footerSubmission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
+        {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       <CompleteFooter
-        submission={footerSubmission}
+        submission={submission}
         missingReason={missingReason}
         label="Complete assessment"
         onSubmit={submit}
