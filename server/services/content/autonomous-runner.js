@@ -319,9 +319,19 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed', failure_message: 'brief-builder unavailable' });
     }
     const t2 = Date.now();
+    // GATE_CONTENT_WRITER_TERMINAL: a row that waits for a terminal draft
+    // keeps the brief it was handed. Every look at the row (the 1pm
+    // catch-up, the next batch) and the run that finally takes the draft use
+    // that one stored brief, from here on: the run's metadata, the pre-draft
+    // gates and the gates on the draft all read the brief the draft was
+    // written from. A fresh brief is composed only when none is waiting.
+    const terminalWriter = require('./terminal-writer');
+    const handedBrief = !dryRun && terminalWriter.terminalWriterLive()
+      ? await this._briefHandedToTerminal(opp.id)
+      : null;
     let brief;
     try {
-      brief = await briefBuilder.compose(opp.id, {
+      brief = handedBrief || await briefBuilder.compose(opp.id, {
         // Operator-intercept rows skip SERP profiling: several intercept
         // keywords are competitor-brand queries a profiler would mis-read as
         // navigational, and the decision-router pins the action for this
@@ -596,7 +606,6 @@ class AutonomousRunner {
     // GATE_CONTENT_WRITER_TERMINAL: the draft comes from the owner's terminal
     // (terminal-writer.js), not from an agent session. Only this step
     // changes; the claim, the brief and every gate below are the same.
-    const terminalWriter = require('./terminal-writer');
     const viaTerminal = !dryRun && terminalWriter.writesInTerminal(brief);
     let selfLintOptions = null;
     // The in-loop lint belongs to an agent session; a terminal draft meets
@@ -615,8 +624,9 @@ class AutonomousRunner {
       selfLintOptions,
     };
     const dispatchOnce = () => (viaTerminal
-      // Only a draft written from the brief this row waits on is usable.
-      ? terminalWriter.waitingBriefId(opp.id).then((expectedBriefId) => terminalWriter.fetchTerminalDraft(opp.id, { expectedBriefId }))
+      // Only a draft written from the brief this row was handed is usable;
+      // a row with a fresh brief has nothing to read yet.
+      ? terminalWriter.fetchTerminalDraft(opp.id, { expectedBriefId: handedBrief ? brief.id : null })
       : dispatcher.runWithBrief(brief, dispatchOptions)
     ).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
@@ -669,19 +679,10 @@ class AutonomousRunner {
       await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
       return finalized;
     }
-    // The draft is judged against the brief it was written from, not the
-    // one this attempt just composed. That binding is also what makes a
-    // draft read-once: this run now becomes the row's latest, so the brief
+    // The run that takes a draft becomes the row's latest run, so its brief
     // stops being "the one the row waits on" and the same file can never be
     // accepted again. Deleting the branch is cleanup only.
     if (viaTerminal && dispatchResult.ok) {
-      const writtenFrom = await this._loadReviewedBrief({ brief_id: dispatchResult.brief_id });
-      if (!writtenFrom || String(writtenFrom.id) !== String(dispatchResult.brief_id)) {
-        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
-        return finalize(run, t0, { outcome: 'failed', failure_message: 'terminal_draft_brief_missing' });
-      }
-      brief = writtenFrom;
-      run.brief_id = writtenFrom.id;
       await terminalWriter.retireTerminalDraft(opp.id, { revision: dispatchResult.revision });
     }
 
@@ -4377,6 +4378,26 @@ class AutonomousRunner {
   // Load + JSONB-parse the brief the reviewed run was generated against
   // (run.brief_id), falling back to the latest brief for the opportunity only
   // when the run carries no brief_id. Shape consumed by the astro-publisher.
+  /**
+   * The stored brief a row waits on for its terminal draft, or null: no run
+   * of the row is waiting, the brief is gone, or it is older than the
+   * terminal writer allows (a row nobody wrote for gets a fresh brief). A
+   * lookup failure is null too: the row is then briefed again, never blocked.
+   */
+  async _briefHandedToTerminal(opportunityId) {
+    const terminalWriter = require('./terminal-writer');
+    try {
+      const briefId = await terminalWriter.waitingBriefId(opportunityId);
+      const brief = briefId ? await this._loadReviewedBrief({ brief_id: briefId }) : null;
+      if (!brief || String(brief.id) !== String(briefId)) return null;
+      const age = Date.now() - new Date(brief.created_at).getTime();
+      return age <= terminalWriter.MAX_BRIEF_AGE_MS ? brief : null;
+    } catch (err) {
+      logger.warn(`[autonomous-runner] terminal brief lookup failed for ${opportunityId}: ${err.message}`);
+      return null;
+    }
+  }
+
   async _loadReviewedBrief(run) {
     let row = null;
     if (run?.brief_id) row = await db('content_briefs').where('id', run.brief_id).first();

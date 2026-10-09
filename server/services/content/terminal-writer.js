@@ -21,10 +21,11 @@
  * catch-up and the next morning's batch look again. After the batch ONE admin
  * item lists the rows that wait for a draft.
  *
- * A draft must name the brief on the row's latest run, and that run must have
- * ended waiting. The runner loads that stored brief for the rest of the run,
- * so the draft is judged against the brief it was written from. The same
- * binding makes a draft read-once: the run that takes it becomes the latest
+ * A row that waits keeps the brief it was handed: while its latest run ended
+ * waiting, the runner loads that stored brief instead of composing a new one
+ * (up to MAX_BRIEF_AGE_MS), for the whole run. A draft must name that brief,
+ * so it is judged against the brief it was written from. The same binding
+ * makes a draft read-once: the run that takes it becomes the latest
  * run, so the file's brief is no longer the one the row waits on. A gate
  * retry therefore asks for a fresh draft, written against the retry brief
  * the next run composes. Deleting the branch afterwards is cleanup.
@@ -59,6 +60,8 @@ const DRAFT_FIELDS = Object.freeze(['frontmatter', 'body', 'schema', 'claims_led
 // How far back a waiting run still counts. A row nobody wrote for a week is
 // re-briefed by the next batch anyway.
 const AWAITING_WINDOW_DAYS = 7;
+// A handed brief older than this is replaced by a fresh one (new search data).
+const MAX_BRIEF_AGE_MS = AWAITING_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 function terminalWriterLive() {
   return process.env.GATE_CONTENT_WRITER_TERMINAL === 'true';
@@ -241,5 +244,5 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
 module.exports = {
   terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, awaitingTerminalDrafts, raiseTerminalDue,
   branchFor, draftPathFor, draftProblem,
-  AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, RECHECK_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
+  AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
 };
