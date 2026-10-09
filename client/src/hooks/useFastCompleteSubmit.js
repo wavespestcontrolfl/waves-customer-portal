@@ -113,8 +113,13 @@ function sameScope(left, right) {
 }
 
 export default function useFastCompleteSubmit({
-  base, request, serviceId, operatorId, confirmable = false, sheet = '',
+  base, request, serviceId, operatorId, confirmable = false, sheet = '', invoiceFields = null,
 }) {
+  // The visit's invoice fields (lib/completion-invoice-fields.js), the same
+  // ones the full form posts. Read when a NEW body is built; a held, retried
+  // or restored body keeps the fields it was prepared with.
+  const invoiceFieldsRef = useRef(invoiceFields);
+  invoiceFieldsRef.current = invoiceFields;
   const keyRef = useRef(genIdempotencyKey());
   const pendingBodyRef = useRef(null);
   const pendingSummaryRef = useRef('');
@@ -337,7 +342,7 @@ export default function useFastCompleteSubmit({
     if (inFlight.current || recovering) return;
     const scope = scopeRef.current;
     const held = pendingBodyRef.current;
-    const body = held || { idempotencyKey: keyRef.current, ...buildBody() };
+    const body = held || { idempotencyKey: keyRef.current, ...buildBody(), ...(invoiceFieldsRef.current || {}) };
     const heldSummary = held ? pendingSummaryRef.current : String(summary || '');
     pendingBodyRef.current = body;
     pendingSummaryRef.current = heldSummary;
