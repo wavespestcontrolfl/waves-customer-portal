@@ -32,6 +32,7 @@ test('completion defaults require both owner gates', () => {
 test('verified plan math is projected unchanged with an editable method', () => {
   const { plan, context } = fixture();
   const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.eligible).toBe(true);
   expect(result.items[0].mix).toEqual(plan.mixCalculator.items[0].mix);
   expect(result.items[0].applicationMethod).toBe('broadcast_spray');
   expect(result.history).toBe(context.history);
@@ -105,7 +106,10 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   // withdrawn so the tier is the only claim.
   if (reason === 'nonmember_lane') { plan.propertyGate.billingMode = 'one_time'; plan.appointmentAssignment = {}; }
   if (reason === 'nonlawn') context.isLawn = false;
-  expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
+  const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.items).toEqual([]);
+  // Readers that offer a product beyond the add-ons stand behind the same verdict.
+  expect(result.eligible).toBe(false);
 });
 
 test('every option carries the protocol row\'s application mode, so an added herbicide records the prescribed broadcast, not the catalog\'s spot default', () => {

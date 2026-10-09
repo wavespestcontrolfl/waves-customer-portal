@@ -1,6 +1,9 @@
 const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
+const { applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
+const V13_VERSION = '2026.10-v13';
+const { worstPropertyCount, worstPropertyTotal } = require('../utils/property-counts');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
 // active ingredient shared by every product that carries it (prodiamine: 65 WDG,
@@ -74,6 +77,16 @@ function familyConvert(amount, unit, capUnit) {
   return rateInUnit(amount, unit, capUnit) || 0;
 }
 
+// One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
+// the ledger's own reading only (the recorded rate, else the quantity over the treated area), and when the
+// ledger cannot size it the row's FIXED fallback rate (Arena: the old 0.29 oz, the whole year) - never the
+// catalog default, which an admin can change (to the new 0.147) and so halve what an unreadable full-rate pass counts.
+function v13AmountShare(row, limit) {
+  const sized = capShare({ ...row, default_rate_per_1000: null, limit_value: limit.limit_value, limit_unit: limit.limit_unit });
+  if (sized) return sized;
+  return { share: Number(limit.fallback_rate) / Number(limit.limit_value), estimated: true };
+}
+
 // What could not be counted exactly, for the end of a cap message.
 function sizingNote(unsized, estimated) {
   const notes = [
@@ -105,10 +118,18 @@ const isBermudaProgramRow = (limit) => limit.match_value === BERMUDA_PROGRAM;
 // elsewhere, so it still counts. No option, no change.
 function scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId } = {}, table) {
   if (propertyId) {
+    // The row's treated property is the one frozen on the ledger when it was written (an address
+    // correction on the visit later must not move it). A row placed elsewhere is out; a legacy row
+    // with no frozen property falls back to its visit's property, and one with no property at all
+    // cannot be proven elsewhere, so it still counts.
+    query.where(function placedHereOrUnplaced() {
+      this.whereNull(`${table}.property_id`).orWhere(`${table}.property_id`, propertyId);
+    });
     query.whereNotExists(function elsewhere() {
       this.select(database.raw('1')).from('service_records as sr_scope')
         .join('scheduled_services as ss_scope', 'sr_scope.scheduled_service_id', 'ss_scope.id')
         .whereRaw('sr_scope.id = ??.service_record_id', [table])
+        .whereRaw('??.property_id is null', [table])
         .whereNotNull('ss_scope.property_id')
         .whereNot('ss_scope.property_id', propertyId);
     });
@@ -127,6 +148,9 @@ class ApplicationLimitChecker {
   // cap shared across formulations counts it with the season's earlier ones. A
   // caller that reads AFTER the application was ledgered (completion, the compliance
   // page) passes none, so the application is never counted twice.
+  // opts.proposal (true) marks a PROPOSAL check that names no dose (POST /api/admin/compliance/check-limits): a v13 yearly
+  // amount cap then counts the program's dose for the product with the season's earlier applications. A status-only read
+  // (the compliance page, a read after the ledger write) passes neither and adds nothing.
   // opts.excludeScheduledServiceId leaves that visit's own ledger rows out of the product
   // history and the shared cap, for a plan rebuilt after the visit completed. opts.propertyId
   // limits both to the treated property (no property: every property of the customer).
@@ -143,17 +167,16 @@ class ApplicationLimitChecker {
     // Product-specific history
     // Retracted rows (recap deselection corrections) never count toward
     // application limits.
-    const historyQuery = database('property_application_history')
+    // Applications on or before the day judged, as the shared cap reads them: a backdated
+    // completion is not held against an application that had not happened yet. The treated
+    // property and the visit being planned scope this history exactly as they scope the shared
+    // cap below; a caller that passes neither reads the customer's whole history.
+    const priorApplications = () => scopeHistoryToTreatment(database('property_application_history')
       .where({ customer_id: customerId, product_id: productId })
-      .where('application_date', '>=', yearStart)
-      // Applications on or before the day judged, as the shared cap reads them: a backdated
-      // completion is not held against an application that had not happened yet.
       .where('application_date', '<=', etCalendarDayOf(proposedDate))
-      .whereNull('retracted_at');
-    // The treated property and the visit being planned scope this history exactly as they
-    // scope the shared cap below; a caller that passes neither reads the customer's whole year.
-    scopeHistoryToTreatment(historyQuery, database, opts, 'property_application_history');
-    const history = await historyQuery.orderBy('application_date', 'desc');
+      .whereNull('retracted_at'), database, opts, 'property_application_history')
+      .orderBy('application_date', 'desc');
+    const history = await priorApplications().where('application_date', '>=', yearStart);
 
     // MOA group history
     const moaHistory = product.moa_group ? await database('property_application_history')
@@ -162,7 +185,8 @@ class ApplicationLimitChecker {
       .orderBy('application_date', 'desc').limit(10) : [];
 
     // Get applicable limits
-    const productLimits = await database('product_limits').where({ product_id: productId });
+    // The v13 program's own count cap (Celsius: 2) while GATE_LAWN_V13 is on; the stored row is the legacy value.
+    const productLimits = await applyV13CountCaps(database, product, await database('product_limits').where({ product_id: productId }), productId);
     const moaLimits = product.moa_group ? await database('product_limits')
       .where({ match_type: 'moa_group', match_value: product.moa_group }) : [];
     const nitrogenLimits = this.isNitrogenFertilizer(product)
@@ -176,14 +200,31 @@ class ApplicationLimitChecker {
     const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits]
       .filter((limit) => !isBermudaProgramRow(limit) || (bermudaLive && opts.program === BERMUDA_PROGRAM));
     let bermudaHistory = null;
+    // The rows judged on the product's own history (every row but a bermuda removal row).
+    const ownLimits = allLimits.filter((limit) => !isBermudaProgramRow(limit));
+    // A minimum interval spans the new year (a December application and a February one are 50
+    // days apart): it reads the latest earlier application whatever its calendar year. This
+    // year's newest row is that application when there is one; only an empty year looks back.
+    const needsInterval = ownLimits.some((limit) => limit.limit_type === 'min_interval_days');
+    const lastApplication = history[0] || (needsInterval ? await priorApplications().first() : null);
+
+    // A yearly count is per lawn. With a treated property the history is already that property's; a
+    // caller with none (the compliance page, the legacy check-limits route) is judged on the busiest
+    // property of the customer, never on the sum across properties.
+    const needsAnnual = ownLimits.some((limit) => limit.limit_type === 'annual_max_apps');
+    const annualCount = needsAnnual ? await this.annualCountFor(database, history, opts) : history.length;
 
     for (const limit of allLimits) {
       let limitHistory = history;
+      let counted = { lastApplication, annualCount };
       if (isBermudaProgramRow(limit)) {
         if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, productId, yearStart, proposedDate, ...opts });
         limitHistory = bermudaHistory;
+        // Its yearly count and its interval read the step's own history (Recognition on the
+        // treated property), never the judged product's own rows.
+        counted = {};
       }
-      const check = await this.evaluateLimit(limit, limitHistory, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
+      const check = await this.evaluateLimit(limit, limitHistory, moaHistory, proposedDate, product, database, { customerId, yearStart, ...counted, ...opts });
 
       if (check.violated) {
         const entry = { type: limit.limit_type, matchType: limit.match_type || null, matchValue: limit.match_value || null, message: check.message, description: limit.description, current: check.current, max: check.max };
@@ -224,7 +265,7 @@ class ApplicationLimitChecker {
     const limitValue = limit.limit_value == null ? null : Number(limit.limit_value);
     switch (limit.limit_type) {
       case 'annual_max_apps': {
-        const count = history.length;
+        const count = ctx.annualCount ?? history.length;
         const max = limitValue;
         if (count >= max) return { violated: true, message: `${product.name}: ${count}/${max} applications this year — LIMIT REACHED.`, current: count, max };
         if (count >= max - 1) return { approaching: true, message: `${product.name}: ${count}/${max} this year — this would be the LAST allowed.`, current: count, max };
@@ -232,12 +273,13 @@ class ApplicationLimitChecker {
       }
 
       case 'min_interval_days': {
-        if (!history.length) return { violated: false };
+        const last = ctx.lastApplication || history[0];
+        if (!last) return { violated: false };
         // pg `date` columns arrive as JS Date objects (no type parser is
         // configured) — normalize to YYYY-MM-DD before building the anchor.
         // Both operands are ET calendar days anchored at noon UTC so the
         // interval is whole days regardless of the proposed instant's clock.
-        const lastApp = new Date(etCalendarDayOf(history[0].application_date) + 'T12:00:00Z');
+        const lastApp = new Date(etCalendarDayOf(last.application_date) + 'T12:00:00Z');
         // proposedDate may itself be a hydrated pg DATE (admin-dispatch passes
         // svc.scheduled_date) — etCalendarDayOf keeps its literal calendar day.
         const proposedDay = new Date(etCalendarDayOf(proposedDate) + 'T12:00:00Z');
@@ -250,6 +292,7 @@ class ApplicationLimitChecker {
 
       case 'annual_max_rate': {
         if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, { ...ctx, proposedDate }, database);
+        if (limit.match_type === V13_AMOUNT) return this.evaluateV13AmountCap(limit, product, { ...ctx, proposedDate }, database);
         const applied = history.reduce((sum, h) => sum + (isBermudaProgramRow(limit) ? bermudaRowRate(h, limit) : (parseFloat(h.application_rate) || 0)), 0);
         const maxRate = limitValue;
         // The bermuda removal row warns on the projected year, as the active-ingredient cap
@@ -345,7 +388,9 @@ class ApplicationLimitChecker {
       })
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
         'pl.limit_value', 'pl.limit_unit', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
-    scopeHistoryToTreatment(query, database, ctx, 'pah');
+    // The treated property (the one frozen on the ledger row, a legacy row's visit property as the
+    // fallback) and the visit being planned: the same scope every other per-lawn reader uses.
+    scopeHistoryToTreatment(query, database, { propertyId: ctx.propertyId, excludeScheduledServiceId: ctx.excludeScheduledServiceId }, 'pah');
     const history = await query;
 
     let used = 0;
@@ -374,6 +419,61 @@ class ApplicationLimitChecker {
       return { approaching: true, message: `${label}${withThis}${detail}.`, current: pct(used), max: 100 };
     }
     return { violated: false, current: pct(used), max: 100 };
+  }
+
+  // The program's dose of a product, by product id: the highest rate any staged v13 protocol row states for it (the plan's
+  // own rows; Arena 0.147 oz). { ratePer1000: null } when no row states one: the caller counts the cap's fallback rate.
+  async programDose(database, productId) {
+    const row = await database('lawn_protocol_products as p')
+      .join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+      .join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+      .where({ 'p.product_id': productId, 'l.version': V13_VERSION })
+      .where('p.rate_per_1000', '>', 0)
+      .orderBy('p.rate_per_1000', 'desc')
+      .first('p.rate_per_1000', 'p.rate_unit');
+    return row ? { ratePer1000: Number(row.rate_per_1000), unit: row.rate_unit } : { ratePer1000: null, unit: null };
+  }
+
+  // The v13 yearly AMOUNT cap on one product (Arena: 0.294 oz per 1,000 sq ft, GATE_LAWN_V13): the lawn's
+  // recorded applications of this product this year, each as a share of the cap (an unreadable one counts
+  // at the cap row's fallback rate), plus the application being planned. Per 1,000 sq ft of the treated
+  // area, as the shared active-ingredient cap reads it: a spot is its recorded rate, not scaled to its area.
+  async evaluateV13AmountCap(limit, product, ctx, database = db) {
+    const query = database('property_application_history as pah')
+      .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
+      .where('pah.customer_id', ctx.customerId)
+      .where('pah.product_id', product.id)
+      .where('pah.application_date', '>=', ctx.yearStart)
+      .where('pah.application_date', '<=', etCalendarDayOf(ctx.proposedDate))
+      .whereNull('pah.retracted_at')
+      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
+        'pah.property_id', 'pah.service_record_id', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+    scopeHistoryToTreatment(query, database, { propertyId: ctx.propertyId, excludeScheduledServiceId: ctx.excludeScheduledServiceId }, 'pah');
+    const { share: used, estimated } = await this.lawnAmountShare(database, await query, limit, { propertyId: ctx.propertyId });
+    const cap = Number(limit.limit_value);
+    const amountUsed = Math.round(used * cap * 10000) / 10000;
+    // The application being planned. A named dose is read in the cap's unit (`unit`, or `rateUnit` as the plan rows spell it). A
+    // proposal (opts.proposal: the compliance route, the plan's selected products) whose dose is missing or unreadable counts the
+    // program's own dose for the product, by product id, from ANY staged v13 window (Arena 0.147 oz even in October, a month
+    // that has no Arena row), and failing that the fixed fallback rate: a proposal never reads as fitting when it does not.
+    // A status read (the compliance page, a read after the ledger write) names no dose, is no proposal, and adds nothing.
+    const capUnit = capUnitOf(limit.limit_unit);
+    const readable = (dose) => {
+      const size = dose ? rateInUnit(dose.ratePer1000, dose.unit ?? dose.rateUnit, capUnit) : null;
+      return size > 0 ? size : null;
+    };
+    let dose = readable(ctx.proposed);
+    if (dose == null && ctx.proposal) dose = readable(await this.programDose(database, product.id));
+    const adds = dose != null ? dose / cap : ((ctx.proposed || ctx.proposal) ? Number(limit.fallback_rate) / cap : 0);
+    const total = used + adds;
+    const detail = estimated ? ` (${estimated} earlier application${estimated === 1 ? '' : 's'} sized at the standard rate)` : '';
+    const label = `${product.name}: this year's applications on the lawn total ${pct(used)}% of the yearly label amount (${limit.limit_value} ${capUnitOf(limit.limit_unit)} per 1,000 sq ft)`;
+    const withThis = adds ? `; this application brings it to ${pct(total)}%` : '';
+    if (used >= 1 - 1e-9 || total > 1 + 1e-9) {
+      return { violated: true, message: `${label}${withThis} — ${used >= 1 - 1e-9 ? 'LIMIT REACHED' : 'THIS APPLICATION WOULD EXCEED IT'}${detail}.`, current: pct(used), max: 100, amountUsed };
+    }
+    if (total >= AI_CAP_APPROACHING) return { approaching: true, message: `${label}${withThis}${detail}.`, current: pct(used), max: 100, amountUsed };
+    return { violated: false, current: pct(used), max: 100, amountUsed };
   }
 
   async getPropertyComplianceStatus(customerId) {
@@ -446,6 +546,111 @@ class ApplicationLimitChecker {
 
   // Accepts a true instant or a hydrated pg DATE — etCalendarDayOf keeps a
   // UTC-midnight Jan 1 as Jan 1 (etParts would read it as Dec 31 ET).
+  // The per-lawn yearly count of already-loaded history rows (see checkLimits).
+  async annualCountFor(database, history, opts = {}) {
+    if (opts.propertyId || history.length < 2) return history.length;
+    return worstPropertyCount(await this.placeOnProperty(database, history));
+  }
+
+  // The rows with `treated_property_id`: the property frozen on the ledger row; a legacy row without one
+  // falls back to its visit's property; null = it cannot be placed (counted at every property).
+  async placeOnProperty(database, history) {
+    const legacyRecordIds = [...new Set(history.filter((row) => !row.property_id).map((row) => row.service_record_id).filter(Boolean))];
+    const placed = legacyRecordIds.length
+      ? await database('service_records as sr_prop')
+        .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
+        .whereIn('sr_prop.id', legacyRecordIds).select('sr_prop.id as record_id', 'ss_prop.property_id')
+      : [];
+    const propertyOf = new Map((placed || []).map((row) => [String(row.record_id), row.property_id]));
+    return history.map((row) => ({
+      ...row,
+      treated_property_id: row.property_id || (row.service_record_id ? propertyOf.get(String(row.service_record_id)) || null : null),
+    }));
+  }
+
+  // The v13 yearly amount of already-loaded history rows, as a share of the cap, per lawn: with a treated
+  // property the rows are already that property's (summed); a caller with none (the compliance page, the
+  // legacy check-limits route) is judged on the busiest property of the customer, never the sum across
+  // properties. Rows that cannot be sized count at the cap row's fallback rate.
+  async lawnAmountShare(database, rows, limit, { propertyId } = {}) {
+    const sized = rows.map((row) => v13AmountShare(row, limit));
+    const estimated = sized.filter((entry) => entry.estimated).length;
+    if (propertyId || rows.length < 2) return { share: sized.reduce((sum, entry) => sum + entry.share, 0), estimated };
+    const placed = await this.placeOnProperty(database, rows);
+    return { share: worstPropertyTotal(placed.map((row, index) => ({ treated_property_id: row.treated_property_id, share: sized[index].share })), (entry) => entry.share), estimated };
+  }
+
+  // The closeout audit of one recorded application, whatever order the visits were recorded in
+  // (a backdated closeout included). It judges the product-level hard_block count limits on the
+  // service date and returns EVERY violated one:
+  //   annual_max_apps  the other applications of the product in the whole calendar year of the date
+  //                    (before AND after it) already fill the cap;
+  //   min_interval_days the nearest application on EACH side of the date, in any calendar year, is
+  //                    closer than the minimum.
+  // Scoped to the treated property, the visit's own ledger rows left out, retracted rows ignored.
+  async auditHardCountLimits(customerId, productId, serviceDate, database = db, opts = {}) {
+    const product = await database('products_catalog').where({ id: productId }).first();
+    if (!product) return [];
+    const limits = (await applyV13CountCaps(database, product, await database('product_limits')
+      .where({ product_id: productId, match_type: 'product' })
+      .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']), productId))
+      .filter((limit) => limit.severity === 'hard_block');
+    if (!limits.length) return [];
+    const day = etCalendarDayOf(serviceDate);
+    const others = () => scopeHistoryToTreatment(database('property_application_history')
+      .where({ customer_id: customerId, product_id: productId }).whereNull('retracted_at'), database, opts, 'property_application_history');
+    const violations = [];
+    for (const limit of limits) {
+      const max = Number(limit.limit_value);
+      let violation;
+      if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max);
+      else if (limit.match_type === V13_AMOUNT) violation = await this.auditAmount(database, customerId, product, day, limit, opts);
+      else violation = await this.auditInterval(others, product, day, max);
+      if (violation) violations.push({ ...violation, limitId: limit.id, description: limit.description });
+    }
+    return violations;
+  }
+
+  async auditAnnualCount(others, product, day, max) {
+    const year = day.slice(0, 4);
+    const rows = await others().where('application_date', '>=', `${year}-01-01`).where('application_date', '<=', `${year}-12-31`).select('id');
+    if (rows.length < max) return null;
+    return { type: 'annual_max_apps', message: `${product.name}: ${rows.length}/${max} other applications in ${year} — LIMIT REACHED.`, current: rows.length, max };
+  }
+
+  // The yearly amount: every other application of the product in the calendar year of the date (before and
+  // after it) plus this visit's own recorded ones must fit the cap. A visit with no ledger rows of its own
+  // adds nothing (only the others filling the cap is flagged), as the count audit does.
+  async auditAmount(database, customerId, product, day, limit, opts = {}) {
+    const year = day.slice(0, 4);
+    const yearRows = (query) => query.where({ 'pah.customer_id': customerId, 'pah.product_id': product.id }).whereNull('pah.retracted_at')
+      .where('pah.application_date', '>=', `${year}-01-01`).where('pah.application_date', '<=', `${year}-12-31`)
+      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft', 'pah.property_id', 'pah.service_record_id',
+        'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+    const base = () => database('property_application_history as pah').leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id');
+    const others = await scopeHistoryToTreatment(yearRows(base()), database, opts, 'pah');
+    const own = opts.excludeScheduledServiceId
+      ? await scopeHistoryToTreatment(yearRows(base()), database, { propertyId: opts.propertyId }, 'pah')
+        .whereIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
+      : [];
+    // Per lawn: with no treated property the busiest property of the customer is judged (this visit's rows count where it was done).
+    const { share: used } = await this.lawnAmountShare(database, others, limit, { propertyId: opts.propertyId });
+    const { share: total } = await this.lawnAmountShare(database, [...others, ...own], limit, { propertyId: opts.propertyId });
+    if (total <= 1 + 1e-9 && used < 1 - 1e-9) return null;
+    return { type: 'annual_max_rate', message: `${product.name}: ${pct(total)}% of the yearly label amount in ${year} — LIMIT EXCEEDED.`, current: pct(total), max: 100 };
+  }
+
+  async auditInterval(others, product, day, min) {
+    const before = await others().where('application_date', '<=', day).orderBy('application_date', 'desc').first('application_date');
+    const after = await others().where('application_date', '>', day).orderBy('application_date', 'asc').first('application_date');
+    const anchor = new Date(`${day}T12:00:00Z`);
+    const gaps = [before, after].filter(Boolean)
+      .map((row) => Math.abs(Math.round((anchor - new Date(`${etCalendarDayOf(row.application_date)}T12:00:00Z`)) / 86400000)));
+    if (!gaps.length || Math.min(...gaps) >= min) return null;
+    const nearest = Math.min(...gaps);
+    return { type: 'min_interval_days', message: `${product.name}: only ${nearest} days from another application (min ${min}).`, current: nearest, max: min };
+  }
+
   getYearStart(date) { return `${etCalendarDayOf(date).slice(0, 4)}-01-01`; }
 }
 

@@ -4782,10 +4782,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
       const services = [
         { service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly',
           annual: 480, mo: 40, perTreatment: 120, catalog: 'pest_general_quarterly' },
-        // Pest + mosquito: one stop group (owner 2026-10-05: pest and lawn
-        // never share one stop, so a lawn line would book its own stop).
-        { service: 'mosquito', name: 'Monthly Mosquito Control', visitsPerYear: 12, frequency: 'monthly',
-          annual: 1440, mo: 120, perTreatment: 120, catalog: 'mosquito_monthly' },
+        { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6, frequency: 'bimonthly',
+          annual: 720, mo: 60, perTreatment: 120, catalog: 'lawn_care_recurring' },
       ];
       const catalogs = await trx('services').whereIn('service_key', services.map((service) => service.catalog));
       expect(catalogs).toHaveLength(2);
@@ -4813,7 +4811,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
         firstApplicationAmount: 240, visitEstimatedPrice: 240,
       });
       const profile = await resolveCatalogSlotProfile(estimate, {}, trx);
-      expect(profile.services.map((service) => service.service)).toEqual(['pest_control', 'mosquito']);
+      expect(profile.services.map((service) => service.service)).toEqual(['pest_control', 'lawn_care']);
       expect(profile.durationMinutes).toBe(120);
       expect(profile.reservationServiceMix).toMatchObject({ version: 1, durationMinutes: 120 });
       coordsSpy = jest.spyOn(require('../services/estimate-slot-availability'), 'resolveEstimateCoords')

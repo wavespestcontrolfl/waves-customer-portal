@@ -346,6 +346,36 @@ describe('class rules', () => {
     expect(classify(note({ category: 'schedule', metadata: { triggerKey: 'appointment_reschedule_intent', dedupeKey: `reservice-booked:${VISIT}` } }))).toBeNull();
   });
 
+  test('phone-booking rain notice: done once its visit is closed, gone, moved or past its date (owner 2026-10-08)', async () => {
+    const bell = (over = {}) => note({
+      category: 'schedule',
+      link: `/admin/dispatch?tab=schedule&date=2026-09-30&appointment=${VISIT}`,
+      metadata: { dedupeKey: `call-booking-rain:${VISIT}`, scheduledServiceId: VISIT, scheduled_date: '2026-09-30', window_start: '14:00', rain_chance_pct: 88, ...over },
+    });
+    const booked = (over = {}) => visit({ service_date: '2026-09-30', window_start: '14:00:00', ...over });
+    // Still the visit it was raised for: open.
+    for (const status of ['pending', 'confirmed']) {
+      mockTables['scheduled_services as ss'] = [booked({ status })];
+      expect(await reasonFor(bell())).toEqual({ cls: 'call_booking_rain', reason: null });
+    }
+    for (const status of ['completed', 'cancelled', 'no_show', 'skipped']) {
+      mockTables['scheduled_services as ss'] = [booked({ status })];
+      expect((await reasonFor(bell())).reason).toBe('Visit is closed');
+    }
+    // Moved to another day, or to another start on the same day.
+    mockTables['scheduled_services as ss'] = [booked({ service_date: '2026-10-02' })];
+    expect((await reasonFor(bell())).reason).toBe('Visit was moved');
+    mockTables['scheduled_services as ss'] = [booked({ window_start: '09:00:00' })];
+    expect((await reasonFor(bell())).reason).toBe('Visit was moved');
+    // Its day has passed (TODAY is 2026-09-28).
+    mockTables['scheduled_services as ss'] = [booked({ service_date: '2026-09-27' })];
+    expect((await reasonFor(bell({ scheduled_date: '2026-09-27' }))).reason).toBe('Visit date has passed');
+    mockTables['scheduled_services as ss'] = [];
+    expect((await reasonFor(bell())).reason).toBe('Visit is gone');
+    // The self-booked re-service bell on the same category is another class.
+    expect(classify(note({ category: 'schedule', metadata: { triggerKey: 'reservice_self_booked', dedupeKey: `reservice-booked:${VISIT}` } })).key).toBe('reservice_booked');
+  });
+
   test('promise chaser: settled once the promise it chases is closed; a missing promise or another missed-call bell is never judged (owner 2026-10-03)', async () => {
     const P = uid(520);
     const chaser = (over = {}) => note({

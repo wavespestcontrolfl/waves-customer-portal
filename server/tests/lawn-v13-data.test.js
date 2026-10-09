@@ -18,6 +18,8 @@ const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixe
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
+const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 // Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
@@ -53,13 +55,16 @@ describe('the v13 recipe', () => {
     }
   });
 
-  test('what the program drops stays out (no Pennant, no July potash, no March large patch spray, no SpeedZone)', () => {
+  test('what the program drops stays out (no Pennant, no July potash, no March large patch spray, no SpeedZone); Headway is in on purpose (20261007180000)', () => {
     const text = JSON.stringify(v13);
-    expect(text).not.toMatch(/pennant|k-?flow|potash|speedzone|medallion|t-storm|eagle|sedgehammer|cleary|harrell|atrazine|headway|image for southern/i);
+    expect(text).not.toMatch(/pennant|k-?flow|speedzone|medallion|t-storm|eagle|sedgehammer|cleary|harrell|atrazine|image for southern/i);
     const jul = visitFor(7);
     expect(jul.primary).toMatch(/scout visit/i);
-    expect(jul.primary).not.toMatch(/\bLESCO|Dimension|Stonewall/);
-    expect(visitFor(3).secondary).not.toMatch(/velista|gravex/i);
+    expect(jul.primary).not.toMatch(/Dimension|Stonewall|24-0-11/);
+    expect(lines(jul.primary).filter((l) => / — /.test(l))).toEqual([]);
+    expect(JSON.stringify(v13)).not.toMatch(/0-0-50|potash/i);
+    // March has no large patch spray (Velista there is for rust and leaf spot only).
+    expect(visitFor(3).secondary).not.toMatch(/large patch/i);
     expect(visitFor(3).secondary).toMatch(/artavia/i);
   });
 
@@ -81,9 +86,11 @@ describe('the v13 recipe', () => {
   test('N targets parse from the visit notes and total the program', () => {
     const n = MONTHS.map((m) => engine.parseVisitNutrientTargets(visitFor(m).notes).targetNPer1000);
     // October is Dimension 18-0-10 at 4.04 lb per 1,000 sq ft (commercial label, Coastal South): 0.73 lb N, 0.40 lb K2O.
-    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.73, 0.75, 0.5]);
-    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.23);
+    // December is LESCO 10-0-22 at 4.5 lb per 1,000 sq ft (owner 2026-10-08): 0.45 lb N, 0.99 lb K2O.
+    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.73, 0.75, 0.45]);
+    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.18);
     expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.4);
+    expect(engine.parseVisitNutrientTargets(visitFor(12).notes).targetKPer1000).toBe(0.99);
     // No N or P in Jun-Sep.
     for (const m of [6, 7, 8, 9]) expect(n[m - 1]).toBe(0);
   });
@@ -92,7 +99,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
     ]);
   });
 });
@@ -171,7 +178,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -302,13 +309,20 @@ describe('staged migration 20261005120000', () => {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
       // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
-      const whole = rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0]));
-      const spots = rowsForWindow.filter((s) => !s[6]).map((s) => s[0]);
+      // The staged December row names the 24-0-11; 20261008130000 swaps it for LESCO 10-0-22.
+      // 20261007180000 turns the April Artavia row into Headway and adds its own rows (Arena keeps its name: 20261007181000 undoes the rename).
+      // (The July 0-0-50 row 180000 inserts is deleted by 20261007189000: the recipe has no July potash.)
+      const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP);
+      const after = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
+      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : s[0]))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
+      const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name)];
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
       // Migration 20261007150000 retires the Dismiss rows and the recipe drops its lines (use up the jug, do not reorder).
-      expect(spots.filter((n) => n !== migration.NAMES.DIS).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
+      // 20261008130000 retires February's Certainty and surfactant rows (Celsius alone in February); the recipe lines are gone.
+      const retiredHere = new Set((decemberMigration.RETIRE.find(([key]) => key === windowKey) || [, []])[1]);
+      expect(spots.filter((n) => n !== migration.NAMES.DIS && !retiredHere.has(n)).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');
@@ -350,7 +364,8 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
     for (const month of MONTHS) {
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
-    const specNames = fixMigration.PRODUCTS.map((p) => p.name);
+    // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008130000 inserts the 10-0-22.
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));
@@ -545,13 +560,16 @@ describe('migration 20261005140000: rollback order, EPA numbers, Blindside rows'
         }
       }
     }
-    // The windows that list Blindside are exactly the recipe months that list it.
+    // The staged windows list Blindside beside every Celsius line; the recipe lists it for January, March and December only
+    // (owner 2026-10-08: November through March, February Celsius alone), and 20261008130000 retires the other staged rows.
     const recipeMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith(BLINDSIDE)));
     const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')));
-    expect(recipeMonths).toEqual(celsiusMonths);
+    expect(recipeMonths).toEqual([1, 3, 12]);
     const protocol = v13Protocols(db)[0];
     const monthsWithBlindside = db.lawn_protocol_windows.filter((w) => w.lawn_protocol_id === protocol.id && db.lawn_protocol_products.some((r) => r.lawn_protocol_window_id === w.id && r.product_name === BLINDSIDE)).map((w) => w.month).sort((a, b) => a - b);
-    expect(monthsWithBlindside).toEqual(recipeMonths);
+    expect(monthsWithBlindside).toEqual(celsiusMonths);
+    const retiredMonths = decemberMigration.RETIRE.filter(([, names]) => names.includes(BLINDSIDE)).map(([key]) => migration.WINDOWS.find((w) => w[1] === key)[0]).sort((a, b) => a - b);
+    expect(monthsWithBlindside.filter((m) => !retiredMonths.includes(m))).toEqual(recipeMonths);
     // Idempotent.
     const count = db.lawn_protocol_products.length;
     await round2.up(knex);

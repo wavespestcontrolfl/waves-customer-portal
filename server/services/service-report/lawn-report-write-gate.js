@@ -16,6 +16,7 @@
 const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
 const { resolveWaterInForecast } = require('./lawn-watering-forecast');
+const { freezeCoverageVerdict } = require('./lawn-coverage-verdict');
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -88,10 +89,12 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, programVisi
 // The report build's options. The recurring-plan answer (the program line's own
 // resolveProgramVisit) is asked for only while the Visit Summary gate is live, so a gate-off
 // build does no extra read.
-function buildOptions(instructionOut, programVisitOut) {
-  return featureGates.lawnVisitSummaryV2Live()
+function buildOptions(instructionOut, programVisitOut, coverageOut) {
+  const options = featureGates.lawnVisitSummaryV2Live()
     ? { wateringInstructionOut: instructionOut, programVisitOut }
     : { wateringInstructionOut: instructionOut };
+  // The coverage verdict's inputs are asked for only while its gate is live.
+  return featureGates.lawnCoverageHideDefaultZonesLive() ? { ...options, lawnCoverageOut: coverageOut } : options;
 }
 
 // The result with the Visit Summary's freeze added only when one exists.
@@ -105,7 +108,7 @@ function withVisitSummary(result, visitSummaryFreeze) {
  * @param {object} input.knex
  * @returns {Promise<{ smsSummary: string|null, warnings: object[], persisted: boolean }>}
  */
-async function finalizeLawnReportSynthesis({ service, knex } = {}) {
+async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowed = false } = {}) {
   const empty = { smsSummary: null, warnings: [], persisted: false };
   if (!service || !service.id || !knex) return empty;
   const serviceLine = service.service_line || (/(lawn)/i.test(String(service.service_type || '')) ? 'lawn' : null);
@@ -126,8 +129,30 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     const record = joined || service;
     const token = await ensureReportToken(service.id, knex);
     const instructionOut = {};
+    const coverageOut = {};
     const programVisitOut = {};
-    const data = await buildReportV1Data(record, token, knex, buildOptions(instructionOut, programVisitOut)).catch(() => null);
+    const data = await buildReportV1Data(record, token, knex, buildOptions(instructionOut, programVisitOut, coverageOut)).catch(() => null);
+
+    // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES: freeze whether this visit's coverage
+    // zones are only schematic defaults, ONCE, now that the technician's zone
+    // writes for the visit are done. First writer wins, own top-level key, own
+    // guarded statement (never inside lawnReportV2, whose write below replaces
+    // the whole object). Only when the gate is live and the zone / geometry
+    // reads SUCCEEDED; a failed read freezes nothing, and a render with no
+    // frozen verdict shows coverage exactly as with the gate off. Gate off: no
+    // write. Independent of the report synthesis, so it runs before the
+    // reportV2 check.
+    // The joined record carries the map center drift resolution needs; a failed
+    // join falls back to the bare row, where every mark reads as trusted, so it
+    // freezes nothing (codex #6089 r7).
+    // Only the original completion with a successful zone sync may freeze
+    // (coverageFreezeAllowed): a failed sync may leave stale or partial rows, and
+    // a resumed retry must not derive a later verdict from live zones (codex #6089).
+    if (data && joined && coverageFreezeAllowed === true && featureGates.lawnCoverageHideDefaultZonesLive()
+      && coverageOut.readOk === true && typeof coverageOut.defaultsOnly === 'boolean') {
+      await freezeCoverageVerdict({ knex, serviceRecordId: service.id, defaultsOnly: coverageOut.defaultsOnly });
+    }
+
     const reportV2 = data && data.reportV2;
     if (!reportV2) return empty;
 

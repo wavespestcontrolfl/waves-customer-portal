@@ -58,6 +58,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/context` | admin-dispatch |
+| GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/treatment-guide` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
@@ -131,11 +132,13 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/feature-flags` | admin-feature-flags |
 | GET | `/api/admin/intelligence-bar/actions/:id` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/cancel-action` | admin-intelligence-bar |
+| POST | `/api/admin/intelligence-bar/choose-product` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/confirm-action` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/execute` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/knowledge-gap` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/query` | admin-intelligence-bar |
 | GET | `/api/admin/intelligence-bar/quick-actions` | admin-intelligence-bar |
+| POST | `/api/admin/intelligence-bar/show-again` | admin-intelligence-bar |
 | GET | `/api/admin/intelligence-bar/tasks` | admin-intelligence-bar |
 | GET | `/api/admin/intelligence-bar/tasks/:id` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/tasks/:id/resume` | admin-intelligence-bar |
@@ -324,6 +327,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/staff-documents/:id` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/:id/pdf` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/availability` | tech-staff-documents |
+| GET | `/api/tech/staff-documents/onboarding` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/people` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/acknowledge` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/records` | tech-staff-documents |
@@ -560,6 +564,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/triage/:id/confirm-email` | admin-triage |
 | PUT | `/api/admin/triage/:id/dismiss` | admin-triage |
 | PUT | `/api/admin/triage/:id/resolve` | admin-triage |
+| POST | `/api/admin/triage/:id/save-contact-note` | admin-triage |
 | POST | `/api/admin/triage/:id/verdict` | admin-triage |
 | GET | `/api/admin/triage/auto-routed` | admin-triage |
 | POST | `/api/admin/triage/auto-routed/:callLogId/verdict` | admin-triage |

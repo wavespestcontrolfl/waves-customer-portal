@@ -254,6 +254,11 @@ function buildLawnCompletionDefaults(plan, context) {
     && plan.mixCalculator.items.some(item => item.selected === true && item.product?.active !== false);
   return {
     enabled: true, serviceId: plan.serviceId, propertyId: context.propertyId,
+    // Whether the plan offers anything for this visit at all (a lawn visit, the saved profile matches the
+    // property, a program applies and the resolved protocol is the visit's): the rule the items, the
+    // add-ons and the options are all built behind. Readers that offer a product outside the month's
+    // add-ons (the sheet's chinch tap) stand behind the same rule.
+    eligible: !!eligible,
     lawnSqft: context.propertyMatchesProfile ? plan.mixCalculator.lawnSqft : null,
     propertyMatchesProfile: context.propertyMatchesProfile,
     items, addOns, history: context.history,

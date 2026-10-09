@@ -103,6 +103,8 @@ beforeEach(() => {
     if (table === 'estimates') return readQuery(account.estimates);
     if (table === 'customer_properties') return readQuery(account.properties, account.failProperties === true);
     if (table === 'product_limits') return readQuery(account.tagged);
+    // The visit's city (loadVisitCity): a city with no product window, so nothing is held.
+    if (table === 'customers') return readQuery(account.customerId ? [{ id: account.customerId, city: 'Bradenton' }] : []);
     throw new Error(`Unexpected table: ${table}`);
   });
 });

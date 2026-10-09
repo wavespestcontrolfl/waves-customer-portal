@@ -441,7 +441,7 @@ Object.assign(api, {
   getServiceStats: async () => ({
     servicesYTD: 4,
     celsiusApplicationsThisYear: 1,
-    celsiusMaxPerYear: 3,
+    celsiusMaxPerYear: 2,
     thatch: { current: 0.5, initial: 0.7, currentDate: day(-50), initialDate: day(-140) },
   }),
   getServiceReportUrl: () => '#',

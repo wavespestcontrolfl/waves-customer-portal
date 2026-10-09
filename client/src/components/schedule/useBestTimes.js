@@ -273,9 +273,10 @@ async function searchPlainHint(search, { date, rangeKey, pickedArgs, scopedToTec
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
-  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt, serviceTypes,
-  // New Appointment's two best-times rows: asked for only by the consumer
-  // that shows them (the server skips the rain and road-time work otherwise).
+  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt, serviceTypes, serviceKeys,
+  // The two best-times rows (New Appointment, Quick Move, Edit and the
+  // reschedule dialogs): asked for only by a consumer that shows them (the
+  // server skips the rain and road-time work otherwise).
   bestRows = false,
   // Edit appointment's choice on a shared stop ('together' | 'separate'):
   // the route check answers for the move the save will make.
@@ -306,6 +307,9 @@ export function useBestTimes({
   // The booking's services, so the compared list leaves out a tech who
   // cannot perform one of them.
   const serviceTypesKey = (serviceTypes || []).filter(Boolean).map(String).join('\n');
+  // Catalog key of each service, parallel to serviceTypes ('' when a line has
+  // none): the rain ranking reads the selected row's identity, not its name.
+  const serviceKeysKey = (serviceKeys || []).map((k) => String(k || '')).join('\n');
   const compareKey = !technicianId && !pickedKey && /^\d{2}:\d{2}(:\d{2})?$/.test(String(compareTechsAt || ''))
     ? String(compareTechsAt).slice(0, 5) : '';
 
@@ -318,7 +322,7 @@ export function useBestTimes({
   const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
   const requestKey = [
     enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
-    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, bestRows,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows,
   ].map((v) => v ?? '').join('|');
   const availability = useMemo(() => {
     if (!answer || !enabled) return null;
@@ -367,7 +371,10 @@ export function useBestTimes({
         // A past date has no days around it to offer (the engine never
         // searches before today) — the plain hint handles it as it always has.
         if (summary && date >= today && Date.now() >= summaryUnavailableUntil) {
-          const rainArgs = bestRows && serviceTypesKey ? { serviceTypes: serviceTypesKey.split('\n') } : {};
+          const rainArgs = bestRows && serviceTypesKey ? {
+            serviceTypes: serviceTypesKey.split('\n'),
+            serviceKeys: serviceKeysKey.split('\n').some(Boolean) ? serviceKeysKey.split('\n') : undefined,
+          } : {};
           const data = await searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs });
           if (controller.signal.aborted) return;
           const summarized = normalizeAvailability(data, { date, scopedToTech });
@@ -399,6 +406,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, bestRows]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows]);
   return { bestTimes, picked, pickedByTech, bestInRange, availability, checking };
 }

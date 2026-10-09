@@ -61,6 +61,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/schedule/AutoDispatchLockBox";
 import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
@@ -2096,6 +2097,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return derived != null ? String(derived) : "";
     })(),
   });
+  // Auto-dispatch lock (recurring occurrences only). Sent with the save as
+  // the box's value and the value it opened with; the server acts only on a
+  // flip, and may also set the lock itself when the date or time changes.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveErrorState] = useState("");
@@ -2291,6 +2297,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // How a shared stop moves (the choice box near the date and time). Declared
   // here because the availability search below answers for that move.
   const [comboMove, setComboMove] = useState("together");
+  const editServices = [
+    { name: form.serviceType, key: form.serviceKey },
+    ...serviceLines.map((line) => ({ name: line.serviceType, key: line.serviceKey })),
+  ].filter((item) => typeof item.name === "string" && item.name.trim());
   const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
     moveScope: comboMove,
@@ -2318,6 +2328,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // A re-picked Service address is where the save sends the visit —
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
+    // The same two best-times rows as New Appointment (owner 2026-10-08),
+    // ranked for what the save will book: the form's primary service (it can
+    // be re-picked here) and its add-on lines, in the same order as their
+    // catalog keys. The server adds a shared stop's other services when they
+    // move with it (moveScope).
+    serviceTypes: editServices.map((item) => item.name),
+    serviceKeys: editServices.map((item) => item.key || ""),
+    bestRows: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
   // The form as it opened: a save that leaves the visit's slot alone (a
@@ -3704,6 +3722,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          // The auto-dispatch box and the value it opened with; the server acts only on a flip.
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
           // A shared stop: the server runs the choice in this one request.
           comboMove: comboSlotChanged ? comboMove : undefined,
           // The stop this form showed; the server refuses if it changed.
@@ -6196,6 +6217,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
+                bestRows
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
@@ -6358,6 +6380,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
+              <AutoDispatchLockBox
+                service={service}
+                checked={autoDispatchLocked}
+                onChange={setAutoDispatchLocked}
+                disabled={saving}
+                helperColor={D.muted}
+                rowProps={{ style: { marginBottom: 14 } }}
+              />
               <div
                 style={{
                   display: "flex",
@@ -9535,6 +9565,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
     pickedStart: manualTime,
     rangeFrom: etDateString(),
+    // The same two best-times rows as New Appointment (owner 2026-10-08).
+    // The server reads what the visit books from its own rows (serviceId).
+    bestRows: true,
   });
 
   // One POST path for the suggested and custom pickers. A 409
@@ -25702,10 +25735,21 @@ const TRACK_SAFETY_RULES = {
   ],
 };
 
+/* Overrides for a lawn payload that carries its own safety_rules (the v13 program,
+   GATE_LAWN_V13): Celsius is limited to 2 applications a year there. The base list above keeps the
+   legacy wording (3) for the gate-off protocol. */
+const PRODUCT_DESCRIPTIONS_V13 = {
+  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
+  celsius: "selective weed killer for warm-season grass (max 2x/year)",
+  "lesco 10-0-22":
+    "slow-release fertilizer with extra potassium for winter hardiness",
+};
+
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */
 export {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 };

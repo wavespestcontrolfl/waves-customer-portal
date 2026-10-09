@@ -2030,6 +2030,48 @@ describe('rain-out service', () => {
       expect(options.extraReasonsEnabled).toBe(false);
     });
 
+    test('each option carries the hourly rain chance for its own window; the day number is only the fallback', async () => {
+      // 13:00Z = 09:00 ET → same-day presets at 11:00 and 13:00.
+      jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([
+          { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+          { date: '2026-06-13', displayDate: 'Sat, Jun 13', suggestedWindow: { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' }, score: 100 },
+        ]);
+        getDailyRainOutlook.mockResolvedValue({
+          '2026-06-11': { rainChance: 90, shortForecast: 'Thunderstorms' },
+          '2026-06-12': { rainChance: 74, shortForecast: 'Thunderstorms' },
+          '2026-06-13': { rainChance: 20, shortForecast: 'Mostly Sunny' },
+        });
+        getHourlyRainOutlook.mockResolvedValue([
+          { startTime: '2026-06-11T11:00:00-04:00', rainChance: 85 },
+          // No reading for today 13:00: that preset shows no number.
+          { startTime: '2026-06-12T08:00:00-04:00', rainChance: 15 },
+          // The 9 AM hour is outside the booked 8-9 AM block.
+          { startTime: '2026-06-12T09:00:00-04:00', rainChance: 70 },
+        ]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+
+        expect(getHourlyRainOutlook).toHaveBeenCalledWith(SERVICE.customer_latitude, SERVICE.customer_longitude);
+        expect(options.sameDay.map((o) => [o.window.start, o.rainChance])).toEqual([['11:00', 85], ['13:00', null]]);
+        expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 15, rainScope: 'hour' });
+        // The hourly feed has nothing for Jun 13: the whole-day chance, marked as such.
+        expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20, rainScope: 'day' });
+        expect(options.today.rainChance).toBe(90);
+      } finally {
+        jest.useRealTimers();
+        getDailyRainOutlook.mockResolvedValue(null);
+        getHourlyRainOutlook.mockResolvedValue(null);
+      }
+    });
+
     test('annotates same-day presets with overlap conflicts (name + window), day options skipped', async () => {
       const { listOccupiedWindows } = require('../services/scheduling/occupancy');
       // 13:00Z = 09:00 ET → same-day presets at 11:00 and 13:00.

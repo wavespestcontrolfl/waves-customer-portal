@@ -1,4 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
+const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -6429,6 +6430,7 @@ router.get('/', async (req, res, next) => {
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
+        autoDispatchLocked: s.auto_dispatch_locked === true,
         recurringPattern: s.recurring_pattern || null,
         recurringOngoing: s.recurring_ongoing ?? null,
         recurringNth: s.recurring_nth ?? null,
@@ -6658,6 +6660,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
+          'scheduled_services.auto_dispatch_locked',
           'scheduled_services.recurring_parent_id',
           'scheduled_services.recurring_pattern',
           'scheduled_services.recurring_ongoing',
@@ -6994,6 +6997,7 @@ router.get('/week', async (req, res, next) => {
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,
           recurringParentId: s.recurring_parent_id || null,
+          autoDispatchLocked: s.auto_dispatch_locked === true,
           recurringPattern: s.recurring_pattern || null,
           recurringOngoing: s.recurring_ongoing ?? null,
           recurringNth: s.recurring_nth ?? null,
@@ -7098,6 +7102,7 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
         'scheduled_services.is_recurring',
+        'scheduled_services.auto_dispatch_locked',
         'scheduled_services.recurring_parent_id',
         'scheduled_services.recurring_pattern',
         'scheduled_services.recurring_ongoing',
@@ -7181,6 +7186,7 @@ router.get('/month', async (req, res, next) => {
         duration: s.estimated_duration_minutes || 30,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
+        autoDispatchLocked: s.auto_dispatch_locked === true,
         recurringPattern: s.recurring_pattern || null,
         recurringOngoing: s.recurring_ongoing ?? null,
         recurringNth: s.recurring_nth ?? null,
@@ -13152,6 +13158,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       assignmentScope,
+      // The edit form's "Keep auto-dispatch off this visit" box and the value it
+      // opened with (auto-dispatch/staff-edit-lock.js).
+      autoDispatchLocked, autoDispatchLockedWas,
       // Apply this save's PRICE / primary-SERVICE change to the rest of the
       // series ('following') or keep it per-visit ('this_only', the default).
       // Only honored behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — see the
@@ -13228,7 +13237,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         }
       }
     }
-    const updates = {};
+    // A flipped "Keep auto-dispatch off this visit" box is a change in itself.
+    const updates = { ...autoDispatchBoxPatch({ now: autoDispatchLocked, was: autoDispatchLockedWas }) };
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
     // filters, and the catalog's own type/amount as the authority. Without
@@ -14527,6 +14537,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
+        // A staff date/window choice locks the occurrence from auto-dispatch
+        // (this path writes no reschedule_log row the person-placed guard reads).
+        Object.assign(updates, staffEditLockPatch(occRow, updates));
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)
@@ -20022,139 +20035,7 @@ async function joinOwnStopExtension(ctx, candidate, clashRows) {
   const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(ctx.parent.customer_id));
   const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
   if (!ownOnly || stopTechs.length !== 1) return null;
-  const joined = await placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
-  return joined || placeAfterOtherGroupStop(ctx, candidate, clashRows);
-}
-
-// Two stop groups (owner ruling 2026-10-05): pest and lawn never share a stop.
-// When the customer's own stop of the OTHER group sits on the cadence date,
-// the extension books right after it (the first whole hour after the stop's
-// work, same day and technician) instead of skipping a cadence step or
-// overlapping it. null = not that case, or the hour is not free.
-async function placeAfterOtherGroupStop(ctx, candidate, clashRows) {
-  const { conn, parent, parentId, cols, svcLike, opts } = ctx;
-  const stop = await otherGroupStopRows(conn, parent, parentId, candidate, clashRows);
-  if (!stop || !(await stopSharesSeriesPremise(conn, parent, stop))) return null;
-  const window = followOnWindow(stop, parent);
-  if (!window) return null;
-  const scope = deferredCommitScope(conn);
-  try {
-    const placed = await conn.transaction(async (sp) => {
-      const tech = await assignablePlacementTechnicianId(sp, parent, stop[0].technician_id, candidate);
-      // The parent's legacy time label (e.g. "Morning") would contradict the
-      // moved window: the window is the appointment time.
-      const template = {
-        ...parent, ...window, time_window: null, recurring_technician_override: true, recurring_technician_id: tech,
-      };
-      const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
-        ...opts, onSkip: undefined, forceDate: candidate, commitScope: scope,
-      });
-      if (!visit) throw new Error('nothing placed');
-      // A stand-alone stop only: joining another visit at that hour would make
-      // the technician's work the members' sum, beyond this row's window.
-      const placedRow = await sp('scheduled_services').where({ id: visit.scheduledServiceId }).first('visit_id');
-      if (placedRow?.visit_id || await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId)) {
-        throw new Error('the next hour is taken');
-      }
-      return visit;
-    });
-    scope.keep();
-    return placed;
-  } catch (err) {
-    scope.drop(err);
-    logger.info(`[recurring] parent=${parentId} ${candidate} cannot follow the other group's stop (${err.message})`);
-    return null;
-  }
-}
-
-// The whole other-group stop the clash belongs to: every live row of this
-// customer that day on the clashing technician whose stop group differs from
-// the series'. null unless every clash row is part of it.
-async function otherGroupStopRows(conn, parent, parentId, candidate, clashRows) {
-  const techs = new Set(clashRows.map((r) => String(r.technician_id || '')));
-  if (techs.size !== 1 || techs.has('') || !parent.service_id) return null;
-  const ownFamily = (await conn('services').where({ id: parent.service_id }).first('group_family'))?.group_family || null;
-  const rows = await conn('scheduled_services as ss')
-    .join('services as svc', 'svc.id', 'ss.service_id')
-    .where({ 'ss.customer_id': parent.customer_id, 'ss.scheduled_date': candidate, 'ss.technician_id': [...techs][0] })
-    .whereNot('ss.id', parentId)
-    .whereNotNull('svc.group_family')
-    // A rescheduled row's date and window are stale while it awaits its
-    // replacement (JOIN_INELIGIBLE_STATUSES): not a stop to follow, and a
-    // clash with one leaves this path (the clash rows must all be in the stop).
-    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status',
-      [...new Set([...ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-        ...require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES])]))
-    .select('ss.*', 'svc.group_family as stop_group_family');
-  const stop = connectedStop(rows.filter((r) => r.stop_group_family !== ownFamily), clashRows);
-  const ok = ownFamily && stop && new Set(stop.map((r) => r.stop_group_family)).size === 1;
-  return ok ? stop : null;
-}
-
-const { workDuration: rowWorkMinutes, startCoVisitChain } = require('../services/route-reorder-window-fit');
-
-// The stop the clash belongs to: the clashing rows plus every row that touches
-// their span, grown until nothing more touches it. Members work one after
-// another, so the span runs from the first arrival for the summed work (or to
-// the latest window end, when later). A separate appointment later that day
-// is not part of it, nor is a windowless row (no occupancy). null when a clash
-// row is not among the timed rows.
-function connectedStop(allRows, clashRows) {
-  const rows = allRows.filter((r) => parseHHMM(r.window_start) != null);
-  let stop = rows.filter((r) => clashRows.some((c) => String(c.id) === String(r.id)));
-  if (stop.length !== clashRows.length) return null;
-  for (;;) {
-    const [lo, hi] = stopSpan(stop);
-    const grown = rows.filter((r) => parseHHMM(r.window_start) <= hi
-      && parseHHMM(r.window_start) + rowWorkMinutes(r) >= lo);
-    if (grown.length === stop.length) return stop;
-    stop = grown;
-  }
-}
-
-// The canonical co-visit workload (route-reorder-window-fit coVisitWork):
-// real estimates add up, floored by the longest member's window-derived work.
-function stopSpan(stop) {
-  const lo = Math.min(...stop.map((r) => parseHHMM(r.window_start)));
-  const parts = stop.map(startCoVisitChain);
-  const work = Math.max(...parts.map((p) => p.coFloor), parts.reduce((sum, p) => sum + p.coEstimates, 0));
-  return [lo, Math.max(lo + work, ...stop.map((r) => parseHHMM(r.window_end) ?? 0))];
-}
-
-// The same premise on every side, judged like the rider preview: a row's own
-// stamp (property id or service address), else its series root's scope; mixed
-// id-only / address-only shapes compared through withComparableKeys.
-async function stopSharesSeriesPremise(conn, parent, stop) {
-  const Preview = require('../services/rider-series-preview');
-  const rootScopes = new Map();
-  const rootScope = async (rootId) => {
-    if (!rootScopes.has(rootId)) {
-      const root = await conn('scheduled_services').where({ id: rootId }).first();
-      rootScopes.set(rootId, root ? await Preview.resolveSeriesPropertyScope(conn, root) : { resolved: false });
-    }
-    return rootScopes.get(rootId);
-  };
-  const scopes = [];
-  for (const row of stop) {
-    const own = Preview._internals.rowPropertyScope(row);
-    scopes.push(own.resolved ? own : await rootScope(String(row.recurring_parent_id || row.id)));
-  }
-  const [series, ...rows] = await Preview.withComparableKeys(conn,
-    [await Preview.resolveSeriesPropertyScope(conn, parent), ...scopes]);
-  return rows.every((scope) => Preview.seriesPropertyVerdict(series, scope) === 'same');
-}
-
-// The first whole hour after the stop's work, through the canonical
-// appointment-window rules.
-function followOnWindow(stop, parent) {
-  try {
-    return assertAdminAppointmentWindow({
-      windowStart: minutesToHHMM(Math.ceil(stopSpan(stop)[1] / 60) * 60),
-      durationMinutes: Number(parent.estimated_duration_minutes) || 60,
-    });
-  } catch {
-    return null;
-  }
+  return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
 }
 
 // The next-date search of extendSeriesOnceLocked: a ride on the lawn first
@@ -20220,13 +20101,7 @@ async function walkExtensionCandidates(ctx) {
     // series can lose most of a year's candidates to one recurring
     // conflict. Insert on the cadence date and log the overlap instead.
     if (opts.overlapAdvisoryOnly) {
-      // Top-up: the customer's own other-group stop on the date gets the
-      // follow-on hour too (owner ruling 2026-10-05), before the generic
-      // advisory overlap insert.
-      const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
-      const after = clashRows.length ? await placeAfterOtherGroupStop(ctx, candidate, clashRows) : null;
-      if (after) return { joined: after };
-      if (clashRows.length) {
+      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
         logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
       }
     } else {
@@ -28215,8 +28090,6 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
-  connectedStop,
-  followOnWindow,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,

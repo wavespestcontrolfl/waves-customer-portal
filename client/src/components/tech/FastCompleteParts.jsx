@@ -15,6 +15,7 @@ import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
 import { isMlUnit } from '../../lib/measure-units';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
+import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
 import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
 import { UiSurface, ActionFeedback, Button, Field, Input, Select, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
@@ -154,7 +155,9 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
+// `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
+// form button until the sheet itself says the visit needs the full form.
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
@@ -165,7 +168,7 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && (
+      {!done && fullFormOffered && (
         <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
@@ -600,10 +603,27 @@ export function ChoiceSection({ title, action, columns = 2, children }) {
 // our own transcriber, which answers the words for this box.
 // `micInside` (the lawn sheet): the mic sits in the box's bottom-right corner
 // instead of beside it, and the box keeps clear padding so words never run under it.
+// The note's box grows with its words (owner 2026-10-08: a dictated note ran
+// past the three lines and its fourth line showed cut in half), up to
+// NOTE_MAX_LINES whole lines; a longer note scrolls inside the box.
+const NOTE_MAX_LINES = 10;
+function noteMaxHeight(el) {
+  if (!el || typeof window === 'undefined') return undefined;
+  const style = window.getComputedStyle(el);
+  const px = (value) => parseFloat(value) || 0;
+  const line = px(style.lineHeight) || px(style.fontSize) * 1.5;
+  if (!line) return undefined;
+  return Math.ceil(line * NOTE_MAX_LINES + px(style.paddingTop) + px(style.paddingBottom) + px(style.borderTopWidth) + px(style.borderBottomWidth));
+}
+
 export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false }) {
   const noteId = useId();
+  const noteRef = useRef(null);
+  const maxHeight = useCallback(() => noteMaxHeight(noteRef.current), []);
+  useAutoGrowTextarea(noteRef, note, maxHeight);
   const text = (
     <Textarea
+      ref={noteRef}
       id={noteId}
       className="tech-visit-control"
       rows={3}

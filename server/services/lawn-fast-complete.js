@@ -347,6 +347,8 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
       completionTime: now,
       lawnAssessment: { waterContext: { scheduleUnconfirmed: context.scheduleUnconfirmed } },
       knex,
+      // The report freezes this wording at completion, so the preview shows it.
+      forCompletion: true,
     });
   } catch (err) {
     // The report builds no instruction when its irrigation inputs cannot be read.
@@ -483,6 +485,166 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
 
 // ── planned products ────────────────────────────────────────────────────────
 
+// GATE_LAWN_SPOT_RULES: the rate the program approved for a line the plan gave no rate (a
+// spot row: the plan sizes none), from its staged protocol row (`ratePer1000` / `rateUnit`,
+// the values v13SpotReference prints), so the sheet figures a spot amount from it rather
+// than the catalog default. `{}` when the gate is off, the plan already carries a rate, the
+// row has none, or the row states a concentration (a surfactant figures nothing).
+function programRateFor(item, programRows) {
+  const row = programRows?.get(String(item.product.id));
+  if (!row || item.mix?.ratePer1000 != null || row.gates?.concentration) return {};
+  return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
+}
+
+// With the treatment guide live, a weed mix whose limit read failed carries the guide's one wording
+// (its products are released to the search, which the note names). The spot-rules note stands without it.
+const unreadableWeedNote = (weedMix) => (featureGates.lawnTreatmentGuideLive() && weedMix.mode === 'unavailable'
+  ? { ...weedMix, note: require('./lawn-treatment-guide').UNREADABLE_NOTE } : weedMix);
+
+// GATE_LAWN_SPOT_RULES: the weed add-ons as one cap-aware entry (see lawn-weed-mix.js), as
+// `{ weedMix }` to spread into plannedProducts, or `{}` (gate off, or no weed group). Its
+// limit read is caught inside (mode 'unavailable'); only a defect lands in the catch here.
+async function loadWeedMix({ addOns, svc, plan, knex, readFailures }) {
+  if (!featureGates.lawnSpotRulesLive()) return {};
+  try {
+    const weedMix = await require('./lawn-weed-mix').buildWeedMix({ addOns, svc, structured: plan?.protocol?.structured, knex });
+    return weedMix ? { weedMix: unreadableWeedNote(weedMix) } : {};
+  } catch (err) {
+    logger.warn(`[lawn-fast] weed mix unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    readFailures.add('weed_mix');
+    return {};
+  }
+}
+
+// GATE_LAWN_TREATMENT_GUIDE: the chinch bug product for this lawn, as `{ chinch }` to spread into
+// plannedProducts (the standing "Chinch bugs found" entry, every month) or `{}` (gate off, no
+// staged chinch rows). `chinch.item` is the add-on the tap opens, shaped like a plan add-on: the
+// month's own add-on when the plan holds the product, else built from the program's staged row
+// (an off-plan product the sheet records like any catalog product the technician adds), and only
+// while the plan is eligible for the visit (the same rule the add-ons are built behind).
+async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
+  // Only where the plan offers anything for this visit: an ineligible plan (no program applies, the
+  // profile does not match the property, the protocol is not the visit's) offers no chinch product.
+  if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
+  try {
+    const chinch = await chinchOffer({ svc, structured: loaded.plan?.protocol?.structured, sheetAddOns: sheet.addOns, knex });
+    return chinch ? { chinch } : {};
+  } catch (err) {
+    logger.warn(`[lawn-fast] chinch product unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    readFailures.add('treatment_guide');
+    return {};
+  }
+}
+
+// GATE_LAWN_TREATMENT_GUIDE: the month's add-ons a guide card may own (the fungicide, the caterpillar
+// and the wetting-agent rows, by what their staged rows say), as `{ guidedProductIds }` or `{}`. The
+// sheet holds their taps until the fresh guide has answered, so a card never finds its product
+// already on the sheet. Pure; no limit read.
+function guidedProductIds(loaded, sheet) {
+  if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
+  const guide = require('./lawn-treatment-guide');
+  const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
+  const picks = guide.pickAddOns(loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows);
+  return { guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId) };
+}
+
+async function chinchOffer({ svc, structured, sheetAddOns, knex }) {
+  const guide = require('./lawn-treatment-guide');
+  const found = await guide.resolveChinch({ svc, structured, knex });
+  if (!found) return null;
+  const { rungIds, blockedIds, unreadableIds } = found;
+  if (!found.productId) return { item: null, note: found.note, rungIds, blockedIds, unreadableIds };
+  const planned = sheetAddOns.find((addOn) => String(addOn.productId).toLowerCase() === found.productId.toLowerCase());
+  if (planned) return { item: planned, note: found.note, rungIds, blockedIds, unreadableIds };
+  const catalog = (await loadCatalogRows([found.productId], knex)).get(found.productId) || null;
+  const entry = productRuleEntry(found.productId, catalog);
+  const staged = found.stagedRow;
+  const rate = Number(staged.rate_per_1000);
+  const engine = require('./waveguard-plan-engine');
+  const gates = typeof staged.gates === 'string' ? JSON.parse(staged.gates) : staged.gates;
+  return {
+    item: {
+      productId: found.productId,
+      name: found.name,
+      applicationMethod: 'spot_treatment',
+      amount: null,
+      amountUnit: null,
+      treatedSqft: null,
+      areaUnit: null,
+      ratePer1000: rate > 0 ? rate : null,
+      rateUnit: rate > 0 ? staged.rate_unit || null : null,
+      approvedForReport: entry.approvedForReport,
+      wateringRule: entry.rule,
+      wateringSummary: entry.ruleSummary,
+      mowHoldDays: entry.mowHoldDays,
+      line: null,
+      substituteFor: null,
+      gateNotes: typeof engine.v13GateNotes === 'function' ? engine.v13GateNotes(gates, { monthNumber: visitMonthOf(svc) }).map((note) => note.text) : [],
+    },
+    note: found.note,
+    rungIds,
+    blockedIds,
+    unreadableIds,
+  };
+}
+
+// The visit's month (1-12, ET).
+const visitMonthOf = (svc) => Number(String(etCalendarDayOf(svc.scheduled_date) || '').slice(5, 7)) || null;
+
+// The plan's lists for a recurring visit, raw: `{ plan, items, addOns }` (the completion defaults'
+// planned rows and opt-in rows that name a product), or null when the completion-defaults gates are
+// off. A failed plan read throws.
+async function loadPlan(svc, knex) {
+  if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return null;
+  const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
+  const withProduct = (list) => (Array.isArray(list) ? list : []).filter((item) => item?.product?.id);
+  return {
+    plan,
+    // The plan's own eligibility for this visit: the rule behind the items and the add-ons.
+    eligible: plan?.completionDefaults?.eligible === true,
+    items: withProduct(plan?.completionDefaults?.items),
+    addOns: withProduct(plan?.completionDefaults?.addOns),
+  };
+}
+
+// The plan's lists as the sheet reads them: `{ items, addOns }`, in the plan's order.
+async function sheetPlanned({ plan, items, addOns }, knex) {
+  const rows = await loadCatalogRows([...items, ...addOns].map((item) => String(item.product.id)), knex);
+  const programRows = featureGates.lawnSpotRulesLive() ? require('./waveguard-plan-engine').v13ProtocolRows(plan?.protocol?.structured) : null;
+  const plannedItem = (item) => {
+    const entry = productRuleEntry(String(item.product.id), rows.get(String(item.product.id)) || null);
+    return {
+      productId: item.product.id,
+      name: item.product.name || entry.name,
+      applicationMethod: item.applicationMethod || null,
+      amount: item.mix?.amount ?? null,
+      amountUnit: item.mix?.amountUnit ?? null,
+      // The treated area and planned rate exactly as the full form's completion defaults
+      // prefill them (lawnPlanSelections reads mix.treatedSqft in square feet and
+      // mix.ratePer1000 / mix.rateUnit): the same plan item, nothing computed here. null
+      // when the plan carries none (never invented); /complete then asks for the area.
+      treatedSqft: item.mix?.treatedSqft ?? null,
+      areaUnit: item.mix?.treatedSqft != null ? 'sqft' : null,
+      ratePer1000: item.mix?.ratePer1000 ?? null,
+      rateUnit: item.mix?.rateUnit ?? null,
+      ...programRateFor(item, programRows),
+      approvedForReport: entry.approvedForReport,
+      wateringRule: entry.rule,
+      wateringSummary: entry.ruleSummary,
+      mowHoldDays: entry.mowHoldDays,
+    };
+  };
+  return {
+    items: items.map(plannedItem),
+    addOns: addOns.map((item) => ({
+      ...plannedItem(item),
+      line: typeof item.raw === 'string' && item.raw.trim() ? item.raw.trim() : null,
+      substituteFor: item.substitution?.originalProductName || null,
+      gateNotes: (Array.isArray(item.gateNotes) ? item.gateNotes : []).map((note) => note?.text).filter((text) => typeof text === 'string' && text),
+    })),
+  };
+}
+
 /**
  * The visit's planned products with each one's watering rule: `{ source, items,
  * unavailable }`. Only a recurring program appointment has a plan: with the
@@ -502,49 +664,22 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
   // per-application appointment. Only a recurring program appointment gets it.
   if (visitType !== 'recurring') return empty();
   try {
-    if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return empty();
-    const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
-    const withProduct = (list) => (Array.isArray(list) ? list : []).filter((item) => item?.product?.id);
-    const items = withProduct(plan?.completionDefaults?.items);
-    const addOns = withProduct(plan?.completionDefaults?.addOns);
-    const rows = await loadCatalogRows([...items, ...addOns].map((item) => String(item.product.id)), knex);
-    const plannedItem = (item) => {
-      const entry = productRuleEntry(String(item.product.id), rows.get(String(item.product.id)) || null);
-      return {
-        productId: item.product.id,
-        name: item.product.name || entry.name,
-        applicationMethod: item.applicationMethod || null,
-        amount: item.mix?.amount ?? null,
-        amountUnit: item.mix?.amountUnit ?? null,
-        // The treated area and planned rate exactly as the full form's completion defaults
-        // prefill them (lawnPlanSelections reads mix.treatedSqft in square feet and
-        // mix.ratePer1000 / mix.rateUnit): the same plan item, nothing computed here. null
-        // when the plan carries none (never invented); /complete then asks for the area.
-        treatedSqft: item.mix?.treatedSqft ?? null,
-        areaUnit: item.mix?.treatedSqft != null ? 'sqft' : null,
-        ratePer1000: item.mix?.ratePer1000 ?? null,
-        rateUnit: item.mix?.rateUnit ?? null,
-        approvedForReport: entry.approvedForReport,
-        wateringRule: entry.rule,
-        wateringSummary: entry.ruleSummary,
-        mowHoldDays: entry.mowHoldDays,
-      };
-    };
+    const loaded = await loadPlan(svc, knex);
+    if (!loaded) return empty();
+    const sheet = await sheetPlanned(loaded, knex);
     return {
       source: 'plan',
       unavailable: null,
-      items: items.map(plannedItem),
+      items: sheet.items,
       // The visit's month (1-12, ET), for the add-on row's title.
-      month: Number(String(etCalendarDayOf(svc.scheduled_date) || '').slice(5, 7)) || null,
+      month: visitMonthOf(svc),
       // The window's opt-in products as the same plan built them (the visit's
       // substitute, the plan's mix and method), offered as one-tap add-ons, with
       // the protocol's own words for when they go down and the plan's gate notes.
-      addOns: addOns.map((item) => ({
-        ...plannedItem(item),
-        line: typeof item.raw === 'string' && item.raw.trim() ? item.raw.trim() : null,
-        substituteFor: item.substitution?.originalProductName || null,
-        gateNotes: (Array.isArray(item.gateNotes) ? item.gateNotes : []).map((note) => note?.text).filter((text) => typeof text === 'string' && text),
-      })),
+      addOns: sheet.addOns,
+      ...(await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures })),
+      ...(await loadChinch({ loaded, sheet, svc, knex, readFailures })),
+      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet)),
     };
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
@@ -672,6 +807,15 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture,
     plannedProducts,
+    // GATE_LAWN_SPOT_RULES: the sheet asks for a spot row's area (and holds Complete without
+    // one). The key exists only while the gate is live, so gate off is byte-identical.
+    ...(featureGates.lawnSpotRulesLive() ? { spotRules: true } : {}),
+    // GATE_LAWN_TREATMENT_GUIDE: the sheet reads the "Suggested from this lawn" cards once the
+    // assessment is confirmed (the treatment-guide route). Only a visit with a plan has any, and
+    // the key exists only while the gate is live, so gate off is byte-identical.
+    // A visit whose program rows could not be read has no guide at all (the read failure is named), rather
+    // than a guide that claims a clean "no chinch rows staged".
+    ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true } : {}),
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,
@@ -701,6 +845,63 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // Names of the reads that failed while building this context ([] when none).
     readFailures: [...readFailures],
   };
+}
+
+// ── treatment guide ─────────────────────────────────────────────────────────
+
+/**
+ * GET /:serviceId/lawn-fast/treatment-guide?assessmentId=: the "Suggested from this lawn" cards for
+ * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
+ * asks once the technician confirms; the plan is read again here so the cards name the same add-ons
+ * the sheet lists, each one's limits read fresh. Read-only; nothing is added or recorded.
+ * `{ ok: true, v: 1, assessmentId, cards, weedMix }` (`weedMix` is the Weed spots decision read fresh, the
+ * sheet's one source for the weed entry, the weed card and the search exclusion; null when the month has no
+ * weed group), `blockedProductIds` (the governed products the fresh read kept out because of a limit, a hold or
+ * a failed limit read: see lawn-treatment-guide.blockedProductIds), and `chinch` (the standing chinch tap's decision read fresh the same way: `{ item, note }`, or null
+ * when the protocol stages no chinch product), or `{ ok: false, reason }`: disabled, invalid_assessment,
+ * not_found, not_eligible, not_confirmed, not_usable. A plan or limit read that fails throws (a 500:
+ * the sheet then shows no cards and works as before).
+ */
+async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
+  if (!featureGates.lawnTreatmentGuideLive()) return { ok: false, reason: 'disabled' };
+  if (!isUuid(assessmentId)) return { ok: false, reason: 'invalid_assessment' };
+  const base = await resolveLawnFastEligibility(serviceId, knex);
+  if (!base.ok) return { ok: false, reason: base.reason };
+  const { svc, reason, visitType, readFailures } = base;
+  if (reason) return { ok: false, reason: 'not_eligible' };
+  const assessment = await knex('lawn_assessments').where({ id: assessmentId, service_id: svc.id, customer_id: svc.customer_id }).first();
+  if (!assessment) return { ok: false, reason: 'not_found' };
+  if (assessment.confirmed_by_tech !== true) return { ok: false, reason: 'not_confirmed' };
+  if (!(await assessmentUsableForReport(svc, assessment, knex))) return { ok: false, reason: 'not_usable' };
+  const guide = require('./lawn-treatment-guide');
+  const result = (cards, weedMix = null, chinch = null, ids = {}) => ({
+    ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds: ids.blocked || [], unreadableProductIds: ids.unreadable || [], unreadableNote: guide.UNREADABLE_NOTE,
+  });
+  // Only a recurring program visit has a plan, and so any product to suggest.
+  const loaded = visitType === 'recurring' ? await loadPlan(svc, knex) : null;
+  if (!loaded) return result([]);
+
+  const structured = loaded.plan?.protocol?.structured;
+  const sheet = await sheetPlanned(loaded, knex);
+  const rows = require('./waveguard-plan-engine').v13ProtocolRows(structured);
+  const weedMix = (await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures })).weedMix || null;
+  // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
+  if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
+  const [offers, chinch] = await Promise.all([
+    guide.addOnOffers({ candidates: loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows, svc, knex }),
+    loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex }) : null,
+  ]);
+  // A read that throws fails the request (the sheet then follows the context's decisions); only a
+  // missing run row, which a legacy assessment legitimately has, reads as no run.
+  const run = (await require('./lawn-visit-runs').loadRun(assessment.id, knex)) || null;
+  return result(guide.buildCards({
+    signals: guide.signalsFromAssessment(assessment, run),
+    month: visitMonthOf(svc),
+    offers: { ...offers, chinch },
+    weeds: guide.weedOffer(weedMix, sheet.addOns),
+    // No trouble-area store exists yet, so take-all stays the check only.
+    troubleAreas: [],
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }) });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────
@@ -926,6 +1127,7 @@ module.exports = {
   evaluatePhotoFloor,
   buildLawnFastContext,
   buildLawnFastWateringPreview,
+  buildLawnTreatmentGuide,
   preflightLawnFastCompletion,
   assertLawnFastVisitTypeUnderLock,
 };

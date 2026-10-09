@@ -34,11 +34,11 @@ const { LAWN_TARGET_SUGGESTIONS } = require('./treatment-target-vocabulary');
 
 const ENGINE_VERSION = 'lawn_expectations_v1';
 
-// Celsius WG label/protocol cap: 3 applications per property per year
-// (server/config/protocols.json lawn notes, "CELSIUS CAP"). The caller passes
-// the year-to-date count INCLUDING any application on this visit; at the cap
-// the second-application line swaps to the "different product" line.
-const CELSIUS_YTD_CAP = 3;
+// Celsius WG cap per property per year (the figures and the one gate-following reader live in
+// config/lawn-v13-count-caps.js, so no other module needs this engine to read them): 2 under the v13
+// lawn program, 3 before it (GATE_LAWN_V13 off). The caller passes the year-to-date count INCLUDING any
+// application on this visit; at the cap the second-application line swaps to the "different product" line.
+const { CELSIUS_YTD_CAP, CELSIUS_YTD_CAP_LEGACY, celsiusYtdCap } = require('./lawn-v13-count-caps');
 
 const MAX_LINE_WORDS = 33;
 
@@ -97,6 +97,8 @@ const PRODUCT_CLASS_ENTRIES = [
   // Granular slow-release nitrogen
   ['LESCO 24-0-11', FAMILY.GRANULAR_N],
   ['LESCO 24-0-11 with PolyPlus OPTI', FAMILY.GRANULAR_N],
+  // December feeding (v13): slow-release N with potassium; the same expectation line the 24-0-11 gave there.
+  ['LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', FAMILY.GRANULAR_N],
   ['LESCO 24-2-11', FAMILY.GRANULAR_N],
   ['LESCO 24-2-11 50% NOS Plus BIO 6% Fe', FAMILY.GRANULAR_N],
 
@@ -162,6 +164,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Tenacity Herbicide', null],
   ['Certainty Turf Herbicide', null],
   ['Blindside Herbicide', null],
+  // Fire ant bait (optional add-on the office prices): no result timing the owner has approved.
+  ['Advion Fire Ant Bait', null],
 ];
 
 function normalizeProductName(name) {
@@ -899,6 +903,8 @@ for (const rows of [PRODUCT_ROWS, ISSUE_ROWS]) {
 module.exports = {
   ENGINE_VERSION,
   CELSIUS_YTD_CAP,
+  CELSIUS_YTD_CAP_LEGACY,
+  celsiusYtdCap,
   MAX_LINE_WORDS,
   FAMILY,
   PRODUCT_CLASS,

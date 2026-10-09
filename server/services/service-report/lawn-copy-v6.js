@@ -35,7 +35,7 @@
 const logger = require('../logger');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { buildLawnExpectations } = require('./lawn-expectations');
-const { CELSIUS_YTD_CAP } = require('../../config/lawn-expectations');
+const { celsiusYtdCap } = require('../../config/lawn-expectations');
 
 const COPY_VERSION = 'lawn_report_v6_fixed_1';
 const FREEZE_KEY = 'lawnCopyV6';
@@ -160,7 +160,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     // Not tracked for the report yet: the cap makes a Celsius row print its
     // "a different product may be used" line, true either way, rather than
     // promise a second application that may be capped.
-    celsiusYtdCount: CELSIUS_YTD_CAP,
+    celsiusYtdCount: celsiusYtdCap(),
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));

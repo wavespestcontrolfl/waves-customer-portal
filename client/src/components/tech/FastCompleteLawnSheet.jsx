@@ -35,6 +35,21 @@
 //     every lawn visit treats the whole lawn, so a sprayed or spread product
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
+//     With the context's `spotRules` (GATE_LAWN_SPOT_RULES, owner 2026-10-08) a
+//     spot-treatment row takes its area from the tech instead: quick sizes
+//     (100 / 250 / 500 / 1,000 sq ft) or a typed number, which figures the
+//     amount the same way, goes to /complete as areaValue (sqft), and is
+//     required (or a typed amount) before Complete. The weed products the
+//     protocol ties together are ONE "Weed spots" entry (the context's
+//     `plannedProducts.weedMix`, decided on the server: the yearly cap, the
+//     surfactant by temperature) whose rows share one area control.
+//     With the context's `treatmentGuide` (GATE_LAWN_TREATMENT_GUIDE, owner 2026-10-08),
+//     once the assessment is confirmed the sheet asks the server for "Suggested from
+//     this lawn": one card per photo finding (the finding, the check to do first, the
+//     product, one tap), between the plan's rows and the protocol add-ons. The rules
+//     live on the server; the sheet only renders the cards and performs their taps, and
+//     the completion carries which cards showed and what the tech did (`lawnFast.
+//     treatmentGuide`). Nothing is added by itself.
 //  4. Customer home (the pest sheet's three choices, preset to not home, full
 //     access), then Tips from your tech (optional, one tip);
 //  5. Blog post for the customer (optional, GATE_REPORT_BLOG_POST);
@@ -99,7 +114,7 @@ import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
 import CallBridgeLink from '../admin/CallBridgeLink';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
-import { Button, ActionFeedback } from '../ui';
+import { Button, ActionFeedback, Input } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Mowing height the server accepts (turf_height_invalid outside it).
@@ -196,7 +211,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined,
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, chinch: null, guidedProductIds: [],
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -209,6 +224,20 @@ function blockedReasonFor(data, service) {
 
 const plannedItemsOf = (data) => (Array.isArray(data?.plannedProducts?.items) ? data.plannedProducts.items.filter((item) => item?.productId) : []);
 const addOnsOf = (data) => (Array.isArray(data?.plannedProducts?.addOns) ? data.plannedProducts.addOns.filter((item) => item?.productId) : []);
+// The server's weed-spot decision (GATE_LAWN_SPOT_RULES), or null: an older or dark server sends none.
+const weedMixOf = (data) => {
+  const mix = data?.spotRules === true ? data?.plannedProducts?.weedMix : null;
+  return mix && Array.isArray(mix.productIds) && Array.isArray(mix.groupProductIds) ? mix : null;
+};
+// The standing "Chinch bugs found at the edge of damage" offer (GATE_LAWN_TREATMENT_GUIDE): the add-on its tap opens
+// (null when the limits leave nothing to add) and the line that says why, or null.
+const chinchShape = (chinch) => {
+  const item = chinch?.item?.productId ? chinch.item : null;
+  const rungIds = Array.isArray(chinch?.rungIds) ? chinch.rungIds : [];
+  const unreadableIds = Array.isArray(chinch?.unreadableIds) ? chinch.unreadableIds : [];
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds } : null;
+};
+const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
@@ -241,6 +270,14 @@ const findingsTypeUndecidable = (data) => !('findingsType' in data)
 const optionalContextFields = (data) => ({
   findingsType: data.findingsType ?? null,
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
+  // Spot-area rules: only while the server says so, so an older server renders as before.
+  spotRules: data?.spotRules === true,
+  weedMix: weedMixOf(data),
+  // The treatment guide: the server says the cards are on, and offers the chinch tap.
+  treatmentGuide: data?.treatmentGuide === true,
+  chinch: chinchOf(data),
+  // The add-ons a guide card may own: their taps wait for the fresh guide.
+  guidedProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.guidedProductIds) ? data.plannedProducts.guidedProductIds : [],
 });
 
 const sameText = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -307,6 +344,182 @@ function useLawnFastContext({ base, request, service }) {
   return { ...ctx, retry };
 }
 
+// The Weed spots decision the guide read fresh (the plan and the limits are read again after
+// Confirm): the object, null when the month has no weed group, or undefined when the answer carries
+// none (then the context's stands).
+function freshWeedMix(data) {
+  if (data.weedMix === null) return null;
+  const mix = data.weedMix;
+  return mix && Array.isArray(mix.productIds) && Array.isArray(mix.groupProductIds) ? mix : undefined;
+}
+
+// The standing chinch tap's decision the guide read fresh (the limits are read again after Confirm):
+// the offer, null when there is nothing to offer or say, or undefined when the answer carries none.
+function freshChinch(data) {
+  return 'chinch' in data ? chinchShape(data.chinch) : undefined;
+}
+
+// The ONE chinch decision the standing entry follows (the card is the guide's own): the guide's
+// fresh one once it has read, so a cap reached since the sheet opened, or a failed fresh limit read,
+// is never overruled by the context's older offer of Arena.
+const effectiveChinch = (guide, ctx) => (guide && guide.chinch !== undefined ? guide.chinch : ctx.chinch);
+
+// The ONE Weed spots decision the sheet follows: the guide's fresh one once it has read, else the
+// context's from when the sheet opened. The weed entry, the weed card, the search exclusion, the
+// surfactant note and the area exemptions all read this, so two offers never show.
+const effectiveWeedMix = (guide, ctx) => (guide && guide.weedMix !== undefined ? guide.weedMix : ctx.weedMix);
+
+// The treatment guide's cards (GATE_LAWN_TREATMENT_GUIDE) for the CONFIRMED assessment: read from
+// the server each time a confirmed assessment appears, dropped when a retake clears it.
+// `status`: 'idle' (no confirmed assessment, or the guide is off), 'pending' (asked, not answered),
+// 'answered' (`guide` = { assessmentId, cards, weedMix, chinch }) or 'failed' (the read failed or
+// the answer was malformed: the sheet then follows the context's decisions, as without a guide).
+const GUIDE_KINDS = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'];
+const guideCardOk = (card) => !!card && GUIDE_KINDS.includes(card.kind) && typeof card.title === 'string' && Array.isArray(card.productIds) && Array.isArray(card.items);
+function useTreatmentGuide({ base, request, enabled, assessmentId }) {
+  const [state, setState] = useState({ for: null, status: 'idle', guide: null });
+  useEffect(() => {
+    if (!enabled || !assessmentId) return undefined;
+    let active = true;
+    request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}`)
+      .then((data) => {
+        if (!active) return;
+        if (data?.v === 1 && Array.isArray(data.cards)) {
+          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
+        } else setState({ for: assessmentId, status: 'failed', guide: null });
+      })
+      .catch(() => { if (active) setState({ for: assessmentId, status: 'failed', guide: null }); });
+    return () => { active = false; };
+  }, [base, request, enabled, assessmentId]);
+  if (!enabled || !assessmentId) return { guide: null, status: 'idle' };
+  return state.for === assessmentId ? { guide: state.guide, status: state.status } : { guide: null, status: 'pending' };
+}
+
+// The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
+function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable }) {
+  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId });
+  const [checkedState, setCheckedState] = useState({ for: null, map: {} });
+  const forId = guide?.assessmentId ?? null;
+  const onGuideCheck = useCallback((kind, value) => setCheckedState((prev) => ({
+    for: forId, map: { ...(prev.for === forId ? prev.map : {}), [kind]: value },
+  })), [forId]);
+  // The guide-governed taps wait for the answer (or for the read to fail, then the context's
+  // decisions stand, as without a guide). Off for a visit without a guide.
+  const locked = enabled && status !== 'answered' && status !== 'failed';
+  return { guide, status, locked, guideChecks: checkedState.for === forId ? checkedState.map : {}, onGuideCheck };
+}
+
+const lowerIds = (ids) => (ids || []).filter(Boolean).map((id) => String(id).toLowerCase());
+
+// The products a visible guide card owns or holds: out of the generic add-ons list and the search,
+// so the card's check is the only way in. A dismissed card releases its product ("looked and
+// decided"); a held product (take-all, no trouble area on file) has no dismiss and stays out.
+function cardOwnedIds(guide, checks) {
+  return lowerIds((guide?.cards || []).filter((card) => checks[card.kind] !== 'none')
+    .flatMap((card) => [...card.productIds, ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
+}
+
+// What the guide governs for this visit, and what the LATEST decision does with it. ONE invariant:
+// a product that belongs to a guide-governed kind (the weed group, the chinch rungs, and the month's
+// fungicide, caterpillar and dry-spot picks) may be ON the sheet only if the latest decision offers
+// it, and may be ADDED only through the entry or card the latest decision offers. The latest
+// decision is the fresh guide answer, or, when the read failed, the context's own decisions.
+//   governed  every such product            offered  what the latest decision lets onto the sheet
+//   hidden    kept out of the add-ons list and the search (every governed product that is not
+//             released to the generic list)   locked   no decision yet: the taps wait
+// A pick is RELEASED to the generic list when nothing blocked or holds it and no visible card owns
+// it: a clean answer with no finding for it ("the technician can still treat what he sees"), or a
+// card he dismissed. A blocked pick (a limit or a city hold that was READ) never is.
+// A product whose limit read FAILED is UNREADABLE, not blocked: its entry or card offers nothing (we
+// cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
+// is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
+// leave no way to record a real application. Completion records the visit and flags it to the office.
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
+
+function guideGovernance({ ctx, guide, status, checks }) {
+  if (!ctx.treatmentGuide) return NO_GOVERNANCE;
+  const answered = status === 'answered' && !!guide;
+  const settled = answered || status === 'failed';
+  const cards = answered ? guide.cards : [];
+  const weedMix = effectiveWeedMix(guide, ctx);
+  const chinch = effectiveChinch(guide, ctx);
+  const picks = lowerIds(ctx.guidedProductIds);
+  const chinchItem = lowerIds([chinch?.item?.productId]);
+  const weedOffered = weedMix && ['lead', 'replacement'].includes(weedMix.mode) ? lowerIds(weedMix.productIds) : [];
+  const blocked = lowerIds(answered ? guide.blockedProductIds : []);
+  const held = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
+  const cardIds = lowerIds(cards.flatMap((card) => [...card.productIds, ...card.items.map((item) => item.productId)]));
+  const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => card.productIds));
+  const weedGroup = lowerIds(weedMix?.groupProductIds);
+  // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
+  const unreadable = settled ? [
+    ...lowerIds(answered ? guide.unreadableProductIds : []),
+    // The mix is withheld as a whole; the members not read as forbidding are released.
+    ...(weedMix?.mode === 'unavailable' ? weedGroup.filter((id) => !lowerIds(weedMix.blockedIds).includes(id)) : []),
+    ...lowerIds(chinch?.unreadableIds),
+  ] : [];
+  const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
+  const owned = cardOwnedIds(answered ? guide : null, checks);
+  const governed = [...picks, ...weedGroup, ...lowerIds(chinch?.rungIds), ...chinchItem];
+  return {
+    enabled: true,
+    locked: !settled,
+    governed: new Set(governed),
+    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable]),
+    hidden: new Set(governed.filter((id) => (!free.includes(id) && !unreadable.includes(id)) || owned.includes(id))),
+    unreadable: new Set(unreadable),
+    unreadableNote: answered ? guide.unreadableNote : '',
+    weedOffered: new Set(weedOffered),
+    chinchOffered: new Set([...chinchItem, ...chinchCardIds]),
+  };
+}
+
+// The rows on the sheet the latest decision does not offer: a governed product it does not offer, or
+// a row an entry opened (weeds, chinch) that its entry no longer offers.
+function staleGuideRows(rows, gov) {
+  return rows.filter((row) => {
+    const id = String(row.productId).toLowerCase();
+    // An unreadable product cannot be called forbidden: its row stays.
+    if (gov.unreadable.has(id)) return false;
+    return (gov.governed.has(id) && !gov.offered.has(id))
+      || (row.guided === 'weeds' && !gov.weedOffered.has(id))
+      || (row.guided === 'chinch' && !gov.chinchOffered.has(id));
+  });
+}
+
+// The governance of the latest decision, and its reconciliation. Whenever a decision replaces an
+// earlier one (answered to answered, answered to failed, failed to answered, and after a retake),
+// every row the new decision does not offer is dropped and the tech is told (`removed`). A failed
+// refresh falls back to the context's decisions, so what the context does not offer goes too. The
+// first decision reconciles nothing: the taps were locked until it came.
+function useGuideGovernance({ ctx, guide, status, checks, products }) {
+  const gov = useMemo(() => guideGovernance({ ctx, guide, status, checks }), [ctx, guide, status, checks]);
+  const [removed, setRemoved] = useState({ names: [], why: '' });
+  const decided = useRef(false);
+  const latest = useRef({});
+  latest.current = { rows: products.rows, removeRows: products.removeRows, gov };
+  useEffect(() => {
+    if (status !== 'answered' && status !== 'failed') return;
+    if (decided.current) {
+      const stale = staleGuideRows(latest.current.rows, latest.current.gov);
+      latest.current.removeRows(stale.map((row) => row.productId));
+      setRemoved({ names: stale.map((row) => row.name), why: status === 'failed' ? 'The limits could not be checked.' : 'The limits changed.' });
+    }
+    decided.current = true;
+  }, [guide, status]);
+  return { gov, removed };
+}
+
+// Complete is held while the guide is still reading (the rows are judged against its answer), and
+// by a governed row the latest decision does not offer (it should be impossible after the
+// reconciliation; the sheet never completes with one).
+function guideHoldReason({ gov, status, rows }) {
+  if (!gov.enabled) return '';
+  if (status === 'pending') return 'Wait for the lawn guide to finish.';
+  const stale = staleGuideRows(rows, gov)[0];
+  return stale ? `Remove ${stale.name}: it is not offered for this lawn right now.` : '';
+}
+
 // ── products ────────────────────────────────────────────────────────────────
 
 // The plan's quantity as the row starts: the plan's own measure and amount
@@ -332,11 +545,18 @@ function plannedRate(planned) {
 // A row for a catalog product. `planned` carries the plan's amount, unit and
 // method (a planned row's, or a tapped protocol add-on's plan item); an added
 // product has none and starts on its own default method.
-function productRow(product, { planned = null, added = false }) {
+// The guide card or entry that opened a row (weeds, chinch, fungus, caterpillars, dry_spots), or
+// null; and the plan's notes for the product (a watering hold, a distance), which the row shows.
+const guideRowFields = (planned, guided) => ({ guided: guided || null, gateNotes: planned?.gateNotes || [] });
+
+function productRow(product, { planned = null, added = false, weedGroup = false, guided, spotRules = false }) {
   const rawMethod = planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
-  const seeded = plannedSeed(planned, productUnits(product, { method }));
+  // Under the spot rules a spot row never holds the plan's quantity: it is figured from the plan's
+  // estimate of the spot area, and the tech's own area figures the amount instead.
+  const spotRow = spotRules && normalizeApplicationMethod(method) === 'spot_treatment';
+  const seeded = plannedSeed(spotRow ? { ...planned, amount: null } : planned, productUnits(product, { method }));
   return {
     product,
     productId: product.id,
@@ -346,6 +566,9 @@ function productRow(product, { planned = null, added = false }) {
     // A protocol add-on the tech tapped: seeded from its plan item like a
     // planned row, labelled for where it came from.
     fromProtocol: added && !!planned,
+    // One of the Weed spots entry's rows: they share one area (weedArea).
+    weedGroup,
+    ...guideRowFields(planned, guided),
     method,
     dimension: seeded.dimension,
     totalAmount: seeded.amount,
@@ -355,6 +578,9 @@ function productRow(product, { planned = null, added = false }) {
     // plan's exactly as the plan gave it, and the first change to the row's
     // amount or amount unit (rateChanged) drops it.
     planRate: plannedRate(planned),
+    // The plan item's rate as the server sent it, for a spot row's figuring (figuringRate).
+    plannedRatePer1000: planned && Number(planned.ratePer1000) > 0 ? Number(planned.ratePer1000) : null,
+    plannedRateUnit: planned?.rateUnit || null,
     rateChanged: false,
     // The plan's method and the square feet it gives at that method, if any:
     // the plan's area stands only while the row is on the plan's method.
@@ -467,7 +693,11 @@ function convertAmount(amount, from, to, dimension) {
 // catalog's. A per-basis rate (per gallon, per acre, per spot) or one in mL
 // figures nothing.
 function figuringRate(row) {
-  const source = resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
+  // A spot row under the spot rules figures from the rate the program approved (the server
+  // sends it on the plan item when the plan gave none); only a row whose protocol line has
+  // none falls back to the catalog's. A unit the row cannot express still figures nothing.
+  const program = row.spotRule && onPlannedMethod(row) && row.plannedRatePer1000 ? { rate: row.plannedRatePer1000, rateUnit: row.plannedRateUnit } : null;
+  const source = program || resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
   const rate = Number(source?.rate);
   const rateUnit = String(source?.rateUnit || '').trim();
   if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;
@@ -481,10 +711,16 @@ function figuringRate(row) {
 // planned spot row's own plan area while it is on the plan's method; else
 // none, so a planned row moved to spot treatment figures nothing from the old
 // plan area.
-const figuringArea = (row, lawnSqft) => (requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null));
+// A spot row under the spot rules is figured on the area the tech set for it (spotArea) and on
+// no other: the plan's own spot estimate figures nothing there.
+const figuringArea = (row, lawnSqft) => {
+  if (row.spotRule) return row.spotArea > 0 ? row.spotArea : null;
+  return requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null);
+};
 
 function derivedAmount(row, lawnSqft) {
-  if (row.amountPicked || row.fromPlan) return null;
+  // spotExempt: a rate that is not per area (the surfactant's percent of the tank) figures nothing.
+  if (row.amountPicked || row.fromPlan || row.spotExempt) return null;
   const area = figuringArea(row, lawnSqft);
   const figured = figuringRate(row);
   if (!(area > 0) || !figured) return null;
@@ -496,13 +732,15 @@ function derivedAmount(row, lawnSqft) {
   // the precision the record keeps for the unit (three decimals for fl oz and
   // gal, as submittedAmount sends them; two for spoons and dry weights): a
   // two-decimal pre-round in fl oz would zero a tiny dose (0.004 fl oz) and
-  // the record would disagree with the box.
+  // the record would disagree with the box. A spot-rule row's dry dose also
+  // keeps three (0.028 oz per 1,000 sq ft on 100 sq ft is 0.003 oz, and
+  // service_products.total_amount holds three); every other row is as before.
   const inBase = rate * (area / 1000);
   const shown = row.unitPicked
     ? { amount: convertAmount(inBase, unit, row.amountUnit, row.dimension), unit: row.amountUnit }
     : seededAmount(inBase, unit);
   if (shown.amount == null) return null;
-  const places = shown.unit === 'fl_oz' || shown.unit === 'gal' ? 1000 : 100;
+  const places = shown.unit === 'fl_oz' || shown.unit === 'gal' || (row.spotRule && shown.unit !== 'tsp' && shown.unit !== 'tbsp') ? 1000 : 100;
   const amount = Math.round(shown.amount * places) / places;
   if (!(amount > 0)) return null;
   return {
@@ -511,6 +749,32 @@ function derivedAmount(row, lawnSqft) {
     // The rate on the record, in its base unit (the plan's own shape).
     rate: rateUnitForRecord(base) ? { rate, unit: rateUnitForRecord(base) } : null,
     note: `${rate} ${unitLabel(base)} per 1,000 sq ft × ${area.toLocaleString('en-US')} sq ft`,
+  };
+}
+
+// Spot-area quick sizes (sq ft) offered beside the typed box.
+export const SPOT_AREA_SIZES = [100, 250, 500, 1000];
+
+const sameId = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
+const positiveNumber = (value) => (Number(value) > 0 ? Number(value) : null);
+
+// The spot rules for one row (the context's `spotRules`, owner 2026-10-08): a row whose
+// method is spot treatment carries the area the tech set for it (a weed-mix row, the one
+// shared `weedArea`; any other, its own `spotSqft`) and nothing else: a plan's estimate of
+// a spot area is not the area treated. `spotExempt` marks a weed-mix member whose rate is not per area, which
+// needs no area. Any other row, and every row without the rules, passes through untouched.
+function withSpotArea(row, { spotRules, weedMix, weedArea }) {
+  if (!spotRules || normalizeApplicationMethod(row.method) !== 'spot_treatment') return row;
+  const typed = positiveNumber(row.weedGroup ? weedArea : row.spotSqft);
+  return {
+    ...row,
+    // The plan's own quantity for a spot row is figured from its estimate of the spot area. Only an
+    // amount the tech entered stands (amountEntered, kept in the stored row): anything else in the
+    // box is the plan's, under whatever unit, and is dropped; the tech's area figures the amount.
+    ...(row.amountEntered ? {} : { totalAmount: '', fromPlan: false }),
+    spotRule: true,
+    spotArea: typed || null,
+    spotExempt: !!weedMix?.noAreaProductIds?.some((id) => sameId(id, row.productId)),
   };
 }
 
@@ -539,11 +803,12 @@ function plannedRows(ctx, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
   return uniquePlanned(ctx.planned).map((item) => productRow(
     byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
-    { planned: item },
+    { planned: item, spotRules: !!ctx.spotRules },
   ));
 }
 
 function useProductRows(ctx, catalog) {
+  const spotRules = !!ctx.spotRules;
   const [rows, setRows] = useState(() => plannedRows(ctx, catalog));
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => {
@@ -553,27 +818,34 @@ function useProductRows(ctx, catalog) {
       // derivedAmount figures in it. Only a typed number is the tech's amount.
       const unitOnly = 'amountUnit' in patch && !('totalAmount' in patch) && !row.amountPicked && !row.fromPlan;
       if (unitOnly) return { ...row, amountUnit: patch.amountUnit, unitPicked: true };
+      // A row moved ONTO spot treatment under the spot rules drops the plan's quantity it still
+      // holds, as a row created on it never had one (productRow).
+      const toSpot = spotRules && row.fromPlan && !('totalAmount' in patch) && 'method' in patch && normalizeApplicationMethod(patch.method) === 'spot_treatment';
+      if (toSpot) return { ...row, ...patch, totalAmount: '', fromPlan: false };
       return {
         ...row,
         ...patch,
         // An amount the tech changed is no longer the plan's, and the plan's
         // rate no longer describes the row.
         ...('totalAmount' in patch || 'amountUnit' in patch ? { fromPlan: false, rateChanged: true } : {}),
+        // The tech typed (or dictated) this row's amount: the one amount a spot-rule row keeps.
+        ...('totalAmount' in patch ? { amountEntered: patch.totalAmount !== '' && patch.totalAmount != null } : {}),
       };
     }));
-  }, []);
-  const addProduct = useCallback((product, { planned = null } = {}) => {
+  }, [spotRules]);
+  const addProduct = useCallback((product, { planned = null, weedGroup = false, guided } = {}) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { added: true, planned }),
+      productRow(product, { added: true, planned, weedGroup, guided, spotRules }),
     ]));
-  }, []);
+  }, [spotRules]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
+  const removeRows = useCallback((ids) => setRows((prev) => prev.filter((row) => !ids.includes(row.productId))), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
     setRows((prev) => prev.map((row) => ({ ...row, product: withFreshStock(row.product, fresh) })));
   }, []);
-  return { rows, updateRow, addProduct, removeRow, applyStock };
+  return { rows, updateRow, addProduct, removeRow, removeRows, applyStock };
 }
 
 // ── what is missing, and the body ───────────────────────────────────────────
@@ -621,9 +893,10 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
   return { label: missingReason, disabled: !progress[can], onClick: () => block.current?.[run]() };
 }
 
-function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
+  const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -633,10 +906,14 @@ function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, pho
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
     [!rows.length, ADD_PRODUCTS],
+    // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
+    [guideHold, guideHold],
     [areaHold, areaHold],
     [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
       ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
       : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
+    // A spot row needs the area treated or a typed amount (spot rules).
+    [missingSpot, missingSpot && `Enter the area treated for ${missingSpot.name}.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [typed && !form.condition, 'Pick the lawn condition.'],
@@ -644,7 +921,7 @@ function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, pho
   return reason;
 }
 
-function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable }) {
+function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {} }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
@@ -661,7 +938,23 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
     visitOutcome: 'completed',
     // The context's service object, every key, nulls included.
     expectedVisit: ctx.raw,
-    lawnFast: { visitType: ctx.visitType },
+    // The guide's record (owner choice D4): which cards showed, what the tech checked, and whether
+    // the card's product is on the sheet at completion. The server validates it and freezes it.
+    lawnFast: {
+      visitType: ctx.visitType,
+      ...(guideCards ? {
+        treatmentGuide: {
+          v: 1,
+          cards: guideCards.map((card) => ({
+            kind: card.kind,
+            shown: true,
+            checked: guideChecks[card.kind] || null,
+            taken: cardOnSheet(card, on),
+            productIds: card.productIds,
+          })),
+        },
+      } : {}),
+    },
     lawnAssessmentId: assessmentId,
     products: rows.map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
@@ -675,6 +968,8 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
         // A plan product goes on the plan's default areas, as the full form sends it.
         ...(row.planned ? { applicationArea: LAWN_DEFAULT_AREAS.join(', ') } : {}),
         ...(requirement ? { areaValue: areaOf(row, lawnSqft), areaUnit: requirement.unit } : {}),
+        // A spot row's area, as the full form sends the plan's treatedSqft (spot rules).
+        ...(row.spotRule && row.spotArea > 0 ? { areaValue: row.spotArea, areaUnit: 'sqft' } : {}),
         targets: [],
       };
     }),
@@ -922,6 +1217,19 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
+  // The photo step reports back: the confirmed assessment's id (null until
+  // there is one), whether a lookup, analysis or confirm is in flight.
+  const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  // A confirmed assessment the report would reject (made for the visit's
+  // former property) does not count until the tech analyzes again.
+  const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
+  // The treatment guide's cards for the confirmed assessment (not one the report would reject), and
+  // what the tech checked on each.
+  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable });
+  // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
+  const { gov, removed: removedByGuide } = useGuideGovernance({ ctx, guide, status: guideStatus, checks: guideChecks, products });
+  // The one Weed spots decision on screen (the guide's fresh read once it has answered).
+  const weedMix = effectiveWeedMix(guide, ctx);
   // The whole-lawn area: this visit property's recorded lawn area (or the area
   // the technician set when none is recorded), never a planned product's own
   // (possibly partial) area and never the customer-wide turf profile (at a
@@ -929,7 +1237,12 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const lawnSqft = propertyAreas.wholeLawn;
   // Every reader of the rows (Complete's checks, the stock hold, the body, the
   // cards) sees the figured amounts; only the tech's entries live in state.
-  const rows = useMemo(() => products.rows.map((row) => withDerivedAmount(row, lawnSqft)), [products.rows, lawnSqft]);
+  // The weed mix's one shared area (spot rules): typed or picked once, it applies to every row of the entry.
+  const [weedArea, setWeedArea] = useState('');
+  const rows = useMemo(
+    () => products.rows.map((row) => withDerivedAmount(withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }), lawnSqft)),
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea],
+  );
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).
@@ -948,7 +1261,6 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight, and how
   // many photos are held / whether an analysis result is on screen.
-  const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
   const [progress, setProgress] = useState({ photos: 0, assessed: false });
   const block = useRef(null);
   // The tips are ranked by this visit's assessment, so they are read again each
@@ -961,16 +1273,24 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // The blog post search is offered while the server answers available.
   const blog = useBlogPostOffer({ base, request });
   const blockService = useMemo(() => ({ id: service?.id, customerId: ctx.raw?.customerId ?? service?.routedCustomerId ?? null }), [service?.id, service?.routedCustomerId, ctx.raw?.customerId]);
-  // A confirmed assessment the report would reject (made for the visit's
-  // former property) does not count until the tech analyzes again.
-  const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
   const [traced, setTraced] = useState(false);
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
+  // The weed group's products come through the Weed spots entry only, so the search lists none of
+  // them: not the ones the tap adds (one shared area), and not the ones the server held back (the
+  // surfactant in the heat, a member or the lead at its yearly limit, the replacement before its
+  // turn). Only when the limits could not be read does the entry send the tech to the search.
+  const searchCatalog = useMemo(() => {
+    const held = weedMix && weedMix.mode !== 'unavailable' ? weedMix.groupProductIds || [] : [];
+    // Every guide-governed product that is not released to the generic list comes through its entry
+    // or card only (and, before the guide has answered, not at all).
+    const hidden = (product) => gov.hidden.has(String(product.id).toLowerCase()) || held.some((id) => sameId(id, product.id));
+    return held.length || gov.hidden.size ? catalog.filter((product) => !hidden(product)) : catalog;
+  }, [catalog, weedMix, gov]);
   const picker = useProductPicker({
     line: 'lawn',
-    products: catalog,
+    products: searchCatalog,
     commonProducts: [],
     rows,
     locked: locked || dictationPending,
@@ -983,13 +1303,14 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
     inline: true,
   });
 
-  const missingReason = missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
+  const missingReason = missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable }),
+      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks }),
       [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
     );
   };
@@ -1037,7 +1358,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1107,8 +1428,11 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, rows, products, catalog, lawnSqft, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
+  // The weed mix's one area control sits under its first row.
+  const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
+  const surfactantNote = weedMix?.surfactant;
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
@@ -1118,9 +1442,22 @@ function ProductsSection({ ctx, rows, products, catalog, lawnSqft, locked, other
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>
       )}
       {rows.map((row) => (
-        <ProductEditor key={row.productId} row={row} methods={ctx.methods} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+        <React.Fragment key={row.productId}>
+          <ProductEditor
+            row={row}
+            methods={ctx.methods}
+            lawnSqft={lawnSqft}
+            locked={locked}
+            note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : null}
+            onChange={(patch) => updateRow(row.productId, patch)}
+            onRemove={() => removeRow(row.productId)}
+          />
+          {row === areaHost && <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea} />}
+        </React.Fragment>
       ))}
-      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
+      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
@@ -1133,13 +1470,42 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'Ju
 // ("in place of" the original), the protocol line, the gate notes, the method
 // and the rate. A product the sheet's catalog does not list cannot be built
 // into a row and is left out; one already on the sheet reads as such.
-function ProtocolAddOns({ addOns, month, rows, catalog, locked, onAdd }) {
-  const titleId = useId();
+// The add-ons the sheet's catalog can build into rows, split into the ones listed on their
+// own and the Weed spots entry's (the products the server grouped are listed only as that
+// entry; an entry whose products the catalog cannot all build is left out, like any add-on).
+function splitAddOns(addOns, weedMix, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
-  const items = (addOns || [])
+  const withProduct = (addOns || [])
     .map((item) => ({ ...item, product: byId.get(String(item.productId).toLowerCase()) || null }))
     .filter((item) => item.product);
-  if (!items.length) return null;
+  const grouped = new Set((weedMix?.groupProductIds || []).map((id) => String(id).toLowerCase()));
+  const weedItems = (weedMix?.productIds || []).map((id) => withProduct.find((item) => sameId(item.productId, id)));
+  return {
+    items: withProduct.filter((item) => !grouped.has(String(item.productId).toLowerCase())),
+    weedEntry: weedMix && weedItems.every(Boolean) ? weedItems : null,
+  };
+}
+
+// What the add-ons group lists. A product a visible card owns is on the card, not here; a card the
+// guide shows for the weed mix or the chinch bugs IS that entry, so it is not listed twice. Nothing
+// to add (the limit is reached) is still said, as a line.
+function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog }) {
+  const split = splitAddOns(addOns, weedMix, catalog);
+  const cardShown = (kind) => !!guideCards?.some((card) => card.kind === kind) && guideChecks[kind] !== 'none';
+  return {
+    // Before the guide has answered a governed product waits in the list; after, the ones the latest
+    // decision does not release to the list are not listed.
+    items: split.items.filter((item) => gov.locked || !gov.hidden.has(String(item.productId).toLowerCase())),
+    weedEntry: split.weedEntry,
+    showWeed: !cardShown('weeds') && !!weedMix && (split.weedEntry?.length > 0 || (!weedMix.productIds.length && !!weedMix.note)),
+    showChinch: !cardShown('chinch') && !!chinch,
+  };
+}
+
+function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd }) {
+  const titleId = useId();
+  const { items, weedEntry, showWeed, showChinch } = addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog });
+  if (!items.length && !showWeed && !showChinch) return null;
   const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
   const monthName = month ? MONTH_NAMES[month - 1] : null;
   return (
@@ -1148,32 +1514,159 @@ function ProtocolAddOns({ addOns, month, rows, catalog, locked, onAdd }) {
         <h4 id={titleId} className="tech-protocol-addons-title">{monthName ? `Also in ${monthName}’s protocol` : 'Also in this month’s protocol'}</h4>
         <p className="tech-visit-muted">Tap what you applied.</p>
       </div>
-      {items.map((item) => {
-        const onSheet = on.has(String(item.productId).toLowerCase());
-        const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
-        const why = [
-          item.substituteFor ? `In place of ${item.substituteFor}` : '',
-          item.line || '',
-          ...(item.gateNotes || []),
-          item.applicationMethod ? methodLabel(item.applicationMethod) : '',
-          rate,
-        ].filter(Boolean).join(' · ');
+      {showWeed && (
+        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />
+      )}
+      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />}
+      {items.map((item) => (
+        <AddOnLine
+          key={item.productId}
+          item={item}
+          onSheet={on.has(String(item.productId).toLowerCase())}
+          // A product a guide card may own waits for the card (the fresh guide), then follows it.
+          waiting={gov.locked && gov.governed.has(String(item.productId).toLowerCase())}
+          unreadableNote={gov.unreadable.has(String(item.productId).toLowerCase()) ? gov.unreadableNote : ''}
+          locked={locked}
+          onAdd={onAdd}
+        />
+      ))}
+    </div>
+  );
+}
+
+// One opt-in product of the month: its name, the protocol's own words for it, and its tap.
+function AddOnLine({ item, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
+  const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
+  const why = [
+    item.substituteFor ? `In place of ${item.substituteFor}` : '',
+    item.line || '',
+    ...(item.gateNotes || []),
+    item.applicationMethod ? methodLabel(item.applicationMethod) : '',
+    rate,
+    // A product whose limit read failed is never silent: the one wording says what to do.
+    unreadableNote,
+  ].filter(Boolean).join(' · ');
+  return (
+    <div className="tech-protocol-addon">
+      <span className="tech-protocol-addon-text">
+        <span className="tech-protocol-addon-name">{item.product.name}</span>
+        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : why}</span>
+      </span>
+      {!waiting && (
+        <Button
+          type="button"
+          variant="secondary"
+          className="tech-visit-action tech-protocol-addon-add"
+          aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}`}
+          disabled={locked || onSheet}
+          onClick={() => onAdd(item.product, { planned: item })}
+        >
+          {onSheet ? '✓' : 'Add'}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// What a guide-governed tap says until the fresh guide has answered (the sheet's order is assessment first).
+const CONFIRM_FIRST = 'Confirm the assessment first.';
+
+// "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
+// opens the rows it names (each seeded from its own plan item, as a single add-on is) and
+// they share one area. With nothing to add (the yearly limit is reached) it is a line only.
+function WeedSpotsEntry({ weedMix, items, on, locked, waiting = false, onAdd }) {
+  const allOn = items.length > 0 && items.every((item) => on.has(String(item.productId).toLowerCase()));
+  const names = items.map((item) => item.product.name).join(', ');
+  return (
+    <div className="tech-protocol-addon">
+      <span className="tech-protocol-addon-text">
+        <span className="tech-protocol-addon-name">Weed spots</span>
+        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : [allOn ? 'On the sheet' : names, weedMix.note].filter(Boolean).join(' · ')}</span>
+      </span>
+      {items.length > 0 && !waiting && (
+        <Button
+          type="button"
+          variant="secondary"
+          className="tech-visit-action tech-protocol-addon-add"
+          aria-label={allOn ? 'Weed spots are on the sheet' : 'Add weed spots'}
+          disabled={locked || allOn}
+          onClick={() => items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds' }))}
+        >
+          {allOn ? '✓' : 'Add'}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// The catalog product a plan-shaped item stands for. A product the sheet's catalog does not list
+// still opens as a row, built from the item's name, like a planned row (plannedRows).
+const catalogProductFor = (item, catalog) => (catalog || []).find((product) => sameId(product.id, item.productId)) || { id: item.productId, name: item.name || 'Product' };
+
+// The guide's cards, or null while there is no guide.
+const guideCardsOf = (guide) => (guide ? guide.cards : null);
+
+// The plan's notes for the products a card offers (a watering hold), each once.
+const gateNotesOf = (items) => [...new Set(items.flatMap((item) => item.gateNotes || []))];
+
+// Every product a card offers is on the sheet (a half-added weed mix is not: its tap finishes it).
+const cardOnSheet = (card, on) => card.productIds.length > 0 && card.productIds.every((id) => on.has(String(id).toLowerCase()));
+
+// "Suggested from this lawn" (GATE_LAWN_TREATMENT_GUIDE): one card per photo finding. The server
+// decided every word and every product; this renders them and performs the taps. A card with a
+// check asks the tech to do it first: "Found at the edge. Add it" opens the product as a spot row (the
+// same path as a single add-on tap) and "Nothing found" dismisses the card. The weed card is the
+// Weed spots entry's own tap. Nothing is added by itself.
+function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }) {
+  const titleId = useId();
+  const cards = guideCardsOf(guide);
+  if (!cards) return null;
+  const visible = cards.filter((card) => checks[card.kind] !== 'none');
+  // Cards that were all dismissed leave nothing to show; a lawn with no findings says so.
+  if (cards.length && !visible.length) return null;
+  const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
+  // The tap adds what THIS card names (the fresh read), the weed card's rows as the entry's rows.
+  const add = (card) => {
+    card.items.forEach((item) => onAdd(catalogProductFor(item, catalog), { planned: item, guided: card.kind, ...(card.kind === 'weeds' ? { weedGroup: true } : {}) }));
+    if (card.check) onCheck(card.kind, 'found');
+  };
+  return (
+    <div className="tech-protocol-addons tech-guide" role="group" aria-labelledby={titleId}>
+      <div className="tech-protocol-addons-head">
+        <h4 id={titleId} className="tech-protocol-addons-title">Suggested from this lawn</h4>
+        <p className="tech-visit-muted">From the photos you confirmed. Tap what you applied.</p>
+      </div>
+      {!cards.length && <p className="tech-guide-empty tech-visit-muted" role="status">Nothing extra suggested from the photos.</p>}
+      {visible.map((card) => {
+        const onSheet = cardOnSheet(card, on);
         return (
-          <div key={item.productId} className="tech-protocol-addon">
-            <span className="tech-protocol-addon-text">
-              <span className="tech-protocol-addon-name">{item.product.name}</span>
-              <span className="tech-visit-muted">{onSheet ? 'On the sheet' : why}</span>
-            </span>
-            <Button
-              type="button"
-              variant="secondary"
-              className="tech-visit-action tech-protocol-addon-add"
-              aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}`}
-              disabled={locked || onSheet}
-              onClick={() => onAdd(item.product, { planned: item })}
-            >
-              {onSheet ? '✓' : 'Add'}
-            </Button>
+          <div key={card.kind} className="tech-guide-card" role="group" aria-label={`${card.title} suggestion`}>
+            <p className="tech-protocol-addon-name">{card.title}</p>
+            <p className="tech-visit-muted">{card.finding}</p>
+            {card.check && <p className="tech-guide-check">{card.check}</p>}
+            {card.detail && <p className="tech-visit-muted">{card.detail}</p>}
+            {gateNotesOf(card.items).map((gateNote) => <p key={gateNote} className="tech-visit-muted">{gateNote}</p>)}
+            {card.note && <p className="tech-visit-muted" role="status">{card.note}</p>}
+            {/* A check-only card (take-all, no trouble area on file) has no product to add. */}
+            <div className="tech-guide-actions">
+              {card.actionLabel && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="tech-visit-action tech-protocol-addon-add"
+                  aria-label={onSheet ? `${card.title}: on the sheet` : undefined}
+                  disabled={locked || onSheet}
+                  onClick={() => add(card)}
+                >
+                  {onSheet ? 'On the sheet' : card.actionLabel}
+                </Button>
+              )}
+              {card.dismissLabel && !onSheet && (
+                <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" disabled={locked} onClick={() => onCheck(card.kind, 'none')}>
+                  {card.dismissLabel}
+                </Button>
+              )}
+            </div>
           </div>
         );
       })}
@@ -1181,9 +1674,65 @@ function ProtocolAddOns({ addOns, month, rows, catalog, locked, onAdd }) {
   );
 }
 
+// "Chinch bugs found at the edge of damage": the standing entry of the optional list in every month (owner 2026-10-08).
+// Any chinch bugs the tech finds are treated in any month without asking the office; the photo
+// card is seasonal, this tap is not. The server picked the product (Arena, else the bifenthrin
+// product at the Arena yearly limit) and says why; with nothing to add it is a line only.
+function ChinchFoundEntry({ chinch, catalog, on, locked, waiting = false, onAdd }) {
+  const { item, note } = chinch;
+  const onSheet = !!item && on.has(String(item.productId).toLowerCase());
+  return (
+    <div className="tech-protocol-addon">
+      <span className="tech-protocol-addon-text">
+        <span className="tech-protocol-addon-name">Chinch bugs found at the edge of damage</span>
+        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : [item && `${item.name}, spot treatment`, ...(item?.gateNotes || []), note].filter(Boolean).join(' · ')}</span>
+      </span>
+      {item && !waiting && (
+        <Button
+          type="button"
+          variant="secondary"
+          className="tech-visit-action tech-protocol-addon-add"
+          aria-label={onSheet ? 'Chinch bug treatment is on the sheet' : 'Add chinch bug treatment'}
+          disabled={locked || onSheet}
+          onClick={() => onAdd(catalogProductFor(item, catalog), { planned: item, guided: 'chinch' })}
+        >
+          {onSheet ? '✓' : 'Add'}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// The area a spot row went down on: quick sizes and a typed box (owner 2026-10-08).
+function SpotAreaControl({ title = null, value, locked, onChange }) {
+  const areaId = useId();
+  return (
+    <div role="group" aria-label={title || 'Area treated'} className={title ? 'tech-spot-area tech-product-editor' : 'tech-spot-area'}>
+      {title && <p className="tech-product-editor-label">{title}</p>}
+      <label htmlFor={areaId} className="tech-product-editor-label">Area treated (sq ft)</label>
+      <div className="tech-visit-tile-grid">
+        {SPOT_AREA_SIZES.map((size) => (
+          <Chip disabled={locked} key={size} label={`${size.toLocaleString('en-US')} sq ft`} pressed={Number(value) === size} onClick={() => onChange(String(size))} />
+        ))}
+      </div>
+      <Input
+        id={areaId}
+        className="tech-visit-control tech-product-amount-input"
+        type="number"
+        inputMode="decimal"
+        min="0"
+        step="any"
+        disabled={locked}
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </div>
+  );
+}
+
 // A product: its name, how it goes down (the method chips, and the area it will
 // submit when the method needs one), the amount, and Remove.
-function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
+function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, onRemove }) {
   const nameId = useId();
   // The area this row will submit, named for what it is: "whole lawn" only when it
   // is the whole-lawn figure; a planned product's own smaller (or unchecked) area
@@ -1198,6 +1747,11 @@ function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
       </div>
       <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} layout="select" />
       {areaText && <p className="tech-visit-muted">{areaText}</p>}
+      {/* Spot rules: a weed-mix row reads the entry's shared area; any other spot row asks for its own. */}
+      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value })} />}
+      {row.spotRule && row.spotArea > 0 && <p className="tech-visit-muted">{`Spot area, ${row.spotArea.toLocaleString('en-US')} sq ft`}</p>}
+      {note && <p className="tech-visit-muted" role="status">{note}</p>}
+      {(row.gateNotes || []).map((gateNote) => <p key={gateNote} className="tech-visit-muted" role="status">{gateNote}</p>)}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
       {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
       {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}

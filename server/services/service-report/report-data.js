@@ -6,6 +6,7 @@ const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
 const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
 const { buildLawnPhotoSet } = require('./lawn-photo-set');
+const { frozenCoverageDefaultsOnly, coverageVerdictStamp } = require('./lawn-coverage-verdict');
 const { buildPhotoFindings, photoFindingsSignatureState } = require('./lawn-photo-findings');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
@@ -42,7 +43,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule, validateRule } = require('./lawn-watering-rule');
-const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold, SETUP_INVITE_LINE } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -1232,6 +1233,17 @@ function aggregateApplicationArea(applications, preferredUnits = []) {
   }, 0);
 }
 
+// A spot-treatment row (the method the server normalizes, so "Spot treatment" and "spot_spray" agree):
+// backpack work on a few square feet, not part of the lawn the visit treated. The "Sq ft" metric
+// counts the whole-lawn rows only, so a 250 sq ft weed spot never reads as 6,250 beside a 6,000 sq ft lawn.
+function isSpotApplication(app) {
+  // Only a RECORDED spot method: a legacy row with no stored method has one inferred from its
+  // category (every herbicide reads as a spot), and its area is a whole-lawn area.
+  if (app?.methodInferred === true) return false;
+  const { normalizeServiceReportApplicationMethod } = require('../complete-scheduled-service');
+  return normalizeServiceReportApplicationMethod(app?.method ?? app?.applicationMethod) === 'spot_treatment';
+}
+
 function metricValue(metric, context) {
   if (metric.key === 'on_site_min') return context.onSiteMin;
   if (metric.aggregate === 'count_zones') return `${context.treatedZoneIds.size}/${context.zones.length}`;
@@ -1246,7 +1258,7 @@ function metricValue(metric, context) {
     return total > 0 ? total : null;
   }
   if (metric.key === 'area_sqft') {
-    const total = Math.round(aggregateApplicationArea(context.applications, ['sqft']));
+    const total = Math.round(aggregateApplicationArea(context.applications.filter((app) => !isSpotApplication(app)), ['sqft']));
     return total > 0 ? total : null;
   }
   const value = context.serviceData?.[metric.key];
@@ -2204,6 +2216,9 @@ function stripLiveOnlyScheduleFields(data) {
   if (data.reportV2?.banner && typeof data.reportV2.banner === 'object') {
     delete data.reportV2.banner.forecastLine;
     delete data.reportV2.banner.observedRain;
+    // GATE_LAWN_REPORT_CLARITY: the sprinkler-setup invitation is a link to the
+    // portal, so it is live-only too.
+    delete data.reportV2.banner.setupLine;
   }
   // The lawn v6 copy's by-next-visit sentences are schedule content too: a
   // non-live render prints "What to expect" without them (lawn-copy-v6.js
@@ -2637,6 +2652,11 @@ function reportPlanRescheduleLive() {
   return typeof featureGates.reportPlanRescheduleLive === 'function' && featureGates.reportPlanRescheduleLive();
 }
 
+// GATE_LAWN_REPORT_CLARITY: read at call time; a partial feature-gates mock (or a missing export) means off.
+function lawnReportClarityLive() {
+  return typeof featureGates.lawnReportClarityLive === 'function' && featureGates.lawnReportClarityLive();
+}
+
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
@@ -2853,6 +2873,25 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES drops the PDF's coverage list, map and
+  // zone legend for a lawn visit whose coverage verdict, frozen at completion
+  // (structured_notes.lawnCoverageVerdict), says defaults only. The key reads
+  // that frozen value from the record itself (a cache-lookup caller's row is
+  // partial), never the live zone rows. The stamp rides only while the gate is
+  // live AND the frozen verdict is defaultsOnly, so a visit with no verdict (or
+  // marked zones) keeps its key; an unreadable record stamps a one-off key.
+  if (featureGates.lawnCoverageHideDefaultZonesLive()) {
+    try {
+      // The same notes snapshot the render reads (codex #6089): the caller's row
+      // when it carries structured_notes, the record only for a partial lookup row.
+      const notes = Object.prototype.hasOwnProperty.call(service, 'structured_notes')
+        ? service.structured_notes
+        : (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes;
+      irrigationStamp += coverageVerdictStamp(notes);
+    } catch {
+      irrigationStamp += `:covhide=err${crypto.randomBytes(4).toString('hex')}`;
+    }
+  }
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
@@ -3802,7 +3841,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
 // Runtime facts come from the same property_preferences row
 // portalIrrigationInches reads, and are withheld after a move
 // (scheduleUnconfirmed: the entries describe the former home).
-async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }) {
+//
+// forCompletion (the completion build that gets frozen, and the Fast Complete
+// preview of it): with GATE_LAWN_REPORT_CLARITY on, a water-in with no sprinkler
+// head type on file states the amount and no minutes. A later render that has to
+// regenerate (nothing frozen) passes nothing and never reads the gate, so a gate
+// flip cannot change what an unfrozen render prints or what its PDF key covers.
+async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion = false }) {
   const waterContext = lawnAssessment?.waterContext || {};
   let runtime = null;
   if (!waterContext.scheduleUnconfirmed) {
@@ -3829,6 +3874,7 @@ async function buildReportWateringInstruction({ products, service, completionTim
     })),
     completedAt: completionTime,
     runtime,
+    plainWhenNoSetup: forCompletion && lawnReportClarityLive(),
   });
 }
 
@@ -3871,6 +3917,17 @@ function bannerForecastExtras(instruction) {
   return forecastLine ? { forecastLine } : {};
 }
 
+// GATE_LAWN_REPORT_CLARITY: the invitation under an amount-only water-in (the
+// instruction was frozen without minutes because no sprinkler setup was on file).
+// Live view only, like the forecast sentence: stripLiveOnlyScheduleFields drops it
+// and it is never part of `lines`. Read at call time; only a frozen amountOnly
+// instruction can carry it, and the gate-off render has no key.
+function bannerSetupExtras(instruction) {
+  const waterIn = ['water_in', 'hold_then_water_in'].includes(instruction.state);
+  return instruction.amountOnly === true && waterIn && lawnReportClarityLive()
+    ? { setupLine: SETUP_INVITE_LINE } : {};
+}
+
 // The banner payload: one server-built object the client, PDF and (later)
 // the completion text all read. expiresAt is when the instruction lapses.
 // The plan-dependent sentence is composed here, from the weekly plan present on
@@ -3909,6 +3966,7 @@ function buildWateringBanner(instruction, weekPlan = null) {
     // from every non-live render by stripLiveOnlyScheduleFields, and it is
     // never part of `lines`. Gate off = no key.
     ...bannerForecastExtras(instruction),
+    ...bannerSetupExtras(instruction),
   };
 }
 
@@ -4251,10 +4309,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Every input read that feeds the lawn treatment-memory entry reports its
   // failure here (see failSoft); one entry blocks the first freeze.
   const readFailures = new Set();
+  // Feeds ONLY the write gate's freeze (opts.lawnCoverageOut): a failed zone or
+  // geometry read is not proof of default zones, so nothing is frozen. The
+  // render never reads it.
+  let coverageReadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
-    knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
-    knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
+    knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => { coverageReadFailed = true; return null; }),
+    knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => { coverageReadFailed = true; return []; }),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
@@ -4305,6 +4367,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     height: 340,
   }, { allOrNothing: true });
   const zones = resolvedDbZones.length ? resolvedDbZones : defaultZones(areaLabels, serviceLine);
+  // "Defaults" = no zone keeps a technician satellite mark AFTER drift
+  // resolution (the same predicate the satellite overlay uses: a non-empty
+  // geometry_image). Zone rows alone prove nothing: property-zones.js creates
+  // rows with only stock schematic geometry and clears geometry_image without
+  // deleting the row, and resolveZoneRowsImageDrift nulls untrusted marks.
+  // Out-param for the write gate, which freezes this verdict at completion
+  // (lawn-coverage-verdict.js). The render never decides from it.
+  if (serviceLine === 'lawn' && opts.lawnCoverageOut && typeof opts.lawnCoverageOut === 'object') {
+    opts.lawnCoverageOut.readOk = !coverageReadFailed;
+    opts.lawnCoverageOut.defaultsOnly = !resolvedDbZones.some((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0);
+  }
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
@@ -5434,7 +5507,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     geometryGeoJson: normalizeGeometry(zone.geometry_geojson) || undefined,
     geometryImage: parseJsonObject(zone.geometry_image),
   }));
-  const serviceCoverage = normalizeServiceCoverage({
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (owner 2026-10-06): a lawn visit with
+  // only schematic default zones shows no coverage section. The lawn is
+  // treated whole (the product card says "Your whole lawn").
+  // The verdict is the one frozen at completion; no frozen verdict (older
+  // visits, a failed freeze) renders exactly as with the gate off.
+  const hideDefaultLawnCoverage = serviceLine === 'lawn'
+    && featureGates.lawnCoverageHideDefaultZonesLive()
+    && frozenCoverageDefaultsOnly(structured);
+  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
@@ -5555,7 +5636,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // only from a complete rule set: a failed catalog read builds none).
           wateringInstruction = readFrozenWateringInstruction(structured)
             || (rulesUnknown ? null
-              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
+              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion: !!opts.wateringInstructionOut }));
         } catch { wateringInstruction = null; wateringInputsFailed = true; readFailures.add('watering_inputs'); }
         // An UNFROZEN render whose inputs could not be read omits the customer's
         // watering direction: serve it, never cache it, and let a pinned delivery
@@ -6578,6 +6659,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let upcomingVisitsCard = null;
   if (opts.mode === 'live' && opts.upcomingVisitsCard === true
     && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
+    // GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): a LAWN report's card shows one
+    // visit, the next upcoming LAWN visit at this property (never another
+    // line's). The card then starts EMPTY and stays empty when there is none (or
+    // a read fails), so the plan section falls back to no visit line rather than
+    // naming another line's visit in its place. Other lines are untouched.
+    const lawnOnly = serviceLine === 'lawn' && lawnReportClarityLive();
+    const visitCap = lawnOnly ? 1 : 6;
+    if (lawnOnly) upcomingVisitsCard = reportPlanRescheduleLive() ? { visits: [], merged: true } : { visits: [] };
     try {
       // Shared stamp → property_id → source_estimate_id resolver (codex
       // round-4 P1 — a FOURTH consecutive parallel reimplementation of
@@ -6712,7 +6801,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const propertyById = new Map();
         const estimateById = new Map();
 
-        for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
+        for (let page = 0; page < MAX_PAGES && matched.length < visitCap; page += 1) {
           const candidates = await knex('scheduled_services')
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>=', todayIso)
@@ -6775,7 +6864,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           }
 
           for (const row of candidates) {
-            if (matched.length >= 6) break;
+            if (matched.length >= visitCap) break;
+            if (lawnOnly && !isSameLineVisit(row, { serviceLine: 'lawn' })) continue;
             // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
             // property_id/source_estimate_id lookups below are cache hits
             // after the batched reads above.
@@ -7350,6 +7440,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     companionReports,
     metrics,
     mapSvg,
+    // Only present while GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES hides a lawn
+    // visit's default-zone coverage: the PDF then prints no schematic map or
+    // A-D legend either (they come from the same default zones). Absent = the
+    // payload is byte-identical to before.
+    ...(hideDefaultLawnCoverage ? { lawnCoverageHidden: true } : {}),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {
@@ -7593,6 +7688,7 @@ module.exports = {
   taggedNoteLines,
   minutesFromElapsed,
   methodFromProduct,
+  metricValue,
   inferCatalogProductType,
   approvedReportProductFacts,
   withApplicationHold,

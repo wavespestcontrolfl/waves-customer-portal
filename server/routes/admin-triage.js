@@ -18,6 +18,32 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Cards whose payload.customer_ids lists the customers to open: the list resolves each to its live merge
+// survivor (owed_customer_open_ids).
+const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];
+// Cards only an admin sees and settles: property-role proposals embed the customer's other property
+// addresses, and a family-account suggestion lists customers and the caller's number for the office to
+// link. Hidden from the tech list and counts, and refused on every shared transition.
+// Cards whose transitions must carry the version (expected_updated_at) the operator saw: a reprocess
+// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion).
+const VERSION_BOUND_REASONS = [
+  'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
+  'auto_booking_skipped_after_approval', 'missing_first_name', 'family_account_candidates',
+];
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];
+// Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
+// the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
+// what the card asks).
+const NOT_A_VERDICT_MESSAGES = {
+  email_bounce_reverify: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.',
+  property_role_confirm: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.',
+  reschedule_link_promise: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.',
+  attached_booking_followup_unbooked: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.',
+  missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
+  family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.',
+};
+
+
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
 // Match the booking/estimate address-confirmation notices before applying the
@@ -254,7 +280,7 @@ router.get('/', async (req, res) => {
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('triage_items.reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS);
       })
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
@@ -295,7 +321,7 @@ router.get('/', async (req, res) => {
       .select('status')
       .count('* as n')
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('reason_code', ADMIN_ONLY_REASONS);
       })
       .groupBy('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, dismissed: 0 };
@@ -344,7 +370,7 @@ router.get('/', async (req, res) => {
 
     // A first-name card's "Open customer" links must reach an editable record: a listed customer
     // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
-    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
+    const nameCards = items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code));
     if (nameCards.length) {
       const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
       for (const item of nameCards) {
@@ -355,6 +381,10 @@ router.get('/', async (req, res) => {
         }
       }
     }
+
+    // The second-contact "Save to notes" action: the server's own rule decides
+    // which cards qualify, so the screen holds no second copy of it.
+    stampSaveContactNote(items);
 
     res.json({ items, counts });
   } catch (err) {
@@ -522,7 +552,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // newer one. Same rule as Apply — required (the lane is dark, no
     // legacy clients); checked under the lock.
     if (beforeTransition) await beforeTransition(trx);
-    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
+    // Row-locked (after the advisory lock and the hold rows: the GLOBAL LOCK
+    // ORDER above): the processor's reprocess refresh updates this open row
+    // WITHOUT the advisory lock, so an unlocked read let a refresh commit
+    // between the version check and the update below and be closed unseen.
+    // Locked, a refresh either committed first (the version check refuses) or
+    // waits for this transaction and then finds no open row to merge into.
+    const live = await trx('triage_items').where({ id }).forUpdate().first('updated_at', 'payload');
     // Promise cards can gain another commitment while this action waits for
     // the call lock. The operator must review that newer payload before a
     // Resolve/Dismiss settles every commitment now attached to the card.
@@ -533,19 +569,10 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // force-reprocess refreshes in place: "Follow-up booked" on the old
     // screen must not settle the newer obligation (pre-push audit P1 after
     // r27).
-    if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
-      || item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'attached_booking_followup_unbooked'
-      // …and the recovery task a settlement refreshes in place (window,
-      // address, retained visit) — a stale click must not close the newer
-      // obligation (codex r30 P1).
-      || item.reason_code === 'auto_booking_skipped_after_approval'
-      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
-      // Resolve / Dismiss must not settle a customer the operator never saw.
-      || item.reason_code === 'missing_first_name'
-      // …and email review cards (codex round-3 P1): the client already
-      // sends expected_updated_at on every resolve/dismiss, so a stale view
-      // of a card whose evidence has since changed refuses instead of
-      // settling evidence the operator never saw.
+    // VERSION_BOUND_REASONS: property-role, reschedule-promise, house-number-conflict, attached-follow-up,
+    // recovery-task, owed-first-name and family-account cards, each of which a reprocess refreshes in
+    // place — a stale Resolve / Dismiss must not settle evidence the operator never saw.
+    if (VERSION_BOUND_REASONS.includes(item.reason_code)
       || emailReviewCard
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
@@ -765,7 +792,7 @@ async function transition(req, res, nextStatus) {
   // property correction through these shared transitions either.
   if (req.techRole !== 'admin') {
     const guarded = await db('triage_items').where({ id }).first('reason_code');
-    if (guarded && guarded.reason_code === 'property_role_confirm') {
+    if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {
       return res.status(403).json({ error: 'Admin access required' });
     }
     // A missing first name is settled on the customer record, which only an admin edits:
@@ -1513,6 +1540,126 @@ router.post('/:id/apply-property-roles', async (req, res) => {
   }
 });
 
+// What a secondary_contact_captured card lets the office file as a note: a card
+// that names exactly ONE person, who is not a message recipient. The entry list
+// is the one the card shows: the singleton plus secondary_contacts after its
+// first entry (entry 0 is the raw V2 mirror of the singleton, never written).
+// Anything more, a contact the slot writer owns (wants_notifications, an
+// on-site opt-in candidate) or a missing name/phone/email is refused whole, so
+// a card is never closed over a party that was not filed. The list route
+// stamps the verdict on each card (can_save_contact_note) for the screen.
+function stampSaveContactNote(items) {
+  for (const item of items) {
+    if (item.reason_code !== 'secondary_contact_captured') continue;
+    const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+    item.can_save_contact_note = !secondContactNote(payload).refusal;
+  }
+}
+
+function secondContactNote(payload) {
+  const { isImpossibleNanpPhone } = require('../utils/phone');
+  const oneLine = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const c = payload?.secondary_contact;
+  const more = Array.isArray(payload?.secondary_contacts) ? payload.secondary_contacts.slice(1).filter(Boolean) : [];
+  if (!c || typeof c !== 'object') return { refusal: 'Card names no contact' };
+  if (more.length || payload.other_parties_mentioned === true) {
+    return { refusal: 'Card names more than one person — add them to the customer by hand' };
+  }
+  if (['wants_notifications', 'wants_appointment_texts', 'on_site', 'is_billing_party'].some((flag) => c[flag] === true)) {
+    return { refusal: 'This person gets messages, is on site or pays the bill — they are not a plain note' };
+  }
+  const name = oneLine(c.name_full || [c.first_name, c.last_name].filter(Boolean).join(' '));
+  const rawPhone = oneLine(c.phone || c.phone_e164);
+  // A phone no NANP line can have is dropped, like the slot writer does.
+  const phone = rawPhone && !isImpossibleNanpPhone(rawPhone) ? rawPhone : '';
+  const email = oneLine(c.email);
+  if (!name || (!phone && !email)) return { refusal: 'Card names no contact with a name and a phone or email' };
+  const role = oneLine(c.role).toLowerCase().replace(/_/g, ' ');
+  const who = ['', 'unknown'].includes(role) ? name : `${name} (${role})`;
+  const notes = oneLine(c.notes);
+  return { line: `Contact named on call (not a message recipient): ${[who, phone, email].filter(Boolean).join(' · ')}.${notes ? ` ${notes}` : ''}`.slice(0, 500) };
+}
+
+// POST /api/admin/triage/:id/save-contact-note   { expected_updated_at }
+// One tap on a secondary_contact_captured card: files the one person it names
+// as a dated line in the linked customer's crm_notes (the notes Customer 360
+// shows and edits) and resolves the card. A PURE internal note — it never
+// touches the service-contact slots, the customer's own phone/email or any
+// consent column, and sends nothing; the pipeline's slot write
+// (persistCallSecondaryContact) stays the only path that makes a named person
+// a message recipient. Idempotent: a line already in the notes is not added
+// twice. Settled through transitionCore with requireVersion, so a card a
+// reprocess refreshed since it was displayed is a 409.
+//
+// LOCK ORDER as apply-property-roles / the Customer 360 PATCH: customers row
+// FIRST, then (inside transitionCore) the call advisory lock, then the
+// call_log row. The call_log row lock is the relink fence: the relink
+// (admin-call-recordings PUT /calls/:id/customer) updates call_log without the
+// call advisory lock, but it must wait on this row, and a relink that
+// committed before it is seen as a changed customer_id and 409s.
+router.post('/:id/save-contact-note', async (req, res) => {
+  try {
+    // Customer notes are admin-territory, like the property-role apply.
+    if (req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid card id' });
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
+    }
+    if (item.reason_code !== 'secondary_contact_captured') {
+      return res.status(400).json({ error: 'Not a second-contact card' });
+    }
+    if (!item.call_log_id) return res.status(409).json({ error: 'This card has no call to take a customer from' });
+    const parsed = (row) => (typeof row.payload === 'string' ? (() => { try { return JSON.parse(row.payload); } catch { return null; } })() : row.payload);
+    const early = secondContactNote(parsed(item));
+    if (early.refusal) return res.status(400).json({ error: early.refusal });
+
+    let result;
+    await db.transaction(async (trx) => {
+      const call = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
+      const customer = call?.customer_id
+        ? await trx('customers').where({ id: call.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'crm_notes')
+        : null;
+      if (!customer) {
+        throw Object.assign(new Error('This call has no linked customer — link the call to a customer first'), { noCustomer: true });
+      }
+      result = await transitionCore({
+        id: item.id, nextStatus: 'resolved', note: 'contact saved to customer notes', assignedTo: req.technicianId,
+        expectedUpdatedAt: req.body?.expected_updated_at || null, conn: trx, requireVersion: true,
+        beforeTransition: async (t) => {
+          const live = await t('call_log').where({ id: item.call_log_id }).forUpdate().first('customer_id');
+          if (!live || String(live.customer_id) !== String(customer.id)) {
+            throw Object.assign(new Error('the call was relinked to another customer — reload and retry'), { conflict: true });
+          }
+        },
+        afterTransition: async (t) => {
+          // The LIVE payload, under the locks: transitionCore already proved it is the version displayed.
+          const livePayload = parsed(await t('triage_items').where({ id: item.id }).first('payload'));
+          const { line, refusal } = secondContactNote(livePayload);
+          if (refusal) throw Object.assign(new Error(refusal), { refused: true });
+          // The call's Eastern day: an evening call is already the next day in UTC.
+          const callDay = require('../utils/datetime-et').etDateString(new Date(call.created_at));
+          const notes = require('../services/call-profile-enrichment').appendWithProvenance(customer.crm_notes, line, callDay, '\n\n');
+          // crm_notes only — no slot, phone/email or consent column.
+          if (notes !== customer.crm_notes) await t('customers').where({ id: customer.id }).update({ crm_notes: notes, updated_at: new Date() });
+          // Ids only: the contact's name, phone and email stay out of logs.
+          logger.info(`[admin-triage] save-contact-note card=${item.id} customer=${customer.id}`);
+        },
+      });
+    });
+    return sendTransitionResult(res, result, item.id, 'resolved');
+  } catch (err) {
+    if (err.noCustomer || err.conflict) return res.status(409).json({ error: err.message });
+    if (err.refused) return res.status(400).json({ error: err.message });
+    // Code/name only: a knex message embeds the bound note text.
+    logger.error(`[admin-triage] save-contact-note failed: ${err.code || err.name || 'error'}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to save contact note' });
+  }
+});
+
 // Is the customer's LIVE address one of the two premises the reviewer
 // compared (the office adopted the caller's number, or the on-file line
 // was retyped)? Street line, unit (explicit or embedded) and locality all
@@ -1847,31 +1994,11 @@ router.post('/:id/verdict', async (req, res) => {
     // arrive DAYS after the call and say nothing about whether the AI routed
     // it correctly. They resolve individually via /resolve; recording an
     // accept/deny on one would pollute route_feedback calibration.
-    if (item.reason_code === 'email_bounce_reverify') {
-      return res.status(400).json({ error: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.' });
-    }
-    // Property-role cards are pending DATA changes, not call-routing
-    // judgments — they apply via /apply-property-roles or dismiss.
-    if (item.reason_code === 'property_role_confirm') {
-      return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
-    }
-    // A parked reschedule-link promise is exception handling on an
-    // OBLIGATION, not a call-routing judgment — and settling it (see
-    // transitionCore) needs the single-card Resolve/Dismiss transition, not
-    // a call-level cascade that never touches the underlying commitment.
-    if (item.reason_code === 'reschedule_link_promise') {
-      return res.status(400).json({ error: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.' });
-    }
-    // An owed follow-up visit is booked by hand and settled by its own
-    // Resolve — a call verdict says nothing about visit 2 and the bulk
-    // resolve below leaves this card out on purpose (codex r10 P1).
-    if (item.reason_code === 'attached_booking_followup_unbooked') {
-      return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
-    }
-    // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
-    // customer record, not a routing judgment — a verdict would close it without a name.
-    if (item.reason_code === 'missing_first_name') {
-      return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
+    // Cards that are not a call verdict (bounced-email follow-up, property roles, a parked reschedule-link
+    // promise, an owed follow-up visit, an owed first name, a family-account suggestion): see
+    // NOT_A_VERDICT_MESSAGES. Their bulk-resolve exclusions are listed below.
+    if (NOT_A_VERDICT_MESSAGES[item.reason_code]) {
+      return res.status(400).json({ error: NOT_A_VERDICT_MESSAGES[item.reason_code] });
     }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
@@ -2114,6 +2241,8 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          // …and a family-account suggestion, which only a link (or its own Resolve / Dismiss) settles.
+          'family_account_candidates',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])
@@ -2443,4 +2572,5 @@ module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
-  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL };
+  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL,
+  stampSaveContactNote };

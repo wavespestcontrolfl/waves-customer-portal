@@ -1675,8 +1675,12 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // outage — its plan is known not to apply — so the add-on line governs.
   const protocolLine = planned || lawnPlan?.error ? null : addonLine;
   const plan = protocolLine ? null : lawnPlan;
-  const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
-  const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
+  // A v13 spot row has no quantity, but it states the program's rate (Arena 0.147 oz, not the catalog's 0.29 oz).
+  const plannedRate = planned?.mix?.ratePer1000 != null ? planned.mix : planned?.spot?.ratePer1000 != null ? planned.spot : null;
+  const ratePer1000 = plannedRate ? plannedRate.ratePer1000 : product.default_rate_per_1000;
+  // The spot row's rate is stated over its own carrier (Arena 0.147 oz in 4 gal per 1,000 sq ft): the dose uses it, not the rig's or the window's.
+  const rowCarrier = plannedRate && plannedRate === planned?.spot ? Number(planned.spot.carrierGalPer1000) : null;
+  const rateUnit = plannedRate?.rateUnit || product.rate_unit;
   // Pest / tree products whose label rate is per gallon of finished spray
   // (default_rate "X" or "X-Y" + default_unit "<unit>/gal") dilute straight
   // into the tank — no carrier calibration involved.
@@ -1750,7 +1754,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   ].find(([applies]) => applies);
   const mix = withheld
     ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
-    : (perGallon ? buildPerGallonAmount(perGallon, volume) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons: volume }));
+    : (perGallon ? buildPerGallonAmount(perGallon, volume) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
   const packSizes = await loadPackSizes(dbh, [product.id]);
   // The label rate is itself a dosing instruction: it rides only with a
   // permitted amount, never alongside a withheld one.

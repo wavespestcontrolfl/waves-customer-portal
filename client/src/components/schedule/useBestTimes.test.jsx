@@ -192,11 +192,14 @@ it('best rows send the booking\'s services on every request, the week fallback i
   const { result } = renderHook(() => useBestTimes({
     summary: true, bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
     serviceTypes: ['General Pest Control', 'WDO Inspection'],
+    serviceKeys: ['pest_general_quarterly', ''],
   }));
   await waitFor(() => expect(result.current.availability).not.toBeNull());
   expect(fetch).toHaveBeenCalledTimes(2);
   for (const call of fetch.mock.calls) {
     expect(JSON.parse(call[1].body).serviceTypes).toEqual(['General Pest Control', 'WDO Inspection']);
+    // The selected catalog rows' keys ride in the same order (Codex #6120 r1).
+    expect(JSON.parse(call[1].body).serviceKeys).toEqual(['pest_general_quarterly', '']);
   }
 });
 
