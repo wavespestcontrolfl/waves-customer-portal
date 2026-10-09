@@ -53,16 +53,18 @@ async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
 }
 
 // The same canonical current-assignment predicate as loadOwnedVisitOr403, as
-// SQL on the visit alias (own row, not a dead status, inside the window), so a
-// read is coupled to the CURRENT assignment in its own query. An admin reads
-// any visit. One definition for every guarded read in this router.
-function scopeToCurrentAssignment(query, req, alias) {
+// SQL on the visit table aliased `ss` (own row, not a dead status, inside the
+// window), so a read is coupled to the CURRENT assignment in its own query. An
+// admin reads any visit. One definition for every guarded read in this router;
+// each caller aliases its visit table as `ss`. The three predicates travel
+// together and their text is pinned (technician-scope-r8-sweep.test.js).
+function scopeToCurrentAssignment(q, req) {
   if (req.techRole !== 'admin') {
-    query.where(`${alias}.technician_id`, req.technicianId)
-      .whereNotIn(`${alias}.status`, TECH_DEAD_ASSIGNMENT_STATUSES)
-      .where(`${alias}.scheduled_date`, '>=', techAccessCutoff());
+    q.where('ss.technician_id', req.technicianId)
+      .whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+      .where('ss.scheduled_date', '>=', techAccessCutoff());
   }
-  return query;
+  return q;
 }
 
 // POST /api/admin/consultations/:scheduledServiceId/outcome
@@ -111,7 +113,7 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
     const q = db('consultation_outcomes as co')
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
       .where('co.scheduled_service_id', scheduledServiceId);
-    scopeToCurrentAssignment(q, req, 'ss');
+    scopeToCurrentAssignment(q, req);
     const row = await q.first('co.*');
     if (!row) {
       // Reassigned in between → the same 403 the check gives; else 404.
@@ -141,7 +143,7 @@ router.get('/:scheduledServiceId/estimate', adminAuthenticate, requireTechOrAdmi
     // assignment (the outcome read's own guard): a technician reassigned after
     // the check above gets no estimate.
     const visit = await scopeToCurrentAssignment(
-      db('scheduled_services as ss').where('ss.id', scheduledServiceId), req, 'ss',
+      db('scheduled_services as ss').where('ss.id', scheduledServiceId), req,
     ).first('ss.id', 'ss.customer_id', 'ss.source_estimate_id');
     if (!visit) {
       // Reassigned in between → the same 403 the check gives; else 404.

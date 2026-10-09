@@ -359,6 +359,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/communications/scheduled` | admin-communications |
 | DELETE | `/api/admin/communications/scheduled/:id` | admin-communications |
 | GET | `/api/admin/communications/template-performance` | admin-communications |
+| GET | `/api/admin/consultations/:scheduledServiceId/estimate` | admin-consultations |
 | GET | `/api/admin/dashboard-ops/field-leads` | admin-dashboard-ops |
 | GET | `/api/admin/dashboard-ops/inbox` | admin-dashboard-ops |
 | POST | `/api/admin/dashboard-ops/inbox/:id/read` | admin-dashboard-ops |
