@@ -110,14 +110,46 @@ async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile
  * identity (`ownServiceKey`) is whatever it already is; every sold area add-on
  * it does not carry becomes an add-on row on it.
  */
-async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownServiceKey = null }) {
+// Minutes an existing appointment holds: its recorded duration, else its window.
+function bookedVisitMinutes(row = {}) {
+  const recorded = Number(row.estimated_duration_minutes);
+  if (recorded > 0) return recorded;
+  const toMinutes = (value) => {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ''));
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  };
+  const start = toMinutes(row.window_start);
+  const end = toMinutes(row.window_end);
+  return start !== null && end !== null && end > start ? end - start : 0;
+}
+
+function needsNewSlotError(needed, booked) {
+  const err = new Error(`The existing appointment holds ${booked || 'an unknown number of'} minutes and the add-on treatments need ${needed}. Book a new time for this estimate.`);
+  err.status = 409;
+  err.statusCode = 409;
+  err.code = 'AREA_ADDON_VISIT_NEEDS_NEW_SLOT';
+  err.isOperational = true;
+  return err;
+}
+
+// Adopting an appointment that already exists never resizes it, so sold add-on
+// work is attached only when the appointment already holds the whole visit
+// (the sum the slot profile sizes a fresh booking to). A shorter or unsized
+// appointment fails the accept closed: a new slot must be chosen, rather than
+// 90 minutes of treatments riding a 30-minute stop into the next booking.
+async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownServiceKey = null, adoptedRow = {} }) {
   // Lazy: estimate-slot-availability loads slot-reservation, which loads this module.
   const profile = require('./estimate-slot-availability').resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+  if (areaAddOnProfileRows(profile).length === 0) return 0;
+  const needed = Number(profile.durationMinutes) || 0;
+  const booked = bookedVisitMinutes(adoptedRow);
+  if (!(booked >= needed)) throw needsNewSlotError(needed, booked);
   return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey });
 }
 
 module.exports = {
   writeAdoptedAreaAddOns,
+  bookedVisitMinutes,
   AREA_ADDON_ENGINE_KEY,
   primaryProfileService,
   areaAddOnProfileRows,

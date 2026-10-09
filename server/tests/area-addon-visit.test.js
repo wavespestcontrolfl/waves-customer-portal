@@ -239,6 +239,45 @@ describe('B. every add-on other than the visit\'s own becomes a structured row',
   });
 });
 
+describe('adopting an existing appointment never squeezes the add-on visit into a shorter stop', () => {
+  test('booked minutes come from the recorded duration, else the window', () => {
+    expect(rows.bookedVisitMinutes({ estimated_duration_minutes: 90, window_start: '09:00', window_end: '09:30' })).toBe(90);
+    expect(rows.bookedVisitMinutes({ window_start: '09:00:00', window_end: '10:30:00' })).toBe(90);
+    expect(rows.bookedVisitMinutes({ window_start: '10:00', window_end: '09:00' })).toBe(0);
+    expect(rows.bookedVisitMinutes({})).toBe(0);
+  });
+
+  test('a shorter or unsized appointment fails the accept closed and writes nothing', async () => {
+    const { estimate } = oneTimeEstimate(THREE);
+    const needed = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' }).durationMinutes;
+    expect(needed).toBeGreaterThan(60);
+    for (const adoptedRow of [{ estimated_duration_minutes: 60 }, { window_start: '09:00', window_end: '09:30' }, {}]) {
+      const trx = fakeTrx({ catalog: catalogFor(KEYS) });
+      await expect(rows.writeAdoptedAreaAddOns(trx, { scheduledServiceId: 'visit-1', estimate, adoptedRow }))
+        .rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_VISIT_NEEDS_NEW_SLOT' });
+      expect(trx.state.addons).toEqual([]);
+    }
+  });
+
+  test('an appointment that already holds the whole visit takes the add-on rows', async () => {
+    const { estimate } = oneTimeEstimate(THREE);
+    const needed = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' }).durationMinutes;
+    const trx = fakeTrx({ catalog: catalogFor(KEYS) });
+    await rows.writeAdoptedAreaAddOns(trx, {
+      scheduledServiceId: 'visit-1', estimate, ownServiceKey: KEYS[0], adoptedRow: { estimated_duration_minutes: needed },
+    });
+    // The appointment's own service is not repeated as a row.
+    expect(trx.state.addons.map((r) => r.service_key_snapshot)).toEqual(KEYS.slice(1));
+  });
+
+  test('an estimate with no area add-on adopts as before, whatever the appointment length', async () => {
+    const estimate = { service_interest: 'One-time service', estimate_data: { result: { oneTime: { total: 150, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 150 }] } } } };
+    const trx = fakeTrx();
+    await expect(rows.writeAdoptedAreaAddOns(trx, { scheduledServiceId: 'visit-1', estimate, adoptedRow: {} })).resolves.toBe(0);
+    expect(trx.state.addons).toEqual([]);
+  });
+});
+
 describe('the completion invoice equals the one-time total with no double count', () => {
   const InvoiceService = require('../services/invoice');
   // The visit row and its add-on rows as the accept leaves them: estimated_price is

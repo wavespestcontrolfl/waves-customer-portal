@@ -19895,6 +19895,8 @@ async function writeAdoptedAreaAddOnRows(trx, { treatAsOneTime, appointmentId, e
     scheduledServiceId: appointmentId,
     estimate,
     ownServiceKey: updates.service_key_snapshot || lockedAdoptRow.service_key_snapshot || lockedAdoptRow.catalog_service_key || null,
+    // The window this accept writes wins over the row's stored one.
+    adoptedRow: { ...lockedAdoptRow, ...updates },
   });
 }
 
