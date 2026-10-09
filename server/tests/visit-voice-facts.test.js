@@ -819,6 +819,30 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(readSweep('Swept the eaves, will spray tomorrow.', { done: true, quote: 'Swept the eaves' })).toEqual({ quote: 'swept the eaves' });
   });
 
+  // Codex round 2 on #6147.
+  test.each([
+    ['another action stands between the removal and the webs', 'Removed ant bait stations and sprayed the webs on the eaves.'],
+    ['the sweep is said as not completed', 'Sweeping the eaves was not completed.'],
+    ['the sweep is said as not performed', 'Web sweep was not performed.'],
+    ['the sweep is called incomplete', 'Web sweep incomplete, ladder was locked up.'],
+    ['a word that only contains "web"', 'Removed the Weber grill from the lanai.'],
+    ['the webs were not swept', 'Sprayed the perimeter. Webs were not swept.'],
+    ['the webs wait for another day', 'Webs will be swept next time.'],
+    ['a sweep only if needed', 'Will knock down webs if needed.'],
+  ])('no sweep when %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+
+  test.each([
+    ['a prior day said of an earlier look, then today\'s sweep', 'Yesterday inspected the eaves and swept the eaves today.'],
+    ['one sweep denied and another done', "Didn't sweep the rear eaves, but swept the front eaves."],
+    ['a dewebbing', 'Dewebbed the lanai and entry.'],
+    ['cobwebs knocked down', 'Knocked down the cobwebs today and sprayed the perimeter.'],
+    ['spider webs brushed off', 'Brushed spider webs off the front entry.'],
+  ])('a sweep stands with %s', (_label, note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
+  });
+
   test('webs only seen are not a sweep', () => {
     const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
     expect(said(note, 'Saw webs on the eaves')).toBeNull();

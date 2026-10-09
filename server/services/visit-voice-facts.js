@@ -215,7 +215,7 @@ function nameAssertion(name) {
 // Whether the note denies what a quote asserts at every place the quote
 // appears. A quote with no assertion is read whole: a denial in it, right
 // before it or right after it.
-function deniedInNote(quote, note, { assertion, denialAfter, denialBefore = DENIAL_RIGHT_BEFORE_RE, otherDay = notToday }) {
+function deniedInNote(quote, note, { assertion, denialAfter }) {
   const span = assertion(quote);
   const from = span ? span.offset : 0;
   const to = span ? span.offset + span.length : quote.length;
@@ -226,8 +226,8 @@ function deniedInNote(quote, note, { assertion, denialAfter, denialBefore = DENI
     // Said for another day where it stands in the note ("will spray inside
     // tomorrow" quoted as "spray inside") reads as not done today (pre-push
     // P1 on #5538).
-    const denied = denialBefore.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to))
-      || (!!span && otherDay(note, at + from));
+    const denied = DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to))
+      || (!!span && notToday(note, at + from));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
   }
@@ -735,9 +735,10 @@ function readSpray(spray, grounding) {
 // fascia), so "saw webs on the eaves" (a sighting) and "swept the lanai" (no
 // web, no eave) never count. An eave with no web is not enough when the quote
 // speaks of a nest or wasps: "removed a wasp nest from the eaves" is not a web
-// sweep. See sweepAssertion.
+// sweep. See sweepAssertions.
 const SWEEP_ACTION_RE = /\b(?:swe(?:ep|pt|eping)s?|brush(?:ed|es|ing)?|knock(?:ed|s|ing)?\s+(?:down|off|out)|remov(?:e|ed|es|ing)|clear(?:ed|s|ing)?|clean(?:ed|s|ing)?|wip(?:ed|es|ing)|tak(?:e|es|ing)\s+down|took\s+down|de-?web(?:bed|bing|s)?)\b/;
-const SWEEP_WEB_RE = /\b[a-z-]*web[a-z]*\b/;
+// Webs by their own names only: "Weber grill" is no web (Codex P2 on #6147).
+const SWEEP_WEB_RE = /\b(?:cob\s?webs?|spider\s?webs?|webs?|webbing)\b/;
 const SWEEP_EAVE_RE = /\b(?:eaves?|soffits?|fascia)\b/;
 const SWEEP_NEST_RE = /\b(?:nests?|hives?|wasps?|hornets?|bees?|daubers?)\b/;
 // With no web named, only a sweeping word makes an eave a sweep: "cleaned the
@@ -749,56 +750,94 @@ const SWEEP_BRUSH_RE = /\b(?:swe(?:ep|pt|eping)s?|brush(?:ed|es|ing)?|knock(?:ed
 const SWEEP_DENIAL_FILLER = String.raw`to|us|me|them|him|her|you|able|get|got|any|the|a|an|of|be|been|need|needed|necessary|want|wanted|have|has|had|asked|told|allowed|let|manage|managed|time|chance|around|really|even|webs?|cobwebs?|spider\s*webs?|eaves?|soffits?`;
 const SWEEP_DENIAL_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|unable|asked\s+(?:us\s+)?not)\b(?:\s+(?:${SWEEP_DENIAL_FILLER})){0,6}\s+$`);
 const all = (re, text) => [...text.matchAll(new RegExp(re.source, 'g'))];
-const SWEEP_SENTENCE_BREAK_RE = /[.;!?\n]/;
-// The sweep a quote asserts: a removal action TIED to the web or eave it
-// removes, with nothing between the two that is only looking ("removed a wasp
-// nest and saw webs on the eaves" saw the webs, Codex P2 on #6147) and no
-// sentence end. A web takes any removal action; an eave with no web needs a
-// sweeping word and a quote with no nest or wasp in it.
-function sweepAssertion(quote) {
-  const tied = (action, thing) => {
-    const [low, high] = action.index < thing.index
-      ? [action.index + action[0].length, thing.index]
-      : [thing.index + thing[0].length, action.index];
-    const gap = quote.slice(low, high);
-    return !OBSERVATION_WORDS_RE.test(gap) && !SWEEP_SENTENCE_BREAK_RE.test(gap);
-  };
+// What may not stand between a removal action and the web or eave it removes:
+// the end of a clause, a look, another action (a treatment, another removal),
+// a denial or a word of intent. Each means the action is not of that web:
+// "removed ant bait stations and sprayed the webs", "removed a wasp nest and
+// saw webs", "webs were not swept", "webs will be swept" (Codex P2s on #6147).
+const SWEEP_GAP_BREAK_RE = /[.,;!?\n]/;
+const SWEEP_OTHER_ACTION_RE = /\b(?:spray(?:ed|ing|s)?|treat(?:ed|ing|s)?|bait(?:ed|ing)|dust(?:ed|ing)|appl(?:y|ied|ying)|plac(?:ed|ing)|spread(?:ing)?)\b/;
+const SWEEP_INTENT_RE = /\b(?:will|shall|gonna|going\s+to|needs?|needed|should|would|could|might|may|wants?|wanted|plan(?:s|ned|ning)?|if)\b/;
+const SWEEP_GAP_MAX_WORDS = 6;
+const SWEEP_DEWEB_RE = /^de-?web/;
+function sweepTie(quote, action, thing) {
+  const [low, high] = action.index < thing.index
+    ? [action.index + action[0].length, thing.index]
+    : [thing.index + thing[0].length, action.index];
+  const gap = quote.slice(low, high);
+  const broken = [SWEEP_GAP_BREAK_RE, OBSERVATION_WORDS_RE, SWEEP_OTHER_ACTION_RE, SWEEP_ACTION_RE, DENIAL_IN_RE, SWEEP_INTENT_RE]
+    .some((re) => re.test(gap));
+  if (broken || gap.trim().split(/\s+/).filter(Boolean).length > SWEEP_GAP_MAX_WORDS) return null;
+  const offset = Math.min(action.index, thing.index);
+  return { offset, length: Math.max(action.index + action[0].length, thing.index + thing[0].length) - offset };
+}
+// Every sweep a quote asserts, each the words from its removal action to the
+// web or eave it removes (either order). A web takes any removal action; an
+// eave with no web needs a sweeping word and a quote with no nest or wasp in
+// it; "dewebbed" says its own web.
+function sweepAssertions(quote) {
   const webs = all(SWEEP_WEB_RE, quote);
   const eaves = SWEEP_NEST_RE.test(quote) ? [] : all(SWEEP_EAVE_RE, quote);
-  const action = all(SWEEP_ACTION_RE, quote).find((m) => webs.some((web) => tied(m, web))
-    || (SWEEP_BRUSH_RE.test(m[0]) && eaves.some((eave) => tied(m, eave))));
-  return spanOf(action);
+  return all(SWEEP_ACTION_RE, quote).flatMap((action) => {
+    const things = [...webs, ...(SWEEP_BRUSH_RE.test(action[0]) ? eaves : [])];
+    const spans = things.map((thing) => sweepTie(quote, action, thing)).filter(Boolean);
+    return SWEEP_DEWEB_RE.test(action[0]) ? [spanOf(action), ...spans] : spans;
+  });
 }
 
-// Whether a sweep is said for another day. A time word ("last visit",
-// "tomorrow") is the sweep's when it follows the sweep with no other action
-// or look between them ("swept the eaves last visit"), or when it opens the
-// clause ("last visit we swept the eaves"). One that follows another action or
-// look is that one's: "inspected the eaves last visit and swept the eaves
-// today" swept today (Codex P2 on #6147).
-function sweepNotToday(text, at) {
-  const { from, to } = clauseBounds(text, at);
-  if (FUTURE_BEFORE_RE.test(text.slice(from, at))) return true;
+// Whether a sweep (the words from `start` to `end` in the note) is said for
+// another day. "Today" or "this visit" said after it, with no other action or
+// look between, makes it today's. Else a time word ("last visit", "tomorrow")
+// is the sweep's when it follows the sweep with no other action or look
+// between them ("swept the eaves last visit"), or when it opens the clause
+// ("last visit we swept the eaves"). One that follows another action or look
+// is that one's: "inspected the eaves last visit and swept the eaves" swept.
+const SWEEP_TODAY_RE = /\b(?:today|this\s+(?:visit|time|service|trip|morning|afternoon))\b/;
+function sweepNotToday(text, start, end) {
+  const { from, to } = clauseBounds(text, start);
+  if (FUTURE_BEFORE_RE.test(text.slice(from, start))) return true;
   const clause = text.slice(from, to);
   const others = [
     ...governingWords(text, from, to).map((word) => word.at),
     ...all(SWEEP_ACTION_RE, clause).map((m) => from + m.index),
-  ].filter((wordAt) => wordAt !== at);
+  ].filter((wordAt) => wordAt < start || wordAt >= end);
+  const nothingBetween = (low, high) => !others.some((wordAt) => wordAt >= low && wordAt < high);
+  const saysToday = all(SWEEP_TODAY_RE, clause).some((m) => from + m.index >= end && nothingBetween(end, from + m.index));
+  if (saysToday) return false;
   return all(OTHER_DAY_RE, clause).some((m) => {
     const timeAt = from + m.index;
-    return timeAt > at
-      ? !others.some((wordAt) => wordAt > at && wordAt < timeAt)
-      : !others.some((wordAt) => wordAt < timeAt);
+    return timeAt >= end ? nothingBetween(end, timeAt) : nothingBetween(from, timeAt);
   });
 }
 
+// A sweep said as not done after its own words ("sweeping the eaves was not
+// completed", "web sweep was not performed"), or called undone in its clause.
+const SWEEP_TRAILING_DENIAL_RE = trailingDenial('swept|completed|performed|finished|done|needed|necessary|required|possible|today');
+const SWEEP_UNDONE_RE = /\b(?:incomplete|skipped|omitted|unfinished|not\s+(?:completed|performed|finished|done|possible))\b/;
+// One sweep stands when, somewhere the quote appears in the note, nothing
+// denies it, undoes it or puts it on another day.
+function sweepStands(quote, note, span) {
+  for (let at = note.indexOf(quote); at >= 0; at = note.indexOf(quote, at + 1)) {
+    const start = at + span.offset;
+    const end = start + span.length;
+    const { from, to } = clauseBounds(note, start);
+    const denied = SWEEP_DENIAL_BEFORE_RE.test(note.slice(0, start))
+      || SWEEP_TRAILING_DENIAL_RE.test(note.slice(end))
+      || SWEEP_UNDONE_RE.test(note.slice(from, to))
+      || sweepNotToday(note, start, end);
+    if (!denied) return true;
+  }
+  return false;
+}
+
+// The sweep: a grounded quote in which at least one asserted sweep stands, so
+// "didn't sweep the rear eaves, but swept the front eaves" swept (every
+// assertion is judged, not only the first; Codex P2 on #6147).
 function readSweep(sweep, grounding) {
   if (sweep?.done !== true) return {};
-  const read = readQuote(sweep.quote, grounding, {
-    assertion: sweepAssertion, denialAfter: TRAILING_DENIAL.treatment, denialBefore: SWEEP_DENIAL_BEFORE_RE, otherDay: sweepNotToday,
-  });
-  // No tied action in the quote is no sweep (readQuote alone would pass it).
-  return read && !read.denied && sweepAssertion(read.quote) ? { sweep: { quote: read.quote } } : {};
+  const quote = groundedQuote(sweep.quote, grounding);
+  if (!quote) return {};
+  return sweepAssertions(quote).some((span) => sweepStands(quote, grounding, span)) ? { sweep: { quote } } : {};
 }
 
 /**
