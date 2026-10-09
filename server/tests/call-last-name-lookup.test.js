@@ -313,6 +313,20 @@ describe('county owner record', () => {
     },
   );
 
+  test('a parcel on another street with the same house number is not used; the same street spelled out is', async () => {
+    setupDb();
+    lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, situsAddress: '100 EXAMPLE RD' });
+    await run();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    setupDb({ customer: { ...CUSTOMER, address_line1: '100 Sample Avenue' } });
+    lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, situsAddress: '100 SAMPLE AVE' });
+    raiseAdminAlert.mockResolvedValue({ id: 'note-1' });
+    await run();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
   test('a parcel whose house number is not the customer\'s is not used', async () => {
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, situsAddress: '102 SAMPLE AVE' });
     setupDb();

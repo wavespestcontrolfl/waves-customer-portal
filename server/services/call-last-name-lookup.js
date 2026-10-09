@@ -105,10 +105,6 @@ function sameIdentity(before, now) {
   return IDENTITY_COLUMNS.every((col) => String(before[col] ?? '') === String(now[col] ?? ''));
 }
 
-function leadingHouseNumber(address) {
-  return (String(address || '').trim().match(/^(\d+)/) || [])[1] || null;
-}
-
 // Every eligibility fact, read fresh. Returns { customer, relationship } or a skip code.
 async function loadEligible({ callLogId, customerId }) {
   const call = await db('call_log').where({ id: callLogId })
@@ -143,10 +139,13 @@ async function surnameFromCounty({ customer, relationship }) {
   if (customer.latitude == null || customer.longitude == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return { skip: 'no_coordinates' };
   const parcel = await lookupCountyParcelByPoint(lat, lng, { includeOwners: true, timeoutMs: COUNTY_LOOKUP_TIMEOUT_MS });
   if (!parcel?.ownerNames?.length) return { skip: 'no_owner_names' };
-  // The coordinates may sit on a neighbour's lot: the parcel's house number
-  // must be the customer's own.
-  const parcelNumber = leadingHouseNumber(parcel.situsAddress);
-  if (!parcelNumber || parcelNumber !== leadingHouseNumber(customer.address_line1)) return { skip: 'parcel_address_mismatch' };
+  // The coordinates may sit on a neighbour's lot, also one on another street
+  // with the same number: the parcel must be the customer's own house on the
+  // customer's own street, by the pipeline's street-identity rule (St ==
+  // Street, N == North, with or without the suffix). Required lazily, like the
+  // processor: that module is large.
+  const { sameHouseNumberStreet } = require('./call-triage-flags');
+  if (!sameHouseNumberStreet(parcel.situsAddress, customer.address_line1)) return { skip: 'parcel_address_mismatch' };
   const surname = surnameFromOwnerNames(parcel.ownerNames, customer.first_name, parcel.county);
   return surname ? { surname } : { skip: 'no_single_owner_match' };
 }
@@ -351,5 +350,5 @@ function enqueueCallLastNameLookup({ callLogId, customerId } = {}) {
 module.exports = {
   runCallLastNameLookup,
   enqueueCallLastNameLookup,
-  _private: { callContactPhoneKey, leadingHouseNumber, cleanSurname, groupBySurname, whyFor },
+  _private: { callContactPhoneKey, cleanSurname, groupBySurname, whyFor },
 };
