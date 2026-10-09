@@ -44,11 +44,18 @@ describe('extractorFingerprint', () => {
     expect(print(over)).not.toBe(print());
   });
 
+  // The replay calls the extractor without the agent-proposed-slot block, so a
+  // change to that variant alone must not ask for (or be marked by) a check
+  // that cannot see it.
+  test('does not change when only the slot-variant prompt changes', () => {
+    const variant = { extractionPromptVersion: (names, opts = {}) => (opts.agentProposedSlotCommitment ? 'v9-zzzz-a' : 'v9-aaaa') };
+    expect(print({ prompts: variant })).toBe(print());
+  });
+
   test('reads the real prompt module, route and fixture', () => {
     const { fingerprint, parts } = onChange.extractorFingerprint();
     expect(fingerprint).toMatch(/^[0-9a-f]{16}$/);
     expect(parts.prompt).toBeTruthy();
-    expect(parts.promptWithSlots).not.toBe(parts.prompt);
     expect(parts.primary).toMatch(/^(openai|anthropic|gemini)\/.+/);
   });
 });
@@ -77,6 +84,7 @@ describe('checkCallReplayDue', () => {
     expect(opts).toMatchObject({ dedupeKey: 'call-replay-due:fp-new', link: '/admin/agents' });
     expect(opts.metadata).toMatchObject({ severity: 'needs-you', doneWhen: 'call_check_run' });
     expect(opts.detail).toContain('openai/gpt-x, then anthropic/claude-y');
+    expect(opts.detail).toContain('npm run eval:call-replay');
   });
 
   test('the replay never ran: the item says so', async () => {

@@ -39,7 +39,7 @@ async function recordCheckedRun(result) {
   if (ARGS['no-mark'] || ARGS.fixture || !['pass', 'fail'].includes(result.status)) return;
   const onChange = require('../services/eval/call-replay-on-change');
   await onChange.markChecked(onChange.extractorFingerprint().fingerprint);
-  await onChange.checkCallReplayDue().catch((err) => console.error(`Could not close the call check reminder: ${err.message}`));
+  await onChange.checkCallReplayDue();
 }
 
 (async function main() {
@@ -53,8 +53,6 @@ async function recordCheckedRun(result) {
     if (ARGS.fixture) opts.fixturePath = ARGS.fixture;
 
     const result = await runCallExtractionReplayEval(opts);
-
-    await recordCheckedRun(result);
 
     if (ARGS.json) {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -77,6 +75,10 @@ async function recordCheckedRun(result) {
 
     if (result.status === 'fail') process.exitCode = 1;
     else if (result.status === 'inconclusive') process.exitCode = 3;
+
+    // After the verdict is printed and its exit code set: a failure to record
+    // the run must not hide a finished replay or change what it found.
+    await recordCheckedRun(result).catch((err) => console.error(`The verdict above stands, but the run was not recorded as checked: ${err.message}`));
   } catch (err) {
     console.error(`Call extraction replay eval failed to run: ${err.message}`);
     process.exitCode = 2;

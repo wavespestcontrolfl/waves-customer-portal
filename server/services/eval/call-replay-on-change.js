@@ -10,8 +10,8 @@
  *
  * With the gate on:
  *   - the weekly cron does not run the replay;
- *   - a daily check compares the extractor's fingerprint (its prompt
- *     versions, its primary and fallback models, the reviewed-call fixture)
+ *   - a daily check compares the extractor's fingerprint (its base prompt
+ *     version, its primary and fallback models, the reviewed-call fixture)
  *     with the fingerprint the replay last ran against. Different, or never
  *     run: ONE admin item asks for the check. Same: nothing, and an open item
  *     is closed;
@@ -39,9 +39,13 @@ function callReplayOnChangeLive() {
 const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
 /**
- * What decides the extractor's answers, as one short id. The catalog of
- * bookable service names is left out on purpose: it is data, it changes
- * without a deploy, and the replay reads it live on every run.
+ * What decides the answers the REPLAY can see, as one short id: only inputs
+ * the replay exercises, so a recorded fingerprint never claims a check that
+ * did not happen. Left out on purpose:
+ *   - the agent-proposed-slot prompt variant: the replay calls the extractor
+ *     without it, so a change there is neither asked for nor marked checked;
+ *   - the catalog of bookable service names: it is data, it changes without
+ *     a deploy, and the replay reads it live on every run.
  */
 function extractorFingerprint({ fixturePath = DEFAULT_FIXTURE_PATH, deps = {} } = {}) {
   const { extractionPromptVersion } = deps.prompts || require('../prompts/call-extraction-v1');
@@ -51,7 +55,6 @@ function extractorFingerprint({ fixturePath = DEFAULT_FIXTURE_PATH, deps = {} } 
   const leg = (l) => `${l?.provider}/${l?.model}`;
   const parts = {
     prompt: extractionPromptVersion([]),
-    promptWithSlots: extractionPromptVersion([], { agentProposedSlotCommitment: true }),
     primary: leg(route.primary),
     fallback: leg(route.fallback),
     fixture: sha(fs.readFileSync(fixturePath)).slice(0, 12),
@@ -105,7 +108,8 @@ async function checkCallReplayDue({ now = new Date(), deps = {} } = {}) {
     metadata: composed.metadata,
     dedupeKey: key,
     detail: [
-      'Run call-check in the terminal. It replays the reviewed calls through the live extractor (about 27 model calls).',
+      'Run this from the repo, with the production environment: npm run eval:call-replay',
+      'It replays the reviewed calls through the live extractor (about 27 model calls) and ends this item when it reaches a verdict.',
       '',
       `Prompt version: ${parts.prompt}`,
       `Models: ${parts.primary}, then ${parts.fallback}`,
