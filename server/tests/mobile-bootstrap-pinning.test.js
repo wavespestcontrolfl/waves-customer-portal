@@ -71,6 +71,35 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source.indexOf('target.source_build_phase')).toBeLessThan(source.indexOf('Add $SCENE_KEY dict'));
   });
 
+  test('Xcode Cloud can generate the ignored iOS project from a clean clone', () => {
+    const postClone = path.join(root, 'client/ios/App/ci_scripts/ci_post_clone.sh');
+    // Xcode Cloud runs ci_scripts/ci_post_clone.sh from beside the workspace, and only if it is executable.
+    expect(fs.statSync(postClone).mode & 0o111).not.toBe(0);
+    const ci = fs.readFileSync(postClone, 'utf8');
+    expect(ci).toContain('bash scripts/mobile/bootstrap-ios.sh');
+    expect(ci).toMatch(/^export CI=true$/m);
+    // Node follows .nvmrc and is checked against the published checksums.
+    expect(ci).toContain('< .nvmrc');
+    expect(ci).toContain('shasum -a 256 -c -');
+    // That folder is the only tracked path inside the generated project.
+    const tracked = spawnSync('git', ['ls-files', 'client/ios'], { cwd: root, encoding: 'utf8' });
+    expect(tracked.stdout.trim().split('\n')).toEqual(['client/ios/App/ci_scripts/ci_post_clone.sh']);
+    const ignored = spawnSync('git', ['check-ignore', '-q', 'client/ios/App/App.xcodeproj/project.pbxproj'], { cwd: root });
+    expect(ignored.status).toBe(0);
+
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    // A clean clone has client/ios/App (the tracked folder) but no project: the add still runs.
+    expect(source).toContain('if [ ! -d "ios/App/App.xcodeproj" ]; then');
+    expect(source).not.toContain('if [ ! -d "ios/App" ]; then');
+    // The tracked folder is moved aside for `cap add` and put back on every exit.
+    expect(source).toContain('trap restore_ci_scripts EXIT');
+    expect(source.indexOf('hold_ci_scripts\n  # Only empty folders')).toBeLessThan(source.indexOf('npx cap add ios'));
+    // Xcode Cloud builds only a shared scheme; version and team are written only when named.
+    expect(source).toContain('scheme.save_as(project.path, "App", true)');
+    expect(source).toContain('c.build_settings["MARKETING_VERSION"] = version unless version.empty?');
+    expect(source).toContain('c.build_settings["DEVELOPMENT_TEAM"] = team unless team.empty?');
+  });
+
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-ios-assets-'));
     const assetCatalog = path.join(fixture, 'Assets.xcassets');
