@@ -168,7 +168,7 @@ describe('auditAnnualCount counts a visit\'s second row of the product as anothe
     const path = require('path');
     expect(fs.readFileSync(path.join(__dirname, '..', 'services', 'application-limits.js'), 'utf8')).not.toContain('GATE_AREA_ADDONS');
     const completion = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
-    expect(completion).toContain('addOnRows: addOnTags.size > 0');
+    expect(completion).toContain('addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags)');
     expect(completion).toContain('excludeScheduledServiceId: svc.id, addOnRows,');
   });
 });
