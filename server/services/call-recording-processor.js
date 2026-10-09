@@ -1609,6 +1609,10 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     const anchorMs = currentCallCreatedAt ? new Date(currentCallCreatedAt).getTime() : Date.now();
     const hoursAgo = Math.max(1, Math.round((anchorMs - new Date(row.created_at).getTime()) / 3600000));
     return {
+      // Which call this is. Not rendered into the prompt (buildPriorCallBlock reads
+      // named fields only); the offline replay uses it to check that this call's
+      // extraction existed when the pass it replays ran.
+      callId: row.id,
       hoursAgo,
       summary: sanitizePriorText(row.call_summary || v1.call_summary) || null,
       captured: {

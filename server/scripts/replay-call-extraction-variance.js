@@ -1339,10 +1339,43 @@ function overrideReachedStoredExtraction(call, storedExtractedAt) {
   return Number.isFinite(overrideMs) && Number.isFinite(extractedMs) && overrideMs < extractedMs;
 }
 
+// The prompt's customer for the stored extraction:
+//   - no override: the phone lookup (what Step 2 runs);
+//   - an override the stored extraction came AFTER: the override's customer;
+//   - an override set after the stored extraction: the customer the call was linked
+//     to just before it (`previous_customer_id`, which the admin route records).
+//     That covers link A->B, reprocess, then unlink or link B->C: the stored pass
+//     saw B (codex #6214 r3 P1). No previous customer means no known caller.
+// The created-before-extraction cutoff below still applies to whichever row this is.
+async function promptCustomerForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }) {
+  let metadata = call?.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const override = metadata?.customer_link_override;
+  const hasOverride = !!override && typeof override === 'object' && 'customer_id' in override;
+  if (!hasOverride) return CRP._test.findCustomerForCallContact(contactPhone, {}, { db });
+  if (overrideReachedStoredExtraction(call, storedExtractedAt)) return CRP.resolveKnownCallerCustomer(call, contactPhone, { db });
+  if (!override.previous_customer_id) return null;
+  return db('customers').where({ id: override.previous_customer_id }).whereNull('deleted_at').first();
+}
+
+// The prior call's extraction must have existed when the stored pass ran (codex
+// #6214 r3 P1): summarizePriorCall bounds the prior CALL's time only, so an
+// earlier call processed out of order, or reprocessed later, would hand the
+// replay facts the stored pass never had. Its V2 record carries the time it was
+// extracted; when that is unknown or later than the stored pass, no prior call.
+async function priorCallForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }) {
+  const priorCall = await CRP.summarizePriorCall(contactPhone, call.id, db, call.created_at);
+  if (!priorCall) return null;
+  const cutoffMs = storedExtractedAt ? new Date(storedExtractedAt).getTime() : NaN;
+  if (!Number.isFinite(cutoffMs) || !priorCall.callId) return null;
+  const row = await db('call_log').where({ id: priorCall.callId }).first('ai_extraction_enriched');
+  const priorExtractedAt = parseJson(row?.ai_extraction_enriched, null)?.meta?.extracted_at;
+  const priorMs = priorExtractedAt ? new Date(priorExtractedAt).getTime() : NaN;
+  return Number.isFinite(priorMs) && priorMs < cutoffMs ? priorCall : null;
+}
+
 async function productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart, storedExtractedAt = null }) {
-  const linkedCustomer = await (overrideReachedStoredExtraction(call, storedExtractedAt)
-    ? CRP.resolveKnownCallerCustomer(call, contactPhone, { db })
-    : CRP._test.findCustomerForCallContact(contactPhone, {}, { db })).catch(() => null);
+  const linkedCustomer = await promptCustomerForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }).catch(() => null);
   // The cutoff is the STORED extraction's own time when it is known, else the call
   // start. A first pass extracts before its Step 3 creates the lead, so that row
   // postdates the extraction and is left out. A reprocess extracts after the first
@@ -1352,7 +1385,7 @@ async function productionCallFacts({ call, contactPhone, bookableServices, CRP, 
   const startMs = Number.isFinite(extractedMs) ? extractedMs : (callStart instanceof Date ? callStart.getTime() : NaN);
   const createdMs = linkedCustomer?.created_at ? new Date(linkedCustomer.created_at).getTime() : NaN;
   const predatesCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
-  const priorCall = await CRP.summarizePriorCall(contactPhone, call.id, db, call.created_at).catch(() => null);
+  const priorCall = await priorCallForStoredExtraction({ call, contactPhone, CRP, db, storedExtractedAt }).catch(() => null);
   return {
     bookableServiceNames: (Array.isArray(bookableServices) ? bookableServices : []).map((svc) => svc?.name).filter(Boolean),
     knownCaller: predatesCall ? CRP._test.summarizeKnownCaller(linkedCustomer) : null,
