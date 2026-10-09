@@ -653,7 +653,7 @@ function finalTriageFlagsFor(call, extraction) {
     suppressUnsupportedModelFlags(extraction.triage_flags, extraction), addressValidation,
   );
   const deterministicFlags = computeDeterministicTriageFlags(extraction, {
-    addressValidation, contactPhone: resolveCallContactPhone(call, null),
+    addressValidation, contactPhone: resolveCallContactPhone(call, null), transcript: call.transcription,
   });
   return mergeTriageFlags(modelFlags, deterministicFlags);
 }

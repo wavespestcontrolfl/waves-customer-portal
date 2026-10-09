@@ -1037,7 +1037,7 @@ function routeForV2(extraction, contactPhone, helpers, addressValidation = null,
   // the context scores those as address_not_validated and the variance output
   // reports a divergence that does not exist.
   const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], addressValidation);
-  const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation });
+  const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation, transcript: conflictCheck?.transcription });
   const flags = helpers.mergeTriageFlags(modelFlags, deterministicFlags);
   let route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...failOpenContext });
   // The live path never stops at canAutoRoute: a fail-open allow whose V1
