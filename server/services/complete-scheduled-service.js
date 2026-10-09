@@ -9245,8 +9245,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never an instruction to remove anything) and sent to the office as an admin notification
     // (deduped per record, so a retry or a resume rings once). Never blocks.
     if (record?.id && !issuedInvoiceCloseout) {
-      // addOnRows: false when no row of this closeout is tagged to an add-on (the duplicate-application read is then skipped); the audit never asks the gate.
-      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db, addOnRows: addOnTags.size > 0 });
+      // addOnRows: false when no row of this closeout is tagged to an add-on (the duplicate-application read is then skipped); a tag read that failed (a replay or resume) is not "none", so the read runs; the audit never asks the gate.
+      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db, addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags) });
       if (limitFindings.length) {
         applicationLimitAdvisory = {
           advisory: true,

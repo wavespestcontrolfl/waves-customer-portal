@@ -200,11 +200,66 @@ describe('which add-on each application row belongs to', () => {
     expect(rows.areaAddOnKeysByVisit).not.toHaveBeenCalled();
   });
 
-  test('a host visit with no chemical add-on, and a visit whose read fails, tag nothing (a completion never fails for it)', async () => {
+  test('a host visit with no chemical add-on tags nothing', async () => {
     rows.areaAddOnKeysByVisit.mockResolvedValue(new Map());
-    expect((await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: 'lawn_standard' }, [{ productId: 'p', areaAddOnKey: ARENA }])).size).toBe(0);
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: 'lawn_standard' }, [{ productId: 'p', areaAddOnKey: ARENA }]);
+    expect(tags.size).toBe(0);
+    expect(tags.unreadable).toBeUndefined();
+  });
+
+  test('a visit that IS a chemical add-on and whose rows claim no other add-on tags its rows without reading anything', async () => {
     rows.areaAddOnKeysByVisit.mockRejectedValue(new Error('connection lost'));
-    expect((await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: ARENA }, [{ productId: 'p' }])).size).toBe(0);
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: ARENA }, [{ productId: 'p' }, { productId: 'q', areaAddOnKey: ARENA }]);
+    expect(Object.fromEntries(tags)).toEqual({ 'p|': ARENA, [`q|${ARENA}`]: ARENA });
+    expect(rows.areaAddOnKeysByVisit).not.toHaveBeenCalled();
+    expect(tags.unreadable).toBeUndefined();
+  });
+
+  // Codex round 14 P2: a failed read must not look like a visit with no add-ons.
+  describe('a failed add-on read is not "no add-ons"', () => {
+    const unreadable = async (svc, products) => {
+      rows.areaAddOnKeysByVisit.mockRejectedValue(new Error('connection lost'));
+      return governed.resolveApplicationAddOnTags(fakeKnex(), svc, products);
+    };
+    const host = { id: VISIT, service_key_snapshot: 'ts_standard_6x' };
+    const claim = [{ productId: 'p-snap', areaAddOnKey: SNAP }];
+
+    test('a read that was needed and failed marks the map unreadable and tags nothing', async () => {
+      const tags = await unreadable(host, claim);
+      expect(tags.size).toBe(0);
+      expect(tags.unreadable).toBe(true);
+      // The same when the visit is an add-on and a row claims another one.
+      const mixed = await unreadable({ id: VISIT, service_key_snapshot: ARENA }, [{ productId: 'p' }, ...claim]);
+      expect(mixed.size).toBe(0);
+      expect(mixed.unreadable).toBe(true);
+    });
+
+    test('a fresh completion is refused with a retryable 503 before anything is written; a replay or resume is not', async () => {
+      const tags = await unreadable(host, claim);
+      const never = () => { throw new Error('must not query'); };
+      const run = (opts) => governed.requireAddOnActuals(never, claim, tags, opts).then(() => null, (err) => err);
+      expect(await run({ fresh: true })).toMatchObject({
+        statusCode: 503, isOperational: true, code: 'area_addon_unreadable',
+        message: 'The add-on treatments for this visit could not be read right now. Try completing the visit again.',
+      });
+      expect(await run()).toMatchObject({ statusCode: 503 });
+      expect(await run({ fresh: false })).toBeNull();
+    });
+
+    test('a completion that claims nothing and is not an add-on visit runs no read and cannot fail for it', async () => {
+      const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), host, [{ productId: 'p' }]);
+      expect(tags.unreadable).toBeUndefined();
+      expect(await governed.requireAddOnActuals(() => { throw new Error('must not query'); }, [{ productId: 'p' }], tags)).toBeUndefined();
+    });
+
+    test('the completion refuses the fresh closeout from the same call, and the limit audit reads the add-on rows when the tags were unreadable', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+      expect(src).toContain('addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags)');
+      expect(governed.mayHaveAddOnRows(new Map())).toBe(false);
+      expect(governed.mayHaveAddOnRows(Object.assign(new Map(), { unreadable: true }))).toBe(true);
+      expect(governed.mayHaveAddOnRows(new Map([['p|', ARENA]]))).toBe(true);
+      expect(src).toContain("await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });");
+    });
   });
 
   test('the column is written only when it exists and the row has a tag', () => {

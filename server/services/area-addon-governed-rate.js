@@ -193,16 +193,20 @@ const productRowKey = (product) => `${product?.productId}|${typeof product?.area
  * key. A tag is accepted only when that add-on is actually on the visit (the visit's own service or a
  * scheduled_service_addons row) and is a chemical add-on; anything else is dropped, so a client cannot
  * name an add-on the visit does not carry. On a visit whose own service is a chemical add-on, an untagged
- * row is that add-on's. Never throws: a failed read tags nothing.
+ * row is that add-on's. The attached add-on rows are read only when a submitted row claims an add-on other
+ * than the visit's own; a visit that is not an add-on and whose rows claim none runs no query (every ordinary
+ * completion). Never throws: a read that was needed and failed marks the map `unreadable`, and a FRESH
+ * completion refuses to go on (requireAddOnActuals), because an empty map from a failed read looks like a
+ * visit with no add-ons and would save the add-on's product as a plain row with no actuals.
  */
 async function resolveApplicationAddOnTags(knex, svc, products) {
   const tags = new Map();
+  const own = ownAreaAddOnKey(svc);
+  const list = Array.isArray(products) ? products : [];
+  const claimsOther = list.some((p) => p && typeof p.areaAddOnKey === 'string' && p.areaAddOnKey !== own);
+  if (!own && !claimsOther) return tags;
   try {
-    const own = ownAreaAddOnKey(svc);
-    const list = Array.isArray(products) ? products : [];
-    // No add-on is claimed and the visit is not one: nothing to tag, and no query (every ordinary completion).
-    if (!own && !list.some((p) => p && typeof p.areaAddOnKey === 'string')) return tags;
-    const attached = (await areaAddOnKeysByVisit(knex, [svc?.id])).get(String(svc?.id)) || [];
+    const attached = claimsOther ? (await areaAddOnKeysByVisit(knex, [svc?.id])).get(String(svc?.id)) || [] : [];
     const onVisit = new Set([own, ...attached].filter((key) => key && isGoverned(key)));
     if (!onVisit.size) return tags;
     const ownChemical = own && onVisit.has(own) ? own : null;
@@ -214,9 +218,15 @@ async function resolveApplicationAddOnTags(knex, svc, products) {
     }
   } catch (err) {
     logger.warn(`[area-addon-governed-rate] add-on tags not resolved for ${svc?.id}: ${err.message}`);
+    tags.clear();
+    tags.unreadable = true;
   }
   return tags;
 }
+
+// Might a closeout's rows carry an add-on tag? Yes when one is tagged, and also when the tag read failed (a replay or resume
+// of a committed completion): an unreadable map is not "none".
+const mayHaveAddOnRows = (tags) => !!tags && (tags.size > 0 || tags.unreadable === true);
 
 // The service_products columns an application row gets for its add-on tag: {} when it has none or the
 // column is not migrated yet. The completion saves a row once per identity: productId plus the resolved tag.
@@ -358,6 +368,8 @@ function rateFindings(rows, expectedProductIds = new Map()) {
 // area when the client sends none. An incomplete visit is exempt, as it is for the lawn square-feet rule.
 // ---------------------------------------------------------------------------------------------------------------
 const ACTUALS_CODE = 'area_addon_actuals_required';
+const ADDONS_UNREADABLE_CODE = 'area_addon_unreadable';
+const ADDONS_UNREADABLE_SENTENCE = 'The add-on treatments for this visit could not be read right now. Try completing the visit again.';
 const positive = (value) => value != null && value !== '' && Number(value) > 0 && Number.isFinite(Number(value));
 const humanize = (key) => String(key || '').replace(AREA_ADDON_KEY_PREFIX, '').split('_').filter(Boolean)
   .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
@@ -406,13 +418,15 @@ async function addOnDisplayNames(knex, keys) {
 /**
  * Checks the tagged rows of a fresh completion and fills each one's total amount. Throws the 400 (an operational error,
  * code `area_addon_actuals_required`) naming the first add-on and the fields it lacks when a tagged row does not carry its
- * actuals; returns nothing otherwise. `tags` is resolveApplicationAddOnTags' map. Sets the submitted row's `totalAmount`
+ * actuals; returns nothing otherwise. Throws a retryable 503 (code `area_addon_unreadable`) when the tag read FAILED (the map is
+ * `unreadable`): a fresh closeout does not go on as if the visit had no add-ons, so nothing is written for it. `tags` is resolveApplicationAddOnTags' map. Sets the submitted row's `totalAmount`
  * and `amountUnit` to rate x treated area whenever the rate has an area basis (a client total is replaced), so the inventory
  * check, the N budget, the ledger and the deduction all read the server's amount. Not a fresh execution (a replay or resume of a committed completion), or no tag: nothing is checked and no query
  * runs. The visit's OUTCOME does not matter: an incomplete visit still writes the compliance row for a product that was
  * applied, so a tagged row needs its actuals whenever it is submitted.
  */
 async function requireAddOnActuals(knex, products, tags, { fresh = true } = {}) {
+  if (fresh && tags?.unreadable) throw Object.assign(new Error(ADDONS_UNREADABLE_SENTENCE), { statusCode: 503, isOperational: true, code: ADDONS_UNREADABLE_CODE });
   if (!fresh || !tags?.size || !Array.isArray(products)) return;
   const rows = products.filter((p) => p && p.productId && tags.has(productRowKey(p)));
   const problem = rows.map((p) => ({ p, tag: tags.get(productRowKey(p)), missing: completeActuals(p) })).find((row) => row.missing.length);
@@ -463,6 +477,8 @@ module.exports = {
   WRONG_PRODUCT_LIMIT_TYPE,
   UNCHECKED_RATE_LIMIT_TYPE,
   ACTUALS_CODE,
+  ADDONS_UNREADABLE_CODE,
+  ADDONS_UNREADABLE_SENTENCE,
   uncheckedRateSentence,
   requireAddOnActuals,
   productRowKey,
@@ -474,6 +490,7 @@ module.exports = {
   areaAddOnFeed,
   resolveApplicationAddOnTags,
   addOnProductColumns,
+  mayHaveAddOnRows,
   rateFindings,
   flagRatesAboveGoverned,
 };
