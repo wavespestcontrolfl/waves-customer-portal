@@ -25,10 +25,10 @@
  */
 const logger = require('../logger');
 const {
-  rainFitFor, withCatalogKeys, storedVisitServices, widenToSpan, inRainHorizon, boundedHourlyRain,
+  rainFitFor, withCatalogKeys, storedVisitServices, inRainHorizon, boundedHourlyRain,
   RAIN_AFTER_HOURS, RAIN_DAYS,
 } = require('../scheduling/rain-fit');
-const { etParts, etDateString, addETDays, parseETDateTime, formatETTime } = require('../../utils/datetime-et');
+const { etParts, etDateString, addETDays, parseETDateTime, formatETTime, dateOnlyString } = require('../../utils/datetime-et');
 
 const GATE = 'GATE_AUTO_DISPATCH_RAIN_PASS';
 const KEY_PREFIX = 'rain-pass:';
@@ -46,7 +46,8 @@ const toMin = (hhmm) => {
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
 };
 const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-const dateOnly = (value) => (value instanceof Date ? etDateString(value) : String(value || '').slice(0, 10));
+// A DATE column arrives as a Date at UTC midnight: its calendar date, not its ET day.
+const dateOnly = (value) => String(dateOnlyString(value) || '');
 
 // The chance for every hour from `startMin` through RAIN_AFTER_HOURS after
 // `endMin`: { peak, complete }. `complete` is false when any hour has no
@@ -65,16 +66,15 @@ function spanRain(hourly, date, startMin, endMin) {
   return { peak, complete };
 }
 
-// The stop's reach on its date, in minutes: the stored window, or the visit's
-// real length when that is longer (a two-hour treatment is stored with a
-// one-hour window), widened to every service that shares the stop.
-function stopSpan(visit, span) {
-  const start = toMin(visit.window_start);
+// One service row's reach on its date, in minutes: the stored window, or
+// the service's real length when that is longer (a two-hour treatment is
+// stored with a one-hour window). null without a readable start.
+function rowReach(row) {
+  const start = toMin(row.window_start);
   if (start == null) return null;
-  const length = Number(visit.estimated_duration_minutes);
-  const end = Math.max(start + 60, toMin(visit.window_end) ?? 0, Number.isFinite(length) && length > 0 ? start + length : 0);
-  const wide = widenToSpan({ start_time: toHHMM(start), end_time: toHHMM(Math.min(end, 24 * 60 - 1)) }, span);
-  return { startMin: toMin(wide.start_time), endMin: Math.max(toMin(wide.end_time), toMin(wide.start_time) + 60), ownStartMin: start };
+  const length = Number(row.estimated_duration_minutes);
+  const end = Math.max(start + 60, toMin(row.window_end) ?? 0, Number.isFinite(length) && length > 0 ? start + length : 0);
+  return { startMin: start, endMin: Math.min(end, 24 * 60) };
 }
 
 // The dry, open start on the same date that is nearest the visit's own
@@ -96,8 +96,7 @@ function dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin, dayEn
 }
 
 // Live visits on the dates the forecast can read, one row per stop: services
-// that share a stop (visit_id) move as one, so the earliest row stands for
-// all of them.
+// that share a stop (visit_id) move as one.
 async function loadStops(db, from, to) {
   const rows = await db('scheduled_services')
     .whereBetween('scheduled_date', [from, to])
@@ -106,11 +105,25 @@ async function loadStops(db, from, to) {
     .whereNotNull('window_start')
     .select(...VISIT_COLUMNS)
     .orderBy(['scheduled_date', 'window_start', 'id']);
+  return groupStops(rows);
+}
+
+// The earliest row stands for the stop (rows arrive in start order); the
+// stop's reach covers every member's own window and length.
+function groupStops(rows) {
   const stops = new Map();
   for (const row of rows) {
+    const reach = rowReach(row);
+    if (!reach) continue;
     const key = row.visit_id ? `stop:${row.visit_id}` : `row:${row.id}`;
-    if (stops.has(key)) stops.get(key).memberIds.push(String(row.id));
-    else stops.set(key, { ...row, memberIds: [String(row.id)] });
+    const stop = stops.get(key);
+    if (!stop) {
+      stops.set(key, { ...row, memberIds: [String(row.id)], reach: { ...reach, ownStartMin: reach.startMin } });
+    } else {
+      stop.memberIds.push(String(row.id));
+      stop.reach.startMin = Math.min(stop.reach.startMin, reach.startMin);
+      stop.reach.endMin = Math.max(stop.reach.endMin, reach.endMin);
+    }
   }
   return [...stops.values()];
 }
@@ -123,7 +136,7 @@ async function stopServices(visit, db, deps) {
   const services = await (deps.withCatalogKeys || withCatalogKeys)(
     list.map((item) => ({ name: item.name, serviceKey: item.key || null })), db, { gate: GATE },
   );
-  return { services, span: stored?.span || null };
+  return services;
 }
 
 // One stop's verdict: { wet: false, reason } or { wet: true, peak, proposal }.
@@ -131,10 +144,8 @@ async function judgeStop(visit, ctx) {
   const { db, deps, today, nowMin, occupancy, day } = ctx;
   const date = dateOnly(visit.scheduled_date);
   if (!inRainHorizon(date, today)) return { wet: false, reason: 'past_horizon' };
-  const { services, span } = await stopServices(visit, db, deps);
-  if (rainFitFor(services) !== 'avoid') return { wet: false, reason: 'not_outdoor' };
-  const reach = stopSpan(visit, span);
-  if (!reach) return { wet: false, reason: 'no_window' };
+  if (rainFitFor(await stopServices(visit, db, deps)) !== 'avoid') return { wet: false, reason: 'not_outdoor' };
+  const { reach } = visit;
   const earliestMin = date === today ? nowMin + LEAD_MINUTES : 0;
   if (reach.ownStartMin < earliestMin) return { wet: false, reason: 'too_soon' };
   const point = await deps.visitPoint(visit, { db, deps });
@@ -267,4 +278,4 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
   }
 }
 
-module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, _test: { spanRain, dryStart, stopSpan } };
+module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, _test: { spanRain, dryStart, groupStops } };

@@ -21,12 +21,12 @@ const hourlyFor = (wetHours = [13, 14, 15, 16, 17]) => [0, 1, 2, 3].flatMap((d) 
 const stop = (extra = {}) => ({
   id: 'visit-1', customer_id: 'cust-1', service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_general_quarterly',
   technician_id: 'tech-1', status: 'confirmed', scheduled_date: D1, window_start: '14:00:00', window_end: '15:00:00',
-  memberIds: ['visit-1'], ...extra,
+  ...extra,
 });
 
-function deps(stops, extra = {}) {
+function deps(rows, extra = {}) {
   return {
-    loadStops: jest.fn(async () => stops),
+    loadStops: jest.fn(async () => _test.groupStops(rows)),
     storedVisitServices: jest.fn(async () => null),
     withCatalogKeys: jest.fn(async (items) => items.map((item) => ({ name: item.name, serviceKey: item.serviceKey, findingsType: null }))),
     visitPoint: jest.fn(async () => ({ lat: 27.4, lng: -82.4 })),
@@ -105,17 +105,29 @@ describe('auto-dispatch rain pass', () => {
     expect(row).toMatchObject({ wet: false, reason: 'too_soon' });
   });
 
-  test('a shared stop is judged across every service on it: a dry own hour with a wet sibling hour is wet', async () => {
-    const d = deps([stop({ window_start: '11:00:00', window_end: '12:00:00', memberIds: ['visit-1', 'visit-2'] })], {
+  test('a shared stop is judged across every service on it, each at its real length', async () => {
+    // Pest 11:00-12:00, then lawn stored 12:00-13:00 but two hours long.
+    const d = deps([
+      stop({ window_start: '11:00:00', window_end: '12:00:00', visit_id: 'stop-1' }),
+      stop({ id: 'visit-2', service_type: 'Lawn Care', service_key_snapshot: 'lawn_care_monthly', window_start: '12:00:00', window_end: '13:00:00', estimated_duration_minutes: 120, visit_id: 'stop-1' }),
+    ], {
       storedVisitServices: jest.fn(async () => ({
         own: [{ name: 'Quarterly Pest Control Service', key: 'pest_general_quarterly' }],
         siblings: [{ name: 'Lawn Care', key: 'lawn_care_monthly' }],
-        span: { startOffset: 0, endOffset: 120 },
       })),
     });
+    const rows = await planRainPass({ now: NOW, db: {}, deps: d });
+    expect(rows).toHaveLength(1);
+    // 11:00-14:00 of work is in the 13:00 rain. Three hours of work and two
+    // of drying fit before 13:00 only from 08:00.
+    expect(rows[0]).toMatchObject({ wet: true, peak: 80, proposal: '08:00' });
+    expect(d.rainOut.conflictsForTarget.mock.calls[0][4]).toEqual({ excludeServiceIds: ['visit-1', 'visit-2'], technicianId: 'tech-1' });
+  });
+
+  test('a date column value (a Date at UTC midnight) keeps its calendar date', async () => {
+    const d = deps([stop({ scheduled_date: new Date(`${D1}T00:00:00Z`) })]);
     const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
-    // 11:00-13:00 of work, then drying through 15:00: the 13:00 rain is inside it.
-    expect(row).toMatchObject({ wet: true, peak: 80, proposal: '09:00' });
+    expect(row).toMatchObject({ wet: true, date: D1 });
   });
 
   test('an hour with no reading is never taken for a dry hour', () => {
@@ -129,7 +141,7 @@ describe('auto-dispatch rain pass', () => {
     const raiseAdminAlert = jest.fn()
       .mockRejectedValueOnce(new Error('db down'))
       .mockResolvedValueOnce({ notification: { id: 'n1' }, deduped: true });
-    const d = deps([stop(), stop({ id: 'visit-2', memberIds: ['visit-2'] })], { raiseAdminAlert });
+    const d = deps([stop(), stop({ id: 'visit-2' })], { raiseAdminAlert });
     expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 2, wet: 2, noticed: 0 });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
   });
