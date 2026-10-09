@@ -169,3 +169,11 @@ describe('conflict moves: least added drive, with a ceiling (replay 2026-10-09)'
     expect(none).toMatchObject({ qualifies: false, ceilingFailed: true, floorFailed: false, best: far });
   });
 });
+
+test('a day move compares totals clamped WITHOUT the default-time credit (Codex #6207 r7 P2)', () => {
+  const { moveGain } = require('../services/auto-dispatch/move-rules');
+  // Components total 105 with 12.5 default-time points: capped total 100, default-free 92.5 (not 87.5).
+  const cand = { total_score: 100, default_time_score: 12.5, total_without_default_time: 92.5 };
+  const current = { total_score: 60, default_time_score: 0, total_without_default_time: 60 };
+  expect(moveGain({ service: { window_start: '10:00' }, current: { date: '2026-12-07' }, currentScore: current, cand: { date: '2026-12-09' }, candScore: cand })).toBe(32.5);
+});

@@ -383,8 +383,12 @@ test('current placement excludes an ungeocoded secondary-property neighbor', asy
 
 test('legacy current placement marks a grouped visit: its detour is measured against its own siblings (Codex #6207 r1 P1)', async () => {
   const { computeCurrentPlacement } = require('../services/auto-dispatch/candidate-slots');
-  const grouped = await computeCurrentPlacement({ ...SERVICE, visit_id: 'v1' }, 'general', ctx());
+  const withSibling = { excludeIds: new Set(['s1', 's2']), siblings: [{ id: 's2' }], visitWindowStart: null };
+  const grouped = await computeCurrentPlacement({ ...SERVICE, visit_id: 'v1' }, 'general', { ...ctx(), groupContext: withSibling });
   expect(grouped.detour_group_blind).toBe(true);
+  // A visit_id whose other members are all terminal: the detour is valid (r7 P2).
+  const alone = { excludeIds: new Set(['s1']), siblings: [], visitWindowStart: null };
+  expect(await computeCurrentPlacement({ ...SERVICE, visit_id: 'v1' }, 'general', { ...ctx(), groupContext: alone })).not.toHaveProperty('detour_group_blind');
   const standalone = await computeCurrentPlacement(SERVICE, 'general', ctx());
   expect(standalone).not.toHaveProperty('detour_group_blind');
 });

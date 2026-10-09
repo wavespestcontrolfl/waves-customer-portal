@@ -152,13 +152,15 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
     stabilityPenalty = Math.min(15, 5 * ctx.changeCount);
   }
 
-  const total = clamp(
-    routeScore + prefScore + techScore + densityScore + workloadScore + continuityScore - stabilityPenalty,
-    0, 100,
-  );
+  const raw = routeScore + prefScore + techScore + densityScore + workloadScore + continuityScore - stabilityPenalty;
+  const total = clamp(raw, 0, 100);
 
   return {
     total_score: round2(total),
+    // The same total with the default-time credit left out BEFORE the clamp
+    // (move-rules.js compares day moves on it; subtracting the credit from a
+    // clamped total under-counts a placement at the cap, Codex #6207 r7 P2).
+    total_without_default_time: round2(clamp(raw - defaultTimeScore, 0, 100)),
     route_efficiency_score: round2(routeScore),
     customer_preference_score: round2(prefScore),
     default_time_score: round2(defaultTimeScore),

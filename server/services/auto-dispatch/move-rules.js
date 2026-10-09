@@ -40,13 +40,19 @@ function driveSavingMinutes(current, cand) {
   return round2((Number(current.detour_minutes) || 0) - (Number(cand.detour_minutes) || 0));
 }
 
+// A score's total with the default-time credit left out (scoring.js clamps
+// it separately; a breakdown without the field falls back to subtraction).
+function withoutDefaultTime(score) {
+  return score.total_without_default_time ?? (score.total_score - (score.default_time_score || 0));
+}
+
 // Points the candidate gains over the current placement. A day move leaves
 // the default-time credit out of both totals; everything else is the raw
 // difference (the pre-2026-10-09 improvement).
 function moveGain({ service, current, currentScore, cand, candScore }) {
   const raw = candScore.total_score - currentScore.total_score;
   if (isUnplacedDueDate(service) || !isDayMove(current, cand)) return round2(raw);
-  return round2(raw - ((candScore.default_time_score || 0) - (currentScore.default_time_score || 0)));
+  return round2(withoutDefaultTime(candScore) - withoutDefaultTime(currentScore));
 }
 
 // Whether a candidate is a legal KIND of move at all, before the score bar:

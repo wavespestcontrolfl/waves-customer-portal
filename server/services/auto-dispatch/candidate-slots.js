@@ -615,10 +615,19 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     capability_level: ctx.capabilityFor(techId, category),
     // The legacy neighbors above exclude only this row, so a grouped visit's
     // detour is measured against its own siblings (move-rules.js drive floor).
-    ...(service.visit_id && !autoDispatchSharedModelLive() ? { detour_group_blind: true } : {}),
+    ...(await legacyGroupBlindField(service, ctx)),
     ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr)),
     ...(await currentConflictField(service, ctx)),
   };
+}
+
+// Legacy model only: `detour_group_blind` when the visit has a live grouped
+// sibling. A visit_id alone is not enough — a group whose other members are
+// all terminal has a valid detour (Codex #6207 r7 P2).
+async function legacyGroupBlindField(service, ctx) {
+  if (!service.visit_id || autoDispatchSharedModelLive()) return {};
+  const { siblings } = await groupContextFor(service, ctx);
+  return siblings.length ? { detour_group_blind: true } : {};
 }
 
 // GATE_AUTO_DISPATCH_CONFLICT_MOVES (ctx.conflictMoves): `conflict` when the
