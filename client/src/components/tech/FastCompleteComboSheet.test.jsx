@@ -530,3 +530,65 @@ describe('Full form waits for the saved forms to be deleted', () => {
   });
 });
 
+describe('a rollback only ever makes a part less ready', () => {
+  const stored = async () => Object.keys((await store.getVisitCompletionDraft('combo:visit', 'op-1'))?.forms || {}).sort();
+
+  it('a failed revocation leaves the part not ready, Complete stop off and nothing posted; Try again does not bring the old body back', async () => {
+    mount();
+    await prepareBoth();
+    await bothPersisted();
+    const spy = vi.spyOn(store, 'putVisitCompletionDraft').mockResolvedValue(false);
+    click('pest unsave');
+    await screen.findByText(/rejected: Could not save this on this device/);
+    expect(completeStop()).toBeDisabled();
+    expect(screen.getByText(/Pest part: changed, save it again/)).toBeInTheDocument();
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    expect(post).not.toHaveBeenCalled();
+    // The store failed again: still not ready, still blocked.
+    fireEvent.click(retry);
+    await waitFor(() => expect(completeStop()).toBeDisabled());
+    // The store works again: the retry lands, the part is STILL not ready until it is saved again.
+    spy.mockRestore();
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument());
+    expect(completeStop()).toBeDisabled();
+    expect(await stored()).toEqual(['svc-lawn']);
+    click('pest save');
+    await waitFor(() => expect(completeStop()).toBeEnabled());
+  });
+
+  it('a failed new save of an already saved part leaves it not ready (the earlier body is not put back)', async () => {
+    mount();
+    await prepareBoth();
+    await bothPersisted();
+    vi.spyOn(store, 'putVisitCompletionDraft').mockResolvedValue(false);
+    click('pest save');
+    await screen.findByText(/rejected: Could not save this on this device/);
+    expect(completeStop()).toBeDisabled();
+    expect(screen.getByText(/Pest part: /)).toBeInTheDocument();
+  });
+
+  it('after a crash with a failed revocation the store still holds the old body, but a reload does not trust it', async () => {
+    const first = mount();
+    await prepareBoth();
+    await bothPersisted();
+    vi.spyOn(store, 'putVisitCompletionDraft').mockResolvedValue(false);
+    click('pest unsave');
+    await screen.findByText(/rejected: Could not save this on this device/);
+    first.unmount();
+    vi.restoreAllMocks();
+    adminFetch.mockImplementation(async (path, options) => {
+      if (options?.method === 'POST') return post(path, options);
+      if (path.startsWith('/admin/schedule?')) return { services: rows };
+      return detail;
+    });
+    // The remaining exposure, stated: the store itself still has both bodies...
+    expect(await stored()).toEqual(['svc-lawn', 'svc-pest']);
+    mount();
+    // ...but the revocation marker keeps the pest part from coming back as saved.
+    await screen.findByTestId('pest-part');
+    expect(screen.getAllByText('Saved earlier on this device. Edit it to change anything.')).toHaveLength(1);
+    expect(completeStop()).toBeDisabled();
+  });
+});
+

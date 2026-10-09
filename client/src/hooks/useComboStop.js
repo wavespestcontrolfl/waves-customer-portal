@@ -17,6 +17,19 @@ import {
 } from '../lib/visit-closeout-packet';
 
 const PERSIST_ERROR = 'Could not save this on this device. Free some storage and try again.';
+
+// A revoked part's body may still sit in the draft store (its write is pending, or failed). A small synchronous marker,
+// kept apart from the store, says so: a load never trusts a stored body whose revocation has not landed, even after a
+// crash. Cleared when a write that no longer holds the part lands.
+const revokedKey = (scope, visitId) => `waves_combo_revoked:${scope}:${visitId}`;
+function readRevoked(scope, visitId) {
+  try { return JSON.parse(localStorage.getItem(revokedKey(scope, visitId)) || '[]'); } catch { return []; }
+}
+function writeRevoked(scope, visitId, ids) {
+  try {
+    if (ids.length) localStorage.setItem(revokedKey(scope, visitId), JSON.stringify(ids)); else localStorage.removeItem(revokedKey(scope, visitId));
+  } catch { /* no marker: the in-memory map and the next write still hold */ }
+}
 // A packet refusal that means the short screen cannot close this stop: the long form's.
 const REFUSAL_CODES = /^lawn_fast|visit_grouped|visit_members/;
 
@@ -54,7 +67,8 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     const saved = draft.forms || {};
     noteRef.current = draft.note || '';
     keyRef.current = draft.key;
-    entries.current = Object.fromEntries(Object.entries(saved).filter(([, form]) => form?.body)
+    const revoked = readRevoked(scope, visitId);
+    entries.current = Object.fromEntries(Object.entries(saved).filter(([id, form]) => form?.body && !revoked.includes(id))
       .map(([id, form]) => [id, { body: form.body, seq: 0, noteAtSave: form.noteAtSave ?? noteRef.current }]));
     restoredRef.current = Object.keys(entries.current);
   }
@@ -74,6 +88,8 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
       if (ok) {
         w.compensating = false;
         setPersistError('');
+        // The store no longer holds any part the map does not: those markers are done.
+        writeRevoked(scope, visitId, readRevoked(scope, visitId).filter((id) => id in forms));
         batch.forEach((waiter) => waiter.resolve());
       } else {
         batch.forEach((waiter) => { waiter.rollback?.(); waiter.reject(new Error(PERSIST_ERROR)); });
@@ -91,27 +107,36 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     if (!w.running) { w.running = true; void drain(); }
   }), [drain]);
 
+  // INVARIANT: a rollback may only ever make a part LESS ready. The map is authoritative for what "Complete stop" may
+  // send; the store only follows it. So a failed write never restores a body the part has since cleared or replaced:
+  // a failed save leaves the part absent (not ready), and a failed revocation leaves it absent too (the store is stale,
+  // the marker above keeps a reload from trusting it, and the error blocks Complete stop until a write lands).
   // A part's onPrepared (the contract in useFastCompleteSubmit): applied only if its seq is the greatest seen for the
-  // service; a failed write puts the entry back as it was and rejects (the part stays not ready).
-  const apply = useCallback((id, body, seq) => {
-    if (!(seq > (lastSeq.current[id] ?? 0))) return Promise.resolve();
-    lastSeq.current[id] = seq;
-    const before = entries.current[id];
-    if (body) entries.current[id] = { body, seq, noteAtSave: noteRef.current }; else delete entries.current[id];
-    bump();
-    return persist(() => {
-      if (entries.current[id]?.seq !== seq && body) return;
-      if (before) entries.current[id] = before; else delete entries.current[id];
-    });
-  }, [persist, bump]);
-
-  // "Edit this part": the entry is gone at once, the write follows; a failed write is shown, the part stays not ready.
-  const drop = useCallback((id) => {
+  // service.
+  const revoke = useCallback((id) => {
+    writeRevoked(scope, visitId, [...new Set([...readRevoked(scope, visitId), id])]);
     delete entries.current[id];
     restoredRef.current = restoredRef.current.filter((x) => x !== id);
     bump();
+  }, [scope, visitId, bump]);
+  const apply = useCallback((id, body, seq) => {
+    if (!(seq > (lastSeq.current[id] ?? 0))) return Promise.resolve();
+    lastSeq.current[id] = seq;
+    if (body) entries.current[id] = { body, seq, noteAtSave: noteRef.current }; else revoke(id);
+    bump();
+    return persist(() => { if (entries.current[id]?.seq === seq) delete entries.current[id]; })
+      .then(() => { if (body) writeRevoked(scope, visitId, readRevoked(scope, visitId).filter((x) => x !== id)); })
+      .catch((err) => { if (!body) setPersistError(err.message); throw err; });
+  }, [persist, bump, revoke, scope, visitId]);
+
+  // "Edit this part": the entry is gone at once, the write follows; a failed write is shown, the part stays not ready.
+  const drop = useCallback((id) => {
+    revoke(id);
     return persist().catch((err) => setPersistError(err.message));
-  }, [persist, bump]);
+  }, [persist, revoke]);
+
+  // "Try again" on a persist error: write the current map again.
+  const retryPersist = useCallback(() => persist().then(() => setPersistError(''), (err) => setPersistError(err.message)), [persist]);
 
   const setNote = useCallback((text) => {
     noteRef.current = text;
@@ -136,7 +161,7 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     visitId, key: keyRef.current, note: noteRef.current,
     forms: Object.fromEntries(ids.filter(ready).map((id) => [id, { body: entries.current[id].body }])),
   });
-  return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, draftFor, persistError, draftId };
+  return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, retryPersist, draftFor, persistError, draftId };
 }
 
 export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {

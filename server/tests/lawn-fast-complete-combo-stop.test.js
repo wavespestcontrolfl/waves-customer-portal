@@ -31,7 +31,7 @@ const svcRow = (extra = {}) => ({
 
 // scheduled_services answers .first() with the service and, once whereNotIn ran (visit-groups.openMembers),
 // its awaited list with `members`.
-function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT }, { id: OTHER }], packet = null, svc = svcRow(), projectError = false, invoice = null, invoiceError = false } = {}) {
+function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT }, { id: OTHER }], packet = null, svc = svcRow(), projectError = false, invoice = null, invoiceError = false, records = [], recordsError = false } = {}) {
   const queried = [];
   const knex = jest.fn((table) => {
     queried.push(table);
@@ -54,7 +54,10 @@ function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT
       }
       return tables[table];
     };
-    chain.then = (resolve, reject) => Promise.resolve(list && table === 'scheduled_services' ? members : []).then(resolve, reject);
+    chain.then = (resolve, reject) => {
+      if (table === 'service_records') return (recordsError ? Promise.reject(new Error('records read failed')) : Promise.resolve(records)).then(resolve, reject);
+      return Promise.resolve(list && table === 'scheduled_services' ? members : []).then(resolve, reject);
+    };
     chain.catch = () => Promise.resolve([]);
     return chain;
   });
@@ -368,3 +371,36 @@ describe('invoice state and the pest report gate are rechecked (header path and 
     expect(wheres).toEqual(['scheduled_service_id', 'service_record_id']);
   });
 });
+
+describe('an invoice that hangs on a member\'s service record refuses the combo (header path and packet path)', () => {
+  const invoiceModule = require('../services/visit-completion-invoice');
+  const paths = [
+    ['header path', (extra) => fakeKnex(extra), { stop: true }],
+    ['packet path', (extra) => fakeKnex({ visit: { id: STOP, status: 'closing' }, packet: PK, ...extra }), { packetContext: { packetId: PACKET } }],
+  ];
+
+  test.each(paths)('%s: the lookup is given each member\'s existing record ids, and an invoice found by them refuses', async (_label, knexFor, ask) => {
+    comboLive();
+    const lookup = jest.spyOn(invoiceModule, 'linkedMemberInvoices');
+    const records = [{ id: 'rec-pest', scheduled_service_id: OTHER }, { id: 'rec-lawn-1', scheduled_service_id: VISIT }, { id: 'rec-lawn-2', scheduled_service_id: VISIT }];
+    expect(await groupedStopAllowed(knexFor({ records }), svcRow(), ask)).toBe(true);
+    const given = lookup.mock.calls.at(-1)[1];
+    expect(given).toEqual(expect.arrayContaining([
+      { id: OTHER, record_id: 'rec-pest' }, { id: VISIT, record_id: 'rec-lawn-1' }, { id: VISIT, record_id: 'rec-lawn-2' },
+    ]));
+    expect(await groupedStopAllowed(knexFor({ records, invoice: { id: 'inv-on-record' } }), svcRow(), ask)).toBe(false);
+  });
+
+  test.each(paths)('%s: members with no record yet are looked up by the visit alone', async (_label, knexFor, ask) => {
+    comboLive();
+    const lookup = jest.spyOn(invoiceModule, 'linkedMemberInvoices');
+    await groupedStopAllowed(knexFor({}), svcRow(), ask);
+    expect(lookup.mock.calls.at(-1)[1]).toEqual(expect.arrayContaining([{ id: VISIT, record_id: null }, { id: OTHER, record_id: null }]));
+  });
+
+  test.each(paths)('%s: a failed record read refuses (fail closed)', async (_label, knexFor, ask) => {
+    comboLive();
+    expect(await groupedStopAllowed(knexFor({ recordsError: true }), svcRow(), ask)).toBe(false);
+  });
+});
+

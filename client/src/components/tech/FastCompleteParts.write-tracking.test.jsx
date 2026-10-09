@@ -5,19 +5,20 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PartBusyContext, useWriteTracking } from './FastCompleteParts';
+import { PartBusyContext, usePartBusy, useWriteTracking } from './FastCompleteParts';
 
 afterEach(() => cleanup());
 
 function harness(request, enabled = true) {
   const reports = [];
+  const active = new Set();
   const holder = {};
   function Probe() {
     holder.request = useWriteTracking(request, enabled);
     return null;
   }
-  render(<PartBusyContext.Provider value={(source, busy) => reports.push([source, busy])}><Probe /></PartBusyContext.Provider>);
-  const busyNow = () => reports.filter(([source]) => source === 'writes').at(-1)?.[1] === true;
+  render(<PartBusyContext.Provider value={(key, busy) => { reports.push([key, busy]); if (busy) active.add(key); else active.delete(key); }}><Probe /></PartBusyContext.Provider>);
+  const busyNow = () => active.size > 0;
   return { holder, busyNow, reports };
 }
 const deferred = () => { let resolve; let reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
@@ -74,5 +75,41 @@ describe('useWriteTracking', () => {
     const request = vi.fn();
     const { holder } = harness(request, false);
     expect(holder.request).toBe(request);
+  });
+});
+
+describe('busy keys are per part', () => {
+  it('overlapping writes in two parts: the first to finish leaves the stop busy; the second makes it idle', async () => {
+    const keys = new Set();
+    const report = (key, on) => { if (on) keys.add(key); else keys.delete(key); };
+    const pest = deferred(); const lawn = deferred();
+    const holders = { pest: {}, lawn: {} };
+    function Part({ name, request }) {
+      holders[name].request = useWriteTracking(request, true);
+      return null;
+    }
+    render(<PartBusyContext.Provider value={report}><Part name="pest" request={vi.fn(() => pest.promise)} /><Part name="lawn" request={vi.fn(() => lawn.promise)} /></PartBusyContext.Provider>);
+    let a; let b;
+    act(() => { a = holders.pest.request('/x', { method: 'POST' }); b = holders.lawn.request('/y', { method: 'POST' }); });
+    expect(keys.size).toBe(2);
+    await act(async () => { pest.resolve(1); await a; });
+    // The pest write finished: the lawn write still holds the stop busy.
+    expect(keys.size).toBe(1);
+    await act(async () => { lawn.resolve(2); await b; });
+    expect(keys.size).toBe(0);
+  });
+
+  it('two sources of one part (a write and a dictation) never share a key either', () => {
+    const keys = new Set();
+    const report = (key, on) => { if (on) keys.add(key); else keys.delete(key); };
+    function Part({ dictating, writing }) {
+      usePartBusy('dictation', dictating);
+      usePartBusy('writes', writing);
+      return null;
+    }
+    const { rerender } = render(<PartBusyContext.Provider value={report}><Part dictating writing /></PartBusyContext.Provider>);
+    expect(keys.size).toBe(2);
+    rerender(<PartBusyContext.Provider value={report}><Part dictating={false} writing /></PartBusyContext.Provider>);
+    expect(keys.size).toBe(1);
   });
 });

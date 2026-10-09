@@ -47,12 +47,16 @@ function pestReportFlowAdmits(profile, serviceType, isCallback) {
     && require('./visit-lane-facts').voiceLaneFor({ profile, serviceType }) == null;
 }
 
-// Does any invoice already hang on these members? The mint's own `existing_member_invoice` predicate
-// (visit-completion-invoice.js linkedMemberInvoices); a failed read counts as invoiced (fail closed).
+// Does any invoice already hang on these members, by the visit or by a service record they already have? The mint's own
+// `existing_member_invoice` predicate (linkedMemberInvoices) over the members with their record ids
+// (membersWithRecordIds, the relation the mint insists on). A failed read counts as invoiced (fail closed).
 async function membersInvoiced(knex, memberIds) {
-  const { linkedMemberInvoices } = require('./visit-completion-invoice');
-  const found = await linkedMemberInvoices(knex, memberIds.map((id) => ({ id, record_id: null }))).first('id').catch(() => ({}));
-  return !!found;
+  const { linkedMemberInvoices, membersWithRecordIds } = require('./visit-completion-invoice');
+  try {
+    return !!await linkedMemberInvoices(knex, await membersWithRecordIds(knex, memberIds)).first('id');
+  } catch {
+    return true;
+  }
 }
 
 // Exactly one pest member and one lawn member, each judged by the canonical server rule: the pest report flow

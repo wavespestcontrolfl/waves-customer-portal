@@ -3927,13 +3927,13 @@ describe('prepare mode (a part of a grouped stop)', () => {
     });
     render(<PartBusyContext.Provider value={(source, busy) => reports.push([source, busy])}><FastCompleteLawnSheet service={SERVICE} request={slow} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={vi.fn()} /></PartBusyContext.Provider>);
     await screen.findByRole('heading', { name: 'Lawn assessment' });
-    expect(reports.some(([source, busy]) => source === 'writes' && busy)).toBe(false);
+    expect(reports.some(([source, busy]) => source.endsWith(':writes') && busy)).toBe(false);
     await addPhoto();
     fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
-    await waitFor(() => expect(reports.some(([source, busy]) => source === 'writes' && busy)).toBe(true));
+    await waitFor(() => expect(reports.some(([source, busy]) => source.endsWith(':writes') && busy)).toBe(true));
     release();
     await screen.findByLabelText('Density score');
-    await waitFor(() => expect(reports.filter(([source]) => source === 'writes').at(-1)[1]).toBe(false));
+    await waitFor(() => expect(reports.filter(([source]) => source.endsWith(':writes')).at(-1)[1]).toBe(false));
   });
 
   test('a refused hand-over shows its message and leaves the sheet editable', async () => {
