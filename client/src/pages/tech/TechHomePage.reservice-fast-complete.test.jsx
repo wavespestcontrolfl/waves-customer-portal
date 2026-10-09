@@ -22,10 +22,19 @@ vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => 
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service, onFullForm, voiceFillEnabled }) => (
+  default: ({ service, onFullForm, onViewDetails, voiceFillEnabled }) => (
     <div data-recap-enabled={String(service.recapEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)}>
       Fast Complete sheet for {service.id}
       <button type="button" onClick={onFullForm}>Sheet full form</button>
+      {onViewDetails && <button type="button" onClick={onViewDetails}>Sheet details</button>}
+    </div>
+  ),
+}));
+vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({
+  default: ({ service, onEdit }) => (
+    <div>
+      Appointment details for {service.id}
+      <button type="button" onClick={() => onEdit(service)}>Edit appointment</button>
     </div>
   ),
 }));
@@ -132,6 +141,23 @@ it.each([
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   const sheet = (await screen.findByText('Fast Complete sheet for svc-recap')).closest('[data-recap-enabled]');
   expect(sheet.getAttribute('data-recap-enabled')).toBe(expected);
+});
+
+// Details (owner 2026-10-09): the sheet's Details pill swaps it for the
+// appointment details sheet (quick move, cancel, reschedule, price edit); the
+// sheet's Dispatch-only destinations reopen it there on the visit's day.
+it('the sheet\'s Details opens the appointment details sheet here, and its Edit goes to Dispatch\'s detail deep link', async () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', { ...window.location, assign });
+  rows = [row('svc-details', { reserviceFastCompleteEnabled: true, scheduledDate: '2026-10-09' })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  await screen.findByText('Fast Complete sheet for svc-details');
+  fireEvent.click(screen.getByRole('button', { name: 'Sheet details' }));
+  expect(await screen.findByText('Appointment details for svc-details')).toBeInTheDocument();
+  expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit appointment' }));
+  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2026-10-09&appointment=svc-details');
 });
 
 it('the recap flag alone never opens the sheet: the routing gate still decides', async () => {
