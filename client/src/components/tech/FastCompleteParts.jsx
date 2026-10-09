@@ -154,7 +154,9 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
+// `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
+// form button until the sheet itself says the visit needs the full form.
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
@@ -165,7 +167,7 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && (
+      {!done && fullFormOffered && (
         <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>

@@ -58,8 +58,7 @@ describe('combined visit booking capacity', () => {
         expect(profile.reservationServiceMix).toBeUndefined();
         process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
         const combined = await require('../services/estimate-slot-availability').resolveCatalogSlotProfile(estimateFor([first, second]));
-        // Two stop groups: the first group's work rounds up to the hour before the other starts.
-        expect(combined.durationMinutes).toBe(100);
+        expect(combined.durationMinutes).toBe(70);
         expect(combined.reservationServiceMix.version).toBe(2);
       } finally { link.mockRestore(); }
     },
@@ -232,16 +231,16 @@ describe('combined visit booking capacity', () => {
       .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
   });
 
-  test('one held block becomes one hour per service, back to back: pest group first, then the lawn group', () => {
+  test('one held block becomes sequential on-the-hour service windows', () => {
     const anchor = {
       window_start: '09:00:00',
       reservation_service_mix: capacityForServices(services.map((service) => ({ service }))),
     };
     expect(services.map((_, index) => windowForCapacityService(anchor, index))).toEqual([
-      { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }, // pest
-      { window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60 }, // lawn
-      { window_start: '12:00', window_end: '13:00', estimated_duration_minutes: 60 }, // tree & shrub
-      { window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }, // mosquito
+      { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
+      { window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 },
+      { window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60 },
+      { window_start: '12:00', window_end: '13:00', estimated_duration_minutes: 60 },
     ]);
     expect(() => windowForCapacityService(anchor, 4)).toThrow();
     expect(() => windowForCapacityService({ ...anchor, window_start: '09:30' }, 0)).toThrow();
