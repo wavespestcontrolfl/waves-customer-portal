@@ -7115,7 +7115,7 @@ function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
       />
       <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
 
-      {p.sod_laid_on && (
+      {isAdmin && p.sod_laid_on && (
         <>
           <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
           <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />

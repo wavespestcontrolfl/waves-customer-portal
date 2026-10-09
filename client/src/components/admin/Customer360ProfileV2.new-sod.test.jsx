@@ -268,11 +268,15 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
 
   it('a technician sees no new-sod fields and never calls the office-only endpoint', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
-    const fetchMock = stubFetch({ onPut: () => response({}) });
+    // A saved record: the read view must not show it to a technician either.
+    const fetchMock = stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'Back yard strip' }, onPut: () => response({}) });
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findAllByText('Avery Customer');
     fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
     await screen.findByText('Access & Preferences');
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/new-sod'))).toBe(false);
+    expect(screen.queryByText('New sod')).not.toBeInTheDocument();
+    expect(screen.queryByText('Sod Laid On')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Back yard strip/)).not.toBeInTheDocument();
   });
 });

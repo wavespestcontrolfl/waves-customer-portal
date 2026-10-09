@@ -13,15 +13,17 @@
  * Nothing here writes, texts or emails.
  */
 
-const { sodHolds, validateSodLaidOn } = require('./lawn-sod-holds');
+const { sodHolds, validateSodLaidOn, MAX_SOD_AGE_MONTHS } = require('./lawn-sod-holds');
+const { stampedDivergesSql } = require('./stamped-address');
 const { isPreEmergent } = require('./service-report/lawn-watering-rule');
-const { etCalendarDayOf, validCalendarDate } = require('../utils/datetime-et');
+const { etCalendarDayOf, validCalendarDate, etDateString, addETDays } = require('../utils/datetime-et');
 
 // Dimension granular label: delay sprigging 12 weeks after the pre-emergent.
 const PRE_EMERGENT_BEFORE_SOD_DAYS = 84;
 const PRE_EMERGENT_WARNING = 'Pre-emergent was applied less than 12 weeks before this sod. Tell the customer.';
-// Newest completed product rows read when looking for the last pre-emergent.
-const HISTORY_ROWS_READ = 300;
+// How far back the history is read: the oldest sod date the form accepts (MAX_SOD_AGE_MONTHS) plus the 12 weeks
+// before it, with a margin. A date window, never a row limit: a busy file must not push the pre-emergent out.
+const HISTORY_DAYS_READ = (MAX_SOD_AGE_MONTHS + 4) * 31;
 
 const DAY_MS = 86400000;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -50,7 +52,7 @@ function daysBetween(fromYmd, toYmd) {
 }
 
 /**
- * The newest completed pre-emergent application on the customer's file.
+ * The newest completed pre-emergent application at the customer's current home.
  * Uses the same product test as the lawn watering rule (isPreEmergent), on the
  * product name plus what the catalog says about it.
  * @returns {Promise<{ date: string, product: string }|{ unreadable: true }|null>} null when none;
@@ -61,11 +63,16 @@ async function lastWavesPreEmergent(knex, customerId) {
   try {
     rows = await knex('service_products as sp')
       .join('service_records as sr', 'sp.service_record_id', 'sr.id')
+      .join('customers as c', 'sr.customer_id', 'c.id')
+      .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
       .leftJoin('products_catalog as pc', 'sp.product_name', 'pc.name')
       .where('sr.customer_id', customerId)
       .where('sr.status', 'completed')
+      .where('sr.service_date', '>=', etDateString(addETDays(new Date(), -HISTORY_DAYS_READ)))
+      // This home only: a visit stamped with another address (a former home, or a second property) is not this
+      // lawn's history. A visit with no stamp is kept: nothing proves it was elsewhere.
+      .whereRaw(`NOT COALESCE(${stampedDivergesSql('ss', 'c')}, false)`)
       .orderBy('sr.service_date', 'desc')
-      .limit(HISTORY_ROWS_READ)
       .select(
         'sr.service_date',
         'sp.product_name',

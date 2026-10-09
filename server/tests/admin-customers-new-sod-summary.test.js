@@ -20,7 +20,7 @@ const mockState = { customer: { id: 'cust-1' }, prefsRow: null, productRows: [],
 jest.mock('../models/db', () => {
   const chain = (resolve) => {
     const q = {};
-    for (const m of ['where', 'whereNull', 'join', 'leftJoin', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereNull', 'whereRaw', 'join', 'leftJoin', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
     q.first = jest.fn(async () => resolve());
     q.select = jest.fn(async () => resolve());
     return q;
@@ -29,10 +29,11 @@ jest.mock('../models/db', () => {
     if (table === 'customers') return chain(() => mockState.customer);
     if (table === 'property_preferences') return chain(() => mockState.prefsRow);
     if (String(table).startsWith('service_products')) {
-      return chain(() => {
+      mockState.historyQuery = chain(() => {
         if (mockState.productsThrow) throw new Error('relation does not exist');
         return mockState.productRows;
       });
+      return mockState.historyQuery;
     }
     throw new Error(`Unexpected table ${table}`);
   });
@@ -140,6 +141,19 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     expect(byKey.fertilizer.text).toBe(`Fertilizer is held until Oct 31, 2026${byKey.fertilizer.active ? '' : ' (this hold is over)'}.`);
     expect(byKey.weedKiller.text).toContain('Weed killer is held until Oct 31, 2026 and until the technician confirms the sod is rooted');
     expect(byKey.preEmergent.text).toContain('Pre-emergent is held until Oct 1, 2027');
+  });
+
+  it('the history read is this home only and a date window, never a row limit', async () => {
+    await getNewSod();
+    const q = mockState.historyQuery;
+    expect(q.limit).not.toHaveBeenCalled();
+    expect(q.whereRaw).toHaveBeenCalledTimes(1);
+    // A visit stamped with another address is left out; one with no stamp is kept.
+    expect(q.whereRaw.mock.calls[0][0]).toMatch(/^NOT COALESCE\(.*ss\.service_address_line1.*c\.address_line1.*, false\)$/s);
+    const window = q.where.mock.calls.find((call) => call[0] === 'sr.service_date');
+    expect(window[1]).toBe('>=');
+    // Reaches past the oldest sod date the form accepts (24 months) plus the 12 weeks before it.
+    expect(window[2] <= daysAgo(24 * 31 + 84)).toBe(true);
   });
 
   it('a pre-emergent after the sod date does not hide one applied shortly before it', async () => {
