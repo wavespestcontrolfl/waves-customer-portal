@@ -432,6 +432,38 @@ describe('the rooted tick', () => {
       expect(rowNames()).toEqual([P_BAG24]);
     });
 
+    // Codex round 4 on #6240.
+    test('the add-ons follow the re-read too: one the refreshed plan dropped is gone, a new one is offered', async () => {
+      await openSheet(context(DAY31), context(AFTER, { addOns: [addOn(P_DYLOX, 'Test Dylox'), addOn(P_DIM, 'Test Dimension Bag')] }));
+      const addons = () => screen.getByRole('group', { name: 'Also in October’s protocol' });
+      expect(within(addons()).queryByText('Test Celsius')).toBeTruthy();
+      await tickIt();
+      expect(within(addons()).queryByText('Test Celsius')).toBeNull();
+      expect(within(addons()).getByRole('button', { name: 'Add Test Dimension Bag' })).toBeTruthy();
+    });
+
+    test('a re-read that could not read the plan changes nothing and keeps Complete off', async () => {
+      await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), { ...context(AFTER, { items: [] }), plannedProductsUnavailable: 'planned_products', readFailures: ['planned_products'] });
+      await confirmAssessment();
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await waitFor(() => expect(screen.getAllByText('Saved. The sheet could not reload the holds. Tap the box again.').length).toBeGreaterThan(0));
+      expect(screen.getAllByRole('group', { name: 'Test Nutra Mix' }).length).toBeGreaterThan(0);
+      expect(within(heldGroup()).getByText('Test 24-0-11 Bag')).toBeTruthy();
+      expect(completeButton().disabled).toBe(true);
+    });
+
+    test('the retry after a failed re-read gets 404: the sheet says to close and open the visit, and the box stays', async () => {
+      await openSheet(context(DAY31), context(AFTER));
+      failContextAfter = contextReads;
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await screen.findByText('Saved. The sheet could not reload the holds. Tap the box again.');
+      rootedAnswer = Object.assign(new Error('Not found'), { status: 404 });
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await waitFor(() => expect(screen.getAllByText('Saved. The sheet could not reload the holds. Close this visit and open it again.').length).toBeGreaterThan(0));
+      expect(within(banner()).getByRole('checkbox')).toBeTruthy();
+    });
+
     test('a row the technician changed himself stays as he left it', async () => {
       await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(AFTER, { items: [item(P_BAG24, 'Test 24-0-11 Bag')] }));
       const nutra = () => screen.getAllByRole('group', { name: 'Test Nutra Mix' })[0];

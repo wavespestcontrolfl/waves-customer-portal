@@ -287,6 +287,11 @@ const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 // without it is the legacy context, so the sheet then has no holds to show.
 const SOD_AWARE = 'sodAware=1';
 const SOD_BUSY_MESSAGE = 'Checking the new sod holds. Wait a moment.';
+const SOD_REOPEN_MESSAGE = 'Saved. The sheet could not reload the holds. Close this visit and open it again.';
+// The parts of the context that come from the visit's plan: the re-read after the rooted tick replaces them together.
+const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'guidedProductIds', 'takeAllProductIds', 'troubleAreas', 'mixHelp'];
+// A context re-read the sheet can rebuild from: the visit still takes this sheet, the plan was read, the sod record was checked.
+const sodRereadUsable = (next) => !!next && !next.loadError && !next.handoff && !next.blockedReason && !next.plannedUnavailable && !next.newSod?.unavailable;
 const SOD_REREAD_MESSAGE = 'Saved. The sheet could not reload the holds. Tap the box again.';
 
 // What each entry of the context's `readFailures` means for the sheet:
@@ -1486,56 +1491,61 @@ function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }
 
 // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them, and the rooted tick. The tick reads the holds again
 // (`sodFresh`; `undefined` = the context's own).
-function useSodHolds({ ctx, request, base, reconcilePlanned }) {
+function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
   const [sodFresh, setSodFresh] = useState(undefined);
   // True from the tick until the holds are read again: the sheet does not complete on the rows of the old holds.
   const [sodBusy, setSodBusy] = useState(false);
-  const [sodStale, setSodStale] = useState(false);
-  // The planned lines as the server last gave them (`undefined` = the context's own): the plan may have changed since the sheet opened.
-  const [plannedFresh, setPlannedFresh] = useState(undefined);
+  // The tick is saved but the sheet has not read the plan and the holds again: '' or the sentence that says what to do.
+  const [sodStale, setSodStale] = useState('');
+  const saved = useRef(false);
+  // The plan parts of the context as the server last gave them (null = the context's own): the plan may have changed since the sheet opened.
+  const [planFresh, setPlanFresh] = useState(null);
   const saveSodRooted = useCallback(async (sodLaidOn) => {
-    await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
-    // The weed lines un-hold on this re-read: the server's own words, not a guess here.
+    try {
+      await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
+    } catch (err) {
+      // The tick was saved on an earlier tap and the server no longer offers it (404): this sheet cannot read the holds again.
+      if (!(saved.current && err?.status === 404)) throw err;
+      setSodStale(SOD_REOPEN_MESSAGE);
+      throw new Error(SOD_REOPEN_MESSAGE);
+    }
     // The tick is saved from here: until a re-read succeeds the rows on the sheet are the old holds' rows, and the sheet does
     // not complete on them (a line the tick released would be recorded as skipped). Ticking again reads again.
-    setSodStale(true);
-    let data;
-    try {
-      data = await request(`${base}/lawn-fast/context?${SOD_AWARE}`);
-    } catch {
-      throw new Error(SOD_REREAD_MESSAGE);
-    }
-    const fresh = newSodOf(data);
-    // A re-read that could not check the sod record says nothing: the holds stay as they were (no line is released).
-    if (fresh?.unavailable) throw new Error(SOD_REREAD_MESSAGE);
-    setSodStale(false);
-    setSodFresh(fresh);
-    // The rows follow the refreshed plan and holds, not the opening ones: a released line comes back, a line the plan dropped
-    // or the holds now keep off leaves. An add-on is a plain "Add" again on its own.
-    const planned = plannedItemsOf(data);
-    setPlannedFresh(planned);
-    reconcilePlanned(splitHeldPlanned(uniquePlanned(planned), fresh).start);
-  }, [request, base, reconcilePlanned]);
+    saved.current = true;
+    setSodStale(SOD_REREAD_MESSAGE);
+    // The weed lines un-hold on this re-read: the server's own words, not a guess here.
+    const next = await request(`${base}/lawn-fast/context?${SOD_AWARE}`).then((data) => contextFrom(data, service)).catch(() => null);
+    // A re-read that failed, that could not read the plan, or that could not check the sod record says nothing: the rows and
+    // the holds stay as they were (no line is released, none is removed).
+    if (!sodRereadUsable(next)) throw new Error(SOD_REREAD_MESSAGE);
+    saved.current = false;
+    setSodStale('');
+    setSodFresh(next.newSod);
+    // The whole plan part of the sheet follows the re-read (the add-ons, the weed mix and the chinch decision with the lines),
+    // and so do the rows: a released line comes back, a line the plan dropped or the holds now keep off leaves.
+    setPlanFresh(Object.fromEntries(PLAN_CONTEXT_FIELDS.map((key) => [key, next[key]])));
+    reconcilePlanned(splitHeldPlanned(uniquePlanned(next.planned), next.newSod).start);
+  }, [request, base, service, reconcilePlanned]);
   const confirmSodRooted = useCallback(async (sodLaidOn) => {
     setSodBusy(true);
     try { await saveSodRooted(sodLaidOn); } finally { setSodBusy(false); }
   }, [saveSodRooted]);
-  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, planned: plannedFresh, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale ? SOD_REREAD_MESSAGE : '' };
+  const liveCtx = useMemo(() => (planFresh ? { ...ctx, ...planFresh } : ctx), [ctx, planFresh]);
+  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, liveCtx, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale };
 }
 
 function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
   const base = `/admin/dispatch/${service?.id}`;
-  // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
-  const searchedIds = useRef([]);
-  const dosesRef = useRef({});
-  const { tick: placeTick, placeCtx, refused, refusedCard, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
-  // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads them again (`undefined` = the context's own).
-  const { newSod, planned: sodPlanned, confirmSodRooted, sodWait } = useSodHolds({ ctx, request, base, reconcilePlanned: products.reconcilePlanned });
-  // The context with the planned lines of the last read: the skipped list and the held group follow them.
-  const sheetCtx = useMemo(() => (sodPlanned ? { ...ctx, planned: sodPlanned } : ctx), [ctx, sodPlanned]);
+  // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads the plan and the holds again;
+  // `sheetCtx` is the context with the plan parts of that last read (the opening context until then).
+  const { newSod, liveCtx: sheetCtx, confirmSodRooted, sodWait } = useSodHolds({ ctx, service, request, base, reconcilePlanned: products.reconcilePlanned });
+  // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
+  const searchedIds = useRef([]);
+  const dosesRef = useRef({});
+  const { tick: placeTick, placeCtx, refused, refusedCard, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx: sheetCtx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
@@ -1569,7 +1579,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlace, setWeedPlace] = useState('');
   // GATE_LAWN_MIX_HELP: the shared tank size and the weed entry's gallons sprayed.
-  const mix = useMixHelp(ctx.mixHelp, operatorId);
+  const mix = useMixHelp(sheetCtx.mixHelp, operatorId);
   const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, refusedCard, moved });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
