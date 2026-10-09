@@ -555,6 +555,9 @@ async function readLimitHistory(database, { estimate, keys, customerId, property
   // In a savepoint: a failed read must not poison the transaction it runs inside (the 409 is the answer).
   const history = await savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
     customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeVisitIds, prospect: prospectOf(estimate),
+    // The 12 months are counted back from the day being booked (a backdated booking is judged against its own window).
+    // `day` can be a Date from a scheduled_date column: its ET calendar day. No day named: today (the reader's default).
+    asOf: day ? dayOf(day) : undefined,
   }));
   return { day, history };
 }
@@ -626,7 +629,7 @@ async function movedVisitHistory(database, { visit, visitId, property, keys, day
     customerId: visit.customer_id, propertyId: isUuid(property) ? property : null, keys, excludeVisitIds: [visitId], prospect: found ? found.prospect : null,
     // The 12 months are counted back from the day the visit lands on, not from today: a backdated visit is judged against
     // the applications that were inside its own window.
-    asOf: day,
+    asOf: day ? dayOf(day) : undefined,
   }));
 }
 

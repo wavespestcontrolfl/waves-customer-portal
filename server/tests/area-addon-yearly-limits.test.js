@@ -728,6 +728,17 @@ describe('a customer who does not exist yet: the holds of the same person count,
   });
 });
 
+// Codex round 49: the booking paths (reserve, accept, staff booking) count the 12 months back from the booked day too.
+describe('a backdated booking is judged against its own window', () => {
+  const fireAnt = { id: ESTIMATE, customer_id: CUSTOMER, property_id: PROPERTY, estimate_data: storedWith(['fire_ant_yard']) };
+  test('an application over a year before today but inside the 12 months of the backdated day closes that day', async () => {
+    const BACK = limits.addDays(TODAY, -300);
+    const tables = () => fakeDb(world({ property_application_history: [ledger('p-top', 400)] }));
+    await expect(service.assertAreaAddOnLimitsOpen(tables(), { estimate: fireAnt, appliedOn: BACK, staff: true })).rejects.toMatchObject({ code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' });
+    await expect(service.assertAreaAddOnLimitsOpen(tables(), { estimate: fireAnt, appliedOn: TODAY, staff: true })).resolves.toBeUndefined();
+  });
+});
+
 describe('the day of the visit is judged on every path (Codex round 9)', () => {
   const lastYear = world({ property_application_history: [ledger('p-top', 360)] });
   const fireAnt = { id: ESTIMATE, customer_id: CUSTOMER, property_id: PROPERTY, estimate_data: storedWith(['fire_ant_yard']) };

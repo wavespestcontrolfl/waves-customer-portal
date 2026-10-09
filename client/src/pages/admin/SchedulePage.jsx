@@ -10534,6 +10534,27 @@ function effectiveApplicationMethod(method) {
 // The first product row of a completion that cannot be saved yet, as the sentence to show, or null: a row whose method
 // needs a treated area that is missing, and a row recorded for a chemical area add-on without its rate, unit, treated square
 // feet or amount (the server refuses it too, the row being that add-on's application record). `typeFor` is the row's service type.
+// The completion group a removed product row belongs to: the ROW's own persisted id (a restored draft has it before any
+// protocol action loads), else the loaded action's for that product. An add-on's own row of a product is never part of the
+// host's completion group.
+export function completionGroupOfRemovedRow(removedRow, productId, protocolActions) {
+  if (removedRow?.group) return removedRow.group;
+  if (removedRow?.areaAddOnKey) return undefined;
+  return (protocolActions || []).find((a) => a.group && a.product?.id === productId)?.group;
+}
+// The rest of a completion group: the product ids that come off with it (every row with that group plus the loaded
+// actions' products) and the chip labels handleProtocolActionSelect added for each member (a member's label is its
+// product name). No group: nothing.
+export function completionGroupMates(group, selectedProducts, protocolActions) {
+  if (!group) return { productIds: new Set(), labels: new Set() };
+  const members = (selectedProducts || []).filter((p) => p.group === group);
+  const actions = (protocolActions || []).filter((a) => a.group === group);
+  return {
+    productIds: new Set([...members.map((p) => p.productId), ...actions.filter((a) => a.product?.id).map((a) => a.product.id)]),
+    labels: new Set([...members.map((p) => String(p.name)), ...actions.map((a) => String(a.note || a.label || a.raw || "Completed protocol item"))]),
+  };
+}
+
 function completionProductRowProblem(service, rows, typeFor) {
   const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p));
   const missingArea = rows.find((p) => {
@@ -17527,49 +17548,37 @@ export function CompletionPanel({
   }
   // `rowId` is productRowId(row): the product and, for an add-on's row, the add-on, so the host's row of a
   // product and the add-on's row of the same product are removed and edited separately.
+  // A removed lawn plan default is remembered by product, with its name (a governed row restored while the plan request
+  // failed is still a plan default: its removal must survive a successful retry, pre-push audit).
+  function rememberRemovedLawnDefault(removedRow, productId) {
+    if (!(lawnDefaultsEnabled || removedRow?.lawnPlanDefaults)) return;
+    const removedName = removedRow?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+    if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
+    setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+  }
   function removeProduct(rowId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
-    const productId = selectedProducts.find((p) => productRowId(p) === rowId)?.productId ?? rowId;
-    // A governed row restored while the plan request failed is still a plan
-    // default: its removal must survive a successful retry (pre-push audit).
-    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => productRowId(p) === rowId && p.lawnPlanDefaults);
-    if (governed) {
-      const removedName = selectedProducts.find((p) => productRowId(p) === rowId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
-      if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
-      setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
-    }
+    const removedRow = selectedProducts.find((p) => productRowId(p) === rowId);
+    const productId = removedRow?.productId ?? rowId;
+    rememberRemovedLawnDefault(removedRow, productId);
     // Same ledger, for the protocol-defaults seed (pre-push audit P1, PR
     // #5049 r2) — a deliberate removal of a seeded default must survive
     // the list going empty, or a later open re-seeds what the tech took
     // off. Only THIS function (the tech's own tap) records one; the
     // non-performed-outcome clearing effect deliberately does not.
-    const removedRow = selectedProducts.find((p) => productRowId(p) === rowId);
     if (removedRow?.protocolDefaultProduct || removedRow?.pestDefaultMixProduct) {
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
-    // Products that share a completion group (the bermuda removal mix) come off together. The group is the
-    // ROW's own persisted id (a restored draft has it before any protocol action loads), else the loaded
-    // action's; the members are every row with that group plus the loaded actions' products.
-    const group = selectedProducts.find((p) => productRowId(p) === rowId)?.group
-      // An add-on's own row of a product is never part of the host's completion group.
-      || (removedRow?.areaAddOnKey ? undefined : protocolActions.find((a) => a.group && a.product?.id === productId)?.group);
-    const members = group ? selectedProducts.filter((p) => p.group === group) : [];
-    const groupMateIds = new Set(group ? [...members.map((p) => p.productId), ...protocolActions.filter((a) => a.group === group && a.product?.id).map((a) => a.product.id)] : []);
-    // The group's chips go with its products: the labels, scopes and [Protocol] note lines
-    // handleProtocolActionSelect added for each member (a member's label is its product name).
-    if (group) {
-      const labels = new Set([
-        ...members.map((p) => String(p.name)),
-        ...protocolActions.filter((a) => a.group === group).map((a) => String(a.note || a.label || a.raw || "Completed protocol item")),
-      ]);
-      for (const label of labels) removeSelectedLabel("protocol", label);
-    }
+    // Products that share a completion group (the bermuda removal mix) come off together, with the group's chips.
+    const group = completionGroupOfRemovedRow(removedRow, productId, protocolActions);
+    const mates = completionGroupMates(group, selectedProducts, protocolActions);
+    for (const label of mates.labels) removeSelectedLabel("protocol", label);
     setSelectedProducts((prev) =>
       // The row itself goes by its row id (an add-on's row of a product and the host's row are separate); the rest of a
       // completion group goes by product, and never takes an add-on's tagged row with it.
-      promoteTankOwner(prev.filter((p) => productRowId(p) !== rowId && !(groupMateIds.has(p.productId) && !p.areaAddOnKey))),
+      promoteTankOwner(prev.filter((p) => productRowId(p) !== rowId && !(mates.productIds.has(p.productId) && !p.areaAddOnKey))),
     );
   }
   // The x on a report pill. A label that belongs to a completion group (the bermuda
