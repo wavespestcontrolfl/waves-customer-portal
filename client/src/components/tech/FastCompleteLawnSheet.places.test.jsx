@@ -993,3 +993,44 @@ describe('the type sent for a chinch-ladder row', () => {
   });
 });
 
+
+// ── with the report ties (lawnReportTies) and the report facts (lawnReportFacts) live ───────────────────────────────
+describe('places beside the report ties and the spot-area marker', () => {
+  const ARENA_ITEM = { productId: P_ARENA, name: 'Arena 50 WDG', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: 0.147, rateUnit: 'oz', gateNotes: [] };
+  const CHINCH = {
+    item: ARENA_ITEM, note: null, rungIds: [P_ARENA], blockedIds: [], unreadableIds: [], chinchOnlyIds: [P_ARENA],
+    byPlace: { front: { item: ARENA_ITEM, note: null, unreadableIds: [], blockedIds: [] }, back: { item: ARENA_ITEM, note: null, unreadableIds: [], blockedIds: [] } },
+  };
+  const tied = () => ({ ...placeContext({ treatmentGuide: true, chinch: CHINCH, addOns: [] }), lawnReportTies: true, lawnReportFacts: true });
+
+  test('the chinch entry per place records the find with the place; the body carries the place and the spot-area marker together', async () => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: CHINCH };
+    await open(tied());
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment: Back' }));
+    typeArea(placeGroup('Arena 50 WDG'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    const body = completeCalls()[0].body;
+    expect(body.products.find((p) => p.productId === P_ARENA)).toMatchObject({ areaPlace: 'back', areaValue: 100, areaUnit: 'sqft', troubleType: 'chinch' });
+    expect(body.lawnFast.spotAreas).toEqual({ v: 1, productIds: [P_ARENA] });
+    expect(body.lawnFast.treatmentGuide.cards).toEqual([{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA], place: 'back' }]);
+  });
+
+  test('a chinch product already on the sheet reads "Found": one tap marks it, the record names its place, no row is added', async () => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: CHINCH };
+    await open({ ...tied(), plannedProducts: { ...tied().plannedProducts, items: [ARENA_ITEM] } });
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    fireEvent.click(chipOf(within(placeGroup('Arena 50 WDG')).getByRole('group', { name: 'Place for Arena 50 WDG' }), 'Front'));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Chinch bugs found: mark the treatment on the sheet' }));
+    expect(within(addons()).getByRole('button', { name: 'Chinch bug treatment is on the sheet' }).disabled).toBe(true);
+    typeArea(placeGroup('Arena 50 WDG'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    const body = completeCalls()[0].body;
+    expect(body.products).toHaveLength(1);
+    expect(body.lawnFast.treatmentGuide.cards).toEqual([{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA], place: 'front' }]);
+  });
+});

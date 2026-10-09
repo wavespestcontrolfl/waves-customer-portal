@@ -692,6 +692,33 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect('guidedProductIds' in (await context(tablesFor())).plannedProducts).toBe(false);
     });
 
+    test('lawnReportTies (the sheet records the standing chinch tap as a find) exists only while the report ties are live', async () => {
+      const TIE_GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2', 'GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+      try {
+        live();
+        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
+        for (const name of TIE_GATES.slice(0, 3)) process.env[name] = 'true';
+        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
+        process.env.GATE_LAWN_REPORT_LEAD = 'true';
+        expect((await context(tablesFor())).lawnReportTies).toBe(true);
+        delete process.env.GATE_LAWN_REPORT_FACTS;
+        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
+      } finally {
+        for (const name of TIE_GATES) delete process.env[name];
+      }
+    });
+
+    test('lawnReportFacts (the sheet names the spot rows whose area it recorded) exists only while GATE_LAWN_REPORT_FACTS is live', async () => {
+      try {
+        live();
+        expect('lawnReportFacts' in (await context(tablesFor()))).toBe(false);
+        process.env.GATE_LAWN_REPORT_FACTS = 'true';
+        expect((await context(tablesFor())).lawnReportFacts).toBe(true);
+      } finally {
+        delete process.env.GATE_LAWN_REPORT_FACTS;
+      }
+    });
+
     test('the month\'s take-all fungicide rows are named, a pick or not; with the guide off or no take-all row the key says so', async () => {
       live();
       expect((await context(tablesFor())).plannedProducts.takeAllProductIds).toEqual([]);

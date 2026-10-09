@@ -18,14 +18,11 @@ const TABLES = [
   'lawn_protocol_product_actuals', 'property_application_history', 'service_products',
 ];
 
-describe('the Advion rate in the recipe is the verified label figure', () => {
-  test('0.0344 lb per 1,000 sq ft (1.5 lb per acre / 43,560 sq ft x 1,000), and nothing says 0.034', () => {
+describe('the Advion rate: the staged rows and the catalog carry the verified label figure (the recipe no longer names Advion)', () => {
+  test('0.0344 lb per 1,000 sq ft (1.5 lb per acre / 43,560 sq ft x 1,000), and the recipe holds no Advion line since 20261009100000', () => {
     expect(Math.round((1.5 / 43.56) * 10000) / 10000).toBe(0.0344);
     expect(round6.NEW_RATE).toBe(0.0344);
-    const lines = Object.values(v13).flatMap((track) => track.visits).flatMap((visit) => String(visit.secondary).split('\n')).filter((line) => line.startsWith('Advion Fire Ant Bait'));
-    expect(lines.length).toBe(6);
-    for (const line of lines) expect(line).toMatch(/1\.5 lb per acre \(0\.0344 lb per 1,000 sq ft\)/);
-    expect(JSON.stringify(v13)).not.toMatch(/0\.034 lb/);
+    expect(JSON.stringify(v13)).not.toMatch(/Advion|0\.034 lb/);
   });
 });
 

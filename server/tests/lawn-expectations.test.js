@@ -1017,6 +1017,8 @@ describe('buildLawnExpectations', () => {
         'services/service-report/lawn-expectations.js',
         // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
         'services/service-report/lawn-progress.js',
+        // GATE_LAWN_REPORT_FACTS: the finding-to-product tie reads the engine's modeLock classification (Acelepryn is preventive-locked), so a tie can never contradict the product's "What to expect" line.
+        'services/service-report/lawn-report-facts.js',
         // P16: the one shared seasonal-dip approval check (dormancy card, cross-season notes).
         'services/service-report/lawn-seasonality.js',
       ]);
