@@ -14798,6 +14798,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,
+                  // The replay rebuilds appointmentId from this, as the
+                  // immediate send passes it: the App push opens the visit's
+                  // report, not the Documents tab.
+                  scheduled_service_id: svc.id,
                   original_block_code: smsResult.code,
                   refresh_customer_phone: true,
                   // from_phone above is a NOT-NULL placeholder — the

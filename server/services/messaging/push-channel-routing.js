@@ -150,6 +150,54 @@ function pushPresentation(messageType) {
   return PRESENTATION[messageType] || { title: 'Waves Pest Control', link: '/', category: 'service' };
 }
 
+function isReportPush(messageType) {
+  return messageType.startsWith('service_complete') || messageType.startsWith('service_report_v1');
+}
+
+// The visit's own public report page, when the visit has one the customer
+// can open: a completed service_report_v1 record with a minted view token
+// whose typed delivery is not suppressed (the same rule the composer's
+// report link applies). Null when nothing qualifies.
+async function reportDeepLink(customerId, appointmentId) {
+  if (!customerId || !appointmentId) return null;
+  const { suppressedTypedReport } = require('../../routes/reports-public');
+  const rows = await db('service_records')
+    .where({ scheduled_service_id: appointmentId, customer_id: customerId, status: 'completed', report_template_version: 'service_report_v1' })
+    .whereNotNull('report_view_token')
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]);
+  // No cap: a visit has a handful of sibling records, and a cap applied
+  // before the suppression filter could miss the one viewable report.
+  const record = rows.find((row) => !suppressedTypedReport(row));
+  return record ? `/report/${encodeURIComponent(record.report_view_token)}` : null;
+}
+
+// The invoice's own permanent receipt page (receipt-v2 never 404s a real
+// token). Null when the invoice is not this customer's. Deposit receipts are
+// not invoice receipts (their sender carries no invoice id), so they keep the
+// Billing tab.
+async function receiptDeepLink(customerId, invoiceId) {
+  if (!customerId || !invoiceId) return null;
+  const invoice = await db('invoices').where({ id: invoiceId, customer_id: customerId }).first('token');
+  return invoice?.token ? `/receipt/${encodeURIComponent(invoice.token)}` : null;
+}
+
+// A report or receipt push opens the page itself when the ids name one
+// (owner 2026-10-09: the report push landed on the portal home / Documents
+// tab, not the report). Both are public token pages, so the retired-house
+// fail-closed case that sent these pushes to a customer-wide tab does not
+// apply. The tab stays the fallback: no ids, no token, or a lookup failure.
+async function resolvePushDestination(presentation, messageType, { customerId, appointmentId = null, invoiceId = null } = {}) {
+  try {
+    let link = null;
+    if (isReportPush(messageType)) link = await reportDeepLink(customerId, appointmentId);
+    else if (presentation === PRESENTATION.receipt) link = await receiptDeepLink(customerId, invoiceId);
+    return link ? { ...presentation, link } : presentation;
+  } catch (err) {
+    logger.warn(`[push-routing] ${messageType}: deep link lookup failed, opening the tab instead: ${err.message}`);
+    return presentation;
+  }
+}
+
 /**
  * Pure routing decision — unit-tested. Everything that must force SMS is
  * decided here; subscription presence and delivery proof are runtime.
@@ -344,8 +392,8 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, appointmentId = null } = {}) {
-  const { title, link, category } = pushPresentation(messageType);
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, appointmentId = null, invoiceId = null } = {}) {
+  const { title, link, category } = await resolvePushDestination(pushPresentation(messageType), messageType, { customerId, appointmentId, invoiceId });
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
     title,
@@ -398,9 +446,9 @@ function windowGuardFrom(preSendCheck) {
 // NotificationService.create (not notifyCustomer) on purpose: the message
 // already passed the SMS pipeline's consent checks, and notifyCustomer
 // would fire its own second push.
-async function recordBell(customerId, messageType, body, dedupeKey, appointmentId = null) {
+async function recordBell(customerId, messageType, body, dedupeKey, appointmentId = null, invoiceId = null) {
   try {
-    const { title, link, category } = pushPresentation(messageType);
+    const { title, link, category } = await resolvePushDestination(pushPresentation(messageType), messageType, { customerId, appointmentId, invoiceId });
     const NotificationService = require('../notification-service');
     const notif = await NotificationService.notifyCustomer(customerId, category, title, body, {
       link, dedupeKey, push: false,
@@ -545,7 +593,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         presentation = { title: messageType === 'invoice_followup' ? 'Invoice reminder' : 'Your invoice is ready',
           link: `/pay/${encodeURIComponent(invoice.token)}`, category: 'billing' };
       }
-      const { title, link, category } = presentation;
+      const { title, link, category } = await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
       deliveryOutcome = 'uncertain';
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
@@ -584,6 +632,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         shouldContinue: windowGuardFrom(preSendCheck),
         minUpdatedAt: heartbeatCutoff(),
         appointmentId,
+        invoiceId,
       });
     if (!delivered) {
       // These App notices have durable replay owners. Other App-first
@@ -702,7 +751,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         }
       }
     }
-    const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey, appointmentId);
+    const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey, appointmentId, invoiceId);
     const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
     acceptedResult = { delivered: true, deliveryOutcome: 'accepted', sid, notificationId, acceptedAt };
     if (proofRowId && notificationId) {
@@ -787,5 +836,5 @@ module.exports = {
   PUSH_ROUTING_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushPresentation, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };
