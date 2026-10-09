@@ -272,6 +272,32 @@ const LAWN_TIERS = {
   premium:  { freq: 12, index: 2, label: '12x applications/yr' },
 };
 const LAWN_SOLD_TIERS = ['standard', 'enhanced', 'premium'];
+// Bermuda removal add-on cost (GATE_LAWN_BERMUDA_REMOVAL, owner 2026-10-06): what the
+// two yearly sprays cost to do, for margin REPORTING only (never a cost floor: add-on
+// revenue must not satisfy floors, and these dollars never raise one). Per spray:
+// product $/1,000 sq ft x the whole lawn (a conservative worst case: the real mix goes
+// on mapped areas plus a 3 ft border) plus labor at LAWN_PRICING_V2.laborRateLoaded for
+// mixMinutes + minutesPer1000 x lawn sq ft / 1,000. These are the code defaults of
+// LAWN_PRICING_V2.bermudaSuppression.cost: the pricing_config lawn_pricing_v2 row can
+// overlay it (db-bridge deep-merges and rebases to these on every sync), so an edit
+// there changes the cost with no deploy. The engine reads it at call time.
+// Product prices are owner-provided, dated 2026-10-06, NOT read from products_catalog
+// (priceLawnCare is synchronous and database-free):
+//   Recognition 0.03 oz/1,000: SiteOne $183.30 per 1.95 oz bottle = $94.00/oz = $2.82
+//   Fusilade II 0.55 fl oz/1,000: DoMyOwn $93.88 per 32 fl oz = $2.934/fl oz = $1.61
+//     (owner's pick; the SiteOne quart is $135.29 and the 2.5 gal jug $4.63/fl oz)
+//   LESCO 90/10 surfactant 0.32 fl oz/1,000: about $0.07
+// (Not frozen: db-bridge snapshots and restores every export of this module in place.)
+const BERMUDA_SUPPRESSION_COST_DEFAULTS = {
+  recognitionPer1000: 2.82,
+  fusiladePer1000: 1.61,
+  surfactantPer1000: 0.07,
+  mixMinutes: 10,
+  minutesPer1000: 2.5,
+};
+// Label ceiling, not a price: at most 2 sprays a calendar year.
+const LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR = 2;
+
 const LAWN_COST_PLUS_LIST_DEFAULTS = {
   listMargin: 0.45,
   minimumPerVisit: 55,
@@ -350,7 +376,7 @@ const LAWN_PRICING_V2 = {
   // behind GATE_BERMUDA_SUPPRESSION. Both knobs are DB-editable on the
   // pricing_config lawn_pricing_v2 row (deepMerge); adder =
   // perAppBase + perAppPer1000Sqft * (turf sqft / 1000).
-  bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 },
+  bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2, cost: { ...BERMUDA_SUPPRESSION_COST_DEFAULTS } },
   // Cost-plus list price for residential recurring lawn care (owner ruling
   // 2026-10-09), behind GATE_LAWN_COST_PLUS_LIST (ships OFF). List price =
   // annual cost / (1 - listMargin), never below the market table nor
@@ -2406,7 +2432,7 @@ const INSPECTION_CREDIT = {
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, TURF_FACTORS,
-  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_COST_PLUS_LIST_DEFAULTS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_COST_PLUS_LIST_DEFAULTS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
