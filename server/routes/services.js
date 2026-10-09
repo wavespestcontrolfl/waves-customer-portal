@@ -11,6 +11,13 @@ const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts } = require('../services/portal-service-history');
 const { etDateString } = require('../utils/datetime-et');
+
+// service_products columns the customer service-detail route returns (the table's columns before 20261009110000 added treated_place).
+const CUSTOMER_PRODUCT_COLUMNS = [
+  'id', 'service_record_id', 'product_name', 'product_category', 'active_ingredient', 'moa_group', 'application_rate', 'rate_unit',
+  'total_amount', 'amount_unit', 'notes', 'created_at', 'updated_at', 'application_method', 'application_area', 'epa_reg_number',
+  'product_id', 'zone_ids', 'targets', 'area_value', 'area_unit', 'applied_at',
+];
 const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
 const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
 const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
@@ -82,7 +89,10 @@ router.get('/:id', async (req, res, next) => {
     const products = suppressCustomerArtifacts
       ? []
       : await db('service_products')
-        .where({ service_record_id: service.id });
+        .where({ service_record_id: service.id })
+        // The customer-safe product fields, listed so a column added to the table later (the place a spot treatment went) never
+        // reaches the customer by default. Exactly the columns the table had before treated_place.
+        .select(CUSTOMER_PRODUCT_COLUMNS);
 
     const photos = suppressCustomerArtifacts
       ? []

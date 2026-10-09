@@ -137,7 +137,7 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * fungicide in program order is the suggestion; a product that is at a limit, whose limit could not
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
-async function addOnOffers({ candidates, rows, svc, knex }) {
+async function addOnOffers({ candidates, rows, svc, knex, places = null }) {
   const picks = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
   // A take-all row the pick passed over (October's Headway row follows the large patch row) is governed
   // all the same: its limit is read so a forbidden one stays out of the search, and it has no offer.
@@ -148,15 +148,53 @@ async function addOnOffers({ candidates, rows, svc, knex }) {
   // has no finding is neither.
   const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [] };
   if (!chosen.length) return offers;
-  const capped = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
-  if (!capped) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
+  const wide = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
+  if (!wide) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
+  // GATE_LAWN_TROUBLE_AREAS: what this read found closed at each place, `{ [productId]: { [place]: message } }` for every product it
+  // read (an empty entry = open at every place), in the shape of the context's troubleAreas.blocked: the sheet prefers it once the
+  // answer settles, so a limit that changed since the sheet opened is never judged by the older map.
+  const placeBlocked = places?.length ? Object.fromEntries(chosen.map(([, c]) => [idOf(c.raw.product.id), {}])) : null;
+  const placeTypes = places?.length ? {} : null;
+  const capped = places?.length ? await openSomewhere({ chosen, wide, rows, svc, knex, places, placeBlocked, placeTypes }) : wide;
   for (const [kind, candidate] of chosen) {
     const id = idOf(candidate.raw.product.id);
     if (kind !== TAKE_ALL_KIND) offers[kind] = offerFor(kind, candidate, { capped, rows });
     if (isBlocked(candidate, capped)) offers.blocked.push(id);
     else if (isUnreadable(candidate, capped)) offers.unreadable.push(id);
   }
+  if (placeBlocked) { offers.placeBlocked = placeBlocked; offers.placeTypes = placeTypes; }
   return offers;
+}
+
+// GATE_LAWN_TROUBLE_AREAS: the limit answer with the picks that SOME place still permits taken out of it. The yearly limits are
+// judged per place for a spot treatment, so a pick closed lawn-wide (or at one place) but open at another is still offered (the
+// row's place chips then close only the forbidden places, with the limit's words). A pick stays blocked or unreadable only when
+// NO place permits it, with the lawn-wide answer's own entry; a place whose read fails permits nothing (fail closed). A place can
+// only be more open than the lawn, so only the picks capped lawn-wide are read again, once per place. A city hold is no limit
+// and is judged by isBlocked as before.
+async function openSomewhere({ chosen, wide, rows, svc, knex, places, placeBlocked, placeTypes }) {
+  const closed = chosen.filter(([, c]) => limitBlocks(c, wide).length > 0 && !heldByCity(c.raw));
+  if (!closed.length) return wide;
+  const open = new Set();
+  const unread = new Set();
+  for (const place of places) {
+    const here = await readCaps({ products: closed.map(([, c]) => c.raw.product), rows, svc, knex, place });
+    for (const [, c] of closed) {
+      const id = idOf(c.raw.product.id);
+      const blocks = here ? here.get(id) || [] : null;
+      const typed = blocks?.find(require('./lawn-trouble-areas').refusesAtPlace);
+      if (typed) {
+        placeBlocked[id][place] = typed.message || 'A yearly limit is reached for this place.';
+        (placeTypes[id] = placeTypes[id] || {})[place] = typed.type;
+      }
+      if (blocks && !blocks.length) open.add(id);
+      // A place whose read failed (the whole call, or this product's own typeless block) is UNKNOWN there, not closed: a product
+      // unreadable at ANY place stays reachable by the search with the unreadable note, and a place that read as capped stays closed.
+      else if (!blocks || blocks.every((block) => !block.type)) unread.add(id);
+    }
+  }
+  const UNREAD = [{ message: 'application limits could not be read.' }];
+  return new Map([...wide].filter(([id]) => !open.has(id)).map(([id, blocks]) => [id, unread.has(id) ? UNREAD : blocks]));
 }
 
 // The one add-on each kind may suggest: the FIRST fungicide in program order, the others by trigger.
@@ -187,10 +225,10 @@ function takeAllAddOns(candidates, rows) {
 
 // The plan's own limit reader over some products as selected lines: the hard blocks by product id,
 // or null when the read failed (nothing is then suggested).
-async function readCaps({ products, rows, svc, knex }) {
+async function readCaps({ products, rows, svc, knex, place = null }) {
   try {
     const engine = require('./waveguard-plan-engine');
-    return (await engine.v13VisitLimits(knex, svc, products.map((product) => ({ selected: true, product })), rows, {})).capped;
+    return (await engine.v13VisitLimits(knex, svc, products.map((product) => ({ selected: true, product })), rows, {}, ...(place ? [{ place }] : []))).capped;
   } catch (err) {
     logger.warn(`[lawn-guide] limits unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return null;
@@ -230,8 +268,10 @@ function offerFor(kind, candidate, { capped, rows }) {
  */
 function blockedProductIds({ offers, chinch, weedMix }) {
   // Unavailable (a member's own read failed): only the members whose limit WAS read as forbidding stay blocked.
-  const weedOut = weedMix?.mode === 'unavailable' ? weedMix.blockedIds || []
-    : weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [];
+  const weedOut = (weedMix?.mode === 'unavailable' ? weedMix.blockedIds || []
+    : weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [])
+    // Unreadable at some place (GATE_LAWN_TROUBLE_AREAS): not forbidden.
+    .filter((id) => !(weedMix?.unreadableIds || []).includes(id));
   return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];
 }
 
@@ -244,14 +284,23 @@ function blockedProductIds({ offers, chinch, weedMix }) {
 function unreadableProductIds({ offers, chinch, weedMix }) {
   // The mix is withheld as a whole, so the members NOT read as forbidden are released to the search.
   const weedUnread = weedMix?.mode === 'unavailable' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.blockedIds || []).includes(id)) : [];
-  return [...new Set([...(offers?.unreadable || []), ...(chinch?.unreadableIds || []), ...weedUnread].map(idOf))];
+  return [...new Set([...(offers?.unreadable || []), ...(chinch?.unreadableIds || []), ...weedUnread, ...(weedMix?.unreadableIds || [])].map(idOf))];
 }
 
 function weedOffer(weedMix, items) {
   if (!weedMix || !['lead', 'replacement'].includes(weedMix.mode) || !Array.isArray(weedMix.productIds) || !weedMix.productIds.length) return null;
   const found = weedMix.productIds.map((id) => (items || []).find((item) => idOf(item.productId).toLowerCase() === idOf(id).toLowerCase()));
   if (!found.every(Boolean)) return null;
-  return { productIds: weedMix.productIds.map(idOf), names: found.map((item) => item.name), items: found, note: weedMix.note || null };
+  const offer = { productIds: weedMix.productIds.map(idOf), names: found.map((item) => item.name), items: found, note: weedMix.note || null };
+  if (!weedMix.byPlace) return offer;
+  // GATE_LAWN_TROUBLE_AREAS: what each place takes (the card then adds a place's own mix with one tap on the place).
+  const byPlace = {};
+  for (const [place, decision] of Object.entries(weedMix.byPlace)) {
+    if (!['lead', 'replacement'].includes(decision?.mode) || !Array.isArray(decision.productIds) || !decision.productIds.length) continue;
+    const here = decision.productIds.map((id) => (items || []).find((item) => idOf(item.productId).toLowerCase() === idOf(id).toLowerCase()));
+    if (here.every(Boolean)) byPlace[place] = { productIds: decision.productIds.map(idOf), names: here.map((item) => item.name), items: here, note: decision.note || null };
+  }
+  return { ...offer, byPlace };
 }
 
 // ── chinch bugs ─────────────────────────────────────────────────────────────
@@ -270,7 +319,7 @@ function weedOffer(weedMix, items) {
  * `rungIds` are all the rungs' products (governed by the guide whether offered or not); `blockedIds` the ones
  * a limit that was read kept out; `unreadableIds` all of them when the limit read failed.
  */
-async function resolveChinch({ svc, structured, knex }) {
+async function resolveChinch({ svc, structured, knex, places = null }) {
   const engine = require('./waveguard-plan-engine');
   const rows = engine.v13ProtocolRows(structured);
   if (!rows || !rows.size || !structured?.id) return null;
@@ -280,8 +329,65 @@ async function resolveChinch({ svc, structured, knex }) {
   // rungs" the sheet cannot tell from case 1; (3) rows found but the LIMIT read failed: unreadable.
   const products = chinchProducts(await stagedChinchRows({ structured, knex }));
   if (!products.length) return null;
-  const capped = await readCaps({ products: products.map((p) => ({ id: p.productId, name: p.name })), rows, svc, knex });
-  return withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
+  const lines = products.map((p) => ({ id: p.productId, name: p.name }));
+  const capped = await readCaps({ products: lines, rows, svc, knex });
+  const wide = withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
+  if (!places || !places.length) return wide;
+  // GATE_LAWN_TROUBLE_AREAS: which rungs are chinch-only (the sheet types a row of one as chinch without being told). See chinchOnlyIds.
+  const chinchOnlyIds = await chinchOnlyIdsOf({ products, structured, knex });
+  // GATE_LAWN_TROUBLE_AREAS: the same ladder walked at each place of the lawn (the yearly count, the interval and the
+  // yearly amount are judged per place for a spot treatment), `byPlace[place]` shaped like the lawn-wide answer. A place
+  // can only be more open than the lawn, so with nothing capped lawn-wide every place takes the lawn-wide answer; a limit
+  // read that failed lawn-wide is read again per place, each failing closed on its own. The top-level answer is the first
+  // place that has a product to add, else the lawn-wide one.
+  const byPlace = {};
+  for (const place of places) {
+    if (capped && !capped.size) { byPlace[place] = wide; continue; }
+    const here = await readCaps({ products: lines, rows, svc, knex, place });
+    byPlace[place] = withRungs(here ? chooseChinch(products, here) : unreadableChinch(), products);
+    // `amountBlocked`: a yearly AMOUNT limit shaped this place's answer (judged at the program dose; the sheet drops it when the row's dose changes).
+    if (here && [...here.values()].some((blocks) => blocks.some((block) => block.type === 'annual_max_rate'))) byPlace[place] = { ...byPlace[place], amountBlocked: true };
+  }
+  const best = places.find((place) => byPlace[place].productId);
+  const top = best ? byPlace[best] : wide;
+  // The sheet's search and reconciliation read the TOP-LEVEL unreadable ids, which follow one place only. A rung unreadable at ANY
+  // place stays unreadable here (released to the search with the note, never dropped by reconciliation) and is not also blocked.
+  const unreadableIds = [...new Set(places.flatMap((place) => byPlace[place].unreadableIds || []))];
+  return { ...top, unreadableIds, blockedIds: (top.blockedIds || []).filter((id) => !unreadableIds.includes(id)), byPlace, chinchOnlyIds };
+}
+
+/**
+ * The chinch rungs that are chinch-only in this program, by the staged rows' triggers (never the name): the ladder's first rung, when
+ * every row the protocol stages for that product carries a first-rung trigger. A later rung (Talak) is also the caterpillar and mole
+ * cricket product, so a row of it is chinch only when the technician says so (the chinch entry or card, or the place's own decision).
+ */
+async function chinchOnlyIdsOf({ products, structured, knex }) {
+  const first = products.filter((product) => product.rung === 0);
+  if (!first.length) return [];
+  const { activeProtocolProducts } = require('./lawn-protocol-retired');
+  const staged = await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
+    .join('lawn_protocol_windows as w', 'lpp.lawn_protocol_window_id', 'w.id')
+    .where('w.lawn_protocol_id', structured.id)
+    .whereRaw('lpp.product_id::text = ANY(?)', [first.map((product) => product.productId)])
+    .select('lpp.product_id', 'lpp.gates');
+  const only = (id) => staged.filter((row) => idOf(row.product_id) === id).every((row) => CHINCH_RUNGS[0].includes((parseJson(row.gates) || {}).trigger));
+  return first.map((product) => product.productId).filter(only);
+}
+
+/** Every chinch rung's product id for a protocol (the staged-row rule resolveChinch uses), with no limit read: what the completion confirms a `chinch` hint against. */
+async function chinchLadderIds({ structured, knex }) {
+  if (!structured?.id) return [];
+  return chinchProducts(await stagedChinchRows({ structured, knex })).map((product) => product.productId);
+}
+
+/**
+ * The ladder and its chinch-only rungs, `{ ladder, only }` (product ids), with no limit read: what the completion classifies a placed row by
+ * on its own, whatever the sheet said (a chinch-only first rung is always chinch; a shared rung needs the sheet's word AND the ladder).
+ */
+async function chinchLadderSets({ structured, knex }) {
+  if (!structured?.id) return { ladder: [], only: [] };
+  const products = chinchProducts(await stagedChinchRows({ structured, knex }));
+  return { ladder: products.map((product) => product.productId), only: products.length ? await chinchOnlyIdsOf({ products, structured, knex }) : [] };
 }
 
 // Every rung's product id (all of them are governed by the guide, offered or not). The rungs a READ limit
@@ -314,12 +420,12 @@ async function stagedChinchRows({ structured, knex }) {
 function chinchProducts(staged) {
   const usable = (Array.isArray(staged) ? staged : []).filter((row) => row.catalog_id && row.catalog_active !== false);
   const products = [];
-  for (const rung of CHINCH_RUNGS) {
+  for (const [rungIndex, rung] of CHINCH_RUNGS.entries()) {
     const row = usable
       .filter((candidate) => rung.includes((parseJson(candidate.gates) || {}).trigger))
       .sort((a, b) => (Number(a.month) - Number(b.month)) || (Number(a.sort_order) - Number(b.sort_order)))[0];
     if (row && !products.some((product) => product.productId === idOf(row.product_id))) {
-      products.push({ productId: idOf(row.product_id), name: row.catalog_name || row.product_name, stagedRow: row });
+      products.push({ productId: idOf(row.product_id), name: row.catalog_name || row.product_name, stagedRow: row, rung: rungIndex });
     }
   }
   return products;
@@ -354,7 +460,11 @@ function chooseChinch(products, capped) {
       return { ...product, note, blockedIds: earlier, unreadableIds: [] };
     }
     if (state === 'unreadable') return none(UNREADABLE_NOTE, [...earlier, ...idsOf(products.slice(index + 1), 'blocked')], [product.productId, ...idsOf(products.slice(index + 1), 'unreadable')]);
-    if (!typedOf(product).every((block) => block.type === YEARLY_CAP)) return none(typedOf(product)[0].message || CHINCH_LIMIT_REACHED, products.map((p) => p.productId));
+    // Another limit (an interval, a blackout) holds the whole offer with its own words. A rung whose OWN read failed is still the unknown,
+    // not blocked: a sibling's known limit never turns an unreadable rung into a forbidden one.
+    if (!typedOf(product).every((block) => block.type === YEARLY_CAP)) {
+      return none(typedOf(product)[0].message || CHINCH_LIMIT_REACHED, products.filter((p) => stateOf(p) !== 'unreadable').map((p) => p.productId), idsOf(products, 'unreadable'));
+    }
     skipped = skipped || product;
   }
   return none(CHINCH_LIMIT_REACHED, products.map((p) => p.productId));
@@ -392,6 +502,7 @@ function weedsCard({ s, weeds }) {
     // The fresh offer's own add-ons: the tap adds exactly these, not the context's older weed mix.
     items: weeds.items,
     actionLabel: 'Add weed spots',
+    ...(weeds.byPlace ? { byPlace: weeds.byPlace } : {}),
   });
 }
 
@@ -406,6 +517,9 @@ function fungusCard({ s, offers, troubleAreas }) {
   }
   return cardFor('fungus', {
     title: 'Fungus', finding, check: CHECKS.fungus, detail: protocolLine(item), productIds: [item.productId], items: [item],
+    // A take-all card offered because the lawn has take-all areas on file names them (GATE_LAWN_TROUBLE_AREAS).
+    // GATE_LAWN_TROUBLE_AREAS: the card's row may go only on these mapped places (the sheet offers only them; /complete enforces it for a card row).
+    ...(takeAll ? { note: `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.`, allowedPlaces: [...new Set(troubleAreas.map((area) => area.place))], checkOnlyNote: TAKE_ALL_NOTE } : {}),
     actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
   });
 }
@@ -423,7 +537,13 @@ function chinchCard({ s, month, offers }) {
     items: [item],
     actionLabel: 'Found at the edge. Add it',
     dismissLabel: 'Nothing found',
+    // GATE_LAWN_TROUBLE_AREAS: the product each place takes (Arena where it is open, the bifenthrin product where it is capped).
+    ...(offers.chinch.byPlace ? { byPlace: chinchCardPlaces(offers.chinch.byPlace) } : {}),
   });
+}
+
+function chinchCardPlaces(byPlace) {
+  return Object.fromEntries(Object.entries(byPlace).filter(([, d]) => d?.item).map(([place, d]) => [place, { productIds: [d.item.productId], names: [d.item.name], items: [d.item], note: d.note || null }]));
 }
 
 function caterpillarsCard({ s, offers }) {
@@ -458,15 +578,29 @@ function dryCard({ s, offers }) {
 
 const MAX_RECORD_PRODUCTS = 4;
 
+// One card of the record. With GATE_LAWN_TROUBLE_AREAS live, a card taken at a place also names that place (a closed-list place) and its
+// product ids are the ones actually added: the ids stay a flat list, narrowed to the applied products when the completion's list is
+// known, and a card with a place and nothing applied is not taken. Without a valid place the card is exactly what it always was.
+function frozenCard(card, productIds, appliedIds) {
+  const base = { kind: card.kind, shown: true, checked: card.checked === 'found' || card.checked === 'none' ? card.checked : null, taken: card.taken === true, productIds };
+  const live = require('../config/feature-gates').lawnTroubleAreasLive();
+  if (!live || !base.taken || !require('./lawn-trouble-areas').isPlace(card.place)) return base;
+  const added = appliedIds ? productIds.filter((id) => appliedIds.has(id)) : productIds;
+  return { ...base, taken: added.length > 0, productIds: added, ...(added.length ? { place: card.place } : {}) };
+}
+
 /**
  * The completion's record of the guide (owner choice D4): `{ lawnTreatmentGuide: { v: 1, cards } }`
  * to spread into structured_notes, or `{}`. Built from the `treatmentGuide` block of the submit's
  * `lawnFast` echo, checked here: only while the gate is live, only version 1, unknown kinds and
  * repeats dropped, product ids uuids (at most four each), `checked` found | none | null,
  * `taken` a boolean (every product the card offers is on the sheet; the client decides). Every card kept was shown. Frozen on the record for tuning the rules and read
- * by no customer or public path.
+ * by no customer or public path. With GATE_LAWN_TROUBLE_AREAS live a card taken at a place also carries `place` (see frozenCard).
  */
-function treatmentGuideFreeze(lawnFast) {
+// The lower-case ids of the products a completion applied, or null when its list is not known.
+const appliedIdsOf = (products) => (Array.isArray(products) ? new Set(products.map((row) => String(row?.productId || '').toLowerCase())) : null);
+
+function treatmentGuideFreeze(lawnFast, { products = null, appliedIds = appliedIdsOf(products) } = {}) {
   if (!require('../config/feature-gates').lawnTreatmentGuideLive()) return {};
   const block = lawnFast && typeof lawnFast === 'object' ? lawnFast.treatmentGuide : null;
   if (!block || typeof block !== 'object' || Array.isArray(block) || block.v !== 1) return {};
@@ -477,13 +611,7 @@ function treatmentGuideFreeze(lawnFast) {
     seen.add(card.kind);
     const productIds = [...new Set((Array.isArray(card.productIds) ? card.productIds : [])
       .filter((id) => typeof id === 'string' && UUID_RE.test(id)).map((id) => id.toLowerCase()))].slice(0, MAX_RECORD_PRODUCTS);
-    cards.push({
-      kind: card.kind,
-      shown: true,
-      checked: card.checked === 'found' || card.checked === 'none' ? card.checked : null,
-      taken: card.taken === true,
-      productIds,
-    });
+    cards.push(frozenCard(card, productIds, appliedIds));
   }
   return { lawnTreatmentGuide: { v: 1, cards } };
 }
@@ -559,6 +687,9 @@ module.exports = {
   unreadableProductIds,
   UNREADABLE_NOTE,
   resolveChinch,
+  chinchLadderIds,
+  chinchLadderSets,
+  chinchOnlyIdsOf,
   buildCards,
   treatmentGuideFreeze,
   guideTakenFindings,

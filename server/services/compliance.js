@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { savepointRead } = require('../utils/savepoint-read');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
@@ -251,6 +252,18 @@ const ComplianceService = {
       ? await k('scheduled_services').where({ id: sr.scheduled_service_id }).first('property_id')
       : null;
     const treatedPropertyId = visit?.property_id || null;
+    // GATE_LAWN_TROUBLE_AREAS: a PLACED application (the product record carries a treated_place) whose visit has no property link is frozen on
+    // the property the property-area flow resolves for the visit (lawn-trouble-areas propertyOf), read once; unresolved stays unplaced (NULL).
+    // Every other row keeps exactly the property it had.
+    let placedLookup = null;
+    const placedProperty = () => {
+      // On the completion's transaction this read sits in a savepoint of its own: a failure leaves the row unplaced and aborts nothing.
+      placedLookup = placedLookup || savepointRead(k, async (kk) => {
+        const row = sr.scheduled_service_id ? await kk('scheduled_services').where({ id: sr.scheduled_service_id }).first() : null;
+        return row ? require('./lawn-trouble-areas').propertyOf(kk, row) : null;
+      }).catch(() => null);
+      return placedLookup;
+    };
 
     // Rows already ledgered for this record. New-style rows are identified
     // by service_product_id; legacy rows (NULL there) by catalog product.
@@ -298,7 +311,7 @@ const ComplianceService = {
         customer_id: sr.customer_id,
         service_record_id: serviceRecordId,
         service_product_id: sp.id,
-        property_id: treatedPropertyId,
+        property_id: sp.treated_place && !treatedPropertyId ? await placedProperty() : treatedPropertyId,
         product_id: productId,
         technician_id: sr.technician_id,
         application_date: sr.service_date || etDateString(),
@@ -329,6 +342,9 @@ const ComplianceService = {
         restricted_use: catalog?.restricted_use || false,
         applicator_license: tech?.fl_applicator_license || null,
         notes: sp.notes || null,
+        // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went, frozen on the ledger beside its property. Present only when
+        // the product record carries one (the completion writes it while the gate is live), so every other row inserts as before.
+        ...require('./lawn-trouble-areas').ledgerPlace(sp),
       };
 
       // Catch-all DO NOTHING (no conflict target): a race can conflict on
