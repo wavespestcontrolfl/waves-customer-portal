@@ -186,7 +186,7 @@ describe('GET /:serviceId/tech-tips', () => {
     mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
     const res = await invoke({ serviceId: 'svc-1' });
     expect(res.body.groups[0]).toMatchObject({ id: 'for_service', label: 'For this service', primary: true });
-    expect(res.body.groups[0].tips.map((tip) => tip.id)).toEqual(['mq_pool', 'mq_tree_holes']);
+    expect(res.body.groups[0].tips.map((tip) => tip.id)).toEqual(['mq_pool', 'mq_tree_holes', 'mq_thin_hedges', 'mq_lanai_fan', 'mq_downspout_pipe']);
     expect(mockResolveProfile).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-1' }));
     mockResolveProfile.mockRejectedValue(new Error('catalog down'));
     const fallback = await invoke({ serviceId: 'svc-1' });
@@ -201,7 +201,7 @@ describe('GET /:serviceId/tech-tips', () => {
     mockDbCurrent = scriptedDb({ service: SERVICE, calls: [], addons: [{ key_snapshot: 'flea_tick', catalog_key: 'tick_control' }, { key_snapshot: null, catalog_key: 'bora_care' }] });
     const res = await invoke({ serviceId: 'svc-1' });
     expect(res.body.groups[0].tips.map((tip) => tip.id).sort())
-      .toEqual(['bc_keep_dry', 'flea_keep_vacuuming', 'flea_pet_prevention', 'flea_shady_spots', 'mq_pool', 'mq_tree_holes']);
+      .toEqual(['bc_find_the_water', 'bc_keep_dry', 'flea_keep_vacuuming', 'flea_pet_prevention', 'flea_shady_spots', 'flea_the_car', 'flea_white_towel', 'mq_downspout_pipe', 'mq_lanai_fan', 'mq_pool', 'mq_thin_hedges', 'mq_tree_holes']);
   });
 
   test('a tree & shrub visit\'s picker payload carries watchKeys on the tips that have them', async () => {

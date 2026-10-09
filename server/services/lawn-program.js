@@ -25,8 +25,19 @@ const LAWN_V13_VERSION = '2026.10-v13';
 
 // `?.()`: many suites mock feature-gates with a partial object. A reader the
 // mock lacks reads as off, the fail-closed answer.
+// The v13 recipe as every reader below GATE_LAWN_BERMUDA_REMOVAL sees it: the
+// per-visit `addOns` blocks (the bermuda removal step) are left out, so with that
+// gate off no reader, the programs route, the protocol reader or the estimate
+// tools included, sees an add-on. Built once.
+const v13WithoutAddOns = Object.fromEntries(Object.entries(v13).map(([track, program]) => [
+  track,
+  // A visit with no add-on keeps its own object (identity), so a reader that holds one sees the recipe's.
+  { ...program, visits: program.visits.map((visit) => (visit.addOns ? (({ addOns, ...rest }) => rest)(visit) : visit)) },
+]));
+
 function lawnProtocols() {
-  return featureGates.lawnV13Live?.() ? v13 : protocols.lawn;
+  if (!featureGates.lawnV13Live?.()) return protocols.lawn;
+  return featureGates.lawnBermudaRemovalLive?.() === true ? v13 : v13WithoutAddOns;
 }
 
 // v13 is one program for every grass, still filed under the three track keys.

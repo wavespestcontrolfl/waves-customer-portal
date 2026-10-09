@@ -2,7 +2,7 @@
 // service-pricing.js — All service line pricing calculations
 // ============================================================
 const {
-  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
+  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
@@ -2106,6 +2106,31 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
   };
 }
 
+// Annual cost of the bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL), for margin
+// reporting only: sprays per year x (product cost over the whole lawn + labor). The
+// prices and minutes are LAWN_PRICING_V2.bermudaSuppression.cost, read here at call
+// time, so a pricing_config edit changes the cost with no deploy (see
+// BERMUDA_SUPPRESSION_COST_DEFAULTS for the sources). A key the row lacks or holds as a
+// non-number or non-positive value reads as its code default.
+function bermudaRemovalCostConfig() {
+  const row = LAWN_PRICING_V2.bermudaSuppression?.cost || {};
+  const pick = (key) => (Number.isFinite(Number(row[key])) && Number(row[key]) > 0 ? Number(row[key]) : BERMUDA_SUPPRESSION_COST_DEFAULTS[key]);
+  return {
+    productPer1000: pick('recognitionPer1000') + pick('fusiladePer1000') + pick('surfactantPer1000'),
+    mixMinutes: pick('mixMinutes'),
+    minutesPer1000: pick('minutesPer1000'),
+  };
+}
+
+function calcBermudaRemovalAnnualCost(lawnSqFt) {
+  const c = bermudaRemovalCostConfig();
+  const turfK = lawnSqFt / 1000;
+  const laborRate = LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE;
+  const perSpray = c.productPer1000 * turfK
+    + ((c.mixMinutes + c.minutesPer1000 * turfK) / 60) * laborRate;
+  return Math.round(LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR * perSpray * 100) / 100;
+}
+
 function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options = {}) {
   return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPrice;
 }
@@ -2228,6 +2253,7 @@ function priceLawnCare(property, options = {}) {
   // the cost-floor model (floors are disarmed; margin stays reporting-only).
   const bsCfg = LAWN_PRICING_V2.bermudaSuppression || {};
   const bermudaSuppressionEligible = normalizedTrack === 'st_augustine';
+  const bermudaRemovalLive = require('../../config/feature-gates').lawnBermudaRemovalLive?.() === true;
   let bermudaSuppressionPerApp = 0;
   if (bermudaSuppression === true && bermudaSuppressionEligible) {
     // Gate enforcement lives HERE, the deepest chokepoint, so every entry
@@ -2261,6 +2287,12 @@ function priceLawnCare(property, options = {}) {
     }
     bermudaSuppressionPerApp = adder;
   }
+  // Add-on spray cost for margin reporting (gate on only). Added to the cost the
+  // margin and the WaveGuard "looks low" check read, never to the cost-floor
+  // details: floors stay exactly what they were without the add-on.
+  const bermudaRemovalCost = bermudaRemovalLive && bermudaSuppressionPerApp > 0
+    ? calcBermudaRemovalAnnualCost(lawnSqFt)
+    : 0;
   // Discount scope mirrors lookupLawnBracket: armed AND inside the table —
   // above LAWN_TABLE_MAX_SQFT the discount (and therefore its floor-lift
   // resolution) does not apply (owner ruling 2026-08-07 on #3274), unless
@@ -2368,6 +2400,7 @@ function priceLawnCare(property, options = {}) {
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
       bermudaSuppressionPerApp: bermudaSuppressionPerApp > 0 ? bermudaSuppressionPerApp : null,
+      ...(bermudaRemovalCost > 0 ? { bermudaRemovalAnnualCost: bermudaRemovalCost } : {}),
       cadenceLadderLiftApplied: cadenceLadderLiftApplied || undefined,
       tier: t,
       index: tc.index,
@@ -2406,7 +2439,8 @@ function priceLawnCare(property, options = {}) {
   const annual = selected.annual;
   const perApp = selected.perApp;
   const selectedCosts = selected.costFloorDetails || {};
-  const selectedAnnualCost = Number.isFinite(Number(selectedCosts.annualCost)) ? Number(selectedCosts.annualCost) : annualCost;
+  const selectedAnnualCost = (Number.isFinite(Number(selectedCosts.annualCost)) ? Number(selectedCosts.annualCost) : annualCost)
+    + bermudaRemovalCost;
   const margin = annual > 0 ? (annual - selectedAnnualCost) / annual : 0;
   const customQuoteFlag = lawnSqFt > LAWN_TABLE_MAX_SQFT;
   const display = LAWN_TRACK_DISPLAY[normalizedTrack] || LAWN_TRACK_DISPLAY.st_augustine;
@@ -2509,6 +2543,7 @@ function priceLawnCare(property, options = {}) {
       annualEquipment: roundMoney(selectedCosts.annualEquipment ?? 0),
       annualCallbackReserve: roundMoney(selectedCosts.annualCallbackReserve ?? 0),
       annualAdmin: roundMoney(selectedCosts.annualAdmin ?? GLOBAL.ADMIN_ANNUAL),
+      ...(bermudaRemovalCost > 0 ? { annualBermudaRemoval: roundMoney(bermudaRemovalCost) } : {}),
       total: roundMoney(selectedAnnualCost),
     },
     minimumCollectedAnnualPrice: selected.minimumCollectedAnnualPrice,
@@ -9424,6 +9459,7 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   assertFinitePriceFields,
+  calcBermudaRemovalAnnualCost,
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
