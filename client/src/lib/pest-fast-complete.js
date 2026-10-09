@@ -123,3 +123,11 @@ export function reportFlowFields(service, { stationMapOff = false } = {}) {
     traceEligible: service.traceEligible !== false && !laneFlow && !typedFlow,
   };
 }
+
+// The station map is known to be off: the flags were read from the server and
+// `station-map-v1` is off. A load still in flight, or one that failed (the
+// hook then answers off, fail closed), is not that answer: a station visit
+// keeps the full form, whose map records a check for every station.
+export function stationMapKnownOff(stationMap) {
+  return stationMap?.ready === true && stationMap?.known === true && stationMap?.enabled === false;
+}

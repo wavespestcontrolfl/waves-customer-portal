@@ -1,5 +1,5 @@
 import { isTreeShrubFastCompleteEligible } from "./tree-shrub-fast-complete";
-import { isLawnFastCompleteEligible } from "./lawn-fast-complete";
+import { isLawnFastCompleteEligible, isLawnReserviceFastCompleteEligible } from "./lawn-fast-complete";
 import { isFastCompleteReportEligible, isLaneReportEligible, isTypedReportEligible } from "./pest-fast-complete";
 
 export const TERMINAL_VISIT_STATUSES = new Set([
@@ -55,6 +55,17 @@ export function shouldOpenLawnFastComplete(service) {
     && !service?.checkoutInvoiceToken;
 }
 
+// Admin Dispatch opens the lawn re-service's own Fast Complete sheet for a
+// visit the shared rule makes eligible (owner 2026-10-08: the technician home
+// already did), on the same terms as the sheets above.
+export function shouldOpenLawnReserviceFastComplete(service) {
+  return isLawnReserviceFastCompleteEligible(service)
+    && "propertyId" in service
+    && !service?.completionInvoiceAlreadySent
+    && !service?.checkoutInvoiceId
+    && !service?.checkoutInvoiceToken;
+}
+
 // Admin Dispatch opens the pest Fast Complete sheet, in its report flow, for the
 // regular pest visits and pest re-services the technician home already sends
 // there (owner 2026-10-05: the long form was slow for a regular quarterly
@@ -91,4 +102,16 @@ export function shouldOpenSpecialtyFastComplete(service, { stationMapOff = false
     && !service?.completionInvoiceAlreadySent
     && !service?.checkoutInvoiceId
     && !service?.checkoutInvoiceToken;
+}
+
+// Which one-screen sheet admin Dispatch opens for a visit, or null for the
+// full form. Order matters: a lawn re-service is a typed lawn visit, so it is
+// asked first (as on the technician home) and no later rule may claim it.
+export function fastCompleteSheetFor(service, { stationMapOff = false } = {}) {
+  if (service == null) return null;
+  if (shouldOpenLawnReserviceFastComplete(service)) return "lawn_reservice";
+  if (shouldOpenTreeShrubFastComplete(service)) return "tree_shrub";
+  if (shouldOpenLawnFastComplete(service)) return "lawn";
+  if (shouldOpenPestFastComplete(service) || shouldOpenSpecialtyFastComplete(service, { stationMapOff })) return "pest";
+  return null;
 }

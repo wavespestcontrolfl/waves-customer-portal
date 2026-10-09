@@ -24,6 +24,7 @@ vi.mock('./SchedulePage', () => ({
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
   default: ({ service }) => <div>Tree and shrub sheet for {service.id}</div>,
 }));
+vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: ({ service }) => <div>Lawn re-service sheet for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
   default: ({ service, operatorId, catalog, onClose, onCompleted, onFullForm, onViewDetails }) => (
     <div>
@@ -51,7 +52,7 @@ vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
 }));
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service }) => <div>Details sheet for {service.id}</div> }));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
+vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true, known: true }) }));
 
 const visit = (id, overrides = {}) => ({
   id,

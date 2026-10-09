@@ -56,6 +56,7 @@ import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
 import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
+import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
@@ -72,6 +73,7 @@ import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminU
 import { etDateString } from '../../lib/timezone';
 import {
   closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
+  stationMapKnownOff,
 } from '../../lib/pest-fast-complete';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
@@ -124,16 +126,8 @@ function isReserviceFastCompleteEligible(service) {
 // lib/pest-fast-complete.js too, shared with admin Dispatch (owner 2026-10-08).
 
 // Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
-// `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
-// open lawn re-service (completionProfile.serviceKey === 'lawn_re_service', a
-// TYPED one_time_lawn_treatment visit) then opens the one-screen sheet instead
-// of the Dispatch typed-completion deep link. Gate off, or any other service,
-// routes exactly as before.
-function isLawnReserviceFastCompleteEligible(service) {
-  return service?.lawnReserviceFastCompleteEnabled === true
-    && service?.completionProfile?.serviceKey === 'lawn_re_service'
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
+// isLawnReserviceFastCompleteEligible lives in lib/lawn-fast-complete.js, shared
+// with admin Dispatch (owner 2026-10-08).
 
 // Typed specialty jobs (profile cut over to the service-report flow with a
 // findings schema) complete through the Dispatch completion form — neither
@@ -350,7 +344,7 @@ export default function TechHomePage({ section = 'today' }) {
   // The tech's station map: a station visit opens the sheet only once the
   // flag has loaded and is off (isTypedReportEligible).
   const stationMap = useFeatureFlagReady('station-map-v1');
-  const stationMapOff = stationMap.ready && !stationMap.enabled;
+  const stationMapOff = stationMapKnownOff(stationMap);
   // The verified profile's name first: the timecard signature pre-fill must
   // not fall back to a stale or missing stored copy.
   const techName = staff?.name || getAdminDisplayName('Tech');
