@@ -33,7 +33,7 @@
         },
         "is_spam": {
           "type": "boolean",
-          "description": "True only when the caller is soliciting the business: a sales pitch, a robocall, a scam, a vendor cold call, a paid-placement promoter or a collections cold call. A wrong number is not spam: set false and sentiment_and_lead.lead_quality \"wrong_number\"."
+          "description": "Solicitation or robocall. A wrong number is not spam: set false and sentiment_and_lead.lead_quality \"wrong_number\"."
         },
         "transcript_word_count": {
           "type": "integer",

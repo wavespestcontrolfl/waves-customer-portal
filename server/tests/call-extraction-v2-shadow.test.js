@@ -365,9 +365,11 @@ describe('meta.is_spam: a wrong number is not spam (schema 1.26.0)', () => {
   test.each([
     'call-extraction.model-output.schema.json',
     'call-extraction.persisted.schema.json',
-  ])('%s limits spam to a caller soliciting the business', (file) => {
+  ])('%s keeps a wrong number out of spam and lists no spam kinds beyond the old two', (file) => {
     const description = describedIn(file);
-    expect(description).toMatch(/soliciting the business/);
+    expect(description).toMatch(/^Solicitation or robocall\. /);
+    // A longer list (vendor cold call, collections…) raised false spam on a reviewed call.
+    expect(description).not.toMatch(/vendor|collections|scam|sales pitch/i);
     expect(description).toMatch(/A wrong number is not spam: set false/);
     expect(description).toMatch(/lead_quality "wrong_number"/);
   });

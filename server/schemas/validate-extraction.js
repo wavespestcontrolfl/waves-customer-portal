@@ -175,11 +175,14 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // 1.25.0: customer_history.competitor_name is NARROWED by its new description to a pest
 // control or lawn care provider (null for a home inspector, realtor, builder, HOA…). No
 // field added or removed; the version marks rows written under the narrower meaning.
-// 1.26.0: meta.is_spam is NARROWED by its description to a caller soliciting the business.
+// 1.26.0: meta.is_spam is NARROWED by its description: a wrong number is no longer spam.
 // The model-output description said "Solicitation, robocall, or wrong number" while the
 // prompt rule said a wrong number is not spam; every model followed the description. A
 // wrong number is now false (lead_quality "wrong_number" carries it). No field added or
-// removed; the version marks rows written under the narrower meaning.
+// removed; the version marks rows written under the narrower meaning. The description
+// stays as short as the old one: a longer list of spam kinds (vendor cold call,
+// collections…) was measured on the reviewed call `spam-fp-callback-request` and marked
+// that genuine caller spam in 7 of 14 runs, against 2 of 12 for the old text.
 const SCHEMA_VERSION = '1.26.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
