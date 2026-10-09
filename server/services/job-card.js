@@ -1777,8 +1777,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     sprayCheck,
     context: protocolLine ? { line: protocolLine.addon, conditional: !protocolLine.selected } : { line: null },
     ...mix,
-    // The group repeat this product would make, shown beside the amount (null when none, or when the amount is withheld).
-    rotationWarning: permitted ? clean(productBlocks.find(isRotationWarning)?.message, 200) || null : null,
+    // Every group repeat this product would make (Headway can repeat FRAC 3 and FRAC 11), shown beside the amount.
+    // Empty when there is none, or when the amount is withheld (the reason line speaks then).
+    rotationWarnings: permitted ? productBlocks.filter(isRotationWarning).map((block) => clean(block.message, 200)).filter(Boolean) : [],
     planBlocks,
     tank,
     // The rig the amount was computed for, so the section labels the dose

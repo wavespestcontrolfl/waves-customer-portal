@@ -7513,8 +7513,10 @@ function JobCardTank({ tank, serviceId, D }) {
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
-            {!busy && mix?.amount != null && mix.rotationWarning && (
-              <div role="alert" style={{ fontSize: 13, color: "#C8312F" }}>Warning: {mix.rotationWarning}</div>
+            {!busy && mix?.amount != null && mix.rotationWarnings?.length > 0 && (
+              <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
+                {mix.rotationWarnings.map((warning, i) => <div key={i}>Warning: {warning}</div>)}
+              </div>
             )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
