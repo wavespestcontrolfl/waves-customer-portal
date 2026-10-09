@@ -29,8 +29,10 @@
  * A tip may carry `pests` (owner 2026-10-09): the pest sheet's chips
  * (TIP_PESTS) it is advice for. The pest sheet lifts it when the tech taps or
  * names that pest, on any visit; it never selects a tip. Only a tip that
- * claims no work (no bait, traps, stations or treated soil) is tagged, so a
- * lifted tip is true on a visit that did none of that work.
+ * claims no work is tagged: no bait, traps or stations, and no word of what
+ * the technician treated or where ("the treatment", "where I worked"). A
+ * lifted tip is then true whatever this visit did. A tip that does name the
+ * work stays in its own list and opens by search.
  *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
@@ -260,7 +262,7 @@ const TIPS = Object.freeze([
   // ── Around the house ──────────────────────────────────────────────────
   {
     id: 'ext_shrub_clearance', group: 'exterior', label: "A hand's width off the wall",
-    pests: ['Ants'], keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
+    keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
     copy: "Branches touching the house are a bridge over the treated band along the foundation — ants and roaches walk the branch, not the ground, and the treatment never touches them. Trim to a hand's width of daylight between plant and wall and the bridge is closed.",
   },
   {
@@ -361,7 +363,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'seal_screen_tears', group: 'sealing', label: 'Patch lanai screen tears',
-    pests: ['Wasps'], keywords: ['screen', 'lanai', 'tear', 'wasps', 'mosquito'], lines: ['mosquito', 'pest'], season: 'all',
+    keywords: ['screen', 'lanai', 'tear', 'wasps', 'mosquito'], lines: ['mosquito', 'pest'], season: 'all',
     copy: "One tear in the lanai screen is a permanent open door for mosquitos and wasps, no matter what I treat outside it. A patch kit from the hardware store handles it in a few minutes.",
   },
   {
@@ -1148,7 +1150,7 @@ const TIPS = Object.freeze([
   // ── Third batch (owner-approved 2026-10-09, "batch 2 ok") ─────────────────
   {
     id: 'ant_wipe_trail', group: 'kitchen', label: "Clean up what the ants were after",
-    pests: ['Ants'], keywords: ["trail", "crumbs", "spill", "counter", "wipe"], lines: ["pest"], season: 'all',
+    keywords: ["trail", "crumbs", "spill", "counter", "wipe"], lines: ["pest"], season: 'all',
     copy: "Ants follow a scent trail that the first scouts lay down. Clean up the spill or the crumbs they were walking to, and keep that spot clean for a week. Leave the sill, the door frame, and the baseboard where I worked as they are for now, since wiping there can undo the treatment.",
   },
   {

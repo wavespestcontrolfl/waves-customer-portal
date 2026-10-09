@@ -102,7 +102,9 @@ const NOTE_PESTS = [
 // roaches", "no ants, roaches, or spiders"), up to the end of the sentence or
 // "but". A comma does not end it: a list of pests is the common case. The
 // lift is a suggestion, so dropping too much of a run-on note only loses one.
-const NEGATED_PEST_RE = /\b(?:no|not|zero|without)\b[^.;!?\n]*?(?=\bbut\b|[.;!?\n]|$)/g;
+// Contractions count ("didn't see", "weren't any", typed with or without the
+// apostrophe), and so do "never", "none" and "nothing".
+const NEGATED_PEST_RE = /(?:\b(?:no|not|zero|without|never|none|nothing|cannot)\b|\b[a-z]+n['’]t\b|\b(?:didnt|dont|doesnt|wasnt|werent|isnt|arent|havent|hasnt|couldnt|cant|wont)\b)[^.;!?\n]*?(?=\bbut\b|[.;!?\n]|$)/g;
 
 const withoutNegated = (note) => String(note || "").toLowerCase().replace(NEGATED_PEST_RE, " ");
 

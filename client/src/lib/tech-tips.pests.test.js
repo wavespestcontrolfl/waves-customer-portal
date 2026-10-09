@@ -16,6 +16,10 @@ describe('pestsInNote', () => {
     expect(pestsInNote('No roaches seen. No signs of ants. Spiders on the lanai.')).toEqual(['Spiders']);
     expect(pestsInNote('Not seeing any fleas, without live wasps.')).toEqual([]);
     expect(pestsInNote('No ants, roaches, or spiders were seen.')).toEqual([]);
+    expect(pestsInNote("Didn't see any roaches. There weren't any fleas; never saw ants.")).toEqual([]);
+    expect(pestsInNote('Didnt find spiders. None of the wasps are back.')).toEqual([]);
+    // A word that only ends in "nt" is not a negation.
+    expect(pestsInNote('Front door: ants at the vent.')).toEqual(['Ants']);
     expect(pestsInNote('No ants, roaches, or spiders, but earwigs under the mat.')).toEqual(['Earwigs']);
     expect(pestsInNote('No German roaches. No ants or roaches inside; without any evidence of fleas.')).toEqual([]);
     expect(pestsInNote('No roaches inside but ants at the back door.')).toEqual(['Ants']);
