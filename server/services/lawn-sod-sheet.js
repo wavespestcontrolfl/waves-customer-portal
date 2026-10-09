@@ -205,6 +205,9 @@ async function visitIsAtSodHome(svc, knex) {
   const scope = await resolveVisitPropertyScope(svc, knex, { onLookupFailure: () => { failed = true; } });
   if (failed) throw new Error('visit property lookup failed');
   if (scope.hasEvidence) return !!scope.key && sameResolvedProperty(scope.key, mirrorKey);
+  // The single-premises fallback proves nothing from a customer address with no locality (a legacy partial stamp could be
+  // any city's street): rejected, as every other caller of the fallback does. No holds.
+  if (linkage.scopeKeyLacksLocality(mirrorKey)) return false;
   const customer = await knex('customers').where({ id: svc.customer_id }).first('has_multi_home');
   return customerHasOnlyPrimaryPremises(knex, svc.customer_id, customer, mirrorKey, { unresolvedFails: true });
 }
@@ -326,19 +329,14 @@ const NO_PRODUCT_STALE = Object.freeze({
   payload: { error: 'The new sod record changed. Reopen the visit.', code: 'lawn_sod_no_product_stale' },
 });
 
-/**
- * The completion preflight's no-product check (called from preflightLawnFastCompletion; `next` is the
- * rest of the preflight). A submission with an EMPTY product list whose technician note carries the
- * new-sod no-product sentence says "the holds took every planned product". The server never takes that
- * on trust: it rebuilds the sheet context (as a sod-aware sheet) and accepts only when that context sets
- * `noProductAllowed` and its generated note is the one sent. Anything else (record cleared or changed to
- * part of the lawn, a failed read, the gate off) is 409 lawn_sod_no_product_stale, a terminal "reopen".
- * An empty list WITHOUT the sentence, and any list with a product, is judged exactly as before.
- */
-async function checkNoProductNote({ knex, svc, products, technicianNotes, next }) {
-  const empty = !Array.isArray(products) || products.length === 0;
-  const notes = String(technicianNotes || '');
-  if (!empty || !notes.includes(NO_PRODUCT_NOTE_PREFIX)) return next();
+// A completion CLAIMS "the new sod holds every planned product" when the list is empty and the technician note carries
+// the new-sod no-product sentence. Nothing else is judged here: an empty list without the sentence, and any list with a
+// product, are judged exactly as before.
+const claimsNoProduct = (products, technicianNotes) => (!Array.isArray(products) || products.length === 0)
+  && String(technicianNotes || '').includes(NO_PRODUCT_NOTE_PREFIX);
+
+// True only when the sheet context rebuilt NOW (as a sod-aware sheet, on `knex`) allows no product and generated the note sent.
+async function noProductStillAllowed({ knex, svc, technicianNotes }) {
   let sod = null;
   try {
     const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex, sodAware: true });
@@ -346,8 +344,40 @@ async function checkNoProductNote({ knex, svc, products, technicianNotes, next }
   } catch (err) {
     logger.warn(`[lawn-sod-sheet] no-product check unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
   }
-  if (sod?.noProductAllowed === true && notes.includes(sod.noProductNote)) return next();
-  return NO_PRODUCT_STALE;
+  return sod?.noProductAllowed === true && String(technicianNotes || '').includes(sod.noProductNote);
+}
+
+/**
+ * The completion preflight's no-product check (called from preflightLawnFastCompletion; `next` is the
+ * rest of the preflight), UNLOCKED: it gives the technician the early plain answer. The same check is
+ * repeated inside the commit transaction (`lockSodRecordForNoProduct` + `assertNoProductUnderLock`), because
+ * the office can change the sod record between the two. A claim the rebuilt context does not back (record
+ * cleared or changed to part of the lawn, a different sod date, a failed read, the gate off) is 409
+ * lawn_sod_no_product_stale, a terminal "reopen".
+ */
+async function checkNoProductNote({ knex, svc, products, technicianNotes, next }) {
+  if (!claimsNoProduct(products, technicianNotes)) return next();
+  return (await noProductStillAllowed({ knex, svc, technicianNotes })) ? next() : NO_PRODUCT_STALE;
+}
+
+/**
+ * The commit transaction's half (complete-scheduled-service.js persistRecord). `lockSodRecordForNoProduct` is
+ * called FIRST in that transaction, before any other lock, and takes the property-preferences advisory lock sod
+ * record writers take (writeAdminPreferences, the rooted tick) so the record cannot change until this completion
+ * commits; the order is then the writers' own: advisory lock, customer (FOR SHARE), visit row. It returns whether
+ * the case applies (gate on, completed lawn sheet, empty list, the sentence); only then is the recheck needed.
+ * `assertNoProductUnderLock` runs after the visit row lock and rolls the completion back with
+ * lawn_sod_no_product_stale (409) when the rebuilt context no longer backs the claim.
+ */
+async function lockSodRecordForNoProduct(trx, { customerId, lawnFast, isIncompleteVisit, products, technicianNotes }) {
+  if (lawnFast == null || isIncompleteVisit || !featureGates.lawnNewSodNoteLive() || !claimsNoProduct(products, technicianNotes)) return false;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+  return true;
+}
+
+async function assertNoProductUnderLock(trx, { svc, technicianNotes }) {
+  if (await noProductStillAllowed({ knex: trx, svc, technicianNotes })) return;
+  throw Object.assign(new Error('new sod record changed during completion'), { code: 'lawn_sod_no_product_stale' });
 }
 
 // Every product the plan could put on this visit, with the hold classes of each (by lower-case id).
@@ -515,5 +545,8 @@ module.exports = {
   loadSodForContext,
   sodContextParts,
   checkNoProductNote,
+  lockSodRecordForNoProduct,
+  assertNoProductUnderLock,
+  NO_PRODUCT_STALE,
   confirmSodRooted,
 };

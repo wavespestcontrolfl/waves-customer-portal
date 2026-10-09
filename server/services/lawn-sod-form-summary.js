@@ -31,6 +31,20 @@ function formatDay(ymd) {
 
 // The three plain lines for a recorded sod. Dates are the fixed hold end days
 // (read as of the sod date); "hold is over" is added once today is past them.
+// A part-of-lawn record holds no fertilizer line, but through day 30 the sheet keeps fertilizer off the new sod
+// (lawn-sod-holds.js `fertilizerKeepOff`): the office line says so, active until that date, then the plain line.
+function partFertilizerLine(atStart, now) {
+  const keepOff = atStart.fertilizerKeepOff;
+  if (keepOff?.on && now.fertilizerKeepOff?.on) {
+    return {
+      key: 'fertilizer',
+      active: true,
+      text: `Fertilizer stays off the new sod until ${formatDay(keepOff.until)}. The rest of the lawn is fertilized as planned.`,
+    };
+  }
+  return { key: 'fertilizer', active: false, text: 'Fertilizer is not held. The new sod covers only part of the lawn.' };
+}
+
 function holdLinesFor(prefsRow, todayEt) {
   const laid = ymdOrNull(prefsRow?.sod_laid_on);
   if (!laid) return [];
@@ -55,11 +69,7 @@ function holdLinesFor(prefsRow, todayEt) {
       active: now.fertilizer.held,
       text: `Fertilizer is held until ${formatDay(atStart.fertilizer.until)}${overNote(now.fertilizer.held)}.`,
     }
-    : {
-      key: 'fertilizer',
-      active: false,
-      text: 'Fertilizer is not held. The new sod covers only part of the lawn.',
-    });
+    : partFertilizerLine(atStart, now));
 
   const rootedNote = now.weedKiller.held ? '' : ' (this hold is over)';
   const areaNote = atStart.covers === 'part' ? ' The hold covers the named area only.' : '';

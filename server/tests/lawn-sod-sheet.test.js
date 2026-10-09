@@ -344,6 +344,25 @@ describe('loadSodForContext', () => {
     });
   });
 
+  describe('the single-premises fallback (a visit with no address evidence)', () => {
+    test('control: a mirror address with its city and zip on a single-premises account counts as the home', async () => {
+      const out = await load({ record: prefs(), visit: visitRow({ property_id: null }), planned: planned() });
+      expect(out.newSod).not.toBeNull();
+    });
+
+    test('a customer address with no locality is rejected before the fallback: no holds', async () => {
+      const out = await load({
+        record: prefs(),
+        visit: visitRow({ property_id: null, cust_city: null, cust_zip: null }),
+        planned: planned(),
+        extraTables: { customer_properties: { address_line1: '100 Example Court', address_line2: null, city: null, zip: null } },
+      });
+      expect(out.newSod).toBeNull();
+      expect(out.plannedProducts.items).toHaveLength(2);
+      expect(out.readFailures.size).toBe(0);
+    });
+  });
+
   test('no sod record, a sod date after the visit, or a hold that is over: no newSod', async () => {
     expect((await load({ record: undefined, planned: planned() })).newSod).toBeNull();
     expect((await load({ record: prefs({ sod_laid_on: null }), planned: planned() })).newSod).toBeNull();
@@ -553,6 +572,79 @@ describe('preflightLawnFastCompletion: an empty product list', () => {
     expect(await run({ products: [{ productId: P_BAG24 }], technicianNotes: '' })).toBeNull();
     // A list with a product that still carries the sentence is a normal completion: nothing to authorize.
     expect(await run({ products: [{ productId: P_BAG24 }], technicianNotes: NOTE })).toBeNull();
+  });
+});
+
+// ── the commit transaction's recheck ────────────────────────────────────────
+
+describe('the no-product claim inside the commit transaction', () => {
+  const NOTE = 'No product applied: new sod is rooting (laid Oct 1, 2026). Held: fertilizer until Oct 31, 2026.';
+  const trxWith = (events) => ({ raw: jest.fn(async (sql, binds) => { events.push(['raw', binds]); }) });
+  const GATE = process.env.GATE_LAWN_NEW_SOD_NOTE;
+  afterEach(() => { if (GATE === undefined) delete process.env.GATE_LAWN_NEW_SOD_NOTE; else process.env.GATE_LAWN_NEW_SOD_NOTE = GATE; });
+  const claim = (extra = {}) => ({ customerId: 'cust-1', lawnFast: { visitType: 'recurring' }, isIncompleteVisit: false, products: [], technicianNotes: NOTE, ...extra });
+
+  test('claim + gate on: takes the property-preferences advisory lock (the sod writers\' key) and says the recheck is needed', async () => {
+    process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+    const events = [];
+    const trx = trxWith(events);
+    expect(await sodSheet.lockSodRecordForNoProduct(trx, claim())).toBe(true);
+    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', 'cust-1']);
+  });
+
+  test.each([
+    ['gate off', { gate: false }],
+    ['no lawnFast block', { lawnFast: null }],
+    ['an incomplete visit outcome', { isIncompleteVisit: true }],
+    ['a product on the list', { products: [{ productId: P_BAG24 }] }],
+    ['no list at all but no sentence', { technicianNotes: 'Nothing to spread.' }],
+  ])('%s: no lock, no recheck (completes exactly as before)', async (_label, { gate = true, ...extra }) => {
+    if (gate) process.env.GATE_LAWN_NEW_SOD_NOTE = 'true'; else delete process.env.GATE_LAWN_NEW_SOD_NOTE;
+    const trx = trxWith([]);
+    expect(await sodSheet.lockSodRecordForNoProduct(trx, claim(extra))).toBe(false);
+    expect(trx.raw).not.toHaveBeenCalled();
+  });
+
+  describe('assertNoProductUnderLock: the claim is re-judged on the transaction\'s own reads', () => {
+    const GATES = ['GATE_LAWN_NEW_SOD_NOTE', 'GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+    const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
+    beforeEach(() => {
+      resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue({
+        category: 'lawn_care', serviceKey: 'lawn_care_monthly', billingType: 'recurring', findingsType: null, projectBacked: false, requiresProject: false, companions: [],
+      });
+      buildPlanForService.mockReset().mockResolvedValue({
+        completionDefaults: { items: [{ product: { id: P_BAG24, name: SOD_SWAP_BAG.name }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' } }] },
+      });
+      process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+    });
+    afterAll(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
+    const trxFor = (record) => Object.assign(fakeKnex({
+      scheduled_services: visitRow(), customers: { billing_mode: null, has_multi_home: false }, products_catalog: CATALOG,
+      property_preferences: record, customer_properties: HOME, customer_turf_profiles: { grass_type: 'st_augustine' },
+    }), { raw: jest.fn() });
+    const assertWith = (record, technicianNotes = NOTE) => sodSheet.assertNoProductUnderLock(trxFor(record), { svc: { id: VISIT, customer_id: 'cust-1' }, technicianNotes });
+
+    test('the record still backs the claim: nothing thrown', async () => {
+      await expect(assertWith(prefs())).resolves.toBeUndefined();
+    });
+
+    test.each([
+      ['the record was cleared', null],
+      ['the record was changed to part of the lawn', prefs({ sod_covers: 'part', sod_area: 'front yard' })],
+      ['the sod date was changed (the note sent is the old one)', prefs({ sod_laid_on: '2026-09-28' })],
+      ['the read failed', new Error('read failed')],
+    ])('%s: the completion rolls back with lawn_sod_no_product_stale', async (_label, record) => {
+      await expect(assertWith(record)).rejects.toMatchObject({ code: 'lawn_sod_no_product_stale' });
+    });
+
+    test('the rebuilt context reads through the transaction (not the pool)', async () => {
+      const trx = trxFor(prefs());
+      await sodSheet.assertNoProductUnderLock(trx, { svc: { id: VISIT, customer_id: 'cust-1' }, technicianNotes: NOTE });
+      expect(trx.mock.calls.map(([table]) => table)).toContain('property_preferences');
+    });
   });
 });
 
