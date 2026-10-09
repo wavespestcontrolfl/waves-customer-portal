@@ -255,6 +255,24 @@ async function probe(label, unavailable, fn) {
   }
 }
 
+// The active and retracted application rows each chemical area add-on on the visit has, as { <key>: { active,
+// retracted } } (an add-on with no row is absent), or null when the read failed. undefined when the visit's
+// requirements name no chemical add-on: nothing per add-on is judged then, and no query runs. The tag is
+// service_products.area_addon_key, set at completion only for an add-on the visit really carries.
+async function addOnApplicationCounts(knex, recordIds, requirements, unavailable) {
+  if (!requirements?.areaAddOnApplicationKeys?.length) return undefined;
+  if (!recordIds.length) return {};
+  const found = await probe('property_application_history (area add-on rows)', unavailable, () => knex('property_application_history as h')
+    .join('service_products as sp', 'sp.id', 'h.service_product_id')
+    .whereIn('h.service_record_id', recordIds)
+    .whereNotNull('sp.area_addon_key')
+    .groupBy('sp.area_addon_key')
+    .select('sp.area_addon_key as key',
+      knex.raw('COUNT(*) FILTER (WHERE h.retracted_at IS NULL) AS active'),
+      knex.raw('COUNT(*) FILTER (WHERE h.retracted_at IS NOT NULL) AS retracted')));
+  return found.error ? null : Object.fromEntries(found.value.map((row) => [row.key, { active: toNumber(row.active), retracted: toNumber(row.retracted) }]));
+}
+
 // ---------------------------------------------------------------------------
 // Loader — every DB read for one service, each individually fallible.
 // ---------------------------------------------------------------------------
@@ -470,6 +488,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
 
   inputs.activeApplicationCount = activeAppsProbe.value ? toNumber(activeAppsProbe.value.n) : null;
   inputs.retractedApplicationCount = retractedAppsProbe.value ? toNumber(retractedAppsProbe.value.n) : null;
+  inputs.addOnApplications = await addOnApplicationCounts(knex, recordIds, inputs.requirements, unavailable);
   inputs.photoCount = photosProbe.value ? toNumber(photosProbe.value.n) : null;
   inputs.photoSource = projectId ? 'project_photos' : 'service_photos';
   inputs.deliveries = deliveryProbe.error ? null : (deliveryProbe.value || []);
@@ -653,6 +672,33 @@ function deriveBillingExpectation(inputs) {
   return { ...prediction, why: prediction.kind, ruleSource: 'lane', laneSource: lane.source };
 }
 
+// The application fact of a visit with chemical area add-ons (Codex round 8 on #6135): done only when EVERY
+// chemical add-on on the visit has its own application row, and the visit's host service has its own when it
+// owes one (the host's log and each add-on's log are separate requirements). `base` is the verdict the
+// one-boolean rules gave. Pending or failed names the add-ons with no row. A visit whose requirements carry
+// no per-add-on list (every visit without a chemical add-on, and every snapshot frozen before the list
+// existed) keeps `base` exactly.
+function areaAddOnApplicationFact(base, requirements, inputs) {
+  const keys = requirements?.areaAddOnApplicationKeys;
+  const counts = inputs.addOnApplications;
+  if (!keys?.length) return base;
+  // Requirements that were not frozen at completion (a failed freeze, or a visit that predates freezing) are
+  // the live catalog's: a visit with no tagged row at all was completed before rows carried a tag, so it keeps
+  // its original verdict rather than turning pending after the fact.
+  if (!requirements.frozen && !(counts && Object.keys(counts).length)) return base;
+  if (base.state === 'pending' || base.state === 'failed') return { ...base, missingAddOns: keys };
+  if (base.reason !== 'active_application_rows') return base;
+  if (!counts) return fact('unknown', 'application_addon_lookup_failed', { activeCount: base.activeCount });
+  const missing = keys.filter((key) => !(counts[key]?.active > 0));
+  const taggedActive = Object.values(counts).reduce((sum, row) => sum + row.active, 0);
+  const missingHost = requirements.hostApplicationLog === true && base.activeCount - taggedActive <= 0;
+  if (!missing.length && !missingHost) return { ...base, addOnsRecorded: keys };
+  const retracted = missing.some((key) => counts[key]?.retracted > 0);
+  return fact(retracted ? 'failed' : 'pending', retracted ? 'addon_application_rows_retracted' : 'addon_application_rows_missing', {
+    activeCount: base.activeCount, retractedCount: base.retractedCount, requiredAddOns: keys, missingAddOns: missing, ...(missingHost ? { missingHostApplication: true } : {}),
+  });
+}
+
 function deriveCloseoutFacts(inputs) {
   const now = inputs.now instanceof Date ? inputs.now : new Date();
   const contradictions = [];
@@ -766,6 +812,7 @@ function deriveCloseoutFacts(inputs) {
   else if (inputs.retractedApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed', { activeCount: 0, detail: 'retracted-row lookup unavailable; cannot tell empty from all-retracted' });
   else if (inputs.retractedApplicationCount > 0) application = fact('failed', 'all_application_rows_retracted', { activeCount: 0, retractedCount: inputs.retractedApplicationCount });
   else application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0 });
+  application = areaAddOnApplicationFact(application, requirements, inputs);
 
   // ---- 3. photos ---------------------------------------------------------------
   let photos;
@@ -1325,6 +1372,7 @@ module.exports = {
   deriveCloseoutFacts,
   deriveBillingExpectation,
   summarizeCloseout,
+  addOnApplicationCounts,
   FACT_STATES,
   FACT_NAMES,
   // The canonical "was this invoice actually shown to the customer" status

@@ -94,6 +94,8 @@ const REQUIREMENT_COLUMNS = [
   'requires_license',
   'license_category',
   'closeout_requirements_source',
+  // The catalog key names the area add-on a requirement belongs to (areaAddOnApplication below).
+  'service_key',
 ];
 
 // Area add-ons (GATE_AREA_ADDONS): several add-ons are one visit, and every
@@ -136,7 +138,7 @@ async function areaAddOnCatalogRowsByVisit(jobs, { knex, strict }) {
       .then((rows) => rows.filter((row) => String(row.service_key || '').startsWith(AREA_ADDON_KEY_PREFIX)));
     if (!lines.length) return;
     const catalog = await knex('services').whereIn('service_key', [...new Set(lines.map((row) => row.service_key))])
-      .select(...REQUIREMENT_COLUMNS, 'service_key');
+      .select(...REQUIREMENT_COLUMNS);
     const byKey = new Map(catalog.map((row) => [row.service_key, row]));
     for (const line of lines) {
       const row = byKey.get(line.service_key);
@@ -154,6 +156,34 @@ async function areaAddOnCatalogRowsByVisit(jobs, { knex, strict }) {
 
 function uniqueCategories(list) {
   return [...new Set(list.filter(Boolean))];
+}
+
+// The application logs an area add-on visit owes, one for each chemical add-on (Codex round 8 on #6135).
+// requiresApplicationLog folds to ONE boolean, and one application row satisfied it for any number of
+// add-ons, so a visit with two chemical add-ons closed green with one treatment undocumented. The
+// requirement now also names the chemical add-ons (catalog keys, each needing a row tagged with its own
+// key: service_products.area_addon_key) and whether the visit's host service owes a log of its own (a
+// lawn or pest visit does; an add-on visit has no host). The fields exist ONLY for a visit that has a
+// chemical add-on, and a snapshot frozen without them keeps its original verdict.
+// A chemical add-on is an area add-on whose own catalog row requires an application log (the web sweep
+// does not).
+const isAreaAddOnKey = (key) => typeof key === 'string' && key.startsWith(AREA_ADDON_KEY_PREFIX);
+
+function areaAddOnApplication(catalogRow, own, extraRows) {
+  const chemical = (row) => isAreaAddOnKey(row?.service_key) && normalizeRequirements(row).requiresApplicationLog;
+  const keys = [...new Set([catalogRow, ...extraRows].filter(chemical).map((row) => row.service_key))];
+  return keys.length
+    ? { areaAddOnApplicationKeys: keys, hostApplicationLog: !isAreaAddOnKey(catalogRow?.service_key) && own.requiresApplicationLog }
+    : {};
+}
+
+// The per-add-on application fields of a requirement or a frozen snapshot, or {} when the shape is not
+// exactly the one written above (a snapshot without them is read as it always was).
+function frozenAddOnApplication(src) {
+  const keys = src.areaAddOnApplicationKeys;
+  return Array.isArray(keys) && keys.length > 0 && keys.every(isAreaAddOnKey) && typeof src.hostApplicationLog === 'boolean'
+    ? { areaAddOnApplicationKeys: [...keys], hostApplicationLog: src.hostApplicationLog }
+    : {};
 }
 
 // The visit's requirements with its area add-on rows folded in: a flag any row
@@ -211,6 +241,7 @@ function buildCloseoutRequirementsSnapshot(requirements, { now = new Date() } = 
     requiresLicense: requirements.requiresLicense === true,
     licenseCategory: requirements.licenseCategory || null,
     ...frozenLicenseCategories(requirements),
+    ...frozenAddOnApplication(requirements),
   };
 }
 
@@ -262,6 +293,7 @@ function frozenCloseoutRequirements(structuredNotes) {
     requiresLicense: snap.requiresLicense,
     licenseCategory: snap.licenseCategory || null,
     ...frozenLicenseCategories(snap),
+    ...frozenAddOnApplication(snap),
     source: snap.source,
     // Backfilled snapshots record the original verdict's provenance here
     // (migration 20260831000080) — passed through so status classification
@@ -342,8 +374,10 @@ async function resolveCloseoutRequirementsForJobs(jobs = [], { knex = db, strict
     const serviceType = job.service_type || job.metadata?.serviceType || null;
     const catalogRow = byId.get(job.service_id) || byName.get(String(serviceType || '').trim().toLowerCase());
     const own = normalizeRequirements(catalogRow || {}, serviceType);
-    const extra = (addOnRows.get(String(job.id)) || []).map((row) => normalizeRequirements(row));
-    result.set(job.id || job.sourceRecordId, extra.length ? foldAddOnRequirements(own, extra) : own);
+    const extraRows = addOnRows.get(String(job.id)) || [];
+    const extra = extraRows.map((row) => normalizeRequirements(row));
+    const requirements = extra.length ? foldAddOnRequirements(own, extra) : own;
+    result.set(job.id || job.sourceRecordId, { ...requirements, ...areaAddOnApplication(catalogRow, own, extraRows) });
   }
   return result;
 }
