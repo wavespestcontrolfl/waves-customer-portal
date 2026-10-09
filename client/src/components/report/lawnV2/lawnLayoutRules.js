@@ -5,7 +5,7 @@
 // with the gate off none of this runs and the page is exactly what it was.
 
 import COPY from '../../../../../shared/lawn-report-layout-copy.json';
-import { WAVES_SUPPORT_PHONE_DISPLAY } from '../../../constants/business';
+import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../../../constants/business';
 
 export const LAYOUT_COPY = COPY;
 
@@ -283,6 +283,23 @@ export function mowingLine(range, mowing) {
 }
 
 // ── When to call ────────────────────────────────────────────────────────────
-export function whenToCallLines() {
-  return COPY.whenToCall.map((line) => fill(line, { phone: WAVES_SUPPORT_PHONE_DISPLAY }));
+/**
+ * True when treatment may have been applied on this visit: the products section's own verdict
+ * (appliedProductsKind: 'products' or 'poison' when something went down, or the verdict is unknown) is not 'none'.
+ * An older payload with no applicationMade verdict counts as unknown, i.e. "may have applied".
+ */
+export function treatmentMayHaveBeenApplied(data, productsKind) {
+  return productsKind !== 'none' || data?.applicationMade === undefined;
 }
+
+/**
+ * The approved call lines. "if the area we treated gets worse" is about a treatment, so it prints only when one
+ * may have been applied; the damage line (no treatment in it) always prints. The approved sentences are not changed.
+ */
+export function whenToCallLines({ treated = true } = {}) {
+  const lines = COPY.whenToCall.map((line) => fill(line, { phone: WAVES_SUPPORT_PHONE_DISPLAY }));
+  return treated ? lines : lines.filter((line) => !/\btreated\b/.test(line));
+}
+
+/** The office number as the report's footer prints it, for the block that has no sentence carrying it. */
+export const OFFICE_PHONE = { display: WAVES_SUPPORT_PHONE_DISPLAY, tel: WAVES_SUPPORT_PHONE_TEL };

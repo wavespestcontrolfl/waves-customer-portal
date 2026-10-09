@@ -3796,7 +3796,8 @@ function CompanionSectionHeader({ companion }) {
 // placements carry it (codex #3379 r2 P2): top and bottom are mutually
 // exclusive mounts — pest/V2 reports place the card high, legacy non-pest
 // reports low — so legacy reports were silently keeping the old copy.
-// placement survives for layout classes only.
+// placement survives for layout classes and the click event's metadata: 'top' and 'bottom' are the two
+// standard mounts, 'lawn-layout' is the lawn layout's mount (GATE_LAWN_REPORT_LAYOUT), mid-page.
 export function reviewRequestCopy(placement = 'top', firstName = '', techName = '') {
   const name = String(firstName || '').trim();
   const tech = String(techName || '').trim().split(/\s+/)[0];
@@ -9748,7 +9749,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 techNote: <TechNoteCard data={data} mode={mode} />,
                 nearYou: <NearYouCard data={data} mode={mode} />,
                 crossSell: <CrossSellCard data={data} token={token} mode={mode} />,
-                review: <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />,
+                review: <ReviewRequestCard data={data} token={token} mode={mode} placement="lawn-layout" />,
                 referral: <ReferralCard data={data} token={token} mode={mode} />,
                 highlights: <ServiceHighlightsSection moments={orderedProofMoments} />,
                 markedPhotos: <MarkedPhotosSection data={data} mode={mode} />,

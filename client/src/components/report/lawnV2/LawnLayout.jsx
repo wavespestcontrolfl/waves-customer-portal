@@ -41,6 +41,7 @@ import {
 } from './LawnReportV2';
 import {
   LAYOUT_COPY,
+  OFFICE_PHONE,
   bannerRepeatsAftercare,
   bannerShowsAnything,
   insightsWithoutRepeats,
@@ -48,6 +49,7 @@ import {
   mowingLine,
   pageCarriesInstruction,
   planShowsNextVisit,
+  treatmentMayHaveBeenApplied,
   watchingLine,
   whenToCallLines,
   withoutRepeatedApplied,
@@ -170,10 +172,11 @@ function WhatWeDid({ data, slots }) {
           {tech ? <LeadBox label="From your technician" testId="lawn-lead-tech">{tech}</LeadBox> : null}
         </Card>
       ) : null}
-      {summaryText ? (
+      {summaryText || slots.recordedFindings ? (
         <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
           <h2>Visit Summary</h2>
-          <ReportText text={summaryText} sections={summary.sections} nextVisitLabel={summary.nextVisitLabel} />
+          {summaryText ? <ReportText text={summaryText} sections={summary.sections} nextVisitLabel={summary.nextVisitLabel} /> : null}
+          {slots.recordedFindings}
         </section>
       ) : null}
       <LawnProgramLine snapshot={v2.snapshot} />
@@ -195,7 +198,6 @@ function PhotosAndFindings({ data, slots, nowMs }) {
       {insights.length ? <LawnInsightCards insights={insights} lead={lead} /> : null}
       {slots.markedPhotos}
       {slots.highlights}
-      {slots.recordedFindings}
       {slots.recommendations}
     </>
   );
@@ -242,14 +244,22 @@ function WhatToExpect({ data }) {
   );
 }
 
-function WhenToCall() {
+// The first approved line is about "the area we treated", so it prints only when a treatment may have been
+// applied (the products section's own verdict). With no treatment the damage line stands alone; the office
+// number then prints by itself (no new sentence), the way the footer prints it.
+function WhenToCall({ treated }) {
   return (
     <Card>
       <div data-testid="lawn-when-to-call">
         <CardTitle>{LAYOUT_COPY.whenToCallTitle}</CardTitle>
-        {whenToCallLines().map((line) => (
+        {whenToCallLines({ treated }).map((line) => (
           <p key={line} style={{ margin: '0 0 8px', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{line}</p>
         ))}
+        {treated ? null : (
+          <p style={{ margin: 0, fontSize: 16, lineHeight: 1.5 }}>
+            <a data-testid="lawn-when-to-call-phone" href={OFFICE_PHONE.tel} style={{ color: COLORS.glassNavy, fontWeight: 700 }}>{OFFICE_PHONE.display}</a>
+          </p>
+        )}
       </div>
     </Card>
   );
@@ -292,6 +302,7 @@ function Products({ slots }) {
 //   a  done + the next lawn visit    status, reservice, plan, upcoming, nextVisit
 //   b  Your part                     yourPart
 //   c  what we did + why now         whatWeDid
+//   c  (also)                         the Visit Summary card holds the recorded findings list, as on the standard page
 //   d  photos + findings             photos (+ marked photos, service highlights, recommendations), recap, treatmentMap
 //   e  score (collapsed)             score
 //   f  what to expect + when to call expect, whenToCall, crossSell
@@ -323,7 +334,7 @@ const SECTIONS = {
   treatmentMap: ({ data, slots }) => (data.treatmentMap?.traced?.snapshotUrl ? slots.tracedMap : null),
   score: (props) => <ScoreSection {...props} />,
   expect: (props) => <WhatToExpect {...props} />,
-  whenToCall: () => <WhenToCall />,
+  whenToCall: ({ data, slots }) => <WhenToCall treated={treatmentMayHaveBeenApplied(data, slots.productsKind)} />,
   crossSell: ({ slots }) => slots.crossSell,
   water: (props) => <WaterAndMowing {...props} />,
   techNote: ({ slots }) => slots.techNote,

@@ -31,7 +31,7 @@ export const STANDARD_BODY_COVERAGE = Object.freeze({
   MosquitoReportV2Section: { how: 'declines', key: 'mosquitoReportV2' },
   TermiteReportV2Section: { how: 'declines', key: 'termiteReportV2' },
   CockroachReportV2Section: { how: 'declines', key: 'cockroachReportV2' },
-  $recordedFindingsList: { how: 'slot', key: 'recordedFindings' },
+  $recordedFindingsList: { how: 'slot', key: 'recordedFindings', note: 'printed inside the Visit Summary card, as the standard page nests it' },
   'host:div#service-timeline': { how: 'hidden', note: 'Visit Timeline, on the brief\'s cut list' },
   LawnVisitTimeline: { how: 'hidden', note: 'Visit Timeline, on the brief\'s cut list' },
   'host:section#visit-summary': { how: 'split', note: 'the Visit Summary paragraph (slot visitSummary) and the lawn section' },

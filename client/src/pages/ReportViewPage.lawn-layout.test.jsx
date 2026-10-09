@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
@@ -412,6 +412,69 @@ describe('gate on: nothing the standard page shows is lost', () => {
     await waitForReport();
     expect(screen.queryByTestId('lawn-your-part')).toBeNull();
     expect(text(third.container)).toContain('Check the zone by the fence.');
+  });
+});
+
+describe('gate on: the call block, the recorded findings and the review card tell the truth about their position', () => {
+  const eventBodies = () => globalThis.fetch.mock.calls
+    .filter(([url]) => String(url).includes('/events'))
+    .map(([, init]) => JSON.parse(init.body));
+
+  it('a visit with no application prints only the damage line, with the number alone; a treated visit prints both lines', async () => {
+    const none = clone(spotOn);
+    none.applications = [];
+    none.applicationMade = false;
+    renderReport(none, '', 'tok-call-none');
+    await waitForReport();
+    const block = screen.getByTestId('lawn-when-to-call');
+    expect(block).toHaveTextContent('Call or text us if you see new damage in your lawn.');
+    expect(block).not.toHaveTextContent('the area we treated');
+    expect(screen.getByTestId('lawn-when-to-call-phone')).toHaveAttribute('href', 'tel:+19412975749');
+    expect(screen.getByTestId('lawn-when-to-call-phone')).toHaveTextContent('(941) 297-5749');
+    cleanup();
+    renderReport(clone(spotOn), '', 'tok-call-treated');
+    await waitForReport();
+    const treated = screen.getByTestId('lawn-when-to-call');
+    expect(treated).toHaveTextContent('Call or text us at (941) 297-5749 if the area we treated gets worse.');
+    expect(treated).toHaveTextContent('Call or text us if you see new damage in your lawn.');
+    expect(screen.queryByTestId('lawn-when-to-call-phone')).toBeNull();
+  });
+
+  it('an unknown application verdict keeps the treatment line', async () => {
+    const unknown = clone(spotOn);
+    unknown.applications = [];
+    unknown.applicationMade = null;
+    renderReport(unknown, '', 'tok-call-unknown');
+    await waitForReport();
+    expect(screen.getByTestId('lawn-when-to-call')).toHaveTextContent('if the area we treated gets worse');
+  });
+
+  it('prints the recorded findings list inside the labeled Visit Summary card', async () => {
+    const payload = clone(spotOn);
+    payload.protocol = { structuredObservations: ['Thin turf along the driveway edge'], structuredObservationsProvenance: 'completion_form_snapshot' };
+    const { container } = renderReport(payload, '', 'tok-recorded');
+    await waitForReport();
+    const lists = [...container.querySelectorAll('ul[aria-label="Recorded lawn findings"]')];
+    expect(lists).toHaveLength(1);
+    expect(lists[0]).toHaveTextContent('Thin turf along the driveway edge');
+    expect(lists[0].closest('#visit-summary')).not.toBeNull();
+    expect(lists[0].closest('#visit-summary').querySelector('h2')).toHaveTextContent('Visit Summary');
+  });
+
+  it('the review card reports the layout\'s own placement, not "top"', async () => {
+    const { container } = renderReport(clone(spotOn), '', 'tok-review-layout');
+    await waitForReport();
+    const card = container.querySelector('[data-section^="review-request-"]');
+    expect(card.getAttribute('data-section')).toBe('review-request-lawn-layout');
+    expect(card.className).toContain('review-request-card-lawn-layout');
+    expect(card.className).not.toContain('review-request-card-top');
+    fireEvent.click(card.querySelector('a.review-cta'));
+    const click = eventBodies().find((body) => body.eventName === 'review_request_clicked');
+    expect(click.metadata.placement).toBe('lawn-layout');
+    cleanup();
+    const standard = renderReport(clone(spotOff), '', 'tok-review-standard');
+    await waitForReport();
+    expect(standard.container.querySelector('[data-section="review-request-top"]')).not.toBeNull();
   });
 });
 
