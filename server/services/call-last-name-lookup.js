@@ -78,11 +78,31 @@ function parseJson(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
-// The number the customer is reached on: the dialed line on an outbound call,
-// the caller's line on an inbound one.
+// The number the customer is reached on, from the call pipeline's OWN resolver
+// (a web-form callback's lead phone, an accepted spoken callback number, the
+// dialed or the calling line): no second phone-selection rule lives here.
+// Required lazily: the processor requires this module.
 function callContactPhoneKey(call) {
-  const outbound = String(call.direction || '').toLowerCase().startsWith('outbound');
-  return phoneIdentityKey(outbound ? call.to_phone : call.from_phone);
+  const { resolveCallContactPhone } = require('./call-recording-processor');
+  return phoneIdentityKey(resolveCallContactPhone(call, parseJson(call.ai_extraction)?.phone || null) || '');
+}
+
+const SUGGESTION_KEY = (customerId) => `call-last-name-suggestion:${customerId}`;
+
+// One suggestion per customer, ever (the notification's dedupe key). When it
+// stands, a reprocess or a later call must not pay for the lookups again.
+async function alreadySuggested(customerId) {
+  const row = await db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [SUGGESTION_KEY(customerId)]).first('id');
+  return !!row;
+}
+
+// The facts every source matched on. Staff can edit the customer while the
+// county and Twilio requests run; answers for the earlier identity or
+// property must not be posted on the edited record.
+const IDENTITY_COLUMNS = ['first_name', 'phone', 'email', 'address_line1', 'latitude', 'longitude'];
+function sameIdentity(before, now) {
+  return IDENTITY_COLUMNS.every((col) => String(before[col] ?? '') === String(now[col] ?? ''));
 }
 
 function leadingHouseNumber(address) {
@@ -92,7 +112,7 @@ function leadingHouseNumber(address) {
 // Every eligibility fact, read fresh. Returns { customer, relationship } or a skip code.
 async function loadEligible({ callLogId, customerId }) {
   const call = await db('call_log').where({ id: callLogId })
-    .first('id', 'customer_id', 'direction', 'from_phone', 'to_phone', 'v2_extraction_status', 'ai_extraction_enriched', 'created_at');
+    .first('id', 'customer_id', 'direction', 'from_phone', 'to_phone', 'source', 'metadata', 'ai_extraction', 'v2_extraction_status', 'ai_extraction_enriched', 'created_at');
   if (!call || String(call.customer_id) !== String(customerId)) return { skip: 'call_not_linked' };
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at')
     .first('id', 'first_name', 'last_name', 'phone', 'email', 'latitude', 'longitude', 'address_line1');
@@ -146,10 +166,13 @@ async function surnameFromRecords({ customer, callCreatedAt }) {
   const email = String(customer.email || '').trim().toLowerCase();
   const phoneKey = phoneIdentityKey(customer.phone || '');
   const nanpKey = /^\d{10}$/.test(phoneKey || '') ? phoneKey : null;
-  if (!email && !nanpKey) return { skip: 'no_identifier' };
+  // An international identity is the full number: matched on its exact digits.
+  const intlDigits = !nanpKey && /^\+\d{8,15}$/.test(phoneKey || '') ? phoneKey.slice(1) : null;
+  if (!email && !nanpKey && !intlDigits) return { skip: 'no_identifier' };
   const sameContact = (q) => {
     if (email) q.whereRaw('LOWER(TRIM(email)) = ?', [email]);
     if (nanpKey) q.orWhereRaw(nanpStoredPhoneClause('phone'), [nanpKey]);
+    if (intlDigits) q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [intlDigits]);
   };
   const baseColumns = ['first_name', 'last_name'];
   const customers = await db('customers').whereNot({ id: customer.id }).whereNull('deleted_at')
@@ -278,7 +301,7 @@ async function postSuggestion({ customer, callLogId }, answers) {
     who: 'person',
   }, {
     bell: true,
-    dedupeKey: `call-last-name-suggestion:${customer.id}`,
+    dedupeKey: SUGGESTION_KEY(customer.id),
     detail: detailFor(first, groups),
     metadata: { customerId: customer.id, callLogId, suggestions: groups.map((g) => ({ surname: g.surname, sources: g.sources })) },
   });
@@ -295,13 +318,15 @@ async function runCallLastNameLookup({ callLogId, customerId } = {}) {
   try {
     const eligible = await loadEligible({ callLogId, customerId });
     if (eligible.skip) return { skipped: eligible.skip };
+    if (await alreadySuggested(customerId)) return { skipped: 'already_suggested' };
     const { answers, tried } = await collectAnswers(eligible);
     if (!answers.length) {
       logger.info(`${LOG_PREFIX} no suggestion`, { callLogId, customerId, outcome: tried });
       return { suggested: false, outcome: 'no_answer' };
     }
-    const now = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'last_name');
+    const now = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'last_name', ...IDENTITY_COLUMNS);
     if (!now || !blank(now.last_name)) return { suggested: false, outcome: 'last_name_appeared' };
+    if (!sameIdentity(eligible.customer, now)) return { suggested: false, outcome: 'customer_changed' };
     const posted = await postSuggestion({ ...eligible, callLogId }, answers);
     const sources = answers.map((a) => a.source);
     const outcome = posted?.id ? 'posted' : 'not_posted';

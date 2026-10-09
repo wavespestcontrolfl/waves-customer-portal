@@ -19,6 +19,10 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/property-lookup/county-parcel-gis', () => ({ lookupCountyParcelByPoint: jest.fn() }));
+// The pipeline's own contact-phone resolver; this stand-in keeps its two plain cases.
+jest.mock('../services/call-recording-processor', () => ({
+  resolveCallContactPhone: jest.fn((call) => (String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone)),
+}));
 jest.mock('../services/outbound-call-reason', () => ({ nanpStoredPhoneClause: (col) => `PHONE_MATCH(${col}) = ?` }));
 // The real composer validates every spec against docs/admin-notifications.md
 // (it throws under NODE_ENV=test); only the notifyAdmin leg is replaced.
@@ -82,9 +86,10 @@ function setupDb(opts = {}) {
     customers: [
       opts.customer === undefined ? CUSTOMER : opts.customer,
       opts.customers || [],
-      opts.recheck === undefined ? { id: 'cust-1', last_name: null } : opts.recheck,
+      opts.recheck === undefined ? { ...(opts.customer === undefined ? CUSTOMER : opts.customer), last_name: null } : opts.recheck,
     ],
     leads: [opts.leads || []],
+    notifications: [opts.standing === undefined ? null : opts.standing],
   };
   const seen = {};
   db.mockImplementation((table) => {
@@ -115,6 +120,9 @@ beforeEach(() => {
   process.env.TWILIO_ACCOUNT_SID = 'ACtest';
   process.env.TWILIO_AUTH_TOKEN = 'tokentest';
   lookupCountyParcelByPoint.mockResolvedValue(PARCEL);
+  // resetAllMocks (afterEach) clears implementations: restore the resolver stand-in every test.
+  require('../services/call-recording-processor').resolveCallContactPhone
+    .mockImplementation((call) => (String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone));
   global.fetch = twilioAnswers(null);
   raiseAdminAlert.mockImplementation(async (category, spec) => {
     jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec);
@@ -344,11 +352,19 @@ describe('county owner record', () => {
 });
 
 describe('our own records', () => {
+  test('an international number is matched on its exact digits', async () => {
+    const intl = { ...CALL, from_phone: '+442079460958', ai_extraction_enriched: { caller: { first_name: 'Pat', last_name: null, relationship_to_property: 'tenant' } } };
+    const { records } = setupDb({ call: intl, customer: { ...CUSTOMER, phone: '+44 20 7946 0958' }, customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
+    await run();
+    expect(records).toContainEqual(['orWhereRaw', "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", ['442079460958']]);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
   test('the call read selects every column the run uses (the mock returns whole rows, so pin the projection)', async () => {
     const { records } = setupDb({ call: tenant(), customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
     await run();
     const callRead = records.find(([verb, ...cols]) => verb === 'first' && cols.includes('v2_extraction_status'));
-    expect(callRead).toEqual(expect.arrayContaining(['customer_id', 'direction', 'from_phone', 'to_phone', 'created_at', 'v2_extraction_status', 'ai_extraction_enriched']));
+    expect(callRead).toEqual(expect.arrayContaining(['customer_id', 'direction', 'from_phone', 'to_phone', 'source', 'metadata', 'ai_extraction', 'created_at', 'v2_extraction_status', 'ai_extraction_enriched']));
   });
 
   test('only rows last written before the call count: the call\'s own lead write is never read back', async () => {
@@ -496,6 +512,41 @@ describe('Twilio caller name', () => {
 });
 
 describe('eligibility', () => {
+  test('the caller\'s number comes from the pipeline\'s own resolver (a form callback\'s lead phone, not the staff leg)', async () => {
+    const { resolveCallContactPhone } = require('../services/call-recording-processor');
+    const bridged = { ...CALL, direction: 'outbound-api', source: 'lead-webhook-auto-bridge', from_phone: '+19415550199', to_phone: '+19415550177',
+      metadata: { type: 'lead_auto_bridge', leadPhone: '+19415550100' }, ai_extraction: { phone: '+19415550100' } };
+    resolveCallContactPhone.mockReturnValueOnce('+19415550100');
+    setupDb({ call: bridged });
+    lookupCountyParcelByPoint.mockResolvedValue(PARCEL);
+    await run();
+    expect(resolveCallContactPhone).toHaveBeenCalledWith(bridged, '+19415550100');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a standing suggestion for the customer: no source runs again, no paid lookup', async () => {
+    const { records } = setupDb({ standing: { id: 'notif-1' } });
+    global.fetch = jest.fn();
+    expect(await run()).toEqual({ skipped: 'already_suggested' });
+    expect(records).toContainEqual(['whereRaw', "metadata->>'dedupeKey' = ?", ['call-last-name-suggestion:cust-1']]);
+    expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['first name', { first_name: 'Robin' }],
+    ['phone', { phone: '(941) 555-0142' }],
+    ['email', { email: 'other@example.com' }],
+    ['address', { address_line1: '200 Sample Ave' }],
+    ['coordinates', { latitude: '27.5000' }],
+  ])('staff changed the %s while the lookups ran: nothing is posted', async (_label, change) => {
+    setupDb({ recheck: { ...CUSTOMER, last_name: null, ...change } });
+    lookupCountyParcelByPoint.mockResolvedValue(PARCEL);
+    expect(await run()).toEqual({ suggested: false, outcome: 'customer_changed' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['nobody gave a first name on the call', { first_name: null }],
     ['a household member gave their own first name', { first_name: 'Robin' }],
