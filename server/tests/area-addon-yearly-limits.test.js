@@ -1098,6 +1098,20 @@ describe('the history is the place\'s, whoever the customer record is (Codex rou
       }
     });
 
+    // Codex round 21: a completed legacy application with no property on the row or on the visit.
+    test('a legacy row with no property anywhere is placed by the address of the estimate its visit was booked from', async () => {
+      const legacy = ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: null, service_record_id: 'sr-1' });
+      const at = (address, over = {}) => ({
+        property_application_history: [legacy],
+        service_records: [{ 'sr.id': 'sr-1', record_id: 'sr-1', visit_id: 'v-legacy', source_estimate_id: OTHER_ESTIMATE, 'ss.property_id': null, 'ss.source_estimate_id': OTHER_ESTIMATE, ...over }],
+        estimates: [{ id: OTHER_ESTIMATE, address }],
+      });
+      await expect(check(at('1 test way, bradenton fl 34202'))).rejects.toMatchObject(refused);
+      await expect(check(at('9 Other St, Bradenton, FL 34202'))).resolves.toBeUndefined();
+      // no source estimate: it cannot be placed
+      await expect(check(at('1 Test Way, Bradenton, FL 34202', { 'ss.source_estimate_id': null }))).resolves.toBeUndefined();
+    });
+
     test('a legacy row with no frozen property is placed by its visit\'s property', async () => {
       const legacy = ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: null, service_record_id: 'sr-1' });
       await expect(check({ property_application_history: [legacy], service_records: [{ 'sr.id': 'sr-1', 'ss.property_id': PROPERTY_B }] })).rejects.toMatchObject(refused);

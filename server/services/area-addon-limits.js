@@ -144,7 +144,7 @@ async function ledgerDates(database, { customerId, propertyId, place, productByK
     place.ids.length ? scope(ledgerAtPlace(database, recent(), place.ids, known ? customerId : null), null) : [],
     siblingIds.length ? scope(ledgerAtPlace(database, recent().where({ customer_id: customerId }), siblingIds, null), null) : [],
   ]);
-  own.push(...siblings);
+  own.push(...siblings, ...(placeIsKnown(place) ? await legacyLedgerAtPlace(database, recent(), { place, customerId: known ? customerId : null, excludeVisitId }) : []));
   const keyOfProduct = new Map([...productByKey].flatMap(([key, productIds]) => productIds.map((id) => [String(id), key])));
   for (const row of [...own, ...placed]) {
     const key = keyOfProduct.get(String(row.product_id));
@@ -162,6 +162,24 @@ function ledgerAtPlace(database, query, propertyIds, customerId) {
         .join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id').whereIn('ss.property_id', propertyIds).select('sr.id'));
     });
   });
+}
+
+// Legacy ledger rows of other customers with no property anywhere (none frozen on the row, none on the visit), placed by the
+// address of the estimate their visit was booked from: the completed twin of unplacedVisitsAtPlace. Three small reads, the
+// last two only when the first finds a row.
+async function legacyLedgerAtPlace(database, query, { place, customerId, excludeVisitId }) {
+  if (customerId) query.whereNot('customer_id', customerId);
+  const rows = await query.whereNull('property_id').whereNotNull('service_record_id').select('product_id', 'application_date', 'service_record_id');
+  if (!rows.length) return [];
+  const visits = await database('service_records as sr').join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+    .whereIn('sr.id', [...new Set(rows.map((row) => row.service_record_id))]).whereNull('ss.property_id').whereNotNull('ss.source_estimate_id')
+    .select('sr.id as record_id', 'ss.id as visit_id', 'ss.source_estimate_id');
+  const mine = visits.filter((visit) => !excludeVisitId || String(visit.visit_id) !== String(excludeVisitId));
+  if (!mine.length) return [];
+  const estimates = await database('estimates').whereIn('id', [...new Set(mine.map((visit) => visit.source_estimate_id))]).select('id', 'address');
+  const here = new Set(estimates.filter((row) => addressIsAtPlace(row.address, place)).map((row) => String(row.id)));
+  const records = new Set(mine.filter((visit) => here.has(String(visit.source_estimate_id))).map((visit) => String(visit.record_id)));
+  return rows.filter((row) => records.has(String(row.service_record_id)));
 }
 
 // The add-on visits booked and not done that `restrict` keeps, as { service_key, scheduled_date, source_estimate_id } rows: a
