@@ -47,37 +47,61 @@ function capFor(name, activeIngredient) {
 
 const yearlyAmountFor = (entry, bedSqft) => round4((entry.perAcreYear * bedSqft) / SQFT_PER_ACRE);
 
+// A product with a label limit on the NUMBER of applications: remember the day of this one. Two
+// rows on one day are one application; a row with no date is its own.
+function noteApplicationDay(applicationDays, entry, row) {
+  if (!entry?.maxApplicationsPerYear) return;
+  const days = applicationDays.get(entry) || new Set();
+  days.add(row.application_date ? String(etCalendarDayOf(row.application_date)) : `row-${days.size}`);
+  applicationDays.set(entry, days);
+}
+
+function productCap(product, entry, area, usedShare, applicationDays) {
+  const yearlyAmount = area ? yearlyAmountFor(entry, area) : null;
+  const counted = Boolean(entry.maxApplicationsPerYear);
+  return {
+    productId: product.id,
+    name: entry.shortName,
+    unit: entry.unit,
+    yearlyAmount,
+    remainingAmount: area ? round4(Math.max(0, 1 - usedShare) * yearlyAmount) : null,
+    maxApplications: counted ? entry.maxApplicationsPerYear : null,
+    applicationsUsed: counted ? (applicationDays.get(entry)?.size || 0) : null,
+  };
+}
+
 /**
  * Pure. `rows` are this property's Tree & Shrub ledger rows for the year ({ product_name,
  * active_ingredient, quantity_applied, quantity_unit }), `catalog` the products to report a
  * remaining amount for ({ id, name, active_ingredient }). One entry per cap:
- * { key, label, usedShare, capByProduct: [{ productId, name, unit, yearlyAmount, remainingAmount }],
- *   unsized, reason }. usedShare and the amounts are null with reason 'bed_area_needed'.
+ * { key, label, usedShare, capByProduct: [{ productId, name, unit, yearlyAmount, remainingAmount,
+ *   maxApplications, applicationsUsed }], uncapped: [{ productId, name }], unsized, reason }.
+ * usedShare and the amounts are null with reason 'bed_area_needed'. `uncapped` names the catalog
+ * products of this ingredient with no strength in the config: the sheet holds them. A product with
+ * a label limit on the NUMBER of applications carries maxApplications and applicationsUsed (the
+ * days it was applied this year, sized or not); the others carry null.
  */
 function computeNeonicLedger({ rows = [], bedSqft = null, catalog = [] } = {}) {
   const area = positive(bedSqft);
   return NEONIC_CAPS.map((cap) => {
     let usedShare = 0;
     let unsized = 0;
+    const applicationDays = new Map();
     for (const row of rows) {
       const found = capFor(row.product_name, row.active_ingredient);
       if (!found || found.cap !== cap) continue;
+      noteApplicationDay(applicationDays, found.entry, row);
       const quantity = found.entry && convertInventoryQuantity(row.quantity_applied, row.quantity_unit, found.entry.unit);
       if (!quantity) { unsized += 1; continue; }
       if (area) usedShare += quantity / yearlyAmountFor(found.entry, area);
     }
     const capByProduct = [];
+    const uncapped = [];
     for (const product of catalog) {
       const found = capFor(product.name, product.active_ingredient);
-      if (!found || found.cap !== cap || !found.entry) continue;
-      const yearlyAmount = area ? yearlyAmountFor(found.entry, area) : null;
-      capByProduct.push({
-        productId: product.id,
-        name: found.entry.shortName,
-        unit: found.entry.unit,
-        yearlyAmount,
-        remainingAmount: area ? round4(Math.max(0, 1 - usedShare) * yearlyAmount) : null,
-      });
+      if (!found || found.cap !== cap) continue;
+      if (!found.entry) { uncapped.push({ productId: product.id, name: String(product.name || '').trim() }); continue; }
+      capByProduct.push(productCap(product, found.entry, area, usedShare, applicationDays));
     }
     return {
       key: cap.key,
@@ -85,6 +109,7 @@ function computeNeonicLedger({ rows = [], bedSqft = null, catalog = [] } = {}) {
       // Unrounded: a rounded share could tip an amount that lands exactly on the cap over it.
       usedShare: area ? usedShare : null,
       capByProduct,
+      uncapped,
       unsized,
       reason: area ? null : BED_AREA_NEEDED,
     };
@@ -130,7 +155,7 @@ async function loadNeonicLedgerRows(database, svc, serviceDate) {
     });
   scopeHistoryToTreatment(query, database, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }, 'pah');
   const rows = await query.select(
-    'pah.quantity_applied', 'pah.quantity_unit',
+    'pah.quantity_applied', 'pah.quantity_unit', 'pah.application_date',
     // The name and ingredient FROZEN when the application was recorded win over the catalog's
     // current ones: renaming a product or editing its ingredient must not re-class its history.
     database.raw('COALESCE(sp.product_name, pc.name) as product_name'),

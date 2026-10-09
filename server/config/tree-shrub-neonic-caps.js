@@ -8,7 +8,8 @@
  * product's yearly amount, and the shares add up to 1.
  *
  * The numbers are label facts; do not change one without the label in hand.
- * `source` names the label each came from.
+ * `source` names the label each came from. A catalog product of a capped ingredient with no entry
+ * here has no strength on file: the sheet holds it (uncapped) and never lets it through unchecked.
  */
 const SQFT_PER_ACRE = 43560;
 
@@ -26,6 +27,9 @@ const NEONIC_CAPS = Object.freeze([
         // 0.54 lb ai per acre per year = 1.811 fl oz per 1,000 sq ft. Foliar and soil
         // count together (Waves' stricter reading of the label).
         perAcreYear: 78.9,
+        // A separate label limit, whatever the amounts: three applications per growing season,
+        // sprays and drenches together. Counted per calendar year (no dormant season here).
+        maxApplicationsPerYear: 3,
         source: 'Zylam Liquid label (PBI-Gordon, EPA 2217-937): dinotefuran 10%, 0.89 lb ai/gal; 78.9 fl oz per acre per year',
       },
       {
@@ -51,6 +55,14 @@ const NEONIC_CAPS = Object.freeze([
         // 1.6 pints = 25.6 fl oz of product (0.4 lb ai) per acre per year = 0.588 fl oz per 1,000 sq ft.
         perAcreYear: 25.6,
         source: 'Merit 2F label: imidacloprid 2 lb ai/gal; 1.6 pints (25.6 fl oz) per acre per year',
+      },
+      {
+        shortName: 'Dominion 2L',
+        namePattern: /^dominion\s+2l\b/i,
+        unit: 'fl_oz',
+        // The same strength and the same ornamental limit as Merit 2F.
+        perAcreYear: 25.6,
+        source: 'Dominion 2L label (Control Solutions, EPA 53883-229): imidacloprid 2 lb ai/gal; outdoor ornamentals 1.6 pints (0.4 lb ai) per acre per year',
       },
     ]),
   },

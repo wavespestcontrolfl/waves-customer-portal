@@ -670,7 +670,7 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
     expect(ctx.neonicCap.ingredients.find((entry) => entry.key === 'imidacloprid').usedShare).toBe(0);
     const dino = ctx.neonicCap.ingredients.find((entry) => entry.key === 'dinotefuran');
     expect(dino.usedShare).toBeCloseTo(0.5, 6);
-    expect(dino.capByProduct).toEqual([{ productId: 'zylam', name: 'Zylam', unit: 'fl_oz', yearlyAmount: 19.725, remainingAmount: 9.8625 }]);
+    expect(dino.capByProduct).toEqual([{ productId: 'zylam', name: 'Zylam', unit: 'fl_oz', yearlyAmount: 19.725, remainingAmount: 9.8625, maxApplications: 3, applicationsUsed: 1 }]);
   });
 
   test('gate on, no bed area: the reason rides the payload and no amount does', async () => {

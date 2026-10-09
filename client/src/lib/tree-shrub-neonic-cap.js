@@ -3,7 +3,8 @@
 // The yearly neonicotinoid cap on the Tree & Shrub Fast Complete sheet (GATE_TS_NEONIC_CAP,
 // owner 2026-10-09). Pure functions: the server sends `neonicCap` in the fast context (how much
 // of each capped product's yearly amount the property has used, and the product amounts in the
-// product's own unit). This shows what is left and holds Complete on an amount over it. Like the
+// product's own unit). This shows what is left and holds Complete on an amount over it, on a
+// product past its label's number of applications a year, and on a product with no limit on file. Like the
 // live-insect check, the hold is the sheet's: /complete does not refuse, and an application that
 // was made is always recorded.
 //
@@ -59,10 +60,33 @@ function cappedRows(ingredient, rows) {
   return out;
 }
 
+// A product of a capped ingredient with no yearly limit on file (the server's `uncapped`) cannot
+// be checked: an active row of it holds Complete, never passes unchecked.
+function uncappedResult(ingredient, rows, lines, holds) {
+  for (const row of rows || []) {
+    if (!row?.active) continue;
+    const product = (ingredient.uncapped || []).find((entry) => String(entry.productId) === String(row.productId));
+    if (!product) continue;
+    lines[row.productId] = `${product.name}: no yearly limit on file.`;
+    holds.push(`${product.name} has no yearly limit on file, so it cannot be checked. Remove it or call the office.`);
+  }
+}
+
+// The label's limit on the NUMBER of applications a year, whatever the amounts.
+function countHold(product) {
+  if (!product.maxApplications || !(product.applicationsUsed >= product.maxApplications)) return '';
+  return `${product.name}: ${product.applicationsUsed} applications already made this year. The label allows ${product.maxApplications}.`;
+}
+
 function ingredientResult(ingredient, rows) {
   const lines = {};
   const holds = [];
+  uncappedResult(ingredient, rows, lines, holds);
   const capped = cappedRows(ingredient, rows);
+  for (const { product } of capped) {
+    const hold = countHold(product);
+    if (hold && !holds.includes(hold)) holds.push(hold);
+  }
   if (ingredient.reason) {
     for (const { row, product } of capped) lines[row.productId] = `${product.name}: bed area needed to check the yearly limit.`;
     return { lines, holds };

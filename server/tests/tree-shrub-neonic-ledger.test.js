@@ -34,6 +34,57 @@ describe('config: the label figures', () => {
     expect((43.2 / 43.56).toFixed(3)).toBe('0.992');
     expect((25.6 / 43.56).toFixed(3)).toBe('0.588');
     for (const cap of NEONIC_CAPS) for (const p of cap.products) expect(p.source).toBeTruthy();
+    // Codex r5 #6204: Dominion 2L is the same strength and limit as Merit 2F; Zylam has a count limit too.
+    expect(per('Dominion 2L')).toMatchObject({ unit: 'fl_oz', perAcreYear: 25.6 });
+    expect(per('Dominion 2L').namePattern.test('Dominion 2L 27.5 oz')).toBe(true);
+    expect(per('Zylam').maxApplicationsPerYear).toBe(3);
+    expect(per('Safari').maxApplicationsPerYear).toBeUndefined();
+  });
+});
+
+describe('Codex r5 #6204: the count limit and products with no limit on file', () => {
+  const DOMINION = { id: 'cat-dominion', name: 'Dominion 2L 1 gal', active_ingredient: 'Imidacloprid 21.4%' };
+  const GENERIC = { id: 'cat-generic', name: 'Generic imidacloprid 75 WSP', active_ingredient: 'Imidacloprid 75%' };
+  const zylamOn = (date, qty = 0.5) => row(ZYLAM, qty, 'fl_oz', { application_date: date });
+  const zylamCap = (rows) => entryOf(computeNeonicLedger({ rows, bedSqft: BED, catalog: CATALOG }), 'dinotefuran')
+    .capByProduct.find((p) => p.productId === 'cat-zylam');
+
+  test('Zylam carries the days it was applied this year against the label\'s three', () => {
+    expect(zylamCap([])).toMatchObject({ maxApplications: 3, applicationsUsed: 0 });
+    expect(zylamCap([zylamOn('2026-02-01'), zylamOn('2026-05-01'), zylamOn('2026-08-01')])).toMatchObject({ maxApplications: 3, applicationsUsed: 3 });
+  });
+
+  test('two rows on one day are one application; an unsized row still counts', () => {
+    expect(zylamCap([zylamOn('2026-02-01'), zylamOn('2026-02-01'), zylamOn('2026-05-01', null)]).applicationsUsed).toBe(2);
+  });
+
+  test('Safari applications do not spend Zylam\'s count, and Safari has no count limit', () => {
+    const dino = entryOf(computeNeonicLedger({
+      rows: [row(SAFARI, 1, 'oz', { application_date: '2026-02-01' }), zylamOn('2026-03-01')], bedSqft: BED, catalog: CATALOG,
+    }), 'dinotefuran');
+    expect(dino.capByProduct.find((p) => p.productId === 'cat-zylam').applicationsUsed).toBe(1);
+    expect(dino.capByProduct.find((p) => p.productId === 'cat-safari')).toMatchObject({ maxApplications: null, applicationsUsed: null });
+  });
+
+  test('Dominion 2L shares the imidacloprid cap with Merit', () => {
+    const imi = entryOf(computeNeonicLedger({
+      rows: [row(DOMINION, 3.2, 'fl_oz')], bedSqft: BED, catalog: [MERIT, DOMINION],
+    }), 'imidacloprid');
+    expect(imi.usedShare).toBeCloseTo(0.5, 6);
+    expect(imi.capByProduct.map((p) => [p.productId, p.remainingAmount])).toEqual([['cat-merit', 3.2], ['cat-dominion', 3.2]]);
+    expect(imi.uncapped).toEqual([]);
+  });
+
+  test('a catalog product of a capped ingredient with no strength on file is named as uncapped, never dropped', () => {
+    const ledger = computeNeonicLedger({ rows: [], bedSqft: BED, catalog: [...CATALOG, GENERIC] });
+    expect(entryOf(ledger, 'imidacloprid').uncapped).toEqual([{ productId: 'cat-generic', name: 'Generic imidacloprid 75 WSP' }]);
+    expect(entryOf(ledger, 'dinotefuran').uncapped).toEqual([{ productId: 'cat-alpine', name: 'Alpine WSG' }]);
+    expect(entryOf(computeNeonicLedger({ rows: [], bedSqft: null, catalog: [GENERIC] }), 'imidacloprid').uncapped).toHaveLength(1);
+  });
+
+  test('the ledger query reads the application date', async () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/tree-shrub-neonic-ledger.js'), 'utf8');
+    expect(src).toMatch(/'pah\.quantity_applied', 'pah\.quantity_unit', 'pah\.application_date'/);
   });
 });
 

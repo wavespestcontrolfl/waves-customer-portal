@@ -122,3 +122,35 @@ describe('evaluateNeonicCap', () => {
     expect(evaluateNeonicCap(context({ unsized: 1 }), [row('zylam', '', 'fl_oz')]).lines.zylam).toContain('(1 earlier application not counted)');
   });
 });
+
+describe('Codex r5 #6204: the count limit and products with no limit on file', () => {
+  const withZylam = (applicationsUsed, dino = 0.1) => ({
+    available: true,
+    ingredients: [{
+      key: 'dinotefuran', usedShare: dino, unsized: 0, reason: null, uncapped: [{ productId: 'alpine', name: 'Alpine WSG' }],
+      capByProduct: [{ ...ZYLAM_CAP, maxApplications: 3, applicationsUsed }, { ...SAFARI_CAP, maxApplications: null, applicationsUsed: null }],
+    }],
+  });
+
+  test('a fourth Zylam application holds Complete, however small the amount', () => {
+    const out = evaluateNeonicCap(withZylam(3), [row('zylam', 0.2, 'fl_oz')]);
+    expect(out.holds).toEqual(['Zylam: 3 applications already made this year. The label allows 3.']);
+    expect(evaluateNeonicCap(withZylam(3), [row('zylam', '', 'fl_oz')]).blockMessage).toBe('Zylam: 3 applications already made this year. The label allows 3.');
+  });
+
+  test('a third application does not hold; an inactive row does not hold; Safari has no count limit', () => {
+    expect(evaluateNeonicCap(withZylam(2), [row('zylam', 0.2, 'fl_oz')]).holds).toEqual([]);
+    expect(evaluateNeonicCap(withZylam(3), [row('zylam', 0.2, 'fl_oz', false)]).holds).toEqual([]);
+    expect(evaluateNeonicCap(withZylam(3), [row('safari', 0.2, 'oz')]).holds).toEqual([]);
+  });
+
+  test('a product with no limit on file holds an active row and says why', () => {
+    const out = evaluateNeonicCap(withZylam(0), [row('alpine', 1, 'oz')]);
+    expect(out.lines).toEqual({ alpine: 'Alpine WSG: no yearly limit on file.' });
+    expect(out.blockMessage).toBe('Alpine WSG has no yearly limit on file, so it cannot be checked. Remove it or call the office.');
+    expect(evaluateNeonicCap(withZylam(0), [row('alpine', 1, 'oz', false)]).holds).toEqual([]);
+    // No bed area on file: the product still cannot be checked, so it still holds.
+    const noArea = withZylam(0); noArea.ingredients[0].reason = 'bed_area_needed';
+    expect(evaluateNeonicCap(noArea, [row('alpine', 1, 'oz')]).holds).toHaveLength(1);
+  });
+});
