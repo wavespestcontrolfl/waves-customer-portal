@@ -280,4 +280,90 @@ postgres('GATE_STATION_FAST_COMPLETE: the sheet\'s completion body writes the sa
       } finally { await cleanup(f); }
     });
   });
+
+  // Codex P2 on #6205: the roster check is serialized with station edits by the
+  // roster lock (termite-stations.js lockStationRoster), and the sheet's check
+  // rows are written in the completion transaction under it.
+  describe('an office station edit racing a sheet completion', () => {
+    const TERMITE = { total_stations: '4', stations_checked: '4', stations_inaccessible: '0', stations_with_activity: '0', termite_activity: 'None observed', bait_consumption: 'None — bait intact' };
+    const TermiteStations = require('../services/termite-stations');
+    const officeRetire = (f, id) => mockPg.transaction((trx) => TermiteStations.upsertStationsForCustomer(trx, {
+      customerId: f.customerId, entries: [{ id, retire: true }], program: 'termite',
+    }));
+    // Never frozen counts that disagree with stored rows.
+    const consistent = async (f, out) => {
+      const rows = await checksByNumber(f);
+      if (out.status === 200) expect(rows).toHaveLength(4);
+      else {
+        expect(out).toMatchObject({ status: 409, body: { code: 'station_roster_changed' } });
+        expect(rows).toEqual([]);
+        expect(await mockPg('service_records').where({ customer_id: f.customerId })).toEqual([]);
+      }
+    };
+
+    test('a retire and a completion started together: the completion either refuses or commits all four checks first', async () => {
+      for (let round = 0; round < 3; round += 1) {
+        const f = await seedVisit();
+        try {
+          const [out] = await Promise.all([
+            complete(f, sheetBody(f, [], 'termite_bait_station', TERMITE)),
+            officeRetire(f, f.stationIds[3]),
+          ]);
+          await consistent(f, out);
+        } finally { await cleanup(f); }
+      }
+    });
+
+    test('a retire waits while a transaction holds the roster lock, and a retire-only office save takes it', async () => {
+      const f = await seedVisit();
+      try {
+        let retired = false;
+        let release;
+        const held = new Promise((resolve) => { release = resolve; });
+        const holder = mockPg.transaction(async (trx) => {
+          await TermiteStations.lockStationRoster(trx, f.customerId, 'termite');
+          await held;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const retire = officeRetire(f, f.stationIds[3]).then(() => { retired = true; });
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        expect(retired).toBe(false);
+        release();
+        await holder;
+        await retire;
+        expect(retired).toBe(true);
+      } finally { await cleanup(f); }
+    });
+
+    test('the check rows are stored by the completion itself: a station retired right after the commit keeps its row', async () => {
+      const f = await seedVisit();
+      const original = TermiteStations.syncStationsForCompletion;
+      const spy = jest.spyOn(TermiteStations, 'syncStationsForCompletion');
+      try {
+        // The post-commit sync (the second call) is made to fail: the rows must
+        // already be there from the completion's own transaction (the first).
+        let calls = 0;
+        spy.mockImplementation(async (...args) => {
+          calls += 1;
+          if (calls > 1) throw new Error('post-commit sync down');
+          return original(...args);
+        });
+        const out = await complete(f, sheetBody(f, [null, 'activity', null, null], 'termite_bait_station', { ...TERMITE, stations_with_activity: '1', termite_activity: 'Active termites present', bait_consumption: 'Light feeding' }));
+        expect(out).toMatchObject({ status: 200 });
+        expect(calls).toBe(2);
+        expect(await checksByNumber(f)).toEqual([[1, 'ok'], [2, 'activity'], [3, 'ok'], [4, 'ok']]);
+      } finally { spy.mockRestore(); await cleanup(f); }
+    });
+
+    test('the full form\'s body is not written in the transaction: its sync stays post-commit', async () => {
+      const f = await seedVisit();
+      const spy = jest.spyOn(TermiteStations, 'syncStationsForCompletion');
+      try {
+        const out = await complete(f, fullFormBody(f, [], 'termite_bait_station', TERMITE));
+        expect(out).toMatchObject({ status: 200 });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(await checksByNumber(f)).toHaveLength(4);
+      } finally { spy.mockRestore(); await cleanup(f); }
+    });
+  });
 });

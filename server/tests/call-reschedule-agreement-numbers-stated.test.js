@@ -40,3 +40,27 @@ describe('spokenNumbersIn is unchanged without lists', () => {
     expect(spokenFiguresIn('about one thousand two hundred dollars')).toEqual([1200]);
   });
 });
+
+// Codex P2 on #6205: the dash in a range is a character class, so a typographic
+// dash names every station between, as a hyphen does.
+describe('ranges with typographic dashes', () => {
+  test.each([
+    ['hyphen-minus', 'stations 2-4'],
+    ['hyphen U+2010', 'stations 2\u20104'],
+    ['figure dash', 'stations 2\u20124'],
+    ['en dash', 'stations 2\u20134'],
+    ['em dash', 'stations 2\u20144'],
+    ['horizontal bar', 'stations 2\u20154'],
+    ['en dash with spaces', 'stations 2 \u2013 4'],
+    ['to', 'stations 2 to 4'],
+    ['through', 'stations 2 through 4'],
+    ['thru', 'stations 2 thru 4'],
+  ])('%s', (_label, text) => {
+    expect(numbersStatedIn(text).sort((a, b) => a - b)).toEqual([2, 3, 4]);
+  });
+
+  test('the default spoken reader is unchanged: a dash still joins number words', () => {
+    expect(spokenNumbersIn('twenty\u2013five')).toEqual([25]);
+    expect(spokenNumbersIn('twenty-five traps, and one hundred and two')).toEqual([25, 102]);
+  });
+});

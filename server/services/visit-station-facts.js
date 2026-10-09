@@ -289,6 +289,10 @@ async function assertStationRosterUnderLock(trx, { customerId, profile, stationR
   const program = stationSheetProgramFor(profile);
   let rows = null;
   if (program && customerId && Array.isArray(stationRosterSeen)) {
+    // The roster lock (termite-stations.js lockStationRoster), taken on the
+    // completion's own transaction so it is held through the commit: an office
+    // add, move or retire either committed first and is seen below, or waits.
+    await require('./termite-stations').lockStationRoster(trx, customerId, program);
     rows = await trx.transaction((sp) => sp('termite_stations')
       .where({ customer_id: customerId, is_active: true })
       .select('id', 'program'));
@@ -297,6 +301,27 @@ async function assertStationRosterUnderLock(trx, { customerId, profile, stationR
   // A marker that cannot be judged (not a list, not a station-sheet visit) fails closed.
   if (rows && stationRosterMatches(ids, stationRosterSeen)) return;
   throw Object.assign(new Error('station roster changed during completion'), { code: 'station_roster_changed' });
+}
+
+// The station sheet's check rows, written INSIDE the completion transaction, under
+// the roster lock taken above, so the stored rows are the roster the frozen counts
+// were judged against even if a station is retired the moment the completion
+// commits. Only a performed completion from the station sheet (it sent the marker)
+// whose entries are plain checks ({ id, status }); the full form's body, with its
+// creates, moves and retires, keeps its post-commit sync untouched. The existing
+// sync function does the write (on a savepoint). The post-commit sync still runs
+// after and is idempotent; a failure here is not fatal for the same reason: it
+// rolls back the savepoint only and the post-commit sync is the fallback.
+async function writeSheetStationChecksInCompletion(trx, { customerId, profile, serviceRecordId, visitOutcome, stationRosterSeen, termiteStations }) {
+  const program = stationRosterSeen === undefined || visitOutcome !== 'completed' ? null : stationSheetProgramFor(profile);
+  const entries = Array.isArray(termiteStations) ? termiteStations : [];
+  const plain = entries.length > 0 && entries.every((entry) => entry && entry.id != null && entry.shape == null && entry.retire !== true);
+  if (!program || !plain || !serviceRecordId) return null;
+  try {
+    return await require('./termite-stations').syncStationsForCompletion(trx, { customerId, serviceRecordId, entries, program });
+  } catch {
+    return null;
+  }
 }
 
 // The completion's answer for that refusal (null for any other error), the way
@@ -320,6 +345,7 @@ module.exports = {
   stationSheetProgramFor,
   stationRosterMatches,
   assertStationRosterUnderLock,
+  writeSheetStationChecksInCompletion,
   stationRosterRefusalResponse,
   stationFastCompleteEnabled,
   stationReadVerdict,

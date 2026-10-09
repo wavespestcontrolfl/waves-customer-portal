@@ -7618,6 +7618,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+        // The station sheet's checks, in this transaction under the roster lock
+        // (visit-station-facts.js); the full form's sync stays post-commit.
+        await require('./visit-station-facts').writeSheetStationChecksInCompletion(trx, {
+          customerId: svc.customer_id, profile: completionProfile, serviceRecordId: record.id, visitOutcome, stationRosterSeen, termiteStations,
+        });
         // Invoice-issued closeout: the issued invoice's record link lands in
         // THIS transaction, beside the record it names (GitHub r3 P1 #4127).
         // The post-commit suppressor lookup is best-effort by contract, so a

@@ -666,7 +666,11 @@ describe('the roster rule, one copy', () => {
     expect(stationRosterMatches([1, 2], ['1', '2'])).toBe(true);
   });
 
-  const trxWith = (rows) => ({ transaction: async (fn) => fn(() => ({ where: () => ({ select: async () => rows }) })) });
+  const locks = [];
+  const trxWith = (rows) => ({
+    raw: async (sql, bindings) => { locks.push({ sql, bindings }); },
+    transaction: async (fn) => fn(() => ({ where: () => ({ select: async () => rows }) })),
+  });
   const profile = { findingsType: 'termite_bait_station' };
   const run = (rows, seen, p = profile) => assertStationRosterUnderLock(trxWith(rows), { customerId: 'c1', profile: p, stationRosterSeen: seen });
 
@@ -676,6 +680,15 @@ describe('the roster rule, one copy', () => {
     for (const [rows, seen] of [[[{ id: 'a', program: 'termite' }], ['a', 'b']], [[{ id: 'a', program: 'termite' }, { id: 'b', program: 'termite' }], ['a']]]) {
       await expect(run(rows, seen)).rejects.toMatchObject({ code: 'station_roster_changed' });
     }
+  });
+
+  test('it takes the roster lock on the completion transaction before it reads, with the office path\'s key', async () => {
+    locks.length = 0;
+    await run([{ id: 'a', program: 'termite' }], ['a']);
+    expect(locks).toEqual([{ sql: 'SELECT pg_advisory_xact_lock(hashtext(?))', bindings: ['termite_stations:c1:termite'] }]);
+    locks.length = 0;
+    await run([{ id: 'a', program: 'termite' }], undefined);
+    expect(locks).toEqual([]);
   });
 
   test('a marker that cannot be judged fails closed: not a list, or not a station sheet visit', async () => {

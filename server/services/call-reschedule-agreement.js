@@ -1200,7 +1200,9 @@ function spokenNumbersIn(text, { lists = false } = {}) {
 // digit ranges ("2-4", "2 through 4", "2 to 4": every number in them). A decimal
 // ("4.5") or an ordinal ("4th") states no whole number, and 1,000 is a thousand.
 // NaN stands for a malformed or ambiguous spoken run, which matches nothing.
-const NUMBER_RANGE = /\b(\d{1,3})\s*(?:-|\u2010-\u2015|to|through|thru)\s*(\d{1,3})\b/gi;
+// The dash is a character class: a hyphen or any typographic dash U+2010 to U+2015
+// (hyphen, figure dash, en dash, em dash, horizontal bar).
+const NUMBER_RANGE = /\b(\d{1,3})\s*(?:[-\u2010-\u2015]|to|through|thru)\s*(\d{1,3})\b/gi;
 const MAX_RANGE = 80;
 function numbersStatedIn(text) {
   const out = [];
