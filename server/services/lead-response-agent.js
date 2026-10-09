@@ -25,7 +25,8 @@ const { getBreaker } = require('./intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('./intelligence-bar/tool-events');
 const { LEAD_RESPONSE_AGENT_CONFIG } = require('./lead-response-agent-config');
 const { recordSessionUsage } = require('./llm-dispatch-metrics');
-const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
+const { isSessionTerminal, streamFailureOf } = require('./agent-control/session-events');
+const { sessionBudget } = require('./agent-control/session-guard');
 const { readSessionFrames } = require('./agent-control/session-stream');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
@@ -383,9 +384,11 @@ async function readLeadRun(run, openedStream) {
     // requires_action while the agent waits for the tool result sent
     // above) — the shared predicate reads only real terminals.
     if (isSessionTerminal(event, data)) return null;
-    if (isSessionError(event)) {
-      logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
-      return 'session_error_event';
+    // An error event, or the session's spend cap (budget_exhausted).
+    const streamFailure = streamFailureOf(event, data);
+    if (streamFailure) {
+      logger.error(`[lead-agent] Agent ${streamFailure}: ${JSON.stringify(data)}`);
+      return streamFailure;
     }
   }
   // The stream closed before the session said it ended: not a success,
@@ -458,6 +461,7 @@ const LeadResponseAgent = {
       const session = await apiCallWithinDeadline('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
         environment_id: LEAD_AGENT_ENVIRONMENT_ID,
+        ...sessionBudget('agent_lead'),
       }, 'new session', deadline);
 
       sessionId = session.id;

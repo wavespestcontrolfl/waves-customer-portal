@@ -481,13 +481,39 @@ jobs:
       - run: npm ci
       - name: Worktree and managed startup checks
         run: npm run test:dev-workflow
-      - name: Client tests (vitest)
+      - name: Customer app coverage floor (the tests related to the gated files)
+        # The whole vitest suite runs in the `client-unit` shards. A shard sees
+        # a third of the tests, so it cannot measure the coverage floor in
+        # client/vite.config.js; this step runs every test that imports one of
+        # the gated files and checks the floor on them.
         working-directory: client
-        run: npm run test:coverage
+        run: npm run test:coverage-floor
       - name: Customer app production build
         # Vite production compilation catches chunking, CSS/import, and
         # service-worker asset failures that the jsdom test runtime cannot.
         run: npm run build
+
+  # The whole client suite (708 files, ~12 min on one runner, the longest job
+  # of the run once the server job ran in lanes) as three parallel shards.
+  # `vitest --shard` splits the test files deterministically: every file runs
+  # in exactly one shard. No coverage here; the floor is the `client` job's.
+  client-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - name: Client tests (vitest)
+        working-directory: client
+        run: npx vitest run --silent --shard=${{ matrix.shard }}/3
 
   browser-previews:
     runs-on: ubuntu-latest

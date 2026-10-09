@@ -1306,24 +1306,11 @@ router.post('/voice', async (req, res) => {
       gateOn: isEnabled('callPreconnectScreen'),
     });
 
-    // #4: Caller ID Enrichment via Twilio Lookup API
-    if (firstDelivery && !customer && From) {
-      try {
-        const lookupUrl = `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(From)}?Fields=caller_name`;
-        const twilioAuth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
-        const lookupRes = await fetch(lookupUrl, { headers: { Authorization: `Basic ${twilioAuth}` } });
-        if (lookupRes.ok) {
-          const lookupData = await lookupRes.json();
-          const callerName = lookupData.caller_name?.caller_name;
-          if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 0) {
-            logger.info(`[CallerID] Lookup matched for inbound call ${maskSid(CallSid)}; deferring customer creation until transcript confirms first name`);
-          }
-        }
-      } catch (lookupErr) {
-        // Non-critical — Twilio Lookup is a paid add-on, may not be enabled
-        logger.info(`[CallerID] Lookup skipped: ${sanitizeVoiceProviderError(lookupErr.message)}`);
-      }
-    }
+    // No caller-name lookup here. One used to run on every unknown inbound
+    // number, awaited before the call was logged, and its result was only
+    // logged, never stored. The paid Lookup v2 caller_name request now has ONE
+    // caller: call-last-name-lookup.js, after processing, only for a customer
+    // with no last name (GATE_CALL_LAST_NAME_LOOKUP).
 
     // Log the inbound call (first delivery only — see claim above).
     // Serialized per-CallSid with /call-status and /recording-status: an

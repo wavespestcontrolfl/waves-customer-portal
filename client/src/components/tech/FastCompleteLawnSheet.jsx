@@ -221,7 +221,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, chinch: null, guidedProductIds: [], troubleAreas: null,
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -302,6 +302,7 @@ const optionalContextFields = (data) => ({
   guidedProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.guidedProductIds) ? data.plannedProducts.guidedProductIds : [],
   // GATE_LAWN_TROUBLE_AREAS: the closed list of places, the known trouble areas and what a limit closes where; null otherwise.
   troubleAreas: troubleAreasOf(data),
+  takeAllProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.takeAllProductIds) ? data.plannedProducts.takeAllProductIds : [],
 });
 
 const sameText = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -413,7 +414,7 @@ function useTreatmentGuide({ base, request, enabled, assessmentId }) {
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
+          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
         } else setState({ for: assessmentId, status: 'failed', guide: null });
       })
       .catch(() => { if (active) setState({ for: assessmentId, status: 'failed', guide: null }); });
@@ -437,11 +438,21 @@ function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable
   return { guide, status, locked, guideChecks: checkedState.for === forId ? checkedState.map : {}, onGuideCheck };
 }
 
+// The note under a take-all fungicide row (it is added from the search only).
+const TAKE_ALL_ROW_NOTE = 'Take-all fungicide is for mapped take-all areas only.';
+// Under the row: the unreadable-limit warning first (when the limit read failed), then the take-all note.
+function takeAllRowNote(gov, productId) {
+  const id = String(productId).toLowerCase();
+  if (!gov.takeAll.has(id)) return null;
+  return [gov.unreadable.has(id) ? gov.unreadableNote : '', TAKE_ALL_ROW_NOTE].filter(Boolean).join(' ');
+}
+
 const lowerIds = (ids) => (ids || []).filter(Boolean).map((id) => String(id).toLowerCase());
 
 // The products a visible guide card owns or holds: out of the generic add-ons list and the search,
 // so the card's check is the only way in. A dismissed card releases its product ("looked and
-// decided"); a held product (take-all, no trouble area on file) has no dismiss and stays out.
+// decided"); a held product (take-all, no trouble area on file) has no dismiss and stays out of the
+// list; the search alone still reaches it (guideGovernance: takeAll).
 function cardOwnedIds(guide, checks) {
   return lowerIds((guide?.cards || []).filter((card) => checks[card.kind] !== 'none')
     .flatMap((card) => [...cardAllIds(card), ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
@@ -462,13 +473,39 @@ function cardOwnedIds(guide, checks) {
 // cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
 // is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
 // leave no way to record a real application. Completion records the visit and flags it to the office.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
+
+// Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
+function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
+  return [
+    ...lowerIds(guide?.unreadableProductIds),
+    // The mix is withheld as a whole; the members not read as forbidding are released.
+    ...(weedMix?.mode === 'unavailable' ? weedGroup.filter((id) => !lowerIds(weedMix.blockedIds).includes(id)) : []),
+    // GATE_LAWN_TROUBLE_AREAS: a member whose limit could not be read at ANY place is released too, whatever the top-level mode.
+    ...lowerIds(weedMix?.unreadableIds),
+    ...lowerIds(chinch?.unreadableIds),
+  ];
+}
+
+// The month's take-all fungicide ids (the fresh guide's, else the context's) and the ones the search may
+// reach: once the decision is in, all but those a limit that was READ forbids.
+function takeAllReach({ ctx, guide, settled, blocked }) {
+  const takeAll = lowerIds(guide?.takeAllProductIds ?? ctx.takeAllProductIds);
+  return { takeAll, searchOnly: settled ? takeAll.filter((id) => !blocked.includes(id)) : [] };
+}
+
+// The governed ids kept out of the list AND the search: not released to the generic list, or a card owns
+// them; a take-all product the search may reach is not.
+function hiddenIds({ governed, searchOnly, free, unreadable, owned }) {
+  return governed.filter((id) => !searchOnly.includes(id) && ((!free.includes(id) && !unreadable.includes(id)) || owned.includes(id)));
+}
 
 function guideGovernance({ ctx, guide, status, checks }) {
   if (!ctx.treatmentGuide) return NO_GOVERNANCE;
   const answered = status === 'answered' && !!guide;
   const settled = answered || status === 'failed';
-  const cards = answered ? guide.cards : [];
+  const fresh = answered ? guide : null;
+  const cards = fresh?.cards || [];
   const weedMix = effectiveWeedMix(guide, ctx);
   const chinch = effectiveChinch(guide, ctx);
   const picks = lowerIds(ctx.guidedProductIds);
@@ -477,28 +514,29 @@ function guideGovernance({ ctx, guide, status, checks }) {
   const weedOffered = lowerIds([weedMix, ...Object.values(weedMix?.byPlace || {})]
     .filter((decision) => decision && ['lead', 'replacement'].includes(decision.mode)).flatMap((decision) => decision.productIds || []));
   const blocked = lowerIds(answered ? guide.blockedProductIds : []);
-  const held = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
   const cardIds = lowerIds(cards.flatMap((card) => [...cardAllIds(card), ...card.items.map((item) => item.productId)]));
   const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => cardAllIds(card)));
   const weedGroup = lowerIds(weedMix?.groupProductIds);
   // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
-  const unreadable = settled ? [
-    ...lowerIds(answered ? guide.unreadableProductIds : []),
-    // The mix is withheld as a whole; the members not read as forbidding are released.
-    ...(weedMix?.mode === 'unavailable' ? weedGroup.filter((id) => !lowerIds(weedMix.blockedIds).includes(id)) : []),
-    // GATE_LAWN_TROUBLE_AREAS: a member whose limit could not be read at ANY place is released too, whatever the top-level mode.
-    ...lowerIds(weedMix?.unreadableIds),
-    ...lowerIds(chinch?.unreadableIds),
-  ] : [];
+  const unreadable = settled ? unreadableIds({ guide: fresh, weedMix, chinch, weedGroup }) : [];
+  // Take-all fungicide (preventive on mapped areas only, never curative on an unmapped lawn): never
+  // released to the plain list, and no tap offers it. Once the decision is in, it is reachable by the
+  // search alone, the deliberate way to record it for a known mapped lawn, unless a limit that was READ
+  // forbids it. The row it opens carries TAKE_ALL_ROW_NOTE.
+  const { takeAll, searchOnly } = takeAllReach({ ctx, guide: fresh, settled, blocked });
+  // Held from the generic list: a check-only card's product, and every take-all product.
+  const held = [...lowerIds(cards.flatMap((card) => card.heldProductIds || [])), ...takeAll];
   const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
-  const owned = cardOwnedIds(answered ? guide : null, checks);
-  const governed = [...picks, ...weedGroup, ...lowerIds(chinch?.rungIds), ...chinchItem];
+  const owned = cardOwnedIds(fresh, checks);
+  const governed = [...picks, ...takeAll, ...weedGroup, ...lowerIds(chinch?.rungIds), ...chinchItem];
   return {
     enabled: true,
     locked: !settled,
     governed: new Set(governed),
-    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable]),
-    hidden: new Set(governed.filter((id) => (!free.includes(id) && !unreadable.includes(id)) || owned.includes(id))),
+    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable, ...searchOnly]),
+    // Hidden from the add-ons list AND the search; a take-all product reachable by the search is not.
+    hidden: new Set(hiddenIds({ governed, searchOnly, free, unreadable, owned })),
+    takeAll: new Set(takeAll),
     unreadable: new Set(unreadable),
     unreadableNote: answered ? guide.unreadableNote : '',
     weedOffered: new Set(weedOffered),
@@ -1424,6 +1462,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               gaugeHeightIn={gaugeHeightIn}
               onGaugeHeight={setGaugeHeightIn}
               technicianNotes={form.note}
+              closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
           <ProductsSection ctx={ctx} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
@@ -1516,7 +1555,7 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
             methods={ctx.methods}
             lawnSqft={lawnSqft}
             locked={locked}
-            note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : null}
+            note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : takeAllRowNote(gov, row.productId)}
             areas={areas}
             onPlace={(place) => updateRow(row.productId, { pickedPlace: place })}
             onChange={(patch) => updateRow(row.productId, patch)}
@@ -1591,7 +1630,10 @@ function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, cat
   return {
     // Before the guide has answered a governed product waits in the list; after, the ones the latest
     // decision does not release to the list are not listed.
-    items: split.items.filter((item) => gov.locked || !gov.hidden.has(String(item.productId).toLowerCase())),
+    items: split.items.filter((item) => {
+      const id = String(item.productId).toLowerCase();
+      return !gov.takeAll.has(id) && (gov.locked || !gov.hidden.has(id));
+    }),
     weedEntry: split.weedEntry,
     showWeed: !cardShown('weeds') && !!weedMix && (split.weedEntry?.length > 0 || (!weedMix.productIds.length && !!weedMix.note)),
     showChinch: !cardShown('chinch') && !!chinch,

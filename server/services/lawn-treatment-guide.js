@@ -58,6 +58,7 @@ const CHECKS = Object.freeze({
 // and no product until a trouble area is on file for the lawn.
 const TAKE_ALL_TRIGGER = /^mapped_take_all/;
 const TAKE_ALL_LINE = /mapped take-all/i;
+const TAKE_ALL_KIND = 'take_all';
 const TAKE_ALL_NOTE = 'Take-all is treated on known trouble areas only. None is on file for this lawn.';
 // "Blocked" means the read found a limit or hold that forbids the product. When the limit read itself
 // failed the product is only UNREADABLE: its entry or card offers nothing (we cannot vouch for it),
@@ -137,7 +138,11 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
 async function addOnOffers({ candidates, rows, svc, knex, places = null }) {
-  const chosen = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
+  const picks = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
+  // A take-all row the pick passed over (October's Headway row follows the large patch row) is governed
+  // all the same: its limit is read so a forbidden one stays out of the search, and it has no offer.
+  const picked = new Set(picks.map(([, candidate]) => idOf(candidate.raw.product.id)));
+  const chosen = [...picks, ...takeAllAddOns(candidates, rows).filter((c) => !picked.has(idOf(c.raw.product.id))).map((c) => [TAKE_ALL_KIND, c])];
   // `blocked`: the picks a limit or a city hold that was READ forbids. `unreadable`: the picks whose
   // limit read failed (nothing is offered for them, and they are not forbidden). A pick that merely
   // has no finding is neither.
@@ -148,7 +153,7 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null }) {
   const capped = places?.length ? await openSomewhere({ chosen, wide, rows, svc, knex, places }) : wide;
   for (const [kind, candidate] of chosen) {
     const id = idOf(candidate.raw.product.id);
-    offers[kind] = offerFor(kind, candidate, { capped, rows });
+    if (kind !== TAKE_ALL_KIND) offers[kind] = offerFor(kind, candidate, { capped, rows });
     if (isBlocked(candidate, capped)) offers.blocked.push(id);
     else if (isUnreadable(candidate, capped)) offers.unreadable.push(id);
   }
@@ -194,6 +199,17 @@ function pickAddOns(candidates, rows) {
     caterpillars: withRole((row) => row.gates?.trigger === CATERPILLAR_TRIGGER)[0] || null,
     dry_spots: withRole((row) => row.gates?.trigger === DRY_SPOT_TRIGGER)[0] || null,
   };
+}
+
+// Every take-all fungicide row of the month, wherever it stands in the program order (owner 2026-10-08:
+// take-all is preventive on mapped areas only, never curative on a lawn with none on file). The staged
+// role says fungicide; the trigger or the protocol line says take-all. The sheet keeps these out of the
+// plain add-on list always, and releases them to the search only (see guideGovernance).
+function takeAllAddOns(candidates, rows) {
+  return (candidates || []).filter((candidate) => {
+    const row = stagedRowOf(rows, candidate.raw);
+    return row && row.role === FUNGICIDE_ROLE && isTakeAll(candidate, rows);
+  });
 }
 
 // The plan's own limit reader over some products as selected lines: the hard blocks by product id,
@@ -544,6 +560,7 @@ module.exports = {
   signalsFromAssessment,
   addOnOffers,
   pickAddOns,
+  takeAllAddOns,
   weedOffer,
   blockedProductIds,
   unreadableProductIds,
