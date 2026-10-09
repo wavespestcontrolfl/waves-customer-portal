@@ -11,7 +11,7 @@
  * prints the list).
  *
  * That branch name is the only link between a queue row and its PR, so this
- * module asks GitHub once per candidate row:
+ * module reads the repo's PR list and matches branches to pending rows:
  *   merged PR on the branch  → the row is completed here (status 'done')
  *   open PR on the branch    → in progress; not due, holds one daily slot
  *   no PR, or closed unmerged → due
@@ -40,9 +40,13 @@ const WRITER_ACTIONS = Object.freeze([
   'create_customer_question_page',
   'rewrite_title_meta',
 ]);
-// Rows read per pass: a small multiple of the daily cap, so a few in-progress
-// or just-merged rows at the top of the queue do not hide the due ones.
-const PEEK_LIMIT = 30;
+// Rows read per action type. peek() limits before this module can filter, so
+// each writing action is read on its own: link tasks and parked review rows
+// cannot crowd the writing rows out of the window.
+const PEEK_LIMIT = 100;
+// Closed PRs read newest-first to find merges. The daily run settles a merge
+// the next morning, so two pages cover far more than a day of site PRs.
+const CLOSED_PR_PAGES = 2;
 
 function terminalWriterLive() {
   return process.env.GATE_CONTENT_WRITER_TERMINAL === 'true';
@@ -55,19 +59,37 @@ function capFromEnv(key, fallback) {
 
 const branchFor = (opportunityId) => `${BRANCH_PREFIX}${opportunityId}`;
 
-/** 'merged' | 'open' | 'none' for the row's branch, with the PR that decided it. */
-async function prStateFor(opportunityId, gh) {
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A branch name is free text: only a well-formed id reaches a query.
+const opportunityIdOf = (pr) => {
+  const ref = pr?.head?.ref || '';
+  const id = ref.startsWith(BRANCH_PREFIX) ? ref.slice(BRANCH_PREFIX.length) : '';
+  return UUID.test(id) ? id.toLowerCase() : null;
+};
+
+/**
+ * Every terminal-writer PR GitHub knows about, by opportunity id: all open
+ * ones, and the merged ones among the most recently closed. Read from the PR
+ * list, not per queue row, so a PR counts whatever its row's score is now.
+ */
+async function terminalPrs(gh) {
   const { owner, repo } = gh.env();
-  const head = encodeURIComponent(`${owner}:${branchFor(opportunityId)}`);
-  const prs = await gh.ghFetchPaginated(`/repos/${owner}/${repo}/pulls?state=all&head=${head}`, { maxPages: 1 });
-  const merged = prs.find((p) => p.merged_at);
-  if (merged) return { state: 'merged', pr: merged };
-  const open = prs.find((p) => p.state === 'open');
-  return open ? { state: 'open', pr: open } : { state: 'none', pr: null };
+  const base = `/repos/${owner}/${repo}/pulls`;
+  const open = new Map();
+  const merged = new Map();
+  for (const pr of await gh.ghFetchPaginated(`${base}?state=open`)) {
+    const id = opportunityIdOf(pr);
+    if (id) open.set(id, pr.html_url);
+  }
+  for (const pr of await gh.ghFetchPaginated(`${base}?state=closed&sort=updated&direction=desc`, { maxPages: CLOSED_PR_PAGES })) {
+    const id = opportunityIdOf(pr);
+    if (id && pr.merged_at) merged.set(id, pr.html_url);
+  }
+  return { open, merged };
 }
 
 /**
- * Sort the top of the queue into due / in progress / merged.
+ * Sort the writing rows of the queue into due / in progress / merged.
  * `complete: true` also marks merged rows done (the daily run); the read-only
  * list script passes false and writes nothing.
  */
@@ -78,28 +100,29 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
 
   const perDay = capFromEnv('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY', 3);
   const perWeek = capFromEnv('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK', 10);
-  const rows = (await queue.peek({ limit: PEEK_LIMIT, minScore: THRESHOLDS.minScoreToAct }))
-    .filter((r) => r.status === 'pending' && WRITER_ACTIONS.includes(r.action_type));
+  const prs = await terminalPrs(gh);
 
-  const candidates = [];
-  const inProgress = [];
-  const merged = [];
-  for (const row of rows) {
-    // Enough rows to fill the day even if every later one is in progress.
-    if (candidates.length >= perDay) break;
-    const { state, pr } = await prStateFor(row.id, gh);
-    if (state === 'open') inProgress.push({ ...row, pr_url: pr.html_url });
-    else if (state === 'merged') merged.push({ ...row, pr_url: pr.html_url });
-    else candidates.push(row);
+  const byId = new Map();
+  for (const actionType of WRITER_ACTIONS) {
+    const rows = await queue.peek({ limit: PEEK_LIMIT, minScore: THRESHOLDS.minScoreToAct, actionType });
+    for (const r of rows) if (r.status === 'pending') byId.set(r.id, r);
   }
+  const pending = [...byId.values()].sort((x, y) => y.score - x.score);
+
+  // A merged PR whose row is still pending has not been settled yet.
+  const merged = pending.filter((r) => prs.merged.has(r.id)).map((r) => ({ ...r, pr_url: prs.merged.get(r.id) }));
+  const inProgress = pending.filter((r) => !prs.merged.has(r.id) && prs.open.has(r.id)).map((r) => ({ ...r, pr_url: prs.open.get(r.id) }));
+  const candidates = pending.filter((r) => !prs.merged.has(r.id) && !prs.open.has(r.id));
 
   if (complete) {
-    for (const row of merged) {
+    // By PR, not by the rows read above: a merged post is settled even when
+    // its row has since dropped out of the claimable window.
+    for (const [id, url] of prs.merged) {
       const updated = await conn('opportunity_queue')
-        .where('id', row.id)
+        .where('id', id)
         .where('status', 'pending')
         .update({ status: 'done', completed_at: now, updated_at: now });
-      if (updated) logger.info(`[terminal-writer] done ${row.id}: merged ${row.pr_url}`);
+      if (updated) logger.info(`[terminal-writer] done ${id}: merged ${url}`);
     }
   }
 
@@ -112,7 +135,9 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
     .first();
   // Merged rows this pass did not mark done (read-only) still used a slot.
   const doneThisWeek = Number(doneRow?.n || 0) + (complete ? 0 : merged.length);
-  const room = Math.max(0, Math.min(perDay - inProgress.length, perWeek - doneThisWeek - inProgress.length));
+  // Every open terminal PR holds a slot, whether or not its row was read above.
+  const openCount = prs.open.size;
+  const room = Math.max(0, Math.min(perDay - openCount, perWeek - doneThisWeek - openCount));
   const due = candidates.slice(0, room).map((r) => ({ ...r, branch: branchFor(r.id) }));
   return { due, inProgress, merged, caps: { perDay, perWeek, doneThisWeek } };
 }
