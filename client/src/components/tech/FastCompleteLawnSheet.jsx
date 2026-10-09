@@ -415,17 +415,20 @@ const guideCardOk = (card) => !!card && GUIDE_KINDS.includes(card.kind) && typeo
 function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 0 }) {
   const [state, setState] = useState({ for: null, status: 'idle', guide: null });
   useEffect(() => {
-    if (!enabled || !assessmentId) return undefined;
+    // No confirmed assessment (a retake, or the guide is off): an answer held for an earlier one is dropped, so it can never come back.
+    if (!enabled || !assessmentId) { setState((prev) => (prev.for === null ? prev : { for: null, status: 'idle', guide: null })); return undefined; }
     let active = true;
+    // A failed read keeps the answer the sheet has ONLY while that answer belongs to this same confirmed assessment; for a new one
+    // it is a failed read like any other (the sheet then follows the context's opening values).
+    const failed = () => setState((prev) => (refreshKey && prev.for === assessmentId && prev.status === 'answered' ? prev : { for: assessmentId, status: 'failed', guide: null }));
     request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}`)
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
           setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
-        } else if (!refreshKey) setState({ for: assessmentId, status: 'failed', guide: null });
+        } else failed();
       })
-      // A refresh (after /complete refused a place) that fails keeps the answer the sheet has.
-      .catch(() => { if (active && !refreshKey) setState({ for: assessmentId, status: 'failed', guide: null }); });
+      .catch(() => { if (active) failed(); });
     return () => { active = false; };
   }, [base, request, enabled, assessmentId, refreshKey]);
   if (!enabled || !assessmentId) return { guide: null, status: 'idle' };

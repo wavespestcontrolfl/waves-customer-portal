@@ -861,6 +861,57 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
     expect(completeCalls()[1].body.products.find((p) => p.productId === P_FUNG).areaPlace).toBe('back');
   });
 
+  // A failed re-read keeps the answer only while it belongs to the SAME confirmed assessment.
+  describe('a failed guide re-read', () => {
+    // Opens the sheet with a fungus card, takes it, and sends a completion the server refuses (400 lawn_place_limit), which re-reads the
+    // context (now OPEN everywhere) and the guide. The first guide answer closes the front; `rereads` says what the second read does.
+    const refuseOnce = async (rereads) => {
+      let contextReads = 0;
+      let guideReads = 0;
+      const base = makeRequest({ ctx: ctxWith({}) });
+      const request = vi.fn(async (path, options) => {
+        if (path.endsWith('/lawn-fast/context')) { contextReads += 1; return ctxWith({}); }
+        return base(path, options);
+      });
+      guideAnswer = () => { guideReads += 1; if (guideReads === 1) return guideWith(closedFront); return rereads(); };
+      await openSheet({ request, props: { catalog: CAT } });
+      await analyze();
+      fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+      typeArea(placeGroup('Spot Fungicide'), '100');
+      fireEvent.click(chipOf(chipsOf(), 'Back'));
+      completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: closed.'));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      await waitFor(() => expect(contextReads).toBe(2));
+      await waitFor(() => expect(guideReads).toBe(2));
+      return { guideReads: () => guideReads };
+    };
+
+    test('the same assessment: the answer the sheet has stands (its per-place blocks), though the fresh context says open', async () => {
+      await refuseOnce(() => { throw refusal(500, 'boom', 'Internal error'); });
+      // The context was re-read and says open; the guide's answer (the front closed) is the one that stays.
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
+      expect(screen.getByRole('group', { name: 'Suggested from this lawn' })).toBeTruthy();
+    });
+
+    test('a new confirmed assessment after the refusal: a failed read drops the old answer; the sheet follows the context, and is not left waiting', async () => {
+      await refuseOnce(() => guideWith(closedFront));
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
+      // Retake, and confirm a different assessment; its guide read fails.
+      fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+      await screen.findByTestId('lawn-shot-list');
+      const NEXT = { ...ASSESSED, id: 'assessment-2' };
+      assessAnswer = { ...assessAnswer, assessment: NEXT };
+      confirmAnswer = { ...confirmAnswer, assessment: { ...NEXT, confirmed_by_tech: true } };
+      guideAnswer = refusal(500, 'boom', 'Internal error');
+      await analyze();
+      // The old assessment's cards and per-place blocks are gone: no cards, the context's opening map (open), and no wait.
+      await waitFor(() => expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull());
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
+      expect(footerNote() + completeButton().textContent).not.toMatch(/Wait for the lawn guide/);
+    });
+  });
+
   test('other refusals do not re-read the place maps; a failed refresh changes nothing', async () => {
     let contextReads = 0;
     const base = makeRequest({ ctx: ctxWith({}) });
