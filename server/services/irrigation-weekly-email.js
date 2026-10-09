@@ -47,6 +47,7 @@ const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../confi
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
+const { irrigationRateOptions, irrigationOwnerRatesLive } = require('./irrigation-rates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts, lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
@@ -234,7 +235,9 @@ function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = 
   const sensorClause = rainSensor
     ? ' Since you have a rain sensor, some of those runs may have been skipped after rain — this figure assumes the full schedule ran, so read it as the most your system would have applied.'
     : '';
-  return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate from University of Florida turf guidance (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
+  // The owner table is not UF's: with GATE_IRRIGATION_OWNER_RATES on the sentence drops the attribution.
+  const rateSource = irrigationOwnerRatesLive() ? '' : ' from University of Florida turf guidance';
+  return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate${rateSource} (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
 }
 
 const lastCompletedWeekEnding = lastCompletedWeekEndingET;
@@ -436,7 +439,7 @@ function decideWeeklyEmail({
   // tech reading — but their explicit inches number always outranks it: the
   // head rate is a published typical, not a measurement of their system.
   const runtimeInputs = normalizeRuntimeInputs({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
-  const derived = deriveIrrigationInchesPerWeek({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
+  const derived = deriveIrrigationInchesPerWeek({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType }, irrigationRateOptions());
   // A toggle turned OFF means the runtime entries describe a system the
   // customer says is not running — no figure may be derived from them, and
   // any tech reading falls through as before. (A typed inches value keeps

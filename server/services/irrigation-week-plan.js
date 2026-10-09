@@ -24,7 +24,8 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const WATERING_COPY = require('../../shared/watering-copy.json');
-const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
+const { buildWeekPlan, defaultEventMinutes, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
+const { irrigationRates, irrigationOwnerRatesLive } = require('./irrigation-rates');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
@@ -175,6 +176,8 @@ function decideWeekPlan({
     rainKnown,
     priorWeekEvents,
     rainOnlyCarryover,
+    // One head rate table for every reader (GATE_IRRIGATION_OWNER_RATES); off = the package table.
+    rates: irrigationRates(),
   });
   const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
   // Everything the decision was made from, for the snapshot (the report
@@ -234,8 +237,16 @@ function comparisonClause(plan, runMinutes) {
   return diff < 0 ? ` — ${Math.abs(diff)} minutes less than you run now` : ` — ${diff} minutes more than you run now`;
 }
 
+// The generic default-dose sentences name the minutes a ½" run takes on each head type: computed from the rate table
+// in force (20 and 60 on the package table, 30 and 80 on the owner table), never typed.
 function eventsOnlyClause() {
-  return `run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 20 minutes on spray zones and 60 on rotor zones`;
+  const m = defaultEventMinutes(irrigationRates());
+  return `run one full cycle on each turf zone — ½ to ¾ inch of water, which is about ${m.spray} minutes on spray zones and ${m.rotor} on rotor zones`;
+}
+
+function fullCycleClause() {
+  const m = defaultEventMinutes(irrigationRates());
+  return `one full cycle on each turf zone (½ to ¾ inch — about ${m.spray} minutes on spray zones, ${m.rotor} on rotor zones)`;
 }
 
 /**
@@ -254,7 +265,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     : null;
   const fallbackCycle = fallbackMinutes
     ? `one cycle of ${fallbackMinutes} per turf zone`
-    : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
+    : fullCycleClause();
 
   let subject;
   let heading;
@@ -320,7 +331,8 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   } else if (plan.action !== 'hold' && plan.minutesPerEvent == null) {
     notes.push('Add your sprinkler head type (spray or rotor) under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
   } else if (plan.action !== 'hold' && plan.rateSource === 'system_type_default' && !omitRateNote) {
-    notes.push(`Minutes assume typical ${HEAD_LABELS[plan.headType] || 'sprinkler'} rates from University of Florida turf guidance. If you know your system's actual weekly output, enter Weekly Inches in your portal and we'll tighten this to your numbers.`);
+    // The owner table is not UF's: with the gate on the note says "typical rates" and stops there.
+    notes.push(`Minutes assume typical ${HEAD_LABELS[plan.headType] || 'sprinkler'} rates${irrigationOwnerRatesLive() ? '' : ' from University of Florida turf guidance'}. If you know your system's actual weekly output, enter Weekly Inches in your portal and we'll tighten this to your numbers.`);
   }
   if (plan.rainSensor && !omitSensorNote) {
     notes.push('Your rain sensor will skip a run on its own if we get a soaking.');
@@ -367,7 +379,7 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     // from the stored fallback (never the customer's own longer cycle).
     const fallback = plan.fallbackMinutesPerEvent != null
       ? `one cycle of ${plan.rateSource === 'measured' ? '' : 'about '}${plan.fallbackMinutesPerEvent} minutes per turf zone`
-      : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
+      : fullCycleClause();
     if (plan.reasons.includes('cool_season_cadence')) {
       return card({
         title: 'This week: skip if you watered last week',
@@ -385,7 +397,7 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     // read as the whole controller program.
     const cycle = minutes
       ? `one cycle of ${minutes} per turf zone`
-      : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
+      : fullCycleClause();
     return card({
       title: 'This week: check the rain before you water',
       detail: plan.events > 1
