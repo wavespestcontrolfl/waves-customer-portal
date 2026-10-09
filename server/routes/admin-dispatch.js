@@ -975,6 +975,58 @@ router.post('/:serviceId/standard-wording', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// Station exceptions for the typed-facts route (GATE_STATION_FAST_COMPLETE): only
+// for a termite or rodent bait station visit with no companion form, the program
+// the completion itself syncs (stationProgramForProfile), and only the stations
+// the sheet showed that are still ACTIVE in this customer's registry for that
+// program. The registry is read here, never taken from the client; the reader
+// verifies every number, status and quote (services/visit-station-facts.js).
+// Gate off, no stations carried or another kind of visit: null.
+async function loadAndReadStationFacts({ svc, profile, note, requested }) {
+  if (!Array.isArray(requested) || !requested.length) return null;
+  if (!require('../config/feature-gates').stationFastCompleteLive()) return null;
+  const { readStationExceptions, stationSheetProgramFor, stationRosterMatches } = require('../services/visit-station-facts');
+  const program = stationSheetProgramFor(profile);
+  if (!program || !svc.customer_id) return null;
+  const sent = new Set(requested.map((station) => String(station?.id)));
+  let rows;
+  try {
+    rows = await db('termite_stations')
+      .where({ customer_id: svc.customer_id, is_active: true })
+      .select('id', 'station_number', 'program', 'is_active');
+  } catch {
+    return { status: 'failed', exceptions: [] };
+  }
+  const stations = (Array.isArray(rows) ? rows : [])
+    .filter((row) => (row.program || 'termite') === program)
+    .map((row) => ({ id: row.id, number: row.station_number, program, is_active: row.is_active }));
+  // The sheet's roster must be the registry's: a station retired since the
+  // sheet loaded, or added, means the sheet would assert and count stations that
+  // are not the property's. No read; the sheet loads the registry again.
+  if (!stationRosterMatches(stations.map((station) => station.id), [...sent])) return { status: 'roster_changed', exceptions: [] };
+  return readStationExceptions({ note, stations, program });
+}
+
+// The answer the sheet takes from that read: `stationRead` is 'read' only when
+// the note was read (or had nothing to read) and everything the model returned
+// verified; else 'failed' with a detail (`unresolved`: part of what was said could
+// not be pinned down, the verified exceptions come beside it).
+// A throw, a timeout, a registry error or a roster that came to nothing is
+// 'failed', never an empty list the sheet could take for "all stations OK".
+async function readStationFactsForVisit(args) {
+  const { stationReadVerdict } = require('../services/visit-station-facts');
+  try {
+    const facts = await loadAndReadStationFacts(args);
+    if (!facts) return null;
+    const verdict = stationReadVerdict(facts.status);
+    // The exceptions that verified ride along even with an 'unresolved' verdict,
+    // for the sheet to pre-mark; every other failure carries none.
+    return { status: verdict, detail: facts.status, exceptions: facts.exceptions || [] };
+  } catch {
+    return { status: 'failed', detail: 'error', exceptions: [] };
+  }
+}
+
 // POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast
 // Complete step 3, GATE_TYPED_VOICE_FILL): a typed visit's own findings read
 // from the note, each pick field's values from the form's own options, each
@@ -995,7 +1047,7 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit, while it is a
     // current assignment; admins keep office-wide reach (the lane fill's
@@ -1019,10 +1071,23 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     // The form as served for the visit's own service key; a score the
     // client already holds (scoreSet) leaves nothing to read for when every
     // field is set too.
-    const facts = await readTypedFacts({
-      note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
+    // GATE_STATION_FAST_COMPLETE: a request that carries the sheet's stations
+    // also reads the station exceptions the note names, beside the fields
+    // (a separate read; null leaves the answer exactly as it was).
+    const [facts, stationFacts] = await Promise.all([
+      // The two reads are independent: a typed read that throws is a failed
+      // typed read, and the station read keeps its own verdict (and the other
+      // way round: readStationFactsForVisit never throws).
+      readTypedFacts({
+        note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
+      }).catch(() => ({ status: 'failed', type: findingsType, values: {}, heard: {}, unclearFields: [] })),
+      readStationFactsForVisit({ svc, profile, note, requested: req.body?.stations }),
+    ]);
+    res.json({
+      available: true,
+      ...facts,
+      ...(stationFacts ? { stationExceptions: stationFacts.exceptions, stationRead: stationFacts.status, stationReadDetail: stationFacts.detail } : {}),
     });
-    res.json({ available: true, ...facts });
   } catch (err) { next(err); }
 });
 

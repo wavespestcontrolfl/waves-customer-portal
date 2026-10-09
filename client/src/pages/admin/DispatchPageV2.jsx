@@ -90,7 +90,7 @@ import {
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
-import { reportFlowFields, stationMapKnownOff } from "../../lib/pest-fast-complete";
+import { reportFlowFields, stationMapKnownOff, stationMapKnownOn } from "../../lib/pest-fast-complete";
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import {
   mergePostPaymentService,
@@ -495,6 +495,9 @@ export default function DispatchPageV2({
   // said the flag is off (isTypedReportEligible), as on the technician home.
   const stationMap = useFeatureFlagReady("station-map-v1");
   const stationMapOff = stationMapKnownOff(stationMap);
+  // GATE_STATION_FAST_COMPLETE: with the map known ON, a termite or rodent bait
+  // station visit also opens the sheet, which carries the station checks.
+  const stationSheetOn = stationMapKnownOn(stationMap);
   const fastCompleteOperatorId = fastCompleteOperatorOf(useOutletContext());
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
@@ -960,13 +963,13 @@ export default function DispatchPageV2({
       lawn: setLawnFastService,
       assessment: setAssessmentFastService,
       pest: setPestFastService,
-    }[fastCompleteSheetFor(service, { stationMapOff })];
+    }[fastCompleteSheetFor(service, { stationMapOff, stationSheetOn })];
     if (openSheet) {
       openSheet(service);
       return;
     }
     setCompletingService(service);
-  }, [data?.visitCloseout, stationMapOff]);
+  }, [data?.visitCloseout, stationMapOff, stationSheetOn]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -2156,7 +2159,7 @@ export default function DispatchPageV2({
             // station map turns on or unread while the sheet is open drops
             // out of the report flow, and the sheet then blocks and points
             // to the full form (Codex P2 on #6140).
-            ...reportFlowFields(pestFastService, { stationMapOff }),
+            ...reportFlowFields(pestFastService, { stationMapOff, stationSheetOn }),
             noteBoxPhotosEnabled: pestFastService.noteBoxPhotosEnabled === true,
             technicianName: pestFastService.technicianName || pestFastService.technician_name || null,
             lat: pestFastService.lat ?? null,

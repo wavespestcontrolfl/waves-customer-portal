@@ -380,6 +380,44 @@ async function assertNoProductUnderLock(trx, { svc, technicianNotes }) {
   throw Object.assign(new Error('new sod record changed during completion'), { code: 'lawn_sod_no_product_stale' });
 }
 
+/**
+ * The completion ledger's half of the bag swap (lawn-protocol-completion.js recordLawnProtocolCompletion).
+ * The swap bag is not a row of the staged program, so the plan carries no substitution for it; without one the
+ * ledger would record the swap bag as an off-protocol product and the Dimension bag it stands in for as a skipped
+ * default. This returns the swap as substitutions in the plan's own shape (planSubstitutionSnapshot), so both
+ * products resolve to the Dimension bag's protocol row: `[]` unless the gate is on, this is a lawn sheet
+ * completion, the visit applied the swap bag, and the sheet context rebuilt NOW on the transaction (as a sod-aware
+ * sheet) still makes that swap. A failed read is `[]` (the ledger is secondary; it never fails the visit).
+ */
+async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts }) {
+  if (lawnFast == null || !featureGates.lawnNewSodNoteLive()) return [];
+  const applied = new Set((Array.isArray(appliedProducts) ? appliedProducts : []).map((row) => lowerId(row?.product_id)).filter(Boolean));
+  if (!applied.size) return [];
+  try {
+    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex: trx, sodAware: true });
+    const items = ctx?.ok && ctx.eligible && Array.isArray(ctx.plannedProducts?.items) ? ctx.plannedProducts.items : [];
+    return items.filter((item) => item?.sodSwap?.forProductId && applied.has(lowerId(item.productId))).map((item) => {
+      const original = items.find((other) => !other.sodSwap && lowerId(other.productId) === item.sodSwap.forProductId);
+      return {
+        id: null,
+        originalProductId: original?.productId || item.sodSwap.forProductId,
+        originalProductName: original?.name || null,
+        substituteProductId: item.productId,
+        substituteProductName: item.name,
+        reason: item.sodSwap.reason,
+        approvedByName: null,
+        approvedAt: null,
+        ratePer1000: item.ratePer1000 ?? null,
+        rateUnit: item.rateUnit || null,
+        source: 'new_sod',
+      };
+    });
+  } catch (err) {
+    logger.warn(`[lawn-sod-sheet] swap substitution unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return [];
+  }
+}
+
 // Every product the plan could put on this visit, with the hold classes of each (by lower-case id).
 async function classifyLines({ holds, plannedProducts, knex }) {
   const items = Array.isArray(plannedProducts?.items) ? plannedProducts.items : [];
@@ -547,6 +585,7 @@ module.exports = {
   checkNoProductNote,
   lockSodRecordForNoProduct,
   assertNoProductUnderLock,
+  sodSwapSubstitutions,
   NO_PRODUCT_STALE,
   confirmSodRooted,
 };

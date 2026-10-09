@@ -640,6 +640,38 @@ describe('the no-product claim inside the commit transaction', () => {
       await expect(assertWith(record)).rejects.toMatchObject({ code: 'lawn_sod_no_product_stale' });
     });
 
+    // The completion ledger's half of the bag swap (Codex on #6231).
+    describe('sodSwapSubstitutions: the bag swap as a ledger substitution', () => {
+      const DIM_NAME = CATALOG.find((row) => row.id === P_DIM_BAG).name;
+      const swapRecord = () => prefs({ sod_laid_on: '2026-08-01' });
+      beforeEach(() => {
+        buildPlanForService.mockResolvedValue({
+          completionDefaults: { items: [{ product: { id: P_DIM_BAG, name: DIM_NAME }, applicationMethod: 'granular_broadcast', mix: { amount: 20.2, amountUnit: 'lb' } }] },
+        });
+      });
+      const subs = (record, extra = {}) => sodSheet.sodSwapSubstitutions(trxFor(record), {
+        svc: { id: VISIT, customer_id: 'cust-1' }, lawnFast: { visitType: 'recurring' }, appliedProducts: [{ product_id: P_BAG24 }], ...extra,
+      });
+
+      test('the visit applied the swap bag: one substitution, the swap bag for the Dimension bag', async () => {
+        expect(await subs(swapRecord())).toEqual([expect.objectContaining({
+          originalProductId: P_DIM_BAG, originalProductName: DIM_NAME, substituteProductId: P_BAG24, substituteProductName: SOD_SWAP_BAG.name,
+          reason: 'New sod: no pre-emergent yet.', source: 'new_sod',
+        })]);
+      });
+
+      test.each([
+        ['the swap bag was not applied', () => subs(swapRecord(), { appliedProducts: [{ product_id: P_DIM_BAG }] })],
+        ['nothing was applied', () => subs(swapRecord(), { appliedProducts: [] })],
+        ['not a lawn sheet completion', () => subs(swapRecord(), { lawnFast: null })],
+        ['the sod record is gone', () => subs(null)],
+        ['the read failed (the ledger never fails the visit)', () => subs(new Error('read failed'))],
+        ['the gate is off', () => { delete process.env.GATE_LAWN_NEW_SOD_NOTE; return subs(swapRecord()); }],
+      ])('%s: no substitution', async (_label, run) => {
+        expect(await run()).toEqual([]);
+      });
+    });
+
     test('the rebuilt context reads through the transaction (not the pool)', async () => {
       const trx = trxFor(prefs());
       await sodSheet.assertNoProductUnderLock(trx, { svc: { id: VISIT, customer_id: 'cust-1' }, technicianNotes: NOTE });
