@@ -203,6 +203,23 @@ async function treeShrubNeonicCapBlocks(database, svc, products, { serviceDate =
   return neonicCapBlocks({ ledger, rows: submitted.map((p) => ({ ...p, unit: baseQuantityUnit(p.amountUnit || p.rateUnit || null) })) });
 }
 
+/**
+ * The same check INSIDE the completion's writing transaction, just before the ledger rows are
+ * written. /complete's first check reads before that transaction, so two visits at one property
+ * finishing together could each pass against the same allowance. This takes a transaction-scoped
+ * advisory lock on the property (the customer when the visit has no property) and checks again;
+ * the lock is held until the ledger rows commit, so the second visit reads the first one's rows.
+ * Over the cap: throws an operational 400 that rolls the completion back. Gate off: no lock, no read.
+ */
+async function recheckNeonicCapInTransaction(trx, svc, products, { serviceDate } = {}) {
+  if (!tsNeonicCapLive()) return;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['ts.neonic_cap', String(svc.property_id || svc.customer_id)]);
+  const blocks = await treeShrubNeonicCapBlocks(trx, svc, products, { serviceDate });
+  if (!blocks.length) return;
+  const payload = neonicCapBlockPayload(blocks);
+  throw Object.assign(new Error(payload.error), { statusCode: 400, code: payload.code, isOperational: true, details: payload.details });
+}
+
 // Pure. The blocks for submitted rows ({ productId, totalAmount, unit }) against a computed ledger.
 function neonicCapBlocks({ ledger, rows }) {
   const blocks = [];
@@ -265,5 +282,6 @@ module.exports = {
   loadBedSqft,
   buildNeonicCapContext,
   treeShrubNeonicCapBlocks,
+  recheckNeonicCapInTransaction,
   neonicCapBlockPayload,
 };

@@ -300,6 +300,50 @@ describe('treeShrubNeonicCapBlocks (the /complete check)', () => {
     process.env.GATE_TS_NEONIC_CAP = 'true';
     await expect(treeShrubNeonicCapBlocks(fakeDb({ failLedger: true }), svc, submit([ZYLAM, 1, 'fl_oz']))).rejects.toThrow('ledger down');
   });
+  // Two visits at one property finishing together: the check runs again inside the writing
+  // transaction under a property lock held until the ledger rows commit (pre-push P1 #6204).
+  describe('recheckNeonicCapInTransaction', () => {
+    const { recheckNeonicCapInTransaction } = require('../services/tree-shrub-neonic-ledger');
+    const trxOf = (options) => {
+      const trx = fakeDb(options);
+      const locks = [];
+      trx.raw = jest.fn(async (sql, bindings) => { locks.push([sql, bindings]); return {}; });
+      trx.locks = locks;
+      return trx;
+    };
+
+    test('gate off: no lock and no read', async () => {
+      delete process.env.GATE_TS_NEONIC_CAP;
+      const trx = trxOf({ ledger: [row(ZYLAM, 50, 'fl_oz')] });
+      await recheckNeonicCapInTransaction(trx, svc, submit([ZYLAM, 99, 'fl_oz']), { serviceDate: '2026-10-09' });
+      expect(trx.locks).toEqual([]);
+      expect(trx.reads).toEqual([]);
+    });
+
+    test('gate on: locks the property, then passes inside the cap', async () => {
+      process.env.GATE_TS_NEONIC_CAP = 'true';
+      const trx = trxOf({ ledger: [row(ZYLAM, 15, 'fl_oz')] });
+      await recheckNeonicCapInTransaction(trx, svc, submit([ZYLAM, 4, 'fl_oz']), { serviceDate: '2026-10-09' });
+      // The first raw call is the lock; later ones are the ledger query's own raw fragments.
+      expect(trx.locks[0]).toEqual(['SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['ts.neonic_cap', 'prop-1']]);
+    });
+
+    test('gate on: a visit with no property locks the customer', async () => {
+      process.env.GATE_TS_NEONIC_CAP = 'true';
+      const trx = trxOf({});
+      await recheckNeonicCapInTransaction(trx, { ...svc, property_id: null }, submit([ZYLAM, 1, 'fl_oz']), { serviceDate: '2026-10-09' });
+      expect(trx.locks[0][1]).toEqual(['ts.neonic_cap', 'cust-1']);
+    });
+
+    test('gate on: rows another visit committed first refuse this one with an operational 400', async () => {
+      process.env.GATE_TS_NEONIC_CAP = 'true';
+      const trx = trxOf({ ledger: [row(ZYLAM, 15, 'fl_oz')] });
+      await expect(recheckNeonicCapInTransaction(trx, svc, submit([ZYLAM, 5, 'fl_oz']), { serviceDate: '2026-10-09' }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'tree_shrub_neonic_cap_exceeded', isOperational: true, message: 'Zylam: 5.0 fl oz is over the 4.7 fl oz left this year for this property.' });
+      // The lock comes before the read.
+      expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(trx.mock.invocationCallOrder[0]);
+    });
+  });
 });
 
 describe('buildNeonicCapContext (the sheet)', () => {
@@ -328,8 +372,18 @@ describe('wiring', () => {
     const gate = source.indexOf("claim.action === 'proceed' && !isIncompleteVisit && (reportServiceLine === 'tree_shrub'");
     expect(gate).toBeGreaterThan(source.indexOf('lawnProhibitedProductsBlockPayload(prohibited)'));
     expect(gate).toBeLessThan(source.indexOf("claim.action === 'proceed' && treeShrubCloseoutRequired"));
-    expect(source.slice(gate, gate + 1800)).toContain('treeShrubNeonicCapBlocks(db, svc, products');
-    expect(source.slice(gate, gate + 1800)).toContain('status: 400, body: neonicCapBlockPayload(neonicBlocks)');
+    expect(source.slice(gate, gate + 2200)).toContain('treeShrubNeonicCapBlocks(db, svc, products');
+    expect(source.slice(gate, gate + 2200)).toContain('status: 400, body: neonicCapBlockPayload(neonicBlocks)');
+    // The year judged is the completion day (or the backfilled day), the date the ledger row carries.
+    expect(source.slice(gate, gate + 2200)).toContain('backfillPlan.active ? backfillPlan.serviceDate : etDateString(finiteDate(packetContext?.completionAt) || new Date())');
+    expect(source.slice(gate, gate + 2200)).not.toContain('svc.scheduled_date');
+  });
+  test('the in-transaction recheck sits just before the ledger write, on the date the ledger row carries', () => {
+    const recheck = source.indexOf('await recheckNeonicCapInTransaction(trx, svc, products, { serviceDate: completionServiceDate });');
+    const write = source.indexOf('await ComplianceService.createComplianceRecords(record.id, { trx });');
+    expect(recheck).toBeGreaterThan(0);
+    expect(write - recheck).toBeGreaterThan(0);
+    expect(write - recheck).toBeLessThan(400);
   });
   test('the gate is a strict opt-in with its own reader', () => {
     const gates = require('../config/feature-gates');
