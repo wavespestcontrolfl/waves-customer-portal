@@ -29,10 +29,12 @@ afterEach(() => {
 });
 
 // A fake completion transaction: trx.transaction runs the callback on a savepoint-like query function.
-function fakeTrx({ updated = 1, updateError = null } = {}) {
+function fakeTrx({ updated = 1, updateError = null, catalog = [] } = {}) {
   const writes = [];
   const sp = jest.fn((table) => {
     const chain = {
+      whereIn: (_column, ids) => { chain.ids = ids; return chain; },
+      select: async () => catalog.filter((row) => chain.ids.includes(row.id)),
       where: () => chain,
       whereRaw: (sql) => { chain.guard = sql; return chain; },
       update: async (patch) => {
@@ -48,8 +50,11 @@ function fakeTrx({ updated = 1, updateError = null } = {}) {
   return { trx, writes };
 }
 
+// The sod record the sheet showed, as the sheet echoes it (lawnFast.sod).
+const SEEN = { laidOn: '2026-10-03', covers: 'whole' };
+
 const newSod = (extra = {}) => ({
-  v: 1, day: 5, sodLaidOn: '2026-10-03', covers: 'whole', area: null, swap: null,
+  v: 1, day: 5, sodLaidOn: '2026-10-03', covers: 'whole', swap: null,
   plannedHeld: [
     { kind: 'fertilizer', until: '2026-11-02', rootedCheck: false, productIds: [PRODUCT_BAG] },
     { kind: 'weedKiller', until: '2026-11-02', rootedCheck: true, productIds: [PRODUCT_CELSIUS] },
@@ -61,7 +66,7 @@ const contextOf = (sod, visitDate = '2026-10-07') => ({ ok: true, eligible: true
 const run = async (trx, extra = {}) => {
   const record = { id: 'rec-1', structured_notes: { existing: 'kept' } };
   const out = await card.freezeNewSodCard(trx, {
-    svc: { id: 'visit-1' }, record, lawnFast: {}, isIncompleteVisit: false, resumingCommittedCompletion: false, appliedProducts: [], ...extra,
+    svc: { id: 'visit-1' }, record, lawnFast: { sod: SEEN }, isIncompleteVisit: false, resumingCommittedCompletion: false, appliedProducts: [], ...extra,
   });
   return { out, record };
 };
@@ -72,7 +77,7 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
     const { trx, writes } = fakeTrx();
     const { out, record } = await run(trx);
     const frozen = {
-      v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole', area: null,
+      v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole',
       held: [{ kind: 'fertilizer', until: '2026-11-02', rootedCheck: false }, { kind: 'weedKiller', until: '2026-11-02', rootedCheck: true }],
       swap: null,
     };
@@ -123,14 +128,15 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
       swap: { resolved: true, forProductId: PRODUCT_BAG, productId: PRODUCT_SWAP, name: SWAP_NAME },
     });
     buildLawnFastContext.mockResolvedValue(contextOf(sod, '2026-10-20'));
-    const applied = await run(fakeTrx().trx, { appliedProducts: [{ product_id: PRODUCT_SWAP.toUpperCase() }] });
+    const lawnFast = { sod: { laidOn: '2026-08-01', covers: 'whole' } };
+    const applied = await run(fakeTrx().trx, { lawnFast, appliedProducts: [{ product_id: PRODUCT_SWAP.toUpperCase() }] });
     expect(applied.out).toMatchObject({ held: [{ kind: 'preEmergent', until: '2027-10-01', rootedCheck: false }], swap: { name: SWAP_NAME } });
     // The swap bag was not spread: no swap sentence.
-    const notApplied = await run(fakeTrx().trx, { appliedProducts: [] });
+    const notApplied = await run(fakeTrx().trx, { lawnFast, appliedProducts: [] });
     expect(notApplied.out.swap).toBeNull();
     // An unresolved swap (the bag was held "by hand") is never recorded.
     buildLawnFastContext.mockResolvedValue(contextOf({ ...sod, swap: { resolved: false, forProductId: PRODUCT_BAG } }, '2026-10-20'));
-    expect((await run(fakeTrx().trx, { appliedProducts: [{ product_id: PRODUCT_SWAP }] })).out.swap).toBeNull();
+    expect((await run(fakeTrx().trx, { lawnFast, appliedProducts: [{ product_id: PRODUCT_SWAP }] })).out.swap).toBeNull();
   });
 
   test('a whole-lawn class the technician applied by hand anyway is not "held"; a part-of-lawn class is (the line ran on the rest)', async () => {
@@ -138,9 +144,35 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
     const whole = await run(fakeTrx().trx, { appliedProducts: [{ product_id: PRODUCT_BAG }] });
     expect(whole.out.held.map((entry) => entry.kind)).toEqual(['weedKiller']);
     buildLawnFastContext.mockResolvedValue(contextOf(newSod({ covers: 'part', area: 'Back left corner' })));
-    const part = await run(fakeTrx().trx, { appliedProducts: [{ product_id: PRODUCT_BAG }] });
-    expect(part.out).toMatchObject({ covers: 'part', area: 'Back left corner' });
+    const part = await run(fakeTrx().trx, { lawnFast: { sod: { laidOn: '2026-10-03', covers: 'part' } }, appliedProducts: [{ product_id: PRODUCT_BAG }] });
+    expect(part.out).toMatchObject({ covers: 'part' });
+    // The office's free-text area name is never frozen for the customer.
+    expect(part.out).not.toHaveProperty('area');
     expect(part.out.held.map((entry) => entry.kind)).toEqual(['fertilizer', 'weedKiller']);
+  });
+
+  test('another product of a held class from the sheet search (not the planned one) also means the class was not held', async () => {
+    buildLawnFastContext.mockResolvedValue(contextOf(newSod()));
+    const OTHER_BAG = '99999999-9999-4999-8999-999999999999';
+    const catalog = [{ id: OTHER_BAG, name: 'Other 16-0-8', category: 'Fertilizer', active_ingredient: '', analysis_n: 16, formulation: 'Granular' }];
+    const { out } = await run(fakeTrx({ catalog }).trx, { appliedProducts: [{ product_id: OTHER_BAG, application_method: 'granular_broadcast' }] });
+    expect(out.held.map((entry) => entry.kind)).toEqual(['weedKiller']);
+  });
+
+  test('the sheet echoes the sod record it showed: no echo, or a record that changed since, freezes no card', async () => {
+    buildLawnFastContext.mockResolvedValue(contextOf(newSod()));
+    for (const lawnFast of [{}, { sod: { laidOn: '2026-09-30', covers: 'whole' } }, { sod: { laidOn: '2026-10-03', covers: 'part' } }]) {
+      const { trx, writes } = fakeTrx();
+      expect((await run(trx, { lawnFast })).out).toBeNull();
+      expect(writes).toEqual([]);
+    }
+  });
+
+  test('a combined-stop lawn leg: the packet authorization reaches the context rebuild', async () => {
+    buildLawnFastContext.mockResolvedValue(contextOf(newSod()));
+    const allowGrouped = { packetContext: { packetId: 'packet-1' } };
+    await run(fakeTrx().trx, { allowGrouped });
+    expect(buildLawnFastContext).toHaveBeenCalledWith('visit-1', expect.objectContaining({ sodAware: true, allowGrouped }));
   });
 
   test('first writer wins: a block already on the record is never replaced (the guarded update matches nothing)', async () => {
@@ -184,7 +216,7 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
 
 describe('cardOf: the exact words', () => {
   const block = (extra) => ({
-    v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole', area: null, swap: null,
+    v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole', swap: null,
     held: [{ kind: 'fertilizer', until: '2026-11-02', rootedCheck: false }, { kind: 'weedKiller', until: '2026-11-02', rootedCheck: true }],
     ...extra,
   });
@@ -234,20 +266,19 @@ describe('cardOf: the exact words', () => {
     });
   });
 
-  test('part of the lawn: the hold is on the named area and the rest of the lawn ran as planned', () => {
+  test('part of the lawn: the hold is on the new sod area (never the office name for it) and the rest ran as planned', () => {
     const out = card.cardOf(block({
-      covers: 'part', area: ' Back left corner. ',
+      covers: 'part', area: 'Back left corner',
       held: [{ kind: 'fertilizer', until: '2026-11-02', rootedCheck: false }, { kind: 'preEmergent', until: '2027-10-01', rootedCheck: false }],
     }));
     expect(out).toEqual({
       title: 'New sod (laid Oct 3)',
-      lead: 'Today we held these on the new sod area (Back left corner):',
+      lead: 'Today we held these on the new sod area:',
       items: ['fertilizer until Nov 2. New sod needs 30 days to root.', 'pre-emergent until Oct 1, 2027, so the new runners can knit in.'],
       rest: 'The rest of the lawn was treated as planned.',
       swap: null,
       close: 'Everything else ran as normal. Same visit, same price.',
     });
-    expect(card.cardOf(block({ covers: 'part', area: null })).lead).toBe('Today we held these on the new sod area:');
   });
 
   test('a sod date from an earlier year prints its year', () => {
@@ -260,7 +291,7 @@ describe('cardOf: the exact words', () => {
         { kind: 'fertilizer', until: '2026-11-02', rootedCheck: false }, { kind: 'weedKiller', until: '2026-11-02', rootedCheck: true },
         { kind: 'preEmergent', until: '2027-10-01', rootedCheck: false }, { kind: 'dylox', until: '2026-11-02', rootedCheck: false },
       ],
-      covers: 'part', area: 'Back left corner', swap: { name: SWAP_NAME },
+      covers: 'part', swap: { name: SWAP_NAME },
     }));
     const words = JSON.stringify(everything);
     expect(words).not.toMatch(/label|ordinance|law\b|large patch|fungicide|disease|discount|free|credit|\$/i);
@@ -279,7 +310,7 @@ describe('cardOf: the exact words', () => {
 
 describe('lawnNewSodPayload: the report payload key', () => {
   const frozen = {
-    v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole', area: null, swap: null,
+    v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole', swap: null,
     held: [{ kind: 'fertilizer', until: '2026-11-02', rootedCheck: false }],
   };
   const notes = { lawnNewSod: frozen };

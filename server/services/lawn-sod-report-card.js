@@ -30,6 +30,8 @@ const YMD = /^\d{4}-\d{2}-\d{2}$/;
 
 const COPY = Object.freeze({
   leadWhole: 'Today we held:',
+  // The office's free-text name for the area is never printed: staff text does not reach the customer unscreened.
+  leadPart: 'Today we held these on the new sod area:',
   restPart: 'The rest of the lawn was treated as planned.',
   swap: 'We used a fertilizer without pre-emergent in place of the usual bag.',
   close: 'Everything else ran as normal. Same visit, same price.',
@@ -63,12 +65,6 @@ const HELD_WORDS = Object.freeze({
   dylox: (held, day) => `Dylox until ${day(held.until)}, while the new sod settles in.`,
 });
 
-// The office's own words for the part of the lawn, as one phrase: no trailing full stop, no stray space.
-function areaPhrase(area) {
-  const text = typeof area === 'string' ? area.trim().replace(/[.\s]+$/, '') : '';
-  return text ? ` (${text})` : '';
-}
-
 // The frozen block when it is whole and readable, else null (a damaged block prints no card).
 function validFrozen(block) {
   if (!block || typeof block !== 'object' || block.v !== 1) return null;
@@ -92,7 +88,7 @@ function cardOf(frozenBlock) {
   const items = KIND_ORDER.flatMap((kind) => block.held.filter((entry) => entry.kind === kind).slice(0, 1).map((entry) => HELD_WORDS[kind](entry, day)));
   return {
     title: `New sod (laid ${day(block.sodLaidOn)})`,
-    lead: part ? `Today we held these on the new sod area${areaPhrase(block.area)}:` : COPY.leadWhole,
+    lead: part ? COPY.leadPart : COPY.leadWhole,
     items,
     rest: part ? COPY.restPart : null,
     swap: block.swap ? COPY.swap : null,
@@ -116,16 +112,22 @@ function lawnNewSodPayload({ serviceLine, structuredNotes } = {}) {
 
 // What the visit held, from the sod-aware context rebuilt on `knex`, or null when nothing planned was held. Throws when
 // the sod record could not be read (the caller's savepoint rolls back).
-async function decideFrozen(knex, { svc, appliedProducts }) {
-  const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex, sodAware: true });
+async function decideFrozen(knex, { svc, lawnFast, appliedProducts, allowGrouped }) {
+  const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex, sodAware: true, allowGrouped });
   const sod = ctx && ctx.ok && ctx.eligible ? ctx.newSod : null;
   if (!sod) return null;
   if (sod.unavailable || !Array.isArray(sod.plannedHeld)) throw new Error('new sod record unavailable');
+  // The card states what the technician's sheet held. The sheet echoes the sod record it showed (lawnFast.sod); a
+  // record that changed since (date or coverage), or a sheet that sent no echo, freezes no card.
+  const seen = lawnFast && lawnFast.sod;
+  if (!seen || typeof seen !== 'object' || seen.laidOn !== sod.sodLaidOn || seen.covers !== sod.covers) return null;
   const applied = new Set((Array.isArray(appliedProducts) ? appliedProducts : []).map((row) => lowerId(row && row.product_id)).filter(Boolean));
   const part = sod.covers === 'part';
-  // A whole-lawn class the technician applied by hand anyway (the sheet warned) was not held.
+  // A whole-lawn class the technician applied anyway (the planned product, or another product of the same class from
+  // the sheet's search) was not held.
+  const appliedKinds = part ? new Set() : await require('./lawn-sod-sheet').appliedClassKinds(knex, appliedProducts);
   const held = sod.plannedHeld
-    .filter((entry) => part || !entry.productIds.some((id) => applied.has(id)))
+    .filter((entry) => part || !(appliedKinds.has(entry.kind) || entry.productIds.some((id) => applied.has(id))))
     .map(({ kind, until, rootedCheck }) => ({ kind, until, rootedCheck }));
   if (!held.length) return null;
   const swapped = sod.swap && sod.swap.resolved === true && applied.has(lowerId(sod.swap.productId));
@@ -134,7 +136,6 @@ async function decideFrozen(knex, { svc, appliedProducts }) {
     visitDay: ctx.visitDate,
     sodLaidOn: sod.sodLaidOn,
     covers: sod.covers,
-    area: sod.area || null,
     held,
     swap: swapped ? { name: sod.swap.name } : null,
   };
@@ -146,11 +147,11 @@ async function decideFrozen(knex, { svc, appliedProducts }) {
  * the later whole-object writes carry it. The work runs in a savepoint: a failed read rolls back to it and the visit
  * completes without the card. Never throws. Returns the frozen block or null.
  */
-async function freezeNewSodCard(trx, { svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts } = {}) {
+async function freezeNewSodCard(trx, { svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts, allowGrouped } = {}) {
   if (lawnFast == null || isIncompleteVisit || resumingCommittedCompletion || !featureGates.lawnNewSodReportCardLive()) return null;
   try {
     const frozen = await trx.transaction(async (sp) => {
-      const block = await decideFrozen(sp, { svc, appliedProducts });
+      const block = await decideFrozen(sp, { svc, lawnFast, appliedProducts, allowGrouped });
       if (!block) return null;
       const written = await sp('service_records')
         .where({ id: record.id })

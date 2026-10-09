@@ -389,12 +389,12 @@ async function assertNoProductUnderLock(trx, { svc, technicianNotes }) {
  * completion, the visit applied the swap bag, and the sheet context rebuilt NOW on the transaction (as a sod-aware
  * sheet) still makes that swap. A failed read is `[]` (the ledger is secondary; it never fails the visit).
  */
-async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts }) {
+async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts, allowGrouped }) {
   if (lawnFast == null || !featureGates.lawnNewSodNoteLive()) return [];
   const applied = new Set((Array.isArray(appliedProducts) ? appliedProducts : []).map((row) => lowerId(row?.product_id)).filter(Boolean));
   if (!applied.size) return [];
   try {
-    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex: trx, sodAware: true });
+    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex: trx, sodAware: true, allowGrouped });
     const items = ctx?.ok && ctx.eligible && Array.isArray(ctx.plannedProducts?.items) ? ctx.plannedProducts.items : [];
     return items.filter((item) => item?.sodSwap?.forProductId && applied.has(lowerId(item.productId))).map((item) => {
       const original = items.find((other) => !other.sodSwap && lowerId(other.productId) === item.sodSwap.forProductId);
@@ -416,6 +416,20 @@ async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts }) {
     logger.warn(`[lawn-sod-sheet] swap substitution unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return [];
   }
+}
+
+/**
+ * The report hold classes of the products a visit applied (`service_products` rows: product_id, application_method),
+ * as a Set. The customer report card uses it: a class the technician applied is not reported as held.
+ */
+async function appliedClassKinds(knex, appliedProducts) {
+  const rowsIn = (Array.isArray(appliedProducts) ? appliedProducts : []).filter((row) => row?.product_id);
+  const catalog = await loadClassRows(knex, [...new Set(rowsIn.map((row) => lowerId(row.product_id)))]);
+  const kinds = new Set();
+  for (const row of rowsIn) {
+    for (const kind of classesOf(catalog.get(lowerId(row.product_id)), { method: row.application_method })) kinds.add(kind);
+  }
+  return kinds;
 }
 
 // Every product the plan could put on this visit, with the hold classes of each (by lower-case id).
@@ -614,6 +628,7 @@ module.exports = {
   lockSodRecordForNoProduct,
   assertNoProductUnderLock,
   sodSwapSubstitutions,
+  appliedClassKinds,
   NO_PRODUCT_STALE,
   confirmSodRooted,
 };

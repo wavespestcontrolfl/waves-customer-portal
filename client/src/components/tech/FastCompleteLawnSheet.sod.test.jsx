@@ -232,6 +232,8 @@ describe('whole lawn, day 5', () => {
     const sent = completeCalls()[0].body;
     expect(sent.products.map((p) => p.productId)).toEqual([P_NUTRA]);
     expect(sent.lawnProtocolCompletion.skippedProducts.map((p) => p.productId)).toEqual([P_BAG24]);
+    // The sod record the sheet showed goes back with the completion (the report's New sod card binds to it).
+    expect(sent.lawnFast.sod).toEqual({ laidOn: WHOLE_DAY5.sodLaidOn, covers: 'whole' });
   });
 });
 

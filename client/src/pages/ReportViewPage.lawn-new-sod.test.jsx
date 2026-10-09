@@ -64,7 +64,7 @@ describe.each([['the standard page', cleanOff], ['the lawn layout', cleanOn]])('
   it('part of the lawn: the area and the rest-of-lawn sentence', async () => {
     const { container } = renderReport({ ...clone(fixture), lawnNewSod: SOD.cards.part });
     await waitForReport();
-    expect(cardText(container)).toContain('Today we held these on the new sod area (Back left corner):');
+    expect(cardText(container)).toContain('Today we held these on the new sod area:');
     expect(cardText(container)).toContain('The rest of the lawn was treated as planned.');
   });
 

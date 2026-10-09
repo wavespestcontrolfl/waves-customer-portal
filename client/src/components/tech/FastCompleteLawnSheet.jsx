@@ -1168,6 +1168,8 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
       visitType: ctx.visitType,
       ...(recordCards ? { treatmentGuide: { v: 1, cards: recordCards } } : {}),
       ...(spotAreas ? { spotAreas } : {}),
+      // The sod record this sheet showed. The server freezes the report's New sod card only while it still matches.
+      ...(newSod?.sodLaidOn ? { sod: { laidOn: newSod.sodLaidOn, covers: newSod.covers } } : {}),
     },
     lawnAssessmentId: assessmentId,
     products: rows.map((row) => {

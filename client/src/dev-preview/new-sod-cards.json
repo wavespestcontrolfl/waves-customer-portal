@@ -5,7 +5,6 @@
       "visitDay": "2026-10-07",
       "sodLaidOn": "2026-10-03",
       "covers": "whole",
-      "area": null,
       "swap": null,
       "held": [
         {
@@ -25,7 +24,6 @@
       "visitDay": "2026-10-20",
       "sodLaidOn": "2026-08-01",
       "covers": "whole",
-      "area": null,
       "swap": {
         "name": "LESCO 24-0-11 with PolyPlus OPTI"
       },
@@ -42,7 +40,6 @@
       "visitDay": "2026-10-07",
       "sodLaidOn": "2026-10-03",
       "covers": "part",
-      "area": "Back left corner",
       "swap": null,
       "held": [
         {
@@ -87,7 +84,7 @@
     },
     "part": {
       "title": "New sod (laid Oct 3)",
-      "lead": "Today we held these on the new sod area (Back left corner):",
+      "lead": "Today we held these on the new sod area:",
       "items": [
         "fertilizer until Nov 2. New sod needs 30 days to root.",
         "pre-emergent until Oct 1, 2027, so the new runners can knit in.",
