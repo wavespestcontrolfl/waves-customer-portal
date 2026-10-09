@@ -230,7 +230,10 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(limits).toMatch(/Scales and mealybugs: one application per calendar year\./);
     expect(limits).toMatch(/6 fl oz followed by 6 fl oz at least 21 days later/);
     expect(limits).not.toMatch(/two per six months/);
-    // Codex r1 #6218: no per-1,000 sq ft figure until the label's two yearly numbers are reconciled.
-    expect(limits).not.toMatch(/per 1,000 sq ft/);
+    // The label's two yearly numbers disagree: the guide holds the stricter one (12 fl oz per acre
+    // = 0.275 fl oz per 1,000 sq ft, rounded down) and says so.
+    expect((12 / 43.56).toFixed(3)).toBe('0.275');
+    expect(limits).toMatch(/use the stricter one: no more than 0\.27 fl oz of Distance per 1,000 sq ft of treated area per year/);
+    expect(limits).not.toMatch(/0\.6 fl oz/);
   });
 });

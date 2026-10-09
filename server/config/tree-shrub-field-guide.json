@@ -233,7 +233,7 @@
         "Does not provide rapid adult-insect control.",
         "Scales and mealybugs: one application per calendar year. A property gets one scale spray a year.",
         "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz at least 21 days later.",
-        "Yearly limit as the label prints it: 12 fl oz (0.176 lb active ingredient per acre) per acre per calendar year, all pyriproxyfen products together. One scale spray a year, at no more than 100 gal of mix per 20,000 sq ft, is the program limit.",
+        "Yearly limit: the label prints 12 fl oz per acre and 0.176 lb active ingredient per acre, and the two do not agree. Until Valent confirms, use the stricter one: no more than 0.27 fl oz of Distance per 1,000 sq ft of treated area per year, all pyriproxyfen products together. At 12 fl oz per 100 gal that is about 2 gallons of mix per 1,000 sq ft, so Distance is a spot treatment.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
       "source": "Valent · EPA 59639-96 · label accepted 11-08-23 · Table 1",
@@ -244,7 +244,8 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Choose target rate"
+      "summary": "Choose target rate",
+      "program": "The label's yearly limit is unclear (owner 2026-10-09 follow-up: ask Valent). The guide holds the stricter reading until it is confirmed."
     },
     "tristar": {
       "kind": "Insects · foliar spray",
