@@ -198,6 +198,8 @@ class AgentDispatcher {
     }
 
     const t0 = Date.now();
+    // The ledger lane, which also picks the session's spend cap.
+    const laneId = route.role === 'meta' ? 'agent_meta' : 'agent_content';
     let session;
     try {
       // Field is `agent`, not `agent_id`, per the live API contract
@@ -206,7 +208,7 @@ class AgentDispatcher {
         agent: route.agent_id,
         environment_id: CONTENT_AGENT_ENVIRONMENT_ID,
         metadata: { source: 'autonomous-content-engine', opportunity_id: brief.opportunity_id },
-        ...sessionBudget(route.role === 'meta' ? 'agent_meta' : 'agent_content'),
+        ...sessionBudget(laneId),
       });
     } catch (err) {
       return { ok: false, reason: `session_create_failed: ${err.message}`, agent_id: route.agent_id };
@@ -217,7 +219,7 @@ class AgentDispatcher {
     // Upserted by session id, so calling it twice is safe.
     // `abandoned`: the run is a success (the draft was captured) but the
     // stream was left before the session said it ended, so it may still run.
-    const recordSession = (failure = null, abandoned = false) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure, abandoned });
+    const recordSession = (failure = null, abandoned) => recordSessionUsage({ laneId, sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure, abandoned });
 
     // The agent's own end — the recorder's usage GET after it (up to its
     // 15 s timeout) is observability time, not agent time.
@@ -265,7 +267,7 @@ class AgentDispatcher {
     // Stream events; execute tool calls; capture emit_draft / emit_metadata_only.
     let abandoned = false;
     try {
-      abandoned = Boolean((await this._streamAndExecute(sessionId, sessionTimeoutMs))?.abandoned);
+      ({ abandoned } = await this._streamAndExecute(sessionId, sessionTimeoutMs));
       agentEndedAt = Date.now();
     } catch (err) {
       agentEndedAt = Date.now();
@@ -387,18 +389,8 @@ class AgentDispatcher {
         // emit_draft) exit after the first tool and report
         // agent_did_not_emit_draft even though the agent was about to
         // continue. Only end_turn (handled below) is the real terminal.
-        if (isSessionTerminal(event, data)) return;
-        if (isBudgetReached(data)) {
-          // The cap is checked between model requests, so the request that
-          // crossed it can be the one that emitted the draft. A captured
-          // draft ships, like the cut-off wind-down below; the session is
-          // already paused, so there is nothing to interrupt.
-          if (getDraft(sessionId)) {
-            logger.warn(`[agent-dispatcher] session ${sessionId} reached its spend cap after the draft was captured`);
-            return undefined;
-          }
-          throw Object.assign(new Error(`session ${sessionId} reached its spend cap`), { code: 'budget_exhausted' });
-        }
+        if (isSessionTerminal(event, data)) return { abandoned: false };
+        if (isBudgetReached(data)) throw Object.assign(new Error(`session ${sessionId} reached its spend cap`), { code: 'budget_exhausted' });
         if (isSessionError(event)) {
           // Don't mask infrastructure failures as a content-quality
           // outcome — throw so runWithBrief surfaces streaming_failed
@@ -412,23 +404,26 @@ class AgentDispatcher {
       // The loop ended without a terminal event: the provider closed the
       // stream early — the same session_stream_eof (→ provider) the other
       // runners file. Our own deadline never reaches here: the reader throws
-      // session_timeout itself (Codex r11). After a captured draft it is the
-      // wind-down that was cut off, not the work.
-      if (getDraft(sessionId)) {
-        logger.warn(`[agent-dispatcher] session ${sessionId} stream closed after the draft, before its terminal event`);
-        return { abandoned: true };
-      }
+      // session_timeout itself (Codex r11).
       throw Object.assign(new Error(`session ${sessionId} stream ended without a terminal event`), { code: 'session_stream_eof' });
     } catch (err) {
-      // The agent had already delivered; only its wind-down outran the
-      // deadline. The draft ships as the success it was — the ledger row
-      // carries the timing.
-      if (err.code !== 'session_timeout' || !getDraft(sessionId)) throw err;
-      logger.warn(`[agent-dispatcher] session ${sessionId} delivered its draft; the wind-down ran past the deadline`);
-      return { abandoned: true };
+      // One rule for the three exits that can follow a captured draft: the
+      // stream closed early, our deadline passed, or the spend cap was
+      // reached (the cap is checked between model requests, so the request
+      // that crossed it can be the one that emitted the draft). The agent
+      // had already delivered; only its wind-down was cut off. The draft
+      // ships as the success it was — the ledger row carries the timing.
+      if (!WIND_DOWN_EXITS.has(err.code) || !getDraft(sessionId)) throw err;
+      logger.warn(`[agent-dispatcher] session ${sessionId} delivered its draft; ${err.code} cut off the wind-down`);
+      // `abandoned` = the session may still be running, so the ledger exit
+      // tells it to stop. At the cap the platform has already paused it.
+      return { abandoned: err.code !== 'budget_exhausted' };
     }
   }
 }
+
+// Exits of _streamAndExecute that are a success once the draft is captured.
+const WIND_DOWN_EXITS = new Set(['session_stream_eof', 'session_timeout', 'budget_exhausted']);
 
 // ── SSE transport and dispatcher deadline ─
 

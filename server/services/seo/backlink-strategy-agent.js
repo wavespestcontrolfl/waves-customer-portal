@@ -15,7 +15,7 @@ const db = require('../../models/db');
 const { executeBacklinkTool } = require('./backlink-strategy-tools');
 const { BACKLINK_STRATEGY_AGENT_CONFIG } = require('./backlink-strategy-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
-const { isSessionTerminal, isSessionError, isBudgetReached } = require('../agent-control/session-events');
+const { isSessionTerminal, streamFailureOf } = require('../agent-control/session-events');
 const { sessionBudget } = require('../agent-control/session-guard');
 const { readSessionFrames } = require('../agent-control/session-stream');
 
@@ -303,15 +303,10 @@ const BacklinkStrategyAgent = {
           break;
         }
 
-        if (isBudgetReached(data)) {
-          logger.error(`[backlink-strategy] Session ${sessionId} reached its spend cap`);
-          failure = 'budget_exhausted';
-          break;
-        }
-
-        if (isSessionError(event)) {
-          logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
-          failure = 'session_error_event';
+        // An error event, or the session's spend cap (budget_exhausted).
+        failure = streamFailureOf(event, data);
+        if (failure) {
+          logger.error(`[backlink-strategy] Agent ${failure}: ${JSON.stringify(data)}`);
           break;
         }
       }

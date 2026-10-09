@@ -55,7 +55,7 @@ describe('agent dispatcher — stream exits carry their ledger code', () => {
 
   it('a terminal event resolves — no code, nothing thrown', async () => {
     global.fetch = jest.fn(async () => ({ ok: true, status: 200, body: sseBody([{ event: 'assistant', data: { text: 'done' } }, { event: 'done', data: {} }]) }));
-    await expect(load()._streamAndExecute('sess-ok', 5_000)).resolves.toBeUndefined();
+    await expect(load()._streamAndExecute('sess-ok', 5_000)).resolves.toEqual({ abandoned: false });
   });
 });
 
@@ -103,7 +103,7 @@ describe('agent dispatcher — a captured draft leaves on the terminal event', (
     const frames = [TOOL_USE, { event: 'assistant', data: { text: 'wind-down' } }, { event: 'done', data: {} }];
     global.fetch = fetchFor(frames);
     const dispatcher = loadWithSink();
-    await expect(dispatcher._streamAndExecute('sess-draft', 5_000)).resolves.toBeUndefined();
+    await expect(dispatcher._streamAndExecute('sess-draft', 5_000)).resolves.toEqual({ abandoned: false });
     expect(drafts.get('sess-draft')).toEqual({ body: 'x' });
     // the tool_result went back AND the stream was read past it to the terminal frame
     expect(global.fetch.mock.calls.filter(([, o]) => o?.method === 'POST')).toHaveLength(1);
@@ -139,7 +139,7 @@ describe('agent dispatcher — a captured draft leaves on the terminal event', (
   it('the spend cap reached after the draft keeps the draft: resolves, not budget_exhausted', async () => {
     global.fetch = fetchFor([TOOL_USE, AT_CAP]);
     const dispatcher = loadWithSink();
-    await expect(dispatcher._streamAndExecute('sess-draft-cap', 5_000)).resolves.toBeUndefined();
+    await expect(dispatcher._streamAndExecute('sess-draft-cap', 5_000)).resolves.toEqual({ abandoned: false });
     expect(drafts.get('sess-draft-cap')).toEqual({ body: 'x' });
   });
 

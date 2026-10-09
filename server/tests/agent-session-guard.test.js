@@ -6,7 +6,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const { sessionBudget, stopAbandonedSession } = require('../services/agent-control/session-guard');
-const { isBudgetReached, isSessionTerminal } = require('../services/agent-control/session-events');
+const { isBudgetReached, isSessionTerminal, streamFailureOf } = require('../services/agent-control/session-events');
 
 const ORIGINAL_ENV = { ...process.env };
 const ORIGINAL_FETCH = global.fetch;
@@ -121,5 +121,11 @@ describe('isBudgetReached', () => {
     expect(isBudgetReached({ stop_reason: { type: 'budget_reached' } })).toBe(true);
     expect(isBudgetReached({ stop_reason: { type: 'requires_action' } })).toBe(false);
     expect(isSessionTerminal('session.status_idle', { stop_reason: { type: 'budget_reached' } })).toBe(false);
+  });
+
+  it('streamFailureOf names the run-ending code of an event, or null', () => {
+    expect(streamFailureOf('session.status_idle', { stop_reason: { type: 'budget_reached' } })).toBe('budget_exhausted');
+    expect(streamFailureOf('session.error', {})).toBe('session_error_event');
+    expect(streamFailureOf('session.status_idle', { stop_reason: { type: 'requires_action' } })).toBeNull();
   });
 });

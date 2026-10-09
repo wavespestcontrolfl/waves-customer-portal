@@ -19,7 +19,7 @@ const db = require('../../models/db');
 const { executeContentTool } = require('./content-agent-tools');
 const { CONTENT_AGENT_CONFIG } = require('./content-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
-const { isSessionTerminal, isSessionError, isBudgetReached } = require('../agent-control/session-events');
+const { isSessionTerminal, streamFailureOf } = require('../agent-control/session-events');
 const { sessionBudget } = require('../agent-control/session-guard');
 const { readSessionFrames } = require('../agent-control/session-stream');
 
@@ -207,16 +207,10 @@ const ContentAgent = {
           break;
         }
 
-        if (isBudgetReached(data)) {
-          logger.error(`[content-agent] Session ${sessionId} reached its spend cap`);
-          failure = 'budget_exhausted';
-          break;
-        }
-
-        // ── Error ──
-        if (isSessionError(event)) {
-          logger.error(`[content-agent] Agent error: ${JSON.stringify(data)}`);
-          failure = 'session_error_event';
+        // ── Error, or the session's spend cap (budget_exhausted) ──
+        failure = streamFailureOf(event, data);
+        if (failure) {
+          logger.error(`[content-agent] Agent ${failure}: ${JSON.stringify(data)}`);
           break;
         }
       }
