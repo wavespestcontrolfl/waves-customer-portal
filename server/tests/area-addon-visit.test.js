@@ -372,6 +372,19 @@ describe('adopting an existing appointment never squeezes the add-on visit into 
     expect([refreshed.discount_id, refreshed.discount_name, refreshed.discount_type, refreshed.discount_amount, refreshed.discount_dollars]).toEqual([null, null, null, null, null]);
   });
 
+  // Codex round 31: the estimate was revised to remove the LAST add-on; the host's stored primary price is the old split.
+  test('an estimate that sells no add-on any more: the carried add-on row goes and the primary-line price is cleared; with no row to drop nothing is written', async () => {
+    const plain = { service_interest: 'One-time service', estimate_data: { result: { oneTime: { total: 180, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 180 }] } } } };
+    const trx = fakeTrx({ catalog: catalogFor(KEYS), existing: [{ scheduled_service_id: 'visit-1', service_key_snapshot: KEYS[0], estimated_price: 99 }] });
+    await rows.writeAdoptedAreaAddOns(trx, { scheduledServiceId: 'visit-1', estimate: plain, ownServiceKey: 'one_time_pest', adoptedRow: { estimated_duration_minutes: 60 } });
+    expect(trx.state.addons).toEqual([]);
+    expect(trx.state.primaryLine).toEqual({ 'visit-1': null });
+    const untouched = fakeTrx({ catalog: catalogFor(KEYS), existing: [{ scheduled_service_id: 'visit-1', service_key_snapshot: 'mosquito_one_time', estimated_price: 50 }] });
+    await rows.writeAdoptedAreaAddOns(untouched, { scheduledServiceId: 'visit-1', estimate: plain, ownServiceKey: 'one_time_pest', adoptedRow: { estimated_duration_minutes: 60 } });
+    expect(untouched.state.primaryLine).toEqual({});
+    expect(untouched.state.addons).toHaveLength(1);
+  });
+
   // Codex round 30: the booked visit IS an add-on, and the estimate was revised to add a host service.
   test('an add-on appointment is not adopted when the estimate now sells a host service: a new time is needed', async () => {
     const { estimate } = oneTimeEstimate(THREE.slice(0, 1), { withPest: true });
