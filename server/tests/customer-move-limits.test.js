@@ -343,6 +343,10 @@ describe('reschedule-public wiring', () => {
     const taken = src.slice(src.indexOf('const slotTakenResponse = async () => {'));
     const body = taken.slice(0, taken.indexOf('// Anti-forgery'));
     expect(body).toMatch(/applyMoveLimit\(limit, refreshed, refreshed, range\)/);
+    // Another tab may have moved the visit: the refresh reads it again and
+    // hands a now-blocked visit to the office.
+    expect(body).toMatch(/const current = \(await loadById\(svc\.id\)\.catch\(\(\) => null\)\) \|\| svc;/);
+    expect(body).toMatch(/loadMoveLimit\(current, elig\);\s*if \(blocked\) return res\.status\(409\)\.json\(\{ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' \}\);/);
     expect(body).toMatch(/\.\.\.limited\.payload/);
   });
 });

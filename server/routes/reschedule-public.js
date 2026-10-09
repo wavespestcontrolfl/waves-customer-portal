@@ -914,16 +914,21 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // any other code falls through to a bare error line with the stale
     // slot still selected).
     const slotTakenResponse = async () => {
+      // The slot can be gone because another tab just moved this visit. Read
+      // the visit again, so the move limit is judged against where it is now:
+      // a visit that became blocked reloads into the text-or-call card.
+      const current = (await loadById(svc.id).catch(() => null)) || svc;
+      const { limit, blocked } = await loadMoveLimit(current, elig);
+      if (blocked) return res.status(409).json({ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' });
       let refreshed = null;
       try {
-        refreshed = await buildAvailabilityForService(svc, { ...range, config });
+        refreshed = await buildAvailabilityForService(current, { ...range, config });
       } catch (err) {
         logger.warn(`[reschedule-public] refresh availability failed for ${svc.id}: ${err.message}`);
       }
-      const { limit } = await loadMoveLimit(svc, elig);
       const limited = applyMoveLimit(limit, refreshed, refreshed, range);
       refreshed = limited.availability;
-      const nextVisit = refreshed ? await loadNextVisitShift(svc, refreshed) : null;
+      const nextVisit = refreshed ? await loadNextVisitShift(current, refreshed) : null;
       return res.status(409).json({
         error: 'That time is no longer open. Here are the latest available times.',
         code: 'SLOT_TAKEN',
