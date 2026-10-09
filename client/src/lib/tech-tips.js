@@ -59,3 +59,85 @@ export function tipsCalledForByNote(tips, note) {
   return scored.sort((a, b) => b.hits - a.hits).map((entry) => entry.tip.id);
 }
 
+
+// Tips the customer has not had lately lead: a tip sent to this customer in
+// the picker's window (`lastSent`, id -> day) moves behind the rest, so a
+// recurring visit's short list changes from visit to visit. Order is otherwise
+// kept; nothing is hidden.
+export function unsentTipsFirst(tips, lastSent) {
+  if (!lastSent) return tips;
+  return [...tips.filter((tip) => !lastSent[tip.id]), ...tips.filter((tip) => lastSent[tip.id])];
+}
+
+// The picker's groups with that order (owner 2026-10-09). A lawn visit keeps
+// the server's order, which ranks by today's findings.
+export function rotatedTipGroups(library) {
+  const groups = library?.groups || [];
+  if (library?.line === "lawn") return groups;
+  return groups.map((group) => ({ ...group, tips: unsentTipsFirst(group.tips || [], library?.lastSent) }));
+}
+
+// Every id a pick may hold: the visit's list and `more`, the tips a search of
+// the whole library reaches.
+export function pickableTipIds(library) {
+  return new Set([...(library?.groups || []).flatMap((group) => group.tips || []), ...(library?.more || [])].map((tip) => tip.id));
+}
+
+// The pest sheet's chips as a note names them (the note is read here only to
+// rank tips; the server's own read fills the record).
+const NOTE_PESTS = [
+  ["Ants", /\bants?\b/],
+  ["Roaches", /\b(cock)?roach(es)?\b|\bpalmetto bugs?\b/],
+  ["Spiders", /\bspiders?\b|\bwebs?\b/],
+  ["Silverfish", /\bsilverfish\b/],
+  ["Wasps", /\bwasps?\b|\bhornets?\b|\byellow ?jackets?\b|\bmud daubers?\b/],
+  ["Earwigs", /\bearwigs?\b/],
+  ["Fleas", /\bfleas?\b/],
+  ["Crickets", /\bcrickets?\b/],
+  ["Centipedes", /\bcentipedes?\b/],
+];
+
+// "No roaches seen" names no pest. A negation rules out the rest of its
+// clause ("no German roaches", "no ants or roaches", "without any evidence of
+// roaches", "no ants, roaches, or spiders"), up to the end of the sentence or
+// "but". A comma does not end it: a list of pests is the common case. The
+// lift is a suggestion, so dropping too much of a run-on note only loses one.
+// Contractions count ("didn't see", "weren't any", typed with or without the
+// apostrophe), and so do "never", "none" and "nothing".
+const NEGATED_PEST_RE = /(?:\b(?:no|not|zero|without|never|none|nothing|cannot)\b|\b[a-z]+n['’]t\b|\b(?:didnt|dont|doesnt|wasnt|werent|isnt|arent|havent|hasnt|couldnt|cant|wont)\b)[^.;!?\n]*?(?=\bbut\b|[.;!?\n]|$)/g;
+
+const withoutNegated = (note) => String(note || "").toLowerCase().replace(NEGATED_PEST_RE, " ");
+
+export function pestsInNote(note) {
+  const text = withoutNegated(note);
+  return NOTE_PESTS.filter(([, re]) => re.test(text)).map(([pest]) => pest);
+}
+
+const PEST_TIP_LIFT_MAX = 4;
+
+// The tips the pest sheet lifts under "For what you saw today": advice tagged
+// for a pest the tech tapped or the note names (from the whole library, so a
+// recurring visit reaches roach or flea advice), then the visit's own tips
+// whose keywords the note names. Tips for more of the pests lead; tips this
+// customer had lately go last, and a tip for the other season (wet or dry) is
+// left to search. A short list, and never a pick.
+export function pestSheetTipIds(library, { pests = [], note = "" } = {}) {
+  const listed = (library?.groups || []).flatMap((group) => group.tips || []);
+  const every = [...listed, ...(library?.more || [])];
+  const seen = new Set([...pests, ...pestsInNote(note)]);
+  const inSeason = (tip) => !tip.season || tip.season === "all" || !library?.season || tip.season === library.season;
+  const forPests = every
+    .filter(inSeason)
+    .map((tip) => ({ tip, hits: (tip.pests || []).filter((pest) => seen.has(pest)).length }))
+    .filter((entry) => entry.hits > 0)
+    .sort((a, b) => b.hits - a.hits)
+    .map((entry) => entry.tip);
+  const byId = new Map(every.map((tip) => [tip.id, tip]));
+  // The same two rules for the keyword lift: nothing the note rules out, and
+  // nothing for the other season.
+  // nothing for the other season; and never a tip that names the treatment
+  // (`namesWork`), since a word of the note does not say what was treated.
+  const forNote = tipsCalledForByNote(listed.filter((tip) => inSeason(tip) && !tip.namesWork), withoutNegated(note)).map((id) => byId.get(id));
+  const lifted = [...new Set([...forPests, ...forNote])];
+  return unsentTipsFirst(lifted, library?.lastSent).slice(0, PEST_TIP_LIFT_MAX).map((tip) => tip.id);
+}
