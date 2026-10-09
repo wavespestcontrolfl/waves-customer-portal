@@ -229,12 +229,12 @@ describe('reminder sync failure after a committed move', () => {
     }
   });
 
-  test('an unreadable committed row is logged, not alerted', async () => {
+  test('a quiet sync whose check cannot be read is escalated to staff (Codex #6208 r5 P2)', async () => {
     AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
     movableQueue();
     db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' }, scheduled_services: undefined }));
     await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
-    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('a sync that resolved null for a visit with no reminder row, or a row on the new time, raises nothing', async () => {
@@ -307,6 +307,7 @@ describe('reminder sync failure after a committed move', () => {
   });
 
   test('a clean reminder sync raises no notice', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: true });
     movableQueue();
     await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();

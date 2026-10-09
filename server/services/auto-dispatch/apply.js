@@ -504,9 +504,10 @@ async function committedReminderTime(AppointmentReminders, service) {
 // After a sync that returned nothing: whether a reminder row exists for the
 // visit and still names a time other than the one the committed visit holds.
 // No row is not a failure (nothing can go out for the old slot).
-// An unreadable row is logged, not alerted: nothing is known either way —
-// unless the caller already knows the sync threw (`alertWhenUnreadable`).
-async function reminderOffNewSlot(AppointmentReminders, service, alertWhenUnreadable = false) {
+// A check that cannot be read or computed counts as off: every caller is
+// looking at a sync that returned nothing or threw, so staff must review
+// (Codex #6208 r5 P2).
+async function reminderOffNewSlot(AppointmentReminders, service) {
   try {
     const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time');
     if (!row) return false;
@@ -515,7 +516,7 @@ async function reminderOffNewSlot(AppointmentReminders, service, alertWhenUnread
     return !expected || Number.isNaN(actual) || actual !== expected.getTime();
   } catch (err) {
     logger.warn(`[auto-dispatch] reminder row could not be read after the move of ${service.id}: ${err.message}`);
-    return alertWhenUnreadable;
+    return true;
   }
 }
 
@@ -562,7 +563,7 @@ async function syncMovedReminders(service, best, moveResult, siblingMembers) {
     // The throw may come from the re-arm update, after the time was written:
     // tell staff only when the persisted reminder is really off the new slot
     // (an unreadable row counts as off: the sync itself threw).
-    if (await reminderOffNewSlot(AppointmentReminders, service, true)) await flagReminderSyncFailed(service, best);
+    if (await reminderOffNewSlot(AppointmentReminders, service)) await flagReminderSyncFailed(service, best);
   }
   await flagSiblingReminders(AppointmentReminders, service, best, siblingMembers);
 }

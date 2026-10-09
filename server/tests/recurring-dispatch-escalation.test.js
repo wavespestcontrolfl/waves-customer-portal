@@ -176,6 +176,8 @@ describe('recurring visit with no arrival time and no due date', () => {
   });
 
   test('a visit of a combined booking (two accepted families) is left to the combined-booking check; a single-service estimate still gets the notice', async () => {
+    const gates = require('../config/feature-gates');
+    const watchdogOn = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'scheduleIntegrityWatchdog');
     const combined = require('../services/combined-booking-check');
     const families = jest.spyOn(combined, 'acceptedFamilies')
       .mockImplementation((estimate) => new Set(estimate.id === 'e2' ? ['pest_control', 'lawn_care'] : ['pest_control']));
@@ -190,9 +192,18 @@ describe('recurring visit with no arrival time and no due date', () => {
       await flagUnplacedVisits({ lockWindowDays: 14 }, now);
     } finally {
       families.mockRestore();
+      watchdogOn.mockRestore();
     }
     const keys = notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey);
     expect(keys).toEqual(['recurring-no-window:one:2026-08-20']);
+  });
+
+  test('with the watchdog gate off nobody else covers a combined booking, so its visit stays in this lane (Codex r5 P1)', async () => {
+    const rows = [{ id: 'two', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-21', source_estimate_id: 'e2' }];
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['recurring-no-window:two:2026-08-21']);
   });
 
   test('rings at most 10 new notices a run, soonest date first; the rest wait for the next run', async () => {

@@ -196,7 +196,10 @@ const MISSING_GEO_RESOLVED_TITLE = 'Address pin alert resolved';
 // read counts as not covered: one extra notice beats none.
 async function combinedBookingEstimateIds(estimateIds) {
   const ids = [...new Set(estimateIds.filter(Boolean).map(String))];
-  if (!ids.length) return new Set();
+  // The combined-booking check runs only inside the schedule-integrity
+  // watchdog; with that gate off nobody else covers these visits, so they
+  // stay in this lane (Codex #6208 r5 P1).
+  if (!ids.length || !require('../../config/feature-gates').isEnabled('scheduleIntegrityWatchdog')) return new Set();
   const { acceptedFamilies } = require('../combined-booking-check');
   const estimates = await db('estimates').whereIn('id', ids).where('status', 'accepted').whereNull('archived_at').select('*');
   const covered = new Set();
