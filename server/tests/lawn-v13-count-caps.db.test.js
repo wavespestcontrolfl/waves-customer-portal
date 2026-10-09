@@ -24,7 +24,7 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
 describe('the recipe text (no database)', () => {
   test('every track states the Arena, Celsius + Certainty and Blindside counts', () => {
     for (const track of Object.values(v13Recipe)) {
-      expect(track.notes.join('\n')).toContain('Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label\'s turf range; about 1.4 level teaspoons), up to 2 applications per lawn per year at least 8 weeks (56 days) apart (app-enforced). Two applications reach the label\'s yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre); after that, use bifenthrin, which is not a neonicotinoid.');
+      expect(track.notes.join('\n')).toContain('Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the Florida 2(ee) recommendation rate, below the label\'s chinch range of 9.6 to 12.8 oz per acre; about 1.4 level teaspoons), up to 2 applications per lawn per year at least 8 weeks (56 days) apart (app-enforced). Two applications reach the label\'s yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre); after that, use bifenthrin, which is not a neonicotinoid.');
       expect(track.notes.join('\n')).toContain('Florida 2(ee) recommendation for southern chinch bug (EPA Reg. No. 59639-152; expires December 31, 2028)');
       expect(track.notes.join('\n')).not.toContain('never treat the same area twice');
       const safety = track.safety_rules.join('\n');
@@ -1395,9 +1395,9 @@ describeDb('v13 count caps through PostgreSQL', () => {
         await knex('product_limits').where({ product_id: catalog[ARENA].id, limit_type: 'min_interval_days' }).del();
       });
 
-      test('only Arena carries an interval: Celsius, Certainty and Blindside get none', async () => {
-        const { V13_COUNT_CAPS } = require('../config/lawn-v13-count-caps');
-        expect(V13_COUNT_CAPS.filter((entry) => entry.minIntervalDays).map((entry) => [entry.name, entry.minIntervalDays])).toEqual([[ARENA, 56]]);
+      test('only Arena (56 days) and Certainty (28 days, v13 final pass) carry an interval: Celsius and Blindside get none', async () => {
+        const { V13_LIMITS } = require('../config/lawn-v13-count-caps');
+        expect(V13_LIMITS.filter((entry) => entry.minIntervalDays).map((entry) => [entry.name, entry.minIntervalDays])).toEqual([[ARENA, 56], [CERTAINTY, 28]]);
       });
     });
 
@@ -1584,9 +1584,9 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(limitBlocks(off)).toEqual([]);
       });
 
-      test('only Arena carries an amount cap, and the synthetic row is a hard block in the product\'s own unit', async () => {
-        const { V13_COUNT_CAPS, applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
-        expect(V13_COUNT_CAPS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA]);
+      test('the amount caps are Arena, Blindside, Velista and Artavia, and the synthetic row is a hard block in the product\'s own unit', async () => {
+        const { V13_LIMITS, applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
+        expect(V13_LIMITS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA, BLINDSIDE, 'Velista', 'Artavia 2 SC (Azoxy)']);
         process.env.GATE_LAWN_V13 = 'true';
         const rows = await applyV13CountCaps(knex, { id: catalog[ARENA].id, name: ARENA }, [], catalog[ARENA].id);
         expect(rows.filter((r) => r.match_type === V13_AMOUNT).map((r) => [r.limit_type, Number(r.limit_value), r.limit_unit, r.severity])).toEqual([['annual_max_rate', 0.294, 'oz/1000sf/year', 'hard_block']]);

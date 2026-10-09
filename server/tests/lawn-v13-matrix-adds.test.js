@@ -110,7 +110,7 @@ describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
     expect(lineFor(9, N.ART)[0]).toMatch(/take-all areas, first fall application/);
     expect(lineFor(10, matrix.HEAD)[0]).toMatch(/take-all areas, second fall application, 3 fl oz per 1,000 sq ft/);
     // October's Artavia line is large patch only now.
-    expect(lineFor(10, N.ART)[0]).toBe(`${N.ART} — mapped large patch with Velista at 2 gal per 1,000 sq ft`);
+    expect(lineFor(10, N.ART)[0]).toBe(`${N.ART} — mapped large patch with Velista, 0.38 to 0.77 fl oz per 1,000 sq ft at 2 gal per 1,000 sq ft`);
   });
   test('Headway rate is the Headway liquid label (EPA 100-1216): 3 fl oz, 30 days after Artavia, so no "label rate to confirm" mark', () => {
     const headway = matrix.CATALOG.find((p) => p.name === matrix.HEAD);
@@ -132,14 +132,17 @@ describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
     const notes = v13.st_augustine.notes.join(' ');
     expect(notes).toMatch(/Take-all: Artavia first, then Headway 30 days later/);
     expect(notes).toMatch(/planned take-all pair: Headway adds propiconazole \(group 3\) to the same azoxystrobin \(group 11\), so group 11 repeats once and this is the named take-all exception/);
-    expect(notes).toMatch(/and the take-all pair \(Artavia, then Headway 30 days later, or Artavia twice; both recorded for take-all\)/);
+    expect(notes).toMatch(/the take-all pair \(Artavia, then Headway 30 days later, or Artavia twice; both recorded for take-all\) and the Pythium pair \(Artavia twice/);
   });
 });
 
 describe('3. spot disease lines from the kit', () => {
   const month = (m, name) => lineFor(m, name).join('\n');
-  test('Pythium root rot: Artavia in June, July and August, 10 to 14 days, two in a row at most; September\'s Artavia is the take-all pass only', () => {
-    for (const m of [6, 7, 8]) expect(month(m, N.ART)).toMatch(/Pythium root rot on saturated areas, 0\.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most/);
+  test('Pythium root rot: Artavia in June, July and August, 10 to 14 days, two in a row at most, a named exception to the group rule (v13 final pass); September\'s Artavia is the take-all pass only', () => {
+    for (const m of [6, 7, 8]) {
+      expect(month(m, N.ART)).toMatch(/Pythium root rot on saturated areas, 0\.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most\. This pair is a named exception to the group rule \(no other Pythium product is in the kit; the Artavia label allows sequential applications\)\. Fix the watering first\./);
+      expect(month(m, matrix.HEAD)).toBe('');
+    }
     for (const m of [1, 2, 3, 4, 5, 9, 10, 11, 12]) expect(month(m, N.ART)).not.toMatch(/Pythium/);
   });
   test('fairy ring: Velista April to October with a wetting agent', () => {

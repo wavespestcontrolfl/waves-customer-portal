@@ -7,37 +7,52 @@
  *                                 cap LOWERS it while the gate is on.
  *   Arena 50 WDG              2   new cap, no legacy value: while the gate is on a synthetic
  *                                 hard_block annual_max_apps limit is ADDED. The v13 chinch rate is
- *                                 0.147 oz per 1,000 sq ft (6.4 oz per acre), the low end of the label's
- *                                 turf range (6.4 to 12.8 oz per acre; "multiple applications can be made
- *                                 but do not exceed 12.8 oz per acre per year", 0.4 lb clothianidin per
- *                                 acre), so two passes reach the yearly limit. The 56 days (8 weeks)
- *                                 between passes is the company's own rule, not a label interval (it follows
- *                                 the manufacturer's former Florida recommendation). The label's limit is
+ *                                 0.147 oz per 1,000 sq ft (6.4 oz per acre), the Florida 2(ee)
+ *                                 recommendation rate and below the label's chinch range (9.6 to 12.8 oz per
+ *                                 acre; "multiple applications can be made but do not exceed 12.8 oz per
+ *                                 acre per year", 0.4 lb clothianidin per acre), so two passes reach the
+ *                                 yearly limit. The 56 days (8 weeks) between passes is the company's own rule, not a
+ *                                 label interval (it follows the manufacturer's former Florida recommendation). The label's limit is
  *                                 an AMOUNT, so the entry also carries annualAmount (0.294 oz per 1,000 sq ft
  *                                 a year, hard block): the lawn's recorded Arena rates plus the one being
  *                                 planned must fit it (an unreadable rate counts as the old 0.29 oz). An entry's
  *                                 minIntervalDays adds a synthetic hard_block min_interval_days limit the
  *                                 same way (a stored product-level row is raised to it, never lowered).
- *   Certainty Turf Herbicide  2   new cap: synthetic limit.
- *   Blindside Herbicide       2   new cap: synthetic limit.
+ *   Certainty Turf Herbicide  2   new cap: synthetic limit. Also minIntervalDays 28 (label: a sequential
+ *                                 application "may be made 4 or more weeks after the initial treatment").
+ *   Blindside Herbicide       2   new cap: synthetic limit. Also annualAmount 0.23 oz per 1,000 sq ft a year
+ *                                 (label EPA 279-3411: "do not exceed 10 oz. product per acre per year"); the
+ *                                 v13 rate of 0.115 oz a pass is what lets two passes fit it.
  *
- * Under v13 the cap is always a hard block: a stored row is lowered to the cap AND made hard_block
+ * Entries that carry no yearly count (v13 final pass, 2026-10-09; V13_MORE_LIMITS below). An entry may carry
+ * any of: a count `cap`, a `minIntervalDays`, an `annualAmount`; the module adds only the synthetic rows an
+ * entry asks for.
+ *   Dylox 6.2 G Granular      3   count cap (label: "limit applications to 3 per calendar year").
+ *   Velista                       yearly amount 2.2 oz per 1,000 sq ft (label EPA 100-1534).
+ *   Artavia 2 SC (Azoxy)          yearly amount 7.1 fl oz per 1,000 sq ft (label: 9.6 quarts per acre per year).
+ *
+ * V13_COUNT_CAPS keeps its four entries and nothing else: migrations 20261007175000 and 20261007177000
+ * (pushed, frozen) read its names when they RUN, and a fifth name would make them stamp annualMaxApps 2 on
+ * that product's staged rows on every fresh database. New entries go in V13_MORE_LIMITS; V13_LIMITS is both.
+ *
+ * Under v13 every limit is a hard block. A stored count row is lowered to the cap AND made hard_block
  * (in memory; the database row is never rewritten), never raised, never replaced by a synthetic one.
  *
  * Identity. The caps are keyed by catalog product ID, not by name, so a catalog rename does not drop
- * one. The four ids are resolved once per connection and cached for a minute, from (1) the staged v13
+ * one. The ids are resolved once per connection and cached for a minute, from (1) the staged v13
  * protocol rows that carry gates.annualMaxApps (their product_id survives a rename; migration
  * 20261007175000 writes those keys), (2) the exact catalog name, else (3) an exact alias. A product
  * no resolver found is matched by its current name as the last resort.
  */
 const LABEL = 'owner 2026-10-06';
+const FINAL_PASS = 'v13 final pass 2026-10-09';
 
 const V13_COUNT_CAPS = Object.freeze([
   { name: 'Celsius WG', cap: 2, description: `Celsius WG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
   {
     name: 'Arena 50 WDG',
     cap: 2,
-    description: `Arena 50 WDG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label's turf range): two applications reach the label's yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre).`,
+    description: `Arena 50 WDG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.147 oz per 1,000 sq ft (6.4 oz per acre, the Florida 2(ee) recommendation rate, below the label's chinch range of 9.6 to 12.8 oz per acre): two applications reach the label's yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre).`,
     // The label's limit is an AMOUNT (12.8 oz per acre = 0.294 oz per 1,000 sq ft a year, 0.4 lb clothianidin per acre), so
     // the count of 2 alone would let a lawn that took the old 0.29 oz rate take a second pass. A history row that cannot be
     // sized counts at fallbackRate (the old rate = the whole year).
@@ -50,12 +65,65 @@ const V13_COUNT_CAPS = Object.freeze([
     minIntervalDays: 56,
     intervalDescription: `Arena 50 WDG: at least 56 days (8 weeks) between applications on a lawn under the v13 lawn program (${LABEL}; the company's own spacing, not a label interval).`,
   },
-  { name: 'Certainty Turf Herbicide', cap: 2, description: `Certainty Turf Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
-  { name: 'Blindside Herbicide', cap: 2, description: `Blindside Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
+  {
+    name: 'Certainty Turf Herbicide',
+    cap: 2,
+    description: `Certainty Turf Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).`,
+    // Certainty label: "A sequential application of 1.25 ounces per acre may be made 4 or more weeks after the initial treatment."
+    minIntervalDays: 28,
+    intervalDescription: `Certainty Turf Herbicide: at least 28 days (4 weeks) between applications on a lawn under the v13 lawn program (label: "A sequential application ... may be made 4 or more weeks after the initial treatment"; ${FINAL_PASS}).`,
+  },
+  {
+    name: 'Blindside Herbicide',
+    cap: 2,
+    description: `Blindside Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.115 oz per 1,000 sq ft a pass.`,
+    // Blindside label (EPA 279-3411): single rate 0.075 to 0.23 oz per 1,000 sq ft (3.25 to 10 oz per acre); "do not exceed 10 oz.
+    // product per acre per year" = 0.23 oz per 1,000 sq ft. Two passes fit only at the v13 rate of 0.115 oz, so a pass at the
+    // label's high rate fills the year. A spot row's rate is read as recorded (a spot is not scaled to its area).
+    annualAmount: {
+      cap: 0.23,
+      unit: 'oz/1000sf/year',
+      fallbackRate: 0.23,
+      description: `Blindside Herbicide: no more than 0.23 oz per 1,000 sq ft (10 oz per acre) a year under the v13 lawn program, all applications on the lawn added up (label EPA 279-3411: "do not exceed 10 oz. product per acre per year"). An earlier application with no readable rate counts as 0.23 oz, the whole year. ${FINAL_PASS}.`,
+    },
+  },
 ]);
 
+// Limits that are not a yearly count of 2 (v13 final pass). Each entry carries only what it needs: a `cap` (count), a
+// `minIntervalDays`, an `annualAmount`. Kept out of V13_COUNT_CAPS (see the header).
+const V13_MORE_LIMITS = Object.freeze([
+  {
+    name: 'Dylox 6.2 G Granular Insecticide',
+    cap: 3,
+    description: `Dylox 6.2 G Granular Insecticide: max 3 applications per lawn per year under the v13 lawn program (label: "limit applications to 3 per calendar year"; ${FINAL_PASS}).`,
+  },
+  {
+    name: 'Velista',
+    // Velista label (EPA 100-1534): "Do not apply more than 2.2 oz of Velista per 1,000 sq ft per year or 6 lb ... per acre per year" and
+    // "Do not apply more than 0.7 oz ... per application". An application the ledger cannot size counts at the single-application maximum.
+    annualAmount: {
+      cap: 2.2,
+      unit: 'oz/1000sf/year',
+      fallbackRate: 0.7,
+      description: `Velista: no more than 2.2 oz per 1,000 sq ft (6 lb per acre) a year under the v13 lawn program, all applications on the lawn added up (label EPA 100-1534). An earlier application with no readable rate counts as 0.7 oz, the label's single-application maximum. ${FINAL_PASS}.`,
+    },
+  },
+  {
+    name: 'Artavia 2 SC (Azoxy)',
+    // Artavia label: "Do not apply more than 9.6 quarts product/acre/year (7.1 fl. oz. product/1,000 square feet/year)". The catalog rate is
+    // 0.77 fl oz (the label's single-application figure), so an unsized application counts at 0.77.
+    annualAmount: {
+      cap: 7.1,
+      unit: 'fl oz/1000sf/year',
+      fallbackRate: 0.77,
+      description: `Artavia 2 SC (Azoxy): no more than 7.1 fl oz per 1,000 sq ft (9.6 quarts per acre) a year under the v13 lawn program, all applications on the lawn added up (label). An earlier application with no readable rate counts as 0.77 fl oz. ${FINAL_PASS}.`,
+    },
+  },
+]);
+const V13_LIMITS = Object.freeze([...V13_COUNT_CAPS, ...V13_MORE_LIMITS]);
+
 const normalize = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-const BY_NAME = new Map(V13_COUNT_CAPS.map((entry) => [normalize(entry.name), entry]));
+const BY_NAME = new Map(V13_LIMITS.map((entry) => [normalize(entry.name), entry]));
 
 const gateLive = () => require('./feature-gates').lawnV13Live?.() === true;
 const v13CountCapFor = (productName) => BY_NAME.get(normalize(productName)) || null;
@@ -86,9 +154,9 @@ async function resolveCapIds(database) {
     add(row.product_id, row.product_name);
   }
   // (2) the exact catalog name (active rows first), (3) an exact alias.
-  const catalog = await read(database, (k) => k('products_catalog').whereIn('name', V13_COUNT_CAPS.map((entry) => entry.name)).select('id', 'name', 'active'));
+  const catalog = await read(database, (k) => k('products_catalog').whereIn('name', V13_LIMITS.map((entry) => entry.name)).select('id', 'name', 'active'));
   for (const row of [...catalog].sort((a, b) => Number(b.active !== false) - Number(a.active !== false))) add(row.id, row.name);
-  const aliases = await read(database, (k) => k('product_aliases').whereIn('alias_name', V13_COUNT_CAPS.map((entry) => entry.name)).select('product_id', 'alias_name'));
+  const aliases = await read(database, (k) => k('product_aliases').whereIn('alias_name', V13_LIMITS.map((entry) => entry.name)).select('product_id', 'alias_name'));
   for (const row of aliases) add(row.product_id, row.alias_name);
   return ids;
 }
@@ -110,7 +178,7 @@ function resetV13CapIdentity() {
 async function v13CapEntryFor(database, productId, productName) {
   if (!gateLive()) return null;
   const ids = await capIdMap(database);
-  return ids.get(String(productId)) || (ids.size < V13_COUNT_CAPS.length ? v13CountCapFor(productName) : null);
+  return ids.get(String(productId)) || (ids.size < V13_LIMITS.length ? v13CountCapFor(productName) : null);
 }
 
 // ── Applying a cap ──────────────────────────────────────────────────────────
@@ -137,16 +205,21 @@ function syntheticCountLimit(entry, productId = null) {
 function withEntryCaps(entry, limits, productId = null) {
   const rows = limits || [];
   if (!entry) return rows;
-  const counted = !rows.some(isProductCount)
-    ? [...rows, syntheticCountLimit(entry, productId)]
-    : rows.map((limit) => {
-      if (!isProductCount(limit)) return limit;
-      const stored = Number(limit.limit_value);
-      const value = Number.isFinite(stored) ? Math.min(stored, entry.cap) : entry.cap;
-      return { ...limit, limit_value: value, severity: 'hard_block' };
-    });
-  const timed = withEntryInterval(entry, counted, productId);
+  const timed = withEntryInterval(entry, withEntryCount(entry, rows, productId), productId);
   return entry.annualAmount && !timed.some((limit) => limit.match_type === V13_AMOUNT) ? [...timed, syntheticAmountLimit(entry, productId)] : timed;
+}
+
+// The count part of an entry. An entry with no `cap` (only an interval or a yearly amount) adds no count row and leaves a
+// stored one as it is.
+function withEntryCount(entry, rows, productId = null) {
+  if (entry.cap == null) return rows;
+  if (!rows.some(isProductCount)) return [...rows, syntheticCountLimit(entry, productId)];
+  return rows.map((limit) => {
+    if (!isProductCount(limit)) return limit;
+    const stored = Number(limit.limit_value);
+    const value = Number.isFinite(stored) ? Math.min(stored, entry.cap) : entry.cap;
+    return { ...limit, limit_value: value, severity: 'hard_block' };
+  });
 }
 
 const isProductInterval = (limit) => limit.limit_type === 'min_interval_days' && (limit.match_type || 'product') === 'product';
@@ -212,7 +285,8 @@ const staleInterval = (entry, gates) => !!(entry.minIntervalDays && gates && typ
 // the field more than the app enforces. Returns the product itself when nothing changes.
 function withEntryCapMetadata(entry, product) {
   if (!entry || !product) return product;
-  const clamp = (value) => (typeof value === 'number' && Number.isFinite(value) && value > entry.cap ? entry.cap : value);
+  // An entry with no count cap (an interval or a yearly amount only) clamps nothing.
+  const clamp = (value) => (entry.cap != null && typeof value === 'number' && Number.isFinite(value) && value > entry.cap ? entry.cap : value);
   const gates = product.gates && typeof product.gates === 'object' ? product.gates : null;
   const counter = product.annual_counter && typeof product.annual_counter === 'object' ? product.annual_counter : null;
   const gateValue = gates ? clamp(gates.annualMaxApps) : undefined;
@@ -241,5 +315,5 @@ module.exports = {
   syntheticIntervalLimit,
   syntheticAmountLimit,
   V13_AMOUNT,
-  V13_COUNT_CAPS, v13CountCapFor, v13CapEntryFor, capIdMap, resetV13CapIdentity, withEntryCaps, applyV13CountCaps, syntheticCountLimit,
+  V13_COUNT_CAPS, V13_MORE_LIMITS, V13_LIMITS, v13CountCapFor, v13CapEntryFor, capIdMap, resetV13CapIdentity, withEntryCaps, applyV13CountCaps, syntheticCountLimit,
 };
