@@ -6988,13 +6988,19 @@ const ACCESS_PREFS_COUPLED = {
   blackoutStart: ["blackoutEnd"],
   blackoutEnd: ["blackoutStart"],
   chemicalSensitivityDetails: ["chemicalSensitivities"],
-  // The sod record saves whole or not at all on the server, so its three
-  // fields always travel together.
-  sodLaidOn: ["sodCovers", "sodArea"],
-  sodCovers: ["sodLaidOn", "sodArea"],
-  sodArea: ["sodLaidOn", "sodCovers"],
 };
+// The sod fields are NOT coupled: the server merges the sod fields a save sends
+// with the stored record under the customer lock (resolveSodRecord), so each
+// save sends only the sod fields changed in this edit and cannot overwrite
+// another admin's newer edit of a different sod field.
 const ACCESS_PREFS_SOD_KEYS = ["sodLaidOn", "sodCovers", "sodArea"];
+
+// Clearing the sod date clears the whole record on the server, so a clear
+// sends the date alone.
+function accessPrefsSodClearKeys(initial, draft, keys) {
+  const clearsDate = keys.includes("sodLaidOn") && !draft.sodLaidOn && !!initial?.sodLaidOn;
+  return clearsDate ? keys.filter((k) => k === "sodLaidOn" || !ACCESS_PREFS_SOD_KEYS.includes(k)) : keys;
+}
 
 // Which draft keys actually changed since the form opened (codex P2): a
 // full-snapshot resubmit could clobber a newer customer portal autosave on
@@ -7038,7 +7044,19 @@ function accessPrefsAdvanceBaseline(baseline, draft, dirtyKeys, failed) {
   };
 }
 
-// The saved new-sod record on the read view (admin only): the record, its hold lines and its warning.
+// The hold lines for the saved record (computed on the server): loading, a failed
+// read stated as such (never shown as no holds), or the lines.
+function AccessPrefsSodLines({ sodInfo }) {
+  if (sodInfo?.loading) {
+    return <div className="text-ui-label text-ink-secondary" data-testid="sod-loading">Checking the hold dates…</div>;
+  }
+  if (sodInfo?.failed) {
+    return <div className="text-ui-label text-ink-secondary" data-testid="sod-failed">Hold dates could not be read.</div>;
+  }
+  return <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />;
+}
+
+// The saved new-sod record on the read view (admin only): the record and its hold lines.
 function AccessPrefsSodReadBlock({ p, sodInfo }) {
   if (!p.sod_laid_on) return null;
   const covers = p.sod_covers === "part" ? `Part of lawn${p.sod_area ? `: ${p.sod_area}` : ""}` : "Whole lawn";
@@ -7047,21 +7065,7 @@ function AccessPrefsSodReadBlock({ p, sodInfo }) {
       <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
       <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
       <AccessPrefRow label="Covers" value={covers} />
-      {sodInfo?.loading && (
-        <div className="text-ui-label text-ink-secondary" data-testid="sod-loading">Checking the hold dates and pre-emergent history…</div>
-      )}
-      <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />
-      {/* The saved record's warning stays on the read view: a fast Save can close the form before the form's own check returns. */}
-      {sodInfo?.preEmergentWarning && (
-        <div role="alert" className="text-ui-label text-alert-fg" data-testid="sod-read-warning">
-          {sodInfo.preEmergentWarning}
-        </div>
-      )}
-      {sodInfo?.lastPreEmergentUnreadable && (
-        <div className="text-ui-label text-ink-secondary">
-          Pre-emergent history could not be read. Check the service history.
-        </div>
-      )}
+      <AccessPrefsSodLines sodInfo={sodInfo} />
     </>
   );
 }
@@ -7211,8 +7215,8 @@ function AccessPrefsSwitchRow({ label, checked, onChange }) {
   );
 }
 
-// The hold lines and the pre-emergent facts come from GET /new-sod (computed on
-// the server from the sod rules); this component only shows them.
+// The hold lines come from GET /new-sod (computed on the server from the sod
+// rules); this component only shows them.
 function AccessPrefsSodHoldLines({ lines }) {
   if (!Array.isArray(lines) || !lines.length) return null;
   return (
@@ -7228,7 +7232,6 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
   const clearRecord = () =>
     setDraft((prev) => ({ ...prev, sodLaidOn: "", sodCovers: "", sodArea: "" }));
   const part = d.sodCovers === "part";
-  const last = sodInfo?.lastPreEmergent;
   return (
     <div className="space-y-3">
       <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
@@ -7261,27 +7264,10 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
         </button>
       )}
       {/* The hold lines describe the SAVED record. Once the sod fields are edited they no longer apply, so they are hidden until the save. */}
-      <AccessPrefsSodHoldLines lines={hasSavedSod && sodUnchanged ? sodInfo?.holdLines : null} />
+      {hasSavedSod && sodUnchanged && <AccessPrefsSodLines sodInfo={sodInfo} />}
       {hasSavedSod && !sodUnchanged && (
         <div className="text-ui-label text-ink-secondary" data-testid="sod-hold-lines-stale">
           Save to see the hold dates for this change.
-        </div>
-      )}
-      {sodInfo?.loading && (
-        <div className="text-ui-label text-ink-secondary" data-testid="sod-loading">Checking the pre-emergent history…</div>
-      )}
-      {sodInfo && !sodInfo.loading && (
-        <div className="text-ui-label text-ink-secondary" data-testid="sod-last-pre-emergent">
-          {last
-            ? `Last pre-emergent by Waves: ${last.dateText} (${last.product})`
-            : sodInfo.lastPreEmergentUnreadable
-              ? "Pre-emergent history could not be read. Check the service history."
-              : "No pre-emergent by Waves on record"}
-        </div>
-      )}
-      {sodInfo?.preEmergentWarning && (
-        <div role="status" className="text-ui-label font-medium text-zinc-900" data-testid="sod-pre-emergent-warning">
-          {sodInfo.preEmergentWarning}
         </div>
       )}
     </div>
@@ -7727,11 +7713,8 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   // The home stamp the form rendered from (irrigation_home_changed_at). A sod
   // date set after the home changed is refused unless the save echoes it back.
   const renderStampRef = useRef(null);
-  // Read-only sod lines from GET /new-sod: hold lines for the saved record, the
-  // last Waves pre-emergent, and the under-12-weeks warning for the date typed.
+  // Read-only hold lines for the saved sod record from GET /new-sod.
   const [sodInfo, setSodInfo] = useState(null);
-  const editing = !!draft;
-  const typedSodDate = draft ? draft.sodLaidOn : null;
   const sodSeq = useRef(0);
 
   useEffect(() => {
@@ -7739,14 +7722,13 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
     const mine = ++sodSeq.current;
     // Not loaded yet is its own state: the lines of the last answer (or none) must not stand beside a newer record.
     setSodInfo({ loading: true });
-    const query = typedSodDate === null ? "" : `?sodLaidOn=${encodeURIComponent(typedSodDate)}`;
-    adminFetch(`/admin/customers/${customerId}/new-sod${query}`)
+    adminFetch(`/admin/customers/${customerId}/new-sod`)
       .then((data) => { if (mine === sodSeq.current) setSodInfo(data?.newSod || null); })
-      // A failed read is stated, never shown as "none on record" or as no warning.
-      .catch(() => { if (mine === sodSeq.current) setSodInfo({ holdLines: [], lastPreEmergent: null, lastPreEmergentUnreadable: true, preEmergentWarning: null }); });
+      // A failed read is stated, never shown as no holds.
+      .catch(() => { if (mine === sodSeq.current) setSodInfo({ failed: true }); });
     return () => { sodSeq.current += 1; };
   }, [
-    customerId, isAdmin, editing, typedSodDate,
+    customerId, isAdmin,
     prefs?.sod_laid_on, prefs?.sod_covers, prefs?.sod_area, prefs?.sod_rooted_on,
   ]);
 
@@ -7788,7 +7770,9 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
       setErr(blackoutError);
       return;
     }
-    const dirtyKeys = accessPrefsDirtyKeys(initialDraftRef.current, draft);
+    const dirtyKeys = accessPrefsSodClearKeys(
+      initialDraftRef.current, draft, accessPrefsDirtyKeys(initialDraftRef.current, draft),
+    );
     if (!dirtyKeys.length) return closeEditor();
 
     setSaving(true);

@@ -66,11 +66,7 @@ function customerDetail(prefsOverride = {}) {
   };
 }
 
-const NEW_SOD = {
-  holdLines: [],
-  lastPreEmergent: { date: '2026-08-10', dateText: 'Aug 10, 2026', product: 'LESCO Dimension 0.25% Granular' },
-  preEmergentWarning: null,
-};
+const NEW_SOD = { holdLines: [] };
 
 // A fetch stub: the customer detail, the new-sod lines, and a PUT handler.
 function stubFetch({ prefs = {}, newSod = NEW_SOD, newSodFails = false, onPut } = {}) {
@@ -133,15 +129,11 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
-    expect(putCalls(fetchMock)[0]).toEqual({
-      sodLaidOn: '2026-10-01',
-      sodCovers: null,
-      sodArea: '',
-      confirmedAsOf: MOVED_AT,
-    });
+    // Only the date changed: covers and area are not sent (the server keeps the stored values).
+    expect(putCalls(fetchMock)[0]).toEqual({ sodLaidOn: '2026-10-01', confirmedAsOf: MOVED_AT });
   });
 
-  it('Part of lawn shows Where (max 120) and sends covers and area with the date', async () => {
+  it('a new record with Part of lawn shows Where (max 120) and sends all three sod fields', async () => {
     const fetchMock = stubFetch({
       onPut: () => response({ success: true, saved: true, preferences: BASE_PREFS }),
     });
@@ -192,21 +184,62 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
-  it('a saved record can be cleared: Clear sod record sends nulls for all three fields', async () => {
-    const fetchMock = stubFetch({
-      prefs: { sod_laid_on: '2026-09-20', sod_covers: 'part', sod_area: 'front yard' },
-      onPut: () => response({ success: true, saved: true, preferences: BASE_PREFS }),
+  describe('partial payloads on a saved record: only the sod fields changed in this edit are sent', () => {
+    const saved = (extra = {}) => ({ sod_laid_on: '2026-09-20', sod_covers: 'whole', sod_area: null, ...extra });
+    const saveWith = async (prefs, edit) => {
+      const fetchMock = stubFetch({ prefs, onPut: () => response({ success: true, saved: true, preferences: BASE_PREFS }) });
+      await openEditor();
+      edit();
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+      return putCalls(fetchMock)[0];
+    };
+
+    it('Covers whole to part with Where typed sends covers and area, not the date', async () => {
+      const body = await saveWith(saved(), () => {
+        fireEvent.click(screen.getByLabelText('Part of lawn'));
+        const where = screen.getByText('Where').closest('label').querySelector('input');
+        fireEvent.change(where, { target: { value: 'back lawn by the pool' } });
+      });
+      expect(body).toEqual({ sodCovers: 'part', sodArea: 'back lawn by the pool', confirmedAsOf: MOVED_AT });
     });
-    await openEditor();
 
-    expect(dateInput()).toHaveValue('2026-09-20');
-    fireEvent.click(screen.getByRole('button', { name: 'Clear sod record' }));
-    expect(dateInput()).toHaveValue('');
-    expect(screen.queryByText('Where')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    it('changing only the date sends the date alone', async () => {
+      const body = await saveWith(saved({ sod_covers: 'part', sod_area: 'front yard' }), () => {
+        fireEvent.change(dateInput(), { target: { value: '2026-09-25' } });
+      });
+      expect(body).toEqual({ sodLaidOn: '2026-09-25', confirmedAsOf: MOVED_AT });
+    });
 
-    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
-    expect(putCalls(fetchMock)[0]).toMatchObject({ sodLaidOn: null, sodCovers: null, sodArea: '' });
+    it('changing only Where sends the area alone', async () => {
+      const body = await saveWith(saved({ sod_covers: 'part', sod_area: 'front yard' }), () => {
+        const where = screen.getByText('Where').closest('label').querySelector('input');
+        fireEvent.change(where, { target: { value: 'side yard' } });
+      });
+      expect(body).toEqual({ sodArea: 'side yard', confirmedAsOf: MOVED_AT });
+    });
+
+    it('Part of lawn back to Whole lawn sends covers alone (the server drops the area)', async () => {
+      const body = await saveWith(saved({ sod_covers: 'part', sod_area: 'front yard' }), () => {
+        fireEvent.click(screen.getByLabelText('Whole lawn'));
+      });
+      expect(body).toEqual({ sodCovers: 'whole', confirmedAsOf: MOVED_AT });
+    });
+
+    it('Clear sod record sends the date as null alone: the server clears the whole record', async () => {
+      const prefs = saved({ sod_covers: 'part', sod_area: 'front yard' });
+      const fetchMock = stubFetch({ prefs, onPut: () => response({ success: true, saved: true, preferences: BASE_PREFS }) });
+      await openEditor();
+
+      expect(dateInput()).toHaveValue('2026-09-20');
+      fireEvent.click(screen.getByRole('button', { name: 'Clear sod record' }));
+      expect(dateInput()).toHaveValue('');
+      expect(screen.queryByText('Where')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+      expect(putCalls(fetchMock)[0]).toEqual({ sodLaidOn: null, confirmedAsOf: MOVED_AT });
+    });
   });
 
   it('there is no Clear sod record action when no record exists', async () => {
@@ -216,7 +249,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(screen.queryByRole('button', { name: 'Clear sod record' })).not.toBeInTheDocument();
   });
 
-  it('shows the three hold lines the server computed, and the last pre-emergent', async () => {
+  it('shows the three hold lines the server computed', async () => {
     stubFetch({
       prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' },
       newSod: {
@@ -234,7 +267,6 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(await screen.findByText('Fertilizer is held until Oct 31, 2026.')).toBeInTheDocument();
     expect(screen.getByText('Pre-emergent is held until Oct 1, 2027.')).toBeInTheDocument();
     expect(screen.getByText(/Weed killer is held until Oct 31, 2026 and until the technician confirms/)).toBeInTheDocument();
-    expect(await screen.findByText('Last pre-emergent by Waves: Aug 10, 2026 (LESCO Dimension 0.25% Granular)')).toBeInTheDocument();
   });
 
   it('the hold lines are hidden once a sod field is edited: they describe the saved record only', async () => {
@@ -264,19 +296,6 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(await screen.findByText('Pre-emergent is held until Oct 1, 2027.')).toBeInTheDocument();
   });
 
-  it('the read view keeps the saved record\'s 12-week warning, so a fast save cannot hide it', async () => {
-    const warning = 'Pre-emergent was applied less than 12 weeks before this sod. Tell the customer.';
-    stubFetch({
-      prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null },
-      newSod: { ...NEW_SOD, preEmergentWarning: warning },
-      onPut: () => response({}),
-    });
-    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
-    await screen.findAllByText('Avery Customer');
-    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
-    expect(await screen.findByTestId('sod-read-warning')).toHaveTextContent(warning);
-  });
-
   it('while the summary is loading the read view says so, and shows no lines from an earlier answer', async () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
@@ -295,7 +314,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(screen.queryByTestId('sod-loading')).not.toBeInTheDocument();
   });
 
-  it('a failed sod read is stated on the read view, never shown as no warning', async () => {
+  it('a failed sod read is stated on the read view, never shown as no holds', async () => {
     stubFetch({
       prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null },
       newSodFails: true,
@@ -304,25 +323,8 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findAllByText('Avery Customer');
     fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
-    expect(await screen.findByText('Pre-emergent history could not be read. Check the service history.')).toBeInTheDocument();
-  });
-
-  it('says so when Waves has no pre-emergent on record, and shows the server warning for the typed date', async () => {
-    const WARNING = 'Pre-emergent was applied less than 12 weeks before this sod. Tell the customer.';
-    const fetchMock = stubFetch({
-      newSod: (path) => (path.includes('sodLaidOn=2026-10-01')
-        ? { ...NEW_SOD, preEmergentWarning: WARNING }
-        : { holdLines: [], lastPreEmergent: null, preEmergentWarning: null }),
-      onPut: () => response({}),
-    });
-    await openEditor();
-
-    expect(await screen.findByText('No pre-emergent by Waves on record')).toBeInTheDocument();
-    expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
-
-    fireEvent.change(dateInput(), { target: { value: '2026-10-01' } });
-    expect(await screen.findByText(WARNING)).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/new-sod?sodLaidOn=2026-10-01'))).toBe(true);
+    expect(await screen.findByText('Hold dates could not be read.')).toBeInTheDocument();
+    expect(screen.queryByTestId('sod-hold-lines')).not.toBeInTheDocument();
   });
 
   it('a technician sees no new-sod fields and never calls the office-only endpoint', async () => {
