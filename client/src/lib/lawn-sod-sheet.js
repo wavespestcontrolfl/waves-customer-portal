@@ -48,3 +48,11 @@ export function splitHeldPlanned(planned, newSod) {
   for (const item of planned || []) (sodHeld(newSod, item.productId) ? held : start).push(item);
   return { start, held };
 }
+
+/** The hold's words for a product line: its reason when held, else the part-of-lawn note, else ''. */
+export const sodWords = (line) => (line?.held ? line.reason : line?.note) || '';
+
+/** How an add-on line looks and reads: a held one is greyed and its button says "Add anyway" (the tap still works). */
+export const sodAddLook = (line) => (line?.held
+  ? { className: 'tech-protocol-addon tech-sod-held-line', suffix: ' anyway', label: 'Add anyway' }
+  : { className: 'tech-protocol-addon', suffix: '', label: 'Add' });

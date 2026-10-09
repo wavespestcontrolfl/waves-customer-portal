@@ -85,6 +85,7 @@ const areasAnswer = { enabled: true, propertyId: 'prop-1', customerId: 'cust-1',
 let requests;
 let contexts;
 let rootedAnswer;
+let completeError;
 let failContextAfter;
 let contextReads;
 
@@ -98,7 +99,7 @@ function makeRequest() {
       if (contextReads > failContextAfter) throw new Error('offline');
       return contexts.length > 1 ? contexts.shift() : contexts[0];
     }
-    if (path.endsWith('/lawn-fast/sod-rooted')) {
+    if (path.split('?')[0].endsWith('/lawn-fast/sod-rooted')) {
       if (rootedAnswer instanceof Error) throw rootedAnswer;
       return rootedAnswer;
     }
@@ -110,7 +111,10 @@ function makeRequest() {
     if (path.includes('/lawn-assessment/service/')) return { shotListEnabled: true, assessment: null };
     if (path.endsWith('/lawn-assessment/assess')) return { success: true, assessment: ASSESSED, visitAssessment: REVIEW, adjustedScores: SCORES, observations: 'Synthetic observation' };
     if (path.endsWith('/lawn-assessment/confirm')) return { success: true, confirmed: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
-    if (path.endsWith('/complete')) return { success: true, invoiceId: null };
+    if (path.endsWith('/complete')) {
+      if (completeError) throw completeError;
+      return { success: true, invoiceId: null };
+    }
     return {};
   });
 }
@@ -132,6 +136,7 @@ class FixtureImage {
 beforeEach(() => {
   requests = [];
   rootedAnswer = { enabled: true, sodRootedOn: '2026-10-05', changed: true };
+  completeError = null;
   failContextAfter = Infinity;
   contextReads = 0;
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
@@ -152,6 +157,7 @@ async function openSheet(first, ...rest) {
 
 const completeButton = () => document.querySelector('.tech-visit-footer .tech-visit-complete');
 const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
+const contextRequests = () => requests.filter((r) => r.path.includes('/lawn-fast/context'));
 const banner = () => screen.queryByRole('region', { name: 'New sod' });
 const heldGroup = () => screen.queryByRole('group', { name: 'Held for new sod' });
 
@@ -260,7 +266,7 @@ describe('the rooted tick', () => {
     expect(within(addons()).getByText(/Weed killer waits until the sod has been mowed twice/)).toBeTruthy();
     fireEvent.click(within(banner()).getByRole('checkbox', { name: 'Sod mowed twice and does not lift' }));
     await waitFor(() => expect(within(banner()).queryByRole('checkbox')).toBeNull());
-    const post = requests.find((r) => r.path.endsWith('/lawn-fast/sod-rooted'));
+    const post = requests.find((r) => r.path.split('?')[0].endsWith('/lawn-fast/sod-rooted'));
     expect(post.options.method).toBe('POST');
     expect(post.body).toEqual({ sodLaidOn: '2026-09-05' });
     // The server's re-read decides: the weed add-on is a plain Add again.
@@ -275,6 +281,40 @@ describe('the rooted tick', () => {
     fireEvent.click(within(banner()).getByRole('checkbox'));
     await screen.findByText('The sod record changed. Close this sheet and open the visit again.');
     expect(within(banner()).getByRole('checkbox').checked).toBe(false);
+  });
+
+  test('the sod-aware signal rides the opening read, the tick and the re-read (and nothing else is asked for)', async () => {
+    await openSheet(context(DAY31), context(AFTER));
+    fireEvent.click(within(banner()).getByRole('checkbox'));
+    await waitFor(() => expect(within(banner()).queryByRole('checkbox')).toBeNull());
+    const reads = contextRequests();
+    expect(reads.length).toBeGreaterThanOrEqual(2);
+    for (const read of reads.filter((r) => !r.path.includes('productIds='))) expect(read.path).toMatch(/\/lawn-fast\/context\?sodAware=1$/);
+    expect(requests.find((r) => r.path.includes('/lawn-fast/sod-rooted')).path).toMatch(/\/lawn-fast\/sod-rooted\?sodAware=1$/);
+  });
+
+  test.each([
+    ['sod_rooted_future_visit', 409, 'This visit is on a later day. Confirm the sod on the day of the visit.'],
+    ['sod_record_changed', 409, 'The sod record changed. Close this sheet and open the visit again.'],
+    ['sod_not_this_home', 409, 'This visit is not at the home with the sod record.'],
+    ['sod_rooted_too_early', 409, 'The sod is still inside its first 30 days. Confirm it after day 30.'],
+  ])('%s: the server\'s own sentence is shown, and the box stays to tick again', async (code, status, message) => {
+    rootedAnswer = Object.assign(new Error(message), { status, code });
+    await openSheet(context(DAY31));
+    fireEvent.click(within(banner()).getByRole('checkbox'));
+    await screen.findByText(message);
+    expect(within(banner()).getByRole('checkbox').checked).toBe(false);
+  });
+
+  test('404 from the tick (the gate is off, or the server does not know this sheet): the tick is hidden, no error, no retry loop', async () => {
+    rootedAnswer = Object.assign(new Error('Not found'), { status: 404 });
+    await openSheet(context(DAY31));
+    fireEvent.click(within(banner()).getByRole('checkbox'));
+    await waitFor(() => expect(within(banner()).queryByRole('checkbox')).toBeNull());
+    expect(within(banner()).queryByText('Not found')).toBeNull();
+    expect(requests.filter((r) => r.path.includes('/lawn-fast/sod-rooted'))).toHaveLength(1);
+    // The rest of the banner stays.
+    expect(banner().textContent).toContain('New sod, day 31.');
   });
 
   test('a tick that saved but whose re-read failed says so, and ticking again is safe', async () => {
@@ -307,6 +347,15 @@ describe('the October bag swap and the all-held message', () => {
     const sent = completeCalls()[0].body.products;
     expect(sent.map((p) => p.productId)).toEqual([P_BAG24]);
     expect(sent[0]).toMatchObject({ totalAmount: 12.5, amountUnit: 'lb', rate: 2.5, rateUnit: 'lb', areaValue: 5000 });
+  });
+
+  test('April on the 9-visit plan: the swap row carries the server\'s 2.1 lb per 1,000 and its amount', async () => {
+    const APRIL = { ...SWAP, swap: { ...SWAP.swap, lbPer1000: 2.1 } };
+    const aprilItems = [swapItems[0], item(P_BAG24, 'Test 24-0-11 Bag', { amount: 10.5, amountUnit: 'lb', ratePer1000: 2.1, rateUnit: 'lb', sodSwap: { forProductId: P_DIM, reason: 'New sod: no pre-emergent yet.' } })];
+    await openSheet(context(APRIL, { items: aprilItems, addOns: [] }));
+    await analyzeAndComplete();
+    const sent = completeCalls()[0].body.products;
+    expect(sent[0]).toMatchObject({ productId: P_BAG24, totalAmount: 10.5, rate: 2.1, rateUnit: 'lb' });
   });
 
   test('every primary line held: the sheet says there is no whole-lawn product today', async () => {
@@ -351,6 +400,18 @@ describe('the October bag swap and the all-held message', () => {
       expect(completeButton().disabled).toBe(true);
       expect(completeButton().textContent).toContain('Products applied required');
       expect(completeCalls()).toHaveLength(0);
+    });
+
+    test('the server refuses the claim as stale (the record changed): its plain sentence is shown, the visit is not marked done', async () => {
+      completeError = Object.assign(new Error('The new sod record changed. Reopen the visit.'), { status: 409, code: 'lawn_sod_no_product_stale' });
+      const onCompleted = vi.fn();
+      contexts = [context(FLAGGED, onlyBag)];
+      render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest()} catalog={CATALOG} onClose={() => {}} onCompleted={onCompleted} onFullForm={() => {}} />);
+      await screen.findByRole('heading', { name: 'Lawn assessment' });
+      await analyzeAndComplete();
+      await screen.findByText('The new sod record changed. Reopen the visit.');
+      expect(onCompleted).not.toHaveBeenCalled();
+      expect(completeCalls()[0].body.technicianNotes).toBe(NOTE);
     });
 
     test('a technician who adds a product by hand completes as usual: his products, his note, no server sentence', async () => {

@@ -126,7 +126,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
   return vi.fn(async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path, options, body });
-    if (path.endsWith('/lawn-fast/context')) {
+    if (path.split('?')[0].endsWith('/lawn-fast/context')) {
       if (contextError) throw contextError;
       return ctx;
     }
@@ -291,7 +291,7 @@ describe('opening the sheet', () => {
     expect(onFullForm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
   test('a visit that changed since the schedule loaded is named, not completed', async () => {
@@ -1764,7 +1764,7 @@ describe('a visit type that could not be read', () => {
     expect(onFullForm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
   test.each(['photo_status', 'turf_height_flag', 'planned_products', 'assessment'])('an advisory %s failure still opens the sheet', async (failure) => {

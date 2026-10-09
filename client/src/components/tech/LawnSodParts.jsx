@@ -13,21 +13,25 @@ import { Button, ActionFeedback } from '../ui';
 
 const lowerId = (id) => String(id ?? '').toLowerCase();
 
-export function SodBanner({ newSod, onRooted, locked = false }) {
+export function SodBanner({ newSod, onRooted, locked = false, dictationPending = false }) {
   const tickId = useId();
-  const [tick, setTick] = useState({ busy: false, error: '' });
+  const [tick, setTick] = useState({ busy: false, error: '', gone: false });
   if (!newSod) return null;
   if (newSod.unavailable) {
     return <p className="tech-sod-banner tech-visit-status--warn" role="status">{newSod.message}</p>;
   }
   const confirm = async (event) => {
     if (!event.target.checked || tick.busy) return;
-    setTick({ busy: true, error: '' });
+    setTick({ busy: true, error: '', gone: false });
     try {
       await onRooted(newSod.rooted.sodLaidOn);
-      setTick({ busy: false, error: '' });
+      setTick({ busy: false, error: '', gone: false });
     } catch (err) {
-      setTick({ busy: false, error: err?.message || 'Could not save that. Try again.' });
+      // 404: the server does not offer the tick (the gate is off, or it does not know this sheet). Hide it; no error to retry.
+      // Every other refusal (sod_record_changed, sod_not_this_home, sod_rooted_too_early, sod_rooted_future_visit) carries the
+      // server's own plain sentence: show it as sent.
+      if (err?.status === 404) setTick({ busy: false, error: '', gone: true });
+      else setTick({ busy: false, error: err?.message || 'Could not save that. Try again.', gone: false });
     }
   };
   return (
@@ -35,9 +39,9 @@ export function SodBanner({ newSod, onRooted, locked = false }) {
       <p className="tech-sod-banner-title">{`${newSod.headline} ${newSod.where}`}</p>
       {newSod.heldLine && <p className="tech-visit-muted">{newSod.heldLine}</p>}
       {newSod.largePatch && <p className="tech-visit-muted">{newSod.largePatch}</p>}
-      {newSod.rooted && (
+      {newSod.rooted && !tick.gone && (
         <div className="tech-sod-tick">
-          <input id={tickId} type="checkbox" checked={tick.busy} disabled={locked || tick.busy} onChange={confirm} />
+          <input id={tickId} type="checkbox" checked={tick.busy} disabled={locked || dictationPending || tick.busy} onChange={confirm} />
           <label htmlFor={tickId}>{newSod.rooted.label}</label>
         </div>
       )}

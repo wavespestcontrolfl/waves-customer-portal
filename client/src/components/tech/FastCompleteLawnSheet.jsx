@@ -129,7 +129,7 @@ import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPos
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
 import { HeldLines, SodBanner } from './LawnSodParts';
-import { newSodOf, sodLineOf, sodRowNote, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
+import { newSodOf, sodAddLook, sodLineOf, sodRowNote, sodWords, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
 import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
@@ -278,6 +278,10 @@ const assessmentOf = (data) => (data?.assessment && typeof data.assessment === '
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 // The tick saved, but the holds could not be read again.
+// GATE_LAWN_NEW_SOD_NOTE capability signal: this sheet understands the context's `newSod`, so the server may hold products back,
+// add the swap bag and offer the rooted tick. Sent on the context reads that feed the holds and on the tick. A context read
+// without it is the legacy context, so the sheet then has no holds to show.
+const SOD_AWARE = 'sodAware=1';
 const SOD_REREAD_MESSAGE = 'Saved. The sheet could not reload the holds. Tap the box again.';
 
 // What each entry of the context's `readFailures` means for the sheet:
@@ -381,7 +385,7 @@ function useLawnFastContext({ base, request, service }) {
   useEffect(() => {
     let active = true;
     setCtx(EMPTY_CONTEXT);
-    request(`${base}/lawn-fast/context`)
+    request(`${base}/lawn-fast/context?${SOD_AWARE}`)
       .then((data) => { if (active) setCtx(contextFrom(data, service)); })
       .catch((err) => {
         if (!active) return;
@@ -676,8 +680,6 @@ function productRow(product, { planned = null, added = false, weedGroup = false,
     // A protocol add-on the tech tapped: seeded from its plan item like a
     // planned row, labelled for where it came from.
     fromProtocol: added && !!planned,
-    // GATE_LAWN_NEW_SOD_NOTE: the server's swap bag line (LESCO 24-0-11 in place of the pre-emergent bag) carries its own rate and reason.
-    sodSwap: planned?.sodSwap || null,
     // One of the Weed spots entry's rows: they share one area (weedArea).
     weedGroup,
     ...guideRowFields(planned, guided),
@@ -928,10 +930,14 @@ export function uniquePlanned(items) {
 function plannedRows(ctx, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
   // GATE_LAWN_NEW_SOD_NOTE: a line a new-sod hold covers is not pre-selected (it is listed under "Held for new sod").
-  return splitHeldPlanned(uniquePlanned(ctx.planned), ctx.newSod).start.map((item) => productRow(
-    byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
-    { planned: item, spotRules: !!ctx.spotRules },
-  ));
+  // The server's swap bag line (LESCO 24-0-11 in place of the pre-emergent bag) carries its own rate and reason: `sodSwap`.
+  return splitHeldPlanned(uniquePlanned(ctx.planned), ctx.newSod).start.map((item) => ({
+    ...productRow(
+      byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
+      { planned: item, spotRules: !!ctx.spotRules },
+    ),
+    sodSwap: item.sodSwap || null,
+  }));
 }
 
 function useProductRows(ctx, catalog) {
@@ -1436,6 +1442,24 @@ function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }
   return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, blockedTypes: { ...base.blockedTypes, ...freshTypes }, refused, refusedCard, moved } : null), [base, fresh, freshTypes, cleared, refused, refusedCard, moved]);
 }
 
+// GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them, and the rooted tick. The tick reads the holds again
+// (`sodFresh`; `undefined` = the context's own).
+function useSodHolds({ ctx, request, base }) {
+  const [sodFresh, setSodFresh] = useState(undefined);
+  const confirmSodRooted = useCallback(async (sodLaidOn) => {
+    await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
+    // The weed lines un-hold on this re-read: the server's own words, not a guess here.
+    let data;
+    try {
+      data = await request(`${base}/lawn-fast/context?${SOD_AWARE}`);
+    } catch {
+      throw new Error(SOD_REREAD_MESSAGE);
+    }
+    setSodFresh(newSodOf(data));
+  }, [request, base]);
+  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, confirmSodRooted };
+}
+
 function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
   const base = `/admin/dispatch/${service?.id}`;
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
@@ -1446,19 +1470,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads them again (`undefined` = the context's own).
-  const [sodFresh, setSodFresh] = useState(undefined);
-  const newSod = sodFresh !== undefined ? sodFresh : ctx.newSod;
-  const confirmSodRooted = useCallback(async (sodLaidOn) => {
-    await request(`${base}/lawn-fast/sod-rooted`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
-    // The weed lines un-hold on this re-read: the server's own words, not a guess here.
-    let data;
-    try {
-      data = await request(`${base}/lawn-fast/context`);
-    } catch {
-      throw new Error(SOD_REREAD_MESSAGE);
-    }
-    setSodFresh(newSodOf(data));
-  }, [request, base]);
+  const { newSod, confirmSodRooted } = useSodHolds({ ctx, request, base });
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
@@ -1609,7 +1621,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
       <div className="tech-visit-body" {...picker.coverProps}>
         <CustomerContact service={service} visit={ctx.visit} request={request} />
         <TimeOnSite since={service?.onSiteAt} />
-        <SodBanner newSod={newSod} onRooted={confirmSodRooted} locked={locked || dictationPending} />
+        <SodBanner newSod={newSod} onRooted={confirmSodRooted} locked={locked} dictationPending={dictationPending} />
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked} micInside />
           <section className="tech-visit-choice-section">
@@ -1852,11 +1864,12 @@ function ProtocolAddOns({ newSod = null, addOns, month, weedMix = null, chinch =
 }
 
 // One opt-in product of the month: its name, the protocol's own words for it, and its tap.
-function AddOnLine({ item, sod = null, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
+function AddOnLine({ item, sod, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
   const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
+  const look = sodAddLook(sod);
   const why = [
     // GATE_LAWN_NEW_SOD_NOTE: the hold's reason (or the part-of-lawn skip note) leads the line.
-    sod?.held ? sod.reason : sod?.note || '',
+    sodWords(sod),
     item.substituteFor ? `In place of ${item.substituteFor}` : '',
     item.line || '',
     ...(item.gateNotes || []),
@@ -1866,7 +1879,7 @@ function AddOnLine({ item, sod = null, onSheet, waiting, unreadableNote = '', lo
     unreadableNote,
   ].filter(Boolean).join(' · ');
   return (
-    <div className={sod?.held ? 'tech-protocol-addon tech-sod-held-line' : 'tech-protocol-addon'}>
+    <div className={look.className}>
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">{item.product.name}</span>
         <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : why}</span>
@@ -1876,11 +1889,11 @@ function AddOnLine({ item, sod = null, onSheet, waiting, unreadableNote = '', lo
           type="button"
           variant="secondary"
           className="tech-visit-action tech-protocol-addon-add"
-          aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}${sod?.held ? ' anyway' : ''}`}
+          aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}${look.suffix}`}
           disabled={locked || onSheet}
           onClick={() => onAdd(item.product, { planned: item })}
         >
-          {onSheet ? '✓' : (sod?.held ? 'Add anyway' : 'Add')}
+          {onSheet ? '✓' : look.label}
         </Button>
       )}
     </div>
@@ -1893,7 +1906,7 @@ const CONFIRM_FIRST = 'Confirm the assessment first.';
 // "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
 // opens the rows it names (each seeded from its own plan item, as a single add-on is) and
 // they share one area. With nothing to add (the yearly limit is reached) it is a line only.
-function WeedSpotsEntry({ newSod = null, weedMix, items, places = null, labels = {}, onPlace, on, locked, waiting = false, onAdd }) {
+function WeedSpotsEntry({ newSod, weedMix, items, places = null, labels = {}, onPlace, on, locked, waiting = false, onAdd }) {
   // What a tap adds: with places (GATE_LAWN_TROUBLE_AREAS) one set per place, each tap naming its place; else the one set.
   const options = places || (items.length ? [{ id: '', items }] : []);
   const onSheet = (ids) => ids.some((id) => on.has(String(id).toLowerCase()));
@@ -1903,14 +1916,15 @@ function WeedSpotsEntry({ newSod = null, weedMix, items, places = null, labels =
   // What differs by place (a place at its limit, a place that takes the replacement) is said by place.
   const byPlace = places ? Object.entries(weedMix.byPlace || {}).filter(([, d]) => d.note && d.note !== weedMix.note) : [];
   // GATE_LAWN_NEW_SOD_NOTE: the entry's products are one weed killer class, so one hold line speaks for them.
-  const sod = items.map((item) => sodLineOf(newSod, item.productId)).find(Boolean) || null;
-  const line = [done ? 'On the sheet' : names, sod?.held ? sod.reason : sod?.note, weedMix.note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  const sod = items.map((item) => sodLineOf(newSod, item.productId)).find(Boolean);
+  const look = sodAddLook(sod);
+  const line = [done ? 'On the sheet' : names, sodWords(sod), weedMix.note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
   const add = (option) => {
     option.items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds', ...(places ? { source: 'tech_tap' } : {}) }));
     if (places) onPlace(option.id);
   };
   return (
-    <div className={sod?.held ? 'tech-protocol-addon tech-sod-held-line' : 'tech-protocol-addon'}>
+    <div className={look.className}>
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">Weed spots</span>
         <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : line.filter(Boolean).join(' · ')}</span>
@@ -1918,8 +1932,8 @@ function WeedSpotsEntry({ newSod = null, weedMix, items, places = null, labels =
       {options.length > 0 && !waiting && (places && !done
         ? <PlaceAddButtons choices={places} locked={locked} ariaPrefix="Add weed spots" onPick={(placeId) => add(places.find((choice) => choice.id === placeId))} />
         : (
-          <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={done ? 'Weed spots are on the sheet' : `Add weed spots${sod?.held ? ' anyway' : ''}`} disabled={locked || done} onClick={() => add(options[0])}>
-            {done ? '✓' : (sod?.held ? 'Add anyway' : 'Add')}
+          <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={done ? 'Weed spots are on the sheet' : `Add weed spots${look.suffix}`} disabled={locked || done} onClick={() => add(options[0])}>
+            {done ? '✓' : look.label}
           </Button>
         ))}
     </div>
@@ -2067,7 +2081,7 @@ const CHINCH_BUTTON = {
   done: { aria: 'Chinch bug treatment is on the sheet', text: '✓', disabled: true },
 };
 
-function ChinchFoundEntry({ newSod = null, chinch, catalog, places, labels, on, locked, waiting, onAdd, markChinch }) {
+function ChinchFoundEntry({ newSod, chinch, catalog, places, labels, on, locked, waiting, onAdd, markChinch }) {
   const { item, note } = chinch;
   // What a tap can add: with places (GATE_LAWN_TROUBLE_AREAS) one product per place, each tap naming its place; else the one product.
   const options = places || (item ? [{ id: '', item }] : []);
@@ -2082,8 +2096,8 @@ function ChinchFoundEntry({ newSod = null, chinch, catalog, places, labels, on, 
   // What differs by place (a place at its limit, a place that takes the second product) is said by place.
   const byPlace = Object.entries(chinch.byPlace || {}).filter(([, d]) => d.note && d.note !== note);
   // GATE_LAWN_NEW_SOD_NOTE: a chinch product a hold covers (Dylox at the end of the ladder) says so; the tap still works.
-  const sod = options.map((option) => sodLineOf(newSod, option.item.productId)).find(Boolean) || null;
-  const line = [names.length ? `${names.join(' or ')}, spot treatment` : null, sod?.held ? sod.reason : sod?.note, ...(item?.gateNotes || []), note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  const sod = options.map((option) => sodLineOf(newSod, option.item.productId)).find(Boolean);
+  const line = [names.length ? `${names.join(' or ')}, spot treatment` : null, sodWords(sod), ...(item?.gateNotes || []), note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
   const add = (option) => {
     onAdd(catalogProductFor(option.item, catalog), { planned: option.item, guided: 'chinch', ...(places ? { source: 'tech_tap', place: option.id } : {}) });
     if (markChinch) markChinch.onTap(option.item.productId);
