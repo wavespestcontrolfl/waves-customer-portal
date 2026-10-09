@@ -140,7 +140,7 @@ test('lawn_pricing_v2 carries the area add-on catalog beside the Bermuda flag, b
       }
       const { items } = (await call(baseUrl, 'GET', '/lawn_pricing_v2', { role: 'admin' })).json.areaAddOns;
       expect(items.find((item) => item.key === 'bed_pre_emergent')).toEqual({
-        key: 'bed_pre_emergent', name: 'Bed Pre-Emergent Weed Control', category: 'lawn_care', areaLabel: 'bed', tiers: [1000, 2000, 3500], maxPerYear: 2, requiresGrassTrack: null,
+        key: 'bed_pre_emergent', name: 'Bed Pre-Emergent Weed Control', category: 'lawn_care', areaLabel: 'bed', tiers: [1000, 2000, 3500], maxPerYear: 4, minDaysApart: 60, limitText: '4 in 12 months, at least 60 days apart', requiresGrassTrack: null,
       });
       expect(items.find((item) => item.key === 'lawn_insect_spot')).toMatchObject({ requiresGrassTrack: 'st_augustine', areaLabel: 'treated lawn' });
       expect(items.find((item) => item.key === 'web_sweep')).toMatchObject({ category: 'pest_control', areaLabel: null, tiers: null });

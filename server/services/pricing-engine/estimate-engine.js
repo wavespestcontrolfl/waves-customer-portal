@@ -1676,6 +1676,8 @@ function generateEstimate(input) {
     grassSources: [services.lawn, input, property],
     isCommercialManualQuote: useCommercialManualQuote,
     visit: services.areaAddOnVisit,
+    // Injected by the route from the database (services/area-addon-limits.js); the engine never queries.
+    history: services.areaAddOnHistory,
   });
   areaAddOns.lines.forEach((line) => {
     line.manualReviewReasons.forEach(addManualReviewReason);

@@ -123,7 +123,8 @@ function normalizeCatalogItem(item) {
     name: item.name,
     areaLabel: typeof item.areaLabel === "string" ? item.areaLabel : null,
     tiers: tiers.length > 0 ? tiers : null,
-    maxPerYear: positiveNumber(item.maxPerYear),
+    // The server states the yearly limit in one sentence ("4 in 12 months, at least 60 days apart"); none for the web sweep.
+    limitText: typeof item.limitText === "string" && item.limitText ? item.limitText : null,
     requiresGrassTrack: typeof item.requiresGrassTrack === "string" ? item.requiresGrassTrack : null,
   };
 }

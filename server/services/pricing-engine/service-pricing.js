@@ -10,6 +10,7 @@ const {
   BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
 const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
@@ -8569,6 +8570,16 @@ function priceAreaAddOn(addOnKey, options = {}) {
     customQuoteReason: reason,
   });
 
+  // The yearly limit (area-addon-limits.js): an add-on whose product is at its limit at this property, or
+  // whose history could not be read, is a custom quote with a staff-readable detail. No history given
+  // (no known customer) means no limit applies. The engine only reads the injected summary.
+  const limitVerdict = areaAddOnLimitVerdict(addOnKey, options.history);
+  if (limitVerdict) {
+    return customQuote(limitVerdict.reason, {
+      areaSqFt, tierSqFt, grassType: grassTrack, detail: limitVerdict.detail,
+      ...(limitVerdict.nextAllowedOn ? { limit: { count: limitVerdict.count, max: limitVerdict.max, lastAppliedOn: limitVerdict.lastAppliedOn, nextAllowedOn: limitVerdict.nextAllowedOn } } : {}),
+    });
+  }
   // A label-bound row (the Arena 2(ee) rate is St. Augustine only) prices
   // only for that verified grass; another or unknown grass is a custom quote.
   if (cfg.requiresGrassTrack && grassTrack !== cfg.requiresGrassTrack) {
@@ -8660,7 +8671,7 @@ function normalizeAreaAddOnVisit(visit) {
 // the first priced add-on the same way, on either visit: a second add-on does
 // not cost a second booking.
 // Returns the priced lines, the normalized requests and the visit (for the host check).
-function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote, visit } = {}) {
+function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote, visit, history } = {}) {
   // The estimate's grass: the first source (lawn service, request, property)
   // that names one, by `track` then `grassType`.
   const grassType = grassSources
@@ -8691,7 +8702,7 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
   const lines = requests
     .filter(({ entry, normalized }) => !isCommercialManualQuote?.(entry, normalized.addOnKey === 'web_sweep' ? 'pest_control' : 'lawn_care'))
     .map(({ options, normalized }) => {
-      const line = priceAreaAddOn(normalized.addOnKey, { ...options, carriesDrive: !driveCarried, carriesAdmin: !adminCarried });
+      const line = priceAreaAddOn(normalized.addOnKey, { ...options, history, carriesDrive: !driveCarried, carriesAdmin: !adminCarried });
       driveCarried = driveCarried || line.carriesVisitDrive === true;
       adminCarried = adminCarried || line.carriesJobAdmin === true;
       return line;
@@ -8700,8 +8711,8 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
 }
 
 // The estimator screen's add-on catalog, built from AREA_ADDONS so the screen
-// never hardcodes the table. maxPerYear is label-limit METADATA for the
-// screen (version 1 sells one application per estimate; nothing here reads it).
+// never hardcodes the table. maxPerYear / minDaysApart / limitText state the
+// yearly limit (area-addon-limits.js reads the same table) for the screen.
 function areaAddOnCatalog() {
   return Object.entries(AREA_ADDONS.items).map(([key, cfg]) => ({
     key,
@@ -8710,6 +8721,8 @@ function areaAddOnCatalog() {
     areaLabel: cfg.areaLabel,
     tiers: cfg.tiers ? [...cfg.tiers] : null,
     maxPerYear: cfg.maxPerYear,
+    minDaysApart: cfg.minDaysApart || null,
+    limitText: limitText(cfg),
     requiresGrassTrack: cfg.requiresGrassTrack || null,
   }));
 }

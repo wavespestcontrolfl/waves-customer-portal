@@ -19,12 +19,12 @@ const ADDRESS = "500 Example Court, Venice, FL 34285";
 // A catalog in the server's shape. The names are the server's to change; the
 // tests read whatever this payload says.
 const ITEMS = [
-  { key: "bed_pre_emergent", name: "Bed Pre-Emergent Weed Control", category: "lawn_care", areaLabel: "bed", tiers: [1000, 2000, 3500], maxPerYear: 2, requiresGrassTrack: null },
-  { key: "lawn_insect_spot", name: "Lawn Insect Spot Treatment", category: "lawn_care", areaLabel: "treated lawn", tiers: [1000, 2000, 3500], maxPerYear: 2, requiresGrassTrack: "st_augustine" },
-  { key: "fire_ant_yard", name: "Fire Ant Yard Treatment", category: "lawn_care", areaLabel: "lawn", tiers: [3000, 5000, 8000], maxPerYear: 1, requiresGrassTrack: null },
-  { key: "lawn_insect_preventive", name: "Yearly Lawn Insect Preventive", category: "lawn_care", areaLabel: "lawn", tiers: [3000, 5000, 8000], maxPerYear: 1, requiresGrassTrack: null },
-  { key: "hardscape_weed", name: "Shell, Rock & Paver Weed Control", category: "lawn_care", areaLabel: "treated", tiers: [1000, 2000, 3500], maxPerYear: 2, requiresGrassTrack: null },
-  { key: "web_sweep", name: "Web Sweep", category: "pest_control", areaLabel: null, tiers: null, maxPerYear: 12, requiresGrassTrack: null },
+  { key: "bed_pre_emergent", name: "Bed Pre-Emergent Weed Control", category: "lawn_care", areaLabel: "bed", tiers: [1000, 2000, 3500], limitText: "2 in 12 months", requiresGrassTrack: null },
+  { key: "lawn_insect_spot", name: "Lawn Insect Spot Treatment", category: "lawn_care", areaLabel: "treated lawn", tiers: [1000, 2000, 3500], limitText: "2 in 12 months", requiresGrassTrack: "st_augustine" },
+  { key: "fire_ant_yard", name: "Fire Ant Yard Treatment", category: "lawn_care", areaLabel: "lawn", tiers: [3000, 5000, 8000], limitText: "1 in 12 months", requiresGrassTrack: null },
+  { key: "lawn_insect_preventive", name: "Yearly Lawn Insect Preventive", category: "lawn_care", areaLabel: "lawn", tiers: [3000, 5000, 8000], limitText: "1 in 12 months", requiresGrassTrack: null },
+  { key: "hardscape_weed", name: "Shell, Rock & Paver Weed Control", category: "lawn_care", areaLabel: "treated", tiers: [1000, 2000, 3500], limitText: "2 in 12 months", requiresGrassTrack: null },
+  { key: "web_sweep", name: "Web Sweep", category: "pest_control", areaLabel: null, tiers: null, limitText: null, requiresGrassTrack: null },
 ];
 const catalog = (enabled = true, items = ITEMS) => ({ enabled, visitContexts: ["standalone", "sameTripAddOn"], items });
 
@@ -124,8 +124,8 @@ describe("add-on treatments group: availability and catalog", () => {
 
   it("builds its rows from the catalog payload, not from a table in the client", async () => {
     areaAddOns = catalog(true, [
-      { key: "bed_pre_emergent", name: "Server-Named Bed Job", category: "lawn_care", areaLabel: "bed", tiers: [500, 900], maxPerYear: 3, requiresGrassTrack: null },
-      { key: "web_sweep", name: "Server-Named Sweep", category: "pest_control", areaLabel: null, tiers: null, maxPerYear: 12, requiresGrassTrack: null },
+      { key: "bed_pre_emergent", name: "Server-Named Bed Job", category: "lawn_care", areaLabel: "bed", tiers: [500, 900], limitText: "3 in 12 months", requiresGrassTrack: null },
+      { key: "web_sweep", name: "Server-Named Sweep", category: "pest_control", areaLabel: null, tiers: null, limitText: null, requiresGrassTrack: null },
     ]);
     renderNew();
     const group = await openGroup();
@@ -135,7 +135,7 @@ describe("add-on treatments group: availability and catalog", () => {
     const tier = screen.getByLabelText("Bed area");
     expect(within(tier).getAllByRole("option").map((o) => o.textContent))
       .toEqual(["Up to 500 sq ft", "Up to 900 sq ft", "Larger: manual quote"]);
-    expect(screen.getByText("Label limit: 3 a year")).toBeInTheDocument();
+    expect(screen.getByText("Limit: 3 in 12 months")).toBeInTheDocument();
     // A flat job takes no area and shows no area select.
     fireEvent.click(box("Server-Named Sweep"));
     expect(document.getElementById("estimate-areaAddOn-web_sweep-tier")).toBeNull();
@@ -331,7 +331,7 @@ describe("notes and the grass track", () => {
     await openGroup();
     fireEvent.click(box("Lawn Insect Spot Treatment"));
     fireEvent.click(box("Shell, Rock & Paver Weed Control"));
-    expect(screen.getAllByText("Label limit: 2 a year").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Limit: 2 in 12 months").length).toBeGreaterThan(0);
     expect(screen.getByText("Hard surfaces and bare ground only. Keep off lawn, beds and root zones.")).toBeInTheDocument();
     expect(screen.getByText("St. Augustine only. Other grass becomes a manual quote.")).toBeInTheDocument();
     expect(screen.getByText("Choose the grass to price this. Until then it is a manual quote.")).toBeInTheDocument();
@@ -517,5 +517,32 @@ describe("preview rows", () => {
     expect(screen.getAllByText(/larger than our standard add-on sizes/).length).toBeGreaterThan(0);
     // An add-on carries no recurring-customer perk, so no -15% badge on its card.
     expect(screen.queryByText("-15%")).not.toBeInTheDocument();
+  });
+
+  it("a yearly-limit custom quote shows the plain reason and the staff detail with the last application and the next allowed day", async () => {
+    const detail = "Snapshot 2.5TG was applied or booked 1 time at this property in the last 12 months (limit 4 in 12 months, at least 60 days apart). Last on 2026-09-19. The next one is allowed on 2026-11-18.";
+    const row = {
+      service: "area_addon", addOnKey: "bed_pre_emergent", name: "Bed Pre-Emergent Weed Control", price: null, det: detail, detail,
+      quoteRequired: true, requiresCustomQuote: true, customQuoteReason: "area_addon_yearly_limit_reached",
+    };
+    calculateReply = () => Promise.resolve(jsonResponse({ ...RESULT, hasOneTime: true, oneTime: { total: 0, otSubtotal: 0, items: [], specItems: [row] }, specItems: [row] }));
+    renderNew();
+    await openGroup();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Pest Control", exact: true }));
+    await lookUp();
+    await generate();
+    expect((await screen.findAllByText(new RegExp(`Last on 2026-09-19. The next one is allowed on 2026-11-18`))).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/applied at your property too recently to repeat/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Quote Required").length).toBeGreaterThan(0);
+  });
+
+  it("the estimate request names the treated property for the add-ons' yearly limits", async () => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Pest Control", exact: true }));
+    await lookUp();
+    await generate();
+    await waitFor(() => expect(calculateBodies().length).toBeGreaterThan(0));
+    expect(calculateBodies()[0].options).toHaveProperty("propertyId", null);
   });
 });

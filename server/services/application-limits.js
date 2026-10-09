@@ -557,6 +557,10 @@ class ApplicationLimitChecker {
     return { type: 'min_interval_days', message: `${product.name}: only ${nearest} days from another application (min ${min}).`, current: nearest, max: min };
   }
 
+  // The treated-property scope of a history query, for readers outside this class (the area add-on yearly limits
+  // count the same rows the closeout audit counts). See scopeHistoryToTreatment.
+  scopeHistoryToTreatment(query, database, opts, table) { return scopeHistoryToTreatment(query, database, opts, table); }
+
   getYearStart(date) { return `${etCalendarDayOf(date).slice(0, 4)}-01-01`; }
 }
 

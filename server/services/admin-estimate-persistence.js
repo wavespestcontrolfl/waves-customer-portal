@@ -1171,6 +1171,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   if (deps.recurringCustomer === true || priorQualifyingServices.length > 0) {
     v1Input.recurringCustomer = true;
   }
+  // Same rule for the area add-ons' yearly-limit history: server-read or none, never the posted copy.
+  require('./area-addon-limits').applyAreaAddOnHistory(v1Input, deps.areaAddOnHistory);
   v1Input = await withTrustedCatalogPricing(v1Input, {
     database: deps.database,
     readRodentAdditionalCheckPriceFromCatalog: deps.readRodentAdditionalCheckPriceFromCatalog,
@@ -1350,7 +1352,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1367,7 +1369,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -2044,6 +2046,8 @@ async function resolveEstimateWritePayload({
     priorQualifyingServices,
     setupWaiverPriorQualifyingServices,
     recurringCustomer,
+    // The add-ons' yearly-limit history, read here from the verified customer (never from the posted data).
+    areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body),
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   const totals = pricing.totals;

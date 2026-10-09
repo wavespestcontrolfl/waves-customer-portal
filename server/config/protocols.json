@@ -2473,7 +2473,7 @@
           "soldAreaNoun": "of bed",
           "rate": "3.45 lb per 1,000 sq ft of bed (label range 2.3 to 4.6). Granular; water in.",
           "area": "Bed square feet treated.",
-          "limit": "Label limit 600 lb per acre (13.8 lb per 1,000 sq ft) in 12 months. At least 60 days between applications.",
+          "limit": "Label limit 600 lb per acre (13.8 lb per 1,000 sq ft) in 12 months: 4 applications, counting any lawn or Tree & Shrub program application. At least 60 days between applications.",
           "safety": "Beds must be weed-free first: it does not kill existing weeds."
         }
       },

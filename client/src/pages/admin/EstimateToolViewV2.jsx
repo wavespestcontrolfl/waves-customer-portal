@@ -4065,6 +4065,8 @@ export default function EstimateToolViewV2({
         // The matched account — the server derives its canonical qualifying
         // families for tier + rodent setup waiver (codex #3591 r16 P1).
         existingCustomerId: existingCustomerMatch?.id || form.customerId || null,
+        // The treated property: the add-ons' yearly limits read this property's history (null = the customer's only property).
+        propertyId: form.propertyId || null,
         // The quoted address + group anchor let the server scope the TIER
         // list per property (grouped / non-primary street) while the rodent
         // setup waiver stays account-wide — the same signals the save body

@@ -16,7 +16,7 @@ import {
 import { calculateEstimate } from "./estimateEngine";
 import { humanizeQuoteReason } from "./quoteDisplay";
 
-const item = { key: "k", name: "K", areaLabel: "bed", tiers: [1000, 2000, 3500], maxPerYear: 2, requiresGrassTrack: null };
+const item = { key: "k", name: "K", areaLabel: "bed", tiers: [1000, 2000, 3500], limitText: "2 in 12 months", requiresGrassTrack: null };
 const grassItem = { ...item, key: "g", requiresGrassTrack: "st_augustine" };
 
 describe("area add-on catalog read", () => {

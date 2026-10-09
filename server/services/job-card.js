@@ -1627,7 +1627,11 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources });
   if (readinessOnly) return dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
-  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
+  // A chemical area add-on's card also says how many applications of its product the property has had in 12 months.
+  const cards = await require('./area-addon-limits').attachLimitUse(
+    await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh }),
+    { catalog, serviceId: facts.serviceId, visitDay: facts.scheduledDate, dbh },
+  );
 
   // A month reference cannot bypass the job's label/weather holds. Keep
   // target and source details, but withhold scaled mixing amounts until

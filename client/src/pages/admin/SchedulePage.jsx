@@ -7327,6 +7327,7 @@ export function JobCardGoverned({ governed, D }) {
       {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
       <div>Area: {governed.area}</div>
       <div>Limit: {governed.limit}</div>
+      {governed.use && <div>{governed.use}</div>}
       {governed.safety && <div style={{ fontWeight: 500 }}>Safety: {governed.safety}</div>}
     </div>
   );

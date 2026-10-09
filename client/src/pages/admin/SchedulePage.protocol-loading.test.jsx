@@ -317,6 +317,12 @@ describe("Job card chemical area add-on", () => {
     expect(screen.getByText("Safety: Hard surfaces and bare ground only. Do not walk on it until dry.")).toBeVisible();
   });
 
+  it("says how many applications of the product the property has had in 12 months", async () => {
+    await show(card({ use: "Application 2 of 2 in 12 months; last applied 2026-08-01." }));
+    expect(await screen.findByText("Application 2 of 2 in 12 months; last applied 2026-08-01.")).toBeVisible();
+    expect(screen.getByText(/^Limit:/)).toBeVisible();
+  });
+
   it("shows the hold reason in place of a withheld rate, and no Safety line when none is stated", async () => {
     await show(card({ rate: null, rateNote: "Spray check: wind over 10 mph — rate withheld", safety: null }));
     expect(await screen.findByText("Spray check: wind over 10 mph — rate withheld")).toBeVisible();

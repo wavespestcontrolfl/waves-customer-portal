@@ -7993,6 +7993,9 @@ async function scheduleCreateHandler(req, res, next) {
           checkRecurring: linkedEstimate.status !== 'accepted',
         });
         if (addOnRefusal) return res.status(409).json({ error: addOnRefusal.message, code: addOnRefusal.code });
+        // The add-ons' yearly limits on the day being booked (the same recheck the customer's accept runs).
+        const limitRefusal = await require('../services/area-addon-limits').areaAddOnLimitRefusal(db, { estimate: linkedEstimate, appliedOn: scheduledDate, staff: true });
+        if (limitRefusal) return res.status(409).json(limitRefusal.body);
       }
       // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
       // (retired 2026-09-24) must not be booked-and-accepted here: the

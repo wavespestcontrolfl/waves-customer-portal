@@ -15,8 +15,8 @@ vi.mock("../../components/admin/EstimateSendDialog", () => ({ useEstimateSend: (
 const ADDRESS = "500 Example Court, Venice, FL 34285";
 const OTHER_ADDRESS = "9 Sample Row, Parrish, FL 34219";
 const ITEMS = [
-  { key: "bed_pre_emergent", name: "Bed Pre-Emergent Weed Control", category: "lawn_care", areaLabel: "bed", tiers: [1000, 2000, 3500], maxPerYear: 2, requiresGrassTrack: null },
-  { key: "web_sweep", name: "Web Sweep", category: "pest_control", areaLabel: null, tiers: null, maxPerYear: 12, requiresGrassTrack: null },
+  { key: "bed_pre_emergent", name: "Bed Pre-Emergent Weed Control", category: "lawn_care", areaLabel: "bed", tiers: [1000, 2000, 3500], limitText: "2 in 12 months", requiresGrassTrack: null },
+  { key: "web_sweep", name: "Web Sweep", category: "pest_control", areaLabel: null, tiers: null, limitText: null, requiresGrassTrack: null },
 ];
 const json = (body) => ({ ok: true, status: 200, json: async () => body, clone() { return this; }, text: async () => JSON.stringify(body) });
 

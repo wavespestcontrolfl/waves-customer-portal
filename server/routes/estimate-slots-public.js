@@ -737,7 +737,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
         revalidateEstimate: async (row, trx) => {
-          return lockedContactReviewRefusal(row, trx);
+          return (await lockedContactReviewRefusal(row, trx))
+            || require('../services/area-addon-limits').areaAddOnLimitRefusal(trx, { estimate: row });
         },
       });
       return res.status(201).json({

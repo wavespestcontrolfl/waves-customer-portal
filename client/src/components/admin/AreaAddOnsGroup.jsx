@@ -36,7 +36,7 @@ function areaFieldLabel(item) {
 
 function rowNotes(item, entry) {
   const notes = [];
-  if (item.tiers && item.maxPerYear) notes.push(`Label limit: ${item.maxPerYear} a year`);
+  if (item.limitText) notes.push(`Limit: ${item.limitText}`);
   if (item.requiresGrassTrack) {
     notes.push(`${GRASS_NAMES[item.requiresGrassTrack] || "One grass"} only. Other grass becomes a manual quote.`);
     if (!entry.grassType) notes.push("Choose the grass to price this. Until then it is a manual quote.");

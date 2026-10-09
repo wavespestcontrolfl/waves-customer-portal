@@ -11791,6 +11791,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       }
 
+      // The add-ons' yearly limits, rechecked HERE: the customer lock above serializes accepts of this customer, so two
+      // estimates cannot each book "the one allowed" application, and history may have changed since the quote.
+      await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, { estimate, customerId: acceptPreLockedCommsId, appliedOn: acceptPreLockedDate });
+
       const acceptedUpdates = {
         status: 'accepted',
         accepted_at: trx.fn.now(),

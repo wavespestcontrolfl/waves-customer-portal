@@ -20,6 +20,10 @@ const FRIENDLY_QUOTE_REASONS = {
     "Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.",
   area_addon_area_above_largest_tier:
     "This area is larger than our standard add-on sizes — Waves will confirm the price with you before it’s finalized.",
+  area_addon_yearly_limit_reached:
+    "This treatment was applied at your property too recently to repeat — Waves will confirm what can be scheduled and the price before it’s finalized.",
+  area_addon_history_unavailable:
+    "Waves could not check this property’s treatment history — Waves will confirm this treatment and its price before it’s finalized.",
   area_addon_grass_not_covered_by_label_rate:
     "This treatment is priced for St. Augustine lawns only — Waves will confirm the right option and price for your grass before it’s finalized.",
 };

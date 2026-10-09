@@ -1538,10 +1538,16 @@ const ONE_TIME = {
 // (SiteOne catalog prices, 2026-10-08). Labor minutes are ESTIMATES, not
 // measured times — recalibrate against completed jobs before re-pricing.
 // Version 1 sells ONE application per estimate (owner ruling 2026-10-08): a
-// second application is a new estimate. maxPerYear is label-limit METADATA
-// only (label ceiling or owner ruling, most applications a property may be
-// sold in 12 months): the catalog payload gives it to the estimator screen,
-// and nothing in the pricer reads it.
+// second application is a new estimate.
+// YEARLY LIMITS (owner ruling 2026-10-08, add-on-only): maxPerYear is the most
+// applications of the add-on's product at one property in any 12 months,
+// program applications and add-on applications both counting, and
+// minDaysApart the days required between two of them; limitProduct is the
+// catalog product the history is read for (the name the governed protocol
+// area_addon hints). The limit only ever blocks the ADD-ON, never a program
+// visit. This table is the ONE source: the pricer (area-addon-limits.js), the
+// catalog payload, the job card and the accept recheck all read it, and a test
+// pins the protocol's label text to it. No limit (maxPerYear null) = unlimited.
 // serviceKey is the add-on's own `services` catalog key (migration
 // 20261008200000): the engine line and the mapped row carry it so nothing
 // downstream guesses a service from the display name. category is the
@@ -1551,8 +1557,8 @@ const AREA_ADDONS = {
   targetMargin: 0.60,
   adminPerJob: 8,             // booking + invoicing of ONE job (the whole add-on group), charged once
   items: {
-    // Snapshot 2.5TG at 3.45 lb/1,000 ($2.99/lb). Owner ruling: offer 2 a
-    // year to pest customers (label: 600 lb/acre per 12 months, 60 days apart).
+    // Snapshot 2.5TG at 3.45 lb/1,000 ($2.99/lb). Label: 600 lb/acre = 13.8 lb per
+    // 1,000 sq ft in 12 months, at least 60 days apart (owner ruling 2026-10-08).
     bed_pre_emergent: {
       name: 'Bed Pre-Emergent Weed Control',
       serviceKey: 'area_addon_bed_pre_emergent',
@@ -1562,7 +1568,10 @@ const AREA_ADDONS = {
       setupMin: 6,
       minPer1000: 8,
       tiers: [1000, 2000, 3500],
-      maxPerYear: 2,
+      // 4 x 3.45 lb = the label's 13.8 lb per 1,000 sq ft in 12 months, program applications counted.
+      maxPerYear: 4,
+      minDaysApart: 60,
+      limitProduct: 'Snapshot 2.5TG',
     },
     // Arena 50 WDG at 0.147 oz/1,000 (6.4 oz/acre, $9.87/oz): the Florida
     // 2(ee) rate for southern chinch bug on St. Augustine (sheet expires
@@ -1579,7 +1588,10 @@ const AREA_ADDONS = {
       setupMin: 8,
       minPer1000: 6,
       tiers: [1000, 2000, 3500],
+      // Same as the v13 lawn program's own Arena cap (lawn-v13-count-caps.js): 2 a year, 56 days (8 weeks) apart.
       maxPerYear: 2,
+      minDaysApart: 56,
+      limitProduct: 'Arena 50 WDG',
       // The 2(ee) rate and its two-application ceiling cover St. Augustine
       // only: any other or unknown grass is a custom quote, never this price.
       requiresGrassTrack: 'st_augustine',
@@ -1595,6 +1607,7 @@ const AREA_ADDONS = {
       minPer1000: 2.5,
       tiers: [3000, 5000, 8000],
       maxPerYear: 1,
+      limitProduct: 'Topchoice Granular Insecticide',
     },
     // Acelepryn at 0.184 fl oz/1,000 ($14.14/fl oz), once a year (April).
     lawn_insect_preventive: {
@@ -1607,6 +1620,7 @@ const AREA_ADDONS = {
       minPer1000: 2.5,
       tiers: [3000, 5000, 8000],
       maxPerYear: 1,
+      limitProduct: 'Acelepryn Insecticide',
     },
     // Weed kill on shell, rock beds, pavers and fence lines. Roundup QuikPro
     // SC Total at the label rate, 16 fl oz/1,000 ($1.155/fl oz). Label limit
@@ -1622,6 +1636,7 @@ const AREA_ADDONS = {
       minPer1000: 6,
       tiers: [1000, 2000, 3500],
       maxPerYear: 2,
+      limitProduct: 'Roundup QuikPro SC',
     },
     // Web sweep of pool cage, lanai and eaves between visits: labor only,
     // one flat job (no area tiers).
@@ -1634,7 +1649,8 @@ const AREA_ADDONS = {
       setupMin: 25,
       minPer1000: 0,
       tiers: null,
-      maxPerYear: 12,
+      maxPerYear: null,
+      limitProduct: null,
     },
   },
 };
