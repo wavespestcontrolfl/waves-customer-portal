@@ -9,7 +9,7 @@
  * existing staff action verify_pin with the truck's parked point as the new pin. This job FINDS those customers
  * and SUGGESTS the parked point. A person confirms it; nothing here changes a pin.
  *
- * Once a day, for visits COMPLETED in the last 2 ET days whose technician has a Bouncie vehicle:
+ * Once a day, for visits COMPLETED in the last 3 ET days (COMPLETED_WINDOW_DAYS) whose technician has a Bouncie vehicle:
  *   1. Destination = the visit's own lat/lng, else the customer's stored pin. The geocoder is never called.
  *      A visit stamped at another address than the customer's primary (a rental, a second property) is skipped.
  *   2. The vehicle's stops on the visit's ET day(s) come from bouncie_webhook_log (bouncie-truck-stops.js).
@@ -53,6 +53,7 @@ const HOME_LOOKBACK_DAYS = 30;
 const HOME_MIN_DAYS = 3;
 const FENCE_TYPES = ['business', 'personal', 'supplier'];
 const PENDING_BELL_LIMIT = 50;
+const COMPLETED_WINDOW_DAYS = 3;
 const RETIRE_LIMIT = 500;
 const NEIGHBOUR_LIMIT = 2000;
 
@@ -298,6 +299,29 @@ function judgeVisit({ visit, stops, radius, context }) {
 
 const BLOCKED_REVIEW = ['verified', 'outside_area'];
 
+const samePoint = (aLat, aLng, bLat, bLng) => {
+  const a = usablePin(aLat, aLng);
+  const b = usablePin(bLat, bLng);
+  return a == null || b == null ? a == null && b == null : store.same7(a.lat, b.lat) && store.same7(a.lng, b.lng);
+};
+
+/**
+ * The verdict was built on a snapshot read earlier in the run. Under the customer's locks, read the visit and its
+ * technician's tracker mapping again: if the visit was reassigned, moved, reopened, or the technician was pointed at
+ * another device since, the evidence no longer describes it and nothing is suggested. Plain reads: no new lock.
+ */
+async function visitUnchanged(trx, visit) {
+  const now = await trx('scheduled_services as s').join('technicians as t', 't.id', 's.technician_id').where('s.id', visit.id)
+    .first('s.technician_id', 's.customer_id', 's.status', 's.lat', 's.lng', 't.bouncie_imei', 't.bouncie_imei_changed_at');
+  if (!now || now.status !== 'completed') return false;
+  if (String(now.technician_id) !== String(visit.technician_id) || String(now.customer_id) !== String(visit.customer_id)) return false;
+  if (!samePoint(now.lat, now.lng, visit.service_lat, visit.service_lng)) return false;
+  if (String(now.bouncie_imei || '').trim() !== visit.bouncie_imei) return false;
+  const before = visit.mapping_changed_at ? new Date(visit.mapping_changed_at).getTime() : null;
+  const after = now.bouncie_imei_changed_at ? new Date(now.bouncie_imei_changed_at).getTime() : null;
+  return before === after;
+}
+
 async function recordSuggestion(conn, visit, verdict) {
   try {
     return await conn.transaction(async (trx) => {
@@ -318,6 +342,7 @@ async function recordSuggestion(conn, visit, verdict) {
       const read = usablePin(visit.customer_latitude, visit.customer_longitude);
       if (!read || !(store.same7(pin.lat, read.lat) && store.same7(pin.lng, read.lng))) return { skipped: 'pin_changed' };
       if (!isInServiceAreaBox(verdict.parked.lat, verdict.parked.lng, { zip: customer.zip })) return { skipped: 'outside_service_area' };
+      if (!(await visitUnchanged(trx, visit))) return { skipped: 'visit_changed' };
       return await insertSuggestion(trx, visit, verdict, pin);
     });
   } catch (err) {
@@ -592,7 +617,10 @@ async function runPinParkedCheck({ now = new Date(), conn = db } = {}) {
   if (!pinParkedCheckLive()) return { skipped: 'gated', retired: await retireAllOpen(conn) };
   if (!reviewEnabled()) return { skipped: 'review_disabled', retired: await retireAllOpen(conn) };
   const radius = (await loadArrivalConfig()).radiusMeters;
-  const days = [etDateString(addETDays(now, -1)), etDateString(now)];
+  // Visits completed in the last COMPLETED_WINDOW_DAYS ET days (today included). Telemetry can arrive up to 12 hours
+  // late, so a visit closed late yesterday is judged again today and the day after: every visit gets at least one
+  // run after its grace period. Decisions are idempotent per customer, so judging a visit again is harmless.
+  const days = [etDateString(addETDays(now, -(COMPLETED_WINDOW_DAYS - 1))), etDateString(now)];
   const window = { fromMs: etDayBounds(days[0]).startMs, toMs: etDayBounds(days[1]).endMs, radius, now };
   const tally = { created: 0, closed: 0 };
   tally.closed += await closeSettledSuggestions(conn);
@@ -621,7 +649,7 @@ module.exports = {
   runPinParkedCheck,
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
-    alertDetail, settledReason, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    alertDetail, settledReason, visitUnchanged, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

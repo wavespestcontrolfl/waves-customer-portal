@@ -738,7 +738,8 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
         scheduled_date: '2026-10-07', completed_at: new Date('2026-10-07T15:00:00Z'), lat: neighbourPin.lat, lng: neighbourPin.lng,
       });
       await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
-      const result = await run();
+      // Judged on Oct 10: the delayed visit (closed Oct 8) is in the window, the neighbour's job (closed Oct 7) is not.
+      const result = await runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg });
       expect(result).toMatchObject({ visits: 1, created: 0, neighbour_visit: 1 });
       expect(await all(customerId)).toHaveLength(0);
     });
@@ -806,6 +807,100 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       await truckStopsAt(north(540), 30);
       expect((await run()).created).toBe(0);
       expect(await all(customerId)).toHaveLength(0);
+    });
+  });
+
+  describe('the completed-visit window is 3 ET days (late telemetry gets another run)', () => {
+    test('a visit completed two ET days ago is still judged; three days ago is not', async () => {
+      const techId = await technician();
+      const recent = await customer();
+      await completedVisit(recent, techId, { scheduled_date: '2026-10-07', completed_at: new Date('2026-10-07T15:30:00Z') });
+      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      const old = await customer();
+      await completedVisit(old, techId, { scheduled_date: '2026-10-06', completed_at: new Date('2026-10-06T15:30:00Z') });
+      expect((await run()).visits).toBe(1);
+      expect(await all(old)).toHaveLength(0);
+    });
+
+    test('judging the same visit again on later days never duplicates or re-rings', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      for (const day of ['2026-10-08T22:00:00Z', '2026-10-09T12:00:00Z', '2026-10-10T12:00:00Z']) {
+        await runPinParkedCheck({ now: new Date(day), conn: mockPg });
+      }
+      expect(await all(customerId)).toHaveLength(1);
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('the snapshot is read again before a suggestion is written', () => {
+    async function snapshot() {
+      const techId = await technician();
+      const customerId = await customer();
+      const visitId = await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      const [visit] = (await pin.loadCompletedVisits(mockPg, { fromMs: Date.parse('2026-10-07T04:00:00Z'), toMs: Date.parse('2026-10-10T04:00:00Z') }))
+        .filter((v) => v.id === visitId);
+      const verdict = { flag: true, pin: PIN, parked: north(540), distanceM: 540, stopMinutes: 30, stopStartedAt: new Date('2026-10-08T14:20:00Z') };
+      return { techId, customerId, visitId, visit, verdict };
+    }
+    const tryRecord = (visit, verdict) => pin.recordSuggestion(mockPg, visit, verdict);
+
+    test('an unchanged snapshot writes the suggestion', async () => {
+      const { customerId, visit, verdict } = await snapshot();
+      expect(await tryRecord(visit, verdict)).toMatchObject({ created: expect.any(Object) });
+      expect(await open(customerId)).toHaveLength(1);
+    });
+
+    test.each([
+      ['the visit was reassigned to another technician', async (c) => {
+        const other = await technician('TESTIMEI0077');
+        await mockPg('scheduled_services').where({ id: c.visitId }).update({ technician_id: other });
+      }],
+      ['the visit destination moved', (c) => mockPg('scheduled_services').where({ id: c.visitId }).update({ lat: PIN.lat + 0.01 })],
+      ['the visit was reopened', (c) => mockPg('scheduled_services').where({ id: c.visitId }).update({ status: 'confirmed' })],
+      ['the technician was pointed at another device', (c) => mockPg('technicians').where({ id: c.techId }).update({ bouncie_imei: 'TESTIMEI0078', bouncie_imei_changed_at: new Date() })],
+      ['the tracker mapping was re-stamped', (c) => mockPg('technicians').where({ id: c.techId }).update({ bouncie_imei_changed_at: new Date('2026-10-01T00:00:00Z') })],
+    ])('%s: nothing is written', async (_name, change) => {
+      const c = await snapshot();
+      await change(c);
+      expect(await tryRecord(c.visit, c.verdict)).toEqual({ skipped: 'visit_changed' });
+      expect(await all(c.customerId)).toHaveLength(0);
+    });
+  });
+
+  describe('a customer merge whose full retire fails', () => {
+    const dedupe = () => require('../services/customer-dedupe')._test.retirePinSuggestionsBeforeSweep;
+
+    test('falls back to superseding the open suggestion and closing its bell, and the merge goes on', async () => {
+      const loser = await openSuggestionWithBell();
+      const spy = jest.spyOn(store, 'retireOnMerge').mockRejectedValueOnce(new Error('lock service down'));
+      try {
+        await dedupe()(mockPg, loser.customerId);
+      } finally { spy.mockRestore(); }
+      expect(await open(loser.customerId)).toHaveLength(0);
+      expect((await all(loser.customerId))[0].status).toBe('superseded');
+      expect((await bellNow(loser.bell.id)).done_at).not.toBeNull();
+    });
+
+    test('if even the fallback fails, the error reaches the merge so it aborts', async () => {
+      const loser = await openSuggestionWithBell();
+      const first = jest.spyOn(store, 'retireOnMerge').mockRejectedValueOnce(new Error('lock service down'));
+      const second = jest.spyOn(store, 'retireOnMergeMinimal').mockRejectedValueOnce(new Error('notifications down'));
+      try {
+        await expect(dedupe()(mockPg, loser.customerId)).rejects.toThrow('notifications down');
+      } finally { first.mockRestore(); second.mockRestore(); }
+      expect((await open(loser.customerId))).toHaveLength(1); // the savepoints rolled back: still open, merge retried whole
+    });
+
+    test('the fallback alone is idempotent and leaves no open row', async () => {
+      const loser = await openSuggestionWithBell();
+      expect(await store.retireOnMergeMinimal(mockPg, loser.customerId)).toBe(1);
+      expect(await store.retireOnMergeMinimal(mockPg, loser.customerId)).toBe(0);
+      expect((await bellNow(loser.bell.id)).done_at).not.toBeNull();
     });
   });
 

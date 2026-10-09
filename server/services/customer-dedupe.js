@@ -1758,11 +1758,15 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
 // retired (superseded, its bell closed) and its closed history moves to the winner; the winner's open row stays.
 // executeMerge retires it before the sweep, so this handler is the backstop for a row opened in between.
 async function retirePinSuggestionsBeforeSweep(trx, loserId) {
+  const pins = require('./customer-pin-suggestions');
   try {
-    await trx.transaction((sp) => require('./customer-pin-suggestions').retireOnMerge(sp, loserId));
+    await trx.transaction((sp) => pins.retireOnMerge(sp, loserId));
   } catch (err) {
-    // A failed retire must not poison the merge: the collision handler above retires again if the sweep needs it.
-    logger.warn('[customer-dedupe] could not retire the loser pin suggestion', { error: err.code || err.name });
+    // The full retire failed (in its own savepoint, so the merge transaction is intact). Fall back, still inside
+    // this merge, to the minimal safe state: the open suggestion superseded and its bell closed. If even that
+    // fails the error propagates and the merge aborts: a failed merge can be retried, a half-reconciled one cannot.
+    logger.warn('[customer-dedupe] retiring the loser pin suggestion failed; using the minimal fallback', { error: err.code || err.name });
+    await trx.transaction((sp) => pins.retireOnMergeMinimal(sp, loserId));
   }
 }
 
@@ -7236,6 +7240,7 @@ module.exports = {
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
+    retirePinSuggestionsBeforeSweep,
     stableStringify,
     normalizeDisclosedTimestamps,
     resetFkCache: () => { fkColumnsCache = null; },

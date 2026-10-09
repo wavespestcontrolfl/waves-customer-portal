@@ -129,6 +129,20 @@ async function retireOnMerge(trx, loserId) {
   return rows.length;
 }
 
+/**
+ * The minimal safe state for a merge when retireOnMerge failed: the loser's open suggestion is superseded with a
+ * plain update (the merge already holds the customer rows; no advisory lock, which may be what failed) and its bell
+ * is closed by dedupe key. Throws if even that fails, so the merge aborts and can be retried.
+ */
+async function retireOnMergeMinimal(trx, loserId) {
+  const rows = await trx('customer_pin_suggestions').where({ customer_id: loserId, status: 'open' })
+    .update({ status: 'superseded', resolved_at: trx.fn.now(), updated_at: trx.fn.now() }).returning('id');
+  if (rows.length) {
+    await closeAdminAlertKeys(trx, rows.map(({ id }) => alertKey(id)), 'merged', { resolution: 'Closed: the customer was merged into another account' });
+  }
+  return rows.length;
+}
+
 /** Closes the customer's open suggestion (if any) as superseded. */
 async function supersedeOpen(customerId, reason, conn = db) {
   const open = await openForCustomer(customerId, conn);
@@ -171,6 +185,6 @@ async function closeAfterVerify(customerId, { suggestionId = null, actorId = nul
 }
 
 module.exports = {
-  alertKey, lockCustomer, evidenceText, publicShape, openForCustomer, visibleSuggestion, closeSuggestion, supersedeOpen, retireOnMerge, dismiss,
+  alertKey, lockCustomer, evidenceText, publicShape, openForCustomer, visibleSuggestion, closeSuggestion, supersedeOpen, retireOnMerge, retireOnMergeMinimal, dismiss,
   closeAfterVerify, closeBell, same7, dayText, SOURCE, COLUMNS,
 };
