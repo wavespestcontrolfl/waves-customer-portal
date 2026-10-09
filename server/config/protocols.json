@@ -644,7 +644,7 @@
         "★ NEW v4: Irrigated vs. Non-irrigated classification at V1 — drives product load. Non-irrigated: skip K-Flow, skip Moist",
         "★ NEW v4: Mole cricket IPM — soapy water flush method defined. Threshold ≥2 per 2 sq ft. Acelepryn preventive + Dylox cu",
         "★ NEW v4: T-Storm removed from Oct default — fungicide now conditional on active dollar spot only. Low-input = no \"just ",
-        "★ NEW v4: Fire ant protocol — Topchoice broadcast ONCE/yr at V4 for documented history. 12-month control. Prevents callb",
+        "★ NEW v4: Fire ant protocol — Topchoice broadcast ONCE/yr at V4 for documented history. The label lists about 1 year of fire ant control. Topchoice: its own pass, not blended with the visit's other products (the label says not to apply it in combination with other materials); one application per lawn per year; water in after application, within 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises.",
         "★ NEW v4: Crabgrass — NO bahia-safe post-emergent curative (Drive/quinclorac NOT labeled for bahia); rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.",
         "★ NEW v4: SpeedZone Sep weather-gated at 85°F. Soil-test branching. Explicit N rates (0.75 lb N/1K per app).",
         "★ NEW v4: Seed head customer communication at V1+V7. Aug all-tier scout. Dec all-tier touchpoint. $60 conditional ceilin",
@@ -703,7 +703,7 @@
           "visit": 4,
           "month": "Apr",
           "primary": "Acelepryn Xtra preventive ($6.78)\n★ SpeedZone Southern WEATHER-GATED ($5.95)\nK-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow (needs water to activate)",
-          "secondary": "★ Topchoice BROADCAST if fire ant history ($8.22)\n— provides 12-month control, prevents callbacks\n★ IF forecast >85°F → DEFER broadleaf (no bahia-safe herbicide when hot)\nMole cricket: Acelepryn covers nymphs",
+          "secondary": "★ Topchoice BROADCAST if fire ant history ($8.22)\n— the label lists about 1 year of fire ant control; its own pass, not blended with the visit's other products (the label says not to apply it in combination with other materials); one application per lawn per year; water in after application, within 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises\n★ IF forecast >85°F → DEFER broadleaf (no bahia-safe herbicide when hot)\nMole cricket: Acelepryn covers nymphs",
           "material_cost": "27.38",
           "labor_cost": "26.96",
           "tiers": {
@@ -712,7 +712,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Acelepryn covers mole cricket nymphs — critical. ★ Fire ant: Topchoice broadcast for documented history (not \"if severe\"). ★ SpeedZone weather-gated. ★ K-Flow skipped on non-irrigated.",
+          "notes": "Acelepryn covers mole cricket nymphs — critical. ★ Fire ant: Topchoice broadcast for documented history (not \"if severe\"): its own pass, not blended with the visit's other products (the label says not to apply it in combination with other materials); one application per lawn per year; water in after application, within 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises. ★ SpeedZone weather-gated. ★ K-Flow skipped on non-irrigated.",
           "conditional_cost": "2.06"
         },
         {
@@ -799,7 +799,7 @@
           "visit": 10,
           "month": "Oct",
           "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\n★ T-Storm CONDITIONAL — ONLY if dollar spot active ($6.15)\nChelated Iron Plus ($1.52)",
-          "secondary": "★ Mole cricket: Dylox 420 SL fall curative if tunneling ($12.53)\n★ Topchoice fall app ONLY if spring Topchoice not applied ($8.22)\nSoil re-test problem props — OPTIONAL on request",
+          "secondary": "★ Mole cricket: Dylox 420 SL fall curative if tunneling ($12.53)\n★ Topchoice fall app ONLY if spring Topchoice not applied ($8.22): its own pass, not blended with the visit's other products (the label says not to apply it in combination with other materials); one application per lawn per year; water in after application, within 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises\nSoil re-test problem props — OPTIONAL on request",
           "material_cost": "24.38",
           "labor_cost": "26.96",
           "tiers": {
@@ -808,7 +808,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "N app 2/2 FINAL @ 0.75 lb N/1K. ★ T-Storm demoted from default to conditional (Bahia = low disease). ★ Fall mole cricket Dylox curative defined. ★ Topchoice fall option.",
+          "notes": "N app 2/2 FINAL @ 0.75 lb N/1K. ★ T-Storm demoted from default to conditional (Bahia = low disease). ★ Fall mole cricket Dylox curative defined. ★ Topchoice fall option: its own pass, not blended with the visit's other products (the label says not to apply it in combination with other materials); one application per lawn per year; water in after application, within 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises.",
           "conditional_cost": "5.19"
         },
         {

@@ -156,3 +156,48 @@ describe('the other files that name the product', () => {
     expect(source).not.toContain('v13_advion_fire_ant');
   });
 });
+
+describe('the gate-off recipe (protocols.json) carries the same Topchoice label rules', () => {
+  const legacy = require('../config/protocols.json');
+  const lawnTexts = () => {
+    const found = [];
+    const walk = (value, where) => {
+      if (Array.isArray(value)) value.forEach((item, index) => walk(item, `${where}[${index}]`));
+      else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => walk(item, `${where}/${key}`));
+      else if (typeof value === 'string' && /Topchoice/.test(value)) found.push({ where, text: value });
+    };
+    walk(legacy.lawn, 'lawn');
+    return found;
+  };
+
+  test('every Topchoice line of the legacy program (the bahia note, April and October secondary and notes) states the label rules', () => {
+    const texts = lawnTexts();
+    expect(texts.map((entry) => entry.where)).toEqual([
+      'lawn/bahia/notes[8]', 'lawn/bahia/visits[3]/secondary', 'lawn/bahia/visits[3]/notes', 'lawn/bahia/visits[9]/secondary', 'lawn/bahia/visits[9]/notes',
+    ]);
+    for (const { where, text } of texts) {
+      for (const part of [
+        'its own pass, not blended with the visit\'s other products (the label says not to apply it in combination with other materials)',
+        'one application per lawn per year',
+        'water in after application, within 24 hours',
+        'not within 15 ft of fresh water or 60 ft of tidal water',
+        'restricted use product, a certified applicator applies or supervises',
+      ]) expect({ where, has: text.includes(part) }).toEqual({ where, has: true });
+    }
+  });
+
+  test('no efficacy claim beyond the label: "prevents callbacks" and "12-month control" are gone; the one-year figure is the label\'s', () => {
+    const joined = lawnTexts().map((entry) => entry.text).join('\n');
+    expect(joined).not.toMatch(/prevents callb|12-month|provides/i);
+    expect(joined).toContain('The label lists about 1 year of fire ant control');
+    // No rate is introduced: the legacy lines stated none.
+    expect(joined).not.toMatch(/\d\s*lb per/);
+  });
+
+  test('the v13 recipe, the legacy recipe and the migration agree on the watering window and the buffers', () => {
+    for (const text of [...lawnTexts().map((entry) => entry.text), addOnLines('st_augustine', 'Apr')[0]]) {
+      expect(text).toMatch(/water in after application, within 24 hours/);
+      expect(text).toMatch(/not within 15 ft of fresh water or 60 ft of tidal water/);
+    }
+  });
+});
