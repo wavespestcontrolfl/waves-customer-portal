@@ -32,12 +32,14 @@ const COCKROACH_TYPED_TYPE = 'cockroach';
 
 // Package sizes the catalog itself defines. cockroach_control is the
 // two-treatment package (TWO_TREATMENT_PACKAGE_KEYS, typed-followup-
-// obligation.js); german_roach_initial is sold as three visits
-// (migration 20260809000000). german_roach ("cleanout") is severity-priced
+// obligation.js) and so is vehicle_german_roach (migration 20261008150000:
+// the car job is the same typed report, two treatments); german_roach_initial
+// is sold as three visits (migration 20260809000000). german_roach ("cleanout") is severity-priced
 // with "the return trips needed" — its size is not a catalog fact, so the
 // calendar decides (see resolveProgram).
 const PACKAGE_TREATMENTS_BY_KEY = {
   cockroach_control: 2,
+  vehicle_german_roach: 2,
   german_roach_initial: 3,
 };
 
@@ -92,6 +94,7 @@ const PREP_COPY = [
 // joins only when bait was actually recorded today (local codex P1 —
 // never instruct the customer about placements that were not made).
 const GERMAN_DEFAULT_PREP_KEYS = ['no_sprays', 'food_debris'];
+const VEHICLE_SERVICE_KEYS = new Set(['vehicle_german_roach']);
 
 function chips(value) {
   if (Array.isArray(value)) return value.map((v) => String(v || '').trim()).filter(Boolean);
@@ -170,7 +173,7 @@ function buildWork(workChips) {
   return items;
 }
 
-function buildHelp({ prepChips, species, baitRecorded = false }) {
+function buildHelp({ prepChips, species, baitRecorded = false, serviceKey = null }) {
   const picked = [];
   for (const chip of prepChips) {
     const rule = PREP_COPY.find((r) => r.match.test(chip));
@@ -182,6 +185,10 @@ function buildHelp({ prepChips, species, baitRecorded = false }) {
       if (!picked.some((p) => p.key === key)) picked.push({ key, text: PREP_COPY.find((r) => r.key === key).text });
     }
   }
+  // A car job gets the same instructions minus the one about household
+  // appliances, whether it came from the defaults or from a picked chip (owner
+  // 2026-10-08: same treatment, nothing vehicle-specific is written).
+  const items = VEHICLE_SERVICE_KEYS.has(String(serviceKey || '')) ? picked.filter((p) => p.key !== 'food_debris') : picked;
   let why = null;
   if (isGerman(species)) {
     why = baitRecorded
@@ -189,10 +196,10 @@ function buildHelp({ prepChips, species, baitRecorded = false }) {
       : 'German cockroach control fails most often when sprays are used between visits — they scatter roaches into new harborage.';
   } else if (isLargeRoach(species)) {
     why = 'Some activity may be seen temporarily as roaches are flushed from hiding areas. Moisture and exterior entry points are what keep large roaches coming in.';
-  } else if (picked.length) {
+  } else if (items.length) {
     why = 'The treatment works best when the conditions that feed and shelter roaches are removed between visits.';
   }
-  return { items: picked, why };
+  return { items, why };
 }
 
 /**
@@ -411,7 +418,7 @@ function buildCockroachReportV2({
   const evidence = chips(values.evidence_observed);
   const conditions = chips(values.conducive_conditions);
   const work = buildWork(chips(values.work_completed));
-  const help = buildHelp({ prepChips: chips(values.customer_prep), species, baitRecorded: recordedWork(work).bait });
+  const help = buildHelp({ prepChips: chips(values.customer_prep), species, baitRecorded: recordedWork(work).bait, serviceKey });
   if (!species && !activityLevel && !locations.length && !work.length) return null;
 
   const status = resolveCockroachStatus({ activityLevel, species, activity, visitSequence, evidence });
