@@ -71,6 +71,13 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source.indexOf('target.source_build_phase')).toBeLessThan(source.indexOf('Add $SCENE_KEY dict'));
   });
 
+  test('bootstrap-ios answers the export compliance question in Info.plist', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    // A boolean, not a string: App Store Connect ignores a string value and holds the build.
+    expect(source).toContain('Add :ITSAppUsesNonExemptEncryption bool false');
+    expect(source).not.toMatch(/set_plist ITSAppUsesNonExemptEncryption/);
+  });
+
   test('Xcode Cloud can generate the ignored iOS project from a clean clone', () => {
     const postClone = path.join(root, 'client/ios/App/ci_scripts/ci_post_clone.sh');
     // Xcode Cloud runs ci_scripts/ci_post_clone.sh from beside the workspace, and only if it is executable.
