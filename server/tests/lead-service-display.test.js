@@ -79,6 +79,7 @@ describe('leadServiceDisplay', () => {
     ['WDO Inspection Service', 'WDO Inspection Service'],
     ['WDO inspection and report', 'WDO Inspection Service'],
     ['Wasp & Hornet Control', 'Bee / Wasp Nest Removal Service'],
+    ['Recurring Pest Control + Rodent Sanitation', 'Quarterly Pest Control Service + Rodent Sanitation Service'],
     ['Quarterly Pest Control + German Cockroach Treatment', 'Quarterly Pest Control Service + German Cockroach Treatment'],
     ['German Cockroach Treatment', 'German Cockroach Treatment'],
     ['Lawn + Tree & Shrub Service', 'Lawn + Tree & Shrub Service'],
@@ -100,7 +101,7 @@ describe('leadServiceDisplay', () => {
     ['Quarterly Pest Control Service + monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
     ['Pest control twice a year', 'Semiannual Pest Control Service'],
     ['Lawn care every six weeks', 'Every 6 Weeks Lawn Care Service'],
-    ['Pest control every two months', 'Quarterly Pest Control Service'], // no bi-monthly row in this catalog
+    ['Pest control every two months', 'Bi-Monthly Pest Control Service'],
     ['Quarterly pest control and monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
     ['Monthly lawn care and quarterly pest control', 'Monthly Lawn Care Service + Quarterly Pest Control Service'],
     ['Pest control and lawn care, monthly or quarterly', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
