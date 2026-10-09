@@ -250,7 +250,7 @@ describe('gallons sprayed at completion', () => {
     expect(help.sprayedGallonsFreeze([again])).toEqual({});
   });
 
-  test.each([[0], [-2], ['abc'], [{}]])('gallons %j: refused as invalid (400)', async (gallons) => {
+  test.each([[0], [-2], ['abc'], [{}], [Infinity], [NaN], ['1e400'], ['Infinity'], [true], [[5]], ['5 gal']])('gallons %j: refused as invalid (400)', async (gallons) => {
     expect(await run([{ productId: P_CEL, sprayedGallons: gallons }])).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_invalid', productId: P_CEL } });
   });
 

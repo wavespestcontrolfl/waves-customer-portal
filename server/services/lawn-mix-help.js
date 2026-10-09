@@ -255,6 +255,14 @@ const FROM_GALLONS = Symbol('lawnAreaFromGallons');
 const refusal = (status, code, error, extra = {}) => ({ status, payload: { error, code, ...extra } });
 const asked = (row) => row.sprayedGallons !== undefined && row.sprayedGallons !== null && row.sprayedGallons !== '';
 
+// The gallons a row states: a finite number above zero, given as a number or a plain decimal string. Anything else (Infinity, NaN,
+// an exponent string, a boolean, an array or an object) is not a quantity a technician typed, so it is refused, never coerced.
+const gallonsOf = (row) => {
+  const raw = row.sprayedGallons;
+  const value = typeof raw === 'number' ? raw : (typeof raw === 'string' && /^\d+(\.\d+)?$/.test(raw.trim()) ? Number(raw.trim()) : NaN);
+  return Number.isFinite(value) && value > 0 ? value : null;
+};
+
 const monthOfVisit = (svc) => Number(String(require('../utils/datetime-et').etCalendarDayOf(svc.scheduled_date) || '').slice(5, 7)) || null;
 
 // The staged rows of the asked products, or null when the plan or the rows could not be read (the caller refuses, retryably).
@@ -274,11 +282,11 @@ function convertGallons(wanted, staged, month) {
   for (const row of wanted) {
     const agreed = agreedRow(staged.get(String(row.productId || '').toLowerCase()) || [], month);
     const carrier = agreed && agreed.mode === 'spot' && !agreed.concentration ? positive(agreed.carrierGalPer1000) : null;
-    const area = areaFromGallons(row.sprayedGallons, carrier);
+    const area = areaFromGallons(gallonsOf(row), carrier);
     if (!area) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed cannot be used for this product. Enter the area instead.', { productId: row.productId });
     row.areaValue = area;
     row.areaUnit = 'sqft';
-    row[FROM_GALLONS] = { gallons: Number(row.sprayedGallons), carrierGalPer1000: carrier, areaSqft: area };
+    row[FROM_GALLONS] = { gallons: gallonsOf(row), carrierGalPer1000: carrier, areaSqft: area };
   }
   return null;
 }
@@ -299,7 +307,7 @@ async function applyGallons(input) {
   for (const row of rows) delete row[FROM_GALLONS];
   const wanted = rows.filter(asked);
   if (!wanted.length || !isLive()) return null;
-  const bad = wanted.find((row) => !positive(row.sprayedGallons));
+  const bad = wanted.find((row) => gallonsOf(row) === null);
   if (bad) return refusal(400, 'lawn_gallons_invalid', 'Enter the gallons sprayed as a number above zero, or enter the area instead.', { productId: bad.productId });
   const staged = await gallonsStaged({ knex, svc, wanted, loadPlan, readStaged });
   if (!staged) return refusal(503, 'lawn_gallons_unreadable', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.');
