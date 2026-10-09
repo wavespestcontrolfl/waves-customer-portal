@@ -9,8 +9,9 @@ export const BLADE_CROWN = "blade_crown";
 
 /**
  * Whether the prompt shows now: a photo is tagged Problem area, none is tagged Blade and crown, and no
- * analysis has run. It is spent for the visit once it was open and then answered (a Blade and crown
- * photo, an analysis, which is what a Retake follows) or dismissed, so a retake never brings it back.
+ * analysis has run. It is spent for the visit once it was open and then closed for any reason (a Blade
+ * and crown photo, an analysis, a Dismiss, or the Problem area photo removed or retagged), so neither a
+ * retake nor a second Problem area tag brings it back.
  */
 export function useCloseUpPrompt({ enabled, shotList, photos, hasResult }) {
   const [done, setDone] = useState(false);
@@ -20,8 +21,8 @@ export function useCloseUpPrompt({ enabled, shotList, photos, hasResult }) {
   const open = !!enabled && !!shotList && !done && trouble && !bladeCrown && !hasResult;
   useEffect(() => {
     if (open) wasOpen.current = true;
-    else if (wasOpen.current && (bladeCrown || hasResult)) setDone(true);
-  }, [open, bladeCrown, hasResult]);
+    else if (wasOpen.current) setDone(true);
+  }, [open]);
   return { open, dismiss: () => setDone(true) };
 }
 

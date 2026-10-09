@@ -3494,6 +3494,17 @@ describe('suggested from this lawn', () => {
       expect(screen.queryByText(PROMPT)).toBeNull();
     });
 
+    test('retagging the Problem area photo closes it for the visit: a second Problem area tag does not show it again', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      tagPhoto(1, 'front');
+      await waitFor(() => expect(screen.queryByText(PROMPT)).toBeNull());
+      tagPhoto(1, 'trouble');
+      expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
     test('Dismiss takes it away', async () => {
       await open();
       await addPhoto();
