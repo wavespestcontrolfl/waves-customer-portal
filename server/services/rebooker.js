@@ -1282,24 +1282,38 @@ async function loadNextVisitSweep(conn, serviceId) {
 //    kept, as it does in the move.
 //  - without deferred placement every other movable row takes its date.
 async function nextVisitIsKept(conn, next, { deferred, now = new Date() }) {
-  try {
-    if (next.visit_id && await visitStopIsHeld(conn, next.visit_id)) return true;
+  // `strict` (a caller's transaction): an unreadable state throws so the
+  // savepoint below rolls back. A read that failed inside a transaction
+  // leaves it aborted in Postgres even when the error is caught, and the
+  // mover's writes after the Confirm pin would then fail.
+  const read = async (c, strict) => {
+    if (next.visit_id && await visitStopIsHeld(c, next.visit_id, { strict })) return true;
     if (!deferred) return false;
     if (!['pending', 'confirmed'].includes(next.status)) return true;
     if (next.customer_confirmed || next.auto_dispatch_locked || next.auto_dispatch_excluded) return true;
-    const freeze = await require('./auto-dispatch/route-tiers').loadReminderFreeze(conn, [next.id], now);
-    return !freeze || freeze.failed || freeze.frozen.has(next.id);
+    const freeze = await require('./auto-dispatch/route-tiers').loadReminderFreeze(c, [next.id], now);
+    if (!freeze || freeze.failed) {
+      if (strict) throw new Error('Next visit reminder state unreadable');
+      return true;
+    }
+    return freeze.frozen.has(next.id);
+  };
+  try {
+    return conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => read(sp, true))
+      : await read(conn, false);
   } catch {
     return true;
   }
 }
 
-async function visitStopIsHeld(conn, visitId) {
+async function visitStopIsHeld(conn, visitId, { strict = false } = {}) {
   const live = await conn('scheduled_services').where({ visit_id: visitId })
     .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
     .count({ n: 'id' }).first();
   if (Number(live?.n || 0) >= 2) return true;
   const verdict = await require('./visit-groups').frozenVisitVerdict(conn, visitId);
+  if (strict && verdict?.reason === 'unreadable') throw new Error('Next visit stop unreadable');
   return !!verdict?.frozen;
 }
 

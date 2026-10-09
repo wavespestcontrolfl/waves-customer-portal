@@ -284,6 +284,48 @@ describe('reschedule-public projectedNextVisitDate (the Confirm pin, Codex r2 P1
   });
 });
 
+describe('reads on the mover\'s transaction run in savepoints (pre-push audit P1)', () => {
+  // A transaction handle: .transaction(fn) runs fn on a savepoint handle and
+  // counts a rollback when fn throws.
+  function trxFor(planned) {
+    const base = connFor(planned);
+    const state = { savepoints: 0, rollbacks: 0 };
+    const handle = (...args) => base(...args);
+    handle.isTransaction = true;
+    handle.transaction = async (fn) => {
+      state.savepoints += 1;
+      try { return await fn(handle); } catch (err) { state.rollbacks += 1; throw err; }
+    };
+    return { handle, state };
+  }
+
+  test('an unreadable reminder state rolls its savepoint back and names no date', async () => {
+    mockFreeze = { failed: true };
+    const { handle, state } = trxFor(plan());
+    expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: handle })).toBeNull();
+    expect(state.rollbacks).toBe(1);
+  });
+
+  test('a readable state uses a savepoint and still names the date', async () => {
+    const { handle, state } = trxFor(plan());
+    const shift = await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: handle });
+    expect(shift.byDate['2026-10-22']).toBeTruthy();
+    expect(state.savepoints).toBeGreaterThanOrEqual(1);
+    expect(state.rollbacks).toBe(0);
+  });
+
+  test('the Confirm pin projects inside a savepoint; a thrown read rolls back and rethrows', async () => {
+    process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE = 'true';
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const spy = jest.spyOn(SmartRebooker, 'projectNextVisitDates').mockRejectedValue(new Error('boom'));
+    const { handle, state } = trxFor(plan());
+    await expect(projectedNextVisitDate({ id: 'svc-1', is_recurring: true }, '2026-10-22', handle)).rejects.toThrow('boom');
+    expect(state.savepoints).toBe(1);
+    expect(state.rollbacks).toBe(1);
+    spy.mockRestore();
+  });
+});
+
 describe('projectNextVisitDates reads the weekday preference once (Codex r2 P2)', () => {
   test('many offered dates, one preference read', async () => {
     const { customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');

@@ -141,7 +141,12 @@ async function loadNextVisitShift(svc, availability) {
 // Same conditions as loadNextVisitShift, so GET and Confirm cannot differ.
 async function projectedNextVisitDate(svc, date, conn) {
   if (!nextVisitDateActive() || !isSeriesVisit(svc) || !collectiveAnchorActive()) return null;
-  const shift = await SmartRebooker.projectNextVisitDates(svc.id, [date], { conn });
+  // On the mover's transaction the reads run in a savepoint: a failed read
+  // rolls back to it, and the caller's catch leaves the transaction usable.
+  const project = (c) => SmartRebooker.projectNextVisitDates(svc.id, [date], { conn: c });
+  const shift = conn?.isTransaction && typeof conn.transaction === 'function'
+    ? await conn.transaction((sp) => project(sp))
+    : await project(conn);
   const to = shift?.byDate?.[date] || null;
   return to && shift.currentDate && to !== shift.currentDate ? to : null;
 }
