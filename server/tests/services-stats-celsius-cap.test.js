@@ -5,11 +5,13 @@ jest.mock('../services/account-properties', () => ({
   ...jest.requireActual('../services/account-properties'),
   resolveSessionScope: jest.fn(async () => ({ scoped: false, property: null })),
 }));
+const mockWhereCalls = [];
 jest.mock('../models/db', () => {
   const rows = { count: '0' };
   const make = () => {
     const q = {};
-    for (const m of ['where', 'whereNotNull', 'whereIn', 'whereNull', 'orderBy', 'select', 'leftJoin', 'join', 'count']) q[m] = jest.fn(() => q);
+    for (const m of ['whereNotNull', 'whereIn', 'whereNull', 'orderBy', 'select', 'leftJoin', 'join', 'count']) q[m] = jest.fn(() => q);
+    q.where = jest.fn((...args) => { mockWhereCalls.push(args); return q; });
     q.first = jest.fn(async () => rows);
     q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return q;
@@ -48,6 +50,37 @@ describe('celsiusMaxPerYear', () => {
     expect(source).toMatch(/const \{ celsiusYtdCap \} = require\('\.\.\/config\/lawn-v13-count-caps'\)/);
     expect(source).toMatch(/celsiusMaxPerYear: celsiusYtdCap\(\)/);
     expect(source).not.toMatch(/lawnV13Live\(\) \? 2 : 3/);
+  });
+});
+
+describe('celsiusWindow: the window the Celsius count used, from the same windowForName call', () => {
+  const saved = process.env.GATE_LAWN_V13;
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved; });
+  const { etDateString } = require('../utils/datetime-et');
+  // The start day the count's query was given (celsius-application-count filters pah.application_date >= start).
+  const countStart = () => mockWhereCalls.filter(([column, op]) => column === 'pah.application_date' && op === '>=').pop()[2];
+
+  test('gate on: rolling365 and a count that starts 364 days back', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    mockWhereCalls.length = 0;
+    const body = await stats();
+    expect(body.celsiusWindow).toBe('rolling365');
+    expect(body.celsiusApplicationsThisYear).toBe(0);
+    expect(countStart()).toBe(require('../services/application-limits').windowFor(etDateString(), 'rolling365').start);
+  });
+
+  test('gate off: calendar_year and a count that starts on 1 January', async () => {
+    delete process.env.GATE_LAWN_V13;
+    mockWhereCalls.length = 0;
+    const body = await stats();
+    expect(body.celsiusWindow).toBe('calendar_year');
+    expect(countStart()).toBe(`${etDateString().slice(0, 4)}-01-01`);
+  });
+
+  test('the existing field keeps its name and value', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const body = await stats();
+    expect(Object.keys(body)).toEqual(expect.arrayContaining(['servicesYTD', 'celsiusApplicationsThisYear', 'celsiusMaxPerYear', 'celsiusWindow', 'thatch']));
   });
 });
 
