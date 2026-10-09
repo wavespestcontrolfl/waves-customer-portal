@@ -526,15 +526,26 @@ function dryCard({ s, offers }) {
 
 const MAX_RECORD_PRODUCTS = 4;
 
+// One card of the record. With GATE_LAWN_TROUBLE_AREAS live, a card taken at a place also names that place (a closed-list place) and its
+// product ids are the ones actually added: the ids stay a flat list, narrowed to the applied products when the completion's list is
+// known, and a card with a place and nothing applied is not taken. Without a valid place the card is exactly what it always was.
+function frozenCard(card, productIds, appliedIds) {
+  const base = { kind: card.kind, shown: true, checked: card.checked === 'found' || card.checked === 'none' ? card.checked : null, taken: card.taken === true, productIds };
+  const live = require('../config/feature-gates').lawnTroubleAreasLive();
+  if (!live || !base.taken || !require('./lawn-trouble-areas').isPlace(card.place)) return base;
+  const added = appliedIds ? productIds.filter((id) => appliedIds.has(id)) : productIds;
+  return { ...base, taken: added.length > 0, productIds: added, ...(added.length ? { place: card.place } : {}) };
+}
+
 /**
  * The completion's record of the guide (owner choice D4): `{ lawnTreatmentGuide: { v: 1, cards } }`
  * to spread into structured_notes, or `{}`. Built from the `treatmentGuide` block of the submit's
  * `lawnFast` echo, checked here: only while the gate is live, only version 1, unknown kinds and
  * repeats dropped, product ids uuids (at most four each), `checked` found | none | null,
  * `taken` a boolean (every product the card offers is on the sheet; the client decides). Every card kept was shown. Frozen on the record for tuning the rules and read
- * by no customer or public path.
+ * by no customer or public path. With GATE_LAWN_TROUBLE_AREAS live a card taken at a place also carries `place` (see frozenCard).
  */
-function treatmentGuideFreeze(lawnFast) {
+function treatmentGuideFreeze(lawnFast, { appliedIds = null } = {}) {
   if (!require('../config/feature-gates').lawnTreatmentGuideLive()) return {};
   const block = lawnFast && typeof lawnFast === 'object' ? lawnFast.treatmentGuide : null;
   if (!block || typeof block !== 'object' || Array.isArray(block) || block.v !== 1) return {};
@@ -545,13 +556,7 @@ function treatmentGuideFreeze(lawnFast) {
     seen.add(card.kind);
     const productIds = [...new Set((Array.isArray(card.productIds) ? card.productIds : [])
       .filter((id) => typeof id === 'string' && UUID_RE.test(id)).map((id) => id.toLowerCase()))].slice(0, MAX_RECORD_PRODUCTS);
-    cards.push({
-      kind: card.kind,
-      shown: true,
-      checked: card.checked === 'found' || card.checked === 'none' ? card.checked : null,
-      taken: card.taken === true,
-      productIds,
-    });
+    cards.push(frozenCard(card, productIds, appliedIds));
   }
   return { lawnTreatmentGuide: { v: 1, cards } };
 }

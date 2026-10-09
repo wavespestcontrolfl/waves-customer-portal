@@ -802,7 +802,7 @@ describe('lawnTreatmentGuideLive: strict, and only with the spot rules and the v
 
 describe('treatmentGuideFreeze: the completion record', () => {
   const card = (extra = {}) => ({ kind: 'fungus', shown: true, checked: 'found', taken: true, productIds: [P_ART], ...extra });
-  const freeze = (cards, extra = {}) => treatmentGuideFreeze({ visitType: 'recurring', treatmentGuide: { v: 1, cards, ...extra } });
+  const freeze = (cards, extra = {}, options = undefined) => treatmentGuideFreeze({ visitType: 'recurring', treatmentGuide: { v: 1, cards, ...extra } }, options);
   beforeEach(() => { process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true'; });
 
   test('the v13 program off: nothing is written (fail closed)', () => {
@@ -869,6 +869,41 @@ describe('treatmentGuideFreeze: the completion record', () => {
     const kinds = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'].map((kind) => card({ kind }));
     expect(freeze(kinds).lawnTreatmentGuide.cards).toHaveLength(5);
   });
+
+  // GATE_LAWN_TROUBLE_AREAS: a card taken at a place also names the place, and its ids are the products actually added.
+  describe('a card taken at a place', () => {
+    const placed = (extra = {}) => card({ kind: 'weeds', productIds: [P_CEL, P_CERT], place: 'back', ...extra });
+    const applied = (...ids) => ({ appliedIds: new Set(ids) });
+    beforeEach(() => { process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; });
+    afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+    test('the place and the flat list of ids actually added are recorded', () => {
+      expect(freeze([placed()], {}, applied(P_CEL, P_CERT)).lawnTreatmentGuide.cards).toEqual([
+        { kind: 'weeds', shown: true, checked: 'found', taken: true, productIds: [P_CEL, P_CERT], place: 'back' },
+      ]);
+    });
+
+    test('ids that were not applied are dropped; a card with a place and nothing applied is not taken and names no place', () => {
+      expect(freeze([placed()], {}, applied(P_CEL)).lawnTreatmentGuide.cards[0]).toMatchObject({ taken: true, productIds: [P_CEL], place: 'back' });
+      const none = freeze([placed()], {}, applied(P_ART)).lawnTreatmentGuide.cards[0];
+      expect(none).toMatchObject({ taken: false, productIds: [] });
+      expect(none).not.toHaveProperty('place');
+    });
+
+    test.each([['roof'], [''], [null], [3], ['BACK']])('a place that is not on the closed list (%p) is not recorded: the card is exactly what it always was', (place) => {
+      const out = freeze([placed({ place })], {}, applied(P_CEL, P_CERT)).lawnTreatmentGuide.cards[0];
+      expect(out).toEqual({ kind: 'weeds', shown: true, checked: 'found', taken: true, productIds: [P_CEL, P_CERT] });
+    });
+
+    test('a card not taken carries no place even if one is sent', () => {
+      expect(freeze([placed({ taken: false })], {}, applied(P_CEL)).lawnTreatmentGuide.cards[0]).toEqual({ kind: 'weeds', shown: true, checked: 'found', taken: false, productIds: [P_CEL, P_CERT] });
+    });
+
+    test('without the places gate the record is byte-identical: the place is ignored and ids are not narrowed', () => {
+      delete process.env.GATE_LAWN_TROUBLE_AREAS;
+      expect(freeze([placed()], {}, applied(P_ART)).lawnTreatmentGuide.cards[0]).toEqual({ kind: 'weeds', shown: true, checked: 'found', taken: true, productIds: [P_CEL, P_CERT] });
+    });
+  });
 });
 
 describe('the record never leaves the technician side', () => {
@@ -887,6 +922,6 @@ describe('the record never leaves the technician side', () => {
 
   test('the completion freezes it through the validator, from the lawnFast echo', () => {
     const source = fs.readFileSync(path.join(root, 'services', 'complete-scheduled-service.js'), 'utf8');
-    expect(source).toContain("...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast),");
+    expect(source).toContain("...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, {");
   });
 });

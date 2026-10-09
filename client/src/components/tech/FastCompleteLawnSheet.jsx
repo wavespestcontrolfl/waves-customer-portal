@@ -1036,13 +1036,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
       ...(guideCards ? {
         treatmentGuide: {
           v: 1,
-          cards: guideCards.map((card) => ({
-            kind: card.kind,
-            shown: true,
-            checked: guideChecks[card.kind] || null,
-            taken: cardOnSheet(card, on),
-            productIds: card.productIds,
-          })),
+          cards: guideCards.map((card) => guideRecordCard(card, { checks: guideChecks, on, rows })),
         },
       } : {}),
     },
@@ -1764,6 +1758,20 @@ function placeSets(card, areas) {
   const sets = entries.map(([id, entry]) => [id, entry.items.map((item) => item.name).join(', ')]);
   if (!areas || new Set(sets.map(([, names]) => names)).size < 2) return [];
   return sets.map(([id, names]) => `${areas.places.find((place) => place.id === id)?.label || id}: ${names}`);
+}
+
+// What the completion's guide record says of one card. A card with a set per place records the set of the place the tech took: the
+// products actually added (a flat list of ids, as for any card) and the place as an extra field. A card not taken, or one with no
+// places, records exactly what it always did.
+function guideRecordCard(card, { checks, on, rows }) {
+  const record = { kind: card.kind, shown: true, checked: checks[card.kind] || null, taken: cardOnSheet(card, on), productIds: card.productIds };
+  const onSheet = (item) => on.has(String(item.productId).toLowerCase());
+  const taken = cardPlaceEntries(card).filter(([, entry]) => entry.items.every(onSheet));
+  if (!record.taken || !taken.length) return record;
+  // Several places can share one set; the place is the one the rows of that set carry.
+  const placeOf = ([, entry]) => rows.find((row) => sameId(row.productId, entry.items[0].productId))?.place;
+  const [place, entry] = taken.find((candidate) => placeOf(candidate) === candidate[0]) || taken[0];
+  return { ...record, productIds: entry.items.map((item) => item.productId), place };
 }
 
 const cardOnSheet = (card, on) => {

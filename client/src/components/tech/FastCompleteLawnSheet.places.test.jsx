@@ -658,8 +658,47 @@ describe('reachability: the front is capped, the back is open', () => {
     expect(body.map((p) => p.areaPlace)).toEqual(rowNames.map(() => 'back'));
   });
 
+  // The completion's guide record carries the set of the place the tech took (a flat list of the ids added) and the place.
+  describe('the guide record names the place taken and the products actually added', () => {
+    const recordOf = (kind) => completeCalls()[0].body.lawnFast.treatmentGuide.cards.find((c) => c.kind === kind);
+    const take = async (build, tapName, rowNames) => {
+      taps = 0;
+      await openSheet({ request: makeRequest({ ctx: build() }), props: { catalog: CAT2 } });
+      await analyze();
+      await screen.findByRole('group', { name: 'Suggested from this lawn' });
+      if (tapName) fireEvent.click(inSuggested().getByRole('button', { name: tapName }));
+      typeAreaFor(rowNames);
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+    };
+
+    test('weeds card, the front (the replacement) and the back (the lead mix) each record their own set and place', async () => {
+      const ctx = () => guided([WEEDS_CARD()], { weedMix: MIX({ front: BLIND_SET, back: LEAD_SET }), troubleAreas: areasBlock() });
+      await take(ctx, 'Add weed spots: Front', ['Blind Herbicide']);
+      expect(recordOf('weeds')).toEqual({ kind: 'weeds', shown: true, checked: null, taken: true, productIds: [P_BLIND], place: 'front' });
+      cleanup(); requests = [];
+      await take(ctx, 'Add weed spots: Back', ['Lead WG', 'Cert Herbicide', 'Tank Surfactant']);
+      expect(recordOf('weeds')).toEqual({ kind: 'weeds', shown: true, checked: null, taken: true, productIds: [P_LEAD, P_CERT, P_SURF], place: 'back' });
+    });
+
+    test('chinch card: the product of the chosen place and the place', async () => {
+      await take(() => guided([CHINCH_CARD()], { chinch: CHINCH }), 'Found at the edge. Add it: Back', ['Arena 50 WDG']);
+      expect(recordOf('chinch')).toMatchObject({ taken: true, productIds: [P_ARENA], place: 'back' });
+    });
+
+    test('a card not taken records what it offered, with no place', async () => {
+      taps = 0;
+      await openSheet({ request: makeRequest({ ctx: guided([WEEDS_CARD()], { weedMix: MIX({ front: BLIND_SET, back: LEAD_SET }), planned: [PLANNED[0]] }) }), props: { catalog: CAT2 } });
+      await analyze();
+      await screen.findByRole('group', { name: 'Suggested from this lawn' });
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      expect(recordOf('weeds')).toEqual({ kind: 'weeds', shown: true, checked: null, taken: false, productIds: [P_LEAD, P_CERT, P_SURF] });
+    });
+  });
+
   function typeAreaFor(rowNames) {
-    const weed = rowNames.includes('Lead WG');
+    const weed = rowNames.includes('Lead WG') || rowNames.includes('Blind Herbicide');
     typeArea(weed ? group('Weed spots') : placeGroup(rowNames[0]), weed ? '500' : '100');
   }
 });
