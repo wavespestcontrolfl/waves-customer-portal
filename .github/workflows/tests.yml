@@ -209,6 +209,11 @@ jobs:
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
+      - name: Estimate draft retire transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/estimate-draft-retire-postgres.test.js
       - name: Invoice-issued closeout resolver transaction tests
         working-directory: server
         env:
