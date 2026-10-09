@@ -259,3 +259,26 @@ describe('Codex r1: entity notes in parentheses and company mailbox endings', ()
     expect(surnameFromEmail('pat.ismail@example.com', 'Pat')).toBe('Ismail');
   });
 });
+
+describe('Codex r6: ambiguous nicknames, mailing lines, mixed email separators', () => {
+  test('a nickname shared by two names matches only itself on a parcel; a one-group nickname still matches', () => {
+    expect(surnameForFirstName('SAMPLE, PATRICIA', 'Pat', 'Manatee')).toBeNull();
+    expect(surnameForFirstName('SAMPLE, PATRICK', 'Pat', 'Manatee')).toBeNull();
+    expect(surnameForFirstName('SAMPLE, PAT', 'Pat', 'Manatee')).toBe('Sample');
+    expect(surnameForFirstName('SAMPLE, WILLIAM', 'Bill', 'Manatee')).toBe('Sample');
+  });
+
+  test('a mailing line in the owner field is not an owner', () => {
+    expect(surnameForFirstName('ATTN PAT SAMPLE', 'Pat', 'Sarasota')).toBeNull();
+    expect(surnameForFirstName('ATTENTION PAT SAMPLE', 'Pat', 'Sarasota')).toBeNull();
+    expect(surnameForFirstName('CARE OF PAT SAMPLE', 'Pat', 'Sarasota')).toBeNull();
+    expect(surnameForFirstName('PO BOX PAT', 'Pat', 'Sarasota')).toBeNull();
+  });
+
+  test('a middle initial hidden by mixed separators reads as nothing; a real hyphenated surname stays', () => {
+    expect(surnameFromEmail('pat.q-sample@example.com', 'Pat')).toBeNull();
+    expect(surnameFromEmail('pat_q.sample@example.com', 'Pat')).toBeNull();
+    expect(surnameFromEmail('pat.sample-example@example.com', 'Pat')).toBe('Sample-Example');
+    expect(surnameFromEmail('pat-sample@example.com', 'Pat')).toBe('Sample');
+  });
+});

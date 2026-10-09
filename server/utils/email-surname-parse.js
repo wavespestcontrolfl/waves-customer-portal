@@ -42,6 +42,8 @@ function surnameFromEmail(email, callerFirstName) {
   if (!GIVEN_RE.test(given) || !sameFirstName(normalizeNamePart(given), callerFirst)) return null;
   if (surname.length < 2 || !SURNAME_RE.test(surname)) return null;
   const pieces = surname.split('-');
+  // "pat.q-sample": a one-letter piece is a middle initial, not half of a hyphenated surname.
+  if (pieces.some((piece) => piece.replace(/'/g, '').length < 2)) return null;
   if (pieces.some((piece) => BUSINESS_WORDS.has(piece))) return null;
   if (pieces.some((piece) => BUSINESS_SUFFIXES.some((word) => piece.length > word.length && piece.endsWith(word)))) return null;
   return titleCaseSurname(surname);

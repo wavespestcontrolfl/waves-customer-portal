@@ -82,7 +82,8 @@ function builder(result, record) {
 function setupDb(opts = {}) {
   const records = [];
   const tables = {
-    call_log: [opts.call === undefined ? CALL : opts.call],
+    // Read twice: eligibility, then the full re-check before posting (recheckCall = what the second read sees).
+    call_log: [opts.call === undefined ? CALL : opts.call, opts.recheckCall === undefined ? (opts.call === undefined ? CALL : opts.call) : opts.recheckCall],
     customers: [
       opts.customer === undefined ? CUSTOMER : opts.customer,
       opts.customers || [],
@@ -327,6 +328,17 @@ describe('county owner record', () => {
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
+  test.each([
+    ['another unit at the same address', '100 SAMPLE AVE UNIT 2', { address_line1: '100 Sample Ave Unit 4' }, false],
+    ['a unit parcel for a customer with no unit', '100 SAMPLE AVE UNIT 2', {}, false],
+    ['the same unit, written differently', '100 SAMPLE AVE UNIT 4', { address_line1: '100 Sample Ave', address_line2: 'Apt 4' }, true],
+  ])('%s', async (_label, situsAddress, customerPatch, used) => {
+    setupDb({ customer: { ...CUSTOMER, ...customerPatch } });
+    lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, situsAddress });
+    await run();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(used ? 1 : 0);
+  });
+
   test('a parcel whose house number is not the customer\'s is not used', async () => {
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, situsAddress: '102 SAMPLE AVE' });
     setupDb();
@@ -540,11 +552,22 @@ describe('Twilio caller name', () => {
 });
 
 describe('eligibility', () => {
+  test.each([
+    ['relinked to another customer', { ...CALL, customer_id: 'cust-2' }, 'recheck_call_not_linked'],
+    ['reprocessed and now invalid', { ...CALL, v2_extraction_status: 'invalid' }, 'recheck_no_valid_extraction'],
+    ['reprocessed and the caller now has a last name', { ...CALL, ai_extraction_enriched: { caller: { first_name: 'Pat', last_name: 'Sample', relationship_to_property: 'owner' } } }, 'recheck_caller_gave_last_name'],
+  ])('the call was %s while the lookups ran: nothing is posted', async (_label, recheckCall, outcome) => {
+    setupDb({ recheckCall });
+    lookupCountyParcelByPoint.mockResolvedValue(PARCEL);
+    expect(await run()).toEqual({ suggested: false, outcome });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
   test('the caller\'s number comes from the pipeline\'s own resolver (a form callback\'s lead phone, not the staff leg)', async () => {
     const { resolveCallContactPhone } = require('../services/call-recording-processor');
     const bridged = { ...CALL, direction: 'outbound-api', source: 'lead-webhook-auto-bridge', from_phone: '+19415550199', to_phone: '+19415550177',
       metadata: { type: 'lead_auto_bridge', leadPhone: '+19415550100' }, ai_extraction: { phone: '+19415550100' } };
-    resolveCallContactPhone.mockReturnValueOnce('+19415550100');
+    resolveCallContactPhone.mockReturnValue('+19415550100'); // eligibility and the re-check before posting
     setupDb({ call: bridged });
     lookupCountyParcelByPoint.mockResolvedValue(PARCEL);
     await run();
@@ -563,15 +586,16 @@ describe('eligibility', () => {
   });
 
   test.each([
-    ['first name', { first_name: 'Robin' }],
-    ['phone', { phone: '(941) 555-0142' }],
-    ['email', { email: 'other@example.com' }],
-    ['address', { address_line1: '200 Sample Ave' }],
-    ['coordinates', { latitude: '27.5000' }],
-  ])('staff changed the %s while the lookups ran: nothing is posted', async (_label, change) => {
+    ['first name', { first_name: 'Robin' }, 'recheck_caller_first_name_differs'],
+    ['phone', { phone: '(941) 555-0142' }, 'recheck_caller_not_customer'],
+    ['email', { email: 'other@example.com' }, 'customer_changed'],
+    ['address', { address_line1: '200 Sample Ave' }, 'customer_changed'],
+    ['unit', { address_line2: 'Apt 4' }, 'customer_changed'],
+    ['coordinates', { latitude: '27.5000' }, 'customer_changed'],
+  ])('staff changed the %s while the lookups ran: nothing is posted', async (_label, change, outcome) => {
     setupDb({ recheck: { ...CUSTOMER, last_name: null, ...change } });
     lookupCountyParcelByPoint.mockResolvedValue(PARCEL);
-    expect(await run()).toEqual({ suggested: false, outcome: 'customer_changed' });
+    expect(await run()).toEqual({ suggested: false, outcome });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 

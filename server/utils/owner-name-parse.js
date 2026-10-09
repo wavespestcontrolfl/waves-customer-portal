@@ -29,7 +29,7 @@
  * properCase's Mac+capital guess ("MacHado") is worse than "Machado".
  */
 
-const { sameFirstName, normalizeNamePart } = require('./name-match');
+const { sameFirstNameUnambiguous, normalizeNamePart } = require('./name-match');
 const { properCase } = require('./name-case');
 
 // A whole-string match on any of these means the owner is not a person.
@@ -40,6 +40,8 @@ const ENTITY_WORDS = new Set([
   'CHURCH', 'MINISTRIES', 'MINISTRY', 'FOUNDATION', 'SCHOOL', 'DISTRICT', 'AUTHORITY', 'BOARD',
   'COUNTY', 'CITY', 'STATE',
   'HOLDINGS', 'PROPERTIES', 'INVESTMENTS', 'APARTMENTS', 'HOMES',
+  // A mailing line, not an owner (Sarasota's second name field carries address lines).
+  'ATTN', 'ATTENTION', 'CARE', 'MAIL', 'MAILING', 'PO', 'BOX', 'SUITE', 'STE', 'APT', 'UNIT', 'DEPT', 'FLOOR',
 ]);
 // Dropped from the END of a name segment (a trailing run, in any order).
 const SUFFIX_WORDS = new Set(['JR', 'SR', 'II', 'III', 'IV', 'TRUSTEE', 'TRUSTEES', 'TTEE', 'TTEES', 'ETAL']);
@@ -94,7 +96,8 @@ function splitSurnameFirst(tokens) {
   return run < tokens.length ? { surname: tokens.slice(0, run), given: tokens.slice(run) } : null;
 }
 
-const sameGiven = (token, callerFirst) => sameFirstName(normalizeNamePart(token), callerFirst);
+// A parcel can list another household member: "Pat" must not match PATRICIA's or PATRICK's record by a guess.
+const sameGiven = (token, callerFirst) => sameFirstNameUnambiguous(normalizeNamePart(token), callerFirst);
 
 function manateeSurname(text, callerFirst) {
   const comma = text.indexOf(',');

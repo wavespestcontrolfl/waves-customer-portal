@@ -56,6 +56,7 @@ const { sameFirstName, normalizeNamePart } = require('../utils/name-match');
 const { surnameFromOwnerNames } = require('../utils/owner-name-parse');
 const { surnameFromEmail } = require('../utils/email-surname-parse');
 const { surnameFromCallerName } = require('../utils/caller-name-parse');
+const { splitStreetLineUnit } = require('../utils/address-normalizer');
 
 const LOG_PREFIX = '[call-last-name-lookup]';
 // The V2 relationship values that may read the county owner record: the
@@ -100,7 +101,7 @@ async function alreadySuggested(customerId) {
 // The facts every source matched on. Staff can edit the customer while the
 // county and Twilio requests run; answers for the earlier identity or
 // property must not be posted on the edited record.
-const IDENTITY_COLUMNS = ['first_name', 'phone', 'email', 'address_line1', 'latitude', 'longitude'];
+const IDENTITY_COLUMNS = ['first_name', 'phone', 'email', 'address_line1', 'address_line2', 'latitude', 'longitude'];
 function sameIdentity(before, now) {
   return IDENTITY_COLUMNS.every((col) => String(before[col] ?? '') === String(now[col] ?? ''));
 }
@@ -111,7 +112,7 @@ async function loadEligible({ callLogId, customerId }) {
     .first('id', 'customer_id', 'direction', 'from_phone', 'to_phone', 'source', 'metadata', 'ai_extraction', 'v2_extraction_status', 'ai_extraction_enriched', 'created_at');
   if (!call || String(call.customer_id) !== String(customerId)) return { skip: 'call_not_linked' };
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at')
-    .first('id', 'first_name', 'last_name', 'phone', 'email', 'latitude', 'longitude', 'address_line1');
+    .first('id', 'first_name', 'last_name', 'phone', 'email', 'latitude', 'longitude', 'address_line1', 'address_line2');
   if (!customer) return { skip: 'customer_gone' };
   if (!blank(customer.last_name)) return { skip: 'has_last_name' };
   if (blank(customer.first_name)) return { skip: 'no_first_name' };
@@ -146,8 +147,19 @@ async function surnameFromCounty({ customer, relationship }) {
   // processor: that module is large.
   const { sameHouseNumberStreet } = require('./call-triage-flags');
   if (!sameHouseNumberStreet(parcel.situsAddress, customer.address_line1)) return { skip: 'parcel_address_mismatch' };
+  // sameHouseNumberStreet ignores units: a separately assessed unit at the
+  // same street address is another household. When either side names a unit,
+  // both must, and they must be the same one.
+  const parcelUnit = unitKey(splitStreetLineUnit(parcel.situsAddress).unit);
+  const customerUnit = unitKey(splitStreetLineUnit(customer.address_line1).unit || customer.address_line2);
+  if (parcelUnit !== customerUnit) return { skip: 'parcel_unit_mismatch' };
   const surname = surnameFromOwnerNames(parcel.ownerNames, customer.first_name, parcel.county);
   return surname ? { surname } : { skip: 'no_single_owner_match' };
+}
+
+// "Apt 4", "#4", "Unit 4" -> "4"; '' when there is none.
+function unitKey(value) {
+  return String(value || '').toLowerCase().replace(/\b(?:apartment|apt|unit|suite|ste|number|no)\b\.?/g, '').replace(/[^a-z0-9]/g, '');
 }
 
 // Stored values that stand in for "no last name": the placeholders
@@ -335,9 +347,12 @@ async function runCallLastNameLookup({ callLogId, customerId } = {}) {
       logger.info(`${LOG_PREFIX} no suggestion`, { callLogId, customerId, outcome: tried });
       return { suggested: false, outcome: 'no_answer' };
     }
-    const now = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'last_name', ...IDENTITY_COLUMNS);
-    if (!now || !blank(now.last_name)) return { suggested: false, outcome: 'last_name_appeared' };
-    if (!sameIdentity(eligible.customer, now)) return { suggested: false, outcome: 'customer_changed' };
+    // The lookups ran for seconds on a snapshot. Every eligibility fact is read
+    // again: the call may have been relinked or reprocessed, the customer
+    // named, deleted or edited. Anything but the same eligible state posts nothing.
+    const again = await loadEligible({ callLogId, customerId });
+    if (again.skip) return { suggested: false, outcome: again.skip === 'has_last_name' || again.skip === 'customer_gone' ? 'last_name_appeared' : `recheck_${again.skip}` };
+    if (!sameIdentity(eligible.customer, again.customer) || again.relationship !== eligible.relationship) return { suggested: false, outcome: 'customer_changed' };
     const posted = await postSuggestion({ ...eligible, callLogId }, answers);
     const sources = answers.map((a) => a.source);
     const outcome = posted?.id ? 'posted' : 'not_posted';
