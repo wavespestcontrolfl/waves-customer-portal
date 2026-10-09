@@ -3575,6 +3575,12 @@ class SmartRebooker {
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
           const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);
+          // A carried partner that lands on another day and carries a limited area add-on is judged for that day, as the
+          // single-row move is (area-addon-limits assertMovedVisitLimitsOpen; the row is read there, so every key it needs
+          // is present). A partner with no limited add-on costs one row read and one add-on row read.
+          if (partnerDateChanges) {
+            await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: partner.id, scheduledDate: dateStr, staff: initiatedBy === 'admin' });
+          }
           const updatedPartnerRows = await writePartnerCas(trx, partner, pUpdate);
           if (awaitingPlacement && partner.window_start) {
             await require('./appointment-reminders').precloseWindowlessReminderInTx(trx, partner.id);

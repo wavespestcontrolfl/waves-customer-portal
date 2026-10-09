@@ -180,8 +180,9 @@ describe('every mover of a booked visit\'s date or property asks it, in its own 
     expect(src).toContain("assertMovedVisitLimitsOpen(trx, { visitId: serviceId, visit: service, scheduledDate: newDateStr, staff: initiatedBy === 'admin' });");
     expect(src.indexOf("job transitioned to a non-reschedulable state concurrently'), {\n          statusCode: 409,\n        });\n      }\n\n      // A visit that carries a limited area add-on")).toBeGreaterThan(0);
     expect(src.indexOf(call)).toBeLessThan(src.indexOf("await trx('reschedule_log').insert({\n        scheduled_service_id: serviceId,"));
-    // the series path moves recurring cadence rows only, and a repeating series never carries an area add-on
-    expect(src.split(call).length - 1).toBe(1);
+    // the series path moves recurring cadence rows (a repeating series never carries an area add-on) and the one-time
+    // partners it carries, which have their own check (next test)
+    expect(src.split(call).length - 1).toBe(2);
   });
 
   test('the bulk board reschedule: after its CAS write, per id, so a refusal fails that id and the batch goes on', () => {
@@ -194,6 +195,16 @@ describe('every mover of a booked visit\'s date or property asks it, in its own 
   test('Update Details: date, a new property (address plan) and an added add-on, through the one route helper', () => {
     const src = read('routes', 'admin-schedule.js');
     expect(src).toContain("visitId, scheduledDate: updates.scheduled_date, propertyId: addressPlan ? addressPlan.propertyId : null, serviceKeys: keys, force: Boolean(addressPlan) || added.length > 0, staff: true,");
+  });
+
+  // Codex round 33: a series move can carry a grouped one-time partner; the partner is written by its own CAS.
+  test('a carried partner of a series move is judged for its new day before its CAS write', () => {
+    const src = read('services', 'rebooker.js');
+    const carry = src.slice(src.indexOf('const carryVisitPartners = async ('));
+    const ask = carry.indexOf("assertMovedVisitLimitsOpen(trx, { visitId: partner.id, scheduledDate: dateStr, staff: initiatedBy === 'admin' });");
+    expect(ask).toBeGreaterThan(0);
+    expect(ask).toBeLessThan(carry.indexOf('await writePartnerCas(trx, partner, pUpdate);'));
+    expect(carry.slice(ask - 120, ask)).toContain('if (partnerDateChanges) {');
   });
 
   test('the Intelligence Bar movers (single and batch) call it under their own transaction', () => {
