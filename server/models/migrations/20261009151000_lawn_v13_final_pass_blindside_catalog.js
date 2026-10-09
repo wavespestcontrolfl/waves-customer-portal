@@ -102,19 +102,30 @@ async function catalogUp(knex, id) {
     action: ACTION_CATALOG,
     changed_fields: JSON.stringify(Object.keys(fields)),
     before_snapshot: JSON.stringify({}),
-    after_snapshot: JSON.stringify({ id, name: row.name, fields }),
+    // `pair`: the rate and the unit as the row held them right after this write, the written one and the other one. down() needs
+    // both: a write of the unit alone must not be undone once the rate beside it has been edited.
+    after_snapshot: JSON.stringify({ id, name: row.name, fields, pair: { default_rate_per_1000: update.default_rate_per_1000 ?? row.default_rate_per_1000 ?? null, rate_unit: update.rate_unit ?? row.rate_unit ?? null } }),
     metadata: JSON.stringify({ migration: MIGRATION }),
   });
+}
+
+// Is the catalog pair still exactly what it was right after up()? The rate by value, the unit as text, empty as empty.
+function pairUntouched(row, pair) {
+  if (!row || !pair) return false;
+  const rateSame = isEmpty(pair.default_rate_per_1000) ? isEmpty(row.default_rate_per_1000) : isRate(row.default_rate_per_1000, Number(pair.default_rate_per_1000));
+  const unitSame = isEmpty(pair.rate_unit) ? isEmpty(row.rate_unit) : row.rate_unit === pair.rate_unit;
+  return rateSame && unitSame;
 }
 
 async function catalogDown(knex) {
   for (const log of await knex('lawn_protocol_audit_log').where({ action: ACTION_CATALOG }).select('id', 'after_snapshot')) {
     const after = asObject(log.after_snapshot);
     const row = after.id ? await knex('products_catalog').where({ id: after.id }).first('id', 'default_rate_per_1000', 'rate_unit') : null;
-    // The rate and its unit are one fact: restore the fields written here only while ALL of them still hold what was written. If an
-    // admin has edited either one since, both stay (a rate left with a null unit would be unreadable).
+    // The rate and its unit are one fact: restore what was written here only while BOTH columns still hold what the row held right
+    // after up(), the written one and the one beside it. If an admin has edited either since, both stay (a rate left with a null
+    // unit would be unreadable), also when up() wrote only one of them.
     const written = Object.entries(after.fields || {});
-    const untouched = row && written.length > 0 && written.every(([column, change]) => (column === 'rate_unit' ? row.rate_unit === change.after : isRate(row[column], change.after)));
+    const untouched = written.length > 0 && pairUntouched(row, after.pair);
     if (untouched) {
       const update = Object.fromEntries(written.map(([column, change]) => [column, change.before]));
       await knex('products_catalog').where({ id: row.id }).update({ ...update, updated_at: knex.fn.now() });

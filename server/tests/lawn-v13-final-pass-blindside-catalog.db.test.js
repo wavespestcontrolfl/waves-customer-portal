@@ -270,6 +270,30 @@ describeDb('v13 final pass part 2 (Blindside catalog + one application a year) t
       expect([row.rate_unit, Number(row.default_rate_per_1000)]).toEqual(['oz', 0.18]);
     });
 
+    test('when only the unit was written (a rate with no unit) an edit of the RATE beside it leaves both; untouched, the unit goes back', async () => {
+      await reset({ catalog: { default_rate_per_1000: 0.2, rate_unit: null } });
+      await migration.up(knex);
+      expect([(await catalogRow()).rate_unit, Number((await catalogRow()).default_rate_per_1000)]).toEqual(['oz', 0.2]);
+      await knex('products_catalog').where({ id: ids.blindside }).update({ default_rate_per_1000: 0.21 });
+      await migration.down(knex);
+      const edited = await catalogRow();
+      expect([edited.rate_unit, Number(edited.default_rate_per_1000)]).toEqual(['oz', 0.21]);
+      await reset({ catalog: { default_rate_per_1000: 0.2, rate_unit: null } });
+      await migration.up(knex);
+      await migration.down(knex);
+      const back = await catalogRow();
+      expect([back.rate_unit, Number(back.default_rate_per_1000)]).toEqual([null, 0.2]);
+    });
+
+    test('when only the rate was written and the UNIT beside it is edited, both stay', async () => {
+      await reset({ catalog: { default_rate_per_1000: null, rate_unit: 'oz' } });
+      await migration.up(knex);
+      await knex('products_catalog').where({ id: ids.blindside }).update({ rate_unit: 'fl oz' });
+      await migration.down(knex);
+      const row = await catalogRow();
+      expect([row.rate_unit, Number(row.default_rate_per_1000)]).toEqual(['fl oz', 0.149]);
+    });
+
     test('a database without the staged tables only gets the catalog write', async () => {
       await reset();
       await knex.raw('ALTER TABLE ??.lawn_protocol_products RENAME TO lawn_protocol_products_away', [owned.schema]);
