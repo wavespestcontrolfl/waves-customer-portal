@@ -445,7 +445,7 @@ function openTimesDayLabel(d) {
 const {
   SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE,
 } = require('./sms-offer-sources');
-const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'named_scheduled_visit']);
+const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'next_of_series', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
 // service's availability build with a possible geocode and the find-time
 // travel probe) is much heavier than the zone finder OPEN_TIMES_TIMEOUT_MS
@@ -3562,6 +3562,7 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
     ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
     ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
     ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
+    ...(visits.filter((v) => v.upcoming).length > 1 ? ['- When the text is about their appointment without saying which one, and their scheduled visits above are all the same service, it is about the NEXT one: answer "visit" with the id of the earliest scheduled date.'] : []),
     '- "none": the text names no service and points at no particular visit.',
     '- "unclear": it could be more than one visit or service, or it asks about several at once.',
     'Choose only from the lists above. When unsure, answer "unclear".',
@@ -3601,10 +3602,31 @@ function visitIdField(visit, visits = []) {
   return twin ? {} : { scheduledServiceId: visit.scheduledServiceId };
 }
 
+// Several upcoming visits of ONE service are a recurring series (a quarterly
+// customer always has the next few dates on file), and a text that names no
+// visit ("can we move my appointment?") is about the NEXT one. Before this,
+// every recurring customer read as ambiguous and got no OPEN TIMES (10-08
+// audit: 14 of 23 scheduling drafts without times had several upcoming
+// visits). Null — still ambiguous — when the services differ, a date is
+// missing, or two visits share the earliest date.
+function nextVisitOfSeries(upcoming) {
+  if (upcoming.length < 2 || new Set(upcoming.map((v) => v.type)).size !== 1) return null;
+  const times = upcoming.map((v) => (v.date ? new Date(v.date).getTime() : NaN));
+  if (times.some((t) => !Number.isFinite(t))) return null;
+  const order = upcoming.map((v, i) => i).sort((x, y) => times[x] - times[y]);
+  const [first, second] = [upcoming[order[0]], upcoming[order[1]]];
+  return formatEtDate(first.date) === formatEtDate(second.date) ? null : first;
+}
+
 function unnamedServiceIdentity(visits, openEstimate) {
   const upcoming = visits.filter((v) => v.upcoming);
   if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming', ...visitIdField(upcoming[0]) };
-  if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
+  if (upcoming.length > 1) {
+    const next = nextVisitOfSeries(upcoming);
+    return next
+      ? { serviceType: next.type, certain: true, reason: 'next_of_series', ...visitIdField(next, visits) }
+      : { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
+  }
   if (openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
   const completed = visits.find((v) => !v.upcoming);
   if (completed) return { serviceType: completed.type, certain: true, reason: 'last_completed' };

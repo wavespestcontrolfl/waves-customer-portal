@@ -270,6 +270,47 @@ describe('gate on — an upcoming visit is offered through the reschedule link p
     expect(r.openTimesSnapshot).toBeNull();
   });
 
+  // 10-08 audit: every recurring customer has several upcoming visits of ONE service, so an
+  // unnamed "can we move my appointment?" read as ambiguous and got no OPEN TIMES.
+  test('a recurring series (several upcoming visits of one service), unnamed text: the NEXT visit is the one offered times', async () => {
+    const drafter = freshDrafter();
+    // listed out of order on purpose: the earliest DATE wins, not the first row
+    const context = baseContext([
+      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-jan'),
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-oct'),
+      upcomingEntry('Quarterly Pest', '2027-04-02', 'id-apr'),
+    ]);
+    const identity = await drafter.serviceIdentityFor('can we move my appointment?', context);
+    expect(identity).toEqual({ serviceType: 'Quarterly Pest', certain: true, reason: 'next_of_series', scheduledServiceId: 'id-oct' });
+    // the identity prompt tells the model the same rule, and only when there are several visits
+    expect(mockIdentity.prompts.join('\n')).toContain('it is about the NEXT one: answer "visit" with the id of the earliest scheduled date');
+
+    const client = makeClient(plainReply());
+    await drafter.generateGroundedDraft(argsFor(client, context));
+    expect(picker.loadById).toHaveBeenCalledWith('id-oct');
+    expect(oldFinder).not.toHaveBeenCalled();
+  });
+
+  test('a single upcoming visit: the identity prompt carries no next-of-series line', async () => {
+    const drafter = freshDrafter();
+    await drafter.serviceIdentityFor('move it', baseContext([upcomingEntry('Quarterly Pest', '2026-10-02', VISIT_ID)]));
+    expect(mockIdentity.prompts.join('\n')).not.toContain('it is about the NEXT one');
+  });
+
+  test('a series whose two earliest visits share a date stays ambiguous: nothing offered', async () => {
+    const drafter = freshDrafter();
+    const context = baseContext([
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-a'),
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-b'),
+      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-c'),
+    ]);
+    expect(await drafter.serviceIdentityFor('can we move it?', context)).toEqual({ serviceType: null, certain: false, reason: 'ambiguous_upcoming' });
+    const client = makeClient(plainReply());
+    await drafter.generateGroundedDraft(argsFor(client, context));
+    expect(picker.loadById).not.toHaveBeenCalled();
+    expect(oldFinder).not.toHaveBeenCalled();
+  });
+
   test('ambiguous upcoming visits: identity uncertain → nothing offered, neither path called', async () => {
     const drafter = freshDrafter();
     const context = baseContext([
