@@ -203,11 +203,16 @@ function choiceCount(availability, lastDate) {
     .reduce((n, day) => n + (Array.isArray(day.slots) ? day.slots.length : 0), 0);
 }
 
-// True when the late-move limit is applied: enough times remain inside it.
+// True when the late-move limit is applied:
+//   - it ends before the booking range does (`rangeTo`). A limit at or past
+//     the end of the range drops nothing, and naming its date would promise
+//     a day the picker cannot offer;
+//   - enough times remain inside it.
 // `fullAvailability` must cover the page's whole range, so GET, the search
-// and the commit reach one answer.
-function lateLimitApplies(limit, fullAvailability) {
-  if (!limit?.lastDate) return false;
+// and the commit reach one answer. Null (not built) applies no limit.
+function lateLimitApplies(limit, fullAvailability, rangeTo) {
+  if (!limit?.lastDate || !fullAvailability) return false;
+  if (rangeTo && limit.lastDate >= dateOnly(rangeTo)) return false;
   return choiceCount(fullAvailability, limit.lastDate) >= MIN_CHOICES;
 }
 
@@ -231,6 +236,25 @@ function noTimeSoon(availability, now = new Date()) {
     && Array.isArray(day.slots) && day.slots.length > 0);
 }
 
+// The list a surface returns under a limit, and the payload keys that go
+// with it. `full` is the whole booking range (it decides whether the limit
+// applies); `shown` is the list being returned (the same object for GET, the
+// search window for find-slots). No limit, or no whole-range list: `shown`
+// as built and no key (fail open).
+function applyLimit(limit, full, shown, { rangeTo, now = new Date() } = {}) {
+  if (!limit || !full) return { availability: shown, payload: {} };
+  const applies = lateLimitApplies(limit, full, rangeTo);
+  return {
+    availability: applies ? withinLimit(shown, limit.lastDate) : shown,
+    payload: {
+      moveLimit: {
+        lastDate: applies ? limit.lastDate : null,
+        noTimeSoon: noTimeSoon(applies ? withinLimit(full, limit.lastDate) : full, now),
+      },
+    },
+  };
+}
+
 module.exports = {
   ALLOWANCE_BY_GAP_DAYS,
   allowanceDays,
@@ -241,6 +265,7 @@ module.exports = {
   moveLimitsEnabled,
   loadMoveLimit,
   lateLimitApplies,
+  applyLimit,
   withinLimit,
   noTimeSoon,
   customerMovesSince,

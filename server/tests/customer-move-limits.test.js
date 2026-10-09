@@ -7,7 +7,7 @@
 const limits = require('../services/scheduling/customer-move-limits');
 
 const {
-  loadMoveLimit, lateLimitApplies, withinLimit, noTimeSoon, customerMovesSince, countedMoves, moveLimitsEnabled, allowanceDays,
+  loadMoveLimit, lateLimitApplies, applyLimit, withinLimit, noTimeSoon, customerMovesSince, countedMoves, moveLimitsEnabled, allowanceDays,
 } = limits;
 
 const move = (overrides = {}) => ({
@@ -230,6 +230,20 @@ describe('the picker is never emptied', () => {
     expect(lateLimitApplies({ ...limit, lastDate: '2026-10-20' }, availability)).toBe(false);
   });
 
+  test('a limit at or past the end of the booking range drops nothing: not applied, no date named', () => {
+    expect(lateLimitApplies(limit, availability, '2026-11-05')).toBe(false);
+    expect(lateLimitApplies(limit, availability, '2026-11-04')).toBe(false);
+    expect(lateLimitApplies(limit, availability, '2026-11-06')).toBe(true);
+    const out = applyLimit(limit, availability, availability, { rangeTo: '2026-11-05', now: new Date('2026-11-01T16:00:00Z') });
+    expect(out.availability).toBe(availability);
+    expect(out.payload).toEqual({ moveLimit: { lastDate: null, noTimeSoon: false } });
+  });
+
+  test('no whole-range list (the build failed): the list is returned as built with no key', () => {
+    expect(applyLimit(limit, null, availability, { rangeTo: '2026-11-20' })).toEqual({ availability, payload: {} });
+    expect(lateLimitApplies(limit, null, '2026-11-20')).toBe(false);
+  });
+
   test('no plan allowance, or no limit: never applied', () => {
     expect(lateLimitApplies({ ...limit, lastDate: null }, availability)).toBe(false);
     expect(lateLimitApplies(null, availability)).toBe(false);
@@ -260,50 +274,58 @@ describe('reschedule-public wiring', () => {
   const day = (date, n) => ({ date, nearby: false, slots: Array.from({ length: n }, () => ({ date })) });
   const full = { days: [day('2026-11-04', 3), day('2026-11-09', 2)], slots: [{ date: '2026-11-04' }, { date: '2026-11-09' }], nearby: false };
   const limit = { dueDate: '2026-10-15', lastDate: '2026-11-05', firstVisitBlocked: false };
+  const range = { rangeFrom: '2026-10-28', rangeTo: '2026-11-10' };
 
   test('no limit: the list is returned as built and the payload key is absent', () => {
-    expect(applyMoveLimit(null, full, full)).toEqual({ availability: full, moveLimit: null });
+    expect(applyMoveLimit(null, full, full, range)).toEqual({ availability: full, payload: {} });
   });
 
   test('limit applies: later days are dropped and the page is told the last date', () => {
-    const out = applyMoveLimit(limit, full, full);
+    const out = applyMoveLimit(limit, full, full, range);
     expect(out.availability.days.map((d) => d.date)).toEqual(['2026-11-04']);
-    expect(out.moveLimit.lastDate).toBe('2026-11-05');
+    expect(out.payload.moveLimit.lastDate).toBe('2026-11-05');
   });
 
   test('fewer than 3 times inside the limit: nothing is dropped and no last date is named', () => {
     const thin = { ...full, days: [day('2026-11-04', 2), day('2026-11-09', 2)] };
-    const out = applyMoveLimit(limit, thin, thin);
+    const out = applyMoveLimit(limit, thin, thin, range);
     expect(out.availability).toBe(thin);
-    expect(out.moveLimit.lastDate).toBeNull();
+    expect(out.payload.moveLimit.lastDate).toBeNull();
   });
 
-  test('GET hands a first visit past its moves to the office before any availability build', () => {
+  test('GET and the search read one verdict: a blocked first visit is not reschedulable (move_limit) before any build', () => {
+    const fold = src.slice(src.indexOf('async function pageEligibilityWithLimit(svc) {'));
+    expect(fold.slice(0, 500)).toMatch(/blocked \? \{ ok: false, reason: 'move_limit', code: 'MOVE_LIMIT' \} : elig/);
     const get = src.slice(src.indexOf("router.get('/:token'"), src.indexOf("router.post('/:token/find-slots'"));
-    const blocked = get.indexOf("reason: 'move_limit'");
-    expect(blocked).toBeGreaterThan(-1);
-    expect(blocked).toBeLessThan(get.indexOf('buildAvailabilityForService(svc'));
+    const verdict = get.indexOf('await pageEligibilityWithLimit(svc)');
+    expect(verdict).toBeGreaterThan(-1);
+    expect(verdict).toBeLessThan(get.indexOf('buildAvailabilityForService(svc'));
+    expect(get).toMatch(/applyMoveLimit\(limit, availability, availability, range\)/);
+    expect(get).toMatch(/\.\.\.limited\.payload/);
   });
 
   test('Confirm checks the limits after the idempotent replay and refuses MOVE_LIMIT', () => {
     const commit = src.slice(src.indexOf("router.post('/:token', commitLimiter"));
     const replay = commit.indexOf('replayed: true');
-    const check = commit.indexOf("code: 'MOVE_LIMIT'");
+    const check = commit.indexOf('await moveLimitRefuses(svc, elig, range, config, date)');
     expect(replay).toBeGreaterThan(-1);
     expect(check).toBeGreaterThan(replay);
-    expect(commit.slice(check - 400, check)).toMatch(/date > limit\.lastDate && await lateLimitActive\(svc, limit, range, config\)/);
-    expect(commit.slice(check - 400, check)).toMatch(/limit\?\.firstVisitBlocked/);
+    expect(commit.slice(check, check + 200)).toMatch(/code: 'MOVE_LIMIT'/);
+    const refuses = src.slice(src.indexOf('async function moveLimitRefuses('));
+    const body = refuses.slice(0, refuses.indexOf('\n}\n'));
+    expect(body).toMatch(/if \(blocked\) return true;/);
+    expect(body).toMatch(/date <= limit\.lastDate\) return false;/);
+    expect(body).toMatch(/lateLimitApplies\(limit, await fullRangeForLimit\(svc, limit, range, config\), range\.rangeTo\)/);
   });
 
   test('the search and the slot-taken refresh decide over the whole range and return the limit they applied', () => {
     const search = src.slice(src.indexOf("router.post('/:token/find-slots'"), src.indexOf("router.post('/:token', commitLimiter"));
-    expect(search).toMatch(/full = await buildAvailabilityForService\(svc, \{ \.\.\.range, config \}\);/);
-    expect(search).toMatch(/\(\{ availability, moveLimit \} = applyMoveLimit\(limit, full, availability\)\)/);
-    expect(search).toMatch(/\.\.\.\(moveLimit \? \{ moveLimit \} : \{\}\)/);
-    expect(search).toMatch(/reason: 'move_limit', code: 'MOVE_LIMIT'/);
+    expect(search).toMatch(/applyMoveLimit\(limit, await fullRangeForLimit\(svc, limit, range, config\), availability, range\)/);
+    expect(search).toMatch(/\.\.\.limited\.payload/);
+    expect(search).toMatch(/reason: elig\.reason, code: elig\.code/);
     const taken = src.slice(src.indexOf('const slotTakenResponse = async () => {'));
     const body = taken.slice(0, taken.indexOf('// Anti-forgery'));
-    expect(body).toMatch(/\(\{ availability: refreshed, moveLimit \} = applyMoveLimit\(limit, refreshed, refreshed\)\)/);
-    expect(body).toMatch(/\.\.\.\(moveLimit \? \{ moveLimit \} : \{\}\)/);
+    expect(body).toMatch(/applyMoveLimit\(limit, refreshed, refreshed, range\)/);
+    expect(body).toMatch(/\.\.\.limited\.payload/);
   });
 });

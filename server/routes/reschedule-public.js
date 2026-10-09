@@ -156,42 +156,52 @@ function nextVisitDisclosureMismatch(svc, body, nextVisit) {
 // Customer move limits (GATE_RESCHEDULE_MOVE_LIMITS, owner 2026-10-09; rules
 // in services/scheduling/customer-move-limits.js). Null = no limit.
 const MOVE_LIMIT_MESSAGE = "Let's find a time that works. Text or call us at (941) 297-5749 and our team will set it up.";
-function loadMoveLimit(svc, elig) {
-  return moveLimits.loadMoveLimit(svc, { database: db, missed: !!elig?.missed });
+// { limit, blocked }: `blocked` = a first visit past its online moves (the
+// office sets the time).
+async function loadMoveLimit(svc, elig) {
+  const limit = await moveLimits.loadMoveLimit(svc, { database: db, missed: !!elig?.missed });
+  return { limit, blocked: !!limit?.firstVisitBlocked };
 }
 
-// The availability the page shows under a limit, plus what the page says.
-// `full` must cover the whole booking range: it decides whether the late-move
-// limit applies (never when fewer than 3 times would remain), so GET, the
-// search and Confirm reach one answer. `shown` is the list being returned
-// (the same object for GET; the search window for find-slots).
-function applyMoveLimit(limit, full, shown) {
-  if (!limit) return { availability: shown, moveLimit: null };
-  const applies = moveLimits.lateLimitApplies(limit, full);
-  const availability = applies ? moveLimits.withinLimit(shown, limit.lastDate) : shown;
-  return {
-    availability,
-    moveLimit: {
-      lastDate: applies ? limit.lastDate : null,
-      noTimeSoon: moveLimits.noTimeSoon(applies ? moveLimits.withinLimit(full, limit.lastDate) : full),
-    },
-  };
+// GET and the search: the page verdict with the move limit folded in. A
+// blocked first visit reads as not reschedulable with reason `move_limit`
+// (and code MOVE_LIMIT, which the search path reloads on); every other
+// visit keeps its verdict and carries its limit.
+async function pageEligibilityWithLimit(svc) {
+  const elig = await pageEligibility(svc);
+  if (!elig.ok) return { elig, limit: null };
+  const { limit, blocked } = await loadMoveLimit(svc, elig);
+  return { elig: blocked ? { ok: false, reason: 'move_limit', code: 'MOVE_LIMIT' } : elig, limit };
 }
 
-// For a caller that does not hold the whole range (the search, Confirm):
-// true when the late-move limit applies. Builds the whole booking range with
-// the arguments GET uses (the range also decides mid-route offers, so a
-// narrower build could count other times) and counts as GET counts. Runs
-// only for a date past the limit. A failed build applies no limit.
-async function lateLimitActive(svc, limit, range, config) {
-  if (!limit?.lastDate) return false;
+// The whole booking range, built with the arguments GET uses (the range also
+// decides mid-route offers, so a narrower build could count other times).
+// The search and Confirm use it to reach GET's answer on whether the
+// late-move limit applies. Null when there is no limit to decide, or when
+// the build fails (no limit is then applied).
+async function fullRangeForLimit(svc, limit, range, config) {
+  if (!limit) return null;
   try {
-    const full = await buildAvailabilityForService(svc, { ...range, config });
-    return moveLimits.lateLimitApplies(limit, full);
+    return await buildAvailabilityForService(svc, { ...range, config });
   } catch (err) {
     logger.warn(`[reschedule-public] move-limit availability failed for ${svc.id}: ${err.message}`);
-    return false;
+    return null;
   }
+}
+
+// { availability, payload } for a list this page returns: the days the limit
+// drops are removed and `payload` carries `moveLimit` (or nothing).
+function applyMoveLimit(limit, full, shown, range) {
+  return moveLimits.applyLimit(limit, full, shown, { rangeTo: range.rangeTo });
+}
+
+// Confirm: true when a move limit refuses this move to `date` (a blocked
+// first visit, or a date past a late-move limit that applies).
+async function moveLimitRefuses(svc, elig, range, config, date) {
+  const { limit, blocked } = await loadMoveLimit(svc, elig);
+  if (blocked) return true;
+  if (!limit?.lastDate || date <= limit.lastDate) return false;
+  return moveLimits.lateLimitApplies(limit, await fullRangeForLimit(svc, limit, range, config), range.rangeTo);
 }
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
@@ -627,7 +637,9 @@ router.get('/:token', async (req, res, next) => {
     // Customer-page-view log (bots/staff skipped, deduped, never blocks).
     void recordPageView({ req, page: 'reschedule', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
-    const elig = await pageEligibility(svc);
+    // A first visit past its online moves reads here as not reschedulable
+    // (reason move_limit, owner 2026-10-09): the office sets the time.
+    const { elig, limit } = await pageEligibilityWithLimit(svc);
     const base = {
       state: elig.ok ? 'reschedulable' : 'not_reschedulable',
       reason: elig.ok ? null : elig.reason,
@@ -659,12 +671,6 @@ router.get('/:token', async (req, res, next) => {
 
     if (!elig.ok) return res.json({ ...base, availability: null });
 
-    // First visit, third online move (owner 2026-10-09): the office sets the time.
-    const limit = await loadMoveLimit(svc, elig);
-    if (limit?.firstVisitBlocked) {
-      return res.json({ ...base, state: 'not_reschedulable', reason: 'move_limit', availability: null });
-    }
-
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
@@ -686,8 +692,8 @@ router.get('/:token', async (req, res, next) => {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
     weatherMove = await weatherMovePromise;
-    let moveLimit = null;
-    if (availability) ({ availability, moveLimit } = applyMoveLimit(limit, availability, availability));
+    const limited = applyMoveLimit(limit, availability, availability, range);
+    availability = limited.availability;
     const nextVisit = await loadNextVisitShift(svc, availability);
 
     return res.json({
@@ -695,8 +701,8 @@ router.get('/:token', async (req, res, next) => {
       weatherMove,
       // Gate off / not a series / nothing to name: key omitted.
       ...(nextVisit ? { nextVisit } : {}),
-      // Gate off / missed visit / unreadable history: key omitted.
-      ...(moveLimit ? { moveLimit } : {}),
+      // moveLimit. Gate off / missed visit / unreadable history: key omitted.
+      ...limited.payload,
       availability: availability
         ? {
           slots: availability.slots,
@@ -728,13 +734,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = await pageEligibility(svc);
+    const { elig, limit } = await pageEligibilityWithLimit(svc);
     if (!elig.ok) {
-      return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
-    }
-    const limit = await loadMoveLimit(svc, elig);
-    if (limit?.firstVisitBlocked) {
-      return res.status(409).json({ error: MOVE_LIMIT_MESSAGE, reason: 'move_limit', code: 'MOVE_LIMIT' });
+      // `code` is set for a move limit only (MOVE_LIMIT: the page reloads).
+      return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason, code: elig.code });
     }
 
     const booking = require('./booking');
@@ -766,24 +769,15 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     // drops the same days, decided over the whole booking range as GET does.
     // It also returns the limit as it stands now: the search replaces the
     // day list on the page, so the line beside it must match these days.
-    let moveLimit = null;
-    if (limit) {
-      let full = null;
-      try {
-        full = await buildAvailabilityForService(svc, { ...range, config });
-      } catch (err) {
-        logger.warn(`[reschedule-public] move-limit availability failed for ${svc.id}: ${err.message}`);
-      }
-      // No whole-range list: apply no limit (fail open) and name none.
-      if (full) ({ availability, moveLimit } = applyMoveLimit(limit, full, availability));
-    }
+    const limited = applyMoveLimit(limit, await fullRangeForLimit(svc, limit, range, config), availability, range);
+    availability = limited.availability;
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
     // A search can offer a day the first load did not: name its date too.
     const nextVisit = await loadNextVisitShift(svc, availability);
     return res.json({
       ...(nextVisit ? { nextVisit } : {}),
-      ...(moveLimit ? { moveLimit } : {}),
+      ...limited.payload,
       summary: summarizeWindow(when, { count: slotCount, nearby: availability.nearby }),
       understood: when.understood,
       window: { date_from: when.dateFrom, date_to: when.dateTo },
@@ -905,9 +899,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // Customer move limits (GATE_RESCHEDULE_MOVE_LIMITS). After the replay
     // above: a retry of a move that already committed still replays. The
     // page reloads on MOVE_LIMIT and shows what GET now offers.
-    const limit = await loadMoveLimit(svc, elig);
-    if (limit?.firstVisitBlocked
-      || (limit?.lastDate && date > limit.lastDate && await lateLimitActive(svc, limit, range, config))) {
+    if (await moveLimitRefuses(svc, elig, range, config, date)) {
       return res.status(409).json({ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' });
     }
 
@@ -928,14 +920,15 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       } catch (err) {
         logger.warn(`[reschedule-public] refresh availability failed for ${svc.id}: ${err.message}`);
       }
-      let moveLimit = null;
-      if (refreshed) ({ availability: refreshed, moveLimit } = applyMoveLimit(limit, refreshed, refreshed));
+      const { limit } = await loadMoveLimit(svc, elig);
+      const limited = applyMoveLimit(limit, refreshed, refreshed, range);
+      refreshed = limited.availability;
       const nextVisit = refreshed ? await loadNextVisitShift(svc, refreshed) : null;
       return res.status(409).json({
         error: 'That time is no longer open. Here are the latest available times.',
         code: 'SLOT_TAKEN',
         ...(nextVisit ? { nextVisit } : {}),
-        ...(moveLimit ? { moveLimit } : {}),
+        ...limited.payload,
         availability: refreshed
           ? { slots: refreshed.slots, days: refreshed.days, nearby: refreshed.nearby, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo }
           : null,
@@ -1258,7 +1251,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 router._test = {
   nextVisitDisclosureMismatch,
   applyMoveLimit,
-  lateLimitActive,
+  moveLimitRefuses,
+  pageEligibilityWithLimit,
   MOVE_LIMIT_MESSAGE,
   eligibility,
   eligibilityAsync,

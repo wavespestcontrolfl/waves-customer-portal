@@ -841,8 +841,9 @@ customer's visit after 2 online moves), and for a movable visit carries
 `moveLimit: { lastDate, noTimeSoon }`. `lastDate` (`YYYY-MM-DD` or null) is the
 last date offered for this visit; when it is set, `availability` holds no day
 after it, and `find-slots` drops the same days. It is null when the visit has
-no plan allowance or when fewer than 3 times would remain inside the limit
-(the limit is then not applied). `noTimeSoon` is true when no time is open in
+no plan allowance, when the limit is at or past the end of the booking range
+(it drops no day), or when fewer than 3 times would remain inside it (the
+limit is then not applied). `noTimeSoon` is true when no time is open in
 the next 7 days. `POST .../find-slots` and the commit route's `SLOT_TAKEN`
 refresh carry the same key for the list they return, and the client replaces
 what it holds with that answer (no key = no line). The key is OMITTED when the

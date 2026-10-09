@@ -1144,7 +1144,10 @@ describe('pageEligibility — the ONE verdict the GET page, find-slots and the t
 
   test('the router\'s inline verdicts are gone: GET and find-slots call pageEligibility', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/reschedule-public'), 'utf8');
-    expect(src.match(/await pageEligibility\(svc\)/g)).toHaveLength(2);
+    // Both reach it through pageEligibilityWithLimit, which adds the move
+    // limit (GATE_RESCHEDULE_MOVE_LIMITS) to that one verdict.
+    expect(src.match(/await pageEligibility\(svc\)/g)).toHaveLength(1);
+    expect(src.match(/await pageEligibilityWithLimit\(svc\)/g)).toHaveLength(2);
     expect(src.match(/withSelfServeNotice\(accountInactive/g)).toHaveLength(1); // only pageEligibility itself
   });
 });
