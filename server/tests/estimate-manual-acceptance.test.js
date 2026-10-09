@@ -33,6 +33,8 @@ jest.mock('../services/estimate-converter', () => ({
   // Real cadence reader: manual acceptance now runs the retired-T&S-cadence
   // gate (codex P1 r9), which reads each row's cadence through it.
   explicitServiceCadence: (...args) => jest.requireActual('../services/estimate-converter').explicitServiceCadence(...args),
+  // Real one-time-only rule: the area add-on Mark Won refusal asks the converter's own question.
+  shouldSuppressRecurringConversion: (...args) => jest.requireActual('../services/estimate-converter').shouldSuppressRecurringConversion(...args),
   // Real-enough commercial helpers for the taxed invoiceTotal path: key from
   // the row's service field, flat base rate, and a blended rate equal to the
   // base (single-line commercial quotes in these tests are fully taxable).
@@ -827,6 +829,40 @@ describe('estimate manual acceptance', () => {
       if (prev === undefined) delete process.env.GATE_AREA_ADDONS;
       else process.env.GATE_AREA_ADDONS = prev;
     }
+  });
+
+  describe('a recurring estimate carrying an area add-on (Codex r6)', () => {
+    const { recurringAcceptWouldDropAreaAddOns, AREA_ADDON_RECURRING_MARK_WON_MESSAGE } = require('../services/estimate-manual-acceptance');
+    const addOnRow = { service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 59 };
+    const recurringWithAddOn = {
+      id: 'estimate-recurring-addon', status: 'sent', monthly_total: 65, annual_total: 780, onetime_total: 59,
+      estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', mo: 65 }] }, oneTime: { items: [addOnRow] } } }),
+    };
+    const addOnOnly = {
+      id: 'estimate-addon-only', status: 'sent', monthly_total: 0, annual_total: 0, onetime_total: 59,
+      estimate_data: JSON.stringify({ result: { recurring: { services: [] }, oneTime: { items: [addOnRow] } } }),
+    };
+
+    test('Mark Won refuses before any write, with the staff message and the one-time-only code', async () => {
+      const prev = process.env.GATE_AREA_ADDONS;
+      process.env.GATE_AREA_ADDONS = 'true';
+      try {
+        const db = makeDb(recurringWithAddOn);
+        await expect(markEstimateManuallyAccepted({ estimateId: recurringWithAddOn.id, adminUserId: 1, database: db.database }))
+          .rejects.toMatchObject({ statusCode: 409, code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY', message: AREA_ADDON_RECURRING_MARK_WON_MESSAGE });
+        expect(db.updates).toHaveLength(0);
+      } finally {
+        if (prev === undefined) delete process.env.GATE_AREA_ADDONS;
+        else process.env.GATE_AREA_ADDONS = prev;
+      }
+    });
+
+    test('the predicate: recurring plan plus add-on drops it; add-on only, or no add-on, does not', () => {
+      expect(recurringAcceptWouldDropAreaAddOns(recurringWithAddOn)).toBe(true);
+      expect(recurringAcceptWouldDropAreaAddOns(recurringWithAddOn, 'prepay_annual')).toBe(true);
+      expect(recurringAcceptWouldDropAreaAddOns(addOnOnly)).toBe(false);
+      expect(recurringAcceptWouldDropAreaAddOns({ ...recurringWithAddOn, estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', mo: 65 }] } } }) })).toBe(false);
+    });
   });
 
   test('refuses manual acceptance of a not-yet-accepted 4x/quarterly tree & shrub estimate (retired 2026-09-24, codex P1 r9)', async () => {

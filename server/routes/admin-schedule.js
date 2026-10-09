@@ -7970,6 +7970,16 @@ async function scheduleCreateHandler(req, res, next) {
             code: areaAddOnMapper.AREA_ADDONS_GATED_CODE,
           });
         }
+        // The appointment commits BEFORE the best-effort acceptance, which refuses a recurring estimate that carries
+        // an area add-on (it would convert the plan and drop the add-on): refuse here so nothing is booked.
+        const manualAccept = require('../services/estimate-manual-acceptance');
+        if (linkedEstimate.status !== 'accepted'
+          && manualAccept.recurringAcceptWouldDropAreaAddOns(linkedEstimate, bookingBillingTerm)) {
+          return res.status(409).json({
+            error: manualAccept.AREA_ADDON_RECURRING_MARK_WON_MESSAGE,
+            code: areaAddOnMapper.AREA_ADDONS_ONE_TIME_ONLY_CODE,
+          });
+        }
       }
       // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
       // (retired 2026-09-24) must not be booked-and-accepted here: the

@@ -110,4 +110,15 @@ describe('booking from a linked estimate (admin schedule)', () => {
     expect(src.slice(bermuda, area)).not.toMatch(/db\.transaction|trx\(/);
     expect(src.slice(area, area + 400)).toMatch(/status\(409\)[\s\S]*AREA_ADDONS_GATED_CODE/);
   });
+
+  test('the preflight refuses a recurring estimate carrying an add-on before the appointment transaction (Codex r6)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    const check = src.indexOf('recurringAcceptWouldDropAreaAddOns(linkedEstimate');
+    const firstTransaction = src.indexOf('db.transaction', src.indexOf('estimateAreaAddOnsGated(linkedEstimate.estimate_data)'));
+    expect(check).toBeGreaterThan(0);
+    expect(check).toBeLessThan(firstTransaction);
+    expect(src.slice(check, check + 400)).toMatch(/status\(409\)[\s\S]*AREA_ADDON_RECURRING_MARK_WON_MESSAGE[\s\S]*AREA_ADDONS_ONE_TIME_ONLY_CODE/);
+    // An already-accepted estimate converts nothing here, so it is not refused.
+    expect(src.slice(check - 120, check)).toMatch(/linkedEstimate\.status !== 'accepted'/);
+  });
 });

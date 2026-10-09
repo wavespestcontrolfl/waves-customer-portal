@@ -444,6 +444,25 @@ async function logManualAcceptance(database, {
   }
 }
 
+// A sold area add-on is booked and billed only by the one-time accept. Marking
+// a RECURRING estimate that carries one as won converts the plan and has no
+// step that books the add-on, so it would be dropped while the estimate reads
+// accepted (the public accept's AREA_ADDONS_ONE_TIME_ACCEPT_ONLY rule). True
+// when this accept would do that; the caller refuses before any write.
+const AREA_ADDON_RECURRING_MARK_WON_MESSAGE = 'This estimate carries an area add-on treatment alongside a recurring plan. Marking it won would convert the plan and drop the add-on. Remove the add-on from this estimate and sell it on its own one-time estimate, then mark this one won.';
+function recurringAcceptWouldDropAreaAddOns(estimate = {}, billingTerm = 'standard') {
+  const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  if (!require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estimateData)) return false;
+  return !EstimateConverter.shouldSuppressRecurringConversion({
+    billingTerm,
+    monthlyRate: parseFloat(estimate.monthly_total || 0),
+    annualTotal: estimate.annual_total,
+    oneTimeTotal: estimate.onetime_total,
+    recurringServices: [],
+    estimateData,
+  });
+}
+
 async function markEstimateManuallyAccepted({
   estimateId,
   adminUserId,
@@ -549,6 +568,10 @@ async function markEstimateManuallyAccepted({
       const { estimateAreaAddOnsGated, areaAddOnsGatedStaffMessage } = require('./pricing-engine/v1-legacy-mapper');
       if (estimateAreaAddOnsGated(estimate.estimate_data || estimate.estimateData)) {
         throw httpError(areaAddOnsGatedStaffMessage('accepting'), 409);
+      }
+      if (recurringAcceptWouldDropAreaAddOns(estimate, normalizedBillingTerm)) {
+        const { AREA_ADDONS_ONE_TIME_ONLY_CODE } = require('./pricing-engine/v1-legacy-mapper');
+        throw Object.assign(httpError(AREA_ADDON_RECURRING_MARK_WON_MESSAGE, 409), { code: AREA_ADDONS_ONE_TIME_ONLY_CODE });
       }
     }
     if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
@@ -1238,6 +1261,8 @@ async function markEstimateManuallyAccepted({
 module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   MANUAL_ACCEPTABLE_STATUSES,
   markEstimateManuallyAccepted,
+  recurringAcceptWouldDropAreaAddOns,
+  AREA_ADDON_RECURRING_MARK_WON_MESSAGE,
   normalizeManualBillingTerm,
   resolveAnnualPrepayAmount,
   annualPrepayInvoiceTotalForEstimate,
