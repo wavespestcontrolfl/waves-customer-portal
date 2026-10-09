@@ -148,12 +148,16 @@ async function buildWeedMix({ addOns, svc, structured, knex }) {
     ({ capped } = await engine.v13VisitLimits(knex, svc, all.map((item) => ({ selected: true, product: item.product })), engine.v13ProtocolRows(structured), {}));
   } catch (err) {
     logger.warn(`[lawn-weed-mix] limits unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return { ...base, mode: 'unavailable', note: LIMITS_UNREAD };
+    return { ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: [] };
   }
   // v13VisitLimits fails closed per product: a read that failed comes back as a block with no
   // limit type (a real limit always names one). That is not a reached cap, so nothing is offered.
   const blocksOf = (item) => capped.get(idOf(item)) || [];
-  if (all.some((item) => blocksOf(item).some((block) => !block.type))) return { ...base, mode: 'unavailable', note: LIMITS_UNREAD };
+  // `blockedIds` (additive, read by the treatment guide only): the members whose limit WAS read as a named
+  // limit, so a sibling's failed read never releases them. The mix is withheld as a whole either way.
+  if (all.some((item) => blocksOf(item).some((block) => !block.type))) {
+    return { ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: all.filter((item) => blocksOf(item).some((block) => block.type)).map(idOf) };
+  }
   const isCapped = (item) => blocksOf(item).length > 0;
   // Only the yearly count hands the visit to the replacement; any other limit on the lead (a
   // minimum interval, a blackout) just holds the weed mix, with the limit's own words.

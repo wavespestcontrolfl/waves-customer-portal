@@ -911,7 +911,10 @@ function InsightLine({ label, value, strong, size = 14.5 }) {
 // Print / PDF always keeps the lines — a printed record is read later and its
 // clock times stay true. No animation anywhere in this block.
 const BANNER_HOLD_STATES = ['hold', 'hold_then_water_in'];
-export function LawnWateringBanner({ banner, style = null }) {
+// Where the customer adds sprinkler details (the portal's property tab): the
+// water block's "Add your watering schedule" link and the banner's invitation.
+const IRRIGATION_SETUP_HREF = '/?tab=property';
+export function LawnWateringBanner({ banner, style = null, setupHref = IRRIGATION_SETUP_HREF }) {
   const print = usePrint();
   const printing = usePrintRequested();
   const expiresMs = banner?.expiresAt ? Date.parse(banner.expiresAt) : NaN;
@@ -944,6 +947,11 @@ export function LawnWateringBanner({ banner, style = null }) {
   const live = watering && !ended && !(print || printing) && !hold;
   const observedLine = live && typeof banner.observedRain?.line === 'string' && banner.observedRain.line ? banner.observedRain.line : null;
   const forecastLine = live && !observedLine && typeof banner.forecastLine === 'string' && banner.forecastLine ? banner.forecastLine : null;
+  // GATE_LAWN_REPORT_CLARITY: the invitation under a water-in that gives the
+  // amount and no minutes (no sprinkler setup on file). Live view only, like the
+  // lines above, but it also shows under a hold-then-water-in; the server only
+  // sends it for a water-in.
+  const setupLine = watering && !ended && !(print || printing) && typeof banner.setupLine === 'string' && banner.setupLine ? banner.setupLine : null;
   return (
     <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
       <div data-testid="lawn-watering-banner" data-state={banner.state ?? 'mow'} data-ended={ended ? 'true' : 'false'}>
@@ -965,6 +973,11 @@ export function LawnWateringBanner({ banner, style = null }) {
             )}
             {forecastLine && (
               <p data-testid="lawn-watering-banner-forecast" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{forecastLine}</p>
+            )}
+            {setupLine && (
+              <p data-testid="lawn-watering-banner-setup" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>
+                <a href={setupHref} style={{ color: COLORS.glassNavy, fontWeight: 600, textDecoration: 'underline' }}>{setupLine}</a>
+              </p>
             )}
           </>
         )}
@@ -1043,7 +1056,7 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
 }
 
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
-export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null, lead = false, coverageCardShown = false }) {
+export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_HREF, aftercare = null, lead = false, coverageCardShown = false }) {
   const mounted = useMounted();
   const print = usePrint();
   // The browser print pass (Report Tools "Print", Cmd+P) over the live page

@@ -4,6 +4,7 @@ const v13 = require('../config/lawn-protocol-v13.json');
 const engine = require('../services/waveguard-plan-engine');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const october = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const prohibited = require('../services/lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
@@ -223,7 +224,7 @@ describe('6. July is the scout visit again: no 0-0-50 potash step (owner: Decemb
   });
 
   test('one tool per visit: spreader visits carry granulars, hose visits carry liquids, July none', () => {
-    const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME]);
+    const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME, december.NEW_NAME]);
     const HOSE_PRODUCTS = new Set([N.NT, N.STW, N.DIM, N.TET]);
     for (const [month, mode] of [[1, 'hose'], [2, 'spreader'], [3, 'hose'], [4, 'spreader'], [5, 'hose'], [6, 'hose'], [7, 'none'], [8, 'hose'], [9, 'hose'], [10, 'spreader'], [11, 'spreader'], [12, 'spreader']]) {
       const tools = lines(visitFor(month).primary).filter((l) => l.includes(' \u2014 ')).map(nameOf);
@@ -471,27 +472,27 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
     expect(note).toMatch(/The 9-visit plan keeps the October Dimension step/);
   });
 
-  test('2026 behavior is untouched: October Dimension 4.04 lb, November 24-0-11 3.1 lb, December 24-0-11 2.1 lb', () => {
+  test('2026 behavior is untouched: October Dimension 4.04 lb, November 24-0-11 3.1 lb, December LESCO 10-0-22 4.5 lb', () => {
     expect(lines(visitFor(10).primary)[0]).toBe(`${october.NEW_NAME} — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader`);
     expect(lines(visitFor(11).primary)[0]).toMatch(/^LESCO 24-0-11 with PolyPlus OPTI — 3\.1 lb per 1,000 sq ft/);
-    expect(lines(visitFor(12).primary)[0]).toMatch(/^LESCO 24-0-11 with PolyPlus OPTI — 2\.1 lb per 1,000 sq ft/);
+    expect(lines(visitFor(12).primary)[0]).toBe(`${december.NEW_NAME} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`);
     expect(lines(visitFor(1).primary)[0]).toMatch(/^LESCO Stonewall 4FL/);
   });
 
-  test('N per application and per year: Oct 0.60, Nov 0.73, and the 2026 December step 0.75, under 1 lb each and under the 4 lb ordinance cap', () => {
+  test('N per application and per year: Oct 0.60, Nov 0.73, and the 2026 December step 0.45 (10-0-22), under 1 lb each and under the 4 lb ordinance cap', () => {
     const oct = 2.5 * 0.24;
     const nov = 4.04 * 0.18;
-    const dec = 3.1 * 0.24;
-    expect([oct, nov, dec].map((n) => Math.round(n * 100) / 100)).toEqual([0.6, 0.73, 0.74]);
+    const dec = 4.5 * 0.10;
+    expect([oct, nov, dec].map((n) => Math.round(n * 100) / 100)).toEqual([0.6, 0.73, 0.45]);
     expect(note).toMatch(/October LESCO 24-0-11 with PolyPlus OPTI at 2\.5 lb per 1,000 sq ft \(0\.60 lb N\)/);
     expect(note).toMatch(/November LESCO Dimension 0\.21% 18-0-10 at 4\.04 lb per 1,000 sq ft \(0\.73 lb N, 0\.37 lb dithiopyr per acre/);
     // December is defined separately (another lane owns it): the note carries no December line.
     expect(note).toMatch(/December is defined separately/);
     expect(note).not.toMatch(/December LESCO|3\.1 lb/);
     for (const n of [oct, nov, dec]) expect(n).toBeLessThanOrEqual(1);
-    // Feb 0.75 + Apr 0.5 + Oct 0.6 + Nov 0.73 + Dec 0.75 = 3.33 lb N a year.
-    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.75).toBeCloseTo(3.33, 2);
-    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.75).toBeLessThan(4);
+    // Feb 0.75 + Apr 0.5 + Oct 0.6 + Nov 0.73 + Dec 0.45 = 3.03 lb N a year.
+    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.45).toBeCloseTo(3.03, 2);
+    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.45).toBeLessThan(4);
   });
 
   test('dithiopyr stays under 1.5 lb ai per acre: March and June 2EW 0.5 fl oz each plus the November bag at 4.04 lb', () => {

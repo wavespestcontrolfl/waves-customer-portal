@@ -24,7 +24,7 @@ router.post('/check-limits', async (req, res, next) => {
 
     const results = [];
     for (const p of products) {
-      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date(), undefined, { propertyId: propertyId || null });
+      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date(), undefined, { propertyId: propertyId || null, proposal: true });
       results.push({ productId: p.productId, productName: p.name, ...check });
     }
 

@@ -788,6 +788,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_dimension_2ew', 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
   ['v13_dimension_18_0_10', 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
   ['v13_lesco_24_0_11', 'LESCO 24-0-11 with PolyPlus OPTI', 'fertilizer', 'fertilizer'],
+  ['v13_lesco_10_0_22', 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
   ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
   ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],

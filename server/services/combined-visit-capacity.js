@@ -16,10 +16,12 @@ function capacityUnavailable() {
   });
 }
 
-// Two stop groups (owner ruling 2026-10-05): pest-group services share one
-// arrival hour and lawn-group services share another; pest and lawn never
-// share a stop. The group of the reserved anchor's service keeps the picked
-// hour; the other group starts on the first whole hour after its work.
+// Two stop groups (owner ruling 2026-10-05, reversed 2026-10-08): a hold
+// stamped 10-06 to 10-08 carries `stopGroups: true` and promised pest-group
+// services one arrival hour and lawn-group services another. Everything from
+// here to capacityForServices only reads those saved holds; no new hold is
+// stamped this way. The group of the reserved anchor's service keeps the
+// picked hour; the other group starts on the first whole hour after its work.
 const PEST_STOP_FAMILIES = new Set(['pest_control', 'mosquito', 'termite_bait', 'rodent_bait']);
 const stopGroupOf = (key) => (PEST_STOP_FAMILIES.has(key) ? 'pest' : 'lawn');
 
@@ -84,17 +86,9 @@ function capacityForServices(services, durations) {
     || new Set(keys).size !== keys.length) throw capacityUnavailable();
   if (durations) {
     if (durations.length !== keys.length || durations.some(value => !Number.isInteger(value) || value < 15 || value > 480)) throw capacityUnavailable();
-    return { version: 2, services: keys, durations, durationMinutes: stopGroupSpanMinutes(keys, durations), stopGroups: true };
+    return { version: 2, services: keys, durations, durationMinutes: durations.reduce((sum, value) => sum + value, 0) };
   }
-  return { version: 1, services: keys, durationMinutes: keys.length * SERVICE_MINUTES, stopGroups: true };
-}
-
-// A hold stamped before the stop groups (no `stopGroups` marker) keeps its
-// original promise: version 1 one hour per member in member order, version 2
-// every member at the shared arrival, and the plain sum of minutes held.
-function legacyDurationMinutes(capacity) {
-  return capacity.version === 2 ? capacity.durations.reduce((sum, value) => sum + value, 0)
-    : capacity.services.length * SERVICE_MINUTES;
+  return { version: 1, services: keys, durationMinutes: keys.length * SERVICE_MINUTES };
 }
 
 function capacityFromReservation(row) {
@@ -103,7 +97,11 @@ function capacityFromReservation(row) {
   if (![1, 2].includes(capacity.version) || !Array.isArray(capacity.services)
     || (capacity.version === 2 && !Array.isArray(capacity.durations))) throw capacityUnavailable();
   const expected = capacityForServices(capacity.services.map((service) => ({ service })), capacity.version === 2 ? capacity.durations : undefined);
-  const held = capacity.stopGroups === true ? expected.durationMinutes : legacyDurationMinutes(capacity);
+  // Back to one stop group (owner ruling 2026-10-08): a new hold is stamped in
+  // the plain format again. A hold stamped 10-06 to 10-08 carries
+  // `stopGroups: true` and its padded span; it keeps that promise below.
+  const held = capacity.stopGroups === true && capacity.version === 2
+    ? stopGroupSpanMinutes(capacity.services, capacity.durations) : expected.durationMinutes;
   if (capacity.durationMinutes !== held) throw capacityUnavailable();
   return capacity;
 }

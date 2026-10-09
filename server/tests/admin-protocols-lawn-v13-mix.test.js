@@ -153,7 +153,7 @@ describe('the sheet opened from a visit applies the plan\'s application limits (
     expect(itemFor(body, NUTRA).jobMix).toMatchObject({ amount: 60 });
     // The same call the plan makes: the visit's customer, product, date, the line's staged rate, the visit's property.
     expect(mockCheckLimits).toHaveBeenCalledWith('cust-1', 'stw', expect.any(Date), db,
-      { proposed: { ratePer1000: 0.5, unit: 'fl oz' }, excludeScheduledServiceId: VISIT, propertyId: 'prop-A' });
+      { proposal: true, proposed: { ratePer1000: 0.5, unit: 'fl oz' }, excludeScheduledServiceId: VISIT, propertyId: 'prop-A' });
   });
 
   test('a capped product has no step in the mixing order; the rest of the mix keeps its steps', async () => {
