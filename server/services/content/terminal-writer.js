@@ -198,6 +198,11 @@ const describe = (r) => `${r.action_type.replace(/_/g, ' ')}: ${r.query || r.pag
  * item when posts are due. Never drafts and never claims a queue row.
  */
 async function handOffToTerminal({ now = new Date(), deps = {} } = {}) {
+  // claimNext is what normally releases a claim a dead API batch left behind,
+  // and nothing calls it while the gate is on. Do it here, or a row claimed
+  // just before the gate was turned on would never be handed to the terminal.
+  const queue = deps.queue || require('./opportunity-queue');
+  await queue.recoverStaleClaims().catch((err) => logger.warn(`[terminal-writer] stale-claim recovery failed: ${err.message}`));
   const work = await terminalWriterWork({ complete: true, now, deps });
   const { due, inProgress, merged } = work;
   const n = due.length;

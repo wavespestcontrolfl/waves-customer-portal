@@ -35,7 +35,10 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0, 
   return {
     updates,
     deps: {
-      queue: { peek: jest.fn(async ({ actionType, minScore }) => rows.filter((r) => r.action_type === actionType && r.score >= minScore)) },
+      queue: {
+        peek: jest.fn(async ({ actionType, minScore }) => rows.filter((r) => r.action_type === actionType && r.score >= minScore)),
+        recoverStaleClaims: jest.fn(async () => 0),
+      },
       gh: {
         env: () => ({ owner: 'acme', repo: 'site', defaultBranch: 'main' }),
         ghFetchPaginated: jest.fn(async (path) => (path.includes('state=open') ? [...open, { head: { ref: 'content/other-pr' }, base: { ref: 'main' }, state: 'open' }, { head: { ref: 'terminal-writer/not-an-id' }, base: { ref: 'main' }, state: 'open' }] : closed)),
@@ -193,6 +196,8 @@ describe('terminal writer hand-off', () => {
     const f = fakes({ rows: [row('a'), row('b')], closed: [mergedPr('a')] });
     const out = await handOffToTerminal({ now: new Date('2026-10-09T13:00:00Z'), deps: f.deps });
     expect(out).toMatchObject({ outcome: 'handed_to_terminal', due: 1, merged: 1 });
+    // a claim a dead API batch left behind is released first, then the queue is read
+    expect(f.deps.queue.recoverStaleClaims.mock.invocationCallOrder[0]).toBeLessThan(f.deps.queue.peek.mock.invocationCallOrder[0]);
     expect(f.updates).toHaveLength(1);
     expect(f.updates[0].patch).toMatchObject({ status: 'done', skip_reason: SETTLED_REASON, completed_at: new Date('2026-10-08T12:00:00Z') });
     expect(f.updates[0].where).toEqual(expect.arrayContaining([['id', uid('a')], ['not', 'status', 'done']]));
