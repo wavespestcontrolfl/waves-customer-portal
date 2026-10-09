@@ -496,6 +496,17 @@ describe('one group held twice on a catalog row (moa_group "Group 1B" and irac_g
     expect(repeats(await run([moaOnly], [prior({ product_name: 'Older organophosphate', moa_group: 'Group 1B' })]))).toEqual(['repeat_moa_group']);
   });
 
+  // Codex round 4 on #6238: the two columns can find two different earlier applications.
+  test('a newer free-text-only application and an older typed one: ONE finding, naming the newer application', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const result = await run([LIQUID], [
+      prior({ product_name: 'Older typed product', service_date: '2026-04-01', irac_group: '1B', catalog_group: '1B' }),
+      prior({ product_name: 'Newer free-text product', service_date: '2026-05-20', moa_group: 'Group 1B' }),
+    ]);
+    const found = result.blocks.filter((block) => /^repeat_/.test(block.code));
+    expect(found.map((block) => [block.code, block.evidence.lastProduct, block.evidence.lastDate])).toEqual([['repeat_moa_group', 'Newer free-text product', '2026-05-20']]);
+  });
+
   test('v13 off: still ONE finding (the catalog rows keep both columns when the gate is off)', async () => {
     delete process.env.GATE_LAWN_V13;
     expect(repeats(await run([LIQUID], [liquidBefore]))).toEqual(['repeat_irac_group']);

@@ -349,20 +349,33 @@ async function repeatGroupFindings(knex, { customerId, propertyId, product, inpu
     if (await rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict })) continue;
     findings.push(repeatGroupFinding({ product, input, groupType, groupValue, last }));
   }
-  return withoutMoaDuplicates(findings);
+  return oneFindingPerGroup(product, findings);
 }
 
-// A catalog row can hold one group twice: in the older free-text column (moa_group "Group 1B") and in the typed column
-// of the label's system (irac_group "1B"). One earlier application then matched both, and the technician saw two
-// findings for one repeat. The free-text finding is dropped when a typed finding names the same group and the same
-// earlier application; the typed one stays (it carries the fungicide code). Not behind the v13 gate: the catalog rows
-// keep both columns when the gate is off, and one repeat is one finding there too.
+// A catalog row can hold one group twice: in the older free-text column (moa_group "Group 11") and in the typed column
+// of the label's system (frac_group "11"). Each column has its own history lookup (an earlier product may hold the
+// group in only one of them), so one resistance group could raise two findings, naming one earlier application or two
+// different ones. The technician gets ONE finding for the group: the one whose earlier application is the latest;
+// on the same day the typed finding stays (it carries the fungicide code). A free-text group with no typed twin on
+// this product is its own group. Not behind the v13 gate: the catalog rows keep both columns when the gate is off.
 const bareGroup = (value) => String(value ?? '').trim().replace(/^group\s+/i, '').toLowerCase();
-function withoutMoaDuplicates(findings) {
-  const sameRepeat = (a, b) => bareGroup(a.evidence.groupValue) === bareGroup(b.evidence.groupValue)
-    && a.evidence.lastProduct === b.evidence.lastProduct && a.evidence.lastDate === b.evidence.lastDate;
-  const typed = findings.filter((finding) => finding.evidence.groupType !== 'moa');
-  return findings.filter((finding) => finding.evidence.groupType !== 'moa' || !typed.some((other) => sameRepeat(finding, other)));
+function oneFindingPerGroup(product, findings) {
+  const typedGroups = productGroups(product).filter(([type]) => type !== 'moa');
+  const keyOf = ({ evidence }) => {
+    const bare = bareGroup(evidence.groupValue);
+    if (evidence.groupType !== 'moa') return `${evidence.groupType}:${bare}`;
+    const twin = typedGroups.find(([, value]) => bareGroup(value) === bare);
+    return twin ? `${twin[0]}:${bare}` : `moa:${bare}`;
+  };
+  const best = new Map();
+  for (const finding of findings) {
+    const key = keyOf(finding);
+    const held = best.get(key);
+    const newer = held && (finding.evidence.lastDate > held.evidence.lastDate
+      || (finding.evidence.lastDate === held.evidence.lastDate && held.evidence.groupType === 'moa'));
+    if (!held || newer) best.set(key, finding);
+  }
+  return findings.filter((finding) => best.get(keyOf(finding)) === finding);
 }
 
 async function evaluateWaveGuardManagerApprovals(knex, {
