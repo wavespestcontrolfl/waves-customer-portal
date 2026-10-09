@@ -25,8 +25,8 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }
     const q = {
       where: (...a) => { calls.push(a); return q; },
       whereIn: (...a) => { calls.push(['in', ...a]); return q; },
-      // pending rows among the merged PR ids, whatever their score
-      select: async () => closed.filter((p) => p.merged_at).map((p) => ({ id: p.head.ref.split('/')[1] })).filter((m) => rows.some((r) => r.id === m.id && r.status === 'pending')),
+      // rows by id, whatever their score or availability
+      select: async () => rows.filter((r) => (calls.find((c) => c[0] === 'in' && c[1] === 'id') || [])[2]?.includes(r.id)),
       update: async (patch) => { updates.push({ where: calls, patch }); return 1; },
     };
     return q;
@@ -39,7 +39,7 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }
         env: () => ({ owner: 'acme', repo: 'site', defaultBranch: 'main' }),
         ghFetchPaginated: jest.fn(async (path) => (path.includes('state=open') ? [...open, { head: { ref: 'content/other-pr' }, base: { ref: 'main' }, state: 'open' }, { head: { ref: 'terminal-writer/not-an-id' }, base: { ref: 'main' }, state: 'open' }] : closed)),
       },
-      db: () => query([]),
+      db: Object.assign(() => query([]), { raw: (sql, bindings) => ({ sql, bindings }) }),
       countPublishedSince: jest.fn(async (action) => (action === 'new_supporting_blog' ? counts[counted++ % 2] : 0)),
       raiseAdminAlert: jest.fn(async (category, spec) => { composeAdminAlert(spec); return { id: 'n1' }; }),
     },
@@ -149,6 +149,27 @@ describe('terminal writer hand-off', () => {
     expect(f.updates).toHaveLength(1);
     expect(f.updates[0].where).toEqual([['in', 'id', [uid('a')]], ['status', 'pending']]);
     expect(f.updates[0].patch.available_at).toEqual(new Date('2026-10-12T13:00:00Z'));
+    expect(f.updates[0].patch.expires_at).toEqual({ sql: 'CASE WHEN expires_at IS NULL THEN NULL ELSE GREATEST(expires_at, ?) END', bindings: [new Date('2026-10-12T13:00:00Z')] });
+  });
+
+  test('a fenced row with an open PR is still listed as in progress, and an expired row with a merged PR is still settled', async () => {
+    const now = new Date('2026-10-09T13:00:00Z');
+    // the queue no longer serves either row: peek returns only b
+    const f = fakes({ rows: [row('b')], open: [pr('a')], closed: [mergedPr('z')] });
+    f.deps.db = Object.assign(() => {
+      const calls = [];
+      const q = {
+        where: (...a) => { calls.push(a); return q; },
+        whereIn: (...a) => { calls.push(['in', ...a]); return q; },
+        select: async () => [row('a'), row('z', { status: 'expired' })],
+        update: async (patch) => { f.updates.push({ where: calls, patch }); return 1; },
+      };
+      return q;
+    }, { raw: (sql, bindings) => ({ sql, bindings }) });
+    const work = await terminalWriterWork({ complete: true, now, deps: f.deps });
+    expect(work.inProgress.map((r) => r.id)).toEqual([uid('a')]);
+    expect(work.merged.map((r) => r.id)).toEqual([uid('z')]);
+    expect(f.updates[0].patch).toMatchObject({ status: 'done' });
   });
 
   test('other queue rows cannot hide a writing row: each writing action is read on its own', async () => {
@@ -170,7 +191,7 @@ describe('terminal writer hand-off', () => {
     expect(out).toMatchObject({ outcome: 'handed_to_terminal', due: 1, merged: 1 });
     expect(f.updates).toHaveLength(1);
     expect(f.updates[0].patch).toMatchObject({ status: 'done', skip_reason: SETTLED_REASON, completed_at: new Date('2026-10-08T12:00:00Z') });
-    expect(f.updates[0].where).toEqual(expect.arrayContaining([['id', uid('a')], ['status', 'pending']]));
+    expect(f.updates[0].where).toEqual(expect.arrayContaining([['id', uid('a')], ['in', 'status', ['pending', 'expired']]]));
     expect(f.deps.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = f.deps.raiseAdminAlert.mock.calls[0];
     expect(category).toBe('content');

@@ -39,6 +39,9 @@ const BRANCH_PREFIX = 'terminal-writer/';
 // publish counter reads it (autonomous-runner.js _countPublishedSince).
 const SETTLED_REASON = 'terminal_writer_merged';
 const OPEN_PR_FENCE_DAYS = 3;
+// A row a terminal PR can still complete. 'expired' is included: the janitor
+// may have expired a row whose post then merged, and that post was published.
+const OPEN_STATUSES = Object.freeze(['pending', 'expired']);
 // The action types a writing session can do. Everything else the queue holds
 // (link-only tasks, GBP posts) is left for its own lane.
 const WRITER_ACTIONS = Object.freeze([
@@ -114,20 +117,23 @@ async function pendingWritingRows(queue) {
  *   merged PR → the row is done, at the PR's merge time, and carries
  *     SETTLED_REASON so the engine's own publish count includes it
  *   open PR   → the row stays pending but is pushed out of the claimable
- *     window for OPEN_PR_FENCE_DAYS, renewed each day. claimNext honors
+ *     window (and its expiry moved) for OPEN_PR_FENCE_DAYS, renewed each day. claimNext honors
  *     available_at, so the API engine cannot claim a row a terminal PR is
  *     working, also in the days after the gate is turned off.
  */
 async function settleAndFence(conn, prs, unsettled, now) {
   for (const id of unsettled) {
-    const updated = await conn('opportunity_queue').where('id', id).where('status', 'pending')
+    const updated = await conn('opportunity_queue').where('id', id).whereIn('status', OPEN_STATUSES)
       .update({ status: 'done', skip_reason: SETTLED_REASON, completed_at: prs.merged.get(id).mergedAt, updated_at: now });
     if (updated) logger.info(`[terminal-writer] done ${id}: merged ${prs.merged.get(id).url}`);
   }
   const openIds = [...prs.open.keys()];
   if (openIds.length) {
+    const until = new Date(now.getTime() + OPEN_PR_FENCE_DAYS * 86400000);
+    // expires_at moves with the fence (never earlier, and a row with no
+    // expiry keeps none): the janitor must not expire a row while its PR is open.
     await conn('opportunity_queue').whereIn('id', openIds).where('status', 'pending')
-      .update({ available_at: new Date(now.getTime() + OPEN_PR_FENCE_DAYS * 86400000), updated_at: now });
+      .update({ available_at: until, expires_at: conn.raw('CASE WHEN expires_at IS NULL THEN NULL ELSE GREATEST(expires_at, ?) END', [until]), updated_at: now });
   }
 }
 
@@ -154,16 +160,17 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
   const countPublishedSince = deps.countPublishedSince || ((a, since) => require('./autonomous-runner')._countPublishedSince(a, since));
 
   const prs = await terminalPrs(gh);
-  const pending = await pendingWritingRows(queue);
-  const merged = pending.filter((r) => prs.merged.has(r.id)).map((r) => ({ ...r, pr_url: prs.merged.get(r.id).url }));
-  const inProgress = pending.filter((r) => !prs.merged.has(r.id) && prs.open.has(r.id)).map((r) => ({ ...r, pr_url: prs.open.get(r.id) }));
-  const candidates = pending.filter((r) => !prs.merged.has(r.id) && !prs.open.has(r.id));
+  // Rows that have a PR are read by id, never through peek: a fenced or
+  // low-scored row is outside the claimable window but its PR still counts.
+  const prIds = [...prs.merged.keys(), ...prs.open.keys()];
+  const prRows = prIds.length ? await conn('opportunity_queue').whereIn('id', prIds).select('*') : [];
+  const open = (r) => OPEN_STATUSES.includes(r.status);
+  const merged = prRows.filter((r) => prs.merged.has(r.id) && open(r)).map((r) => ({ ...r, pr_url: prs.merged.get(r.id).url }));
+  const inProgress = prRows.filter((r) => !prs.merged.has(r.id) && open(r)).map((r) => ({ ...r, pr_url: prs.open.get(r.id) }));
+  const candidates = (await pendingWritingRows(queue)).filter((r) => !prs.merged.has(r.id) && !prs.open.has(r.id));
 
-  // Merged PRs whose row is still pending: read by id, see settleAndFence.
-  const mergedIds = [...prs.merged.keys()];
-  const unsettled = mergedIds.length
-    ? (await conn('opportunity_queue').whereIn('id', mergedIds).where('status', 'pending').select('id')).map((r) => r.id)
-    : [];
+  // Merged PRs whose row is not done yet.
+  const unsettled = merged.map((r) => r.id);
   if (complete) await settleAndFence(conn, prs, unsettled, now);
 
   // A merge this pass did not settle (read-only) still used its slot, in
