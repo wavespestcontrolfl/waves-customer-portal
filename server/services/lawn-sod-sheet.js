@@ -483,6 +483,33 @@ function noProductNoteOf(holds, heldKinds) {
   return `${NO_PRODUCT_NOTE_PREFIX} is rooting (laid ${formatDay(holds.sodLaidOn)}).${waits.length ? ` Held: ${waits.join(', ')}.` : ''}`;
 }
 
+// The hold classes the customer report card names, in the order it prints them. Tetrino and Gravex are held on the
+// sheet but never named to the customer.
+const REPORT_CLASSES = Object.freeze(['fertilizer', 'weedKiller', 'preEmergent', 'dylox']);
+
+// The hold that applies to a PLANNED line of this class today, or null. A whole-lawn record holds the class itself; a
+// part-of-lawn record keeps the line on and skips the sod area (fertilizer: keeps it off the sod until day 30).
+function reportHoldOf(holds, kind) {
+  if (holds.covers === 'part' && kind === 'fertilizer') return holds.fertilizerKeepOff?.on ? { until: holds.fertilizerKeepOff.until } : null;
+  return holds[kind]?.held ? holds[kind] : null;
+}
+
+/**
+ * The classes that kept a PLANNED line (the plan's own primary lines, never the swap bag or an add-on) off, or away from
+ * the sod area on, this visit: `[{ kind, until, rootedCheck, productIds }]` in REPORT_CLASSES order. The completion
+ * transaction freezes it for the report card (lawn-sod-report-card.js). `until` is the first day the class is allowed
+ * again (null for a weed killer that waits only for the rooted check).
+ */
+function plannedHeldOf(holds, items, classesById) {
+  const found = [];
+  for (const kind of REPORT_CLASSES) {
+    const hold = reportHoldOf(holds, kind);
+    const productIds = hold ? items.map((item) => lowerId(item.productId)).filter((id) => (classesById.get(id) || []).includes(kind)) : [];
+    if (productIds.length) found.push({ kind, until: hold.until || null, rootedCheck: kind === 'weedKiller', productIds });
+  }
+  return found;
+}
+
 /**
  * Applies the holds to the plan: the hold decision of every line, the bag swap, the banner.
  * `noProductAllowed` (with `noProductNote`) is set only when this is a whole-lawn record, every
@@ -511,6 +538,7 @@ async function withLines({ holds, visitDay, knex, plannedProducts, ruleFor }) {
     ...(noProductAllowed ? { noProductAllowed: true, noProductNote: noProductNoteOf(holds, heldKinds) } : {}),
     rooted: holds.weedKiller.needsRootedCheck ? { sodLaidOn: holds.sodLaidOn, label: ROOTED_LABEL } : null,
     lines,
+    plannedHeld: plannedHeldOf(holds, items, classesById),
   };
   return { newSod, plannedProducts: nextItems === items ? plannedProducts : { ...plannedProducts, items: nextItems } };
 }

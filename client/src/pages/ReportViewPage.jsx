@@ -9,6 +9,7 @@ import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
+import LawnNewSodCard from '../components/report/lawnV2/LawnNewSodCard';
 import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow } from '../components/report/lawnV2/lawnLayoutRules';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
@@ -9776,6 +9777,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,
                 upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
+                newSod: <LawnNewSodCard data={data} mode={mode} />,
                 yourPart: <LawnYourPart data={data} mode={mode} token={token} />,
                 recap: <RecapVideoCard recap={data.recap} token={token} />,
                 recordedFindings: recordedFindingsList,
@@ -9816,6 +9818,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             <LawnLeadCard lead={data.reportV2.lead} snapshot={data.reportV2.snapshot || {}} style={{ marginTop: 16 }} />
           </LawnPrintContext.Provider>
         )}
+
+        <LawnNewSodCard data={data} mode={mode} style={{ marginTop: 16 }} />
 
         <ReserviceReportCard data={data} mode={mode} />
 

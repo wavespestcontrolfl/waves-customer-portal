@@ -24,6 +24,7 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
+const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
@@ -7489,6 +7490,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight }),
     // GATE_LAWN_REPORT_POLISH (lawn only): the key the page reads for the status card and the hero. Absent = byte-identical payload.
     ...lawnPolishPayload({ serviceLine, reportV2 }),
+    // GATE_LAWN_NEW_SOD_REPORT_CARD (lawn only): the New sod card, built from the block frozen at completion. Absent = byte-identical payload.
+    ...lawnNewSodPayload({ serviceLine, structuredNotes: service.structured_notes }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {

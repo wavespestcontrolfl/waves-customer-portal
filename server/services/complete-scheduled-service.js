@@ -8190,6 +8190,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
         }
 
+        // GATE_LAWN_NEW_SOD_REPORT_CARD: what the new-sod holds kept off this visit, frozen for the report's New sod card
+        // (lawn-sod-report-card.js). Secondary and savepointed; never fails the visit.
+        await require('./lawn-sod-report-card').freezeNewSodCard(trx, {
+          svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts: insertedServiceProducts,
+        });
+
         if (inventoryDeductions.length) {
           // Reconcile the advisory with what the FOR UPDATE deduction actually
           // saw: two concurrent visits can both pass the unlocked preflight
