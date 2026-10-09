@@ -15,12 +15,20 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(async () => false), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 
-const mockState = { customer: { id: 'cust-1' }, prefsRow: null, productRows: [], productsThrow: false };
+const HOME = { id: 'cust-1', address_line1: '100 Sample St', address_line2: 'Unit 3', city: 'Testville', zip: '34200', has_multi_home: false };
+const mockState = { customer: { ...HOME }, prefsRow: null, productRows: [], productsThrow: false, single: true, singleThrows: false, properties: {} };
+
+// The scope chain is the real one; only the "single premises" proof (its own many reads) is stubbed.
+jest.mock('../services/service-report/visit-property-scope', () => ({
+  ...jest.requireActual('../services/service-report/visit-property-scope'),
+  customerHasOnlyPrimaryPremises: jest.fn(async () => { if (mockState.singleThrows) throw new Error('proof read failed'); return mockState.single; }),
+}));
 
 jest.mock('../models/db', () => {
   const chain = (resolve) => {
     const q = {};
     for (const m of ['where', 'whereIn', 'whereNull', 'whereRaw', 'join', 'leftJoin', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+    q.catch = undefined;
     q.first = jest.fn(async () => resolve());
     q.select = jest.fn(async () => resolve());
     return q;
@@ -28,6 +36,11 @@ jest.mock('../models/db', () => {
   const dbFn = jest.fn((table) => {
     if (table === 'customers') return chain(() => mockState.customer);
     if (table === 'property_preferences') return chain(() => mockState.prefsRow);
+    if (table === 'customer_properties') {
+      const q = chain(() => null);
+      q.where = jest.fn((cond) => { q.first = jest.fn(async () => mockState.properties[cond.id] || null); return q; });
+      return q;
+    }
     if (String(table).startsWith('service_products')) {
       mockState.historyQuery = chain(() => {
         if (mockState.productsThrow) throw new Error('relation does not exist');
@@ -59,7 +72,10 @@ async function getNewSod(query = {}) {
 }
 
 beforeEach(() => {
-  mockState.customer = { id: 'cust-1' };
+  mockState.customer = { ...HOME };
+  mockState.single = true;
+  mockState.singleThrows = false;
+  mockState.properties = {};
   mockState.prefsRow = null;
   mockState.productRows = [];
   mockState.productsThrow = false;
@@ -155,19 +171,37 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     expect(window[2] <= daysAgo(24 * 31 + 84)).toBe(true);
   });
 
-  it('this home only: another street, another unit and another ZIP are left out; no stamp or an omitted unit is kept', async () => {
-    const home = { home_line1: '100 Sample St', home_line2: 'Unit 3', home_city: 'Testville', home_zip: '34200' };
-    const at = (days, stamp) => ({ ...DIMENSION, service_date: daysAgo(days), ...home, ...stamp });
-    const named = async (rows) => { mockState.productRows = rows; return (await getNewSod()).body.newSod.lastPreEmergent?.date || null; };
-    expect(await named([at(10, { service_address_line1: '55 Other Rd', service_address_zip: '34200' })])).toBeNull();
-    expect(await named([at(10, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 4', service_address_zip: '34200' })])).toBeNull();
-    expect(await named([at(10, { service_address_line1: '100 Sample St Unit 4' })])).toBeNull();
-    expect(await named([at(10, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 3', service_address_zip: '34999' })])).toBeNull();
-    expect(await named([at(10, { service_address_line1: null })])).toBe(daysAgo(10));
-    expect(await named([at(10, { service_address_line1: '100 Sample Street' })])).toBe(daysAgo(10));
-    expect(await named([at(10, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 3' })])).toBe(daysAgo(10));
-    // The newer visit was at another unit: the older one at this home is the one named.
-    expect(await named([at(5, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 4' }), at(40, { service_address_line1: null })])).toBe(daysAgo(40));
+  describe('this home only (the shared visit property scope chain)', () => {
+    const at = (days, visit) => ({ ...DIMENSION, service_date: daysAgo(days), ...visit });
+    const named = async (rows) => { mockState.productRows = rows; return (await getNewSod()).body.newSod; };
+    const HERE = { service_address_line1: '100 Sample St', service_address_line2: 'Unit 3', service_address_city: 'Testville', service_address_zip: '34200' };
+
+    it('a visit stamped at this home counts; another street, another unit and another ZIP do not', async () => {
+      expect((await named([at(10, HERE)])).lastPreEmergent.date).toBe(daysAgo(10));
+      expect((await named([at(10, { ...HERE, service_address_line1: '55 Other Rd' })])).lastPreEmergent).toBeNull();
+      expect((await named([at(10, { ...HERE, service_address_line2: 'Unit 4' })])).lastPreEmergent).toBeNull();
+      expect((await named([at(10, { ...HERE, service_address_zip: '34999', service_address_city: 'Elsewhere' })])).lastPreEmergent).toBeNull();
+      // The newer visit was at another unit: the older one at this home is the one named.
+      expect((await named([at(5, { ...HERE, service_address_line2: 'Unit 4' }), at(40, HERE)])).lastPreEmergent.date).toBe(daysAgo(40));
+    });
+
+    it('an unstamped visit follows its property link: this home counts, another property does not, a missing property fails closed', async () => {
+      mockState.properties = {
+        'prop-here': { address_line1: '100 Sample St', address_line2: 'Unit 3', city: 'Testville', zip: '34200' },
+        'prop-other': { address_line1: '9 Second Home Ln', address_line2: null, city: 'Testville', zip: '34200' },
+      };
+      expect((await named([at(10, { property_id: 'prop-here' })])).lastPreEmergent.date).toBe(daysAgo(10));
+      expect((await named([at(10, { property_id: 'prop-other' })])).lastPreEmergent).toBeNull();
+      expect((await named([at(10, { property_id: 'prop-gone' })])).lastPreEmergent).toBeNull();
+    });
+
+    it('a visit with no evidence counts only when the customer is proven to have one premises', async () => {
+      expect((await named([at(10, {})])).lastPreEmergent.date).toBe(daysAgo(10));
+      mockState.single = false;
+      expect((await named([at(10, {})])).lastPreEmergent).toBeNull();
+      mockState.singleThrows = true;
+      expect(await named([at(10, {})])).toMatchObject({ lastPreEmergent: null, lastPreEmergentUnreadable: true });
+    });
   });
 
   it('a pre-emergent after the sod date does not hide one applied shortly before it', async () => {

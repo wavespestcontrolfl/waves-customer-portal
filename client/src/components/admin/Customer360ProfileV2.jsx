@@ -7038,6 +7038,31 @@ function accessPrefsAdvanceBaseline(baseline, draft, dirtyKeys, failed) {
   };
 }
 
+// The saved new-sod record on the read view (admin only): the record, its hold lines and its warning.
+function AccessPrefsSodReadBlock({ p, sodInfo }) {
+  if (!p.sod_laid_on) return null;
+  const covers = p.sod_covers === "part" ? `Part of lawn${p.sod_area ? `: ${p.sod_area}` : ""}` : "Whole lawn";
+  return (
+    <>
+      <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
+      <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
+      <AccessPrefRow label="Covers" value={covers} />
+      <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />
+      {/* The saved record's warning stays on the read view: a fast Save can close the form before the form's own check returns. */}
+      {sodInfo?.preEmergentWarning && (
+        <div role="alert" className="text-ui-label text-alert-fg" data-testid="sod-read-warning">
+          {sodInfo.preEmergentWarning}
+        </div>
+      )}
+      {sodInfo?.lastPreEmergentUnreadable && (
+        <div className="text-ui-label text-ink-secondary">
+          Pre-emergent history could not be read. Check the service history.
+        </div>
+      )}
+    </>
+  );
+}
+
 function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
   const code = (value) =>
     isAdmin || !value ? value : "Shown in the tech app on service day";
@@ -7115,28 +7140,7 @@ function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
       />
       <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
 
-      {isAdmin && p.sod_laid_on && (
-        <>
-          <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
-          <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
-          <AccessPrefRow
-            label="Covers"
-            value={p.sod_covers === "part" ? `Part of lawn${p.sod_area ? `: ${p.sod_area}` : ""}` : "Whole lawn"}
-          />
-          <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />
-          {/* The saved record's warning stays on the read view: a fast Save can close the form before the form's own check returns. */}
-          {sodInfo?.preEmergentWarning && (
-            <div role="alert" className="text-ui-label text-alert-fg" data-testid="sod-read-warning">
-              {sodInfo.preEmergentWarning}
-            </div>
-          )}
-          {sodInfo?.lastPreEmergentUnreadable && (
-            <div className="text-ui-label text-ink-secondary">
-              Pre-emergent history could not be read. Check the service history.
-            </div>
-          )}
-        </>
-      )}
+      {isAdmin && <AccessPrefsSodReadBlock p={p} sodInfo={sodInfo} />}
 
       {hasHoa && (
         <>

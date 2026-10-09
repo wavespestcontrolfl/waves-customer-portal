@@ -14,7 +14,8 @@
  */
 
 const { sodHolds, validateSodLaidOn, MAX_SOD_AGE_MONTHS } = require('./lawn-sod-holds');
-const { premiseStampConflicts, inheritReferenceUnit } = require('./stamped-address');
+const linkage = require('./estimate-property-linkage');
+const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./service-report/visit-property-scope');
 const { isPreEmergent } = require('./service-report/lawn-watering-rule');
 const { etCalendarDayOf, validCalendarDate, etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -51,13 +52,24 @@ function daysBetween(fromYmd, toYmd) {
   return Math.round((ms(toYmd) - ms(fromYmd)) / DAY_MS);
 }
 
-// This home only: a visit stamped with another premise (a former home, a second property, another unit at the same
-// street) is not this lawn's history. The repo's one premise comparator decides (street, unit, ZIP, city); a stamp
-// that omits the unit takes the home's. A visit with no stamp is kept: nothing proves it was elsewhere.
-function atAnotherPremise(row) {
-  if (!row?.service_address_line1) return false;
-  const home = { service_address_line1: row.home_line1, service_address_line2: row.home_line2, service_address_city: row.home_city, service_address_zip: row.home_zip };
-  return premiseStampConflicts(inheritReferenceUnit(row, home), home);
+// This home only. The repo's one visit -> property scope chain decides (resolveVisitPropertyScope: the visit's own
+// address stamp, else its property_id, else its source estimate), compared with sameResolvedProperty:
+//   - a visit proven to be at this home counts;
+//   - a visit proven to be elsewhere (a former home, a second property, another unit), or linked to a premises
+//     that cannot be resolved, does not (fail closed);
+//   - a visit with no evidence at all counts only when nothing on file says the customer has a second premises
+//     (customerHasOnlyPrimaryPremises; a failed proof read throws, and the caller reports the history unreadable).
+function homeScope(knex, customerId, home) {
+  const homeKey = linkage.normalizedStampedStreet(home.address_line1, home.address_line2, home.city, home.zip);
+  const caches = { propertyById: new Map(), estimateById: new Map(), onLookupFailure: () => { caches.failed = true; } };
+  let single;
+  return async function atThisHome(row) {
+    const scope = await resolveVisitPropertyScope(row, knex, caches);
+    if (caches.failed) throw new Error('visit property scope lookup failed');
+    if (scope.hasEvidence) return Boolean(scope.key && homeKey && sameResolvedProperty(scope.key, homeKey));
+    if (single === undefined) single = await customerHasOnlyPrimaryPremises(knex, customerId, home, homeKey, { unresolvedFails: true });
+    return single === true;
+  };
 }
 
 /**
@@ -70,12 +82,19 @@ function atAnotherPremise(row) {
  */
 async function lastWavesPreEmergent(knex, customerId) {
   let rows;
+  let home;
   try {
+    home = await knex('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip', 'has_multi_home');
     rows = await knex('service_products as sp')
       .join('service_records as sr', 'sp.service_record_id', 'sr.id')
-      .join('customers as c', 'sr.customer_id', 'c.id')
       .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-      .leftJoin('products_catalog as pc', 'sp.product_name', 'pc.name')
+      // By catalog id: a renamed product is still the product that was applied. By name only for a legacy row
+      // that carries no id.
+      .leftJoin('products_catalog as pc', function () {
+        this.on('sp.product_id', '=', 'pc.id').orOn(function () {
+          this.onNull('sp.product_id').andOn('sp.product_name', '=', 'pc.name');
+        });
+      })
       .where('sr.customer_id', customerId)
       // An incomplete visit still records the products that were applied before it stopped.
       .whereIn('sr.status', ['completed', 'incomplete'])
@@ -90,16 +109,17 @@ async function lastWavesPreEmergent(knex, customerId) {
         'pc.category as catalog_category',
         'pc.subcategory as catalog_subcategory',
         'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
-        'c.address_line1 as home_line1', 'c.address_line2 as home_line2', 'c.city as home_city', 'c.zip as home_zip',
+        'ss.property_id', 'ss.source_estimate_id',
       );
   } catch {
     return { unreadable: true };
   }
+  if (!home) return null;
+  const atThisHome = homeScope(knex, customerId, home);
   // Newest first. The first one is what the form names; the warning needs the newest one on or before the sod
   // date, so every pre-emergent read is kept.
   const applications = [];
   for (const row of rows || []) {
-    if (atAnotherPremise(row)) continue;
     const date = ymdOrNull(row.service_date);
     if (!date) continue;
     const product = {
@@ -108,7 +128,10 @@ async function lastWavesPreEmergent(knex, customerId) {
       subcategory: row.catalog_subcategory,
       category: row.catalog_category || row.applied_category,
     };
-    if (isPreEmergent(product)) applications.push({ date, product: row.product_name });
+    if (!isPreEmergent(product)) continue;
+    let here;
+    try { here = await atThisHome(row); } catch { return { unreadable: true }; }
+    if (here) applications.push({ date, product: row.product_name });
   }
   return applications.length ? { ...applications[0], applications } : null;
 }
