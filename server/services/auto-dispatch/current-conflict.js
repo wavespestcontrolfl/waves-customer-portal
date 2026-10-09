@@ -12,7 +12,8 @@
  *   overlap     the visit's own arrival span overlaps another live stop that
  *               date: the rebooker's read-only probe (probeMoveConflicts,
  *               booked interviews included) expanded by occupancy.js's
- *               occupiedRows. The visit's own group is excluded. So is every
+ *               occupiedRows. The visit's own group is not a conflict; its
+ *               rows give the unit's own occupied span. Also excluded: every
  *               other row of the same customer AT THE SAME PLACE (two
  *               services at one address in one hour are one stop for the
  *               technician, grouped or not; the same customer's second
@@ -95,16 +96,24 @@ async function overlappingStopIds(service, ctx, excludeIds, dateStr) {
   const start = hhmmToMin(service.window_start);
   const end = hhmmToMin(occupancyProbeEnd(service.window_start, service.window_end, service.estimated_duration_minutes));
   if (start == null || end == null) return [];
+  // The probe excludes nothing: the visit's own unit comes back too, so its
+  // span is expanded by the same occupiedRows as every other stop. A
+  // combined allocation of two 60-minute services at 10:00 holds the
+  // technician until 12:00, not 11:00 (Codex #6207 pre-push P1).
   const { rows } = await probeMoveConflicts({
     conn: ctx.db,
     target: {
       id: `auto-dispatch-conflict-probe:${dateStr}`, date: dateStr, windowStart: FULL_DAY.start, windowEnd: FULL_DAY.end, technicianId: null,
     },
-    excludeServiceIds: [...excludeIds],
+    excludeServiceIds: [],
   });
-  const overlapping = occupiedRows(rows)
-    .filter((r) => isOtherStop(r, service) && r.startMin != null && Number.isFinite(r.endMin))
-    .filter((r) => windowsOverlap(start, end, r.startMin, r.endMin));
+  const spans = occupiedRows(rows).filter((r) => r.startMin != null && Number.isFinite(r.endMin));
+  const own = spans.filter((r) => excludeIds.has(String(r.id)));
+  const unitStart = Math.min(start, ...own.map((r) => r.startMin));
+  const unitEnd = Math.max(end, ...own.map((r) => r.endMin));
+  const overlapping = spans
+    .filter((r) => !excludeIds.has(String(r.id)) && isOtherStop(r, service))
+    .filter((r) => windowsOverlap(unitStart, unitEnd, r.startMin, r.endMin));
   const samePlace = await samePlaceIds(ctx.db, service, overlapping);
   return overlapping.map((r) => String(r.id)).filter((id) => !samePlace.has(id));
 }

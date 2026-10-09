@@ -38,12 +38,12 @@ test('a visit with no arrival window is never in conflict', async () => {
   expect(rebooker.probeMoveConflicts).not.toHaveBeenCalled();
 });
 
-test('another customer in the same hour is an overlap; the probe excludes the visit and its group', async () => {
-  rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row()] });
+test('another customer in the same hour is an overlap; the visit\'s own group is not', async () => {
+  rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row(), row({ id: 's1', customer_id: 'c1' }), row({ id: 's1-sibling', customer_id: 'c1' })] });
   expect(await currentConflict(SERVICE, CTX, new Set(['s1', 's1-sibling'])))
     .toEqual({ kind: 'overlap', date: '2026-12-07', with: ['o1'] });
   const call = rebooker.probeMoveConflicts.mock.calls[0][0];
-  expect(call.excludeServiceIds).toEqual(['s1', 's1-sibling']);
+  expect(call.excludeServiceIds).toEqual([]);
   expect(call.target).toMatchObject({ date: '2026-12-07', windowStart: '00:00', windowEnd: '23:59', technicianId: null });
 });
 
@@ -117,4 +117,14 @@ test('a closed day is its own conflict and is read first', async () => {
 test('a failed read propagates: the conflict is never guessed', async () => {
   rebooker.probeMoveConflicts.mockRejectedValue(new Error('db down'));
   await expect(currentConflict(SERVICE, CTX)).rejects.toThrow('db down');
+});
+
+test('the unit\'s whole occupied span is tested: a sibling that runs to 12:00 overlaps an 11:00 stop (pre-push P1)', async () => {
+  const group = new Set(['s1', 's1-sibling']);
+  const sibling = row({ id: 's1-sibling', customer_id: 'c1', window_start: '11:00', window_end: '12:00' });
+  rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row({ id: 's1', customer_id: 'c1' }), sibling, row({ window_start: '11:00', window_end: '12:00' })] });
+  expect(await currentConflict(SERVICE, CTX, group)).toMatchObject({ kind: 'overlap', with: ['o1'] });
+  // Without the sibling the visit ends at 11:00 and the 11:00 stop is back to back.
+  rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row({ id: 's1', customer_id: 'c1' }), row({ window_start: '11:00', window_end: '12:00' })] });
+  expect(await currentConflict(SERVICE, CTX, new Set(['s1']))).toBeNull();
 });
