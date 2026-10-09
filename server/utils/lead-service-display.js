@@ -88,6 +88,14 @@ const COVERED_BY = {
 };
 const TERMITE_WORK_RE = /\btreat(?:ment|ments|ing)?\b|\bbait\b|\btermite\s+(?:control|protection)\b/i;
 const RODENT_NAMED_RE = /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/i;
+// A sentence, not a label: the email reader and lead triage write free
+// prose ("Quarterly pest control for ants, roaches and spiders"). Reading
+// services and cadences out of a sentence guesses, so prose is shown as
+// written; only labels are renamed.
+const PROSE_RE = /[,;(]|\b(?:and|or|for|with|including)\b/i;
+function isProse(text) {
+  return PROSE_RE.test(text) || (text.match(/[A-Za-z0-9]+/g) || []).length > 6;
+}
 const ASSESS_WORD_RE = /\bconsultation\b|\bassessment\b|\bnot\s+sure\b/i;
 
 function topicsFor(text) {
@@ -140,6 +148,7 @@ function classify(part, catalogNames) {
   // (an old catalog name) does not.
   const said = catalogName ? `${part} ${catalogName}` : part;
   const frequency = statesRecurring(said) ? 'recurring' : ONE_TIME_RE.test(said) ? 'one_time' : null;
+  if (!catalogName && isProse(part)) return { kind: 'other', name: part, frequency: null };
   const topics = topicsFor(part);
   if (catalogName) return { kind: 'catalog', name: catalogName, frequency, topic: topics[0] || null };
   if (!topics.length) return { kind: 'other', name: part, frequency };
@@ -158,6 +167,7 @@ const CADENCES = [
   ['Every 6 Weeks', /\bevery\s+(?:6|six)\s+weeks?\b/i],
   ['Monthly', /(?<!\bbi[-\s]?)\bmonthly\b|\bevery\s+month\b|\bper\s+month\b/i],
   ['Quarterly', /\bquarterly\b|\bevery\s+quarter\b|\bper\s+quarter\b/i],
+  ['Seasonal', /\bseasonal\b/i],
   ['Semiannual', /\bsemi[-\s]?annual(?:ly)?\b|\btwice\s+a\s+year\b|\bevery\s+(?:6|six)\s+months\b/i],
 ];
 const CADENCE_PREFIX_RE = new RegExp(`^(?:${CADENCES.map(([word]) => word).join('|')}) `);
@@ -170,20 +180,11 @@ function statesRecurring(text) {
 
 // The topic's recurring service at the stated cadence when the catalog has
 // that row ("Monthly pest control" → Monthly Pest Control Service); the
-// topic's default cadence when none is stated or no such row exists.
-// The cadence stated for THIS topic: the one in the topic's own clause, or
-// the only one in the text. Two cadences that cannot be tied to a clause
-// ("pest and lawn, monthly or quarterly") state none.
-function statedCadence(topic, text) {
-  const inText = CADENCES.filter(([, re]) => re.test(text));
-  if (inText.length <= 1) return inText[0] || null;
-  const clause = text.split(/,|;|&|\+|\band\b|\bplus\b/i).find((piece) => topic.re.test(piece)) || '';
-  const inClause = CADENCES.filter(([, re]) => re.test(clause));
-  return inClause.length === 1 ? inClause[0] : null;
-}
-
+// topic's default cadence when none, or more than one, is stated or no such
+// row exists.
 function recurringName(topic, text, catalogNames) {
-  const stated = statedCadence(topic, text);
+  const inText = CADENCES.filter(([, re]) => re.test(text));
+  const stated = inText.length === 1 ? inText[0] : null;
   if (!stated || !catalogNames || !CADENCE_PREFIX_RE.test(topic.recurring)) return topic.recurring;
   const wanted = topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `);
   return catalogNames.get(wanted.toLowerCase()) || topic.recurring;
