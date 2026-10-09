@@ -452,11 +452,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   };
 }
 
-// New reminder-sync bells in 24 hours. Same number as audit.NEW_NOTICES_PER_RUN:
-// the daily budget for rows that are not a customer reaching out
-// (docs/admin-notifications.md). A run can move 100 rows, so a reminder store
-// that fails for every one of them must not ring 100 times (Codex #6208 r6 P1).
-const REMINDER_SYNC_RINGS_PER_DAY = 10;
+// A run can move 100 rows, so a reminder store that fails for every one of
+// them must not ring 100 times: the notice shares the auto-dispatch lanes'
+// 24-hour budget (audit.ringsLeft; Codex #6208 r6 P1).
 const REMINDER_SYNC_KEY = 'auto-dispatch-reminder-sync:';
 
 // True when this visit's notice may ring: it already stands (a re-raise spends
@@ -464,12 +462,9 @@ const REMINDER_SYNC_KEY = 'auto-dispatch-reminder-sync:';
 // reminder time reaches a customer, a spare bell does not.
 async function reminderSyncMayRing(dedupeKey) {
   try {
-    const rows = await db('notifications')
-      .where({ recipient_type: 'admin', category: 'schedule_conflict' })
-      .whereRaw("metadata->>'dedupeKey' LIKE ? AND created_at >= now() - interval '24 hours'", [`${REMINDER_SYNC_KEY}%`])
-      .select(db.raw("metadata->>'dedupeKey' as dedupe_key"));
-    const keys = new Set(rows.map((r) => r.dedupe_key));
-    return keys.has(dedupeKey) || keys.size < REMINDER_SYNC_RINGS_PER_DAY;
+    const audit = require('./audit');
+    const keys = await audit.recentBudgetKeys();
+    return keys.has(dedupeKey) || keys.size < audit.NEW_NOTICES_PER_RUN;
   } catch (err) {
     logger.warn(`[auto-dispatch] reminder-sync budget read failed: ${err.message}`);
     return true;
@@ -484,7 +479,7 @@ async function flagReminderSyncOverflow(service, best) {
   await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
     area: 'Schedule',
     action: 'check the reminders on today\'s moved visits',
-    why: `More than ${REMINDER_SYNC_RINGS_PER_DAY} visits that auto-dispatch moved have a reminder that did not update.`,
+    why: 'Auto-dispatch moved more visits whose reminder did not update than the daily notice limit shows.',
     severity: 'needs-you',
     link: '/admin/dispatch?tab=schedule',
     subject: { type: 'check', id: 'auto-dispatch-reminder-sync' },

@@ -706,7 +706,7 @@ async function stillMissingPin(run, picked) {
 async function raiseMissingGeoNotices(run) {
   if (!run.missingGeoWanted.length) return;
   try {
-    const picked = audit.withinRingBudget(run.missingGeoWanted, await audit.standingMissingGeoKeys(), audit.NEW_NOTICES_PER_RUN, audit.missingGeoKey);
+    const picked = audit.withinRingBudget(run.missingGeoWanted, await audit.standingMissingGeoKeys(), await audit.ringsLeft(), audit.missingGeoKey);
     for (const row of await stillMissingPin(run, picked)) await flagMissingGeo(row);
   } catch (err) {
     logger.error(`[auto-dispatch] missing-geo notices failed: ${err.message}`);

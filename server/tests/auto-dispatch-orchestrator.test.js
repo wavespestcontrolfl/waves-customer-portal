@@ -22,6 +22,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   // Real budget helpers and key shape; only the notification-store read is faked.
   ...jest.requireActual('../services/auto-dispatch/audit'),
   standingMissingGeoKeys: jest.fn(async () => new Set()),
+  ringsLeft: jest.fn(async () => 10),
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),
