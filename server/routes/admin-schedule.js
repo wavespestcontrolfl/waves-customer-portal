@@ -440,6 +440,31 @@ function discountProvenanceProjection(req, s) {
   };
 }
 
+// The visit's premise and contact fields, serialized ONE way for the day feed
+// and the week feed. The admin Dispatch Fast Complete rules
+// (client/src/lib/dispatchCompletionRouting.js) open a one-screen sheet only
+// for a row that carries `propertyId`, and the sheets check the routed premise
+// against the live visit, so the mobile week list needs the same fields the day
+// list has or its visits fall back to the long form. Needs the row to select
+// property_id, address_line1/2, city, state, zip, visit_lat/visit_lng,
+// customer_phone and check_in_time (the day feed's `scheduled_services.*` and
+// the week feed's explicit select both do).
+function visitPremiseFields(s) {
+  return {
+    customerPhone: s.customer_phone,
+    // The visit's premise (null = never stamped with a property). The tech
+    // Fast Complete sheet checks it against the live visit, so a stale row
+    // can't complete a visit since moved to another unit or property.
+    propertyId: s.property_id ?? null,
+    address: [[s.address_line1, s.address_line2].filter(Boolean).join(' '), s.city, [s.state, s.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+    city: s.city,
+    state: s.state,
+    lat: s.visit_lat != null ? Number(s.visit_lat) : null,
+    lng: s.visit_lng != null ? Number(s.visit_lng) : null,
+    checkInTime: s.check_in_time,
+  };
+}
+
 let discountProvenanceColumnCache = null;
 async function scheduledServicesDiscountProvenanceColumns(database) {
   if (discountProvenanceColumnCache !== null) return discountProvenanceColumnCache;
@@ -6376,14 +6401,10 @@ router.get('/', async (req, res, next) => {
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
-        customerId: s.customer_id, customerPhone: s.customer_phone,
-        // The visit's premise (null = never stamped with a property). The tech
-        // Fast Complete sheet checks it against the live visit, so a stale row
-        // can't complete a visit since moved to another unit or property.
-        propertyId: s.property_id ?? null,
-        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
-        city: s.city,
-        state: s.state,
+        customerId: s.customer_id,
+        // propertyId, address, city, state, lat, lng, customerPhone and
+        // checkInTime: shared with the week feed (visitPremiseFields).
+        ...visitPremiseFields(s),
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
         serviceAddons,
@@ -6396,8 +6417,6 @@ router.get('/', async (req, res, next) => {
         windowDisplay: s.window_display || (s.window_start ? `${fmtTime(s.window_start)}–${fmtTime(s.window_end)}` : 'Flexible'),
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
         has_service_record: s.has_service_record === true,
-        lat: s.visit_lat != null ? Number(s.visit_lat) : null,
-        lng: s.visit_lng != null ? Number(s.visit_lng) : null,
         customerConfirmed: s.customer_confirmed,
         // Lets the sidebar hide actions that the review gate would 409
         // (unreviewed outbound-callback bookings).
@@ -6431,7 +6450,7 @@ router.get('/', async (req, res, next) => {
         lastLineServiceDate: safeDate(lastLineService?.service_date),
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
         lastLineServiceNotes: previewText(lastLineService?.technician_notes),
-        checkInTime: s.check_in_time, checkOutTime: s.check_out_time,
+        checkOutTime: s.check_out_time,
         actualDuration: s.actual_duration_minutes,
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
@@ -6664,6 +6683,16 @@ router.get('/week', async (req, res, next) => {
           ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
           ...(discountProvenanceCols.line_discount_dollars ? ['scheduled_services.line_discount_dollars'] : []),
           'scheduled_services.technician_id',
+          // The premise and contact fields the Dispatch Fast Complete sheets
+          // read (visitPremiseFields): the same columns the day feed gets
+          // from scheduled_services.*, in the same stamped-address-wins form.
+          'scheduled_services.property_id', 'scheduled_services.check_in_time',
+          db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+          db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
+          db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+          db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+          db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+          'customers.phone as customer_phone',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
           'scheduled_services.auto_dispatch_locked',
@@ -6890,6 +6919,9 @@ router.get('/week', async (req, res, next) => {
           id: s.id,
           customerId: s.customer_id,
           customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
+          // propertyId and the rest of the premise the day feed carries: the
+          // Fast Complete rules and sheets read them off this row too.
+          ...visitPremiseFields(s),
           serviceType: svcType,
           serviceTypeDisplay,
           serviceAddons,
