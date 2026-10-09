@@ -113,21 +113,53 @@ export function yourPartIsEmpty({ banner, reentry, lines }) {
   return !bannerShowsAnything(banner) && !reentry && !(lines && lines.length);
 }
 
+// ── What "Nothing for you to do after this visit." may be said over ─────────
+// The sentence is about care AFTER THE VISIT. It is printed only when no printed section carries an after-visit
+// instruction. Two closed lists make that explicit; a third names the slots that are plain information.
+//
+// INSTRUCTION_SOURCES: what COUNTS as an after-visit instruction (any one removes the sentence).
+export const INSTRUCTION_SOURCES = Object.freeze({
+  leadStep: { reason: 'the lead\'s own homeowner step (Other steps)', test: (v2) => alsoSteps(v2.lead).length > 0 },
+  recommendations: { reason: 'the technician\'s recommendations list', test: (v2, data) => (data?.recommendations || []).length > 0 },
+  weeklyPlan: { reason: 'the weekly watering plan on the water card', test: (v2) => Boolean(v2.water?.weekPlan?.title) },
+  coverageWatch: { reason: 'the coverage-watch callout ("worth checking that your sprinklers reach those spots")', test: (v2) => Boolean(v2.water?.coverageWatch) },
+  aftercareNote: { reason: 'the aftercare watering / re-entry note on the water card', test: (v2) => isText(v2.aftercare?.watering) && v2.aftercare?.neutral !== true },
+  techTips: { reason: 'tips from your technician', test: (v2, data) => Boolean(data?.techNote?.tips?.length) },
+  // findings' next steps need the banner clock; see findingsCarryStep
+  findingStep: { reason: 'a finding\'s next step among the cards the findings block prints, after the banner dedupe', test: (v2, data, clock) => findingsCarryStep(v2, clock.nowMs, clock.printing) },
+});
+
+// INVITATIONS: page elements that invite or inform and deliberately do NOT count. None is care after the visit; the
+// page also shows most of them on a clean visit, so counting them would remove the sentence from nearly every report.
+export const INVITATIONS = Object.freeze({
+  waterScheduleCta: 'the "Add your watering schedule" call to action (WaterIntakeBar, scheduleOnFile false): optional account setup that makes the reading more exact; no treatment depends on it',
+  bannerSetupLink: 'the sprinkler-setup link under an amount-only water-in (banner.setupLine): the amount to water is already printed; the link only offers minutes per zone',
+  reviewAsk: 'the review ask',
+  referralCard: 'the referral card',
+  crossSellCard: 'the cross-sell offer',
+  reschedule: 'the Reschedule link on Your plan',
+  textUs: 'the "Something come up between visits? Text us." line and the When to call us block',
+  reserviceInvite: 'the "Still seeing something? Tell us" re-service invitation',
+});
+
+// SLOT_CLASS: every slot the page hands the layout, named in exactly one place: an instruction source, an
+// invitation, or information (a fact, not a task). lawnLayoutCoverage.test.js fails when a slot is in none.
+export const SLOT_CLASS = Object.freeze({
+  status: 'information', recap: 'information', nearYou: 'information', recordedFindings: 'information',
+  visitSummary: 'information', products: 'information', productsKind: 'information', poisonNote: 'information',
+  tracedMap: 'information', markedPhotos: 'information', highlights: 'information',
+  yourPart: 'instruction', recommendations: 'instruction', techNote: 'instruction',
+  reservice: 'invitation', plan: 'invitation', upcoming: 'invitation', review: 'invitation', referral: 'invitation', crossSell: 'invitation',
+});
+
 /**
- * True when ANY section the layout prints carries a customer instruction: the lead's own step, a finding's
- * next step (after the dedupe, among the cards the findings block prints), the technician recommendations, the
- * weekly watering plan, a coverage-watch callout, the aftercare watering or re-entry note, the tips from your
- * technician. The card then never says "nothing to do" (and is left out when it would be empty).
+ * True when ANY section the layout prints carries an after-visit instruction (INSTRUCTION_SOURCES). The card then
+ * never says "nothing to do" (and is left out when it would be empty). INVITATIONS never count.
  */
 export function pageCarriesInstruction(data, nowMs, printing = false) {
   const v2 = data?.reportV2 || {};
-  const care = v2.aftercare || {};
-  const plainInstruction = alsoSteps(v2.lead).length > 0
-    || (data?.recommendations || []).length > 0
-    || Boolean(v2.water?.weekPlan?.title || v2.water?.coverageWatch)
-    || (isText(care.watering) && care.neutral !== true)
-    || Boolean(data?.techNote?.tips?.length);
-  return plainInstruction || findingsCarryStep(v2, nowMs, printing);
+  const clock = { nowMs, printing };
+  return Object.values(INSTRUCTION_SOURCES).some((source) => source.test(v2, data, clock));
 }
 
 // A finding the findings block prints has a next step of its own (after the dedupe against the banner).

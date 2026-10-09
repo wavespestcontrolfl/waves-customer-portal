@@ -274,6 +274,16 @@ describe('gate on: the phone order', () => {
     expect(text(second.container)).toContain('Friday, October 23');
   });
 
+  it('a clean visit with no irrigation schedule on file shows the setup invitation and still says there is nothing to do', async () => {
+    const payload = clone(cleanOn);
+    payload.reportV2.lead.yourPart = [];
+    payload.reportV2.water = { ...payload.reportV2.water, scheduleOnFile: false, irrigationInches: null, weekPlan: null, coverageWatch: false };
+    const { container } = renderReport(payload, '', 'tok-cta');
+    await waitForReport();
+    expect(text(container)).toContain('Add your watering schedule');
+    expect(screen.getByTestId('lawn-your-part')).toHaveTextContent('Nothing for you to do after this visit.');
+  });
+
   it('a finished re-entry keeps its pet advisory in Your part', async () => {
     const payload = clone(cleanOn);
     payload.dynamicContext.reentry.petAdvisory = 'Keep pets off treated turf until it is fully dry.';

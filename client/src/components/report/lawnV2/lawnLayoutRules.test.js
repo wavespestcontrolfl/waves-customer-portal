@@ -9,6 +9,8 @@ import {
   LAYOUT_DECLINES,
   layoutDeclines,
   pageCarriesInstruction,
+  INSTRUCTION_SOURCES,
+  INVITATIONS,
   insightsWithoutRepeats,
   lawnLayoutActive,
   lawnLayoutStatusData,
@@ -498,5 +500,50 @@ describe('planShowsNextVisit: every way the plan area can print a next-visit dat
 
   it.each(rows)('%s', (_name, payload, expected) => {
     expect(planShowsNextVisit(payload, TODAY)).toBe(expected);
+  });
+});
+
+describe('invitations never count as after-visit instructions', () => {
+  const clean = () => ({ reportV2: { lead: {}, insights: [{ priority: 1, status: 'healthy', category: 'overall', customerAction: null }], water: {}, aftercare: { neutral: true, watering: 'No special watering is needed.' } } });
+
+  it('a clean visit with no irrigation schedule on file (the setup CTA shows) still allows the sentence', () => {
+    const data = clean();
+    data.reportV2.water = { scheduleOnFile: false, rainInches: 1.2, status: 'balanced' };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+  });
+
+  it('a sprinkler-setup link under an amount-only water-in is not counted by itself, nor are review, referral, cross-sell and reschedule payloads', () => {
+    const data = clean();
+    data.reportV2.banner = { state: null, lines: [], setupLine: 'Add your sprinkler setup and we\u2019ll give you minutes for each zone.' };
+    data.reviewRequestEligible = true;
+    data.crossSell = { offer: {} };
+    data.referral = { card: {} };
+    data.upcomingVisitsCard = { visits: [{ serviceType: 'Lawn Care', scheduledDate: '2026-10-23', rescheduleUrl: '/x' }], merged: true };
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+  });
+
+  it('the closed lists name the invitations the brief lists', () => {
+    expect(Object.keys(INVITATIONS)).toEqual(expect.arrayContaining(['waterScheduleCta', 'bannerSetupLink', 'reviewAsk', 'referralCard', 'crossSellCard', 'reschedule', 'textUs']));
+  });
+
+  it.each(Object.keys(INSTRUCTION_SOURCES).filter((key) => key !== 'findingStep'))('the instruction source "%s" alone removes the sentence', (key) => {
+    const mutate = {
+      leadStep: (d) => { d.reportV2.lead.yourPart = ['Raise the mower one setting.']; },
+      recommendations: (d) => { d.recommendations = ['Trim the hedge back.']; },
+      weeklyPlan: (d) => { d.reportV2.water.weekPlan = { title: 'This week: about 30 minutes per zone' }; },
+      coverageWatch: (d) => { d.reportV2.water.coverageWatch = true; },
+      aftercareNote: (d) => { d.reportV2.aftercare = { neutral: false, watering: 'Water in today\u2019s application.' }; },
+      techTips: (d) => { d.techNote = { tips: [{ id: 'x' }] }; },
+    }[key];
+    const data = clean();
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+    mutate(data);
+    expect(pageCarriesInstruction(data, Date.now())).toBe(true);
+  });
+
+  it('the finding-step source alone removes it', () => {
+    const data = clean();
+    data.reportV2.insights = [{ priority: 1, status: 'watch', category: 'coverage', customerAction: 'Check the zone by the fence.' }];
+    expect(pageCarriesInstruction(data, Date.now())).toBe(true);
   });
 });

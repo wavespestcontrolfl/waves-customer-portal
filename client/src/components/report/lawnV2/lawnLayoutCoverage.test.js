@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from '@babel/parser';
 import { describe, expect, it } from 'vitest';
 import { STANDARD_BODY_COVERAGE } from './lawnLayoutCoverage';
-import { LAYOUT_DECLINES } from './lawnLayoutRules';
+import { INSTRUCTION_SOURCES, INVITATIONS, LAYOUT_DECLINES, SLOT_CLASS } from './lawnLayoutRules';
 import { LAYOUT_ORDER } from './LawnLayout';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -111,5 +111,29 @@ describe('the standard lawn page body against the lawn layout', () => {
     guards.forEach((guard) => expect(pageSource).toContain(guard));
     expect(pageSource).toContain('const isV2LeadLayout = (isLawnReport && !!data.reportV2) || isTreeShrubV2;');
     expect(pageSource).toContain('const reviewAskOnTop = Boolean(data.reportV2)');
+  });
+});
+
+describe('what the "nothing to do" sentence may be said over', () => {
+  const { slotKeys } = standardBodyMounts(pageSource);
+
+  it('every slot the page hands the layout is classified: instruction, invitation or information (a new slot must be classified)', () => {
+    expect(slotKeys.filter((key) => !SLOT_CLASS[key])).toEqual([]);
+    expect(Object.keys(SLOT_CLASS).filter((key) => !slotKeys.includes(key))).toEqual([]);
+    Object.values(SLOT_CLASS).forEach((kind) => expect(['instruction', 'invitation', 'information']).toContain(kind));
+  });
+
+  it('every slot classified as an instruction is backed by an instruction source (or is the Your part card itself)', () => {
+    const claimed = { recommendations: 'recommendations', techNote: 'techTips' };
+    Object.entries(SLOT_CLASS).filter(([, kind]) => kind === 'instruction').forEach(([key]) => {
+      if (key === 'yourPart') return;
+      expect(Object.keys(INSTRUCTION_SOURCES), key).toContain(claimed[key]);
+    });
+  });
+
+  it('the two closed lists share no entry, and each entry has a reason', () => {
+    expect(Object.keys(INSTRUCTION_SOURCES).filter((key) => key in INVITATIONS)).toEqual([]);
+    Object.values(INSTRUCTION_SOURCES).forEach((source) => expect(source.reason.length).toBeGreaterThan(10));
+    Object.values(INVITATIONS).forEach((reason) => expect(reason.length).toBeGreaterThan(10));
   });
 });
