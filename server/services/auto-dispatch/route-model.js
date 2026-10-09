@@ -125,8 +125,11 @@ function physicalStops(stops) {
       last.coChain = advanceCoVisit({ clock: 0, ...last.coChain }, unit);
       last.minutes = last.coChain.coMerged;
       last.geo = last.geo || unit.geo;
+      last.coIds.push(unit.id);
     } else {
-      out.push(unit.memberIds ? { ...unit, coChain: null } : { ...unit, minutes: stopPlanningMinutes(unit), coChain: startCoVisitChain(unit) });
+      // coIds: every row this stop stands for when it is a co-visit chain, so a
+      // caller never has to guess which rows were folded in.
+      out.push(unit.memberIds ? { ...unit, coChain: null } : { ...unit, minutes: stopPlanningMinutes(unit), coChain: startCoVisitChain(unit), coIds: [unit.id] });
     }
     prevRow = unit.memberIds ? null : unit;
   }

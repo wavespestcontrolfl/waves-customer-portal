@@ -138,17 +138,10 @@ function groupStops(rows, addOns = []) {
   const stops = [];
   for (const dayRows of days.values()) {
     const byId = new Map(dayRows.map((row) => [String(row.id), row]));
-    const units = physicalStops(dayRows);
-    const taken = new Set(units.flatMap((unit) => (unit.memberIds || [unit.id]).map(String)));
-    for (const unit of units) {
-      const members = (unit.memberIds || [unit.id]).map((id) => byId.get(String(id))).filter(Boolean);
-      // Rows the model folded into this stop as a co-visit are not in its
-      // output: they are this customer's untaken rows at the same start.
-      if (unit.coChain) {
-        members.push(...dayRows.filter((row) => !taken.has(String(row.id)) && row.visit_id == null
-          && String(row.customer_id) === String(unit.customer_id)
-          && toMin(row.window_start) === toMin(unit.window_start)));
-      }
+    for (const unit of physicalStops(dayRows)) {
+      // The model names every row a stop stands for: a group's members, or
+      // the rows it folded into a co-visit.
+      const members = (unit.memberIds || unit.coIds).map((id) => byId.get(String(id))).filter(Boolean);
       const startMin = Math.min(...members.map((m) => toMin(m.window_start)));
       // The stop's minutes from its start, and never before a later member's own work is done.
       const endMin = Math.max(startMin + unit.minutes, ...members.map((m) => toMin(m.window_start) + stopPlanningMinutes(m)));

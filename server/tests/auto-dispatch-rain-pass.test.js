@@ -200,6 +200,15 @@ describe('auto-dispatch rain pass', () => {
     expect(rows[0].visit.memberIds).toEqual(['visit-1', 'visit-2']);
   });
 
+  test('two co-visits of one customer at two properties in the same hour stay two stops with their own rows', () => {
+    const at = (line1, lat) => ({ visit_id: null, lat, lng: '-82.4', service_address_line1: line1, service_address_zip: '34201', service_address_city: 'Bradenton', window_start: '09:00:00', window_end: '10:00:00' });
+    const stops = _test.groupStops([
+      stop({ ...at('1 Test St', '27.4'), id: 'a1' }), stop({ ...at('1 Test St', '27.4'), id: 'a2' }),
+      stop({ ...at('9 Other Ave', '27.5'), id: 'b1' }), stop({ ...at('9 Other Ave', '27.5'), id: 'b2' }),
+    ]);
+    expect(stops.map((s) => s.memberIds)).toEqual([['a1', 'a2'], ['b1', 'b2']]);
+  });
+
   test('a failed run resolves as an error, which the scheduler turns into a failed job', async () => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
     const d = deps([stop()], { loadStops: jest.fn(async () => { throw new Error('db down'); }) });
