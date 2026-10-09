@@ -793,7 +793,7 @@ class ApplicationLimitChecker {
       let violation;
       if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max, window, await this.ownApplicationsBeyondFirst(database, customerId, productId, opts));
       else if (limit.match_type === V13_AMOUNT) violation = await this.auditAmount(database, customerId, product, day, limit, opts);
-      else violation = await this.auditInterval(others, product, day, max);
+      else violation = await this.auditInterval(others, product, day, max, await this.ownApplicationsBeyondFirst(database, customerId, productId, opts));
       if (violation) violations.push({ ...violation, limitId: limit.id, description: limit.description });
     }
     return violations;
@@ -855,7 +855,12 @@ class ApplicationLimitChecker {
     return { type: 'annual_max_rate', message: `${product.name}: ${pct(total)}% of the yearly label amount in ${year} — LIMIT EXCEEDED.`, current: pct(total), max: 100 };
   }
 
-  async auditInterval(others, product, day, min) {
+  // `ownBeyondFirst`: a second application of the product on this same visit (a host row plus an add-on row) is a
+  // zero-day gap, whatever the other visits say.
+  async auditInterval(others, product, day, min, ownBeyondFirst = 0) {
+    if (ownBeyondFirst > 0 && min > 0) {
+      return { type: 'min_interval_days', message: `${product.name}: applied ${ownBeyondFirst + 1} times on this visit (min ${min} days between applications).`, current: 0, max: min };
+    }
     const before = await others().where('application_date', '<=', day).orderBy('application_date', 'desc').first('application_date');
     const after = await others().where('application_date', '>', day).orderBy('application_date', 'asc').first('application_date');
     const anchor = new Date(`${day}T12:00:00Z`);

@@ -255,15 +255,20 @@ function applyAreaAddOnHistory(v1Input, history) {
   return v1Input;
 }
 
-// The sold (priced) add-on keys of a stored estimate: the rows an accept would book.
+// The sold (priced) add-on keys of a stored estimate: the rows an accept would book. Every one-time shape the booking
+// normalizer accepts is read (mapped oneTime.items, and the raw engine lines under lineItems on the root, `result` or
+// `engineResult`), and a row is priced by any amount field that normalizer reads. An unpriced custom-quote row is not booked.
+const SOLD_AMOUNT_FIELDS = ['priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total'];
+const isSoldAddOnRow = (row) => !!row && row.service === 'area_addon' && typeof row.addOnKey === 'string'
+  && row.quoteRequired !== true && row.requiresCustomQuote !== true
+  && SOLD_AMOUNT_FIELDS.some((field) => Number(row[field]) > 0);
+const rowsOf = (value) => (Array.isArray(value) ? value : []);
 function soldAddOnKeys(estimateData) {
   let data = estimateData;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return []; } }
-  const roots = [data, data?.result].filter((root) => root && typeof root === 'object');
-  const items = roots.flatMap((root) => (Array.isArray(root.oneTime?.items) ? root.oneTime.items : []));
-  return [...new Set(items
-    .filter((row) => row && row.service === 'area_addon' && typeof row.addOnKey === 'string' && Number(row.price) > 0)
-    .map((row) => row.addOnKey))];
+  const roots = [data, data?.result, data?.engineResult].filter((root) => root && typeof root === 'object');
+  const rows = roots.flatMap((root) => [...rowsOf(root.oneTime?.items), ...rowsOf(root.lineItems)]);
+  return [...new Set(rows.filter(isSoldAddOnRow).map((row) => row.addOnKey))];
 }
 
 function limitError(status, code, message, extra = {}) {

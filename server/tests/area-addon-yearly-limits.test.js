@@ -986,3 +986,25 @@ describe('quote time: only an admin requester reads a customer\'s treatment hist
     expect(calls).toEqual([]);
   });
 });
+
+describe('the recheck finds the sold add-ons in every one-time shape the booking reads (Codex round 16)', () => {
+  const row = (over = {}) => ({ service: 'area_addon', addOnKey: 'fire_ant_yard', ...over });
+  test.each([
+    ['mapped oneTime.items with price', { result: { oneTime: { items: [row({ price: 99 })] } } }],
+    ['raw result.lineItems', { result: { lineItems: [row({ price: 99 })] } }],
+    ['raw engineResult.lineItems', { engineResult: { lineItems: [row({ price: 99 })] } }],
+    ['bare lineItems', { lineItems: [row({ price: 99 })] }],
+    ['amount instead of price', { result: { oneTime: { items: [row({ amount: 99 })] } } }],
+    ['total instead of price', { result: { oneTime: { items: [row({ total: '99' })] } } }],
+    ['priceAfterDiscount', { result: { oneTime: { items: [row({ priceAfterDiscount: 99 })] } } }],
+    ['a JSON string', JSON.stringify({ engineResult: { lineItems: [row({ price: 99 })] } })],
+  ])('%s', (_label, data) => {
+    expect(service.soldAddOnKeys(data)).toEqual(['fire_ant_yard']);
+  });
+
+  test('an unpriced or custom-quote row is not booked and is not rechecked; other services are ignored', () => {
+    const data = { result: { oneTime: { items: [row({ price: null, requiresCustomQuote: true }), row({ price: 0 }), row({ price: 99, quoteRequired: true }), { service: 'one_time_pest', price: 199 }] } } };
+    expect(service.soldAddOnKeys(data)).toEqual([]);
+    expect(service.soldAddOnKeys('not json')).toEqual([]);
+  });
+});

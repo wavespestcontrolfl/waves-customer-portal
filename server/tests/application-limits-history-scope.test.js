@@ -133,6 +133,15 @@ describe('auditAnnualCount counts a visit\'s second row of the product as anothe
     expect(await applicationLimits.auditAnnualCount(others(0), product, '2026-10-09', 2, undefined, 1)).toBeNull();
   });
 
+  test('two rows of the product on one visit are a zero-day gap for the spacing rule, with no other application on record', async () => {
+    const none = () => { throw new Error('the same-visit gap needs no history read'); };
+    expect(await applicationLimits.auditInterval(none, product, '2026-10-09', 56, 1))
+      .toMatchObject({ type: 'min_interval_days', current: 0, max: 56, message: 'Arena 50 WDG: applied 2 times on this visit (min 56 days between applications).' });
+    // One row on the visit: the audit reads the other visits as before.
+    const empty = () => ({ where() { return this; }, orderBy() { return this; }, first: async () => undefined });
+    expect(await applicationLimits.auditInterval(empty, product, '2026-10-09', 56, 0)).toBeNull();
+  });
+
   // Codex round 11 P1 on #6135: a visit booked while the gate was on is completed after it is turned off; the audit returned 0
   // with the gate off, so the host application plus the attached add-on of the same product counted once and the hard limit
   // finding and the office alert were missed. The audit reads the data, never the sale gate.
