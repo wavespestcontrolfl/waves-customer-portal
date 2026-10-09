@@ -488,6 +488,14 @@ describe('is_spam needs a pitch that was heard (prompt v27)', () => {
     expect(prompt).toMatch(/ends before\s+the caller says why they are calling/);
     expect(prompt).toMatch(/When the purpose is unknown, lead_quality is\s+"cold", never "spam_or_solicitation"/);
   });
+
+  test('a follow-up staff agreed to is not spam, and spam_verdict follows is_spam (codex #6224 r1 P1)', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    expect(prompt).toMatch(/follows up on a meeting, a call or an email that Waves staff\s+AGREED to/);
+    expect(prompt).toMatch(/spam_verdict follows the same rules as is_spam/);
+    expect(prompt).toMatch(/spam_verdict\.is_spam_content is false and spam_kind is\s+"not_spam"/);
+  });
 });
 
 describe('schema version alignment', () => {

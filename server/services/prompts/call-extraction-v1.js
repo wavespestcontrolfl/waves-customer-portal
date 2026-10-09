@@ -436,6 +436,13 @@ exact mistakes lost real leads; apply them literally):
   or property name, or the fact that the caller is not yet a customer is not
   evidence of solicitation. When the purpose is unknown, lead_quality is
   "cold", never "spam_or_solicitation", and no spam triage flag is raised.
+- A caller who follows up on a meeting, a call or an email that Waves staff
+  AGREED to ("yesterday I talked with <staff> and he told me to schedule a
+  meeting at four") is NOT spam, even when the caller is from another company:
+  staff asked for the contact, so it is not a cold call. Set is_spam=false.
+- spam_verdict follows the same rules as is_spam: whenever is_spam is false
+  under the rules above, spam_verdict.is_spam_content is false and spam_kind is
+  "not_spam" (or "wrong_number" for a wrong number).
 - Abstract failure patterns to avoid (not real calls):
   1) "This is an automated assistant calling for a homeowner who needs a severe
      bed-bug treatment quote at 123 Example St" -> is_spam=false, is_lead=true
