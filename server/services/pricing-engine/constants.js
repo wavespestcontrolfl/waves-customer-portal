@@ -2312,6 +2312,13 @@ const WAVEGUARD = {
     // Active German Roach Cleanout is a 3-visit specialty/cost-recovery line,
     // not a recurring-service benefit or one-time perk candidate.
     german_roach: true,
+    // Vehicle German roach rows (owner 2026-10-06, migration
+    // 20261008170000): a flat $199 two-visit car job and a flat $99 rider on a
+    // home roach job. Admin Schedule's lineExcludedFromPercentDiscount and the
+    // client picker read this map (the catalog rows carry no engine_keys), not
+    // service_discount_rules (codex #6162 r1 P1).
+    vehicle_german_roach: true,
+    vehicle_roach_addon: true,
     // pest_initial_roach is a non-waivable first-visit cost-recovery charge
     // (auto-fired when recurring pest is booked with a non-none roachType).
     // The whole point is to recover the heavier visit-1 product + labor
