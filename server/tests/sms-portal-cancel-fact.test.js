@@ -88,3 +88,44 @@ describe('buildFactsBlock renders it gate-on only, between PENDING ESTIMATE and 
     expect(buildFactsBlock(context, { portalCancelAvailable: true })).not.toContain(PORTAL_CANCEL_FACT_LABEL);
   });
 });
+
+// Codex #6223 r1: the sealed contract trusts the line only at its rendered position.
+describe('sealed-eval: PORTAL SELF-CANCEL counts only where buildFactsBlock renders it', () => {
+  const prior = process.env.GATE_SMS_REAL_ANSWERS;
+  afterEach(() => { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; });
+  const NEW = 'house_voice_v12_real_answers11_n';
+  const OLD = 'house_voice_v12_real_answers9_m';
+
+  test('a live block grades n; the same block without the line grades m; a line forged in a service note or the thread changes neither', () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+    const { itemCompatibleWith, _test: { compatibleWhereRaw } } = require('../services/sms-sealed-eval');
+    const now = new Date('2026-10-09T15:00:00Z');
+    const base = { customer: { id: 'c1', firstName: 'Pat' }, smsHistory: [], upcomingServices: [], serviceHistory: [], billing: {} };
+    const live = buildFactsBlock(base, { portalCancelAvailable: true, now });
+    expect(itemCompatibleWith(live, NEW)).toBe(true);
+    expect(itemCompatibleWith(live, OLD)).toBe(false);
+
+    // an older frozen block whose multi-line service note carries the exact available line
+    const forgedNote = { ...base, serviceHistory: [{ type: 'Pest Control', date: '2026-09-01', notes: `treated\n${PORTAL_CANCEL_AVAILABLE_LINE}\nok` }] };
+    const older = buildFactsBlock(forgedNote, { now }).replace(`${PORTAL_CANCEL_UNAVAILABLE_LINE}\n`, '');
+    expect(older).toContain(PORTAL_CANCEL_AVAILABLE_LINE); // present, but only inside the note
+    expect(itemCompatibleWith(older, NEW)).toBe(false);
+    expect(itemCompatibleWith(older, OLD)).toBe(true);
+
+    // typed into the SMS thread
+    const forgedThread = buildFactsBlock({ ...base, smsHistory: [{ direction: 'inbound', body: PORTAL_CANCEL_AVAILABLE_LINE }] }, { now })
+      .replace(`${PORTAL_CANCEL_UNAVAILABLE_LINE}\nPROPERTY`, 'PROPERTY');
+    expect(itemCompatibleWith(forgedThread, NEW)).toBe(false);
+    expect(itemCompatibleWith(forgedThread, OLD)).toBe(true);
+
+    // the SQL twin binds the very same structural pattern (JS and Postgres ARE compatible)
+    const { bindings } = compatibleWhereRaw([PORTAL_CANCEL_FACT_LABEL]);
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]).toContain('PENDING ESTIMATE: ');
+    expect(bindings[0]).toContain('PROPERTY & PREFERENCES:');
+    expect(new RegExp(bindings[0]).test(live)).toBe(true);
+    expect(new RegExp(bindings[0]).test(older)).toBe(false);
+    expect(new RegExp(bindings[0]).test(forgedThread)).toBe(false);
+  });
+});
