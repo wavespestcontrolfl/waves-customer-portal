@@ -19,7 +19,10 @@
  *   - a visit in conflict (current-conflict.js, behind
  *     GATE_AUTO_DISPATCH_CONFLICT_MOVES): it overlaps another customer's
  *     stop, or sits on an owner blackout day. A free hour on the same day is
- *     taken first when the day itself stays open.
+ *     taken first when the day itself stays open; then the slot that adds
+ *     the least drive. A slot that adds more than
+ *     config.conflictMaxAddedDriveMinutes is never taken: the visit stays
+ *     and the audit row says CONFLICT_NO_NEAR_SLOT (a person decides).
  */
 
 function round2(v) { return Math.round(v * 100) / 100; }
@@ -60,6 +63,12 @@ function meetsDriveFloor({ current, cand, config }) {
   return driveSavingMinutes(current, cand) >= floor;
 }
 
+// A conflict move may not add more than the ceiling to the visit's detour.
+function withinConflictCeiling({ current, cand, config }) {
+  const ceiling = config.conflictMaxAddedDriveMinutes;
+  return !Number.isFinite(ceiling) || -driveSavingMinutes(current, cand) <= ceiling;
+}
+
 // A visit that must leave its slot whatever the score says.
 function mustMove(service, current) {
   return isUnplacedDueDate(service) || !!(current && current.conflict);
@@ -76,20 +85,25 @@ function mustMove(service, current) {
  */
 function rankCandidates({ service, current, currentScore, scored, threshold, config }) {
   const forced = mustMove(service, current);
-  const sameDayFirst = !!(current && current.conflict && current.conflict.kind === 'overlap');
+  const conflict = (current && current.conflict) || null;
+  const sameDayFirst = !!(conflict && conflict.kind === 'overlap');
   const rows = scored.map(({ cand, sc }, index) => {
     const gain = moveGain({ service, current, currentScore, cand, candScore: sc });
     const floorOk = forced || meetsDriveFloor({ current, cand, config });
+    const ceilingOk = !conflict || withinConflictCeiling({ current, cand, config });
     return {
-      cand, sc, gain, index, floorOk,
-      qualifies: forced || (floorOk && gain >= threshold),
+      cand, sc, gain, index, floorOk, ceilingOk,
+      saving: driveSavingMinutes(current, cand),
+      qualifies: forced ? ceilingOk : (floorOk && gain >= threshold),
       sameDay: !isDayMove(current, cand),
     };
   });
-  // Stable: ties keep encounter order (Array#sort is stable in V8).
-  const byGain = (a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0) || b.gain - a.gain || a.index - b.index;
+  // Stable: ties keep encounter order (Array#sort is stable in V8). A
+  // conflict move ranks by least added drive before score.
+  const byGain = (a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
+    || (conflict ? b.saving - a.saving : 0) || b.gain - a.gain || a.index - b.index;
   const qualifying = rows.filter((r) => r.qualifies).sort(byGain);
-  // Nothing qualifies: the audit shows the nearest miss by gain.
+  // Nothing qualifies: the audit shows the nearest miss.
   const top = qualifying[0] || rows.slice().sort(byGain)[0] || null;
   return {
     best: top && top.cand,
@@ -97,11 +111,13 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     gain: top ? top.gain : 0,
     qualifies: qualifying.length > 0,
     // The nearest miss cleared the score bar and was refused by the drive floor.
-    floorFailed: qualifying.length === 0 && !!top && !top.floorOk && top.gain >= threshold,
+    floorFailed: qualifying.length === 0 && !!top && !forced && !top.floorOk && top.gain >= threshold,
+    // A visit in conflict whose every slot adds too much drive.
+    ceilingFailed: qualifying.length === 0 && !!top && !!conflict && !top.ceilingOk,
     ranked: qualifying.map((r) => r.cand),
   };
 }
 
 module.exports = {
-  isUnplacedDueDate, isDayMove, driveSavingMinutes, moveGain, meetsDriveFloor, mustMove, rankCandidates,
+  isUnplacedDueDate, isDayMove, driveSavingMinutes, moveGain, meetsDriveFloor, withinConflictCeiling, mustMove, rankCandidates,
 };

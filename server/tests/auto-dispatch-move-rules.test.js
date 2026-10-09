@@ -133,3 +133,32 @@ describe('rankCandidates', () => {
     expect(result).toMatchObject({ qualifies: true, best: cand, gain: -20 });
   });
 });
+
+describe('conflict moves: least added drive, with a ceiling (replay 2026-10-09)', () => {
+  const { rankCandidates } = require('../services/auto-dispatch/move-rules');
+  const cur = { date: '2026-12-07', detour_minutes: 14, conflict: { kind: 'overlap', date: '2026-12-07', with: ['o1'] } };
+  const score = (total) => ({ total_score: total, default_time_score: 0 });
+  const cfg = { minDayMoveDriveSavingMinutes: 6, conflictMaxAddedDriveMinutes: 15 };
+  const rank = (cands) => rankCandidates({
+    service: { id: 's1', window_start: '10:00' }, current: cur, currentScore: score(60), threshold: 15, config: cfg,
+    scored: cands.map((c) => ({ cand: c, sc: score(c.total) })),
+  });
+
+  test('same day first, then the slot that adds the least drive, whatever the score', () => {
+    const r = rank([
+      { date: '2026-12-09', start_time: '09:00', detour_minutes: 4, total: 90 },
+      { date: '2026-12-07', start_time: '14:00', detour_minutes: 24, total: 30 },
+      { date: '2026-12-07', start_time: '12:00', detour_minutes: 16, total: 20 },
+    ]);
+    expect(r.qualifies).toBe(true);
+    expect(r.ranked.map((c) => c.start_time)).toEqual(['12:00', '14:00', '09:00']);
+  });
+
+  test('a slot that adds more than the ceiling is never taken; none left means the visit stays', () => {
+    const far = { date: '2026-12-09', start_time: '15:00', detour_minutes: 52, total: 30 };
+    const near = { date: '2026-12-10', start_time: '09:00', detour_minutes: 29, total: 20 };
+    expect(rank([far, near]).ranked).toEqual([near]);
+    const none = rank([far]);
+    expect(none).toMatchObject({ qualifies: false, ceilingFailed: true, floorFailed: false, best: far });
+  });
+});

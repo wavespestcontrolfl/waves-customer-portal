@@ -288,9 +288,36 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   };
 }
 
+// Dry run only: one recommendation per overlapping pair. Apply mode needs no
+// such rule: pass 2 re-evaluates each visit against the live schedule, so
+// once one visit of a pair has moved the other is no longer in conflict. In
+// a dry run nothing moves, so without this both rows would be counted. The
+// visit evaluated first (earliest date, the load order) is the one named.
+function partnerAlreadyMoves(run, service, evalResult) {
+  const conflict = evalResult.current && evalResult.current.conflict;
+  if (!conflict || conflict.kind !== 'overlap') return false;
+  const partners = (conflict.with || []).map(String);
+  if (partners.length && partners.every((id) => run.conflictMovers.has(id))) return true;
+  run.conflictMovers.add(String(service.id));
+  return false;
+}
+
+function signed(n) { return n >= 0 ? `+${n}` : String(n); }
+
+function wouldMoveDescription(evalResult) {
+  const conflict = evalResult.current && evalResult.current.conflict;
+  return `Would move${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(evalResult.improvement)})`;
+}
+
 // Why the nearest candidate did not move the visit: a day move that cleared
 // the score bar and saved too little drive, or a gain under the bar.
 function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
+  if (ranked.ceilingFailed) {
+    return {
+      reason_code: 'CONFLICT_NO_NEAR_SLOT',
+      reason_description: `In conflict, but the nearest free slot adds ${-routeMetrics.drive_saving_minutes} drive minutes > ${config.conflictMaxAddedDriveMinutes} allowed; a person must place it`,
+    };
+  }
   if (ranked.floorFailed) {
     return {
       reason_code: 'NO_DRIVE_SAVING',
@@ -657,8 +684,11 @@ async function evaluateServiceForRun(service, run) {
   // so the per-run change cap spends its budget on the highest-value
   // moves rather than whichever happened to come first by scheduled_date.
   if (config.mode === 'dry_run') {
+    if (partnerAlreadyMoves(run, service, evalResult)) {
+      return audit.logDecision(run.runId, { action: 'no_change', service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...evalResult.audit });
+    }
     totals.recommended++;
-    return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: `Would move (+${evalResult.improvement})`, ...evalResult.audit, appliedBy: 'auto_dispatch' });
+    return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: wouldMoveDescription(evalResult), ...evalResult.audit, appliedBy: 'auto_dispatch' });
   }
   run.plannedMoves.push({ service, prefs, ctx, result: evalResult });
   return undefined;
@@ -684,7 +714,7 @@ function inConflict(pm) {
 const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day' };
 function movedDescription(appliedAudit) {
   const conflict = appliedAudit.constraints && appliedAudit.constraints.conflict;
-  return `Moved${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (+${appliedAudit.improvement})`;
+  return `Moved${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(appliedAudit.improvement)})`;
 }
 
 // Re-check the active day-move guard right before applying — pass 1 read it
@@ -874,6 +904,7 @@ async function runAutoDispatch(opts = {}) {
     // Apply-mode only: qualifying moves found in the pass-1 sweep, applied
     // best-improvement-first in pass 2 so the change cap funds the largest gains.
     plannedMoves: [],
+    conflictMovers: new Set(),
     quarantinedIds: new Set(),
     guardReadDegraded: false, // a failed guard read must not report a green run
   };

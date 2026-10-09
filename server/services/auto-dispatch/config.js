@@ -99,6 +99,12 @@ function moveRuleConfig(overrides) {
     // another customer's stop, or sits on an owner blackout day, moves to the
     // best legal slot without the score bar. See current-conflict.js.
     conflictMovesEnabled: overrides.conflictMovesEnabled ?? isConflictMovesEnabled(),
+    // The most modeled drive a conflict move may ADD to the visit's own detour
+    // (read-only replay 2026-10-09: 13 of 28 overlap moves added drive, up to
+    // 49 minutes). Past it the visit stays and needs a person. Applies to a
+    // closed-day move too. Owner decision pending on the number.
+    conflictMaxAddedDriveMinutes: overrides.conflictMaxAddedDriveMinutes
+      ?? intEnv('AUTO_DISPATCH_CONFLICT_MAX_ADDED_DRIVE_MINUTES', 15, { min: 0, max: 240 }),
   };
 }
 

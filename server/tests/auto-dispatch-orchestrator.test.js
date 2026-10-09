@@ -784,6 +784,24 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     expect(candidateSlots.findValidCandidateSlots.mock.calls[1][2].conflictMoves).toBe(true);
   });
 
+  test('dry run: one recommendation per overlapping pair; a slot past the drive ceiling is not taken', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+    candidateSlots.findValidCandidateSlots
+      .mockResolvedValueOnce({ current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: ['b1'] } }, candidates: [CAND_SMALL] })
+      .mockResolvedValueOnce({ current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: ['a1'] } }, candidates: [CAND_SMALL] });
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('recommended').reason_description).toMatch(/^Would move off an overlapping stop \(/);
+    expect(lastDecision('no_change').reason_code).toBe('CONFLICT_PARTNER_MOVES');
+
+    servicesResult = [svc()];
+    const FAR = { ...CAND_SMALL, detour_minutes: 60 };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [FAR] });
+    const held = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(held).toMatchObject({ recommended: 0 });
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_NO_NEAR_SLOT', reason_description: expect.stringContaining('adds 50 drive minutes > 15') });
+  });
+
   test('an overlapping visit moves on a gain far under the bar, and the audit names the conflict', async () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
