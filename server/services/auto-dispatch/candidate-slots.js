@@ -502,13 +502,15 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   return kept;
 }
 
-// The legacy pre-score cap. With conflict moves on, the visit's own date goes
+// The legacy pre-score cap. For a visit in conflict, its own date goes
 // first (stable), so a same-day repair is never cut behind cheaper other-day
 // slots before move-rules.js ranks same-day first (pre-push P1). Gate off:
 // the order is untouched.
 function legacyCap(service, candidates, ctx) {
   const cap = ctx.scoreCap || SCORE_CAP;
-  if (!ctx.conflictMoves) return candidates.slice(0, cap);
+  // Only for a visit that IS in conflict: any other visit keeps find-time's
+  // route-ranked order under the cap (Codex #6207 r8 P2).
+  if (!ctx.evalConflict) return candidates.slice(0, cap);
   const own = toDateStr(service.scheduled_date);
   return [...candidates.filter((c) => c.date === own), ...candidates.filter((c) => c.date !== own)].slice(0, cap);
 }
@@ -645,7 +647,8 @@ async function legacyGroupBlindField(service, ctx) {
 // visit overlaps another customer's stop or sits on a closed day
 // (current-conflict.js). Gate off: no read, no field.
 async function currentConflictField(service, ctx) {
-  const conflict = await readCurrentConflict(service, ctx);
+  // findValidCandidateSlots reads it once for the evaluation (evalConflict).
+  const conflict = ctx.evalConflict !== undefined ? ctx.evalConflict : await readCurrentConflict(service, ctx);
   return conflict ? { conflict } : {};
 }
 
@@ -681,12 +684,26 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   };
 }
 
+// Rows find-time ignores when it looks for free slots. A visit that overlaps
+// another stop may be repaired by a same-day shift, and its group moves with
+// it: a sibling's old window must not hide the 11:00 start of a 10:00 unit,
+// so the whole moving unit is excluded, as the destination writer does
+// (Codex #6207 r8 P1). Any other visit: itself only, as before.
+async function movingUnitIds(service, ctx) {
+  if (!ctx.evalConflict || ctx.evalConflict.kind !== 'overlap') return [service.id];
+  const { excludeIds } = await groupContextFor(service, ctx);
+  return [...new Set([String(service.id), ...[...(excludeIds || [])].map(String)])];
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
   // The visit group is read ONCE for this evaluation and shared by the
   // current placement and every candidate (see withGroupContext).
-  const ctx = await withGroupContext(service, baseCtx);
+  const grouped = await withGroupContext(service, baseCtx);
+  // Read once: candidate generation, the cap and the current placement all
+  // use the same answer. Gate off: null, no read.
+  const ctx = { ...grouped, evalConflict: await readCurrentConflict(service, grouped) };
 
   // Search within ± tolerance days of the visit's CURRENT date (clamped to the
   // lock floor and lookahead horizon) so optimization tightens the route without
@@ -761,7 +778,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     durationMinutes: duration,
     dateFrom,
     dateTo,
-    excludeServiceIds: [service.id],
+    excludeServiceIds: await movingUnitIds(service, ctx),
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
     // HARD time preference must enter slot GENERATION, not just post-filtering:
     // find-time emits only each gap's earliest-feasible start, so an empty day
@@ -869,6 +886,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, legacyCap,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, legacyCap, movingUnitIds,
   },
 };

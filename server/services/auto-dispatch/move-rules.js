@@ -97,10 +97,13 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
   const sameDayFirst = !!(conflict && conflict.kind === 'overlap');
   const rows = scored.map(({ cand, sc }, index) => {
     const gain = moveGain({ service, current, currentScore, cand, candScore: sc });
-    const floorOk = forced || meetsDriveFloor({ current, cand, config });
+    const normalFloorOk = meetsDriveFloor({ current, cand, config });
+    const floorOk = forced || normalFloorOk;
     const ceilingOk = !conflict || withinConflictCeiling({ current, cand, config });
     return {
       cand, sc, gain, index, floorOk, ceilingOk,
+      // Would this slot move the visit with no conflict to force it?
+      normalOk: normalFloorOk && gain >= threshold,
       saving: driveSavingMinutes(current, cand),
       qualifies: forced ? ceilingOk : (floorOk && gain >= threshold),
       sameDay: !isDayMove(current, cand),
@@ -122,6 +125,9 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     floorFailed: qualifying.length === 0 && !!top && !forced && !top.floorOk && top.gain >= threshold,
     // A visit in conflict whose every slot adds too much drive.
     ceilingFailed: qualifying.length === 0 && !!top && !!conflict && !top.ceilingOk,
+    // A visit in conflict that an ordinary optimization would move anyway:
+    // it still moves after its overlapping partner has left.
+    movesWithoutConflict: !!conflict && rows.some((r) => r.normalOk),
     ranked: qualifying.map((r) => r.cand),
   };
 }

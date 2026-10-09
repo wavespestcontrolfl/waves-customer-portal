@@ -802,6 +802,18 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_NO_NEAR_SLOT', reason_description: expect.stringContaining('adds 50 drive minutes > 15') });
   });
 
+  // Apply mode re-evaluates the partner with no conflict after the first
+  // move; a partner that clears the ordinary bar moves too, so the dry run
+  // recommends both (Codex #6207 r8 P2).
+  test('dry run: a partner an ordinary optimization would move anyway is recommended too', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+    candidateSlots.findValidCandidateSlots
+      .mockResolvedValueOnce({ current: { ...CURRENT, conflict: { ...OVERLAP, with: ['b1'] } }, candidates: [CAND_BIG] })
+      .mockResolvedValueOnce({ current: { ...CURRENT, conflict: { ...OVERLAP, with: ['a1'] } }, candidates: [CAND_BIG] });
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 2 });
+  });
+
   test('an overlapping visit moves on a gain far under the bar, and the audit names the conflict', async () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';

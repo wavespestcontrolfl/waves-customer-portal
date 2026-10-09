@@ -284,7 +284,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 
   if (!ranked.qualifies) return { kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), audit: auditCtx };
   return {
-    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
+    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx, movesWithoutConflict: ranked.movesWithoutConflict === true,
   };
 }
 
@@ -303,12 +303,13 @@ function logDryRunRecommendation(run, service, evalResult) {
 // pass 2 re-evaluates each visit against the live schedule, so once one
 // visit of a pair has moved the other is no longer in conflict; a dry run
 // moves nothing, so a visit whose every overlapping partner is already
-// recommended is logged as staying (Codex #6207 r6 P2).
+// recommended is logged as staying (Codex #6207 r6 P2) — unless an ordinary
+// optimization would move it anyway, as apply mode then does (r8 P2).
 async function recommendOverlapFixes(run) {
   const movers = new Set();
   for (const pm of run.dryRunOverlaps.sort(byDueThenImprovement)) {
     const partners = (overlapOf(pm.result).with || []).map(String);
-    if (partners.length && partners.every((id) => movers.has(id))) {
+    if (partners.length && partners.every((id) => movers.has(id)) && !pm.result.movesWithoutConflict) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });
     } else {
       movers.add(String(pm.service.id));

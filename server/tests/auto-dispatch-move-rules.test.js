@@ -92,6 +92,17 @@ describe('rankCandidates', () => {
     expect(result.ranked).toEqual([retime]);
   });
 
+  // After its overlapping partner leaves, a visit is evaluated with no
+  // conflict: this says whether it would still move then (Codex #6207 r8 P2).
+  test('a visit in conflict says whether an ordinary optimization would move it anyway', () => {
+    const conflict = { kind: 'overlap', date: CURRENT.date, with: ['o1'] };
+    const strong = rank([{ cand: dayMove({ detour_minutes: 2 }), sc: score(90, 12.5) }], { current: { ...CURRENT, conflict } });
+    expect(strong).toMatchObject({ qualifies: true, movesWithoutConflict: true });
+    const weak = rank([{ cand: dayMove({ detour_minutes: 0 }), sc: score(70) }], { current: { ...CURRENT, conflict } });
+    expect(weak).toMatchObject({ qualifies: true, movesWithoutConflict: false });
+    expect(rank([{ cand: dayMove({ detour_minutes: 2 }), sc: score(90, 12.5) }]).movesWithoutConflict).toBe(false);
+  });
+
   test('under the bar: the audit shows the nearest miss and no fallback list', () => {
     const cand = dayMove({ detour_minutes: 0 });
     const result = rank([{ cand, sc: score(70) }]);
