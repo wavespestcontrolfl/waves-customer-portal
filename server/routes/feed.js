@@ -4,6 +4,7 @@ const xml2js = require('xml2js');
 const rateLimit = require('express-rate-limit');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const WATERING_COPY = require('../../shared/watering-copy.json');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const localNewsStore = require('../services/local-news-store');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -456,9 +457,9 @@ router.get('/alerts', async (req, res, next) => {
 router.get('/monthly-tip', async (req, res, next) => {
   const month = new Date().getMonth();
   const TIPS = {
-    0: { title: 'January Lawn Check', tip: "Even though growth slows in winter, keep mowing at 4 inches. Taller grass shades out winter weeds. And don't skip irrigation completely — your lawn still needs about 0.5 inches per week." },
+    0: { title: 'January Lawn Check', tip: `Even though growth slows in winter, keep mowing at 4 inches. Taller grass shades out winter weeds. And don't forget about watering completely — in the cool season, water only when the grass shows ${WATERING_COPY.wiltSigns}, on your allowed watering days.` },
     1: { title: 'Pre-Spring Prep', tip: "February is your last chance for pre-emergent before spring weeds explode. If you're on our lawn program, we've got this covered. Also a great time to sharpen your mower blades." },
-    2: { title: 'Spring Is Here', tip: "Time to bump irrigation back up. Your St. Augustine wants 1 inch per week split into 2-3 waterings. Early morning only — never after 10 AM. Evening watering invites fungus." },
+    2: { title: 'Spring Is Here', tip: `Growth picks up in March. Water when the grass shows ${WATERING_COPY.wiltSigns} — ½ to ¾ inch each time, on your allowed watering days, in the early morning. Evening watering keeps the blades wet longer, and fungus needs wet blades to start.` },
     3: { title: 'Spring Irrigation Check', tip: "Walk your zones this weekend. Look for heads spraying the sidewalk, dry spots, and that one zone that turns your yard into a swamp. Your tech can flag issues during your next visit." },
     4: { title: 'Hurricane Prep Starts Now', tip: "Hurricane prep starts now, not in August. Trim dead palm fronds, clear your yard of anything that becomes a projectile, and make sure your drainage isn't blocked." },
     5: { title: 'Fertilizer Blackout Season', tip: "Fertilizer blackout season started June 1 in Sarasota and Manatee counties. No nitrogen until October 1. Don't worry — your Waves lawn program switches to micronutrients, iron, and targeted weed control." },
@@ -497,7 +498,7 @@ const FAQ_DATA = [
     category: 'Lawn Care', icon: '🌱',
     questions: [
       { q: 'Why does my St. Augustine have brown patches?', a: 'Usually one of three things: large patch fungus (circular patches, cool/wet weather), chinch bugs (sunny edges, hot/dry weather), or drought stress. Text us a photo and we can usually diagnose it from that.' },
-      { q: 'How much should I water my lawn in summer?', a: 'About 1 inch per week, split into 2-3 waterings. Always early morning (before 10 AM). Evening watering is the #1 cause of fungus in SWFL lawns. Your irrigation controller is your best friend.' },
+      { q: 'How much should I water my lawn in summer?', a: `Water when the grass shows ${WATERING_COPY.wiltSigns} — then put down ½ to ¾ inch on an allowed watering day, early in the morning. In the rainy season that is often no sprinkler water at all.` },
       { q: 'What\'s thatch and why does it matter?', a: 'Thatch is the layer of dead grass between the soil and the green blades. Under half an inch is fine. Over that, water and nutrients can\'t reach the roots, and pests love hiding in it. We measure it at every lawn visit.' },
       { q: 'Why can\'t you fertilize in summer?', a: 'Sarasota and Manatee counties ban nitrogen fertilizer from June 1 to September 30 to protect waterways. Your Waves lawn program automatically switches to iron, micronutrients, and targeted weed control during these months.' },
       { q: 'When will I see results from the lawn program?', a: 'Most customers see noticeable improvement in 60-90 days. Full transformation takes 6-12 months depending on starting condition. We track your progress with lawn health scores so you can see the numbers improve.' },

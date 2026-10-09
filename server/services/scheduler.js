@@ -2032,6 +2032,31 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 06:35 — pin check after a visit (GATE_PIN_PARKED_CHECK, dark): compares the map pin of each
+  // customer whose visit was completed in the last 2 ET days with where the technician's truck parked,
+  // and SUGGESTS the parked point to staff. It never changes a pin and never contacts a customer.
+  // Gate read per run, so a flip needs no restart. With the gate off the run only retires any suggestions
+  // still open (a clean rollback), so the tick is not skipped here. runExclusive records the job health.
+  cron.schedule('35 6 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('pin-parked-check', async () => {
+        const result = await require('./pin-parked-check').runPinParkedCheck();
+        if (result.created > 0) logger.info(`[pin-parked-check] ${result.created} new pin suggestion(s)`);
+      });
+      // A tick that never ran (no lock connection) is recorded as a failed run, like the geocode-review alert.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`pin-parked-check tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('pin-parked-check').catch(() => {});
+        await recordJobEnd('pin-parked-check', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[pin-parked-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
