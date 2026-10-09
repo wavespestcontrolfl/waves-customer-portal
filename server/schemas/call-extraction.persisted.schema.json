@@ -1395,14 +1395,16 @@
             "string",
             "null"
           ],
-          "format": "time"
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2}T)?([01]\\d|2[0-3]):[0-5]\\d(:[0-5]\\d(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})?$",
+          "description": "When the caller asked to be called back, or the earliest time of the callback window they gave. Eastern wall-clock time in 24-hour form with no offset: \"14:00\" when only a time was said, \"2026-10-12T14:00\" when the caller also named a day (\"tomorrow at two\", \"Monday morning after nine\"). Null when no callback time was stated. Rows written before schema 1.27.0 may hold a time with seconds and an offset (\"14:00:00-04:00\")."
         },
         "callback_window_end": {
           "type": [
             "string",
             "null"
           ],
-          "format": "time"
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2}T)?([01]\\d|2[0-3]):[0-5]\\d(:[0-5]\\d(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})?$",
+          "description": "The latest time of the callback window the caller gave, in the same form as callback_window_start (\"before four\" -> \"16:00\"). Null when the caller gave one time or none. Rows written before schema 1.27.0 may hold a time with seconds and an offset (\"14:00:00-04:00\")."
         },
         "follow_up_mentioned": {
           "type": [

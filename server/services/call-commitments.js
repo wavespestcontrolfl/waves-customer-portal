@@ -347,7 +347,11 @@ function isoOrNull(value) {
 // nine" said at three in the afternoon). Without the call's start there is
 // no date to pin to, and the promise keeps the implicit deadline. A full
 // datetime is taken as is.
-const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2})?$/;
+// Rows written before schema 1.27.0 hold the old offset form
+// ("14:00:00-04:00"): an Eastern offset of either season is the wall clock
+// it spells (the isoOrNull rule above), so it reads as the bare time. Any
+// other offset is not a bare ET time and falls through.
+const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:-0[45]:?00)?$/;
 function callbackDueAt(value, callStartedAt) {
   if (value == null || value === '') return null;
   const text = String(value).trim();
