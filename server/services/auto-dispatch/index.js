@@ -617,26 +617,59 @@ async function flagMissingGeo(service) {
       action: 'fix the address pin on a visit',
       why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
       severity: 'needs-you',
-      link: `/admin/dispatch?tab=schedule&date=${date}`,
+      link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(service.id)}`,
       subject: { type: 'visit', id: String(service.id) },
       doneWhen: 'visit_has_map_pin',
       who: 'person',
     }, {
       // bell: true — under GATE_ADMIN_BELL_POLICY a bell:false notice inserts
-      // no row at all. One notice per visit (dedupeKey), so it rings once.
+      // no row at all. One notice per visit and date (dedupeKey), so it rings
+      // once; a recurrence after the run closed it reopens (refreshOnDedupe).
       bell: true,
-      dedupeKey: `auto-dispatch-missing-geo:${service.id}`,
-      metadata: { scheduledServiceId: service.id, customerId: service.customer_id },
+      dedupeKey: `auto-dispatch-missing-geo:${service.id}:${date}`,
+      refreshOnDedupe: true,
+      metadata: { scheduledServiceId: service.id, customerId: service.customer_id, scheduledDate: date },
     });
   } catch (err) {
     logger.warn(`[auto-dispatch] missing-geo notice failed for ${service && service.id}: ${err.message}`);
   }
 }
 
+// The missing-pin notice is for a visit on a live plan only: a lapsed plan's
+// visit is not placed anyway. Fails open, like isRecurringPlanActive itself.
+async function missingGeoNoticeWanted(service) {
+  try {
+    return (await isRecurringPlanActive(service, db)).active;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] plan check for the missing-geo notice failed for ${service && service.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// Raise the notice and remember the visit, so the run's end closes the notices
+// of every visit that was not skipped for a missing pin this time.
+async function noticeMissingGeo(run, service) {
+  if (!(await missingGeoNoticeWanted(service))) return;
+  run.missingGeoIds.add(String(service.id));
+  await flagMissingGeo(service);
+}
+
 // An ineligible visit's skip: logged, plus the missing-map-point notice.
 async function logIneligible(run, service, elig) {
   await logSkip(run, service, elig);
-  if (elig.reason_code === 'MISSING_GEO') await flagMissingGeo(service);
+  if (elig.reason_code === 'MISSING_GEO') await noticeMissingGeo(run, service);
+}
+
+// Close the missing-pin notices this run did not raise again. Only after a
+// pass 1 that finished with no failed visit: a run that stopped early did not
+// look at every visit, so silence proves nothing. Best-effort.
+async function closeMissingGeoNotices(run) {
+  if (!run.pass1Complete) return;
+  try {
+    await audit.retireMissingGeoNotices(run.missingGeoIds, run.nowDate);
+  } catch (err) {
+    logger.error(`[auto-dispatch] missing-geo notice close failed: ${err.message}`);
+  }
 }
 
 // Eligibility, self-healing a not-yet-geocoded customer first — but BEFORE
@@ -935,6 +968,10 @@ async function runAutoDispatch(opts = {}) {
     plannedMoves: [],
     quarantinedIds: new Set(),
     guardReadDegraded: false, // a failed guard read must not report a green run
+    // Visits skipped for a missing pin on a live plan this run, and whether
+    // pass 1 looked at every visit (their notices close only then).
+    missingGeoIds: new Set(),
+    pass1Complete: false,
   };
 
   try {
@@ -961,6 +998,8 @@ async function runAutoDispatch(opts = {}) {
       }
     }
 
+    run.pass1Complete = totals.failed === 0;
+
     if (config.mode !== 'dry_run') await runPassTwo(run);
 
     if (totals.failed > 0 || run.guardReadDegraded) runStatus = 'completed_with_errors';
@@ -979,6 +1018,7 @@ async function runAutoDispatch(opts = {}) {
     if (runStatus === 'completed') runStatus = 'completed_with_errors';
     logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
   }
+  await closeMissingGeoNotices(run);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {

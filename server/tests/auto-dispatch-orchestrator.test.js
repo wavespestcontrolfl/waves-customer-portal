@@ -23,6 +23,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),
   flagUnplacedVisits: jest.fn(async () => 0),
+  retireMissingGeoNotices: jest.fn(async () => {}),
 }));
 
 jest.mock('../services/tech-visit-notifications', () => ({
@@ -217,11 +218,53 @@ test('a visit still without a map point after the geocode retry raises one admin
     'schedule_conflict', 'Schedule — fix the address pin on a visit', expect.stringContaining('Aug 4'),
     expect.objectContaining({
       bell: true,
-      link: '/admin/dispatch?tab=schedule&date=2026-08-04',
-      dedupeKey: 'auto-dispatch-missing-geo:s1',
-      metadata: expect.objectContaining({ scheduledServiceId: 's1', customerId: 'c1' }),
+      link: '/admin/dispatch?tab=schedule&date=2026-08-04&appointment=s1',
+      dedupeKey: 'auto-dispatch-missing-geo:s1:2026-08-04',
+      refreshOnDedupe: true,
+      metadata: expect.objectContaining({ scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-08-04' }),
     }),
   );
+});
+
+test('a lapsed plan raises no missing-geo notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(), expect.any(Date));
+});
+
+describe('missing-geo notice close at the end of a run', () => {
+  beforeEach(() => {
+    geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  });
+
+  test('closes with the visits that raised the notice this run', async () => {
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledTimes(1);
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+  });
+
+  test('does not close on a run that failed before pass 1 finished', async () => {
+    db.mockImplementation(() => { throw new Error('database down'); });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res.status).toBe('failed');
+    expect(audit.retireMissingGeoNotices).not.toHaveBeenCalled();
+  });
+
+  test('does not close when a visit failed in pass 1 (it was not fully looked at)', async () => {
+    eligibility.isEligibleForAutoDispatch.mockImplementation(() => { throw new Error('boom'); });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res.failed).toBe(1);
+    expect(audit.retireMissingGeoNotices).not.toHaveBeenCalled();
+  });
+
+  test('a failed close is logged and does not fail the run', async () => {
+    audit.retireMissingGeoNotices.mockRejectedValueOnce(new Error('notification store down'));
+    await expect(runAutoDispatch({ mode: 'dry_run' })).resolves.toMatchObject({ status: 'completed' });
+  });
 });
 
 test('a failed missing-geo notice is logged and fails neither the visit nor the run', async () => {

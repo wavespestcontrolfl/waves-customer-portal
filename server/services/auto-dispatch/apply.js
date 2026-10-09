@@ -464,7 +464,7 @@ async function flagReminderSyncFailed(service, best) {
       action: 'check the reminder time on a moved visit',
       why: `Auto-dispatch moved the visit to ${shortDateET(`${best.date}T12:00:00Z`)} but its reminder did not update.`,
       severity: 'needs-you',
-      link: `/admin/dispatch?tab=schedule&date=${best.date}`,
+      link: `/admin/dispatch?tab=schedule&date=${best.date}&appointment=${encodeURIComponent(service.id)}`,
       subject: { type: 'visit', id: String(service.id) },
       doneWhen: 'reminder_time_checked',
       who: 'person',
@@ -484,18 +484,30 @@ async function flagReminderSyncFailed(service, best) {
 // visit with no reminder row. Tell the two apart by the row itself.
 async function flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best) {
   if (reminderRecord) return;
-  if (await reminderOffNewSlot(AppointmentReminders, service, best)) await flagReminderSyncFailed(service, best);
+  if (await reminderOffNewSlot(AppointmentReminders, service)) await flagReminderSyncFailed(service, best);
+}
+
+// The time the reminder should name: the committed row's canonical arrival
+// (reservation_arrival_start for a sequentially allocated member), the same
+// source handleReschedule and the DB trigger use, not the candidate's start.
+async function committedReminderTime(AppointmentReminders, service) {
+  const row = await db('scheduled_services')
+    .where({ id: service.id })
+    .first('id', 'scheduled_date', 'window_start', 'reservation_service_mix');
+  if (!row) throw new Error('the moved visit could not be read');
+  const start = await require('../reservation-arrival').arrivalStartForService(db, row);
+  return AppointmentReminders.composeScheduledApptTime({ scheduled_date: toDateStr(row.scheduled_date), window_start: start || '08:00' });
 }
 
 // After a sync that returned nothing: whether a reminder row exists for the
-// visit and still names a time other than the slot the move landed on. No row
-// is not a failure (nothing can go out for the old slot).
+// visit and still names a time other than the one the committed visit holds.
+// No row is not a failure (nothing can go out for the old slot).
 // An unreadable row is logged, not alerted: nothing is known either way.
-async function reminderOffNewSlot(AppointmentReminders, service, best) {
+async function reminderOffNewSlot(AppointmentReminders, service) {
   try {
     const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time');
     if (!row) return false;
-    const expected = AppointmentReminders.composeScheduledApptTime({ scheduled_date: best.date, window_start: best.start_time || '08:00' });
+    const expected = await committedReminderTime(AppointmentReminders, service);
     const actual = new Date(row.appointment_time).getTime();
     return !expected || Number.isNaN(actual) || actual !== expected.getTime();
   } catch (err) {

@@ -179,11 +179,27 @@ async function retireResolvedNotices({ keyPattern, stillOpen, resolvedTitle, res
 // How far ahead a recurring visit with no arrival time and no due date raises
 // a notice: far enough to set a time in dispatch before the lock window.
 const NO_WINDOW_HORIZON_DAYS = 45;
+// New no-window notices rung per run. Same number as DEFAULT_RING_BUDGET in
+// combined-booking-check.js (the daily budget the watchdog keeps), so one bad
+// day cannot ring more bells than the sibling check would.
+const NO_WINDOW_RING_BUDGET = 10;
+
+// A row linked to an accepted estimate, directly or through its plan parent,
+// belongs to the combined-booking check (its missing_time_tech bell covers
+// the untimed visit). Same link rule as linkedToEstimate in
+// combined-booking-check.js, so the two never ring for the same visit.
+function excludeEstimateLinked(query) {
+  return query.whereNull('s.source_estimate_id').whereNotExists(function parentLinked() {
+    this.select('p.id').from('scheduled_services as p')
+      .whereRaw('p.id = s.recurring_parent_id')
+      .whereNotNull('p.source_estimate_id');
+  });
+}
 
 // Recurring children that have neither an arrival window nor a due date, so
 // auto-dispatch cannot place them and nothing else would tell staff.
 function noWindowVisits(conn, from, to) {
-  return conn('scheduled_services as s')
+  return excludeEstimateLinked(conn('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
     .where('s.is_recurring', true)
     .whereNotNull('s.recurring_parent_id')
@@ -193,35 +209,87 @@ function noWindowVisits(conn, from, to) {
     .where('s.scheduled_date', '>=', from)
     .where('s.scheduled_date', '<=', to)
     .where('c.active', true)
-    .whereNull('c.deleted_at');
+    .whereNull('c.deleted_at'));
 }
 
-async function retireNoWindowNotices(nowDate, today) {
+// The windowless visits staff can act on now: plan not lapsed (a lapsed plan's
+// visit is not placed, so asking for a time is noise). One plan read per plan.
+async function actionableNoWindowRows(today, to) {
+  const { isRecurringPlanActive } = require('./eligibility');
+  const rows = await noWindowVisits(db, today, to)
+    .select('s.id', 's.customer_id', 's.scheduled_date', 's.recurring_parent_id');
+  const plans = new Map();
+  const actionable = [];
+  for (const row of rows) {
+    const planKey = `${row.customer_id}:${row.recurring_parent_id}`;
+    if (!plans.has(planKey)) plans.set(planKey, (await isRecurringPlanActive(row, db)).active);
+    if (plans.get(planKey)) actionable.push({ ...row, date: toDateStr(row.scheduled_date) });
+  }
+  return actionable;
+}
+
+async function retireNoWindowNotices(nowDate, today, actionableIds) {
   await retireResolvedNotices({
     keyPattern: 'recurring-no-window:%',
-    stillOpen: (sub) => sub
+    stillOpen: (sub) => excludeEstimateLinked(sub
       .whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'")
+      .whereIn('s.id', actionableIds)
       .where('s.is_recurring', true)
       .whereNotNull('s.recurring_parent_id')
       .whereNull('s.window_start')
       .whereNull('s.recurring_dispatch_due_date')
       .where('s.scheduled_date', '>=', today)
-      .whereIn('s.status', ['pending', 'confirmed']),
+      .whereIn('s.status', ['pending', 'confirmed'])),
     resolvedTitle: 'Recurring visit time alert resolved',
-    resolution: 'The visit now has an arrival time, or is no longer waiting on one for that date',
+    resolution: 'The visit now has an arrival time, is no longer waiting on one for that date, or its plan has lapsed',
     body: 'This visit no longer needs an arrival time set.',
   }, nowDate);
 }
 
+function noWindowKey(row) {
+  return `recurring-no-window:${row.id}:${row.date}`;
+}
+
+// Rows to raise or refresh this run: every row that already has a notice
+// (refresh only, no bell spent) plus at most `budget` new ones, soonest first.
+// Rows past the budget wait for the next run.
+function withinRingBudget(rows, existingKeys, budget) {
+  const picked = [];
+  let fresh = 0;
+  const soonestFirst = [...rows].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
+  for (const row of soonestFirst) {
+    if (existingKeys.has(noWindowKey(row))) picked.push(row);
+    else if (fresh < budget) { fresh += 1; picked.push(row); }
+  }
+  return picked;
+}
+
+async function existingNoWindowKeys() {
+  const rows = await db('notifications')
+    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", ['recurring-no-window:%'])
+    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"));
+  return new Set(rows.map((r) => r.dedupe_key));
+}
+
+// Retire standing notices that no longer apply, then return the visits to
+// raise: computed first so a lapsed plan's notice closes in the same pass.
+async function prepareNoWindowNotices(nowDate, today, to) {
+  const rows = await actionableNoWindowRows(today, to);
+  await retireNoWindowNotices(nowDate, today, rows.map((r) => r.id));
+  return rows;
+}
+
 // One notice per windowless recurring visit. Same row lock + shared dedupe as
 // the due-date notice, so a staff placement that wins the lock makes this a no-op.
-async function flagNoWindowVisits(today, to) {
+async function flagNoWindowVisits(candidates, today, to) {
   const { shortDateET } = require('../admin-alert-names');
-  const rows = await noWindowVisits(db, today, to)
-    .select('s.id', 's.customer_id', 's.scheduled_date');
+  const rows = candidates.length
+    ? withinRingBudget(candidates, await existingNoWindowKeys(), NO_WINDOW_RING_BUDGET)
+    : [];
   let flagged = 0;
   for (const row of rows) {
-    const date = toDateStr(row.scheduled_date);
+    const date = row.date;
     const notice = await db.transaction(async (trx) => {
       const current = await noWindowVisits(trx, today, to)
         .where({ 's.id': row.id, 's.customer_id': row.customer_id, 's.scheduled_date': date })
@@ -233,13 +301,13 @@ async function flagNoWindowVisits(today, to) {
         action: 'set an arrival time for a recurring visit',
         why: `The ${shortDateET(`${date}T12:00:00Z`)} visit has no arrival time; set one in dispatch so it can be placed.`,
         severity: 'needs-you',
-        link: `/admin/dispatch?tab=schedule&date=${date}`,
+        link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(row.id)}`,
         subject: { type: 'visit', id: String(row.id) },
         doneWhen: 'visit_has_arrival_time',
         who: 'person',
       }, {
         bell: true,
-        dedupeKey: `recurring-no-window:${row.id}:${date}`,
+        dedupeKey: noWindowKey(row),
         refreshOnDedupe: true,
         metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date },
         trx,
@@ -250,6 +318,22 @@ async function flagNoWindowVisits(today, to) {
     if (notice) flagged += 1;
   }
   return flagged;
+}
+
+// Close missing-pin notices the run no longer raised: the emitter owns the
+// close, because a visit that left the skip list is not otherwise visible here.
+// `flaggedIds` are the visits this run skipped for a missing pin on an active
+// plan; call only after a pass 1 that finished.
+async function retireMissingGeoNotices(flaggedIds, nowDate = new Date()) {
+  await retireResolvedNotices({
+    keyPattern: 'auto-dispatch-missing-geo:%',
+    stillOpen: (sub) => sub
+      .whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'")
+      .whereIn('s.id', [...flaggedIds]),
+    resolvedTitle: 'Address pin alert resolved',
+    resolution: 'Auto-dispatch no longer skips the visit for a missing address pin on that date',
+    body: 'This visit no longer needs its address pin fixed.',
+  }, nowDate);
 }
 
 // Include skipped/locked rows: unplaced due dates must not disappear behind
@@ -268,7 +352,8 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     body: 'This visit is no longer awaiting placement for the recorded due date.',
   }, nowDate);
   const today = etDateString(nowDate);
-  await retireNoWindowNotices(nowDate, today);
+  const noWindowEnd = etDateString(addETDays(nowDate, NO_WINDOW_HORIZON_DAYS));
+  const noWindowRows = await prepareNoWindowNotices(nowDate, today, noWindowEnd);
   const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
   const rows = await db('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
@@ -316,7 +401,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     });
     if (notice) flagged += 1;
   }
-  return flagged + await flagNoWindowVisits(today, etDateString(addETDays(nowDate, NO_WINDOW_HORIZON_DAYS)));
+  return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices };
