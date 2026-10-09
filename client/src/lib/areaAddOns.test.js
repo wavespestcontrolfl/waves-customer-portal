@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addOnActualsProblem,
+  addOnRecordMissingProblem,
   areaAddOnOption,
   areaAddOnRowLabel,
   buildAreaAddOnRequest,
@@ -296,5 +297,23 @@ describe("an add-on's application row needs its actuals", () => {
     expect(addOnActualsProblem(host, [{ name: "Sweep", areaAddOnKey: "area_addon_web_sweep", rate: "" }])).toBeNull();
     expect(addOnActualsProblem({ completionProfile: { serviceKey: "area_addon_web_sweep" } }, [{ name: "x", rate: "" }])).toBeNull();
     expect(addOnActualsProblem(host, undefined)).toBeNull();
+  });
+});
+
+// Codex round 45: a completed visit needs a product row for every chemical add-on it carries.
+describe("addOnRecordMissingProblem", () => {
+  const host = { completionProfile: { serviceKey: "lawn" }, areaAddOns: [{ key: "area_addon_fire_ant_yard", name: "Fire Ant Yard Treatment" }, { key: "area_addon_web_sweep", name: "Web Sweep" }] };
+  const sentence = "Fire Ant Yard Treatment add-on: no product is recorded for it. Record its product, rate and treated square feet, then complete the visit. If it was not applied, ask the office to take it off this visit first.";
+  it("names the chemical add-on with no row; a row for it, or only a web sweep, passes", () => {
+    expect(addOnRecordMissingProblem(host, [{ name: "Host product" }])).toBe(sentence);
+    expect(addOnRecordMissingProblem(host, [{ name: "Topchoice", areaAddOnKey: "area_addon_fire_ant_yard" }])).toBeNull();
+    expect(addOnRecordMissingProblem({ ...host, areaAddOns: [host.areaAddOns[1]] }, [])).toBeNull();
+    expect(addOnRecordMissingProblem({ completionProfile: { serviceKey: "lawn" } }, undefined)).toBeNull();
+  });
+  it("an add-on that IS the visit needs at least one product row", () => {
+    const own = { serviceType: "Fire Ant Yard Treatment", completionProfile: { serviceKey: "area_addon_fire_ant_yard" } };
+    expect(addOnRecordMissingProblem(own, [])).toBe(sentence);
+    expect(addOnRecordMissingProblem(own, [{ name: "Topchoice" }])).toBeNull();
+    expect(addOnRecordMissingProblem({ completionProfile: { serviceKey: "area_addon_web_sweep" } }, [])).toBeNull();
   });
 });

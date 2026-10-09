@@ -600,3 +600,36 @@ describe('sameAddOnTags', () => {
     expect(ask).toBeLessThan(src.indexOf('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);'));
   });
 });
+
+// Codex round 45: a completed visit records an application for every chemical add-on it carries (they are invoiced from the visit).
+describe('requireEveryChemicalAddOnRecorded', () => {
+  const FIRE = 'area_addon_fire_ant_yard';
+  const tags = (entries) => new Map(entries);
+  const ask = (set, map, opts) => governed.requireEveryChemicalAddOnRecorded({}, set, map, opts);
+  beforeEach(() => { require('../models/db').mockReset(); });
+
+  test('every carried chemical add-on has a row: passes; the web sweep is never required; no add-on: no query', async () => {
+    await expect(ask(`${FIRE},area_addon_web_sweep`, tags([['p-1|x', FIRE]]))).resolves.toBeUndefined();
+    await expect(ask('area_addon_web_sweep', tags([]))).resolves.toBeUndefined();
+    await expect(ask('', tags([]))).resolves.toBeUndefined();
+  });
+
+  test('a carried chemical add-on with no row is refused by name', async () => {
+    await expect(ask(FIRE, tags([]))).rejects.toMatchObject({
+      statusCode: 400, code: 'area_addon_application_required', addOnKey: FIRE,
+      message: expect.stringMatching(/add-on: no product is recorded for it\. Record its product, rate and treated square feet, then complete the visit\. If it was not applied, ask the office to take it off this visit first\.$/),
+    });
+    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([['p-1|x', FIRE]]))).rejects.toMatchObject({ addOnKey: 'area_addon_bed_pre_emergent' });
+  });
+
+  test('an incomplete outcome, a replay, and a set that could not be read are not judged', async () => {
+    await expect(ask(FIRE, tags([]), { incomplete: true })).resolves.toBeUndefined();
+    await expect(ask(FIRE, tags([]), { fresh: false })).resolves.toBeUndefined();
+    await expect(ask(null, tags([]))).resolves.toBeUndefined();
+  });
+
+  test('the completion asks it before the transaction, with the outcome (source)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).toContain("requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });");
+  });
+});

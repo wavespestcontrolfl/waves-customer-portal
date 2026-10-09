@@ -169,6 +169,17 @@ export function addOnActualsProblem(service, rows) {
   return null;
 }
 
+// A completed visit records an application for every chemical add-on it carries (the server refuses it otherwise): the first
+// one with no product row, as the sentence to show, or null. An add-on that IS the visit needs at least one product row.
+export function addOnRecordMissingProblem(service, rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const unrecorded = hostAreaAddOns(service).find((addOn) => isChemicalAreaAddOnKey(addOn.key) && !list.some((row) => row?.areaAddOnKey === addOn.key));
+  const sentence = (name) => `${name} add-on: no product is recorded for it. Record its product, rate and treated square feet, then complete the visit. If it was not applied, ask the office to take it off this visit first.`;
+  if (unrecorded) return sentence(unrecorded.name || "Area");
+  if (isChemicalAreaAddOnVisit(service) && !list.some((row) => !row?.areaAddOnKey)) return sentence(service?.serviceType || "Area");
+  return null;
+}
+
 // What the estimate sold for an attached add-on, in plain words, or null (the web
 // sweep has no area): "Sold: up to 2,000 sq ft of bed area".
 export function soldAreaText(addOn) {

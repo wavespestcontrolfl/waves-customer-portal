@@ -4767,6 +4767,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // treated area and amount (a 400 otherwise; the total is filled from the rate and area when the client sent none). A replay or
     // resume of a committed completion and an incomplete visit are left alone, as for the lawn square-feet rule.
     await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
+    // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
+    await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
 
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.

@@ -455,6 +455,31 @@ async function requireAddOnActuals(knex, products, tags, { fresh = true } = {}) 
   });
 }
 
+/**
+ * A fresh COMPLETED visit records an application for every chemical add-on it carries (Codex round 45). The add-on rows are
+ * invoiced from the visit, so a completion with no product row for one would bill a treatment that has no application
+ * record. `carriedKeySet` is visitAreaAddOnKeySet's string for the visit (null = it could not be read: not judged);
+ * `tags` is resolveApplicationAddOnTags' map (its values are the add-ons that have a row).
+ * An incomplete outcome, a replay or a resume is not judged. The web sweep records no product and is never required.
+ * A treatment that was not applied is taken off the visit by the office (Update Details) before the visit is completed.
+ */
+const APPLICATION_REQUIRED_CODE = 'area_addon_application_required';
+async function requireEveryChemicalAddOnRecorded(knex, carriedKeySet, tags, { fresh = true, incomplete = false } = {}) {
+  if (!fresh || incomplete) return;
+  // The set could not be read: nothing is known, and nothing is refused. This check runs on EVERY completion in the app
+  // (most visits carry no add-on), so a failed row read must never stop them; the closeout still reports a missing record.
+  if (carriedKeySet === null || carriedKeySet === undefined) return;
+  const carried = String(carriedKeySet).split(',').filter((key) => key && isGoverned(key));
+  if (!carried.length) return;
+  const recorded = new Set(tags ? [...tags.values()] : []);
+  const missing = carried.find((key) => !recorded.has(key));
+  if (!missing) return;
+  const names = await addOnDisplayNames(knex, [missing]);
+  throw Object.assign(new Error(`${names.get(missing)} add-on: no product is recorded for it. Record its product, rate and treated square feet, then complete the visit. If it was not applied, ask the office to take it off this visit first.`), {
+    statusCode: 400, isOperational: true, code: APPLICATION_REQUIRED_CODE, addOnKey: missing,
+  });
+}
+
 // The product ids of the rows this record saved with an add-on tag (a Set of strings). Empty before the column exists.
 async function taggedProductIds(database, recordId) {
   const cols = await database('service_products').columnInfo();
@@ -495,6 +520,8 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
 
 module.exports = {
   sameAddOnTags,
+  requireEveryChemicalAddOnRecorded,
+  APPLICATION_REQUIRED_CODE,
   visitAreaAddOnKeySet,
   noProductSentence,
   UNCONFIRMED_PRODUCT_SENTENCE,

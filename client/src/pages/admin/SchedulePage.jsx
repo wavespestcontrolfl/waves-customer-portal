@@ -94,7 +94,7 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
-import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
+import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
@@ -10542,7 +10542,8 @@ function completionProductRowProblem(service, rows, typeFor) {
     const value = Number(p.areaValue);
     return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
   });
-  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : addOnActualsProblem(service, rows);
+  // (This helper runs for a COMPLETED visit only: every chemical add-on the visit carries then needs its product row.)
+  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : (addOnActualsProblem(service, rows) || addOnRecordMissingProblem(service, rows));
 }
 
 function productApplicationMethod(product = {}, serviceType = "") {
