@@ -6737,6 +6737,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
             ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
+            // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
+            // from the lawnFast echo and frozen here; no customer or public path reads it.
+            ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
