@@ -390,14 +390,24 @@ describe('the reported-verdict marker is written by the run', () => {
 // that row while the verdict still goes out by digest or email.
 describe('verdictNotifiedSince / markVerdictReported', () => {
   const { verdictNotifiedSince, markVerdictReported } = require('../services/eval/call-extraction-replay');
-  const reading = (value) => ({ conn: () => ({ where: () => ({ first: async () => (value === undefined ? undefined : { value }) }) }) });
+  // marker: the settings value (undefined = no row); bell: the notification row found since the run started
+  const reading = (marker, bell) => ({
+    conn: (table) => (table === 'system_settings'
+      ? { where: () => ({ first: async () => (marker === undefined ? undefined : { value: marker }) }) }
+      : { where: () => ({ whereRaw: () => ({ where: () => ({ first: async () => bell }) }) }) }),
+  });
   const since = new Date('2026-10-05T07:40:00Z');
 
-  test('true when a verdict was reported at or after the killed run started', async () => {
+  test('true when the marker says a verdict was reported at or after the killed run started', async () => {
     expect(await verdictNotifiedSince(since, reading('2026-10-05T07:47:00.000Z'))).toBe(true);
   });
 
-  test('false when the last report is older, absent or unreadable: the killed run is retried', async () => {
+  test('true when the marker is missing or old but the admin notification row is already there (killed before the marker)', async () => {
+    expect(await verdictNotifiedSince(since, reading(undefined, { id: 'n1' }))).toBe(true);
+    expect(await verdictNotifiedSince(since, reading('2026-09-28T07:56:00.000Z', { id: 'n1' }))).toBe(true);
+  });
+
+  test('false when neither says so: the killed run is retried', async () => {
     expect(await verdictNotifiedSince(since, reading('2026-09-28T07:56:00.000Z'))).toBe(false);
     expect(await verdictNotifiedSince(since, reading(undefined))).toBe(false);
     expect(await verdictNotifiedSince(since, reading('not a date'))).toBe(false);

@@ -349,15 +349,25 @@ async function markVerdictReported(now = new Date(), { conn = require('../../mod
 }
 
 /**
- * True when this eval reported a verdict at or after `since`. The deploy-kill
- * retry asks before re-running a killed run: a run that died AFTER it
- * reported must not report the same thing twice. A run that died before
- * reporting, or that had passed (a pass reports nothing), is retried.
+ * True when this eval reported a verdict at or after `since`: the marker, or
+ * failing that its admin notification row. The deploy-kill retry asks before
+ * re-running a killed run: a run that died AFTER it reported must not report
+ * the same thing twice. A run that died before reporting, or that had passed
+ * (a pass reports nothing), is retried.
  */
 async function verdictNotifiedSince(since, { conn = require('../../models/db') } = {}) {
   const row = await conn('system_settings').where({ key: REPORTED_AT_KEY }).first('value');
   const at = row?.value ? new Date(row.value).getTime() : NaN;
-  return Number.isFinite(at) && at >= new Date(since).getTime();
+  if (Number.isFinite(at) && at >= new Date(since).getTime()) return true;
+  // The marker is written last. A run killed between its admin notification
+  // and the marker (the email step runs in between) has still reported: the
+  // notification row itself says so, when the bell policy let it be written.
+  const bell = await conn('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'evalKey' = ?", [EVAL_KEY])
+    .where('created_at', '>=', since)
+    .first('id');
+  return Boolean(bell);
 }
 
 module.exports = {
