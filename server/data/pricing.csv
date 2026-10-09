@@ -126,13 +126,13 @@ LESCO Green Flo 6-0-0 10% Ca,6-0-0 10% Ca,Lawn Care,Fertilizer,Calcium supplemen
 Blindside Herbicide,Sulfentrazone + Metsulfuron,Lawn Care,Herbicide,Sedge + broadleaf combo,SiteOne,0.5 lb,HIGH PRIORITY,,$173.19,$21.65/oz
 Nufarm Cleary 3336F Fungicide,Thiophanate-methyl,Lawn Care,Fungicide,Pythium/disease rotation,SiteOne,2.5 gal,HIGH PRIORITY,,$627.09,$1.96/oz
 ADORN Fungicide,Fluopicolide,Lawn Care,Fungicide,Pythium/Phytophthora control,SiteOne,1 qt,New product,,$420.95,$13.16/oz
-Roundup QuikPro SC,Glyphosate,Lawn Care,Herbicide,Non-selective,SiteOne,2.5 gal,HIGH PRIORITY,,$368.90,$1.15/oz
+Roundup QuikPro SC,Glyphosate + Diquat + Indaziflam,Lawn Care,Herbicide,Non-selective,SiteOne,2.5 gal,HIGH PRIORITY,,$369.61,$1.155/fl oz
 SpeedZone Southern EW,Carfentrazone + 2 4-D + MCPP + Dicamba,Lawn Care,Herbicide,Broadleaf post-emergent,SiteOne,2.5 gal,New product,,$192.50,$0.60/oz
 Segment II Herbicide,Sethoxydim,Lawn Care,Herbicide,Selective grass-in-grass,SiteOne,2.5 gal,New product,,$1293.90,$4.04/oz
 Barricade 4FL,Prodiamine 40.7%,Lawn Care,Herbicide,Liquid pre-emergent,SiteOne,1 gal,New product,,$168.25,$1.31/oz
 Tribute Total WDG,Thiencarbazone + Foramsulfuron + Halosulfuron,Lawn Care,Herbicide,Sedge/broadleaf bermuda/zoysia,SiteOne,6 oz,New product,,$426.40,$71.07/oz
 Monument 75WG,Trifloxysulfuron,Lawn Care,Herbicide,Niche sedge control,SiteOne,25 gm,New product,,$300.00,$340.19/oz
-Snapshot 2.5TG,Trifluralin + Isoxaben,Tree & Shrub Care,Herbicide,Granular bed pre-emergent,SiteOne,50 lb,New product,,$149.24,$0.19/oz
+Snapshot 2.5TG,Trifluralin + Isoxaben,Tree & Shrub Care,Herbicide,Granular bed pre-emergent,SiteOne,50 lb,New product,,$149.53,$2.99/lb
 SureGuard SC,Flumioxazin,Tree & Shrub Care,Herbicide,Pre/post emergent beds,SiteOne,64 oz,New product,,$281.20,$4.39/oz
 Topchoice Granular Insecticide,Fipronil 0.0143%,Lawn Care,Insecticide,Fire ant control,SiteOne,50 lb,HIGH PRIORITY,,$91.55,$1.83/lb
 Forbid 4F,Spiromesifen,Tree & Shrub Care,Insecticide,Mite/whitefly ornamentals,SiteOne,8 oz,New product,,$407.40,$50.93/oz
@@ -185,5 +185,3 @@ LESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer,Sulfate of potash 
 LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer,Nitrogen and potash fertilizer,Lawn Care,Fertilizer,Granular slow-release nitrogen + potassium fertilizer,SiteOne,50 lb,Added for lawn program v13,,$31.81,$0.64/lb
 Acelepryn Insecticide,Chlorantraniliprole 18.4%,Lawn Care,Insecticide,Preventive insect control,SiteOne,64 fl oz,Added for area add-on treatments (catalog price 2026-10-08),,$905.00,$14.14/fl oz
 Arena 50 WDG,50% Clothianidin,Lawn Care,Insecticide,Systemic neonicotinoid,SiteOne,2.5 lb,Price for area add-on treatments (catalog price 2026-10-08),,$394.79,$9.87/oz
-Snapshot 2.5TG,Trifluralin + Isoxaben,Tree & Shrub Care,Herbicide,Granular bed pre-emergent,SiteOne,50 lb,Price update from $149.24 (catalog price 2026-10-08),,$149.53,$2.99/lb
-Roundup QuikPro SC,Glyphosate + Diquat + Indaziflam,Lawn Care,Herbicide,Non-selective,SiteOne,2.5 gal,Price update from $368.90 (catalog price 2026-10-08),,$369.61,$1.155/fl oz
