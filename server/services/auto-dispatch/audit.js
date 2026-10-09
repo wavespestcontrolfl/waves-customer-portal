@@ -213,8 +213,11 @@ async function combinedBookingEstimateIds(estimateIds) {
   const ids = [...new Set(estimateIds.filter(Boolean).map(String))];
   // The combined-booking check runs only inside the schedule-integrity
   // watchdog; with that gate off nobody else covers these visits, so they
-  // stay in this lane (Codex #6208 r5 P1).
-  if (!ids.length || !require('../../config/feature-gates').isEnabled('scheduleIntegrityWatchdog')) return new Set();
+  // stay in this lane (Codex #6208 r5 P1). The watchdog also needs cronJobs
+  // (scheduler.js registers it after the cronJobs early return), while this
+  // notice still runs with cronJobs off (r12 P1).
+  const { isEnabled } = require('../../config/feature-gates');
+  if (!ids.length || !isEnabled('scheduleIntegrityWatchdog') || !isEnabled('cronJobs')) return new Set();
   const { acceptedFamilies } = require('../combined-booking-check');
   const estimates = await db('estimates').whereIn('id', ids).where('status', 'accepted').whereNull('archived_at').select('*');
   const covered = new Set();

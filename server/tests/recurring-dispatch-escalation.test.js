@@ -190,9 +190,25 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(retireStatements[0].bindings).toContain('recurring-dispatch:%');
   });
 
+  // With cronJobs off the scheduler never registers the watchdog, and this
+  // notice still runs: the combined visit stays here (Codex #6208 r12 P1).
+  test('cronJobs off: the watchdog does not run, so a combined-booking visit keeps its notice', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'scheduleIntegrityWatchdog');
+    try {
+      const rows = [{ id: 'two', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-21', source_estimate_id: 'e2' }];
+      query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
+      notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+      await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'));
+      expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['recurring-no-window:two:2026-08-21']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('a visit of a combined booking (two accepted families) is left to the combined-booking check; a single-service estimate still gets the notice', async () => {
     const gates = require('../config/feature-gates');
-    const watchdogOn = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'scheduleIntegrityWatchdog');
+    const watchdogOn = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'scheduleIntegrityWatchdog' || key === 'cronJobs');
     const combined = require('../services/combined-booking-check');
     const families = jest.spyOn(combined, 'acceptedFamilies')
       .mockImplementation((estimate) => new Set(estimate.id === 'e2' ? ['pest_control', 'lawn_care'] : ['pest_control']));
