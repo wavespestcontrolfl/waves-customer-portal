@@ -451,6 +451,9 @@ const DISCOUNT_PROVENANCE_COLUMNS = [
   // month feed selects these two beside the guarded columns above — same
   // guard, so a mid-migration database never 500s that feed either.
   'estimated_price', 'primary_line_price',
+  // The sold area add-on scope (migration 20261008230000): the week feed's explicit select reads it
+  // through the same guard, so a database without the column never 500s the feed.
+  'area_addon_scope',
 ];
 // Pre-push fallback audit P1 on #4657 (d17e523d73): the read-only discount
 // + provenance projection the four schedule feeds (GET /, /week, /month,
@@ -6760,6 +6763,9 @@ router.get('/week', async (req, res, next) => {
           ...(discountProvenanceCols.line_discount_amount ? ['scheduled_services.line_discount_amount'] : []),
           ...(discountProvenanceCols.line_discount_id ? ['scheduled_services.line_discount_id'] : []),
           ...(discountProvenanceCols.line_discount_dollars ? ['scheduled_services.line_discount_dollars'] : []),
+          // areaAddOnFeed reads the own add-on's sold scope (its grass) from this column, as the day feed's
+          // scheduled_services.* gives it: without it the Week view withholds the governed rate.
+          ...['area_addon_scope'].filter((col) => discountProvenanceCols[col]).map((col) => `scheduled_services.${col}`),
           'scheduled_services.technician_id',
           // The premise and contact fields the Dispatch Fast Complete sheets
           // read (visitPremiseFields): the same columns the day feed gets
