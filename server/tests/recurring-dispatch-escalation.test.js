@@ -25,6 +25,7 @@ let resolvedNoticeKeys = [];
 let rungLast24h = [];
 const budgetSql = [];
 const budgetBindings = [];
+const budgetWhere = [];
 const query = {};
 beforeEach(() => {
   jest.clearAllMocks();
@@ -34,6 +35,7 @@ beforeEach(() => {
   rungLast24h = [];
   budgetSql.length = 0;
   budgetBindings.length = 0;
+  budgetWhere.length = 0;
   retire.mockResolvedValue(1);
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   db.raw = jest.fn((sql) => sql);
@@ -60,7 +62,10 @@ beforeEach(() => {
     // The 24-hour budget read (recentBudgetKeys) is told apart by its SQL.
     let budgetRead = false;
     const whereRaw = cleanup.whereRaw.bind(cleanup);
-    cleanup.whereRaw = (sql, bindings) => { if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); budgetBindings.push(bindings); } return whereRaw(sql, bindings); };
+    let firstWhere = null;
+    const where = cleanup.where.bind(cleanup);
+    cleanup.where = (...args) => { if (firstWhere === null) [firstWhere] = args; return where(...args); };
+    cleanup.whereRaw = (sql, bindings) => { if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); budgetBindings.push(bindings); budgetWhere.push(firstWhere); } return whereRaw(sql, bindings); };
     cleanup.select = jest.fn(async () => (budgetRead ? rungLast24h.map((dedupe_key) => ({ dedupe_key })) : [
       ...existingNoticeKeys.map((dedupe_key) => ({ dedupe_key })),
       ...(excludedTitle === 'Recurring visit time alert resolved' ? [] : resolvedNoticeKeys.map((dedupe_key) => ({ dedupe_key }))),
@@ -257,6 +262,8 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(6);
     // A reopened notice keeps its created_at: the read counts the last ring
     // (metadata.rungAt), with created_at as the fallback.
+    // No category filter: the watchdog rings under 'alert' (r8 P1).
+    expect(budgetWhere).toEqual([{ recipient_type: 'admin' }]);
     expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'combined-booking-check:%']));
     expect(budgetSql.join(' ')).toContain("COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours'");
   });

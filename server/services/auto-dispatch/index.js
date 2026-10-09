@@ -639,7 +639,11 @@ async function flagMissingGeo(service) {
 
 // The missing-pin notice is for a visit on a live plan only: a lapsed plan's
 // visit is not placed anyway. Fails open, like isRecurringPlanActive itself.
-async function missingGeoNoticeWanted(service) {
+// `planCheck` is the answer eligibilityWithGeoHeal already read for this
+// visit; only the divergent-address path, which skips that read, looks the
+// plan up here (Codex #6208 r8 P2).
+async function missingGeoNoticeWanted(service, planCheck) {
+  if (planCheck) return planCheck.active;
   try {
     return (await isRecurringPlanActive(service, db)).active;
   } catch (err) {
@@ -650,12 +654,12 @@ async function missingGeoNoticeWanted(service) {
 
 // Pass 1 only records the visit; nothing rings until the run ends, so a geocoder
 // outage cannot raise one bell per visit (raiseMissingGeoNotices).
-async function noticeMissingGeo(run, service) {
+async function noticeMissingGeo(run, service, planCheck) {
   // A lapsed plan's visit is not placed, so nobody needs to fix its pin: a
   // standing notice for it closes at the run's end. This is the path for a
   // visit eligibility stopped before its own plan check (a stamped address
   // that differs from the customer's; Codex #6208 r6 P2).
-  if (!(await missingGeoNoticeWanted(service))) { run.pinOkIds.add(String(service.id)); return; }
+  if (!(await missingGeoNoticeWanted(service, planCheck))) { run.pinOkIds.add(String(service.id)); return; }
   const date = toDateStr(service.scheduled_date);
   run.missingGeoWanted.push({ id: service.id, customer_id: service.customer_id, scheduled_date: date, date });
 }
@@ -675,9 +679,9 @@ function notePinOk(run, service, elig) {
 }
 
 // An ineligible visit's skip: logged, plus the missing-map-point notice.
-async function logIneligible(run, service, elig) {
+async function logIneligible(run, service, elig, planCheck) {
   await logSkip(run, service, elig);
-  if (elig.reason_code === 'MISSING_GEO') await noticeMissingGeo(run, service);
+  if (elig.reason_code === 'MISSING_GEO') await noticeMissingGeo(run, service, planCheck);
 }
 
 // Raise the missing-pin notices pass 1 collected: a visit with a standing
@@ -771,7 +775,7 @@ async function evaluateServiceForRun(service, run) {
   const gate = await eligibilityWithGeoHeal(service, eligCtx, run);
   if (gate.skip) return logLapsedPlanSkip(run, service, gate.skip);
   notePinOk(run, service, gate.elig);
-  if (!gate.elig.eligible) return logIneligible(run, service, gate.elig);
+  if (!gate.elig.eligible) return logIneligible(run, service, gate.elig, gate.planCheck);
 
   // ── Day-move guard (only when a guard mode is active) ──
   const guard = dayMoveGuarded(guardMode, service)

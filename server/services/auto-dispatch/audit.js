@@ -290,7 +290,10 @@ function missingGeoKey(row) {
 function withinRingBudget(rows, existingKeys, budget, keyOf = noWindowKey) {
   const picked = [];
   let fresh = 0;
-  const soonestFirst = [...rows].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
+  // notifyAdmin writes no row for an internal test customer, so such a visit
+  // must not take a slot from a real one (Codex #6208 r8 P2).
+  const { isInternalTestCustomerId } = require('../internal-test-customers');
+  const soonestFirst = rows.filter((r) => !isInternalTestCustomerId(r.customer_id)).sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
   for (const row of soonestFirst) {
     if (existingKeys.has(keyOf(row))) picked.push(row);
     else if (fresh < budget) { fresh += 1; picked.push(row); }
@@ -313,8 +316,10 @@ async function standingNoticeKeys(keyPattern, resolvedTitle) {
 // A reopened notice keeps its created_at; notification-service stamps
 // metadata.rungAt on each ring, so that is the time counted.
 async function recentBudgetKeys() {
+  // No category filter: the watchdog and the combined-booking check ring
+  // under 'alert', these lanes under 'schedule_conflict' (Codex #6208 r8 P1).
   const rows = await db('notifications')
-    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+    .where({ recipient_type: 'admin' })
     .whereRaw(
       `COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours' AND (${BUDGET_LANE_KEYS.map(() => "metadata->>'dedupeKey' LIKE ?").join(' OR ')})`,
       BUDGET_LANE_KEYS.map((k) => `${k}%`),

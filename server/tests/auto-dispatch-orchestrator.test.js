@@ -356,6 +356,27 @@ test.each([
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
 });
 
+// The geo self-heal already read the plan for this visit: the notice reuses
+// that answer, one read per visit (Codex #6208 r8 P2).
+test('a missing-geo visit reads its plan once, not again for the notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(1);
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+});
+
+// notifyAdmin writes no row for an internal test customer, so its visit takes
+// no slot from a real customer's (Codex #6208 r8 P2).
+test('withinRingBudget skips an internal test customer before it counts slots', () => {
+  const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+  const rows = [
+    { id: 'demo', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], date: '2026-08-01' },
+    { id: 'real', customer_id: 'c-real', date: '2026-08-02' },
+  ];
+  expect(audit.withinRingBudget(rows, new Set(), 1, audit.missingGeoKey).map((r) => r.id)).toEqual(['real']);
+});
+
 test('a failed missing-geo notice is logged and fails neither the visit nor the run', async () => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
