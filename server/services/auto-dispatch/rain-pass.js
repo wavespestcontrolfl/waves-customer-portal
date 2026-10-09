@@ -117,39 +117,43 @@ async function loadStops(db, from, to) {
   return groupStops(rows.map((row) => ({ ...row, point: points.get(String(row.id)) || null })), addOns);
 }
 
-// Where each visit's work happens, for the forecast, with the ZIP that goes
-// with it:
-//   1. the point stamped on the visit;
-//   2. else its linked property's own point, only while the property's
+// Where each visit's work happens, for the forecast. Each candidate is a
+// whole pair with its OWN ZIP (the area check's evidence), never one axis or
+// a ZIP borrowed from another source; a missing or zero axis is no point
+// (geocoder-service-locations.js reads a zero the same way):
+//   1. the point stamped on the visit, with the stamped ZIP;
+//   2. else its linked property's point and ZIP, only while the property's
 //      address still matches the visit's stamped address (the stamp is what
 //      was agreed for this visit; a property can be edited or merged later);
 //   3. else, for a visit with NO property link, the customer's primary home
-//      under the divergence guard every route read uses
-//      (scheduling/day-stops.js guardedCoordSelects). A visit linked to a
-//      property never takes the primary home: it may be another house.
+//      and ZIP, only while the stamped address does not diverge from it (the
+//      guard of scheduling/day-stops.js guardedCoordSelects). A visit linked
+//      to a property never takes the primary home: it may be another house.
 // Kept apart from the rows' own lat / lng, which the route model reads as stamped.
 async function loadPoints(db, ids) {
-  const { guardedCoordSelects } = require('../scheduling/day-stops');
   const { stampedDivergesSql } = require('../stamped-address');
-  const propertyMatches = `NOT ${stampedDivergesSql('scheduled_services', 'customer_properties')}`;
+  const guarded = (alias, column) => db.raw(
+    `CASE WHEN NOT ${stampedDivergesSql('scheduled_services', alias)} THEN ${alias}.${column} END as ${alias === 'customers' ? 'customer' : 'property'}_${column === 'latitude' ? 'lat' : column === 'longitude' ? 'lng' : 'zip'}`,
+  );
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .leftJoin('customer_properties', 'scheduled_services.property_id', 'customer_properties.id')
     .whereIn('scheduled_services.id', ids)
     .select('scheduled_services.id', 'scheduled_services.property_id',
-      'scheduled_services.lat as stamped_lat', 'scheduled_services.lng as stamped_lng',
-      'scheduled_services.service_address_zip as stamped_zip', 'customer_properties.zip as property_zip', 'customers.zip as customer_zip',
-      db.raw(`CASE WHEN ${propertyMatches} THEN customer_properties.latitude END as property_lat`),
-      db.raw(`CASE WHEN ${propertyMatches} THEN customer_properties.longitude END as property_lng`),
-      ...guardedCoordSelects(db));
+      'scheduled_services.lat as stamped_lat', 'scheduled_services.lng as stamped_lng', 'scheduled_services.service_address_zip as stamped_zip',
+      guarded('customer_properties', 'latitude'), guarded('customer_properties', 'longitude'), guarded('customer_properties', 'zip'),
+      guarded('customers', 'latitude'), guarded('customers', 'longitude'), guarded('customers', 'zip'));
   return new Map(rows.map((row) => [String(row.id), pickPoint(row)]));
 }
 
 function pickPoint(row) {
-  const pair = (lat, lng, zip) => (lat != null && lng != null ? { lat: Number(lat), lng: Number(lng), zip: row.stamped_zip || zip || null } : null);
-  return pair(row.stamped_lat, row.stamped_lng, row.property_zip || row.customer_zip)
+  const pair = (lat, lng, zip) => {
+    const point = { lat: Number(lat), lng: Number(lng), zip: zip || null };
+    return lat != null && lng != null && Number.isFinite(point.lat) && Number.isFinite(point.lng) && point.lat !== 0 && point.lng !== 0 ? point : null;
+  };
+  return pair(row.stamped_lat, row.stamped_lng, row.stamped_zip)
     || pair(row.property_lat, row.property_lng, row.property_zip)
-    || (row.property_id == null ? pair(row.lat, row.lng, row.customer_zip) : null);
+    || (row.property_id == null ? pair(row.customer_lat, row.customer_lng, row.customer_zip) : null);
 }
 
 // A point inside the service area, or null. The full check: a point in the

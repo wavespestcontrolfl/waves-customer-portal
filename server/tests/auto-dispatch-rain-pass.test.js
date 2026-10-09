@@ -276,15 +276,18 @@ describe('auto-dispatch rain pass', () => {
   });
 
   test('the forecast point: the visit stamp, then a matching property, and the primary home only with no property link', () => {
-    const home = { lat: '27.40', lng: '-82.40', customer_zip: '34201' };
-    // The query hands over property_lat only while the property address matches the visit stamp.
-    expect(_test.pickPoint({ ...home, stamped_lat: '27.50', stamped_lng: '-82.50', stamped_zip: '34208', property_id: 'p1', property_lat: '27.60', property_lng: '-82.60' }))
-      .toEqual({ lat: 27.5, lng: -82.5, zip: '34208' });
-    expect(_test.pickPoint({ ...home, property_id: 'p1', property_lat: '27.60', property_lng: '-82.60', property_zip: '34221' }))
-      .toEqual({ lat: 27.6, lng: -82.6, zip: '34221' });
+    // The query hands over the property and customer columns only while their address matches the visit stamp.
+    const home = { customer_lat: '27.40', customer_lng: '-82.40', customer_zip: '34201' };
+    const property = { property_id: 'p1', property_lat: '27.60', property_lng: '-82.60', property_zip: '34221' };
+    // Each point keeps its own ZIP: a stamped point with no stamped ZIP borrows none.
+    expect(_test.pickPoint({ ...home, ...property, stamped_lat: '27.50', stamped_lng: '-82.50' })).toEqual({ lat: 27.5, lng: -82.5, zip: null });
+    expect(_test.pickPoint({ ...home, ...property })).toEqual({ lat: 27.6, lng: -82.6, zip: '34221' });
     // Linked to a property with no usable point: never the customer's primary home.
     expect(_test.pickPoint({ ...home, property_id: 'p1', property_lat: null, property_lng: null })).toBeNull();
     expect(_test.pickPoint({ ...home, property_id: null })).toEqual({ lat: 27.4, lng: -82.4, zip: '34201' });
+    // A half or zero stamp is no point: the next source gives a whole pair, never one axis.
+    expect(_test.pickPoint({ ...home, property_id: null, stamped_lat: '27.50', stamped_lng: null })).toEqual({ lat: 27.4, lng: -82.4, zip: '34201' });
+    expect(_test.pickPoint({ ...home, ...property, stamped_lat: 0, stamped_lng: 0 })).toEqual({ lat: 27.6, lng: -82.6, zip: '34221' });
   });
 
   test('a point in the excluded inland part of the area box needs a ZIP the area serves', async () => {
