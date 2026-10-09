@@ -35,6 +35,7 @@ function deps(rows, extra = {}) {
     customerName: jest.fn(async () => 'Test Person'),
     raiseAdminAlert: jest.fn(async () => ({ notification: { id: 'n1' } })),
     episodes: { openAdminAlertMetadata: jest.fn(async () => []), closeAdminAlertKeys: jest.fn(async () => 1) },
+    noticesRaisedToday: jest.fn(async () => 0),
     ...extra,
   };
 }
@@ -138,7 +139,21 @@ describe('auto-dispatch rain pass', () => {
     expect(row).toMatchObject({ wet: true, peak: 80, proposal: '09:00' });
   });
 
-  test('a storm rings at most ten new notices a run; a standing notice is rewritten outside the budget', async () => {
+  test('the budget is for the whole day: a run after six notices today rings four more', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const d = deps(Array.from({ length: 7 }, (_, i) => stop({ id: `visit-${i}` })), { noticesRaisedToday: jest.fn(async () => 6) });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 7, noticed: 4, deferred: 3 });
+  });
+
+  test('a reorder of the day does not change which row stands for a stop', () => {
+    const pair = (order1, order2) => _test.groupStops([
+      stop({ id: 'visit-b', visit_id: 'stop-1', route_order: order1 }), stop({ id: 'visit-a', visit_id: 'stop-1', route_order: order2 }),
+    ])[0];
+    expect(pair(1, 2).id).toBe('visit-a');
+    expect(pair(2, 1).id).toBe('visit-a');
+  });
+
+  test('a storm rings at most ten new notices a day; a standing notice is rewritten outside the budget', async () => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
     const rows = Array.from({ length: 13 }, (_, i) => stop({ id: `visit-${i}` }));
     const d = deps(rows);

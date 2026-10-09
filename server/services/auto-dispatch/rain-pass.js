@@ -21,7 +21,7 @@
  * RAIN_PCT (in the wet season most afternoons read 60%); one notice per
  * visit at a given date and start (dedupeKey), so a forecast that goes back
  * and forth never rings twice while the notice stands; a notice whose visit
- * reads dry again is closed; at most MAX_NOTICES_PER_RUN new notices a run; a visit that starts within LEAD_MINUTES is
+ * reads dry again is closed; at most MAX_NOTICES_PER_DAY new notices a day; a visit that starts within LEAD_MINUTES is
  * left to storm-watch.js, which nudges the technician. Never throws.
  */
 const logger = require('../logger');
@@ -37,9 +37,10 @@ const KEY_PREFIX = 'rain-pass:';
 const MOVE_PCT = 70;
 const DRY_PCT = 40;
 const LEAD_MINUTES = 120;
-// docs/admin-notifications.md section 3: at most this many new notices a run.
-// The rest ring on the next run; a standing notice never uses the budget.
-const MAX_NOTICES_PER_RUN = 10;
+// docs/admin-notifications.md section 3: at most this many new notices an ET
+// day, over every run of that day. The rest ring on a later day's run; a
+// standing notice never uses the budget.
+const MAX_NOTICES_PER_DAY = 10;
 // 'rescheduled' rows wait for a new place: their date and window are stale.
 // A NULL status is a live row too (rebooker.js, visit-groups.js).
 const LIVE_STATUSES = ['pending', 'confirmed'];
@@ -142,14 +143,19 @@ function groupStops(rows, addOns = []) {
       // The model names every row a stop stands for: a group's members, or
       // the rows it folded into a co-visit.
       const members = (unit.memberIds || unit.coIds).map((id) => byId.get(String(id))).filter(Boolean);
-      const startMin = Math.min(...members.map((m) => toMin(m.window_start)));
+      // The stop's own row for the notice: its earliest member, then the
+      // lowest id. Never the model's representative, which follows
+      // route_order: a reorder of the day must not give the same stop a
+      // second notice under another member's id.
+      const anchor = [...members].sort((a, b) => toMin(a.window_start) - toMin(b.window_start) || (String(a.id) < String(b.id) ? -1 : 1))[0];
+      const startMin = toMin(anchor.window_start);
       // The stop's minutes from its start, and never before a later member's own work is done.
       const endMin = Math.max(startMin + unit.minutes, ...members.map((m) => toMin(m.window_start) + stopPlanningMinutes(m)));
       stops.push({
-        ...byId.get(String(unit.id)),
-        memberIds: members.map((m) => String(m.id)),
+        ...anchor,
+        memberIds: members.map((m) => String(m.id)).sort(),
         services: members.flatMap(servicesOf),
-        reach: { startMin, endMin: Math.min(24 * 60, endMin), ownStartMin: toMin(unit.window_start) },
+        reach: { startMin, endMin: Math.min(24 * 60, endMin), ownStartMin: startMin },
       });
     }
   }
@@ -230,6 +236,16 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   return rows.sort((a, b) => Number(b.wet) - Number(a.wet) || (b.peak ?? 0) - (a.peak ?? 0));
 }
 
+// Notices this pass first raised today (ET): what the day's budget has used.
+async function noticesRaisedToday(db, now) {
+  const dayStart = parseETDateTime(`${etDateString(now)}T00:00`);
+  const [{ count }] = await db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [KEY_PREFIX])
+    .where('created_at', '>=', dayStart)
+    .count('id as count');
+  return Number(count) || 0;
+}
+
 const noticeKey = (row) => `${KEY_PREFIX}${row.visit.id}:${row.date}:${row.start}`;
 
 // The notice, by the shared composer: the customer's name in the headline, a
@@ -283,6 +299,43 @@ async function sendNotice(row, { db, deps, reopen = null }) {
   );
 }
 
+// Standing: not closed by this pass (autoCleared, which the read leaves out)
+// and not retired by the relevance sweep.
+async function standingKeys(rows, episodes, db) {
+  const open = rows.length ? await episodes.openAdminAlertMetadata(db, KEY_PREFIX) : [];
+  return new Set(open.filter((meta) => meta.dedupeKey && !meta.retired).map((meta) => meta.dedupeKey));
+}
+
+// A standing notice is closed when its visit now reads dry in every hour, or
+// is no longer outdoor work (a service edit): the office must not move a
+// visit for rain that no longer matters to it. An unread forecast or a
+// failed lookup closes nothing. Returns the keys closed.
+async function closeSettled(rows, standing, { episodes, db, now }) {
+  const dried = rows.filter((row) => row.dry === true || row.reason === 'not_outdoor').map(noticeKey).filter((key) => standing.has(key));
+  if (dried.length) {
+    await episodes.closeAdminAlertKeys(db, dried, 'no_longer_in_rain', { now, resolution: 'Cleared: this visit is no longer outdoor work in rain' });
+  }
+  return dried;
+}
+
+// One notice per wet stop. A standing notice is only rewritten; a new one
+// (or one that rings again) needs room in the day's budget.
+async function ringWet(wet, standing, budget, { db, deps, now }) {
+  let noticed = 0;
+  let deferred = 0;
+  for (const row of wet) {
+    const isStanding = standing.has(noticeKey(row));
+    if (!isStanding && noticed >= budget) { deferred += 1; continue; }
+    try {
+      const result = await sendNotice(row, { db, deps, reopen: isStanding ? null : `run:${now.toISOString()}` });
+      if (result && !result.suppressed && (!result.deduped || result.rung === true)) noticed += 1;
+    } catch (err) {
+      logger.warn(`[rain-pass] notice for visit ${row.visit.id} failed: ${err.message}`);
+    }
+  }
+  return { noticed, deferred };
+}
+
 /**
  * The cron entry. Resolves to { ran, checked, wet, noticed, deferred, closed } (for logs and
  * tests); never rejects: a failed run resolves { ran: false, reason: 'error' }
@@ -295,32 +348,11 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
     const rows = await planRainPass({ now, db, deps });
     const wet = rows.filter((row) => row.wet);
     const episodes = deps.episodes || require('../admin-alert-episodes');
-    // Standing: not closed by this pass (autoCleared, which the read leaves
-    // out) and not retired by the relevance sweep.
-    const open = rows.length ? await episodes.openAdminAlertMetadata(db, KEY_PREFIX) : [];
-    const standing = new Set(open.filter((meta) => meta.dedupeKey && !meta.retired).map((meta) => meta.dedupeKey));
-    // A standing notice is closed when its visit now reads dry in every
-    // hour, or is no longer outdoor work (a service edit): the office must
-    // not move a visit for rain that no longer matters to it. An unread
-    // forecast or a failed lookup closes nothing.
-    const dried = rows.filter((row) => row.dry === true || row.reason === 'not_outdoor').map(noticeKey).filter((key) => standing.has(key));
-    if (dried.length) {
-      await episodes.closeAdminAlertKeys(db, dried, 'no_longer_in_rain', { now, resolution: 'Cleared: this visit is no longer outdoor work in rain' });
-    }
-    let noticed = 0;
-    let deferred = 0;
-    for (const row of wet) {
-      // A standing notice is only rewritten; a new one needs room in the budget.
-      const isStanding = standing.has(noticeKey(row));
-      if (!isStanding && noticed >= MAX_NOTICES_PER_RUN) { deferred += 1; continue; }
-      try {
-        const result = await sendNotice(row, { db, deps, reopen: isStanding ? null : `run:${now.toISOString()}` });
-        if (result && !result.suppressed && (!result.deduped || result.rung === true)) noticed += 1;
-      } catch (err) {
-        logger.warn(`[rain-pass] notice for visit ${row.visit.id} failed: ${err.message}`);
-      }
-    }
-    if (deferred) logger.warn(`[rain-pass] notice budget hit (${MAX_NOTICES_PER_RUN}); ${deferred} wait for the next run`);
+    const standing = await standingKeys(rows, episodes, db);
+    const dried = await closeSettled(rows, standing, { episodes, db, now });
+    const budget = Math.max(0, MAX_NOTICES_PER_DAY - (wet.length ? await (deps.noticesRaisedToday || noticesRaisedToday)(db, now) : 0));
+    const { noticed, deferred } = await ringWet(wet, standing, budget, { db, deps, now });
+    if (deferred) logger.warn(`[rain-pass] day's notice budget hit (${MAX_NOTICES_PER_DAY}); ${deferred} wait for a later run`);
     logger.info(`[rain-pass] checked=${rows.length} wet=${wet.length} noticed=${noticed} deferred=${deferred} closed=${dried.length}`);
     return { ran: true, checked: rows.length, wet: wet.length, noticed, deferred, closed: dried.length };
   } catch (err) {
@@ -329,4 +361,4 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
   }
 }
 
-module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_RUN, _test: { spanRain, dryStart, groupStops, VISIT_COLUMNS } };
+module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, VISIT_COLUMNS } };
