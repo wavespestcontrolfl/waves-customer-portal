@@ -350,6 +350,44 @@ describe('Screen 2 — reason and resolution', () => {
   });
 });
 
+describe('scheduled-visit fee (a pulled visit already inside its late-cancellation window)', () => {
+  const toConfirm = async () => {
+    renderFlow();
+    await openReview();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: /what's driving this change/i });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    return screen.findByRole('heading', { name: 'Confirm cancelling my plan' });
+  };
+
+  it('shows the server amount on the review facts AND in the confirm sentence, before the cancel button', async () => {
+    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ lateCancelFee: 75, lateCancelFeeMayApply: false }) });
+    renderFlow();
+    await openReview();
+    expect(screen.getByText('Scheduled-visit fee')).toBeInTheDocument();
+    expect(screen.getByText('$75.00, charged to the card on file (a visit already inside its late-cancellation window)')).toBeInTheDocument();
+    cleanup();
+
+    await toConfirm();
+    expect(screen.getByText(/There is no cancellation fee, but a visit already inside its late-cancellation window keeps its \$75\.00 scheduled-visit fee, charged to the card on file for that visit\./)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel my plan' })).toBeInTheDocument();
+  });
+
+  it('says the fee may apply when the server cannot state the amount', async () => {
+    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ lateCancelFee: null, lateCancelFeeMayApply: true }) });
+    await toConfirm();
+    expect(screen.getByText('May apply (a visit already inside its late-cancellation window)')).toBeInTheDocument();
+    expect(screen.getByText(/a visit already inside its late-cancellation window may keep its scheduled-visit fee\./)).toBeInTheDocument();
+    expect(screen.queryByText(/\$\d+\.\d\d scheduled-visit fee/)).not.toBeInTheDocument();
+  });
+
+  it('no fee: no fee row and the plain no-cancellation-fee sentence', async () => {
+    await toConfirm();
+    expect(screen.queryByText('Scheduled-visit fee')).not.toBeInTheDocument();
+    expect(screen.getByText('This takes effect right away. There is no cancellation fee; charges for visits already completed stay payable.')).toBeInTheDocument();
+  });
+});
+
 describe('gate off', () => {
   it('falls back to the H0 single-step form when the preview answers 404', async () => {
     api.cancelResolutionPreview.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));

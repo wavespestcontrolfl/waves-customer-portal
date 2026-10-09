@@ -39,6 +39,12 @@ jest.mock('../services/cancellation-resolution', () => ({
   openCancellationCase: jest.fn(),
 }));
 
+// The C1 impact table and its scheduled-visit fee facts (lazy requires in the route).
+const mockBuildImpact = jest.fn();
+jest.mock('../services/cancellation-resolution/impact', () => ({ buildCancellationImpact: (...args) => mockBuildImpact(...args) }));
+const mockLateFeeFacts = jest.fn();
+jest.mock('../services/cancellation-resolution/visit-fees', () => ({ customerLateFeeFacts: (...args) => mockLateFeeFacts(...args) }));
+
 const mockValidateAddress = jest.fn();
 jest.mock('../services/address-validation', () => ({
   validateAddress: (...args) => mockValidateAddress(...args),
@@ -146,4 +152,39 @@ test('invalid reason 400s before any work', async () => {
   const res = await post({ reason: 'nope' });
   expect(res.status).toBe(400);
   expect(mockPreview).not.toHaveBeenCalled();
+});
+
+describe('impact carries the scheduled-visit fee the commit will charge', () => {
+  const none = { facts: {}, resolution: { kind: 'none', reasonCode: null, scope: [] } };
+  beforeEach(() => {
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    mockPreview.mockResolvedValue(none);
+    mockBuildImpact.mockReset();
+    mockLateFeeFacts.mockReset();
+  });
+
+  test('the fee facts are computed from the visits THIS cancel pulls and returned on impact', async () => {
+    mockBuildImpact.mockResolvedValue({ visitsCancelled: 2, pulledVisitKeys: ['v1:2026-10-09', 'v2:2026-11-09'], lateCancelFee: null, lateCancelFeeMayApply: false });
+    mockLateFeeFacts.mockResolvedValue({ lateCancelFee: 75, lateCancelFeeMayApply: false });
+    const res = await post({ families: ['pest_control'] });
+    expect(res.status).toBe(200);
+    expect(mockBuildImpact).toHaveBeenCalledWith('cust-1', ['pest_control']);
+    expect(mockLateFeeFacts).toHaveBeenCalledWith(['v1:2026-10-09', 'v2:2026-11-09']);
+    expect(res.body.impact).toMatchObject({ visitsCancelled: 2, lateCancelFee: 75, lateCancelFeeMayApply: false });
+  });
+
+  test('an unknown amount reaches the client as may-apply', async () => {
+    mockBuildImpact.mockResolvedValue({ visitsCancelled: 1, pulledVisitKeys: ['v1:2026-10-09'], lateCancelFee: null, lateCancelFeeMayApply: false });
+    mockLateFeeFacts.mockResolvedValue({ lateCancelFee: null, lateCancelFeeMayApply: true });
+    const res = await post({});
+    expect(res.body.impact).toMatchObject({ lateCancelFee: null, lateCancelFeeMayApply: true });
+  });
+
+  test('no impact (account not found by the builder): no fee lookup, no impact key', async () => {
+    mockBuildImpact.mockResolvedValue(null);
+    const res = await post({});
+    expect(res.status).toBe(200);
+    expect(mockLateFeeFacts).not.toHaveBeenCalled();
+    expect(res.body).not.toHaveProperty('impact');
+  });
 });
