@@ -4431,6 +4431,9 @@ const gates = {
   // logGateStatus only: lawn-spot-target.js reads GATE_LAWN_SPOT_TARGET at call time via lawnSpotTargetLive() (which also needs the guide).
   lawnSpotTarget: process.env.GATE_LAWN_SPOT_TARGET === 'true',
   lawnMixHelp: process.env.GATE_LAWN_MIX_HELP === 'true',
+  // Lawn Fast Complete new-sod holds (owner 2026-10-09). This entry is for logGateStatus only: lawn-sod-sheet.js reads
+  // GATE_LAWN_NEW_SOD_NOTE at call time via lawnNewSodNoteLive().
+  lawnNewSodNote: process.env.GATE_LAWN_NEW_SOD_NOTE === 'true',
   // GATE_LAWN_REPORT_FACTS (owner 2026-10-08): the lawn report's re-entry condition, spot-use text and
   // finding-to-product tie, frozen at completion. Ships DARK. This entry is for logGateStatus only:
   // the lawn write gate reads it at call time via lawnReportFactsLive().
