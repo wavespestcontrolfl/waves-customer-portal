@@ -268,8 +268,9 @@ function offerFor(kind, candidate, { capped, rows }) {
  */
 function blockedProductIds({ offers, chinch, weedMix }) {
   // Unavailable (a member's own read failed): only the members whose limit WAS read as forbidding stay blocked.
+  // In every mode the decision's own `blockedIds` count: a member at its yearly cap while the lead stays open.
   const weedOut = (weedMix?.mode === 'unavailable' ? weedMix.blockedIds || []
-    : weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [])
+    : [...(weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : []), ...(weedMix?.blockedIds || [])])
     // Unreadable at some place (GATE_LAWN_TROUBLE_AREAS): not forbidden.
     .filter((id) => !(weedMix?.unreadableIds || []).includes(id));
   return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];

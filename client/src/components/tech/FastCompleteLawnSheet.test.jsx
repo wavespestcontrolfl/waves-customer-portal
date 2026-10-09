@@ -2147,6 +2147,15 @@ describe('weed spots and the spot area', () => {
     }
   });
 
+  test('a member at its own yearly limit while the lead stays open is not in the search', async () => {
+    await open(weedContext(MIX({ productIds: [P_LEAD], blockedIds: [P_CERT], surfactant: null, note: 'Cert yearly limit reached; left out.' })));
+    const search = await screen.findByLabelText('Search products');
+    fireEvent.change(search, { target: { value: 'Lead WG' } });
+    expect(await screen.findByRole('button', { name: /^Lead WG/ })).toBeTruthy();
+    fireEvent.change(search, { target: { value: 'Cert Herbicide' } });
+    expect(screen.queryByRole('button', { name: /^Cert Herbicide/ })).toBeNull();
+  });
+
   test('lead at its yearly limit: the search lists the replacement and not the products the limit forbids', async () => {
     await open(weedContext(MIX({ mode: 'replacement', productIds: [P_BLIND], surfactant: null, note: 'Lead yearly limit reached; Blind is used in its place.' })));
     const search = await screen.findByLabelText('Search products');
@@ -3333,6 +3342,17 @@ describe('suggested from this lawn', () => {
       expect(lineOf('Chinch bugs found at the edge of damage').textContent).toContain('Arena 50 WDG, spot treatment');
       fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
       expect(present('Arena 50 WDG')).toBe(true);
+    });
+
+    test('a failed guide request keeps the context\'s read limits: Arena at its yearly limit stays out of the search, Talak is listed', async () => {
+      guideAnswer = refusal(500, 'boom', 'Internal error');
+      const chinch = { item: { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' }, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: RUNGS, blockedIds: [P_ARENA] };
+      await mxOpen(mxContext({ plannedProducts: mxPlanned({ chinch }) }));
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('hidden');
+      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('addable');
     });
 
     test('weed members are judged one by one: the member read as capped stays out of the search, its sibling is released', async () => {

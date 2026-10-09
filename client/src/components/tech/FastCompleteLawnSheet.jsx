@@ -273,9 +273,11 @@ const chinchShape = (chinch) => {
   const item = chinch?.item?.productId ? chinch.item : null;
   const rungIds = Array.isArray(chinch?.rungIds) ? chinch.rungIds : [];
   const unreadableIds = Array.isArray(chinch?.unreadableIds) ? chinch.unreadableIds : [];
+  // The rungs a limit that was READ kept out: the search leaves them out when the guide read fails (readForbiddenIds).
+  const blockedIds = Array.isArray(chinch?.blockedIds) ? chinch.blockedIds : [];
   const byPlace = chinchByPlace(chinch);
   const chinchOnlyIds = Array.isArray(chinch?.chinchOnlyIds) ? chinch.chinchOnlyIds : null;
-  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, blockedIds, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
@@ -571,8 +573,9 @@ function hiddenIds({ governed, searchOnly, free, unreadable, owned }) {
 function readForbiddenIds({ weedMix, chinch }) {
   const unreadable = lowerIds([...(weedMix?.unreadableIds || []), ...(chinch?.unreadableIds || [])]);
   const adds = lowerIds(weedMix?.productIds);
+  // In every mode the decision's own blockedIds count: a member at its yearly limit while the lead stays open.
   const weed = !weedMix ? [] : weedMix.mode === 'unavailable' ? lowerIds(weedMix.blockedIds)
-    : weedMix.mode !== 'lead' ? lowerIds(weedMix.groupProductIds).filter((id) => !adds.includes(id)) : [];
+    : [...(weedMix.mode !== 'lead' ? lowerIds(weedMix.groupProductIds).filter((id) => !adds.includes(id)) : []), ...lowerIds(weedMix.blockedIds)];
   return [...weed, ...lowerIds(chinch?.blockedIds)].filter((id) => !unreadable.includes(id));
 }
 
@@ -582,7 +585,8 @@ function readForbiddenIds({ weedMix, chinch }) {
 // A product a check-only card holds (take-all found: check, do not treat) stays out as well.
 function searchReach({ governed, settled, answered, blocked, cardHeld, weedMix, chinch }) {
   if (!settled) return [];
-  const forbidden = [...(answered ? blocked : readForbiddenIds({ weedMix, chinch })), ...cardHeld];
+  // The decisions' own blocks count beside the answer's list: an older server's answer does not name a capped member.
+  const forbidden = [...(answered ? blocked : []), ...readForbiddenIds({ weedMix, chinch }), ...cardHeld];
   return governed.filter((id) => !forbidden.includes(id));
 }
 

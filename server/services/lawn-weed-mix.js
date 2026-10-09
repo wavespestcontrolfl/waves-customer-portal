@@ -122,6 +122,7 @@ async function leadMix({ base, lead, members, isCapped, svc, readTemp = () => cu
  *                   replacement alone), 'none' (the yearly limit is reached, nothing to add) or
  *                   'unavailable' (the limits could not be read: nothing is offered)
  *   productIds      what the tap adds, in order
+ *   blockedIds      the group's products a limit that was READ forbids (every mode)
  *   groupProductIds every product the entry stands for; the add-ons list shows none of them on its own
  *                   (the search lists the ones no read limit forbids)
  *   replacementProductId  the replacement's id, or null
@@ -208,6 +209,9 @@ async function decideMix({ base, lead, members, replacement, all, capped, svc, r
     return { ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: all.filter((item) => blocksOf(item).some((block) => block.type)).map(idOf) };
   }
   const isCapped = (item) => blocksOf(item).length > 0;
+  // Every decision names the products a limit that was READ forbids (`blockedIds`): the sheet's search lists every
+  // lawn product but these, so a member at its own yearly cap while the lead stays open is named too.
+  base = { ...base, blockedIds: all.filter(isCapped).map(idOf) };
   // Only the yearly count hands the visit to the replacement; any other limit on the lead (a
   // minimum interval, a blackout) just holds the weed mix, with the limit's own words.
   const yearlyCapped = (item) => blocksOf(item).some((block) => block.type === YEARLY_CAP);
