@@ -129,7 +129,7 @@ import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPos
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
 import { HeldLines, SodBanner } from './LawnSodParts';
-import { newSodOf, sodAddLook, sodLineOf, sodRowNote, sodWords, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
+import { newSodOf, releasedPlanned, sodAddLook, sodLineOf, sodRowNote, sodWords, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
 import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
@@ -927,11 +927,11 @@ export function uniquePlanned(items) {
   });
 }
 
-function plannedRows(ctx, catalog) {
+// The rows of the given planned items, as a fresh sheet builds them (plan quantity, method, area).
+// The server's swap bag line (LESCO 24-0-11 in place of the pre-emergent bag) carries its own rate and reason: `sodSwap`.
+function rowsForPlanned(items, ctx, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
-  // GATE_LAWN_NEW_SOD_NOTE: a line a new-sod hold covers is not pre-selected (it is listed under "Held for new sod").
-  // The server's swap bag line (LESCO 24-0-11 in place of the pre-emergent bag) carries its own rate and reason: `sodSwap`.
-  return splitHeldPlanned(uniquePlanned(ctx.planned), ctx.newSod).start.map((item) => ({
+  return items.map((item) => ({
     ...productRow(
       byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
       { planned: item, spotRules: !!ctx.spotRules },
@@ -940,9 +940,14 @@ function plannedRows(ctx, catalog) {
   }));
 }
 
+// GATE_LAWN_NEW_SOD_NOTE: a line a new-sod hold covers is not pre-selected (it is listed under "Held for new sod").
+const plannedRows = (ctx, catalog) => rowsForPlanned(splitHeldPlanned(uniquePlanned(ctx.planned), ctx.newSod).start, ctx, catalog);
+
 function useProductRows(ctx, catalog) {
   const spotRules = !!ctx.spotRules;
   const [rows, setRows] = useState(() => plannedRows(ctx, catalog));
+  // The products the technician added or removed himself this session (a hold released later leaves his choice alone).
+  const touched = useRef(new Set());
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => {
       if (row.productId !== productId) return row;
@@ -967,19 +972,32 @@ function useProductRows(ctx, catalog) {
     }));
   }, [spotRules]);
   const addProduct = useCallback((product, { planned = null, weedGroup = false, guided, source = null, place = '' } = {}) => {
+    touched.current.add(String(product.id).toLowerCase());
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
       // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
       { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, pickedPlace: place },
     ]));
   }, [spotRules]);
-  const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
+  const removeRow = useCallback((productId) => {
+    touched.current.add(String(productId).toLowerCase());
+    setRows((prev) => prev.filter((row) => row.productId !== productId));
+  }, []);
+  // A planned default whose new-sod hold ended comes back as the selected row a fresh sheet would show, unless the
+  // technician already added or removed that product himself (or the row is there).
+  const releasePlanned = useCallback((items) => {
+    setRows((prev) => {
+      const here = new Set(prev.map((row) => String(row.productId).toLowerCase()));
+      const back = items.filter((item) => !here.has(String(item.productId).toLowerCase()) && !touched.current.has(String(item.productId).toLowerCase()));
+      return back.length ? [...prev, ...rowsForPlanned(back, ctx, catalog)] : prev;
+    });
+  }, [ctx, catalog]);
   const removeRows = useCallback((ids) => setRows((prev) => prev.filter((row) => !ids.includes(row.productId))), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
     setRows((prev) => prev.map((row) => ({ ...row, product: withFreshStock(row.product, fresh) })));
   }, []);
-  return { rows, updateRow, addProduct, removeRow, removeRows, applyStock };
+  return { rows, updateRow, addProduct, removeRow, removeRows, applyStock, releasePlanned };
 }
 
 // ── what is missing, and the body ───────────────────────────────────────────
@@ -1444,7 +1462,7 @@ function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }
 
 // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them, and the rooted tick. The tick reads the holds again
 // (`sodFresh`; `undefined` = the context's own).
-function useSodHolds({ ctx, request, base }) {
+function useSodHolds({ ctx, request, base, releasePlanned }) {
   const [sodFresh, setSodFresh] = useState(undefined);
   const confirmSodRooted = useCallback(async (sodLaidOn) => {
     await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
@@ -1455,8 +1473,13 @@ function useSodHolds({ ctx, request, base }) {
     } catch {
       throw new Error(SOD_REREAD_MESSAGE);
     }
-    setSodFresh(newSodOf(data));
-  }, [request, base]);
+    const fresh = newSodOf(data);
+    // A re-read that could not check the sod record says nothing: the holds stay as they were (no line is released).
+    if (fresh?.unavailable) throw new Error(SOD_REREAD_MESSAGE);
+    setSodFresh(fresh);
+    // A planned default the hold kept off the sheet comes back; an add-on is a plain "Add" again on its own.
+    releasePlanned(releasedPlanned(uniquePlanned(ctx.planned), ctx.newSod, fresh));
+  }, [request, base, ctx, releasePlanned]);
   return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, confirmSodRooted };
 }
 
@@ -1470,7 +1493,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads them again (`undefined` = the context's own).
-  const { newSod, confirmSodRooted } = useSodHolds({ ctx, request, base });
+  const { newSod, confirmSodRooted } = useSodHolds({ ctx, request, base, releasePlanned: products.releasePlanned });
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);

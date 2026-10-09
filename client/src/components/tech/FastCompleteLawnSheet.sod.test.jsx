@@ -317,6 +317,63 @@ describe('the rooted tick', () => {
     expect(banner().textContent).toContain('New sod, day 31.');
   });
 
+  describe('a planned line the hold kept off the sheet comes back when the tick releases it', () => {
+    const HELD_BAG = { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer waits until the sod has been mowed twice and does not lift.' };
+    const BAG_DAY31 = { ...DAY31, lines: { [P_BAG24]: HELD_BAG, [P_CELSIUS]: HELD_BAG } };
+    const bagRow = () => screen.queryAllByRole('group', { name: 'Test 24-0-11 Bag' }).filter((el) => !el.classList.contains('tech-sod-held'));
+    const tickIt = async () => {
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await waitFor(() => expect(within(banner()).queryByRole('checkbox')).toBeNull());
+    };
+
+    test('a planned default released by the tick becomes a selected row with its planned amount, and the held group is gone', async () => {
+      await openSheet(context(BAG_DAY31), context(AFTER));
+      expect(bagRow()).toHaveLength(0);
+      expect(within(heldGroup()).getByText('Test 24-0-11 Bag')).toBeTruthy();
+      await tickIt();
+      expect(heldGroup()).toBeNull();
+      expect(bagRow()).toHaveLength(1);
+      expect(within(bagRow()[0]).getByRole('spinbutton').value).toBe('12.5');
+      await analyzeAndComplete();
+      expect(completeCalls()[0].body.products.map((p) => p.productId)).toEqual([P_NUTRA, P_BAG24]);
+    });
+
+    test('an add-on released by the tick is a plain Add again', async () => {
+      await openSheet(context(BAG_DAY31), context(AFTER));
+      const addons = () => screen.getByRole('group', { name: 'Also in October’s protocol' });
+      expect(within(addons()).getByRole('button', { name: 'Add Test Celsius anyway' })).toBeTruthy();
+      await tickIt();
+      expect(within(addons()).getByRole('button', { name: 'Add Test Celsius' }).textContent).toBe('Add');
+    });
+
+    test('a line the technician added with "Add anyway" before the tick stays exactly one row', async () => {
+      await openSheet(context(BAG_DAY31), context(AFTER));
+      fireEvent.click(within(heldGroup()).getByRole('button', { name: 'Add Test 24-0-11 Bag anyway' }));
+      expect(bagRow()).toHaveLength(1);
+      await tickIt();
+      expect(bagRow()).toHaveLength(1);
+      expect(heldGroup()).toBeNull();
+    });
+
+    test('a line the technician added and then removed stays removed (and is not offered again)', async () => {
+      await openSheet(context(BAG_DAY31), context(AFTER));
+      fireEvent.click(within(heldGroup()).getByRole('button', { name: 'Add Test 24-0-11 Bag anyway' }));
+      fireEvent.click(within(bagRow()[0]).getByRole('button', { name: /remove/i }));
+      expect(bagRow()).toHaveLength(0);
+      await tickIt();
+      expect(bagRow()).toHaveLength(0);
+    });
+
+    test('a re-read that could not check the sod record releases nothing: the line stays in the held group', async () => {
+      const UNAVAILABLE = { v: 1, unavailable: true, message: 'Could not check this lawn for new sod. Ask the office before you spread fertilizer or spray weed killer.' };
+      await openSheet(context(BAG_DAY31), context(UNAVAILABLE));
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await screen.findByText('Saved. The sheet could not reload the holds. Tap the box again.');
+      expect(bagRow()).toHaveLength(0);
+      expect(within(heldGroup()).getByText('Test 24-0-11 Bag')).toBeTruthy();
+    });
+  });
+
   test('a tick that saved but whose re-read failed says so, and ticking again is safe', async () => {
     failContextAfter = 1;
     await openSheet(context(DAY31));
