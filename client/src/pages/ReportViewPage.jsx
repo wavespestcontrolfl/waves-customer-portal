@@ -679,6 +679,14 @@ export function latestPendingReentryTarget(targets = [], nowMs = Date.now()) {
   }, null)?.target || null;
 }
 
+// A lawn visit's re-entry is a CONDITION frozen at completion (GATE_LAWN_REPORT_FACTS, server
+// lawn-report-facts.js): fixed sentences chosen by the server, no ready-at time and no countdown. A
+// payload without `reentry.condition` (every other line, every older lawn record) keeps the timed targets.
+export function reentryCondition(reentry) {
+  const condition = reentry?.condition;
+  return condition && typeof condition.text === 'string' && condition.text.trim() ? condition : null;
+}
+
 // Pest reports name no treated areas (owner 2026-10-05: "the areas treated
 // needs to be removed from the report"). The product card, the "What Waves
 // did today" cell, the status fallback line and the Ask Waves suggestions all
@@ -816,6 +824,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // payloads without the field keep the treatment presentation.
   const noTreatmentVisit = data.treatmentPerformed === false;
   const pendingTarget = noTreatmentVisit ? null : latestPendingReentryTarget(targets, nowMs);
+  const condition = noTreatmentVisit ? null : reentryCondition(reentry);
   const pendingReadyText = pendingTarget
     ? (mode === 'live'
       ? `Ready in ${formatDuration(Date.parse(pendingTarget.readyAt) - nowMs)}`
@@ -929,6 +938,18 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         : (inaccessible
           ? 'You can contact Waves if you want us to return for the inaccessible area.'
           : (item.customerDescription || 'Review the recommended next step below.')),
+    };
+  }
+
+  // A frozen re-entry condition (lawn): the result line IS the condition. It never counts down.
+  if (condition) {
+    return {
+      heading: 'your service is complete!',
+      status: 'Service complete',
+      statusTone: 'neutral',
+      result: condition.text,
+      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service completed today.',
+      detail: condition.pets || '',
     };
   }
 
@@ -1633,6 +1654,9 @@ export function lawnWateringGuidance(app = {}) {
 }
 
 function applicationZoneText(app = {}, zoneById = new Map(), serviceLine = 'pest') {
+  // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS): the server sends it only for a spot row of a
+  // lawn visit that froze it; every other row keeps the zone text below.
+  if (typeof app.areaUse === 'string' && app.areaUse.trim()) return app.areaUse.trim();
   const zones = applicationZoneIds(app).map((id) => zoneById.get(String(id))).filter(Boolean);
   if (!zones.length) return app.applicationArea || 'Treated area recorded';
   // Applied to every zone → a friendly whole-coverage phrase beats listing each one
@@ -2540,6 +2564,19 @@ export function BlogPostCard({ data, mode = 'live' }) {
 }
 
 function readinessSummary(context, mode = 'live', nowMsOverride) {
+  // A frozen condition (lawn) has no clock: the sentence, one status word, the precaution line.
+  const condition = reentryCondition(context);
+  if (condition) {
+    return {
+      allReady: false,
+      condition: true,
+      areaType: 'Lawn',
+      status: condition.statusLabel || 'Once dry',
+      badge: condition.statusLabel || 'Once dry',
+      headline: condition.text,
+      precautions: condition.pets || 'None listed',
+    };
+  }
   const fallbackNowMs = mode === 'live' ? Date.now() : Date.parse(context?.generatedAt) || Date.now();
   const nowMs = Number.isFinite(nowMsOverride) ? nowMsOverride : fallbackNowMs;
   const targets = Array.isArray(context?.targets) ? context.targets : [];
@@ -3126,7 +3163,13 @@ function ReentryReadinessCard({ context, mode, token }) {
         </div>
         <div className="readiness-status-chip">{readiness.status}</div>
       </div>
-      {readiness.allReady ? (
+      {readiness.condition ? (
+        /* A frozen condition: the headline already says it, so only the precaution line follows. */
+        <div className="sr-cell">
+          <div className="sr-cell-label">Precautions</div>
+          <div className="sr-cell-value">{readiness.precautions}</div>
+        </div>
+      ) : readiness.allReady ? (
         /* Everything is ready: the chip + headline already say "Ready now" —
            repeating it in a Status cell and again per-area tile said the same
            thing four times over 1.5 phone screens (audit 2026-07-28). Keep just
@@ -3212,7 +3255,8 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
     if (clean && !prompts.some((prompt) => prompt.toLowerCase() === clean.toLowerCase())) prompts.push(clean);
   };
   const product = uniqueStrings((data.applications || []).map((app) => applicationProductName(app)))[0];
-  const hasReentry = Array.isArray(data.dynamicContext?.reentry?.targets) && data.dynamicContext.reentry.targets.length > 0;
+  const hasReentry = (Array.isArray(data.dynamicContext?.reentry?.targets) && data.dynamicContext.reentry.targets.length > 0)
+    || !!reentryCondition(data.dynamicContext?.reentry);
   const coverage = normalizeServiceCoverage(data);
   const hasCoverage = Array.isArray(coverage?.items) && coverage.items.length > 0;
   const hasPressure = data.pestPressure
@@ -3905,6 +3949,8 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
       );
     }
   }
+  const condition = reentryCondition(data.dynamicContext?.reentry);
+  if (condition) add(condition.text, condition.pets);
   if (pendingTarget) {
     add(
       `Wait until ${formatReadyTime(pendingTarget.readyAt, data.dynamicContext?.reentry?.displayTimezone)} before using treated ${String(pendingTarget.label || 'areas').toLowerCase()}.`,

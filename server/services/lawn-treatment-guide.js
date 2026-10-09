@@ -472,6 +472,22 @@ function treatmentGuideFreeze(lawnFast) {
   return { lawnTreatmentGuide: { v: 1, cards } };
 }
 
+// The technician's own finds, read back from the record for the lawn report's finding-to-product tie
+// (service-report/lawn-report-facts.js, GATE_LAWN_REPORT_FACTS): the cards whose check was answered
+// "found" and whose product was taken. Only the kinds that name something the technician saw
+// (fungus, chinch bugs, caterpillars). The one deliberate reader of the record besides the freeze
+// above; it hands back kinds only, never the product ids. Pure.
+const TECH_FIND_KINDS = Object.freeze(['fungus', 'chinch', 'caterpillars']);
+function guideTakenFindings(structuredNotes) {
+  const notes = parseJson(structuredNotes);
+  const block = notes && notes.lawnTreatmentGuide;
+  if (!block || typeof block !== 'object' || block.v !== 1 || !Array.isArray(block.cards)) return [];
+  const kinds = block.cards
+    .filter((card) => card && card.checked === 'found' && card.taken === true && TECH_FIND_KINDS.includes(card.kind))
+    .map((card) => card.kind);
+  return [...new Set(kinds)].map((kind) => ({ kind }));
+}
+
 module.exports = {
   KINDS,
   WEED_MIN_PERCENT,
@@ -487,4 +503,5 @@ module.exports = {
   resolveChinch,
   buildCards,
   treatmentGuideFreeze,
+  guideTakenFindings,
 };

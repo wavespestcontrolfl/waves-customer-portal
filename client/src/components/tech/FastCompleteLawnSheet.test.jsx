@@ -2550,6 +2550,43 @@ describe('suggested from this lawn', () => {
     expect(within(addons()).getByRole('button', { name: 'Chinch bug treatment is on the sheet' }).disabled).toBe(true);
   });
 
+  describe('the standing chinch tap is a find the record keeps (the report ties it to the product, GATE_LAWN_REPORT_FACTS)', () => {
+    test('adding the product through the standing entry records a chinch card: found, taken', async () => {
+      answer([]);
+      await open();
+      await analyze();
+      await suggested();
+      fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
+      fireEvent.click(within(editorFor('Arena 50 WDG')).getByRole('button', { name: '100 sq ft' }));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      expect(sentGuide().cards).toEqual([{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA] }]);
+    });
+
+    test('not tapped: the record has no chinch entry', async () => {
+      answer([]);
+      await open();
+      await analyzeAndComplete();
+      expect(sentGuide()).toEqual({ v: 1, cards: [] });
+    });
+
+    test('after "Nothing found" on the chinch card, the standing tap replaces the card\'s entry with found, taken; other cards are kept', async () => {
+      answer([CARDS.caterpillars(), CARDS.chinch()]);
+      await open();
+      await analyze();
+      await suggested();
+      fireEvent.click(within(cardGroup('Insects: check for chinch bugs')).getByRole('button', { name: 'Nothing found' }));
+      fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
+      fireEvent.click(within(editorFor('Arena 50 WDG')).getByRole('button', { name: '100 sq ft' }));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      const cards = sentGuide().cards;
+      expect(cards.find((card) => card.kind === 'chinch')).toEqual({ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA] });
+      expect(cards.filter((card) => card.kind === 'chinch')).toHaveLength(1);
+      expect(cards.find((card) => card.kind === 'caterpillars')).toMatchObject({ checked: null, taken: false });
+    });
+  });
+
   describe('the fresh guide is the one chinch decision on screen', () => {
     // The sheet opened offering Arena; after Confirm the guide re-read the limits.
     const BIF_NOTE = 'Arena yearly limit reached; Atticus is used in its place.';
@@ -2830,12 +2867,16 @@ describe('suggested from this lawn', () => {
       expect(screen.getByRole('group', { name: 'Lead WG' })).toBeTruthy();
       fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
       expect(screen.getByRole('group', { name: 'Arena 50 WDG' })).toBeTruthy();
-      // And nothing is sent as a guide record.
+      // No card was shown, so no card is recorded; the only entry is the technician's own chinch find, which the
+      // standing tap records whatever the guide did (the weed tap names nothing the technician saw).
       fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '250 sq ft' }));
       fireEvent.click(within(editorFor('Arena 50 WDG')).getByRole('button', { name: '100 sq ft' }));
       await waitFor(() => expect(completeButton().disabled).toBe(false));
       await submit();
-      expect(completeCalls()[0].body.lawnFast).toEqual({ visitType: 'recurring' });
+      expect(completeCalls()[0].body.lawnFast).toEqual({
+        visitType: 'recurring',
+        treatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA] }] },
+      });
     });
 
     test('a second answer drops the rows it no longer offers, and says so; rows it still offers stay', async () => {

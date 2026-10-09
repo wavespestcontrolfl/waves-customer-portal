@@ -577,6 +577,32 @@ describe('treatmentGuideFreeze: the completion record', () => {
   });
 });
 
+describe('guideTakenFindings: the one deliberate reader of the record besides the freeze', () => {
+  const { guideTakenFindings } = require('../services/lawn-treatment-guide');
+  const notes = (cards, v = 1) => JSON.stringify({ lawnTreatmentGuide: { v, cards } });
+  const card = (extra = {}) => ({ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ART], ...extra });
+
+  test('a find that was taken: kinds only, never the product ids', () => {
+    expect(guideTakenFindings(notes([card(), card({ kind: 'fungus' }), card({ kind: 'caterpillars' })]))).toEqual([{ kind: 'chinch' }, { kind: 'fungus' }, { kind: 'caterpillars' }]);
+  });
+
+  test('only found AND taken counts; "nothing found", unchecked and not-taken cards do not', () => {
+    expect(guideTakenFindings(notes([card({ checked: 'none' }), card({ kind: 'fungus', checked: null }), card({ kind: 'caterpillars', taken: false })]))).toEqual([]);
+  });
+
+  test('weeds and dry spots name nothing the technician saw, so they never count', () => {
+    expect(guideTakenFindings(notes([card({ kind: 'weeds' }), card({ kind: 'dry_spots' })]))).toEqual([]);
+  });
+
+  test('a repeat is one find; a wrong version, a missing block or a malformed one is nothing', () => {
+    expect(guideTakenFindings(notes([card(), card()]))).toEqual([{ kind: 'chinch' }]);
+    expect(guideTakenFindings(notes([card()], 2))).toEqual([]);
+    expect(guideTakenFindings('{}')).toEqual([]);
+    expect(guideTakenFindings(null)).toEqual([]);
+    expect(guideTakenFindings({ lawnTreatmentGuide: { v: 1, cards: 'x' } })).toEqual([]);
+  });
+});
+
 describe('the record never leaves the technician side', () => {
   const fs = require('fs');
   const path = require('path');
@@ -584,6 +610,8 @@ describe('the record never leaves the technician side', () => {
   const files = (dir) => fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) => (
     entry.isDirectory() ? files(path.join(dir, entry.name)) : (entry.name.endsWith('.js') ? [path.join(dir, entry.name)] : [])));
 
+  // The lawn report's finding-to-product tie (GATE_LAWN_REPORT_FACTS) is a second reader, and a deliberate one: it
+  // goes through guideTakenFindings, which hands back kinds only, so the key still has ONE owner.
   test('only the guide module names the structured_notes key: no report, public or customer path reads it', () => {
     const readers = [...files('routes'), ...files('services')]
       .filter((file) => file !== path.join('services', 'lawn-treatment-guide.js'))

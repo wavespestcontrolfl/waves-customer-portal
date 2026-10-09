@@ -13816,6 +13816,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.techParagraphFreeze) recordStructuredNotes.lawnTechParagraph = { ...(recordStructuredNotes.lawnTechParagraph || {}), ...gate.techParagraphFreeze };
         // And the Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY), keyed by assessment.
         if (gate.visitSummaryFreeze) recordStructuredNotes.lawnVisitSummary = { ...(recordStructuredNotes.lawnVisitSummary || {}), ...gate.visitSummaryFreeze };
+        // And the report facts (GATE_LAWN_REPORT_FACTS): re-entry condition, spot-product text, finding ties.
+        if (gate.reportFactsFreeze) recordStructuredNotes.lawnReportFacts = gate.reportFactsFreeze;
         // A token the earlier mint could not create but the gate's own mint did.
         const recovered = adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl });
         if (recovered) {

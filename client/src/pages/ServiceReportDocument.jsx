@@ -281,6 +281,8 @@ function reentryTargetLine(target) {
 }
 
 function zoneNames(app, zones, serviceLine = 'pest') {
+  // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS); other rows read the zones below.
+  if (typeof app.areaUse === 'string' && app.areaUse.trim()) return app.areaUse.trim();
   const byId = new Map((zones || []).map((zone) => [String(zone.id), zone]));
   const ids = Array.isArray(app.zone_ids) ? app.zone_ids : [];
   const names = ids.map((id) => byId.get(String(id))?.label).filter(Boolean);
@@ -1366,7 +1368,10 @@ export default function ServiceReportDocument({ data, token }) {
             {reentry?.irrigationReadyAt && !lawnV2Watering && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
-            {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
+            {/* A frozen lawn re-entry condition (GATE_LAWN_REPORT_FACTS) is the summary above AND the aftercare line:
+                one sentence, printed once. */}
+            {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry)
+              && sanitizeReentryCopy(data.reportV2.aftercare.reentry) !== reentrySummary && (
               <Bullet>{sanitizeReentryCopy(data.reportV2.aftercare.reentry)}</Bullet>
             )}
           </div>

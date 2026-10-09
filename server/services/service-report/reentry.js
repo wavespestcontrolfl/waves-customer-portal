@@ -3,6 +3,7 @@ const { DEFAULT_TIME_ZONE, formatReadyTime, normalizeDate } = require('./time-fo
 const { normalizeAdvisoryForTreatmentScope, parseJsonObject, resolveTracedExteriorZone } = require('./report-data');
 const { isSprayApplicationMethod } = require('./service-line-configs');
 const { typedTreatmentEvidenceForRecord } = require('./activity-indicators');
+const { frozenReentryForRecord, reentryCondition } = require('./lawn-report-facts');
 
 function addMinutes(date, minutes) {
   return new Date(date.getTime() + (minutes * 60 * 1000));
@@ -73,6 +74,28 @@ function reentryTreatmentEvidence(record, applications) {
   return methods.every((method) => DEFINITE_NON_DRY_DOWN_METHODS.has(method)) ? false : undefined;
 }
 
+// A lawn visit whose re-entry rule was frozen at completion (GATE_LAWN_REPORT_FACTS, lawn-report-facts.js)
+// reads as a CONDITION from the products applied, never a clock: no targets, no ready-at time, no
+// countdown. Rendered only from the record, whatever any gate says. A record with no frozen rule (or the
+// marked 'default'), or one an admin corrected afterwards (reentry_adjusted, the minutes then stand), takes
+// the clock path below exactly as before.
+function frozenConditionContext(record, anchorDate, now) {
+  const rule = frozenReentryForRecord(record);
+  if (!rule) return undefined;
+  const displayTimezone = record?.timezone || record?.property_timezone || DEFAULT_TIME_ZONE;
+  const condition = reentryCondition(rule, { anchor: anchorDate, timeZone: displayTimezone });
+  if (!condition) return undefined;
+  return {
+    ...(anchorDate ? { anchorAppliedAt: anchorDate.toISOString() } : {}),
+    generatedAt: now.toISOString(),
+    displayTimezone,
+    targets: [],
+    condition,
+    petAdvisory: condition.pets,
+    customerSummary: condition.text,
+  };
+}
+
 function buildReentryContextFromRecord(record, now = new Date()) {
   const applications = Array.isArray(record?.applications) ? record.applications : [];
   // The anchor must be a real clock time: date-only service_date parses to
@@ -83,6 +106,10 @@ function buildReentryContextFromRecord(record, now = new Date()) {
     || normalizeDate(record?.ended_at)
     || normalizeDate(record?.started_at);
 
+  return frozenConditionContext(record, anchorDate, now) || buildClockContextFromRecord(record, applications, anchorDate, now);
+}
+
+function buildClockContextFromRecord(record, applications, anchorDate, now) {
   if (!anchorDate) return undefined;
 
   const advisory = normalizeAdvisoryForTreatmentScope(

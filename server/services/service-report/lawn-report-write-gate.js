@@ -17,6 +17,7 @@ const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
 const { resolveWaterInForecast } = require('./lawn-watering-forecast');
 const { freezeCoverageVerdict } = require('./lawn-coverage-verdict');
+const reportFacts = require('./lawn-report-facts');
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -69,11 +70,16 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, programVisi
     const summary = require('./lawn-visit-summary');
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
     if (assessmentId == null || instructionOut.productsLoadFailed) return null;
+    // GATE_LAWN_REPORT_FACTS: a new entry is v4 and carries the finding-to-product ties frozen at completion
+    // (lawn-report-facts.js); gate off writes the v3 entry exactly as before.
+    const tiesLive = featureGates.lawnReportFactsLive();
+    const ties = tiesLive ? reportFacts.frozenTies(record.structured_notes, assessmentId) : [];
     const outcome = await summary.createAndFreezeVisitSummary({
       serviceRecordId: service.id,
       assessmentId,
+      version: tiesLive ? summary.FREEZE_VERSION_TIES : summary.FREEZE_VERSION,
       getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
-      gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, programVisit: programVisitOut && programVisitOut.programVisit === true, nextVisitBooked: programVisitOut && programVisitOut.nextVisitBooked === true, knex }),
+      gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, programVisit: programVisitOut && programVisitOut.programVisit === true, nextVisitBooked: programVisitOut && programVisitOut.nextVisitBooked === true, ties, knex }),
       knex,
     });
     if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
@@ -102,6 +108,12 @@ function withVisitSummary(result, visitSummaryFreeze) {
   return visitSummaryFreeze ? { ...result, visitSummaryFreeze } : result;
 }
 
+// The record with the report facts this run just froze in its in-memory notes, so the first report build (and
+// with it the v6 copy's first freeze) and the Visit Summary read what was just decided.
+function withReportFacts(record, freeze) {
+  return freeze ? { ...record, structured_notes: { ...parseJsonObject(record.structured_notes), [reportFacts.FREEZE_KEY]: freeze } } : record;
+}
+
 /**
  * @param {object} input
  * @param {object} input.service  the service_records row (needs id, service_line/type, customer_id)
@@ -113,6 +125,11 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
   if (!service || !service.id || !knex) return empty;
   const serviceLine = service.service_line || (/(lawn)/i.test(String(service.service_type || '')) ? 'lawn' : null);
   if (serviceLine !== 'lawn') return empty;
+
+  // Set once the report facts are frozen below; every return after that point carries it, so the completion
+  // path folds it into its in-memory notes (its later whole-object writes would otherwise erase the key).
+  let reportFactsFreeze = null;
+  const emptyWithFacts = () => (reportFactsFreeze ? { ...empty, reportFactsFreeze } : empty);
 
   try {
     const { buildReportV1Data } = require('./report-data');
@@ -126,7 +143,14 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     // reportV2 for every lawn visit with a confirmed linked assessment —
     // the LAWN_REPORT_V2 flag is retired, owner ruling 2026-07-09.)
     const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
-    const record = joined || service;
+    let record = joined || service;
+    // GATE_LAWN_REPORT_FACTS: the re-entry condition, the spot-product text and the finding-to-product ties are
+    // decided and frozen NOW, before the first report build, so that build (and the v6 copy it freezes) already
+    // reads them. The gate controls only this freeze; a render never reads it. Gate off: no read, no write.
+    if (featureGates.lawnReportFactsLive()) {
+      reportFactsFreeze = await reportFacts.gatherAndFreezeReportFacts({ record, knex });
+      record = withReportFacts(record, reportFactsFreeze);
+    }
     const token = await ensureReportToken(service.id, knex);
     const instructionOut = {};
     const coverageOut = {};
@@ -154,7 +178,7 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     }
 
     const reportV2 = data && data.reportV2;
-    if (!reportV2) return empty;
+    if (!reportV2) return emptyWithFacts();
 
     const fix = reconcileLawnReport({ data, reportV2 }) || { warnings: [] };
     const warnings = fix.warnings || [];
@@ -256,10 +280,11 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     return withVisitSummary({
       smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,
       ...(techParagraphFreeze ? { techParagraphFreeze } : {}),
+      ...(reportFactsFreeze ? { reportFactsFreeze } : {}),
     }, visitSummaryFreeze);
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);
-    return empty;
+    return emptyWithFacts();
   }
 }
 

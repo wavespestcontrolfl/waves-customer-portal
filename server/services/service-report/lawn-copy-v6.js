@@ -155,6 +155,8 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const built = build({
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
+    // The frozen finding-to-product tie (GATE_LAWN_REPORT_FACTS): a product that treated a finding reads curative.
+    tiedFamilies: Array.isArray(ctx.tiedFamilies) ? ctx.tiedFamilies : [],
     visitDate: ctx.visitDate || null,
     nextVisitGapDays: Number.isFinite(ctx.nextVisitGapDays) ? ctx.nextVisitGapDays : undefined,
     // Not tracked for the report yet: the cap makes a Celsius row print its

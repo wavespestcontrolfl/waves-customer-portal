@@ -921,6 +921,25 @@ function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHe
   return reason;
 }
 
+// The guide's record: one entry per card the guide showed, plus the standing "Chinch bugs found at the edge of
+// damage" tap. That entry has no card, but adding its product IS the technician's find, so the record says
+// chinch: found, taken (the report ties it to the product in one sentence, GATE_LAWN_REPORT_FACTS). Null when
+// the guide recorded nothing.
+function guideRecordCards({ guideCards, guideChecks, rows, on, ctx }) {
+  const cards = (guideCards || []).map((card) => ({
+    kind: card.kind,
+    shown: true,
+    checked: guideChecks[card.kind] || null,
+    taken: cardOnSheet(card, on),
+    productIds: card.productIds,
+  }));
+  const standing = ctx.treatmentGuide ? rows.find((row) => row.guided === 'chinch') : null;
+  if (!standing) return guideCards ? cards : null;
+  const own = cards.find((card) => card.kind === 'chinch');
+  const chinch = { kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: own ? own.productIds : [String(standing.productId).toLowerCase()] };
+  return [...cards.filter((card) => card.kind !== 'chinch'), chinch];
+}
+
 function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {} }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
@@ -934,6 +953,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
       productName: String(item.name || '').trim().slice(0, 180),
     }))
     .filter((item) => item.productName && UUID_RE.test(item.productId));
+  const recordCards = guideRecordCards({ guideCards, guideChecks, rows, on, ctx });
   return {
     visitOutcome: 'completed',
     // The context's service object, every key, nulls included.
@@ -942,18 +962,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
     // the card's product is on the sheet at completion. The server validates it and freezes it.
     lawnFast: {
       visitType: ctx.visitType,
-      ...(guideCards ? {
-        treatmentGuide: {
-          v: 1,
-          cards: guideCards.map((card) => ({
-            kind: card.kind,
-            shown: true,
-            checked: guideChecks[card.kind] || null,
-            taken: cardOnSheet(card, on),
-            productIds: card.productIds,
-          })),
-        },
-      } : {}),
+      ...(recordCards ? { treatmentGuide: { v: 1, cards: recordCards } } : {}),
     },
     lawnAssessmentId: assessmentId,
     products: rows.map((row) => {

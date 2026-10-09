@@ -7,6 +7,7 @@ const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input')
 const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
 const { buildLawnPhotoSet } = require('./lawn-photo-set');
 const { frozenCoverageDefaultsOnly, coverageVerdictStamp } = require('./lawn-coverage-verdict');
+const reportFacts = require('./lawn-report-facts');
 const { buildPhotoFindings, photoFindingsSignatureState } = require('./lawn-photo-findings');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
@@ -2885,6 +2886,20 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
     }
   }
 
+  // GATE_LAWN_REPORT_FACTS: the re-entry condition, the spot-product text and the finding-to-product ties are
+  // frozen at completion (structured_notes.lawnReportFacts) and a render reads only that block, so the key follows
+  // the record and never the gate: present whenever a frozen decision exists, absent otherwise (a record without one
+  // keeps its key). Read from the SAME service row the render loads when it carries structured_notes, from the
+  // record only for a partial lookup row; an unreadable record stamps random (re-render, never a stale hit).
+  try {
+    const notes = Object.prototype.hasOwnProperty.call(service, 'structured_notes')
+      ? service.structured_notes
+      : (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes;
+    irrigationStamp += reportFacts.frozenReportFactsStamp(notes);
+  } catch {
+    irrigationStamp += `:rf=err${crypto.randomBytes(4).toString('hex')}`;
+  }
+
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
   // gallery for a labeled set in shot order, so the same rule: a PDF cached
@@ -4750,6 +4765,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ? customerVisiblePressureIndex(service.pressure_index)
     : null;
 
+  // GATE_LAWN_REPORT_FACTS: a spot product's frozen "where it was used" text. Read from the record only
+  // (never a gate): a record without the frozen block, and every whole-lawn row, keep the card text they had.
+  const frozenUseTexts = serviceLine === 'lawn' ? reportFacts.frozenProductUseTexts(service.structured_notes) : {};
   const applications = products.map((product, index) => {
     const method = methodFromProduct(product, serviceLine);
     return {
@@ -4828,6 +4846,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       applicationArea: product.application_area || product.area || null,
       areaValue: product.area_value,
       areaUnit: product.area_unit,
+      ...(product.id && frozenUseTexts[String(product.id)] ? { areaUse: frozenUseTexts[String(product.id)] } : {}),
       targets: parseJsonArray(product.targets),
       appliedAt: product.applied_at || product.created_at,
     };
@@ -5692,6 +5711,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         ...(pinnedProtocolVersion ? { protocolVersion: pinnedProtocolVersion } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
+        // GATE_LAWN_REPORT_FACTS: the frozen re-entry condition, from the record only (null = the label text as before).
+        reentryText: reportFacts.reentryCondition(reportFacts.frozenReentryForRecord(service))?.text || null,
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,
@@ -5996,7 +6017,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             serviceRecordId: service.id,
             assessmentId: lawnAssessment.assessmentId,
             reportV2,
-            ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays, nextVisitIso: lawnCopyGapDays == null ? null : lawnCopyNextVisitIso },
+            ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays, nextVisitIso: lawnCopyGapDays == null ? null : lawnCopyNextVisitIso, tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes) },
             // Never CREATE the first-writer-wins entry from a degraded read
             // (any input read that failed is in readFailures) or from
             // unverifiable treatment data; a stored entry still replays first.

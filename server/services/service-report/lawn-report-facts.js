@@ -1,0 +1,535 @@
+'use strict';
+
+/**
+ * GATE_LAWN_REPORT_FACTS (owner 2026-10-08): three facts of the customer LAWN report that are
+ * DECIDED ONCE at completion, frozen on the record, and only READ afterwards.
+ *
+ *   1. reentry     "Ready to walk on" is a CONDITION from the products applied, not a 30 minute clock.
+ *   2. productUse  a spot product says where it was used ("Spot treatment, about 250 sq ft").
+ *   3. ties        a photo finding (or the technician's tap) is tied to what was applied, in one
+ *                  fixed sentence (the sentences live in lawn-visit-summary.js) and the product's
+ *                  "What to expect" line follows the tie (lawn-expectations.js).
+ *
+ * Lesson of #6087 and #6089: a decision that changes at RENDER time by a gate races the stored-PDF
+ * cache and never converges in review. So the gate controls ONLY the freeze (the lawn write gate,
+ * lawn-report-write-gate.js). Every reader below takes the record's structured_notes and never
+ * reads a gate: a record that carries a frozen decision renders it whatever the gate says, and a
+ * record without one renders exactly as before. The PDF key carries the frozen decision
+ * (frozenReportFactsStamp, ':rf=').
+ *
+ * structured_notes.lawnReportFacts = {
+ *   v: 1, frozenAt,
+ *   reentry: { rule: 'dry' | 'watered_in_and_dry' | 'timed' | 'default', source: 'facts' | 'label' | 'default',
+ *              hours?, base?,                    // timed only: the label hours, and the condition under them
+ *              products: [{ id, rule, source, hours? }] },
+ *   productUse: { [service_products.id]: { sqft: number | null } },   // spot rows only
+ *   ties: { assessmentId, items: [...] },       // see cleanTies
+ * }
+ *
+ * Only structured facts are stored. Every customer sentence is chosen by code from the closed tables
+ * below at read time, so a hand-edited row prints nothing it was not built from.
+ *
+ * Pure except freezeReportFacts / gatherAndFreezeReportFacts (the writes and reads).
+ */
+
+const crypto = require('crypto');
+const logger = require('../logger');
+const { CONDITION_LABEL_VALUES } = require('../lawn-diagnostic-report');
+const { formatReadyTime, normalizeDate } = require('./time-format');
+
+const FREEZE_KEY = 'lawnReportFacts';
+const FREEZE_VERSION = 1;
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+}
+
+const isPlain = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+// ── 1. Re-entry: the closed tables ──────────────────────────────────────────
+
+// Strictest last. A timed rule (label hours) is stricter than any condition.
+const RULES = Object.freeze(['dry', 'watered_in_and_dry', 'timed']);
+const BASE_RULES = Object.freeze(['dry', 'watered_in_and_dry']);
+const RANK = Object.freeze({ dry: 1, watered_in_and_dry: 2, timed: 3 });
+const SOURCES = Object.freeze(['facts', 'label', 'default']);
+const MAX_LABEL_HOURS = 168;
+
+const REENTRY_TEXT = Object.freeze({
+  dry: 'Ready to walk on once the spray has dried.',
+  watered_in_and_dry: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.',
+});
+const REENTRY_TIMED = Object.freeze({
+  dry: (time) => `Ready to walk on after ${time}, once the spray has dried.`,
+  watered_in_and_dry: (time) => `Ready to walk on after ${time}, once today’s treatment has dried and, after you water it in, the grass is dry again.`,
+});
+const REENTRY_PETS = 'Keep people and pets off the lawn until then.';
+const REENTRY_STATUS = Object.freeze({ dry: 'Once dry', watered_in_and_dry: 'After watering in' });
+
+// The application method as the report payload normalizes it (methodFromProduct).
+function methodOf(row) {
+  const raw = String((row && (row.application_method || row.method)) || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return raw && raw !== 'null' ? raw : '';
+}
+
+const isGranular = (method) => method.includes('granular');
+const isBait = (method) => method.includes('bait') || method === 'station_check';
+
+// The label hours a product states: null when it states none, the number of hours when a stored positive
+// figure stands, or false when a figure exists but cannot be confirmed (a re-entry text that disagrees or
+// cannot be read), which the caller treats as no usable fact. Only a figure the product's own re-entry text
+// does not contradict counts (sms-label-facts.js reentryLevelHours): 0 is the residential "until dry"
+// sentinel and a null catalog value is frozen as 0, so neither is a figure.
+function labelHoursOf(facts) {
+  const hours = Number(facts && facts.reentryHours);
+  const text = facts && facts.reentrySummary;
+  try {
+    const { parseReentryText } = require('../sms-label-facts');
+    const parsed = text ? parseReentryText(text) : null;
+    if (!(Number.isFinite(hours) && hours > 0)) return parsed && parsed.kind === 'hours' ? false : null;
+    if (hours > MAX_LABEL_HOURS) return false;
+    const stated = text ? parsed : { kind: 'hours', hours };
+    return stated && stated.kind === 'hours' && Math.abs(stated.hours - hours) <= 1e-9 ? hours : false;
+  } catch { return false; }
+}
+
+// One applied product's re-entry rule, from facts the visit already froze: the recorded application
+// method, the product's frozen watering rule, and its stored label hours. Never from a name.
+//   water-in rule                         watered_in_and_dry
+//   a granule that is not watered in      dry (its rule is hold or none; a bait is placed, not watered)
+//   a spray, a spot spray, a bait         dry
+//   a granule with no frozen rule, or no recorded method   no usable fact: { rule: null, source: 'default' }
+function productReentry(row) {
+  const facts = isPlain(row && row.approved_report_product_facts) ? row.approved_report_product_facts : null;
+  const method = methodOf(row);
+  const mode = facts && isPlain(facts.wateringRule) ? facts.wateringRule.mode : null;
+  let base = null;
+  if (mode === 'water_in') base = 'watered_in_and_dry';
+  else if (isBait(method)) base = 'dry';
+  else if (isGranular(method)) base = mode === 'hold' || mode === 'none' ? 'dry' : null;
+  else if (method) base = 'dry';
+  const hours = base ? labelHoursOf(facts) : null;
+  if (!base || hours === false) return { id: String(row && row.id), rule: null, source: 'default' };
+  if (hours) return { id: String(row.id), rule: 'timed', source: 'label', hours, base };
+  return { id: String(row.id), rule: base, source: 'facts' };
+}
+
+// The visit's rule is the strictest of its products. One product with no usable fact fails closed:
+// the visit keeps today's line default (rule 'default', marked), because a clean "once the spray has
+// dried" could be wrong for the product we know nothing about.
+function visitReentry(rows) {
+  const products = (Array.isArray(rows) ? rows : []).map(productReentry);
+  if (!products.length) return null;
+  if (products.some((p) => p.rule === null)) return { rule: 'default', source: 'default', products };
+  const strictest = products.reduce((top, p) => (RANK[p.rule] > RANK[top.rule] ? p : top));
+  if (strictest.rule !== 'timed') return { rule: strictest.rule, source: 'facts', products };
+  const base = products.reduce((top, p) => {
+    const rule = p.rule === 'timed' ? p.base : p.rule;
+    return RANK[rule] > RANK[top] ? rule : top;
+  }, 'dry');
+  const hours = Math.max(...products.filter((p) => p.rule === 'timed').map((p) => p.hours));
+  return { rule: 'timed', source: 'label', hours, base, products };
+}
+
+function cleanReentryProduct(raw) {
+  if (!isPlain(raw) || typeof raw.id !== 'string' || !raw.id || raw.id.length > 64) return null;
+  const rule = raw.rule === null || RULES.includes(raw.rule) ? raw.rule : undefined;
+  if (rule === undefined || !SOURCES.includes(raw.source)) return null;
+  const out = { id: raw.id, rule, source: raw.source };
+  if (rule === 'timed') {
+    if (!(Number.isFinite(raw.hours) && raw.hours > 0 && raw.hours <= MAX_LABEL_HOURS) || !BASE_RULES.includes(raw.base)) return null;
+    out.hours = raw.hours;
+    out.base = raw.base;
+  }
+  return out;
+}
+
+// A stored reentry block, shape-checked; null when anything is off.
+function cleanReentry(raw) {
+  if (!isPlain(raw) || !(raw.rule === 'default' || RULES.includes(raw.rule)) || !SOURCES.includes(raw.source)) return null;
+  const products = (Array.isArray(raw.products) ? raw.products : []).map(cleanReentryProduct);
+  if (!products.length || products.some((p) => !p)) return null;
+  if (raw.rule === 'timed') {
+    if (!(Number.isFinite(raw.hours) && raw.hours > 0 && raw.hours <= MAX_LABEL_HOURS) || !BASE_RULES.includes(raw.base)) return null;
+    return { rule: 'timed', source: raw.source, hours: raw.hours, base: raw.base, products };
+  }
+  return { rule: raw.rule, source: raw.source, products };
+}
+
+// ── 2. Product use: a spot row says where it went ───────────────────────────
+
+function spotSqft(row) {
+  const value = row && row.area_value != null && row.area_value !== '' ? Number(row.area_value) : NaN;
+  const unit = String((row && row.area_unit) || '').toLowerCase();
+  return Number.isFinite(value) && value > 0 && (unit === 'sqft' || unit === 'sq_ft') ? value : null;
+}
+
+// Only a spot treatment row is described; every whole-lawn row keeps its card text.
+function productUseEntries(rows) {
+  const out = {};
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (methodOf(row) !== 'spot_treatment' || !row.id) continue;
+    out[String(row.id)] = { sqft: spotSqft(row) };
+  }
+  return out;
+}
+
+function cleanProductUse(raw) {
+  if (!isPlain(raw)) return {};
+  const out = {};
+  for (const [id, entry] of Object.entries(raw)) {
+    if (!isPlain(entry) || !id || id.length > 64) continue;
+    const sqft = Number.isFinite(entry.sqft) && entry.sqft > 0 && entry.sqft < 1e7 ? entry.sqft : null;
+    out[id] = { sqft };
+  }
+  return out;
+}
+
+// "about 250": 5s under 100, 10s under 1,000, 50s above.
+function roundedSqft(sqft) {
+  const step = sqft < 100 ? 5 : (sqft < 1000 ? 10 : 50);
+  return Math.max(step, Math.round(sqft / step) * step);
+}
+
+/** The card text of a spot row: 'Spot treatment, about 250 sq ft' or 'Spot treatment'. */
+function productUseText(entry) {
+  if (!isPlain(entry)) return null;
+  return Number.isFinite(entry.sqft) && entry.sqft > 0
+    ? `Spot treatment, about ${roundedSqft(entry.sqft).toLocaleString('en-US')} sq ft`
+    : 'Spot treatment';
+}
+
+// ── 3. Ties: a finding and what was applied ─────────────────────────────────
+
+// Kind of finding by the allowlisted condition label (lawn-diagnostic-report CONDITION_LABELS).
+// Drought stress is owned by the watering banner: a drought tie prints only when the wetting agent
+// was applied.
+const KIND_BY_LABEL = Object.freeze({
+  'large patch (fungal) activity': 'fungus',
+  'gray leaf spot': 'fungus',
+  'dollar spot': 'fungus',
+  'fungal activity': 'fungus',
+  'weed pressure': 'weeds',
+  'chinch bug activity': 'insects',
+  'caterpillar activity': 'insects',
+  'grub activity': 'insects',
+  'drought stress': 'drought',
+});
+const PHOTO_KINDS = Object.freeze(['fungus', 'weeds', 'insects', 'drought']);
+// The kind of product that answers each kind of finding.
+const PRODUCT_FOR_KIND = Object.freeze({ fungus: 'fungicide', weeds: 'herbicide', insects: 'insecticide', drought: 'wetting_agent' });
+const PRODUCT_KINDS = Object.freeze(['fungicide', 'herbicide', 'insecticide', 'wetting_agent']);
+// A weed or insect finding is answered by a SPOT row; a fungicide or the wetting agent by any row.
+const SPOT_ONLY = Object.freeze(new Set(['herbicide', 'insecticide']));
+// The technician's tap (the treatment guide's card kinds) and the product it needs on the visit.
+const TECH_PRODUCT = Object.freeze({ chinch: 'insecticide', caterpillars: 'insecticide', fungus: 'fungicide' });
+const TECH_KINDS = Object.freeze(Object.keys(TECH_PRODUCT));
+// Which expectation family becomes curative when a tie says the product treated a finding.
+const FAMILY_FOR_PRODUCT = Object.freeze({ fungicide: 'fungicide', insecticide: 'insecticide' });
+const SURE_CONFIDENCES = new Set(['high', 'moderate']);
+const SEVERITY_ORDER = Object.freeze({ severe: 0, moderate: 1, mild: 2 });
+const MAX_TIES = 4;
+
+// What kinds of product a visit's rows hold: { fungicide: {any, spot}, ... }.
+function productKinds(rows) {
+  const held = {};
+  const { classifyProduct } = require('./lawn-report-v2');
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const text = `${row.product_category || ''} ${row.product_name || ''} ${(row.approved_report_product_facts && row.approved_report_product_facts.category) || ''}`;
+    const kind = /wetting/i.test(text) ? 'wetting_agent' : classifyProduct(row).kind;
+    if (!PRODUCT_KINDS.includes(kind)) continue;
+    const seen = held[kind] || { any: false, spot: false };
+    seen.any = true;
+    if (methodOf(row) === 'spot_treatment') seen.spot = true;
+    held[kind] = seen;
+  }
+  return held;
+}
+
+const answered = (held, product) => !!held[product] && (SPOT_ONLY.has(product) ? held[product].spot : held[product].any);
+
+// The kept PHOTO findings of the visit's own reviewed run, by kind: the same guards as "What the
+// photos showed" (a confirmed assessment, its own run, reviewed, rows the technician kept), with the
+// cause labels included (the tie names what was treated). A stored cause label already passed the
+// naming gate when the run was written (safeConditionLabel downgrades a cause below moderate
+// confidence to a generic label), so a cause label here is a moderate-or-better read.
+function photoFindingsByKind(run, assessment) {
+  if (!run || !assessment || assessment.confirmed_by_tech !== true || !run.reviewed_at) return [];
+  if (String(run.assessment_id) !== String(assessment.id)) return [];
+  if (run.customer_id != null && assessment.customer_id != null && String(run.customer_id) !== String(assessment.customer_id)) return [];
+  const { keptRunRows } = require('./tip-library');
+  const rows = keptRunRows(run).reviewed
+    .filter((row) => typeof row.label === 'string' && hasOwn(KIND_BY_LABEL, row.label) && CONDITION_LABEL_VALUES.includes(row.label))
+    .map((row, index) => ({
+      index,
+      label: row.label,
+      kind: KIND_BY_LABEL[row.label],
+      rank: hasOwn(SEVERITY_ORDER, row.severity) ? SEVERITY_ORDER[row.severity] : 3,
+      sure: row.can_determine !== false && SURE_CONFIDENCES.has(String(row.confidence || '').toLowerCase()),
+    }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index);
+  const byKind = new Map();
+  for (const row of rows) {
+    const seen = byKind.get(row.kind);
+    // The most severe row names the finding; the least confident row hedges it.
+    if (!seen) byKind.set(row.kind, { ...row });
+    else seen.sure = seen.sure && row.sure;
+  }
+  return PHOTO_KINDS.filter((kind) => byKind.has(kind)).map((kind) => byKind.get(kind));
+}
+
+/**
+ * The tie items of one visit. `techFindings` are the technician's taps that were found AND taken
+ * (lawn-treatment-guide.js guideTakenFindings): { kind: chinch | caterpillars | fungus }.
+ * A tap counts only while a product of its kind is on the visit (never a treatment we did not
+ * record). The technician's word replaces a photo tie of the same kind.
+ */
+function buildTies({ rows, run, assessment, techFindings = [] }) {
+  const held = productKinds(rows);
+  const items = [];
+  const techKinds = new Set();
+  for (const tap of techFindings) {
+    // The technician said where he treated, so a product of the kind on the visit is enough (any method).
+    if (!TECH_KINDS.includes(tap.kind) || !held[TECH_PRODUCT[tap.kind]]) continue;
+    items.push({ source: 'technician', kind: tap.kind, product: TECH_PRODUCT[tap.kind] });
+    techKinds.add(tap.kind === 'fungus' ? 'fungus' : 'insects');
+  }
+  for (const finding of photoFindingsByKind(run, assessment)) {
+    if (techKinds.has(finding.kind)) continue;
+    const product = PRODUCT_FOR_KIND[finding.kind];
+    items.push({
+      source: 'photo', kind: finding.kind, label: finding.label, sure: finding.sure, product: answered(held, product) ? product : null,
+    });
+  }
+  return items.slice(0, MAX_TIES);
+}
+
+function cleanTie(raw) {
+  if (!isPlain(raw)) return null;
+  if (raw.source === 'technician') {
+    return TECH_KINDS.includes(raw.kind) && raw.product === TECH_PRODUCT[raw.kind]
+      ? { source: 'technician', kind: raw.kind, product: raw.product } : null;
+  }
+  if (raw.source !== 'photo' || !PHOTO_KINDS.includes(raw.kind)) return null;
+  if (typeof raw.label !== 'string' || KIND_BY_LABEL[raw.label] !== raw.kind) return null;
+  if (raw.product !== null && raw.product !== PRODUCT_FOR_KIND[raw.kind]) return null;
+  return { source: 'photo', kind: raw.kind, label: raw.label, sure: raw.sure === true, product: raw.product };
+}
+
+function cleanTies(raw) {
+  if (!isPlain(raw) || !Array.isArray(raw.items)) return null;
+  const items = raw.items.map(cleanTie).filter(Boolean).slice(0, MAX_TIES);
+  return { assessmentId: raw.assessmentId == null ? null : String(raw.assessmentId), items };
+}
+
+// ── The frozen block: build, read, key ──────────────────────────────────────
+
+function buildReportFacts({ rows, run, assessment, techFindings, now = new Date() }) {
+  const reentry = visitReentry(rows);
+  return {
+    v: FREEZE_VERSION,
+    frozenAt: now.toISOString(),
+    ...(reentry ? { reentry } : {}),
+    productUse: productUseEntries(rows),
+    ties: { assessmentId: assessment && assessment.id != null ? String(assessment.id) : null, items: buildTies({ rows, run, assessment, techFindings }) },
+  };
+}
+
+/** The frozen facts on a record's structured_notes, shape-checked, or null (absent or not whole). */
+function readFrozenReportFacts(structuredNotes) {
+  const raw = parseJsonObject(structuredNotes)[FREEZE_KEY];
+  if (!isPlain(raw) || raw.v !== FREEZE_VERSION) return null;
+  return {
+    reentry: cleanReentry(raw.reentry),
+    productUse: cleanProductUse(raw.productUse),
+    ties: cleanTies(raw.ties),
+  };
+}
+
+/** The visit's re-entry rule when it is a real decision (never the marked 'default'), or null. */
+function frozenReentryRule(structuredNotes) {
+  const facts = readFrozenReportFacts(structuredNotes);
+  return facts && facts.reentry && facts.reentry.rule !== 'default' ? facts.reentry : null;
+}
+
+/**
+ * The frozen rule a RENDER of this record reads: frozenReentryRule, unless an admin corrected the
+ * re-entry minutes afterwards (advisory.reentry_adjusted for the exterior side), when the minutes the
+ * admin typed stand and the record renders its clock as before.
+ */
+function frozenReentryForRecord(record) {
+  const rule = frozenReentryRule(record && record.structured_notes);
+  if (!rule) return null;
+  const adjusted = parseJsonObject(record.advisory).reentry_adjusted;
+  return adjusted === true || (isPlain(adjusted) && adjusted.exterior === true) ? null : rule;
+}
+
+/** { [service_products.id]: 'Spot treatment, about 250 sq ft' } for the frozen spot rows. */
+function frozenProductUseTexts(structuredNotes) {
+  const facts = readFrozenReportFacts(structuredNotes);
+  if (!facts) return {};
+  return Object.fromEntries(Object.entries(facts.productUse).map(([id, entry]) => [id, productUseText(entry)]));
+}
+
+/** The frozen ties of one assessment ([] when none, or frozen for another assessment). */
+function frozenTies(structuredNotes, assessmentId) {
+  const facts = readFrozenReportFacts(structuredNotes);
+  if (!facts || !facts.ties || assessmentId == null || facts.ties.assessmentId !== String(assessmentId)) return [];
+  return facts.ties.items;
+}
+
+/** The expectation families a frozen tie makes curative: the product treated a finding. */
+function frozenTiedFamilies(structuredNotes) {
+  const facts = readFrozenReportFacts(structuredNotes);
+  const items = facts && facts.ties ? facts.ties.items : [];
+  return [...new Set(items.filter((t) => t.product && FAMILY_FOR_PRODUCT[t.product]).map((t) => FAMILY_FOR_PRODUCT[t.product]))];
+}
+
+/**
+ * The PDF cache-key component: '' when the record carries no frozen decision, else ':rf=' and a short
+ * hash of the facts a render reads. Gate-free by design: the key follows the record.
+ */
+function frozenReportFactsStamp(structuredNotes) {
+  const facts = readFrozenReportFacts(structuredNotes);
+  if (!facts) return '';
+  const hasDecision = (facts.reentry && facts.reentry.rule !== 'default')
+    || Object.keys(facts.productUse).length > 0
+    || (facts.ties && facts.ties.items.length > 0);
+  if (!hasDecision) return '';
+  const reentry = facts.reentry && facts.reentry.rule !== 'default'
+    ? { rule: facts.reentry.rule, hours: facts.reentry.hours || null, base: facts.reentry.base || null }
+    : null;
+  const body = JSON.stringify({ reentry, productUse: facts.productUse, ties: facts.ties });
+  return `:rf=${crypto.createHash('sha1').update(body).digest('hex').slice(0, 8)}`;
+}
+
+// ── The re-entry condition a render prints ──────────────────────────────────
+
+/**
+ * The customer wording for a frozen re-entry rule: { rule, text, pets, statusLabel }, chosen by code.
+ * A timed rule needs the application time (`anchor`) and the display zone; without a real anchor it
+ * states its base condition only.
+ */
+function reentryCondition(reentry, { anchor = null, timeZone } = {}) {
+  if (!reentry || reentry.rule === 'default' || !RULES.includes(reentry.rule)) return null;
+  const date = normalizeDate(anchor);
+  if (reentry.rule === 'timed' && date) {
+    const readyAt = new Date(date.getTime() + Math.round(reentry.hours * 60) * 60 * 1000);
+    const time = formatReadyTime(readyAt, timeZone);
+    if (time) {
+      return { rule: 'timed', text: REENTRY_TIMED[reentry.base](time), pets: REENTRY_PETS, statusLabel: `After ${time}` };
+    }
+  }
+  const base = reentry.rule === 'timed' ? reentry.base : reentry.rule;
+  return { rule: reentry.rule, text: REENTRY_TEXT[base], pets: REENTRY_PETS, statusLabel: REENTRY_STATUS[base] };
+}
+
+// ── Freeze ──────────────────────────────────────────────────────────────────
+
+/**
+ * Freeze the block, first writer wins: the key's absence is in the UPDATE predicate (the row lock
+ * serializes two writers; the second re-checks after the first commits and writes nothing). Never
+ * throws; returns the block the record is now frozen to, or null.
+ */
+async function freezeReportFacts({ knex, serviceRecordId, facts }) {
+  if (!knex || !serviceRecordId || !facts) return null;
+  try {
+    const written = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .whereRaw(`(structured_notes::jsonb -> '${FREEZE_KEY}') IS NULL`)
+      .update({
+        structured_notes: knex.raw(
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ [FREEZE_KEY]: facts })],
+        ),
+      });
+    if (Number(written) > 0) return facts;
+    const row = await knex('service_records').where({ id: serviceRecordId }).first('structured_notes');
+    const stored = parseJsonObject(row && row.structured_notes)[FREEZE_KEY];
+    return isPlain(stored) ? stored : null;
+  } catch (err) {
+    logger.warn(`[lawn-report-facts] freeze failed for service_record ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
+}
+
+// The lawn rows with their frozen product facts (watering rule, label hours), or null when any read
+// failed: a freeze made from a partial product picture could never be repaired (first writer wins).
+async function loadRows(record, knex) {
+  const { attachApprovedReportProductFacts } = require('./report-data');
+  const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
+  const raw = await knex('service_products').where({ service_record_id: record.id }).orderBy('created_at');
+  const snapshot = applyReportIdentitySnapshot(record).report_identity_snapshot || null;
+  const rows = await attachApprovedReportProductFacts(knex, raw, { frozenFacts: snapshot && snapshot.productFacts ? snapshot.productFacts : null });
+  if (rows.catalogEnrichmentFailed || rows.wateringRuleLookupFailed) return null;
+  return rows;
+}
+
+// The visit's linked assessment and its run; both null when the visit has none.
+async function loadAssessmentAndRun(record, knex) {
+  const { loadLinkedLawnAssessment } = require('./report-data');
+  const assessment = await loadLinkedLawnAssessment(record, knex, { failClosed: true });
+  if (!assessment) return { assessment: null, run: null };
+  const run = await knex('lawn_assessment_runs')
+    .where({ assessment_id: assessment.id, customer_id: assessment.customer_id })
+    .first('assessment_id', 'customer_id', 'reviewed_findings', 'added_details', 'reviewed_at');
+  return { assessment, run: run || null };
+}
+
+/**
+ * The completion step (the lawn write gate, before the first report build, so the v6 copy's first
+ * freeze already sees the ties): read the visit's products, assessment run and the technician's taps,
+ * decide, freeze. Never throws; a failed read freezes nothing and the report renders as it always did.
+ * Returns the frozen block (for the caller's in-memory notes) or null.
+ */
+async function gatherAndFreezeReportFacts({ record, knex, now = new Date() }) {
+  try {
+    if (!record || !record.id || !knex) return null;
+    // Cheap exit: a block already on the row (a resumed completion, a second run) is never rebuilt.
+    if (readFrozenReportFacts(record.structured_notes)) return null;
+    const rows = await loadRows(record, knex);
+    if (!rows || !rows.length) return null;
+    const { assessment, run } = await loadAssessmentAndRun(record, knex);
+    const techFindings = require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes);
+    const facts = buildReportFacts({ rows, run, assessment, techFindings, now });
+    return await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
+  } catch (err) {
+    logger.warn(`[lawn-report-facts] gather failed for service_record ${record && record.id}: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = {
+  FREEZE_KEY,
+  FREEZE_VERSION,
+  REENTRY_TEXT,
+  REENTRY_PETS,
+  KIND_BY_LABEL,
+  PRODUCT_FOR_KIND,
+  TECH_PRODUCT,
+  productReentry,
+  visitReentry,
+  productUseEntries,
+  productUseText,
+  buildTies,
+  buildReportFacts,
+  readFrozenReportFacts,
+  frozenReentryRule,
+  frozenReentryForRecord,
+  frozenProductUseTexts,
+  frozenTies,
+  frozenTiedFamilies,
+  frozenReportFactsStamp,
+  reentryCondition,
+  freezeReportFacts,
+  gatherAndFreezeReportFacts,
+  cleanTies,
+  _test: { methodOf, labelHoursOf, roundedSqft, photoFindingsByKind, productKinds },
+};

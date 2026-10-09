@@ -1227,3 +1227,37 @@ describe('GET /:serviceId/reentry — behavioral', () => {
     expect(res.body).toMatchObject({ hasRecord: true, interiorMinutes: 45, adjusted: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Behavioral: the stepper seeds (GATE_LAWN_REPORT_FACTS, owner 2026-10-08)
+// ---------------------------------------------------------------------------
+
+describe('GET /:serviceId/reentry-defaults — a lawn report reads re-entry as a condition', () => {
+  afterEach(() => { mockDbCurrent = null; delete process.env.GATE_LAWN_REPORT_FACTS; jest.clearAllMocks(); });
+
+  const seeds = async (serviceType) => {
+    mockDbCurrent = makeRecordingDb({ svc: { ...COMPLETED_SVC, service_type: serviceType }, record: RECORD, recordCols: RECORD_COLS });
+    const layer = routeLayer('get', '/:serviceId/reentry-defaults');
+    const res = makeRes();
+    await layer.route.stack[layer.route.stack.length - 1].handle(
+      { params: { serviceId: 'svc-1' }, query: {}, technicianId: 'tech-1', techRole: 'technician' },
+      res,
+      (err) => { throw err; },
+    );
+    return res.body;
+  };
+
+  test('gate off: a lawn visit keeps its stepper seeds, as before', async () => {
+    expect(await seeds('Every 6 Weeks Lawn Care Service')).toEqual({ exteriorMinutes: 30, interiorMinutes: 0 });
+  });
+
+  test('gate on: a lawn visit seeds zero, which hides both steppers, and says why', async () => {
+    process.env.GATE_LAWN_REPORT_FACTS = 'true';
+    expect(await seeds('Every 6 Weeks Lawn Care Service')).toEqual({ exteriorMinutes: 0, interiorMinutes: 0, lawnCondition: true });
+  });
+
+  test('gate on: every other line keeps its steppers', async () => {
+    process.env.GATE_LAWN_REPORT_FACTS = 'true';
+    expect(await seeds('Quarterly Pest Control')).toEqual({ exteriorMinutes: 30, interiorMinutes: 120 });
+  });
+});
