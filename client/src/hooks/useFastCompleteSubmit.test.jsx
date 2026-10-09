@@ -519,3 +519,46 @@ it('a sheet tag rides every saved copy of its attempt (lawn visit sheet)', async
   expect(view.result.current.failure).toBe('retry');
   expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toMatchObject({ sheet: 'lawn_visit', summary: 'Lawn visit' });
 });
+
+describe('useFastCompleteSubmit invoice fields', () => {
+  const sentBody = (request, index = 0) => JSON.parse(request.mock.calls[index][1].body);
+
+  it('adds the visit\'s invoice fields to a new body, after the form\'s own fields', async () => {
+    const request = vi.fn().mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request, invoiceFields: { invoiceAlreadySent: true } }));
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => photoBody, 'Invoiced'); });
+    expect(sentBody(request)).toMatchObject({ ...photoBody, invoiceAlreadySent: true });
+  });
+
+  it('with no invoice fields the body is exactly what it was before the option existed', async () => {
+    const withNone = vi.fn().mockResolvedValue({ success: true });
+    const withEmpty = vi.fn().mockResolvedValue({ success: true });
+    const without = vi.fn().mockResolvedValue({ success: true });
+    for (const [request, extra] of [[withNone, { invoiceFields: null }], [withEmpty, { invoiceFields: {} }], [without, {}]]) {
+      globalThis.indexedDB = new IDBFactory();
+      const view = renderHook(() => useFastCompleteSubmit({ ...scope, request, ...extra }));
+      await waitFor(() => expect(view.result.current.recovering).toBe(false));
+      await act(async () => { await view.result.current.submit(() => photoBody, 'Plain'); });
+      view.unmount();
+    }
+    const strip = (call) => { const { idempotencyKey, ...rest } = call; return rest; };
+    expect(strip(sentBody(withNone))).toEqual(photoBody);
+    expect(strip(sentBody(withEmpty))).toEqual(photoBody);
+    expect(strip(sentBody(without))).toEqual(photoBody);
+    expect(sentBody(without)).not.toHaveProperty('invoiceAlreadySent');
+  });
+
+  it('a retry resends the held body byte for byte under the same key, invoice field included', async () => {
+    const request = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('offline'), { status: 503 }))
+      .mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request, invoiceFields: { invoiceAlreadySent: true } }));
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => photoBody, 'Invoiced'); });
+    await act(async () => { await view.result.current.retry(); });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1][1].body).toBe(request.mock.calls[0][1].body);
+    expect(sentBody(request, 1).invoiceAlreadySent).toBe(true);
+  });
+});
