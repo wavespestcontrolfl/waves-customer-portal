@@ -5375,6 +5375,15 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(await gone.runner.runNext()).toMatchObject({ brief_id: 'brief_fresh' });
   });
 
+  test('a draft that could not be read (GitHub down) keeps the row waiting on the same brief', async () => {
+    const { queue, runner, terminalWriter } = setup({ fetched: missing, handed: city('brief_handed') });
+    terminalWriter.fetchTerminalDraft.mockRejectedValue(Object.assign(new Error('Bad Gateway'), { status: 502 }));
+    const result = await runner.runNext();
+    expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_draft_unreadable', brief_id: 'brief_handed' });
+    expect(queue.defer).toHaveBeenCalledTimes(1);
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
   test('a title/meta rewrite stays on the agent', async () => {
     const composed = { id: 'brief_tw_meta', action_type: 'rewrite_title_meta', page_type: 'metadata', human_review_required: false };
     const { dispatcher, runner, terminalWriter } = setup({ fetched: { ok: true, draft }, composed });

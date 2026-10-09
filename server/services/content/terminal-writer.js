@@ -50,6 +50,8 @@ const GATE_RETRY_OUTCOME = 'deferred_gate_retry';
 const TERMINAL_AGENT_ID = 'terminal-writer';
 const MISSING = 'terminal_draft_missing';
 const INVALID = 'terminal_draft_invalid';
+// The branch could not be read at all (GitHub failed); the row keeps waiting.
+const UNREADABLE = 'terminal_draft_unreadable';
 const ALERT_KEY_PREFIX = 'content-terminal-due:';
 // How long a claim waits before the runner looks for the draft again.
 const RECHECK_MS = 3 * 60 * 60 * 1000;
@@ -109,8 +111,10 @@ async function waitingBriefId(opportunityId, { conn = db } = {}) {
  * so the runner's code after the dispatch does not change.
  *   { ok: true, draft, brief_id, revision }      a usable draft
  *   { ok: false, code: MISSING | INVALID, ... }  wait for the terminal
- * `revision` is the branch commit the file was read at (for the cleanup). A GitHub failure other than "not found" throws:
- * the run fails and retries, it must not be recorded as "no draft yet".
+ * `revision` is the branch commit the file was read at (for the cleanup).
+ * A GitHub failure other than "not found" throws; the runner records it as
+ * `terminal_draft_unreadable` (never as "no draft yet") and the row keeps
+ * waiting on the same brief.
  */
 async function fetchTerminalDraft(opportunityId, { gh = require('../content-astro/github-client'), expectedBriefId } = {}) {
   const t0 = Date.now();
@@ -244,5 +248,5 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
 module.exports = {
   terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, awaitingTerminalDrafts, raiseTerminalDue,
   branchFor, draftPathFor, draftProblem,
-  AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
+  AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
 };

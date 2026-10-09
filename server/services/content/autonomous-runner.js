@@ -667,13 +667,15 @@ class AutonomousRunner {
     run.agent_id = lastSessionResult.agent_id || null;
     run.agent_session_id = lastSessionResult.session_id || null;
 
-    // No usable draft from the terminal yet: not a failure. Record the run,
-    // keep the brief on it for the writing session, and look again later
-    // (defer refunds the attempt this claim used).
-    if (viaTerminal && [terminalWriter.MISSING, terminalWriter.INVALID].includes(dispatchResult.code)) {
+    // No usable draft from the terminal: not a failure. Record the run on
+    // the same brief and look again later (defer refunds the attempt this
+    // claim used). That covers a draft that could not be READ too (GitHub
+    // down): a failed run here would stop the row waiting on its brief and
+    // orphan a draft that is already pushed.
+    if (viaTerminal && !dispatchResult.ok) {
       const finalized = await finalize(run, t0, {
         outcome: terminalWriter.AWAITING_OUTCOME,
-        skip_reason: dispatchResult.code,
+        skip_reason: dispatchResult.code || terminalWriter.UNREADABLE,
         reviewer_notes: dispatchResult.reason,
       });
       await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
