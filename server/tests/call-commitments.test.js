@@ -194,6 +194,47 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     expect(at('09:00:00Z', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
   });
 
+  // codex #6215 r1 P1: the deadline is the latest bound the caller gave.
+  describe('callback window end', () => {
+    const cbFor = (start, end, callStart = '2026-09-02T08:00:00-04:00') => derive({
+      v2: { ...v2, scheduling: { ...v2.scheduling, callback_window_start: start, callback_window_end: end } },
+      callStartedAt: callStart,
+    }).find((i) => i.kind === 'callback');
+    const et = (wall) => new Date(`${wall}-04:00`).toISOString();
+
+    test('"between nine and eleven" is due at eleven, not nine', () => {
+      const cb = cbFor('09:00', '11:00');
+      expect(cb).toMatchObject({ due_at: et('2026-09-02T11:00:00'), due_basis: 'suggested', origin: 'v2:scheduling.callback_window_start' });
+      expect(cb.description).toContain('asked for 09:00 to 11:00');
+    });
+
+    test('a call made inside the window is still due at its end today', () => {
+      expect(cbFor('09:00', '11:00', '2026-09-02T10:00:00-04:00').due_at).toBe(et('2026-09-02T11:00:00'));
+    });
+
+    test('a window already over when the call started is due at its end tomorrow', () => {
+      expect(cbFor('09:00', '11:00', '2026-09-02T15:00:00-04:00').due_at).toBe(et('2026-09-03T11:00:00'));
+    });
+
+    test('a dated start with a bare-time end is due at that end on the start\'s day', () => {
+      expect(cbFor('2026-09-04T09:00', '11:00')).toMatchObject({ due_at: et('2026-09-04T11:00:00'), due_basis: 'stated' });
+    });
+
+    test('a dated end is taken as written', () => {
+      expect(cbFor('2026-09-04T09:00', '2026-09-04T11:30')).toMatchObject({ due_at: et('2026-09-04T11:30:00'), due_basis: 'stated' });
+    });
+
+    test('"before four" has no start: the promise is recorded and due at four', () => {
+      const cb = cbFor(null, '16:00');
+      expect(cb).toMatchObject({ due_at: et('2026-09-02T16:00:00'), due_basis: 'suggested', origin: 'v2:scheduling.callback_window_end' });
+      expect(cb.description).toContain('asked by 16:00');
+    });
+
+    test('an unreadable end falls back to the start', () => {
+      expect(cbFor('09:00', '11:00:00Z')).toMatchObject({ due_at: et('2026-09-02T09:00:00'), due_basis: 'suggested' });
+    });
+  });
+
   test('a callback datetime with no offset (the form the model writes when a day was named) is that ET wall clock', () => {
     const named = { ...v2, scheduling: { ...v2.scheduling, callback_window_start: '2026-09-04T14:00' } };
     const cb = derive({ v2: named, callStartedAt: '2026-09-02T08:00:00-04:00' }).find((i) => i.kind === 'callback');

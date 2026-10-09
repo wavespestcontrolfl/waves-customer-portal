@@ -366,6 +366,33 @@ function callbackDueAt(value, callStartedAt) {
   return due.toISOString();
 }
 
+// The callback DEADLINE is the latest bound the caller gave (codex #6215 r1
+// P1). "Between nine and eleven" is due at eleven, not nine; "before four"
+// has no start at all and is due at four. One time ("at two") is the start
+// and the deadline. An end written as a bare time beside a DATED start
+// ("tomorrow between nine and eleven" -> start 2026-09-03T09:00, end 11:00)
+// is on the start's day. An end that cannot be read falls back to the start.
+const WALL_DATE_RE = /^(\d{4}-\d{2}-\d{2})T/;
+function callbackDeadline(sched = {}, callStartedAt) {
+  const text = (v) => (v == null ? '' : String(v).trim());
+  const start = text(sched.callback_window_start);
+  const end = text(sched.callback_window_end);
+  if (!start && !end) return { asked: false, dueAt: null, basis: null, field: null, words: null };
+  const words = start && end ? `asked for ${start} to ${end}` : (start ? `asked for ${start}` : `asked by ${end}`);
+  const field = start ? 'callback_window_start' : 'callback_window_end';
+  const basisOf = (value) => (TIME_ONLY_RE.test(value) ? 'suggested' : 'stated');
+  if (end) {
+    const endTime = TIME_ONLY_RE.exec(end);
+    const startDate = WALL_DATE_RE.exec(start);
+    const endDue = endTime && startDate
+      ? isoOrNull(`${startDate[1]}T${endTime[1].padStart(2, '0')}:${endTime[2]}`)
+      : callbackDueAt(end, callStartedAt);
+    if (endDue) return { asked: true, dueAt: endDue, basis: endTime && startDate ? 'stated' : basisOf(end), field, words };
+  }
+  const startDue = start ? callbackDueAt(start, callStartedAt) : null;
+  return { asked: true, dueAt: startDue, basis: startDue ? basisOf(start) : null, field, words };
+}
+
 // A V2 quote is admitted only when the transcript literally carries it in
 // the turn of the speaker V2 claims for it (flat match when the transcript
 // has no speaker labels); a schema-valid payload can still hallucinate a
@@ -438,13 +465,14 @@ function deriveCommitmentsFromExtraction({ v2 = null, transcript = '', callStart
   // the same way. The promise is recorded even when it cannot be pinned
   // to an instant (no call start to date a bare time) — it then carries
   // the implicit deadline instead of a stated one.
-  const callbackAsked = sched.callback_window_start != null && String(sched.callback_window_start).trim() !== '';
-  const callbackWindow = callbackDueAt(sched.callback_window_start, callStartedAt);
+  const callback = callbackDeadline(sched, callStartedAt);
+  const callbackAsked = callback.asked;
+  const callbackWindow = callback.dueAt;
   if (callbackAsked || v2?.recommended_disposition === 'callback_task_created') {
     withEvidence({
       party: 'waves',
       kind: 'callback',
-      description: callbackAsked ? `Call the customer back (asked for ${sched.callback_window_start})` : 'Call the customer back',
+      description: callbackAsked ? `Call the customer back (${callback.words})` : 'Call the customer back',
       channel: 'call',
       due_at: callbackWindow,
       // A bare time was STATED; the date it was pinned to (the call's ET
@@ -452,10 +480,10 @@ function deriveCommitmentsFromExtraction({ v2 = null, transcript = '', callStart
       // the morning carries no date in the persisted schema — so the basis
       // is 'suggested', the schema's word for a derived deadline (Codex
       // #3738 r15 P2). A full datetime is a stated deadline.
-      due_basis: callbackWindow ? (TIME_ONLY_RE.test(String(sched.callback_window_start).trim()) ? 'suggested' : 'stated') : null,
+      due_basis: callbackWindow ? callback.basis : null,
       confidence: typeof conf.scheduling_window === 'number' ? conf.scheduling_window : null,
       evidence: evidenceFor(v2, ['/scheduling/callback_window_start', '/scheduling/callback_window_end']),
-      origin: callbackAsked ? 'v2:scheduling.callback_window_start' : 'v2:recommended_disposition',
+      origin: callbackAsked ? `v2:scheduling.${callback.field}` : 'v2:recommended_disposition',
     }, 'agent');
   }
 

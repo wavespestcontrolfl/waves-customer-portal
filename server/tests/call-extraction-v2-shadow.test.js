@@ -401,11 +401,13 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
     }
   });
 
-  test.each(['14:00', '09:30', '14:00:00', '2026-10-12T14:00', '2026-10-12T09:00:00'])('the model output accepts %s', (value) => {
+  // The old offset form stays valid for the model too (codex #6215 r1 P1): a provider
+  // that still writes it must not fail the whole extraction.
+  test.each(['14:00', '09:30', '14:00:00', '2026-10-12T14:00', '2026-10-12T09:00:00', '14:00:00-04:00', '09:00:00-05:00', '2026-10-12T14:00:00-04:00'])('the model output accepts %s', (value) => {
     expect(formErrors(validateModelOutput(withWindow(value, value)))).toEqual([]);
   });
 
-  test.each(['2 PM', '14', '25:00', '14:00:00-04:00', '14:00Z', '2026-10-12T14:00:00-04:00', '2026-10-12', 'afternoon'])('the model output rejects %s', (value) => {
+  test.each(['2 PM', '14', '25:00', '14:00Z', '14:00:00Z', '14:00:00+02:00', '2026-10-12T14:00:00Z', '2026-10-12', 'afternoon'])('the model output rejects %s', (value) => {
     expect(formErrors(validateModelOutput(withWindow(value))).length).toBeGreaterThan(0);
   });
 
