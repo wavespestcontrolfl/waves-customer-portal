@@ -24,6 +24,7 @@ const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { loadTruckStops } = require('../services/bouncie-truck-stops');
 const gps = require('../services/gps-arrival-detector');
 const store = require('../services/customer-pin-suggestions');
+const reviewStore = require('../services/customer-geocode-review');
 
 const describeDb = SKIP ? describe.skip : describe;
 jest.setTimeout(60000);
@@ -353,6 +354,104 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     await mockPg('customers').where({ id: customerId }).update({ deleted_at: new Date() });
     await run();
     expect((await all(customerId))[0].status).toBe('superseded');
+  });
+
+  describe("the saved pin is the review panel's effective pin", () => {
+    const RAW = north(900); // the customer row's own coordinates, 900 m from the primary property's
+    async function primaryProperty(customerId, pin) {
+      await mockPg('customer_properties').insert({
+        customer_id: customerId, address_line1: '100 Fixture Rd', city: 'Fixture City', state: 'FL', zip: '34201',
+        is_primary: true, active: true, latitude: pin.lat, longitude: pin.lng,
+      });
+    }
+
+    test('when the customer row and the primary property differ, the property pin is judged, stored and shown', async () => {
+      const techId = await technician();
+      const customerId = await customer(RAW);
+      await primaryProperty(customerId, PIN);
+      await completedVisit(customerId, techId); // the visit carries the property pin
+      await truckStopsAt(north(540), 30);
+      expect(await run()).toMatchObject({ created: 1 });
+      const [row] = await open(customerId);
+      expect(Number(row.pin_lat)).toBeCloseTo(PIN.lat, 7);
+      expect(row.distance_m).toBe(540); // measured from the pin staff see, not from the raw customer row
+      const detail = await reviewStore.getReviewDetail(customerId, mockPg);
+      expect(store.visibleSuggestion(detail, row)).not.toBeNull(); // the panel shows it, with Dismiss
+    });
+
+    test('a stop at the property pin settles the customer even though the raw customer row is far from it', async () => {
+      const techId = await technician();
+      const customerId = await customer(RAW);
+      await primaryProperty(customerId, PIN);
+      await completedVisit(customerId, techId, { lat: RAW.lat, lng: RAW.lng }); // an old visit stamp from the raw row
+      await truckStopsAt(north(40), 30);
+      expect((await run()).created).toBe(0);
+    });
+
+    test('a pin verified at the property coordinates is verified, whatever the raw customer row says', async () => {
+      const techId = await technician();
+      const customerId = await customer(RAW);
+      await primaryProperty(customerId, PIN);
+      await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      await mockPg('customer_geocode_reviews').insert({
+        customer_id: customerId, address_snapshot: JSON.stringify(['100 Fixture Rd', null, 'Fixture City', 'FL', '34201']),
+        status: 'verified', reason: 'staff_verified', latitude: PIN.lat, longitude: PIN.lng, reviewed_at: new Date(),
+      });
+      expect((await reviewStore.getReviewDetail(customerId, mockPg)).review.status).toBe('verified');
+      expect((await run()).created).toBe(0);
+      expect(await all(customerId)).toHaveLength(0);
+    });
+
+    test('a primary property at another address does not override the customer row', async () => {
+      const techId = await technician();
+      const customerId = await customer(PIN);
+      await mockPg('customer_properties').insert({
+        customer_id: customerId, address_line1: '9 Other Way', city: 'Fixture City', state: 'FL', zip: '34201',
+        is_primary: true, active: true, latitude: RAW.lat, longitude: RAW.lng,
+      });
+      await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      expect(await run()).toMatchObject({ created: 1 });
+      expect(Number((await open(customerId))[0].pin_lat)).toBeCloseTo(PIN.lat, 7);
+    });
+
+    test('a customer with no saved pin gets no suggestion, not an invisible one built from the visit', async () => {
+      const techId = await technician();
+      const customerId = await customer(PIN, { latitude: null, longitude: null });
+      await completedVisit(customerId, techId); // the visit still carries a pin
+      await truckStopsAt(north(540), 30);
+      const result = await run();
+      expect(result.created).toBe(0);
+      expect(await all(customerId)).toHaveLength(0);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('a pin that goes away or moves under an open suggestion closes it', async () => {
+      const techId = await technician();
+      const customerId = await customer(PIN);
+      await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      await run();
+      expect(await open(customerId)).toHaveLength(1);
+      await mockPg('customers').where({ id: customerId }).update({ latitude: null, longitude: null });
+      await run();
+      expect(await open(customerId)).toHaveLength(0);
+      expect((await all(customerId))[0].status).toBe('superseded');
+    });
+
+    test('the dismissed-same-pin check uses the same effective pin', async () => {
+      const techId = await technician();
+      const customerId = await customer(RAW);
+      await primaryProperty(customerId, PIN);
+      await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      await run();
+      const [row] = await open(customerId);
+      await store.dismiss(customerId, row.id, null);
+      expect((await run()).created).toBe(0);
+      expect(await all(customerId)).toHaveLength(1);
+    });
   });
 
   describe('one decision per customer, from every visit in the window', () => {

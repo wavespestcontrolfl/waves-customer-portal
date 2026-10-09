@@ -114,6 +114,24 @@ describe('flag rules', () => {
   });
 });
 
+describe("the effective saved pin (the review panel's own rule)", () => {
+  const row = (extra = {}) => ({
+    customer_address_line1: '100 Fixture Rd', customer_address_line2: null, customer_city: 'Fixture City', customer_state: 'FL', customer_zip: '34201',
+    customer_latitude: 27.5, customer_longitude: -82.6,
+    primary_property_id: 'p1', primary_address_line1: '100 Fixture Rd', primary_address_line2: null, primary_city: 'Fixture City',
+    primary_state: 'FL', primary_zip: '34201', primary_latitude: 27.49, primary_longitude: -82.57, ...extra,
+  });
+  test('the matching primary property pin wins over the customer row', () => {
+    expect(p.effectivePinColumns(row())).toEqual({ customer_latitude: 27.49, customer_longitude: -82.57 });
+  });
+  test('a primary property at another address, without a pin, or absent leaves the customer row', () => {
+    const own = { customer_latitude: 27.5, customer_longitude: -82.6 };
+    expect(p.effectivePinColumns(row({ primary_address_line1: '9 Other Way' }))).toEqual(own);
+    expect(p.effectivePinColumns(row({ primary_latitude: null, primary_longitude: null }))).toEqual(own);
+    expect(p.effectivePinColumns(row({ primary_property_id: null }))).toEqual(own);
+  });
+});
+
 describe('days, grouped visits and neighbours', () => {
   test('a visit looks at the day it was scheduled and the ET day it was completed', () => {
     expect(p.visitDays(visit({ scheduled_day: '2026-10-07', completed_at: new Date('2026-10-08T15:30:00Z') })).sort()).toEqual(['2026-10-07', '2026-10-08']);
@@ -214,6 +232,9 @@ describe('settled suggestions', () => {
     const verified = { status: 'verified', address_snapshot: ['100 Fixture Rd', null, 'Fixture City', 'FL', '34201'], latitude: 27.49, longitude: -82.57 };
     expect(p.settledReason(open, customer, verified)).toBe('pin_verified');
     expect(p.settledReason(open, customer, { status: 'outside_area', address_snapshot: verified.address_snapshot })).toBe('pin_verified');
+  });
+  test('a pin that is gone closes the suggestion too (nothing comparable is left to show)', () => {
+    expect(p.settledReason(open, { ...customer, latitude: null, longitude: null }, null)).toBe('pin_changed');
   });
   test('a stale verification (the pin moved after it) does not count as verified', () => {
     const stale = { status: 'verified', address_snapshot: ['100 Fixture Rd', null, 'Fixture City', 'FL', '34201'], latitude: 27.5, longitude: -82.6 };

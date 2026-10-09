@@ -36,7 +36,7 @@ const logger = require('./logger');
 const { pinParkedCheckLive } = require('../config/feature-gates');
 const { distanceMeters, loadArrivalConfig } = require('./gps-arrival-detector');
 const truckStops = require('./bouncie-truck-stops');
-const { effectiveReview, reviewEnabled } = require('./customer-geocode-review');
+const { effectiveReview, effectiveCustomer, reviewEnabled } = require('./customer-geocode-review');
 const { stampedAddressDiverges } = require('./stamped-address');
 const { isInServiceAreaBox } = require('./service-area');
 const { raiseAdminAlert } = require('./admin-alert-compose');
@@ -85,11 +85,30 @@ async function loadCompletedVisits(conn, { fromMs, toMs }) {
       conn.raw('s.scheduled_date::text as scheduled_day'),
       's.lat as service_lat', 's.lng as service_lng',
       's.service_address_line1', 's.service_address_city', 's.service_address_zip',
-      'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1', 'c.city as customer_city',
-      'c.zip as customer_zip', 'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
-      'p.id as primary_property_id', 't.bouncie_imei',
+      'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2',
+      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip',
+      'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
+      'p.id as primary_property_id', 'p.address_line1 as primary_address_line1', 'p.address_line2 as primary_address_line2',
+      'p.city as primary_city', 'p.state as primary_state', 'p.zip as primary_zip',
+      'p.latitude as primary_latitude', 'p.longitude as primary_longitude', 't.bouncie_imei',
     );
-  return rows.map((row) => ({ ...row, bouncie_imei: String(row.bouncie_imei).trim() }));
+  return rows.map((row) => ({ ...row, ...effectivePinColumns(row), bouncie_imei: String(row.bouncie_imei).trim() }));
+}
+
+/**
+ * The saved pin as the review panel shows it: the review store's own effectiveCustomer (the matching primary
+ * property's coordinates win over the customer row's). One definition for judging, verifying, storing and showing.
+ */
+function effectivePinColumns(row) {
+  const pick = (prefix) => ({
+    address_line1: row[`${prefix}_address_line1`], address_line2: row[`${prefix}_address_line2`], city: row[`${prefix}_city`],
+    state: row[`${prefix}_state`], zip: row[`${prefix}_zip`],
+  });
+  const customer = { ...pick('customer'), latitude: row.customer_latitude, longitude: row.customer_longitude };
+  const primary = row.primary_property_id == null ? null
+    : { ...pick('primary'), latitude: row.primary_latitude, longitude: row.primary_longitude };
+  const effective = effectiveCustomer(customer, primary);
+  return { customer_latitude: effective.latitude, customer_longitude: effective.longitude };
 }
 
 /** One row per physical visit: grouped partners (the same visit_id) are the same stop. */
@@ -208,15 +227,17 @@ async function recordSuggestion(conn, visit, verdict) {
       // suggestion" step always runs after the insert below, never before it.
       const customer = await trx('customers').where({ id: visit.customer_id }).whereNull('deleted_at').forShare().first();
       if (!customer) return { skipped: 'customer_gone' };
-      const review = await trx('customer_geocode_reviews').where({ customer_id: customer.id }).first();
-      if (BLOCKED_REVIEW.includes(effectiveReview(customer, review).status)) return { skipped: 'review_settled' };
-      const saved = usablePin(customer.latitude, customer.longitude);
+      const [review, primary] = await Promise.all([
+        trx('customer_geocode_reviews').where({ customer_id: customer.id }).first(),
+        trx('customer_properties').where({ customer_id: customer.id, active: true, is_primary: true }).first(),
+      ]);
+      // The panel's own view of the customer: this is the pin staff see, verify and replace.
+      const shown = effectiveCustomer(customer, primary);
+      if (BLOCKED_REVIEW.includes(effectiveReview(shown, review).status)) return { skipped: 'review_settled' };
+      const pin = usablePin(shown.latitude, shown.longitude);
+      if (!pin) return { skipped: 'no_saved_pin' }; // nothing comparable to show staff, so nothing to suggest
       const read = usablePin(visit.customer_latitude, visit.customer_longitude);
-      if ((saved && !read) || (!saved && read)
-        || (saved && read && !(store.same7(saved.lat, read.lat) && store.same7(saved.lng, read.lng)))) {
-        return { skipped: 'pin_changed' };
-      }
-      const pin = saved || verdict.pin;
+      if (!read || !(store.same7(pin.lat, read.lat) && store.same7(pin.lng, read.lng))) return { skipped: 'pin_changed' };
       if (!isInServiceAreaBox(verdict.parked.lat, verdict.parked.lng, { zip: customer.zip })) return { skipped: 'outside_service_area' };
       return await insertSuggestion(trx, visit, verdict, pin);
     });
@@ -328,7 +349,7 @@ async function postPendingNotifications(conn) {
 
 // ---------- closing settled suggestions ----------
 
-/** Open suggestions whose customer is gone, whose pin was verified, or whose pin moved. */
+/** Open suggestions whose customer is gone, whose pin was verified, or whose saved pin moved or went away. */
 async function closeSettledSuggestions(conn) {
   const open = await conn('customer_pin_suggestions').where({ status: 'open' }).select(store.COLUMNS);
   if (!open.length) return 0;
@@ -337,9 +358,12 @@ async function closeSettledSuggestions(conn) {
     .map((row) => [String(row.id), row]));
   const reviews = new Map((await conn('customer_geocode_reviews').whereIn('customer_id', ids).select('*'))
     .map((row) => [String(row.customer_id), row]));
+  const primaries = new Map((await conn('customer_properties').whereIn('customer_id', ids).where({ active: true, is_primary: true }).select('*'))
+    .map((row) => [String(row.customer_id), row]));
   let closed = 0;
   for (const row of open) {
-    const customer = customers.get(String(row.customer_id));
+    const found = customers.get(String(row.customer_id));
+    const customer = found && effectiveCustomer(found, primaries.get(String(row.customer_id)));
     const reason = settledReason(row, customer, reviews.get(String(row.customer_id)));
     if (reason && await store.closeSuggestion(row.id, 'superseded', { reason, resolution: 'Closed: the pin no longer needs a check', conn })) {
       closed += 1;
@@ -352,7 +376,8 @@ function settledReason(row, customer, review) {
   if (!customer) return 'customer_gone';
   if (BLOCKED_REVIEW.includes(effectiveReview(customer, review).status)) return 'pin_verified';
   const pin = usablePin(customer.latitude, customer.longitude);
-  if (pin && !(store.same7(pin.lat, row.pin_lat) && store.same7(pin.lng, row.pin_lng))) return 'pin_changed';
+  // No saved pin (revoked, cleared) or a different one: the suggestion no longer describes what staff would see.
+  if (!pin || !(store.same7(pin.lat, row.pin_lat) && store.same7(pin.lng, row.pin_lng))) return 'pin_changed';
   return null;
 }
 
@@ -462,7 +487,7 @@ module.exports = {
   runPinParkedCheck,
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
-    alertDetail, settledReason, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    alertDetail, settledReason, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };
