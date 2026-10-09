@@ -64,6 +64,8 @@ describeDb('v13 final pass limits through PostgreSQL', () => {
       const customerId = await history(BLINDSIDE, [['2026-01-05', 0.149, 'oz']]);
       const second = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.149, unit: 'oz' } });
       expect(second.allowed).toBe(false);
+      // Blocked twice: by the count of 1 (effectiveCap) and by the amount.
+      expect(second.blocks.map((b) => b.type).sort()).toEqual(['annual_max_apps', 'annual_max_rate']);
       expect(amountBlock(second)[0].message).toMatch(/total 64.8% of the yearly label amount \(0\.23 oz per 1,000 sq ft\).*brings it to 129.6% — THIS APPLICATION WOULD EXCEED IT/);
       const over = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.23, unit: 'oz' } });
       expect(over.allowed).toBe(false);
@@ -90,19 +92,20 @@ describeDb('v13 final pass limits through PostgreSQL', () => {
       expect(amountBlock(result)[0].message).toMatch(/total 100% of the yearly label amount.*1 earlier application sized at the standard rate/);
     });
 
-    test('a proposal with no dose counts the staged row\'s 0.149 oz; with no staged rate it counts the fixed 0.23', async () => {
-      const customerId = await history(BLINDSIDE, [['2026-01-05', 0.08, 'oz']]);
+    test('a proposal with no dose counts the staged row\'s 0.149 oz (64.8%); with no staged rate it counts the fixed 0.23 (100%)', async () => {
+      const customerId = await history(BLINDSIDE, []);
       const fixed = await check(customerId, BLINDSIDE, { proposal: true });
-      expect(fixed.allowed).toBe(false);
+      expect(fixed.allowed).toBe(true);
+      expect(fixed.warnings.map((w) => w.message)).toContain('Blindside Herbicide: 0/1 this year — this would be the LAST allowed.');
+      expect(fixed.warnings.find((w) => w.type === 'annual_max_rate').message).toMatch(/this application brings it to 100%/);
       const [protocol] = await knex('lawn_protocols').insert({ protocol_key: 'fixture_fp_limits', version: '2026.10-v13', name: 'Fixture', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
       const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: protocol.id, month: 12, window_key: 'dec_fixture', title: 'dec', visit_type: 'fixture', production_mode: 'fixture' }).returning('*');
       await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[BLINDSIDE].id, product_name: BLINDSIDE, role: 'post_emergent_spot', application_mode: 'spot', rate_per_1000: 0.149, rate_unit: 'oz', default_in_plan: false });
       try {
         const staged = await check(customerId, BLINDSIDE, { proposal: true });
         expect(staged.allowed).toBe(true);
-        const forced = await knex('lawn_protocol_products').update({ rate_per_1000: 0.16 });
-        expect(forced).toBe(1);
-        expect((await check(customerId, BLINDSIDE, { proposal: true })).allowed).toBe(false);
+        // 0.149 of 0.23 is 64.8%: below the warning threshold, so the fixed 0.23 (100%) is not what was counted.
+        expect(staged.warnings.some((w) => w.type === 'annual_max_rate')).toBe(false);
       } finally {
         await knex('lawn_protocol_products').del();
         await knex('lawn_protocol_windows').del();
@@ -110,10 +113,18 @@ describeDb('v13 final pass limits through PostgreSQL', () => {
       }
     });
 
-    test('the count of 2 still applies on top of the amount', async () => {
-      const customerId = await history(BLINDSIDE, [['2026-01-05', 0.05, 'oz'], ['2026-02-02', 0.05, 'oz']]);
-      const result = await check(customerId, BLINDSIDE);
+    test('the count of 1 blocks a second pass even when the amount would fit (a small earlier pass)', async () => {
+      const customerId = await history(BLINDSIDE, [['2026-01-05', 0.05, 'oz']]);
+      const result = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.05, unit: 'oz' } });
+      expect(result.allowed).toBe(false);
       expect(result.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      expect(result.blocks[0].message).toMatch(/1/);
+    });
+
+    test('the count limit row the app reads says 1 for Blindside and still 2 for Certainty', async () => {
+      const count = async (name) => (await caps.applyV13CountCaps(knex, { id: catalog[name].id, name }, [], catalog[name].id)).find((l) => l.limit_type === 'annual_max_apps').limit_value;
+      expect(await count(BLINDSIDE)).toBe(1);
+      expect(await count(CERTAINTY)).toBe(2);
     });
   });
 
@@ -223,7 +234,7 @@ describeDb('v13 final pass limits through PostgreSQL', () => {
       const velista = await history(VELISTA, dates(4).map((d) => [d, 0.7, 'oz']));
       expect((await audit(velista, VELISTA)).map((v) => v.type)).toEqual(['annual_max_rate']);
       const blindside = await history(BLINDSIDE, [['2026-01-05', 0.23, 'oz']]);
-      expect((await audit(blindside, BLINDSIDE)).map((v) => v.type)).toEqual(['annual_max_rate']);
+      expect((await audit(blindside, BLINDSIDE)).map((v) => v.type).sort()).toEqual(['annual_max_apps', 'annual_max_rate']);
       const dylox = await history(DYLOX, [['2026-02-01', 3, 'lb'], ['2026-03-01', 3, 'lb'], ['2026-04-01', 3, 'lb']]);
       expect((await audit(dylox, DYLOX)).map((v) => v.type)).toEqual(['annual_max_apps']);
       const certainty = await history(CERTAINTY, [['2026-05-01', 0.028, 'oz']]);

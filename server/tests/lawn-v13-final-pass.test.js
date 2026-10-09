@@ -14,6 +14,7 @@ const visit = (month, track = 'st_augustine') => v13[track].visits.find((v) => v
 const lines = (text) => String(text || '').split('\n').filter(Boolean);
 const lineFor = (month, name, track) => lines(visit(month, track).secondary).filter((l) => l.startsWith(`${name} — `));
 const N = staged.NAMES;
+const entry = (name) => caps.V13_LIMITS.find((e) => e.name === name);
 
 describe('the recipe file', () => {
   test('the three tracks stay identical except for the name', () => {
@@ -30,60 +31,26 @@ describe('the recipe file', () => {
     expect(raw).toBe(`${JSON.stringify(JSON.parse(raw), null, 2)}\n`);
   });
 
-  test.each(TRACKS)('%s: Topchoice carries the 500 ft scrub-jay setback beside the water setbacks in April and October, and the safety rules say who checks the map', (track) => {
-    for (const month of [4, 10]) {
-      const [line] = lineFor(month, 'Topchoice Granular Insecticide', track);
-      expect(line).toContain('not within 15 ft of fresh water or 60 ft of tidal water; not within 500 ft of areas occupied by the threatened Florida scrub jay, bluetail mole skink or sand skink');
-      expect(line).toContain('the office checks the county scrub-jay habitat map before it prices the add-on');
-    }
-    const rule = v13[track].safety_rules.find((r) => r.startsWith('Topchoice Granular Insecticide: not within 500 ft'));
-    expect(rule).toMatch(/Florida scrub jay, bluetail mole skink or sand skink/);
-    expect(rule).toMatch(/The office checks the county scrub-jay habitat map before it prices the add-on/);
+  test.each(TRACKS)('%s: Blindside is 0.149 oz, one application per lawn per year, in the notes, the safety rule and every Blindside visit line', (track) => {
+    expect(JSON.stringify(v13[track])).not.toContain('0.115');
+    expect(v13[track].safety_rules[0]).toContain('(Celsius and Certainty: up to 2 applications per lawn per year each; Blindside: 1 application per lawn per year)');
+    expect(v13[track].safety_rules[0]).toContain('at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: warm-season rate 0.149 to 0.23 oz a pass, no more than 0.23 oz per 1,000 sq ft a year)');
+    expect(v13[track].notes.join('\n')).toContain('Blindside goes on at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: the warm-season rate is 0.149 to 0.23 oz a pass, and no more than 0.23 oz per 1,000 sq ft (10 oz per acre) a year).');
   });
 
-  test.each(TRACKS)('%s: the Pythium pair stays Artavia twice, as a named exception to the group rule (no Headway: it repeats group 11)', (track) => {
-    for (const month of [6, 7, 8]) {
-      expect(lineFor(month, N.ART, track).join('\n')).toContain('Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most. This pair is a named exception to the group rule (no other Pythium product is in the kit; the Artavia label allows sequential applications). Fix the watering first.');
-      expect(lineFor(month, 'Headway Fungicide', track)).toEqual([]);
-    }
-    const notes = v13[track].notes.join('\n');
-    expect(notes).toMatch(/Three exceptions: Group 3 pre-emergents .*, the take-all pair \(Artavia, then Headway 30 days later, or Artavia twice; both recorded for take-all\) and the Pythium pair \(Artavia twice, 10 to 14 days apart; no other Pythium product is in the kit/);
-    expect(notes).toContain('Pythium root rot with Artavia in June, July and August');
-    expect(v13[track].safety_rules.find((r) => /chemical group/.test(r))).toMatch(/and the Pythium pair \(Artavia twice, 10 to 14 days apart, recorded for Pythium\)\.$/);
-  });
-
-  test.each(TRACKS)('%s: Acelepryn prints the label\'s caterpillar range', (track) => {
-    for (const month of [7, 8, 9]) expect(lineFor(month, 'Acelepryn Insecticide', track)[0]).toContain('caterpillars, 0.05 to 0.09 fl oz per 1,000 sq ft, recheck in 7 days');
-    expect(JSON.stringify(v13[track])).not.toMatch(/0\.046|0\.092/);
-  });
-
-  test.each(TRACKS)('%s: Arena is the Florida 2(ee) rate, below the label range of 9.6 to 12.8 oz per acre, with the numbers unchanged', (track) => {
-    const note = v13[track].notes.find((n) => n.startsWith('Chinch bugs'));
-    expect(note).toContain('Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the Florida 2(ee) recommendation rate, below the label\'s chinch range of 9.6 to 12.8 oz per acre; about 1.4 level teaspoons), up to 2 applications per lawn per year at least 8 weeks (56 days) apart');
-    expect(note).toContain('Two applications reach the label\'s yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre)');
-    expect(JSON.stringify(v13[track])).not.toContain('low end of the label');
-  });
-
-  test.each(TRACKS)('%s: November and December say what to do on an active large patch; N rates are unchanged', (track) => {
-    expect(visit(11, track).notes).toContain('Active large patch mapped this month: use the 0.5 lb N setting (2.1 lb of the 24-0-11 per 1,000 sq ft) and keep fertilizer off the patch.');
-    expect(visit(12, track).notes).toContain('Active large patch mapped this month: keep fertilizer off the patch.');
-    expect(visit(12, track).notes).not.toMatch(/0\.5 lb N setting/);
-    expect(visit(11, track).notes).toMatch(/^N rate: 0\.75 lb N\./);
-    expect(visit(12, track).notes).toMatch(/^N rate: 0\.45 lb N\. K rate: 0\.99 lb K\./);
-    // 2.1 lb of 24-0-11 is the 0.5 lb N the April visit already uses.
-    expect(Math.round(2.1 * 0.24 * 1000) / 1000).toBe(0.504);
-    expect(visit(4, track).primary).toContain('2.1 lb per 1,000 sq ft (0.5 lb N)');
-  });
-
-  test.each(TRACKS)('%s: the large patch and take-all lines state the catalog rates', (track) => {
-    expect(lineFor(1, N.ART, track)[0]).toContain('active large patch, mapped areas, 0.38 to 0.77 fl oz per 1,000 sq ft');
-    expect(lineFor(12, N.ART, track)[0]).toContain('active large patch, mapped areas, 0.38 to 0.77 fl oz per 1,000 sq ft');
-    expect(lineFor(10, N.ART, track)[0]).toContain('mapped large patch with Velista, 0.38 to 0.77 fl oz per 1,000 sq ft at 2 gal per 1,000 sq ft');
-    expect(lineFor(3, N.ART, track)[0]).toContain('mapped take-all areas, first spring application, 0.77 fl oz per 1,000 sq ft');
-    expect(lineFor(9, N.ART, track)[0]).toContain('mapped take-all areas, first fall application, 0.77 fl oz per 1,000 sq ft');
-    expect(lineFor(1, N.VEL, track)[0]).toContain('large patch, the next application after Artavia, 0.5 oz per 1,000 sq ft');
-    expect(lineFor(10, N.VEL, track)[0]).toContain('mapped large patch with Artavia, 0.5 oz per 1,000 sq ft at 2 gal per 1,000 sq ft;');
-    expect(lineFor(11, N.VEL, track)[0]).toContain('mapped large patch, 0.5 oz per 1,000 sq ft at 2 gal per 1,000 sq ft;');
+  // Recipe wording stays behind the data it needs (AGENTS.md "Lawn protocol data fan-out"): the wording below has no staged or
+  // field-exec data yet, so this file keeps the text it had before the final pass. Each later PR that adds the data adds the wording.
+  test.each(TRACKS)('%s: wording with no data behind it is not in the recipe (Pythium exception, Topchoice scrub-jay, Acelepryn rounding, large-patch N, fungicide rates)', (track) => {
+    const text = JSON.stringify(v13[track]);
+    expect(text).not.toMatch(/named exception|Three exceptions|Pythium pair/);
+    expect(text).not.toMatch(/scrub[- ]jay|mole skink|sand skink/);
+    expect(text).not.toMatch(/0\.05 to 0\.09/);
+    expect(text).toContain('0.046 to 0.092 fl oz per 1,000 sq ft');
+    expect(visit(11, track).notes).not.toMatch(/large patch mapped this month/);
+    expect(visit(12, track).notes).not.toMatch(/large patch mapped this month/);
+    expect(lineFor(7, N.ART, track)[0]).toContain('Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most');
+    expect(v13[track].notes.join('\n')).toContain('twice in a row. Two exceptions: Group 3 pre-emergents');
+    expect(lineFor(1, N.ART, track)[0]).toBe(`${N.ART} — active large patch, mapped areas`);
   });
 
   test('no Nutra-TECH rate, North Port wording or N rate moved (spot checks against the pre-change text)', () => {
@@ -96,7 +63,6 @@ describe('the recipe file', () => {
 });
 
 describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
-  const entry = (name) => caps.V13_LIMITS.find((e) => e.name === name);
 
   test('V13_COUNT_CAPS keeps exactly the four names that pushed migrations 20261007175000 and 20261007177000 read when they run', () => {
     expect(caps.V13_COUNT_CAPS.map((e) => e.name)).toEqual(['Celsius WG', 'Arena 50 WDG', 'Certainty Turf Herbicide', 'Blindside Herbicide']);
@@ -108,6 +74,8 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
   test('Blindside: program rate 0.149 oz (label warm-season rate), count 2 kept for frozen migrations, yearly amount 0.23 oz holds it to one pass', () => {
     const blindside = entry('Blindside Herbicide');
     expect(blindside.cap).toBe(2);
+    expect(blindside.effectiveCap).toBe(1);
+    expect(blindside.description).toContain('max 1 application per lawn per year');
     expect(blindside.annualAmount).toMatchObject({ cap: 0.23, unit: 'oz/1000sf/year', fallbackRate: 0.23 });
     expect(blindside.annualAmount.description).toContain('EPA 279-3411');
     // One pass at the v13 rate fits the yearly amount; two (0.298 oz) do not; one at the label maximum fills it.
@@ -125,6 +93,28 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
     expect(migration.BLINDSIDE_UNIT).toBe('oz');
   });
 
+  test('only Blindside has an effectiveCap; every runtime reader uses it (capOf), the frozen migrations still read cap 2', () => {
+    expect(caps.V13_LIMITS.filter((e) => e.effectiveCap != null).map((e) => [e.name, e.cap, e.effectiveCap])).toEqual([['Blindside Herbicide', 2, 1]]);
+    const blind = entry('Blindside Herbicide');
+    const [count] = caps.withEntryCaps(blind, [], 'p1');
+    expect([count.limit_type, count.limit_value, count.description]).toEqual(['annual_max_apps', 1, blind.description]);
+    const stored = { id: 7, product_id: 'p1', match_type: 'product', limit_type: 'annual_max_apps', limit_value: 5, limit_unit: 'applications', severity: 'warning' };
+    expect(caps.withEntryCaps(blind, [stored], 'p1')[0]).toMatchObject({ id: 7, limit_value: 1, severity: 'hard_block' });
+    expect(caps.withEntryCaps(blind, [{ ...stored, limit_value: 0 }], 'p1')[0].limit_value).toBe(0);
+    expect(caps.syntheticCountLimit(blind, 'p1').limit_value).toBe(1);
+    // Plan and visit-brief figures: a stale staged row at 2 shows 1; a row at 1 is left alone (the same object).
+    const stale = caps.withEntryCapMetadata(blind, { gates: { annualMaxApps: 2 }, annual_counter: { maxApplications: 2 } });
+    expect([stale.gates.annualMaxApps, stale.annual_counter.maxApplications]).toEqual([1, 1]);
+    const product = { gates: { annualMaxApps: 1 }, annual_counter: { maxApplications: 1 } };
+    expect(caps.withEntryCapMetadata(blind, product)).toBe(product);
+    for (const name of ['Celsius WG', 'Certainty Turf Herbicide']) {
+      const kept = caps.withEntryCapMetadata(entry(name), { gates: { annualMaxApps: 2 }, annual_counter: { maxApplications: 2 } });
+      expect([kept.gates.annualMaxApps, kept.annual_counter.maxApplications]).toEqual([2, 2]);
+      expect(caps.withEntryCaps(entry(name), [], 'p1')[0].limit_value).toBe(2);
+    }
+    expect(caps.CELSIUS_YTD_CAP).toBe(2);
+  });
+
   test('Certainty keeps its count of 2 and gains a 28 day interval; Dylox is a count of 3; Velista and Artavia carry only a yearly amount', () => {
     expect(entry('Certainty Turf Herbicide')).toMatchObject({ cap: 2, minIntervalDays: 28 });
     expect(entry('Certainty Turf Herbicide').intervalDescription).toContain('4 or more weeks');
@@ -136,13 +126,11 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
     expect(entry('Artavia 2 SC (Azoxy)').cap).toBeUndefined();
   });
 
-  test('the Arena entry: numbers unchanged, wording corrected in the header and the description', () => {
+  test('the Arena entry is as it was (numbers and wording): the source-wording change is not in this PR', () => {
     const arena = entry('Arena 50 WDG');
     expect(arena).toMatchObject({ cap: 2, minIntervalDays: 56, annualAmount: { cap: 0.294, unit: 'oz/1000sf/year', fallbackRate: 0.29 } });
-    expect(arena.description).toContain('the Florida 2(ee) recommendation rate, below the label\'s chinch range of 9.6 to 12.8 oz per acre');
-    const source = fs.readFileSync(path.join(__dirname, '../config/lawn-v13-count-caps.js'), 'utf8');
-    expect(source).not.toMatch(/low end of the label/);
-    expect(source).toMatch(/Florida 2\(ee\)[\s*]+recommendation rate and below the label's chinch range/);
+    expect(arena.description).toContain('the low end of the label\'s turf range');
+    expect(arena.effectiveCap).toBeUndefined();
   });
 
   test.each([
@@ -199,7 +187,16 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
   });
 });
 
-describe('the migration', () => {
+describe('the migrations', () => {
+  const blindsideCatalog = require('../models/migrations/20261009151000_lawn_v13_final_pass_blindside_catalog');
+  test('20261009151000: audit actions fit the column, the figures match the recipe and the limit entry', () => {
+    expect(blindsideCatalog.ACTION_CATALOG.length).toBeLessThanOrEqual(40);
+    expect(blindsideCatalog.ACTION_CAP.length).toBeLessThanOrEqual(40);
+    expect([blindsideCatalog.RATE, blindsideCatalog.UNIT, blindsideCatalog.OLD_CAP, blindsideCatalog.NEW_CAP]).toEqual([0.149, 'oz', 2, 1]);
+    expect(blindsideCatalog.RATE).toBe(migration.BLINDSIDE_RATE);
+    expect(blindsideCatalog.NEW_CAP).toBe(entry('Blindside Herbicide').effectiveCap);
+  });
+
   test('its audit action fits the column (40 characters) and its names are the catalog\'s', () => {
     expect(migration.ACTION.length).toBeLessThanOrEqual(40);
     expect(migration.WEED_NAMES).toEqual([N.CEL, N.CER, N.NIS, 'Blindside Herbicide']);

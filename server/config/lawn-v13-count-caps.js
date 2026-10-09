@@ -7,12 +7,12 @@
  *                                 cap LOWERS it while the gate is on.
  *   Arena 50 WDG              2   new cap, no legacy value: while the gate is on a synthetic
  *                                 hard_block annual_max_apps limit is ADDED. The v13 chinch rate is
- *                                 0.147 oz per 1,000 sq ft (6.4 oz per acre), the Florida 2(ee)
- *                                 recommendation rate and below the label's chinch range (9.6 to 12.8 oz per
- *                                 acre; "multiple applications can be made but do not exceed 12.8 oz per
- *                                 acre per year", 0.4 lb clothianidin per acre), so two passes reach the
- *                                 yearly limit. The 56 days (8 weeks) between passes is the company's own rule, not a
- *                                 label interval (it follows the manufacturer's former Florida recommendation). The label's limit is
+ *                                 0.147 oz per 1,000 sq ft (6.4 oz per acre), the low end of the label's
+ *                                 turf range (6.4 to 12.8 oz per acre; "multiple applications can be made
+ *                                 but do not exceed 12.8 oz per acre per year", 0.4 lb clothianidin per
+ *                                 acre), so two passes reach the yearly limit. The 56 days (8 weeks)
+ *                                 between passes is the company's own rule, not a label interval (it follows
+ *                                 the manufacturer's former Florida recommendation). The label's limit is
  *                                 an AMOUNT, so the entry also carries annualAmount (0.294 oz per 1,000 sq ft
  *                                 a year, hard block): the lawn's recorded Arena rates plus the one being
  *                                 planned must fit it (an unreadable rate counts as the old 0.29 oz). An entry's
@@ -20,11 +20,16 @@
  *                                 same way (a stored product-level row is raised to it, never lowered).
  *   Certainty Turf Herbicide  2   new cap: synthetic limit. Also minIntervalDays 28 (label: a sequential
  *                                 application "may be made 4 or more weeks after the initial treatment").
- *   Blindside Herbicide       2   new cap: synthetic limit. Also annualAmount 0.23 oz per 1,000 sq ft a year
- *                                 (label EPA 279-3411: "do not exceed 10 oz. product per acre per year"). The
- *                                 v13 rate is 0.149 oz a pass (the label's warm-season rate is 0.149 to 0.23 oz),
- *                                 so the yearly amount, not this count of 2, is what holds Blindside to one pass
- *                                 a year (two passes would be 0.298 oz). The cap stays 2: frozen migrations read it.
+ *   Blindside Herbicide       2   new cap: synthetic limit. The v13 rate is 0.149 oz a pass (the label's warm-season
+ *                                 rate is 0.149 to 0.23 oz) and the label's yearly limit is 0.23 oz per 1,000 sq ft
+ *                                 ("do not exceed 10 oz. product per acre per year", EPA 279-3411), so ONE pass a
+ *                                 year fits. The entry says so twice: effectiveCap 1 is the count every runtime reader
+ *                                 uses, and annualAmount 0.23 oz blocks a second pass by amount. `cap` stays 2 only
+ *                                 because the pushed migrations 20261007175000 and 20261007177000 read it when they run.
+ *
+ * effectiveCap. An entry may carry `effectiveCap`: the count the app enforces and shows (the synthetic count limit, a
+ * stored row lowered to it, the plan and visit-brief figures). Every runtime reader goes through capOf(entry) =
+ * effectiveCap ?? cap. Only frozen migrations read `cap` itself.
  *
  * Entries that carry no yearly count (v13 final pass, 2026-10-09; V13_MORE_LIMITS below). An entry may carry
  * any of: a count `cap`, a `minIntervalDays`, an `annualAmount`; the module adds only the synthetic rows an
@@ -54,7 +59,7 @@ const V13_COUNT_CAPS = Object.freeze([
   {
     name: 'Arena 50 WDG',
     cap: 2,
-    description: `Arena 50 WDG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.147 oz per 1,000 sq ft (6.4 oz per acre, the Florida 2(ee) recommendation rate, below the label's chinch range of 9.6 to 12.8 oz per acre): two applications reach the label's yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre).`,
+    description: `Arena 50 WDG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label's turf range): two applications reach the label's yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre).`,
     // The label's limit is an AMOUNT (12.8 oz per acre = 0.294 oz per 1,000 sq ft a year, 0.4 lb clothianidin per acre), so
     // the count of 2 alone would let a lawn that took the old 0.29 oz rate take a second pass. A history row that cannot be
     // sized counts at fallbackRate (the old rate = the whole year).
@@ -78,10 +83,13 @@ const V13_COUNT_CAPS = Object.freeze([
   {
     name: 'Blindside Herbicide',
     cap: 2,
-    description: `Blindside Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}); at the program rate of 0.149 oz per 1,000 sq ft the yearly amount (0.23 oz) allows one pass a year.`,
-    // Blindside label (EPA 279-3411): warm-season single rate 0.149 to 0.23 oz per 1,000 sq ft (6.5 to 10 oz per acre); "do not
-    // exceed 10 oz. product per acre per year" = 0.23 oz per 1,000 sq ft. At the v13 rate of 0.149 oz one pass fits the year (two
-    // would be 0.298 oz), so this yearly amount, not the count of 2 above, holds Blindside to one pass; a pass at 0.23 fills it. A spot row's rate is read as recorded (a spot is not scaled to its area).
+    // `cap: 2` is what migrations 20261007175000 and 20261007177000 (pushed, frozen) read when they run, so it stays. The count the
+    // app enforces and shows is effectiveCap: Blindside label (EPA 279-3411) warm-season single rate 0.149 to 0.23 oz per 1,000 sq ft
+    // (6.5 to 10 oz per acre) and "do not exceed 10 oz. product per acre per year" = 0.23 oz per 1,000 sq ft, so at the v13 rate of
+    // 0.149 oz one pass fits the year (two would be 0.298 oz). The yearly amount below blocks a second pass by amount as well.
+    effectiveCap: 1,
+    description: `Blindside Herbicide: max 1 application per lawn per year under the v13 lawn program (${LABEL}; ${FINAL_PASS}): at the program rate of 0.149 oz per 1,000 sq ft one pass fills the label's 0.23 oz yearly amount.`,
+    // A spot row's rate is read as recorded (a spot is not scaled to its area).
     annualAmount: {
       cap: 0.23,
       unit: 'oz/1000sf/year',
@@ -123,6 +131,9 @@ const V13_MORE_LIMITS = Object.freeze([
   },
 ]);
 const V13_LIMITS = Object.freeze([...V13_COUNT_CAPS, ...V13_MORE_LIMITS]);
+
+// The count every runtime reader uses: effectiveCap when the entry has one, else cap. The frozen migrations read `cap`.
+const capOf = (entry) => entry.effectiveCap ?? entry.cap;
 
 const normalize = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const BY_NAME = new Map(V13_LIMITS.map((entry) => [normalize(entry.name), entry]));
@@ -197,7 +208,7 @@ function syntheticCountLimit(entry, productId = null) {
     match_type: 'product',
     match_value: null,
     limit_type: 'annual_max_apps',
-    limit_value: entry.cap,
+    limit_value: capOf(entry),
     limit_unit: 'applications',
     severity: 'hard_block',
     description: entry.description,
@@ -217,12 +228,12 @@ function withEntryCaps(entry, limits, productId = null) {
 // The count part of an entry. An entry with no `cap` (only an interval or a yearly amount) adds no count row and leaves a
 // stored one as it is.
 function withEntryCount(entry, rows, productId = null) {
-  if (entry.cap == null) return rows;
+  if (capOf(entry) == null) return rows;
   if (!rows.some(isProductCount)) return [...rows, syntheticCountLimit(entry, productId)];
   return rows.map((limit) => {
     if (!isProductCount(limit)) return limit;
     const stored = Number(limit.limit_value);
-    const value = Number.isFinite(stored) ? Math.min(stored, entry.cap) : entry.cap;
+    const value = Number.isFinite(stored) ? Math.min(stored, capOf(entry)) : capOf(entry);
     return { ...limit, limit_value: value, severity: 'hard_block' };
   });
 }
@@ -291,7 +302,7 @@ const staleInterval = (entry, gates) => !!(entry.minIntervalDays && gates && typ
 function withEntryCapMetadata(entry, product) {
   if (!entry || !product) return product;
   // An entry with no count cap (an interval or a yearly amount only) clamps nothing.
-  const clamp = (value) => (entry.cap != null && typeof value === 'number' && Number.isFinite(value) && value > entry.cap ? entry.cap : value);
+  const clamp = (value) => (capOf(entry) != null && typeof value === 'number' && Number.isFinite(value) && value > capOf(entry) ? capOf(entry) : value);
   const gates = product.gates && typeof product.gates === 'object' ? product.gates : null;
   const counter = product.annual_counter && typeof product.annual_counter === 'object' ? product.annual_counter : null;
   const gateValue = gates ? clamp(gates.annualMaxApps) : undefined;
@@ -310,7 +321,7 @@ function withEntryCapMetadata(entry, product) {
 // ── The Celsius yearly figure, as the report copy and the portal read it ───────────────────────────
 // CELSIUS_YTD_CAP is the v13 value, CELSIUS_YTD_CAP_LEGACY the one before v13; celsiusYtdCap() is the ONE
 // reader that follows GATE_LAWN_V13 (the service report's expectations, the portal stats route).
-const CELSIUS_YTD_CAP = V13_COUNT_CAPS.find((entry) => entry.name === 'Celsius WG').cap;
+const CELSIUS_YTD_CAP = capOf(V13_COUNT_CAPS.find((entry) => entry.name === 'Celsius WG'));
 const CELSIUS_YTD_CAP_LEGACY = 3;
 const celsiusYtdCap = () => (gateLive() ? CELSIUS_YTD_CAP : CELSIUS_YTD_CAP_LEGACY);
 
