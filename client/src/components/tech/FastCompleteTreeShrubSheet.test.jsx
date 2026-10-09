@@ -646,6 +646,20 @@ describe('findings and the body', () => {
   });
 });
 
+describe('joint mosquito account notice', () => {
+  const NOTICE = 'This account also has mosquito service. Check for scale, sooty mold and mites; photo any find.';
+
+  test('the server flag shows one notice near the top', async () => {
+    await openSheet(makeRequest({ context: { ...CONTEXT, jointMosquitoAccount: true } }));
+    expect(screen.getAllByText(NOTICE)).toHaveLength(1);
+  });
+
+  test.each([false, undefined, 'true'])('flag %s shows nothing', async (flag) => {
+    await openSheet(makeRequest({ context: { ...CONTEXT, jointMosquitoAccount: flag } }));
+    expect(screen.queryByText(/also has mosquito service/)).toBeNull();
+  });
+});
+
 describe('blocked states', () => {
   test('the gate being off (404) sends the tech to the full form', async () => {
     const request = makeRequest({ context: Object.assign(new Error('Not found'), { status: 404 }) });

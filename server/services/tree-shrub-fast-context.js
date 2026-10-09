@@ -25,6 +25,7 @@ const {
   deriveTreeShrubTreatments,
 } = require('./tree-shrub-closeout');
 const { etCalendarDayOf } = require('../utils/datetime-et');
+const { loadLiveRecurringObligationRows, ownershipKeysForRow } = require('./waveguard-existing-services');
 const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
@@ -410,6 +411,29 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
 }
 
 /**
+ * True when this customer also has a live recurring mosquito service at THIS
+ * property: the T&S protocol asks for a scale / sooty mold / mite check at every
+ * visit of such an account. "Live" is the ownership lifecycle the pricing AI
+ * uses (loadLiveRecurringObligationRows: active customer, recurring, non-terminal,
+ * no callback or one-time source) and "mosquito" is its ownership family. A row
+ * stamped with another property does not count; a row with no property link, or a
+ * visit with none, falls back to the customer level (a notice too many, never one
+ * too few). Any failure answers false and logs.
+ */
+async function loadJointMosquitoAccount(svc, knex, serviceId) {
+  try {
+    const rows = await loadLiveRecurringObligationRows(knex, svc.customer_id);
+    return rows.some((row) => String(row.id) !== String(svc.id)
+      && (!svc.property_id || !row.property_id || String(row.property_id) === String(svc.property_id))
+      && ownershipKeysForRow(row).includes('mosquito'));
+  } catch (err) {
+    // No driver message: it can echo SQL and bound values.
+    logger.warn(`[ts-fast-context] mosquito account check unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+    return false;
+  }
+}
+
+/**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` only
  * for a missing service; an ineligible visit answers `eligible: false` with the
  * reason and the visit identity, and skips the heavier reads.
@@ -477,6 +501,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     ...(monthProductHolds.length && { monthProductHolds }),
     lastVisit: buildLastVisit(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
+    jointMosquitoAccount: await loadJointMosquitoAccount(svc, knex, serviceId),
     warnings,
     ...(warningsUnavailable && { warningsUnavailable: true }),
     // GATE_TS_WATCH_LIST: this visit's month on the seasonal watch list. Gate

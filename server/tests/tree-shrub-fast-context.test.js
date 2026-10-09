@@ -9,8 +9,14 @@ jest.mock('../services/photos', () => ({
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
+// The live recurring rows the joint mosquito flag reads; the ownership classifier stays real.
+jest.mock('../services/waveguard-existing-services', () => ({
+  ...jest.requireActual('../services/waveguard-existing-services'),
+  loadLiveRecurringObligationRows: jest.fn(async () => []),
+}));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { loadLiveRecurringObligationRows } = require('../services/waveguard-existing-services');
 const PhotoService = require('../services/photos');
 const logger = require('../services/logger');
 const {
@@ -625,5 +631,54 @@ describe('GATE_TS_PEST_CHECK: the fast-context pestCheck', () => {
     const ctx = await build();
     expect(ctx.eligible).toBe(false);
     expect('pestCheck' in ctx).toBe(false);
+  });
+});
+
+describe('the fast-context jointMosquitoAccount flag', () => {
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = () => buildTreeShrubFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog }));
+  const row = (extra = {}) => ({ id: 'ss-9', service_type: 'Mosquito Control', status: 'pending', property_id: 'prop-1', ...extra });
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+    loadLiveRecurringObligationRows.mockReset();
+    logger.warn.mockClear();
+  });
+
+  test('a live recurring mosquito row at this property is true', async () => {
+    loadLiveRecurringObligationRows.mockResolvedValue([row()]);
+    expect((await build()).jointMosquitoAccount).toBe(true);
+    expect(loadLiveRecurringObligationRows).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+  });
+
+  test('a row with no property link falls back to the customer level', async () => {
+    loadLiveRecurringObligationRows.mockResolvedValue([row({ property_id: null })]);
+    expect((await build()).jointMosquitoAccount).toBe(true);
+  });
+
+  test('no rows, other service lines, a one-time mosquito row, or another property are false', async () => {
+    for (const rows of [
+      [],
+      [row({ service_type: 'Pest Control' }), row({ id: 'ss-8', service_type: 'Lawn Care' })],
+      [row({ service_type: 'Mosquito One-Time' })],
+      [row({ property_id: 'prop-2' })],
+    ]) {
+      loadLiveRecurringObligationRows.mockResolvedValue(rows);
+      expect((await build()).jointMosquitoAccount).toBe(false);
+    }
+  });
+
+  test('a lookup failure is false, logged without the driver message, and the sheet still loads', async () => {
+    loadLiveRecurringObligationRows.mockRejectedValue(Object.assign(new Error('select * from secret'), { code: 'ECONNRESET' }));
+    const ctx = await build();
+    expect(ctx).toMatchObject({ ok: true, eligible: true, jointMosquitoAccount: false });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('mosquito account check unavailable'));
+    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('secret');
+  });
+
+  test('an ineligible visit carries no flag', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    loadLiveRecurringObligationRows.mockResolvedValue([row()]);
+    expect('jointMosquitoAccount' in await build()).toBe(false);
   });
 });
