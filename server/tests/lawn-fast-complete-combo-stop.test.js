@@ -31,7 +31,7 @@ const svcRow = (extra = {}) => ({
 
 // scheduled_services answers .first() with the service and, once whereNotIn ran (visit-groups.openMembers),
 // its awaited list with `members`.
-function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT }, { id: OTHER }], packet = null, svc = svcRow(), projectError = false } = {}) {
+function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT }, { id: OTHER }], packet = null, svc = svcRow(), projectError = false, invoice = null, invoiceError = false } = {}) {
   const queried = [];
   const knex = jest.fn((table) => {
     queried.push(table);
@@ -48,6 +48,10 @@ function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT
     };
     chain.first = async () => {
       if (table === 'projects' && projectError) throw new Error('projects read failed');
+      if (table === 'invoices') {
+        if (invoiceError) throw new Error('invoices read failed');
+        return invoice || undefined;
+      }
       return tables[table];
     };
     chain.then = (resolve, reject) => Promise.resolve(list && table === 'scheduled_services' ? members : []).then(resolve, reject);
@@ -70,11 +74,12 @@ const preflight = (knex, { packetId, ...args } = {}) => preflightLawnFastComplet
 const LAWN_V = { ok: true, svc: { service_type: 'Lawn Care' }, profile: { category: 'lawn_care', serviceKey: 'lawn_care_monthly', findingsType: null, companions: [] }, reason: 'grouped_visit' };
 const PEST_V = { ok: true, svc: { service_type: 'Quarterly Pest Control Service' }, profile: { category: 'pest_control', serviceKey: 'pest_general_quarterly', findingsType: null, companions: [] }, reason: 'not_lawn' };
 let memberVerdicts;
-const GATES = ['GATE_COMBO_FAST_COMPLETE', 'GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+const GATES = ['GATE_COMBO_FAST_COMPLETE', 'GATE_FAST_COMPLETE_REPORT', 'GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
 const saved = {};
 beforeEach(() => {
   for (const name of GATES) { saved[name] = process.env[name]; delete process.env[name]; }
   process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+  process.env.GATE_FAST_COMPLETE_REPORT = 'true';
   resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue(PROFILE);
   buildPlanForService.mockReset();
   memberVerdicts = { [VISIT]: LAWN_V, [OTHER]: PEST_V };
@@ -322,5 +327,44 @@ describe('serviceHasLinkedProject (the lookup behind the sheet record and the co
   test('a found project is linked; a failed read counts as linked', async () => {
     expect(await serviceHasLinkedProject('svc-1', recording({ id: 'p' }))).toBe(true);
     expect(await serviceHasLinkedProject('svc-1', recording(new Error('boom')))).toBe(true);
+  });
+});
+
+describe('invoice state and the pest report gate are rechecked (header path and packet path)', () => {
+  const paths = [
+    ['header path', (extra) => fakeKnex(extra), { stop: true }],
+    ['packet path', (extra) => fakeKnex({ visit: { id: STOP, status: 'closing' }, packet: PK, ...extra }), { packetContext: { packetId: PACKET } }],
+  ];
+
+  test.each(paths)('%s: the pair with no invoice is allowed', async (_label, knexFor, ask) => {
+    comboLive();
+    expect(await groupedStopAllowed(knexFor({}), svcRow(), ask)).toBe(true);
+  });
+
+  test.each(paths)('%s: an invoice created for a member after the schedule loaded refuses', async (_label, knexFor, ask) => {
+    comboLive();
+    expect(await groupedStopAllowed(knexFor({ invoice: { id: 'inv-1' } }), svcRow(), ask)).toBe(false);
+  });
+
+  test.each(paths)('%s: an invoice read that fails refuses', async (_label, knexFor, ask) => {
+    comboLive();
+    expect(await groupedStopAllowed(knexFor({ invoiceError: true }), svcRow(), ask)).toBe(false);
+  });
+
+  test.each(paths)('%s: the pest report gate off refuses (the kill switch holds against a stale client)', async (_label, knexFor, ask) => {
+    comboLive();
+    process.env.GATE_FAST_COMPLETE_REPORT = 'false';
+    expect(await groupedStopAllowed(knexFor({}), svcRow(), ask)).toBe(false);
+    delete process.env.GATE_FAST_COMPLETE_REPORT;
+    expect(await groupedStopAllowed(knexFor({}), svcRow(), ask)).toBe(false);
+  });
+
+  test('the invoice rule is the mint\'s own predicate (one exported function)', () => {
+    const { linkedMemberInvoices } = require('../services/visit-completion-invoice');
+    const wheres = [];
+    const chain = { whereIn: (col) => { wheres.push(col); return chain; }, orWhereIn: (col) => { wheres.push(col); return chain; } };
+    const trx = () => ({ where: (fn) => { fn.call(chain); return chain; } });
+    linkedMemberInvoices(trx, [{ id: 'a', record_id: 'r' }]);
+    expect(wheres).toEqual(['scheduled_service_id', 'service_record_id']);
   });
 });

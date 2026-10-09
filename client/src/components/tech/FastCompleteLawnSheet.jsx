@@ -121,9 +121,9 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
+  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
   RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
-  methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -1140,6 +1140,11 @@ function guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap = 
   return [...cards.filter((card) => card.kind !== 'chinch'), chinch];
 }
 
+// The sod record this sheet showed, and the planned classes it held. The server freezes the report's New sod card only while it still matches.
+const sodEcho = (newSod) => (newSod?.sodLaidOn
+  ? { sod: { laidOn: newSod.sodLaidOn, covers: newSod.covers, held: (newSod.plannedHeld || []).map((entry) => entry.kind) } }
+  : {});
+
 function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
@@ -1168,6 +1173,7 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
       visitType: ctx.visitType,
       ...(recordCards ? { treatmentGuide: { v: 1, cards: recordCards } } : {}),
       ...(spotAreas ? { spotAreas } : {}),
+      ...sodEcho(newSod),
     },
     lawnAssessmentId: assessmentId,
     products: rows.map((row) => {
@@ -1297,11 +1303,13 @@ function TimeOnSite({ since }) {
 // `onPrepared` (GATE_COMBO_FAST_COMPLETE; a part of a grouped stop): Complete hands the body it would have
 // posted to onPrepared(serviceId, body) and posts nothing. `sharedNote` is the stop's one note: it stands
 // in for this sheet's own, which hides. Without them the sheet is as it was.
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, onPrepared, sharedNote }) {
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
-  useLockBodyScroll(true);
+  // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
+  const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
+  useLockBodyScroll(!embedded);
+  const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   // A part of a grouped stop (onPrepared) says so on every lawn-fast read: the server lifts its grouped-stop
@@ -1309,9 +1317,11 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   // Keyed on whether this is prepare mode, never on the callback's identity: a container that passes an inline
   // onPrepared must not recreate the request (the context would reload and the form would remount).
   const preparing = typeof onPrepared === 'function';
-  const stopRequest = useMemo(() => (preparing
+  const headerRequest = useMemo(() => (preparing
     ? (path, options = {}) => request(path, { ...options, ...(path.includes('/lawn-fast/') ? { headers: { ...options.headers, 'X-Combo-Stop': '1' } } : {}) })
     : request), [request, preparing]);
+  // Every write (a sod rooted date, a cleared trouble area, a photo, Analyze, Confirm) counts as work in flight.
+  const stopRequest = useWriteTracking(headerRequest, preparing);
   const ctx = useLawnFastContext({ base, request: stopRequest, service });
   // The visit's own property areas (read by PropertyServiceAreas, in the form) and
   // their hold: see usePropertyAreaLifecycle. A refused completion starts a refresh.
@@ -1329,6 +1339,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const [dictationPending, setDictationPending] = useState(false);
   // The treatment zone tracer opens over the sheet, which is inert meanwhile.
   const [overlay, setOverlay] = useState(null);
+  usePartBusy('lawn', [submitting, dictationPending, overlay != null].some(Boolean));
 
   // The server says this visit does not use this sheet: the parent opens the
   // full form, once. (No button on the sheet leads there.) Not while a saved
@@ -1357,10 +1368,10 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const locked = submissionHolds(submission);
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
+    <Frame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
       <SheetBody operatorId={operatorId} service={service} request={stopRequest} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} sharedNote={sharedNote} />
-    </FastCompleteFrame>
+    </Frame>
   );
 }
 
@@ -1579,6 +1590,8 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  // An assessment lookup, analysis or confirm in flight (the photo step reports ready = false meanwhile).
+  usePartBusy('lawn-assessment', assessmentReady === false);
   // A confirmed assessment the report would reject (made for the visit's
   // former property) does not count until the tech analyzes again.
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);

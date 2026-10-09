@@ -7,7 +7,7 @@
 // /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel, unsentTipsFirst } from '../../lib/tech-tips';
@@ -164,6 +164,44 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
 // withheld in all three cases.
 export function detailsHandler(ctx, onViewDetails) {
   return ctx?.loading || ctx?.loadError || ctx?.blockedReason ? undefined : onViewDetails;
+}
+
+// Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
+// reads it so it never closes or unmounts a part mid-request. Outside a container the default context is a no-op.
+export const PartBusyContext = createContext(() => {});
+export function usePartBusy(source, busy) {
+  const report = useContext(PartBusyContext);
+  useEffect(() => {
+    report(source, busy);
+    return () => report(source, false);
+  }, [report, source, busy]);
+}
+
+// A part's requests, with every write counted: while any non-GET request is in flight the part reports busy (so the
+// container cannot close or unmount it mid-write). One place covers every present and future write of the sheet,
+// whichever control sends it. Outside a container (`enabled` false) the request is returned as it is.
+export function useWriteTracking(request, enabled) {
+  const [writes, setWrites] = useState(0);
+  usePartBusy('writes', writes > 0);
+  return useMemo(() => (enabled ? async (path, options) => {
+    if (String(options?.method || 'GET').toUpperCase() === 'GET') return request(path, options);
+    setWrites((n) => n + 1);
+    try { return await request(path, options); } finally { setWrites((n) => n - 1); }
+  } : request), [request, enabled]);
+}
+
+// A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no
+// dialog of its own. The container owns the one frame, the one scroll and the header; the part's header is hidden, its
+// body flows with the page and its footer (its own action button) stays at the end of the part (tech-workflow.css).
+export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, dialogClassName, children }) {
+  return (
+    <>
+      <section ref={dialogRef} aria-labelledby={titleId} className={cn('tech-visit-embedded-part', dialogClassName)} {...hiddenProps}>
+        {children}
+      </section>
+      {overlay}
+    </>
+  );
 }
 
 // `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full

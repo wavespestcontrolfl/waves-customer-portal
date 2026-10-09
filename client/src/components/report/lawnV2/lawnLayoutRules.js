@@ -154,7 +154,7 @@ export const INVITATIONS = Object.freeze({
 export const SLOT_CLASS = Object.freeze({
   status: 'information', recap: 'information', nearYou: 'information', recordedFindings: 'information',
   visitSummary: 'information', products: 'information', productsKind: 'information', poisonNote: 'information',
-  tracedMap: 'information', markedPhotos: 'information', highlights: 'information',
+  tracedMap: 'information', markedPhotos: 'information', highlights: 'information', newSod: 'information',
   yourPart: 'instruction', recommendations: 'instruction', techNote: 'instruction',
   reservice: 'invitation', plan: 'invitation', upcoming: 'invitation', review: 'invitation', referral: 'invitation', crossSell: 'invitation',
 });

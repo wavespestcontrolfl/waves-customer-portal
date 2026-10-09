@@ -100,9 +100,9 @@ import {
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from '../../lib/typed-findings-rules';
 import {
-  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
+  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
   SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
-  useDictationSources, useProductPicker, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock, detailsHandler,
+  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock, detailsHandler,
 } from './FastCompleteParts';
 import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
@@ -526,11 +526,15 @@ function prepareFor(service, onPrepared) {
   return plain ? onPrepared : () => { throw new Error(PREPARE_REFUSAL); };
 }
 
-export default function FastCompleteSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, voiceFillEnabled = false, onPrepared, sharedNote }) {
+export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, onViewDetails, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
-  useLockBodyScroll(true);
+  // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
+  const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
+  useLockBodyScroll(!embedded);
+  const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
+  // As a part of a stop, every write the sheet sends is counted as work in flight (see useWriteTracking).
+  const request = useWriteTracking(plainRequest, embedded === true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const reportFlow = service?.reportFlow === true;
@@ -569,6 +573,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   // so Full form and Close wait on it too).
   const [voiceBusy, setVoiceBusy] = useState(false);
   // The form's own word that this visit needs the full form (see the header).
+  usePartBusy('pest', [submitting, voiceBusy, dictationPending, photoBusy].some(Boolean));
   const [fullFormNeeded, setFullFormNeeded] = useState(false);
   const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow: routedStationsOf(service) });
 
@@ -595,7 +600,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   const locked = submissionHolds(submission) || !!submission.prompt;
 
   return (
-    <FastCompleteFrame
+    <Frame
       isMobile={isMobile}
       dialogRef={dialogRef}
       titleId={titleId}
@@ -607,7 +612,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
     >
       <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} fullFormOffered={fullFormOffered} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} />
-    </FastCompleteFrame>
+    </Frame>
   );
 }
 
@@ -1767,6 +1772,7 @@ function ReportFlowForm({
   useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
+  usePartBusy('pest-report', !!writing);
   // After the note's read: the best tip for the pests the reader heard and the
   // words of the note. Offered only while the tech has no tip of their own
   // choosing (or has taken this one); never picked for them.
