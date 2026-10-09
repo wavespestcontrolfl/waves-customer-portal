@@ -15,6 +15,11 @@
  *   1. What we did:   "Today we applied {categories}, which fits the {season} season."
  *   2. Photo read:    area reads as closed (area, status) phrases.
  *   3. Findings:      kept photo findings, by their own symptom label, hedged by confidence.
+ *   3b. Ties (v4, GATE_LAWN_REPORT_FACTS): a photo finding tied to what was applied, or the
+ *                     technician's own find, in fixed sentences from the facts frozen at completion
+ *                     (lawn-report-facts.js). A finding with no matching product says it will be checked
+ *                     by hand, and only on a recurring plan visit with a real next visit; a treatment is
+ *                     never promised.
  *   4. Results build: one fixed sentence (no time words), recurring lawn plan visits only.
  *   5. Next visit:    "At the next visit we will look at {topics}." Only for a recurring plan visit
  *                     with a real scheduled next visit; a one-time visit promises neither line.
@@ -49,15 +54,20 @@ const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { lawnResultTimingViolation } = require('./report-writer-rules');
 const { CARD_FOR_LABEL, CARD_STATUSES_THAT_PRINT, PHOTO_FINDING_LABELS } = require('./lawn-photo-findings');
+const { cleanTies, matchedTiePrints, CARD_FOR_TIE_KIND, KIND_BY_LABEL, PRODUCT_FOR_KIND, TECH_PRODUCT } = require('./lawn-report-facts');
 
 const COMPOSER_VERSION = 'lawn_visit_summary_fixed_v1';
 const FREEZE_KEY = 'lawnVisitSummary';
 // v3: fixed sentences with slots, no watering sentence. Older prototype entries read as nothing.
+// v4 (GATE_LAWN_REPORT_FACTS): the same, plus the finding-to-product tie (slots.ties). A new completion
+// freezes v4 only while that gate is live, v3 otherwise; both versions render, each exactly as frozen.
 const FREEZE_VERSION = 3;
+const FREEZE_VERSION_TIES = 4;
+const READ_VERSIONS = Object.freeze([FREEZE_VERSION, FREEZE_VERSION_TIES]);
 // No model call: the step is record reads plus one atomic write.
 const BUDGET_MS = 10 * 1000;
 // The longest paragraph any valid slots can render (pinned by a test).
-const MAX_TEXT_CHARS = 1100;
+const MAX_TEXT_CHARS = 1500;
 
 // ── Closed phrase tables (the owner reads and approves these) ──────────────
 
@@ -138,6 +148,20 @@ const FINDING_PHRASES = Object.freeze({
 const SURE_CONFIDENCES = new Set(['high', 'moderate']);
 const MAX_FINDINGS = 3;
 
+// Ties (v4). What was applied, in the words a customer hears; what the technician found.
+const TIE_PRODUCT_PHRASES = Object.freeze({
+  fungicide: 'a fungicide treatment',
+  herbicide: 'a spot treatment for weeds',
+  insecticide: 'a spot treatment for insects',
+  wetting_agent: 'a wetting agent treatment',
+});
+const TECH_FOUND_PHRASES = Object.freeze({ chinch: 'chinch bugs', caterpillars: 'caterpillars', fungus: 'signs of fungus' });
+const MAX_TIES = 2;
+// An unmatched finding prints only while the report's own card for its topic shows a concern (CARD_FOR_TIE_KIND, lawn-report-facts.js),
+// and a matched PHOTO tie by the same rule (matchedTiePrints); drought stress never prints unmatched (the watering banner owns water).
+// The technician's finds (chinch bugs, caterpillars, signs of fungus) are all stress / damage topics.
+const TECH_CARD_KIND = Object.freeze({ chinch: 'insects', caterpillars: 'insects', fungus: 'fungus' });
+
 // What we will look at next visit. Insight categories and finding labels both map
 // into this one closed list.
 const TOPIC_PHRASES = Object.freeze({
@@ -165,6 +189,12 @@ const SENTENCE = Object.freeze({
   photoRead: (list) => `Our photo read shows ${list}.`,
   photoReadMixed: (good, concerns) => `Our photo read shows ${good}, along with ${concerns}.`,
   findings: (list) => `In the photos we noticed ${list}.`,
+  // A photo tie states what the photos showed and what the visit included, never that THAT spot was treated: no place is
+  // recorded for a spot row yet, so the finding and the treatment may be in different parts of the lawn.
+  tieSure: (label, product) => `Today’s photos showed ${label} in one area. Today’s visit included ${product}.`,
+  tieHedged: (label, product) => `Today’s photos showed what may be ${label} in one area, and today’s visit included ${product}.`,
+  tieCheck: (label) => `Today’s photos showed what may be ${label} in one area. We will check it by hand at the next visit.`,
+  tieTech: (found) => `Your technician found ${found} and treated that spot today.`,
   results: 'Results from treatments like these build gradually, and each visit adds to the last one.',
   nextVisit: (list) => `At the next visit we will look at ${list}.`,
 });
@@ -238,6 +268,7 @@ function normalizeFacts(input) {
     seen.add(key);
     applied.push(p);
   }
+  const ties = (cleanTies({ items: raw.ties }) || { items: [] }).items;
   return {
     season: Object.prototype.hasOwnProperty.call(SEASONS, raw.season) ? raw.season : null,
     applied: applied.slice(0, 6),
@@ -246,6 +277,8 @@ function normalizeFacts(input) {
     watchNext: (Array.isArray(raw.watchNext) ? raw.watchNext : []).filter((t) => Object.prototype.hasOwnProperty.call(TOPIC_PHRASES, t)),
     recurring: raw.recurring === true,
     nextVisitBooked: raw.nextVisitBooked === true,
+    // Only when there is one: a visit with no tie normalizes (and hashes) exactly as a v3 visit does.
+    ...(ties.length ? { ties } : {}),
   };
 }
 
@@ -271,8 +304,9 @@ function findingSlots(findings, areas) {
     .map((f) => ({ label: f.label, hedged: f.canDetermine === false || !SURE_CONFIDENCES.has(f.confidence) }));
 }
 
-function areaSlots(areas, findings) {
-  const covered = new Set(findings.map((f) => CARD_FOR_LABEL[f.label]));
+function areaSlots(areas, findings, ties = []) {
+  // A card whose topic a finding or a tie already states is not read out a second time.
+  const covered = new Set([...findings.map((f) => CARD_FOR_LABEL[f.label]), ...ties.map((t) => CARD_FOR_TIE_KIND[t.kind] || CARD_FOR_TIE_KIND[TECH_CARD_KIND[t.kind]])]);
   return areas
     .filter((a) => !covered.has(a.key) && AREA_PHRASES[a.key][STATUS_BAND[a.status]])
     .map((a) => ({ key: a.key, band: STATUS_BAND[a.status] }));
@@ -283,6 +317,22 @@ function topicSlots(facts, findings) {
   for (const a of facts.areas) if (a.status === 'watch' || a.status === 'needs_attention') topics.add(TOPIC_BY_AREA[a.key]);
   for (const f of findings) topics.add(TOPIC_BY_LABEL[f.label]);
   return TOPIC_ORDER.filter((t) => topics.has(t)).slice(0, MAX_TOPICS);
+}
+
+// The tie slots (v4): a technician's find, a photo finding with its product, or a photo finding
+// to be checked by hand (recurring visit with a real next visit, card showing a concern).
+function tieSlots(facts) {
+  const status = new Map(facts.areas.map((a) => [a.key, a.status]));
+  const checkable = facts.recurring && facts.nextVisitBooked;
+  const slots = [];
+  for (const tie of facts.ties || []) {
+    // A photo tie is decided from the same card reads the findings sentence uses; a technician's own find always stands.
+    if (!matchedTiePrints(tie, status)) continue;
+    if (tie.source === 'technician') slots.push({ t: 'tech', kind: tie.kind });
+    else if (tie.product) slots.push({ t: 'photo', kind: tie.kind, label: tie.label, sure: tie.sure === true, product: tie.product });
+    else if (checkable && CARD_FOR_TIE_KIND[tie.kind]) slots.push({ t: 'photo', kind: tie.kind, label: tie.label, sure: false, product: null });
+  }
+  return slots.slice(0, MAX_TIES);
 }
 
 /**
@@ -306,14 +356,18 @@ function appliedCategoryPhrases(products) {
 function buildSlots(rawFacts) {
   const facts = normalizeFacts(rawFacts);
   const applied = appliedSlots(facts.applied);
-  const findings = findingSlots(facts.findings, facts.areas);
-  const areas = areaSlots(facts.areas, findings);
-  if (!applied.length && !findings.length && !areas.length) return null;
+  const ties = tieSlots(facts);
+  // A finding the tie already states is not listed again.
+  const tied = new Set(ties.map((t) => t.label).filter(Boolean));
+  const findings = findingSlots(facts.findings, facts.areas).filter((f) => !tied.has(f.label));
+  const areas = areaSlots(facts.areas, findings, ties);
+  if (!applied.length && !findings.length && !areas.length && !ties.length) return null;
   return {
     season: applied.length ? facts.season : null,
     applied,
     areas,
     findings,
+    ...(ties.length ? { ties } : {}),
     // The recurring-plan promises are decided here and frozen, so a read renders the same.
     recurring: facts.recurring,
     nextVisit: facts.recurring && facts.nextVisitBooked,
@@ -321,11 +375,14 @@ function buildSlots(rawFacts) {
   };
 }
 
-const MAX_SENTENCES = 6; // five parts exist today; the cap is a guard against a future template edit
+const MAX_SENTENCES = 6; // counted in SENTENCES, not parts: a tie can be two sentences
 // Reading order, and the order parts are dropped in when a paragraph would pass the cap: the
 // results line first, then the next-visit line, then the area read.
-const SENTENCE_ORDER = Object.freeze(['applied', 'photoRead', 'findings', 'results', 'nextVisit']);
-const DROP_ORDER = Object.freeze(['results', 'nextVisit', 'photoRead']);
+const SENTENCE_ORDER = Object.freeze(['applied', 'photoRead', 'findings', 'tie1', 'tie2', 'results', 'nextVisit']);
+// What drops first when the paragraph would pass the cap: the results line, then the next-visit line, then the area
+// read, then the SECOND tie. A part is a unit: a tie's sentences stay together or both go, so a tie is never cut
+// in half, and the first tie (the strongest finding) is the last thing to leave.
+const DROP_ORDER = Object.freeze(['results', 'nextVisit', 'photoRead', 'tie2']);
 
 // ── Render: slots -> sentences (a closed set; nothing else is ever printed) ──
 
@@ -358,6 +415,27 @@ function findingsSentence(slots) {
   return phrases.length ? SENTENCE.findings(joinList(phrases)) : null;
 }
 
+// One tie slot -> its fixed sentence(s), or null. The label must be a table label of the slot's own
+// kind and the product a table product, so a hand-edited slot prints nothing.
+function tieSentence(tie) {
+  if (!tie || typeof tie !== 'object') return null;
+  if (tie.t === 'tech') {
+    return Object.hasOwn(TECH_FOUND_PHRASES, tie.kind) && TECH_PRODUCT[tie.kind] ? SENTENCE.tieTech(TECH_FOUND_PHRASES[tie.kind]) : null;
+  }
+  if (tie.t !== 'photo' || !Object.hasOwn(KIND_BY_LABEL, tie.label) || KIND_BY_LABEL[tie.label] !== tie.kind) return null;
+  if (tie.product == null) return SENTENCE.tieCheck(tie.label);
+  if (!Object.hasOwn(TIE_PRODUCT_PHRASES, tie.product) || PRODUCT_FOR_KIND[tie.kind] !== tie.product) return null;
+  return (tie.sure === true ? SENTENCE.tieSure : SENTENCE.tieHedged)(tie.label, TIE_PRODUCT_PHRASES[tie.product]);
+}
+
+// The tie sentences of a slots object, one entry per tie (a tie may be two sentences).
+function tieSentences(slots) {
+  return (Array.isArray(slots.ties) ? slots.ties : []).slice(0, MAX_TIES).map(tieSentence).filter(Boolean);
+}
+
+// How many sentences a part holds: every template sentence ends in one full stop, followed by a space or the end.
+const sentenceCount = (text) => (String(text).match(/\.(?:\s|$)/g) || []).length;
+
 function nextVisitSentence(slots) {
   if (slots.nextVisit !== true) return null;
   const topics = (Array.isArray(slots.watch) ? slots.watch : []).filter((t) => Object.hasOwn(TOPIC_PHRASES, t)).map((t) => TOPIC_PHRASES[t]);
@@ -368,17 +446,21 @@ function nextVisitSentence(slots) {
 function renderSentences(slots) {
   if (!slots || typeof slots !== 'object' || Array.isArray(slots)) return [];
   const applied = appliedSentence(slots);
+  const ties = tieSentences(slots);
   const parts = {
     applied,
     photoRead: photoReadSentence(slots),
     findings: findingsSentence(slots),
+    tie1: ties[0] || null,
+    tie2: ties[1] || null,
     results: applied && slots.recurring === true ? SENTENCE.results : null,
     nextVisit: nextVisitSentence(slots),
   };
-  // Every template is ONE sentence; the cap is enforced here anyway, dropping the lowest-priority
-  // parts first, so a template edit cannot break it.
+  // The cap counts SENTENCES (a tie can be two), dropping whole parts in DROP_ORDER until it holds, so a template
+  // edit or two long ties cannot break it and a tie is never cut in half.
   const kept = new Set(SENTENCE_ORDER.filter((id) => parts[id]));
-  for (const id of DROP_ORDER) if (kept.size > MAX_SENTENCES) kept.delete(id);
+  const total = () => [...kept].reduce((sum, id) => sum + sentenceCount(parts[id]), 0);
+  for (const id of DROP_ORDER) if (total() > MAX_SENTENCES) kept.delete(id);
   return SENTENCE_ORDER.filter((id) => kept.has(id)).map((id) => parts[id]);
 }
 
@@ -438,6 +520,7 @@ const engine = createTechParagraphEngine({
   promptVersion: COMPOSER_VERSION,
   freezeKey: FREEZE_KEY,
   freezeVersion: FREEZE_VERSION,
+  readVersions: READ_VERSIONS,
   budgetMs: BUDGET_MS,
   normalizeInputs: normalizeFacts,
   frozenEntryProblem,
@@ -455,6 +538,7 @@ const readFrozenVisitSummary = engine.readFrozenTechParagraph;
 // PDF cache-key component: '' when nothing prints, else ':tp=<hash of the frozen text>' (the caller renames it).
 const visitSummarySignature = engine.techParagraphSignature;
 
+// `args.version` is the version a new entry is written with (4 while GATE_LAWN_REPORT_FACTS is live, else 3).
 function createAndFreezeVisitSummary(args) {
   return engine.createAndFreezeTechParagraph({ ...args, deps: { generate: generateVisitSummary, ...(args.deps || {}) } });
 }
@@ -463,6 +547,7 @@ module.exports = {
   COMPOSER_VERSION,
   FREEZE_KEY,
   FREEZE_VERSION,
+  FREEZE_VERSION_TIES,
   BUDGET_MS,
   MAX_TEXT_CHARS,
   MAX_SENTENCES,
@@ -473,6 +558,8 @@ module.exports = {
   appliedCategoryPhrases,
   AREA_PHRASES,
   FINDING_PHRASES,
+  TIE_PRODUCT_PHRASES,
+  TECH_FOUND_PHRASES,
   TOPIC_PHRASES,
   SENTENCE,
   normalizeFacts,

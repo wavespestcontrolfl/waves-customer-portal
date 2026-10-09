@@ -280,7 +280,16 @@ function reentryTargetLine(target) {
   return `${target.label}: ready once dry — your technician confirms timing`;
 }
 
+// The aftercare card's re-entry line for the printed record: only when something was applied, sanitized, and not
+// the very sentence the summary above already printed (a frozen lawn condition is both).
+function aftercareReentryLine(data, hasActualTreatment, reentrySummary) {
+  const line = hasActualTreatment ? sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) : '';
+  return line && line !== reentrySummary ? line : '';
+}
+
 function zoneNames(app, zones, serviceLine = 'pest') {
+  // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS); other rows read the zones below.
+  if (typeof app.areaUse === 'string' && app.areaUse.trim()) return app.areaUse.trim();
   const byId = new Map((zones || []).map((zone) => [String(zone.id), zone]));
   const ids = Array.isArray(app.zone_ids) ? app.zone_ids : [];
   const names = ids.map((id) => byId.get(String(id))?.label).filter(Boolean);
@@ -1366,8 +1375,10 @@ export default function ServiceReportDocument({ data, token }) {
             {reentry?.irrigationReadyAt && !lawnV2Watering && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
-            {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
-              <Bullet>{sanitizeReentryCopy(data.reportV2.aftercare.reentry)}</Bullet>
+            {/* A frozen lawn re-entry condition (GATE_LAWN_REPORT_FACTS) is the summary above AND the aftercare line:
+                one sentence, printed once. */}
+            {aftercareReentryLine(data, hasActualTreatment, reentrySummary) && (
+              <Bullet>{aftercareReentryLine(data, hasActualTreatment, reentrySummary)}</Bullet>
             )}
           </div>
         )}

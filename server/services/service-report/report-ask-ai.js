@@ -193,6 +193,9 @@ function pressureFact(data) {
 // ── Re-entry readiness ──────────────────────────────────────────────────
 function reentryFacts(data = {}, now = new Date()) {
   const reentry = data.dynamicContext?.reentry;
+  // A lawn visit's re-entry is a CONDITION frozen at completion (GATE_LAWN_REPORT_FACTS): the fact is its fixed
+  // sentence, with no ready-at time (reentry.js frozenConditionContext leaves no targets).
+  if (reentry?.condition?.text) return [{ area: 'outside', status: reentry.condition.text }];
   const targets = Array.isArray(reentry?.targets) ? reentry.targets : [];
   if (!targets.length) return null;
   const zone = reentry.displayTimezone || 'America/New_York';
