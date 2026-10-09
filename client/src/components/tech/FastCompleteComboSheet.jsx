@@ -52,8 +52,9 @@ function PartSheet({ kind, part, note, request, operatorId, catalog, onPrepared,
     : <FastCompleteLawnSheet {...common} catalog={catalog} />;
 }
 
-// `onViewDetails`: the Details pill (owner 2026-10-09), as on every Fast Complete sheet; absent = no pill.
-function Header({ titleId, pest, lawn, onFullForm, onViewDetails, onClose, blocked }) {
+// `onViewDetails`: the Details pill (owner 2026-10-09), as on every Fast Complete sheet, offered once the stop is loaded,
+// still this pair and not finished (`detailsOffered`); absent = no pill.
+function Header({ titleId, pest, lawn, onFullForm, onViewDetails, detailsOffered, onClose, blocked }) {
   const { customerName, address } = pest.service;
   return (
     <header className="tech-visit-header">
@@ -64,7 +65,7 @@ function Header({ titleId, pest, lawn, onFullForm, onViewDetails, onClose, block
         <p className="tech-visit-muted">{pest.service.serviceType} + {lawn.service.serviceType}</p>
       </div>
       <div className="tech-visit-header-actions">
-        {onViewDetails && <Button variant="ghost" className="tech-visit-action" onClick={() => onViewDetails()} disabled={blocked}>Details</Button>}
+        {onViewDetails && detailsOffered && <Button variant="ghost" className="tech-visit-action" onClick={onViewDetails} disabled={blocked}>Details</Button>}
         <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={blocked}>Full form</Button>
       </div>
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={blocked} aria-label="Close">×</Button>
@@ -162,7 +163,8 @@ function usePartsBusy() {
 }
 
 // `suspended`: kept mounted but hidden behind the appointment details sheet (see FastCompleteFrame).
-export default function FastCompleteComboSheet({ visitId, pest, lawn, request, operatorId, catalog, onClose, onSaved, onFullForm, onViewDetails, suspended = false }) {
+// `onViewDetails(rows)`: gets the stop's live schedule rows from this load, not the board's snapshot.
+export default function FastCompleteComboSheet({ visitId, pest, lawn, request, operatorId, catalog, onClose, onSaved, onFullForm, onViewDetails, suspended }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
@@ -204,7 +206,7 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
-      <Header titleId={titleId} pest={pest} lawn={lawn} onFullForm={fullForm} onViewDetails={samePair && !finished ? onViewDetails : undefined} onClose={close} blocked={blocked} />
+      <Header titleId={titleId} pest={pest} lawn={lawn} onFullForm={fullForm} onViewDetails={onViewDetails && (() => onViewDetails(load.rows))} detailsOffered={[samePair, !finished].every(Boolean)} onClose={close} blocked={blocked} />
       <div className="tech-visit-body">
         {load.status === 'loading' && <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading the stop…</ActionFeedback>}
         {load.status === 'error' && <FullFormCard text={load.error} onFullForm={fullForm} disabled={blocked} />}

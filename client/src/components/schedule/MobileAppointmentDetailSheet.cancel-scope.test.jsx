@@ -68,6 +68,13 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(statusCall().scope).toBe('this_only');
   });
 
+  // Opened over a Fast Complete sheet (which drops its own focus trap while suspended) or a schedule row: focus starts
+  // in this sheet, never on the trigger hidden behind it.
+  it('takes focus on open, on its Close button', () => {
+    render(<MobileAppointmentDetailSheet service={baseService} onClose={() => {}} />);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+  });
+
   it('a technician login gets no Edit or Book next (both save through admin-only routes)', () => {
     const { unmount } = render(<MobileAppointmentDetailSheet service={baseService} onClose={() => {}} />);
     expect(screen.getByLabelText('Edit appointment')).toBeTruthy();

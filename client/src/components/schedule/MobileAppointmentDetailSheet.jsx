@@ -185,6 +185,11 @@ export default function MobileAppointmentDetailSheet({
   // would leave this detail sheet showing the voided invoice snapshot.
   const prepaySwitchDirty = useRef(false);
 
+  // Focus starts in this full-screen sheet, not on whatever opened it behind
+  // it (a schedule row, or a Fast Complete sheet now suspended under it).
+  const closeButtonRef = useRef(null);
+  useEffect(() => { closeButtonRef.current?.focus({ preventScroll: true }); }, []);
+
   useEffect(() => {
     setCardRequestInfo(null);
     setCardLinkNotice(null);
@@ -544,6 +549,7 @@ export default function MobileAppointmentDetailSheet({
         style={{ height: 'calc(64px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
+          ref={closeButtonRef}
           type="button"
           onClick={saveAndClose}
           disabled={savingNote}

@@ -2032,7 +2032,8 @@ export default function DispatchPageV2({
           setComboStop(null);
           setClosingVisitId(visitId);
         }}
-        onViewDetails={() => setDetailService(comboStop.row)}
+        // The live row for the member the tech opened, from the stop's own load.
+        onViewDetails={(rows) => setDetailService(rows.find((row) => row.id === comboStop.row.id))}
         suspended={!!detailService}
       />}
       {completingService && (

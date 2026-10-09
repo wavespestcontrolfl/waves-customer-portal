@@ -307,7 +307,9 @@ describe('Details (owner 2026-10-09: every Fast Complete sheet)', () => {
     mount('op-1', { onViewDetails });
     await screen.findByTestId('pest-part');
     click('Details');
+    // It hands up the stop's live schedule rows from its own load, not the board's snapshot.
     expect(onViewDetails).toHaveBeenCalledTimes(1);
+    expect(onViewDetails.mock.calls[0][0].map((row) => row.id)).toEqual(['svc-lawn', 'svc-pest']);
     click('pest busy on');
     expect(screen.getByRole('button', { name: 'Details' })).toBeDisabled();
     cleanup();

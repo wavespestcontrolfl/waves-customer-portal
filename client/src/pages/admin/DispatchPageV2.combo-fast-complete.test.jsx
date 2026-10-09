@@ -24,7 +24,8 @@ vi.mock('../../components/tech/FastCompleteComboSheet', () => ({
     <div data-suspended={String(!!suspended)}>
       Combo sheet for {visitId} (pest {pest.service.id} flow {String(pest.service.reportFlow)}, lawn {lawn.service.id})
       <button type="button" onClick={onFullForm}>Combo full form</button>
-      <button type="button" onClick={() => onViewDetails()}>Combo details</button>
+      {/* The container hands up the stop's live rows from its own load (here: a newer copy of the opened row). */}
+      <button type="button" onClick={() => onViewDetails([{ ...lawn.service, id: lawn.service.id, liveCopy: true }, { ...pest.service, id: pest.service.id, liveCopy: true }])}>Combo details</button>
     </div>
   ),
 }));
@@ -37,7 +38,7 @@ vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ ser
 vi.mock('../../components/schedule/MobilePaymentSheet', () => ({ default: () => null }));
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service, onClose, onCancelled }) => (
   <div>
-    Details sheet for {service.id}
+    Details sheet for {service.id}{service.liveCopy ? ' (live)' : ''}
     <button type="button" onClick={() => onClose()}>Details close</button>
     <button type="button" onClick={() => { onCancelled(service); onClose(); }}>Details cancel</button>
   </div>
@@ -97,11 +98,12 @@ describe('Dispatch routing for a pest + lawn stop', () => {
     mount([pest(), lawn()]);
     await open('svc-lawn');
     fireEvent.click(await screen.findByRole('button', { name: 'Combo details' }));
-    expect(await screen.findByText('Details sheet for svc-lawn')).toBeInTheDocument();
+    // The live row for the member the tech opened, not the board's snapshot.
+    expect(await screen.findByText('Details sheet for svc-lawn (live)')).toBeInTheDocument();
     const sheet = () => screen.getByText(/Combo sheet for visit-1/).closest('[data-suspended]');
     expect(sheet().getAttribute('data-suspended')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'Details close' }));
-    await waitFor(() => expect(screen.queryByText('Details sheet for svc-lawn')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(/Details sheet for svc-lawn/)).not.toBeInTheDocument());
     expect(sheet().getAttribute('data-suspended')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: 'Combo details' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Details cancel' }));
