@@ -657,7 +657,7 @@ export default function DispatchPageV2({
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
-  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || lawnFastService || pestFastService || continueProjectService;
+  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || lawnReserviceFastService || lawnFastService || pestFastService || continueProjectService;
   usePublishIntelligenceBarPageData({
     viewed_date: date,
     appointment_id: ibSelectedService?.id,

@@ -168,6 +168,9 @@ describe("shouldOpenLawnReserviceFastComplete (owner 2026-10-08)", () => {
     expect(shouldOpenLawnReserviceFastComplete(reservice({ linkedProject: { id: "proj-1" } }))).toBe(false);
     expect(shouldOpenLawnReserviceFastComplete(reservice({ visitCloseoutPacket: { id: "pkt" } }))).toBe(false);
     expect(shouldOpenLawnReserviceFastComplete(reservice({ visitId: "v1", visitCloseoutEnabled: true }))).toBe(false);
+    // A grouped stop with the closeout off still carries its visit id.
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ visitId: "v1" }))).toBe(false);
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ visit_id: "v1" }))).toBe(false);
   });
 
   it("keeps this page's guards: the payment return and rows with no propertyId key", () => {

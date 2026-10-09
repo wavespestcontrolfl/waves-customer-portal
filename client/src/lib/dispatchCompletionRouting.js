@@ -1,6 +1,6 @@
 import { isTreeShrubFastCompleteEligible } from "./tree-shrub-fast-complete";
 import { isLawnFastCompleteEligible, isLawnReserviceFastCompleteEligible, LAWN_FINDINGS_TYPE } from "./lawn-fast-complete";
-import { closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isTypedReportEligible } from "./pest-fast-complete";
+import { isFastCompleteReportEligible, isLaneReportEligible, isTypedReportEligible } from "./pest-fast-complete";
 
 export const TERMINAL_VISIT_STATUSES = new Set([
   "completed",
@@ -60,7 +60,7 @@ export function shouldOpenLawnFastComplete(service) {
 // already did), on the same terms as the sheets above.
 // It also asks what the server's own check refuses and the row already
 // shows (lawnReserviceIneligibleReason: not the typed lawn form, a project,
-// companion findings, a whole-visit closeout), so those visits open the
+// companion findings, a grouped stop), so those visits open the
 // working form and not a blocked sheet.
 export function shouldOpenLawnReserviceFastComplete(service) {
   return isLawnReserviceFastCompleteEligible(service)
@@ -74,7 +74,9 @@ function lawnReserviceServerRefuses(service) {
   if (profile.findingsType !== LAWN_FINDINGS_TYPE) return true;
   if (profile.projectBacked || profile.requiresProject || service.linkedProject?.id) return true;
   if ((profile.companions || []).length) return true;
-  return !!service.visitCloseoutPacket || closesOutAsVisit(service);
+  // Any grouped stop: the server refuses every visit id that is not a
+  // dissolved one (grouped_visit), which the row cannot tell apart.
+  return !!(service.visitCloseoutPacket || service.visitId || service.visit_id);
 }
 
 // A visit returning from the payment flow carries invoice fields no sheet sends.
