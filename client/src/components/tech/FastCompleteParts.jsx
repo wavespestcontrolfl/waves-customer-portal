@@ -735,6 +735,37 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
+// Two mics on one sheet (the note's and the tip's own line) report one
+// "dictating" state up: the sheet holds Complete while either records. Each
+// source has its own setter, so one mic stopping never clears the other.
+export function useDictationSources(onDictationPending) {
+  const pending = useRef({ note: false, tip: false });
+  const report = useCallback((key, on) => {
+    pending.current[key] = !!on;
+    onDictationPending?.(pending.current.note || pending.current.tip);
+  }, [onDictationPending]);
+  const note = useCallback((on) => report('note', on), [report]);
+  const tip = useCallback((on) => report('tip', on), [report]);
+  return { note, tip };
+}
+
+// One suggested tip, offered where the sheet has read the note (the report
+// step). One tap adds it; it is never picked for the tech.
+export function TipSuggestion({ library, tip, pressed, locked, onPick }) {
+  if (!tip) return null;
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Tip for the customer</h3>
+        <span className="tech-visit-muted">{pressed ? '1 picked' : 'Suggested from your note'}</span>
+      </div>
+      <div className="tech-visit-tip-list">
+        <TipOption tip={tip} library={library} pressed={pressed} locked={locked} onPick={onPick} />
+      </div>
+    </section>
+  );
+}
+
 // The picker's lists for one render: the lifted tips, the tips under them, and
 // the row set on screen (a search reads the whole library).
 function useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast, q, showAll }) {
@@ -763,7 +794,48 @@ function useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast
   return { priority, lifted, rest, visible, noMatch };
 }
 
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false, sentLast = true }) {
+// The tech's own line. With `mic`, the note's microphone sits beside it and
+// each dictated chunk joins what is already on the line.
+function OwnTipField({ customTip, onCustom, locked, mic }) {
+  const ownRef = useRef({ customTip, onCustom });
+  ownRef.current = { customTip, onCustom };
+  // Stable for the mic.
+  const appendOwn = useCallback((text) => {
+    const said = String(text || '').trim();
+    const own = ownRef.current;
+    if (said) own.onCustom(own.customTip.trim() ? `${own.customTip.trimEnd()} ${said}` : said);
+  }, []);
+  const ownId = useId();
+  const field = (
+    <Input id={ownId} className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
+  );
+  return (
+    <>
+      {mic ? (
+        // Field labels its one child; here the label must name the box, not the row.
+        <div className="ui-field tech-visit-field">
+          <label className="ui-label" htmlFor={ownId}>Your own tip (one sentence)</label>
+          <div className="tech-visit-note-row tech-visit-tip-own-row">
+            <DictationButton onAppend={appendOwn} onPendingChange={mic.onPendingChange} palette={MIC_PALETTE} size={48} title="Say your own tip" disabled={locked} uploadServiceId={mic.serviceId} clipHandler={mic.onClip} />
+            {field}
+          </div>
+        </div>
+      ) : (
+        <Field label="Your own tip (one sentence)" className="tech-visit-field">{field}</Field>
+      )}
+      {customTip.length > CUSTOM_TIP_MAX_CHARS && (
+        <p className="tech-visit-muted tech-visit-status--warn" role="status">Too long. Keep it to one sentence, {CUSTOM_TIP_MAX_CHARS} characters.</p>
+      )}
+      {mic?.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{mic.error}</p>}
+    </>
+  );
+}
+
+// `mic` (optional): the note's own microphone on the tech's own line, so the
+// line is spoken the way the visit note is (owner 2026-10-09): `serviceId`,
+// `onClip` (our own transcriber, where the sheet's note uses it),
+// `onPendingChange`, `error`.
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false, sentLast = true, mic = null }) {
   const [query, setQuery] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [writing, setWriting] = useState(false);
@@ -809,11 +881,7 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
         )}
         {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
       </div>
-      {writingOwn && (
-        <Field label="Your own tip (one sentence)" className="tech-visit-field">
-          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
-        </Field>
-      )}
+      {writingOwn && <OwnTipField customTip={customTip} onCustom={onCustom} locked={locked} mic={mic} />}
     </section>
   );
 }
