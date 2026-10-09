@@ -888,8 +888,19 @@ describe('validateVoiceFacts: the web sweep', () => {
     ['maintenance did it', 'Maintenance removed the webs outside.'],
     ['a room that is not outside', 'Removed cobwebs from the foyer wall.'],
     ['a place that is not the home', 'Knocked down webs in the shed.'],
+    ['another doer carried over an "and"', 'Customer brushed the porch and swept the eaves.'],
+    ['rain carried over an "and"', 'Rain washed the walls and knocked down the webs.'],
   ])('no sweep when %s', (_label, note) => {
     expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
+  });
+
+  test.each([
+    'Sprayed the perimeter and swept the eaves.',
+    'I treated the garage and knocked down the webs outside.',
+    'Then sprayed the lanai and brushed the cobwebs off the entry.',
+    'Customer was not home and I swept the eaves.',
+  ])('the tech\'s own work carried over an "and" stands: %s', (note) => {
+    expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
   });
 
   test('a long quote is not scanned, and a note of repeated sweep words costs little (Codex security P2 on #6147)', () => {

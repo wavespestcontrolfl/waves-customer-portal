@@ -781,7 +781,19 @@ function sweepPartGoverned(part, clauseBefore, clause) {
   if (SWEEP_TODAY_RE.test(part)) return false;
   if (OTHER_DAY_RE.test(clause)) return true;
   if (/^\s*(?:i|we)\s/.test(part)) return false;
-  return DENIAL_IN_RE.test(clauseBefore) || FUTURE_BEFORE_RE.test(`${clauseBefore} `);
+  return DENIAL_IN_RE.test(clauseBefore) || FUTURE_BEFORE_RE.test(`${clauseBefore} `) || !sweepClauseIsOwnWork(clauseBefore);
+}
+// A part with no "I" / "we" of its own takes its doer from the start of its
+// clause, which must then read as the technician's own work: nothing before
+// the part, or a clause that opens with "I" / "we" or straight with a
+// past-tense action ("sprayed the perimeter and swept the eaves"). Any other
+// opening names another doer: "customer brushed the porch and swept the
+// eaves", "rain washed the walls and knocked down the webs" (pre-push P1).
+const SWEEP_OWN_OPENING_RE = /^\s*(?:(?:also|then|today)\s+)?(?:(?:i|we)\b|(?:[a-z]+ed|swept|took|put|did|found|saw|ran|went|left|made|set|got|spoke|met|came|gave|kept)\b)/;
+function sweepClauseIsOwnWork(clauseBefore) {
+  // The joining words themselves ("..., but swept the eaves") are no opening.
+  const opening = clauseBefore.replace(/^(?:\s|\b(?:and|then|but|plus)\b)+/, '');
+  return !opening.trim() || SWEEP_OWN_OPENING_RE.test(opening);
 }
 function sweepPartStands(part, clauseBefore, clause) {
   const swept = SWEEP_WEB_PART_RE.test(part) || SWEEP_EAVE_PART_RE.test(part) || SWEEP_DEWEB_PART_RE.test(part);
