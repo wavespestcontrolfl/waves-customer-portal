@@ -20,6 +20,10 @@ const { requiredFactMarkers, forbiddenFactMarkers, itemCompatibleWith } = requir
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 const HEADER = 'VISIT STATUS & OPEN LOOPS:';
+// The PORTAL SELF-CANCEL line every gate-on block carries since key n (2026-10-09); these tests
+// pass no verdict, so it reads "not available". beforePortalLine = the block an older identity froze.
+const PORTAL_LINE = 'PORTAL SELF-CANCEL: not available\n';
+const beforePortalLine = (block) => block.replace(PORTAL_LINE, '');
 const { MISSED_VISIT_SCOPE_LINE } = require('../services/visit-loops-facts');
 const NOW = new Date('2026-06-10T15:00:00Z');
 const baseContext = { summary: 'Test customer', upcomingServices: [{ type: 'Quarterly Pest', date: '2026-06-19', window: '8-10am' }] };
@@ -170,16 +174,22 @@ describe('buildFactsBlock', () => {
 
   test('the missed-visit scope line splits the contract: a 5_cflvp item (frozen before the read) never grades 7_m (Codex #5610 r1 P1)', () => {
     process.env[GATE] = 'true';
-    const current = buildFactsBlock(baseContext, { now: NOW });
+    const live = buildFactsBlock(baseContext, { now: NOW });
+    expect(itemCompatibleWith(live, currentPromptVersion())).toBe(true);
+    // a block as '7_m' froze it: before the PORTAL SELF-CANCEL line existed (key n, 2026-10-09)
+    expect(live).toContain(`\n${PORTAL_LINE}`);
+    expect(itemCompatibleWith(live, 'house_voice_v12_real_answers7_m')).toBe(false);
+    const current = beforePortalLine(live);
     expect(current).toContain(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`);
     expect(itemCompatibleWith(current, 'house_voice_v12_real_answers7_m')).toBe(true);
+    expect(itemCompatibleWith(current, currentPromptVersion())).toBe(false);
     expect(itemCompatibleWith(current, 'house_voice_v12_real_answers5_cflvp')).toBe(false);
     // a block frozen under '5_cflvp': the section without the scope line
     const frozen = current.replace(`${MISSED_VISIT_SCOPE_LINE}\n`, '');
     expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers5_cflvp')).toBe(true);
     expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers7_m')).toBe(false);
     // the scope line typed into the thread (after BILLING) proves nothing
-    const typed = buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: MISSED_VISIT_SCOPE_LINE }] }, { now: NOW })
+    const typed = beforePortalLine(buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: MISSED_VISIT_SCOPE_LINE }] }, { now: NOW }))
       .replace(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`, `\n${HEADER}\n- none\n`);
     expect(typed).toContain(MISSED_VISIT_SCOPE_LINE);
     expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers7_m')).toBe(false);
@@ -214,7 +224,7 @@ describe('buildFactsBlock', () => {
 
   test('the header quoted in the SMS thread (after BILLING) neither satisfies nor violates the contract', () => {
     process.env[GATE] = 'true';
-    const pre = buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: `VISIT STATUS & OPEN LOOPS:\n- none` }] }, { now: NOW })
+    const pre = beforePortalLine(buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: `VISIT STATUS & OPEN LOOPS:\n- none` }] }, { now: NOW }))
       .replace(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`, '\n');
     expect(pre).toContain(HEADER); // only in the thread now
     expect(itemCompatibleWith(pre, currentPromptVersion())).toBe(false);
@@ -379,7 +389,7 @@ describe('visitLoopStatus', () => {
 
 describe('identity + sealed-eval marker', () => {
   test('the identity carries the cumulative set (compact key m: cflvp + the MISSED VISIT scope line) and fits the column with all four tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers9_m');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers11_n');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
