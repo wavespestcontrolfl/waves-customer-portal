@@ -94,6 +94,7 @@ const PREP_COPY = [
 // joins only when bait was actually recorded today (local codex P1 —
 // never instruct the customer about placements that were not made).
 const GERMAN_DEFAULT_PREP_KEYS = ['no_sprays', 'food_debris'];
+const VEHICLE_SERVICE_KEYS = new Set(['vehicle_german_roach']);
 
 function chips(value) {
   if (Array.isArray(value)) return value.map((v) => String(v || '').trim()).filter(Boolean);
@@ -172,14 +173,17 @@ function buildWork(workChips) {
   return items;
 }
 
-function buildHelp({ prepChips, species, baitRecorded = false }) {
+function buildHelp({ prepChips, species, baitRecorded = false, serviceKey = null }) {
   const picked = [];
   for (const chip of prepChips) {
     const rule = PREP_COPY.find((r) => r.match.test(chip));
     if (rule) { if (!picked.some((p) => p.key === rule.key)) picked.push({ key: rule.key, text: rule.text }); } else picked.push({ key: chip, text: chip });
   }
   if (isGerman(species)) {
-    const defaults = baitRecorded ? ['no_sprays', 'keep_bait', 'food_debris'] : GERMAN_DEFAULT_PREP_KEYS;
+    // A car job gets the same instructions minus the one about household appliances
+    // (owner 2026-10-08: same treatment, nothing vehicle-specific is written).
+    const defaults = (baitRecorded ? ['no_sprays', 'keep_bait', 'food_debris'] : GERMAN_DEFAULT_PREP_KEYS)
+      .filter((key) => !(key === 'food_debris' && VEHICLE_SERVICE_KEYS.has(String(serviceKey || ''))));
     for (const key of defaults) {
       if (!picked.some((p) => p.key === key)) picked.push({ key, text: PREP_COPY.find((r) => r.key === key).text });
     }
@@ -413,7 +417,7 @@ function buildCockroachReportV2({
   const evidence = chips(values.evidence_observed);
   const conditions = chips(values.conducive_conditions);
   const work = buildWork(chips(values.work_completed));
-  const help = buildHelp({ prepChips: chips(values.customer_prep), species, baitRecorded: recordedWork(work).bait });
+  const help = buildHelp({ prepChips: chips(values.customer_prep), species, baitRecorded: recordedWork(work).bait, serviceKey });
   if (!species && !activityLevel && !locations.length && !work.length) return null;
 
   const status = resolveCockroachStatus({ activityLevel, species, activity, visitSequence, evidence });

@@ -41,6 +41,16 @@ describe('buildCockroachReportV2 — assembly and guards', () => {
     expect(buildCockroachReportV2({ typedSnapshotValues: {}, typedReportType: 'cockroach' })).toBeNull();
   });
 
+  test('a car job keeps the German roach instructions except the household appliance one (owner 2026-10-08: same treatment)', () => {
+    const keys = (serviceKey) => buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey, visitSequence: 1 }).help.items.map((item) => item.key);
+    const home = keys('cockroach_control');
+    const car = keys('vehicle_german_roach');
+    expect(home).toContain('food_debris');
+    expect(car).not.toContain('food_debris');
+    expect(car).toEqual(home.filter((key) => key !== 'food_debris'));
+    expect(car).toContain('no_sprays');
+  });
+
   it('treatment 1: species + level headline, counts from the chips, work in plain English, metrics traceable', () => {
     const out = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', visitSequence: 1 });
     expect(out.status).toEqual({ key: 'active', tone: 'watch', label: 'German cockroach activity was moderate today' });
