@@ -15,9 +15,12 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
+const {
+  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit,
+} = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
+const { resolveGeo } = require('./geo');
 const { scoreAppointmentPlacement } = require('./scoring');
 const {
   applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
@@ -228,6 +231,17 @@ function noSlotReason(drops, skipped) {
     : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
 }
 
+// A flex visit whose window collapsed for a stale anchor and found no same-day
+// re-time: say why day moves were never possible, instead of an opaque
+// NO_VALID_SLOT. Label only — the search itself is unchanged.
+function staleAnchorReason(reason, tierMeta) {
+  if (reason.code !== 'NO_VALID_SLOT' || !(tierMeta && tierMeta.anchor_stale)) return reason;
+  return {
+    code: 'DRIFT_ANCHOR_STALE',
+    description: `Day moves are blocked: the visit was re-dated after an earlier auto move and is now more than ${2 * flexTier.FLEX_TIER_RADIUS_DAYS} days from its original date ${tierMeta.anchor}; no same-day re-time found either`,
+  };
+}
+
 // Ids and codes only: the overlap or closed day a visit sits in, for an audit
 // row with no candidate (a person must place it; Codex #6207 r14 P2).
 function conflictOf(current) {
@@ -241,7 +255,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const prefsSnapshot = prefs.raw_snapshot;
 
   if (!current || candidates.length === 0) {
-    const reason = noSlotReason(drops, skipped);
+    const reason = staleAnchorReason(noSlotReason(drops, skipped), ctx.tierMeta);
     return {
       kind: 'no_change',
       reason_code: reason.code,
@@ -500,6 +514,31 @@ async function loadGuardContext(guardMode, services, nowDate) {
   };
 }
 
+// Why the flex tier's own-schedule freeze holds a visit. A recurring child with
+// no arrival window and no due date has no instant to freeze on (the freeze
+// reads an uncomposable instant as frozen, fail closed), so it is skipped as
+// before — but labelled for what it is, not as a 73-hour cutoff weeks away. A
+// combined-allocation stamp does not change this: reservation_arrival_start
+// returns NULL for a row with no window_start before it reads the stamp.
+function frozenSkipReason(service) {
+  const noWindow = !service.window_start && !service.recurring_dispatch_due_date;
+  return noWindow
+    ? { code: 'NO_ARRIVAL_WINDOW', description: 'Visit has no arrival window and no due date; auto-dispatch cannot place it' }
+    : { code: 'WITHIN_73H', description: '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)' };
+}
+
+// Label only: flexTierMoveWindow collapses to the visit's own date when the
+// band around the durable anchor no longer reaches it (a visit re-dated far
+// from its anchor after an earlier auto move — the two ±radius bands cannot
+// overlap beyond twice the radius). The same-day re-time search still runs on
+// that one-day window; this only records why a day move cannot exist.
+function staleAnchorMeta(window, origDate, anchor) {
+  const orig = toDateStr(origDate);
+  const collapsed = window.dateFrom === orig && window.dateTo === orig;
+  const apart = Math.abs(routeTiers.daysBetween(anchor, orig)) > 2 * flexTier.FLEX_TIER_RADIUS_DAYS;
+  return collapsed && apart ? { anchor_stale: true } : {};
+}
+
 // FLEX-TIER window for one visit (past the shared reminder freeze), shared
 // by pass 1 (the bulk-read neighbor map and anchor) and the apply-time
 // recheck (a fresh neighbor read, the pass-1 anchor — durable evidence).
@@ -519,7 +558,8 @@ async function flexWindowFor(service, {
 }) {
   const skip = (code, description, degraded) => ({ window: null, meta: null, skip: { code, description, ...(degraded ? { degraded } : {}) } });
   if (await flexTier.ownScheduleFrozen(db, service, nowDate)) {
-    return skip('WITHIN_73H', '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)');
+    const frozen = frozenSkipReason(service);
+    return skip(frozen.code, frozen.description);
   }
   if (!neighborMap) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Series occurrence order could not be read — no move (fail closed)', true);
   const neighbors = neighborMap.get(service.id);
@@ -531,7 +571,7 @@ async function flexWindowFor(service, {
   }
   return {
     window, meta: {
-      mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, anchor, neighbors, window,
+      mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, anchor, neighbors, window, ...staleAnchorMeta(window, service.scheduled_date, anchor),
     }, skip: null,
   };
 }
@@ -651,6 +691,178 @@ function guardSkipReason(skip) {
   return { reason_code: skip.code, reason_description: skip.description };
 }
 
+// One admin notice per visit that stays without a usable map point after the
+// geocode self-heal, so a visit skipped every night is not left to nobody.
+// Raised at the run's end under a per-run budget (raiseMissingGeoNotices).
+// Best-effort: a notice failure is logged and never fails the run.
+async function flagMissingGeo(service) {
+  try {
+    const date = toDateStr(service.scheduled_date);
+    const { shortDateET } = require('../admin-alert-names');
+    const notice = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+      area: 'Schedule',
+      action: await audit.namedVisitAction(service.customer_id,
+        [(who) => `fix the address pin for ${who}'s visit`, (who) => `fix ${who}'s address pin`],
+        'fix the address pin on a visit'),
+      why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
+      severity: 'needs-you',
+      link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(service.id)}`,
+      subject: { type: 'visit', id: String(service.id) },
+      doneWhen: 'visit_has_map_pin',
+      who: 'person',
+    }, {
+      // bell: true — under GATE_ADMIN_BELL_POLICY a bell:false notice inserts
+      // no row at all. One notice per visit and date (dedupeKey), so it rings
+      // once; a recurrence after the run closed it reopens (refreshOnDedupe).
+      bell: true,
+      dedupeKey: audit.missingGeoKey({ id: service.id, date }),
+      refreshOnDedupe: true,
+      metadata: { scheduledServiceId: service.id, customerId: service.customer_id, scheduledDate: date },
+    });
+    // notifyAdmin resolves null when the write fails and a row with no id
+    // when it suppresses: neither recorded a notice (Codex #6208 r14 P2).
+    // A deduped write rings only when its refresh says so (r16 P2).
+    return audit.noticeRang(notice);
+  } catch (err) {
+    logger.warn(`[auto-dispatch] missing-geo notice failed for ${service && service.id}: ${err.message}`);
+    return false;
+  }
+}
+
+// The missing-pin notice is for a visit on a live plan only: a lapsed plan's
+// visit is not placed anyway. Fails open, like isRecurringPlanActive itself.
+// The single-visit read, used only just before a NEW notice is raised.
+async function missingGeoNoticeWanted(service) {
+  try {
+    return (await isRecurringPlanActive(service, db)).active;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] plan check for the missing-geo notice failed for ${service && service.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// Pass 1 only records the visit; nothing rings until the run ends, so a geocoder
+// outage cannot raise one bell per visit (raiseMissingGeoNotices).
+async function noticeMissingGeo(run, service, planCheck) {
+  // A lapsed plan's visit is not placed, so nobody needs to fix its pin: a
+  // standing notice for it closes at the run's end. This is the path for a
+  // visit eligibility stopped before its own plan check (a stamped address
+  // that differs from the customer's; Codex #6208 r6 P2).
+  // `planCheck` is the answer eligibilityWithGeoHeal already read. A visit
+  // with no answer yet (the divergent-address path, or past the geocode cap)
+  // is NOT read here, one query per visit: the run's end reads every
+  // collected series in one query (raiseMissingGeoNotices; r27 P2).
+  if (planCheck && !planCheck.active) { run.pinOkIds.add(String(service.id)); return; }
+  const date = toDateStr(service.scheduled_date);
+  run.missingGeoWanted.push({ id: service.id, customer_id: service.customer_id, recurring_parent_id: service.recurring_parent_id, scheduled_date: date, date });
+}
+
+// A visit that passed eligibility has a usable pin: the run's end closes a
+// standing missing-pin notice for it. Nothing else closes one early.
+// A missing-pin visit whose plan has lapsed is no longer placed, so nobody
+// needs to fix its pin: a standing notice for it closes at the run's end too
+// (Codex #6208 r4 P2).
+function logLapsedPlanSkip(run, service, skip) {
+  run.pinOkIds.add(String(service.id));
+  return logSkip(run, service, skip);
+}
+
+function notePinOk(run, service, elig) {
+  if (elig.eligible) run.pinOkIds.add(String(service.id));
+}
+
+// An ineligible visit's skip: logged, plus the missing-map-point notice.
+async function logIneligible(run, service, elig, planCheck) {
+  await logSkip(run, service, elig);
+  if (elig.reason_code === 'MISSING_GEO') await noticeMissingGeo(run, service, planCheck);
+}
+
+// Raise the missing-pin notices pass 1 collected: a visit with a standing
+// notice is refreshed free, at most NEW_NOTICES_PER_RUN new ones ring, soonest
+// date first. The rest wait for the next run. Best-effort.
+// The notices are raised at the run's end, so staff may have fixed a pin (or
+// the visit may have moved or closed) since pass 1 skipped it. Re-read the
+// picked visits; one that now resolves a pin, or is no longer live on that
+// date, raises nothing and joins the close list (Codex #6208 r6 P2).
+// The visit is still open on that date for a customer who is still active:
+// the conditions the run's own eligibility read applies (Codex #6208 r7 P2).
+function stillLiveOn(row, date) {
+  return !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === date
+    && row.customer_active !== false && !row.customer_deleted_at
+    // Locked, excluded or customer-confirmed after pass 1: eligibility denies
+    // it outright, so it is no longer skipped for its pin (r21, r24 P2).
+    && !heldOutOfAutoDispatch(row);
+}
+
+async function stillMissingPin(run, picked) {
+  if (!picked.length) return [];
+  const rows = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.id', picked.map((p) => p.id))
+    .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+      'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
+      'customers.active as customer_active', 'customers.deleted_at as customer_deleted_at');
+  const live = new Map((rows || []).map((r) => [String(r.id), r]));
+  return picked.filter((p) => {
+    const row = live.get(String(p.id));
+    const waiting = stillLiveOn(row, p.date) && !resolveGeo(row);
+    if (!waiting) run.pinOkIds.add(String(p.id));
+    return waiting;
+  });
+}
+
+async function raiseMissingGeoNotices(run) {
+  if (!run.missingGeoWanted.length) return;
+  try {
+    // Re-read every wanted visit BEFORE the budget picks, so a visit fixed
+    // since pass 1 does not hold a slot a later visit needs (Codex #6208 r9 P2).
+    const stillOff = await stillMissingPin(run, run.missingGeoWanted);
+    // One plan read for every collected series: a lapsed plan's visit raises
+    // nothing and joins the close list (r6, r27 P2).
+    const lapsed = await lapsedPlanKeys(stillOff, db);
+    const waiting = stillOff.filter((row) => {
+      if (!lapsed.has(planKey(row))) return true;
+      run.pinOkIds.add(String(row.id));
+      return false;
+    });
+    const standing = await audit.standingMissingGeoKeys();
+    let left = await audit.ringsLeft();
+    // Date order; a slot is spent only by a NEW notice that is raised. The
+    // plan is read once more just before a NEW notice (at most the allowance
+    // plus the dropped rows): one that lapsed in between raises nothing,
+    // joins the close list and leaves its slot (r11 P2). A standing notice is
+    // covered by the bulk read above.
+    for (const row of audit.withinRingBudget(waiting, standing, Infinity, audit.missingGeoKey)) {
+      // Allowance spent: nothing more is raised, a standing notice included.
+      if (left <= 0) break;
+      if (!standing.has(audit.missingGeoKey(row)) && !(await missingGeoNoticeWanted(row))) { run.pinOkIds.add(String(row.id)); continue; }
+      // Only a write that rang spends a slot (r13, r14, r16 P2).
+      if (await flagMissingGeo(row)) left -= 1;
+    }
+  } catch (err) {
+    logger.error(`[auto-dispatch] missing-geo notices failed: ${err.message}`);
+  }
+}
+
+// Close the missing-pin notices of visits whose pin this run found usable (and
+// of visits no longer live on that date). Only after a pass 1 that finished
+// with no failed visit. Best-effort.
+async function closeMissingGeoNotices(run) {
+  try {
+    if (run.pass1Complete) await audit.retireMissingGeoNotices(run.pinOkIds, run.nowDate);
+  } catch (err) {
+    logger.error(`[auto-dispatch] missing-geo notice close failed: ${err.message}`);
+  }
+  // A visit the run no longer loads (inside the lock window, locked or
+  // excluded) never enters pinOkIds: read every standing notice's own visit
+  // too, so a pin fixed late still closes its notice (Codex #6208 r19 P2).
+  try {
+    await audit.maintainMissingGeoNotices(run.nowDate);
+  } catch (err) {
+    logger.error(`[auto-dispatch] missing-geo notice upkeep failed: ${err.message}`);
+  }
+}
+
 // Eligibility, self-healing a not-yet-geocoded customer first — but BEFORE
 // the plan-active gate (don't spend the geocode budget on a lapsed plan we'd
 // skip anyway) and deduped per customer (a customer's later visits would
@@ -687,8 +899,9 @@ async function evaluateServiceForRun(service, run) {
   const { config, guardMode, totals } = run;
   const eligCtx = buildEligCtx(guardMode, run.today, run.lockBoundary, config.lockWindowDays);
   const gate = await eligibilityWithGeoHeal(service, eligCtx, run);
-  if (gate.skip) return logSkip(run, service, gate.skip);
-  if (!gate.elig.eligible) return logSkip(run, service, gate.elig);
+  if (gate.skip) return logLapsedPlanSkip(run, service, gate.skip);
+  notePinOk(run, service, gate.elig);
+  if (!gate.elig.eligible) return logIneligible(run, service, gate.elig, gate.planCheck);
 
   // ── Day-move guard (only when a guard mode is active) ──
   const guard = dayMoveGuarded(guardMode, service)
@@ -986,6 +1199,11 @@ async function runAutoDispatch(opts = {}) {
     dryRunOverlaps: [],
     quarantinedIds: new Set(),
     guardReadDegraded: false, // a failed guard read must not report a green run
+    // Visits skipped for a missing pin on a live plan this run, and whether
+    // pass 1 looked at every visit (their notices close only then).
+    pinOkIds: new Set(),
+    missingGeoWanted: [], // visits to raise a missing-pin notice for at the run's end
+    pass1Complete: false,
   };
 
   try {
@@ -1012,6 +1230,8 @@ async function runAutoDispatch(opts = {}) {
       }
     }
 
+    run.pass1Complete = totals.failed === 0;
+
     if (config.mode === 'dry_run') await recommendOverlapFixes(run);
     else await runPassTwo(run);
 
@@ -1031,6 +1251,8 @@ async function runAutoDispatch(opts = {}) {
     if (runStatus === 'completed') runStatus = 'completed_with_errors';
     logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
   }
+  await raiseMissingGeoNotices(run);
+  await closeMissingGeoNotices(run);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {

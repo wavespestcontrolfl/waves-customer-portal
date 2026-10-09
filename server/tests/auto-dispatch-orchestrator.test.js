@@ -7,6 +7,9 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+  heldOutOfAutoDispatch: jest.requireActual('../services/auto-dispatch/eligibility').heldOutOfAutoDispatch,
+  lapsedPlanKeys: jest.fn(async () => new Set()),
+  planKey: jest.requireActual('../services/auto-dispatch/eligibility').planKey,
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -17,11 +20,18 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/auto-dispatch/audit', () => ({
+  // Real budget helpers and key shape; only the notification-store read is faked.
+  ...jest.requireActual('../services/auto-dispatch/audit'),
+  standingMissingGeoKeys: jest.fn(async () => new Set()),
+  ringsLeft: jest.fn(async () => 10),
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),
   flagUnplacedVisits: jest.fn(async () => 0),
+  retireMissingGeoNotices: jest.fn(async () => {}),
+  maintainMissingGeoNotices: jest.fn(async () => {}),
 }));
 
 jest.mock('../services/tech-visit-notifications', () => ({
@@ -35,6 +45,7 @@ const eligibility = require('../services/auto-dispatch/eligibility');
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 const apply = require('../services/auto-dispatch/apply');
 const geocoder = require('../services/geocoder');
+const notifications = require('../services/notification-service');
 const audit = require('../services/auto-dispatch/audit');
 const { runAutoDispatch, _internals } = require('../services/auto-dispatch');
 
@@ -69,6 +80,7 @@ beforeEach(() => {
   db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
+  audit.standingMissingGeoKeys.mockResolvedValue(new Set());
   apply.applyAutoDispatchMove.mockResolvedValue({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
   apply.revalidatePlacement.mockResolvedValue({ ok: true });
 });
@@ -193,6 +205,7 @@ test('self-heals a MISSING_GEO customer by geocoding, then re-checks (not skippe
   const res = await runAutoDispatch({ mode: 'dry_run' });
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
   expect(res).toMatchObject({ skipped: 0, evaluated: 1, geocoded: 1, recommended: 1 });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled(); // healed: nothing to tell staff
 });
 
 test('still skips MISSING_GEO when geocoding cannot resolve the address', async () => {
@@ -202,6 +215,251 @@ test('still skips MISSING_GEO when geocoding cannot resolve the address', async 
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
   expect(res).toMatchObject({ skipped: 1, evaluated: 0, geocoded: 0 });
   expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
+});
+
+test('a visit still without a map point after the geocode retry raises one admin notice, deduped per visit', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+    'schedule_conflict', 'Schedule — fix the address pin on a visit', expect.stringContaining('Aug 4'),
+    expect.objectContaining({
+      bell: true,
+      link: '/admin/dispatch?tab=schedule&date=2026-08-04&appointment=s1',
+      dedupeKey: 'auto-dispatch-missing-geo:s1:2026-08-04',
+      refreshOnDedupe: true,
+      metadata: expect.objectContaining({ scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-08-04' }),
+    }),
+  );
+});
+
+describe('missing-geo notice budget (Codex #6208 r3)', () => {
+  function visitsWithoutPin(count) {
+    servicesResult = Array.from({ length: count }, (_, i) => svc({ id: `g${i}`, customer_id: `c${i}`, scheduled_date: `2026-08-${String(10 + i).padStart(2, '0')}` }));
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+    geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  }
+  const keysRung = () => notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
+
+  test('11 visits ring 10 notices, soonest date first; the latest waits for the next run', async () => {
+    visitsWithoutPin(11);
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ skipped: 11, failed: 0, status: 'completed' });
+    expect(keysRung()).toHaveLength(10);
+    expect(keysRung()[0]).toBe('auto-dispatch-missing-geo:g0:2026-08-10');
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+  });
+
+  // The recheck runs BEFORE the budget picks: the soonest visit's pin was
+  // fixed since pass 1, so the eleventh visit takes its slot (Codex #6208 r9 P2).
+  test('a visit fixed since pass 1 frees its slot for a later visit', async () => {
+    visitsWithoutPin(11);
+    let reads = 0;
+    const fixedFirst = () => servicesResult.map((r, i) => (i === 0 ? { ...r, lat: 27.4, lng: -82.5 } : r));
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? servicesResult : fixedFirst())));
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(keysRung()).toHaveLength(10);
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g0:2026-08-10');
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+  });
+
+  // A notice whose write fails rang nothing: its slot goes to the next visit (r13 P2).
+  test('a failed notice write spends no slot', async () => {
+    visitsWithoutPin(11);
+    notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(11);
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+  });
+
+  // notifyAdmin resolves null on a failed write: no notice, no slot (r14 P2).
+  test('a notice write that resolves null spends no slot', async () => {
+    visitsWithoutPin(11);
+    notifications.notifyAdmin.mockResolvedValueOnce(null);
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(11);
+  });
+
+  test('a visit with a standing notice is refreshed and spends no budget', async () => {
+    visitsWithoutPin(12);
+    // The soonest visit's notice stands: its write is deduped and does not ring.
+    audit.standingMissingGeoKeys.mockResolvedValue(new Set(['auto-dispatch-missing-geo:g0:2026-08-10']));
+    notifications.notifyAdmin.mockImplementation(async (_c, _t, _b, opts) => ({ id: 'n1', deduped: opts.dedupeKey === 'auto-dispatch-missing-geo:g0:2026-08-10' }));
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(keysRung()).toHaveLength(11); // the standing one + 10 new
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g11:2026-08-21');
+  });
+});
+
+test('nothing rings during pass 1: the notice comes at the run end, and a failed key read is logged, not a run failure', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  audit.standingMissingGeoKeys.mockRejectedValue(new Error('notification store down'));
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('a lapsed plan raises no missing-geo notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  // The lapsed visit is in the close list: a standing pin notice for it closes.
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// A stamped address that differs from the customer's skips the geocode
+// self-heal and its plan gate, so the notice's own plan check must put the
+// lapsed visit in the close list (Codex #6208 r6 P2).
+test('a lapsed plan on a visit with a divergent stamped address closes its standing pin notice', async () => {
+  servicesResult = [svc({ id: 's1', service_address_line1: '1 Test Rd', customer_address_line1: '9 Sample Ave' })];
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// Pass 1 makes no plan read for a visit with no answer yet; the run's end
+// reads every collected series in one query (Codex #6208 r27 P2).
+test('pin notice candidates get one bulk plan read at the run\'s end, and a lapsed series closes', async () => {
+  servicesResult = [
+    svc({ id: 's1', recurring_parent_id: 'p1', service_address_line1: '1 Test Rd', customer_address_line1: '9 Sample Ave' }),
+    svc({ id: 's2', recurring_parent_id: 'p2', service_address_line1: '2 Test Rd', customer_address_line1: '9 Sample Ave' }),
+  ];
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.lapsedPlanKeys.mockImplementationOnce(async (rows) => new Set(rows.filter((r) => r.id === 's1').map(eligibility.planKey)));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(eligibility.lapsedPlanKeys).toHaveBeenCalledTimes(1);
+  expect(eligibility.lapsedPlanKeys.mock.calls[0][0].map((r) => r.id)).toEqual(['s1', 's2']);
+  // One single-visit read: just before the one NEW notice (s2).
+  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(1);
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+describe('missing-geo notice close at the end of a run', () => {
+  beforeEach(() => {
+    geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  });
+
+  test('a visit still skipped for a missing pin is not in the close list', async () => {
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledTimes(1);
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(), expect.any(Date));
+  });
+
+  test('a visit that passed eligibility has a usable pin, so its standing notice may close', async () => {
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+  });
+
+  test('does not close on a run that failed before pass 1 finished', async () => {
+    db.mockImplementation(() => { throw new Error('database down'); });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res.status).toBe('failed');
+    expect(audit.retireMissingGeoNotices).not.toHaveBeenCalled();
+    // The standing-notice upkeep reads each notice's own visit, so it does
+    // not depend on pass 1 (Codex #6208 r19 P2).
+    expect(audit.maintainMissingGeoNotices).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not close when a visit failed in pass 1 (it was not fully looked at)', async () => {
+    eligibility.isEligibleForAutoDispatch.mockImplementation(() => { throw new Error('boom'); });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res.failed).toBe(1);
+    expect(audit.retireMissingGeoNotices).not.toHaveBeenCalled();
+  });
+
+  test('a failed close is logged and does not fail the run', async () => {
+    audit.retireMissingGeoNotices.mockRejectedValueOnce(new Error('notification store down'));
+    await expect(runAutoDispatch({ mode: 'dry_run' })).resolves.toMatchObject({ status: 'completed' });
+  });
+});
+
+test('a pin fixed after pass 1 raises no missing-geo notice and the visit joins the close list (Codex #6208 r6 P2)', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  // Every scheduled_services read after the load returns the row with a pin.
+  let reads = 0;
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc({ lat: 27.4, lng: -82.5 })])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// The notice is raised at the run's end: a customer archived or deactivated
+// since pass 1 gets no alert for a pin nobody needs to fix (Codex #6208 r7 P2).
+test.each([
+  ['archived', { customer_deleted_at: '2026-08-01T10:00:00Z' }],
+  ['deactivated', { customer_active: false }],
+  // Staff took the visit out of auto-dispatch after pass 1 (r21 P2).
+  ['with a visit locked', { auto_dispatch_locked: true }],
+  ['with a visit excluded', { auto_dispatch_excluded: true }],
+  ['who confirmed the visit', { customer_confirmed: true }],
+])('a customer %s after pass 1 raises no missing-geo notice', async (_label, change) => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  let reads = 0;
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc(change)])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
+// Pass 1 reuses the plan answer the geo self-heal read (no second read per
+// skipped visit, r8 P2). The plan is read once more only just before a
+// notice is raised, at most once per notice (r11 P2).
+test('a missing-geo visit reads its plan once in pass 1 and once before its notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(2);
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+});
+
+test('a plan that lapses between pass 1 and the notice raises nothing and joins the close list (Codex #6208 r11 P2)', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValueOnce({ active: true }).mockResolvedValueOnce({ active: false });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// notifyAdmin writes no row for an internal test customer, so its visit takes
+// no slot from a real customer's (Codex #6208 r8 P2).
+test('withinRingBudget skips an internal test customer before it counts slots', () => {
+  const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+  const rows = [
+    { id: 'demo', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], date: '2026-08-01' },
+    { id: 'real', customer_id: 'c-real', date: '2026-08-02' },
+  ];
+  expect(audit.withinRingBudget(rows, new Set(), 1, audit.missingGeoKey).map((r) => r.id)).toEqual(['real']);
+});
+
+test('a failed missing-geo notice is logged and fails neither the visit nor the run', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
+});
+
+test('an ineligible visit for any other reason raises no missing-geo notice', async () => {
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'LOCKED', reason_description: 'locked' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
 });
 
 test('caps geocode ATTEMPTS even when they all fail (counts attempts, not successes)', async () => {
