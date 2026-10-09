@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers7_m');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers7_m');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers9_m');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers9_m');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -115,7 +115,19 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(16);
+    expect(COMPANY_FACTS).toHaveLength(20);
+  });
+  test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
+    const section = renderCompanyFactsSection();
+    const aftercare = [
+      'After an inside treatment, clean as usual. On treated baseboards and edges use water only, no bleach or strong cleaners, so the treatment keeps working.',
+      'Seeing more bugs for one to two weeks after a treatment is normal. The treatment flushes them out and eggs keep hatching. If it has not slowed down after two weeks, tell us.',
+      'Small flies at sinks and drains are usually drain flies. They breed in the film inside the drain. Scrub the drain and use an enzyme drain cleaner. A spray does not reach where they breed.',
+      'On a lawn plan, chinch bugs and other lawn insects are part of the program. Tell us and we treat them at the next visit.',
+    ];
+    for (const line of aftercare) expect(section).toContain(`\n- ${line}\n`);
+    // a return visit is the FREE RE-SERVICE fact's job: no line may read as a come-back or coverage promise
+    expect(aftercare.join(' ')).not.toMatch(/we(?:'ll| will)? come back|come back out|free|covered|no charge|damage/i);
   });
   test('the two termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
     expect(COMPANY_FACTS.join(' ')).not.toMatch(/termite|WDO|warranty|guarantee/i);

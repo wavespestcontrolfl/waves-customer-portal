@@ -1,6 +1,6 @@
 'use strict';
 // Owner-approved company facts for the texting agent (owner rulings
-// 2026-09-29/30; service knowledge added 2026-10-03). Rendered as one COMPANY FACTS section in the per-draft
+// 2026-09-29/30; service knowledge added 2026-10-03; aftercare added 2026-10-09). Rendered as one COMPANY FACTS section in the per-draft
 // facts block by sms-shadow-drafter.buildFactsBlock, ONLY while
 // GATE_SMS_REAL_ANSWERS is on (gate off: the facts block is byte-identical
 // to before). Because the verifier grounds a draft against that same block,
@@ -42,6 +42,14 @@ const COMPANY_FACTS = Object.freeze([
   'New residential lawn plans run 9 or 12 applications a year.',
   'Arrival windows are two hours and start on the hour.',
   'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
+  // Aftercare and common pest answers (owner delegated the wording 2026-10-09, text agent
+  // fix plan; drawn from what staff told customers, 14-day audit to 10-08). Each line holds
+  // for every customer it can reach and promises no visit: a return visit is the FREE
+  // RE-SERVICE fact's job, never a COMPANY FACTS line.
+  'After an inside treatment, clean as usual. On treated baseboards and edges use water only, no bleach or strong cleaners, so the treatment keeps working.',
+  'Seeing more bugs for one to two weeks after a treatment is normal. The treatment flushes them out and eggs keep hatching. If it has not slowed down after two weeks, tell us.',
+  'Small flies at sinks and drains are usually drain flies. They breed in the film inside the drain. Scrub the drain and use an enzyme drain cleaner. A spray does not reach where they breed.',
+  'On a lawn plan, chinch bugs and other lawn insects are part of the program. Tell us and we treat them at the next visit.',
 ]);
 
 // The static section: fixed owner-approved policy, identical on every draft
