@@ -670,7 +670,7 @@ describe('the fast-context jointMosquitoAccount flag', () => {
 
   // Mosquito sold as a plan add-on line on another live recurring visit (Codex r1 #6200).
   describe('mosquito as an add-on line', () => {
-    const ADDONS = 'scheduled_service_addons as addon';
+    const ADDONS = 'scheduled_service_addons';
     const withAddons = (addons) => fakeKnex({ scheduled_services: visit(), products_catalog: catalog, [ADDONS]: addons });
     const pest = () => row({ service_type: 'Pest Control' });
 
@@ -684,9 +684,9 @@ describe('the fast-context jointMosquitoAccount flag', () => {
         const knex = withAddons([line]);
         expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(true);
         const calls = knex.calls.filter(([table]) => table === ADDONS);
-        expect(calls).toContainEqual([ADDONS, 'whereIn', 'addon.scheduled_service_id', ['ss-9']]);
-        // One-time add-on lines are not part of the plan.
-        expect(calls.find(([, method]) => method === 'whereRaw')[2]).toMatch(/recurring_pattern IS NULL OR addon\.recurring_pattern <> 'one_time'/);
+        expect(calls).toContainEqual([ADDONS, 'whereIn', 'scheduled_service_addons.scheduled_service_id', ['ss-9']]);
+        // The one plan add-on predicate, not a copy of its SQL (Codex r2 #6200).
+        expect(calls).toContainEqual([ADDONS, 'whereRaw', require('../services/service-library').ADDON_LINE_IS_PLAN_SQL]);
       }
     });
 

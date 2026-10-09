@@ -67,6 +67,7 @@ test('Zylam carries the soil-drench dose by plant height, kept out of the per-ga
     'Yearly limit: 78.9 fl oz per acre, which is 1.81 fl oz per 1,000 sq ft of bed area, sprays and drenches together.',
   ]));
   // The label's drench carrier: 1 quart of mix per foot, or 1/2 inch of irrigation; moist soil for 7 days.
+  expect(zylam.apply).toMatch(/Pull back mulch, rock or gravel first so the mix pools at the base\./);
   expect(zylam.apply).toMatch(/at least 1 quart of water per foot of plant height/);
   expect(zylam.apply).toMatch(/irrigate 1\/2 inch right after\. Keep the soil moist for 7 days\./);
   // The tank calculator keeps the foliar per-gallon range only.

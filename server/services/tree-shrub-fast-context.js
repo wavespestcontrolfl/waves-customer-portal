@@ -26,6 +26,9 @@ const {
 } = require('./tree-shrub-closeout');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { loadLiveRecurringObligationRows, ownershipKeysForRow } = require('./waveguard-existing-services');
+const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
+// ADDON_LINE_IS_PLAN_SQL names this table unaliased.
+const ADDONS = 'scheduled_service_addons';
 const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
@@ -417,7 +420,7 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
  * uses (loadLiveRecurringObligationRows: active customer, recurring, non-terminal,
  * no callback or one-time source) and "mosquito" is its ownership family.
  * Mosquito counts as a live row's own service or as a plan add-on line on one
- * (service-library ADDON_LINE_IS_PLAN_SQL: not a one_time line), this visit's
+ * (service-library ADDON_LINE_IS_PLAN_SQL, the one plan add-on predicate), this visit's
  * own add-on lines included. A row stamped with another property does not
  * count; a row with no property link, or a visit with none, falls back to the
  * customer level (a notice too many, never one too few). Any failure answers
@@ -430,11 +433,11 @@ async function loadJointMosquitoAccount(svc, knex, serviceId) {
     const isMosquito = (row) => ownershipKeysForRow(row).includes('mosquito');
     if (here.some((row) => String(row.id) !== String(svc.id) && isMosquito(row))) return true;
     if (!here.length) return false;
-    const addons = await knex('scheduled_service_addons as addon')
-      .leftJoin('services as addon_service', 'addon_service.id', 'addon.service_id')
-      .whereIn('addon.scheduled_service_id', here.map((row) => row.id))
-      .whereRaw("(addon.recurring_pattern IS NULL OR addon.recurring_pattern <> 'one_time')")
-      .select('addon.service_name as addon_name', 'addon.service_key_snapshot', 'addon_service.service_key', 'addon_service.name as catalog_name');
+    const addons = await knex(ADDONS)
+      .leftJoin('services as addon_service', 'addon_service.id', `${ADDONS}.service_id`)
+      .whereIn(`${ADDONS}.scheduled_service_id`, here.map((row) => row.id))
+      .whereRaw(ADDON_LINE_IS_PLAN_SQL)
+      .select(`${ADDONS}.service_name as addon_name`, `${ADDONS}.service_key_snapshot`, 'addon_service.service_key', 'addon_service.name as catalog_name');
     return addons.some((line) => isMosquito({
       service_key: line.service_key_snapshot || line.service_key,
       service_name: line.catalog_name || line.addon_name,
