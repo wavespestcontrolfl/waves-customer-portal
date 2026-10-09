@@ -88,9 +88,11 @@ function makeKnex({
       limit: () => c,
       select: (...columns) => { state.columns.push(...columns.map(String)); return c; },
       forUpdate: () => { c._lock = true; return c; },
+      forShare: () => { c._lock = true; c._share = true; return c; },
       first: (...columns) => {
         state.columns.push(...columns.map(String));
-        if (c._lock) state.locks.push(`${table} ${JSON.stringify(c._where)}`);
+        if (c._lock) state.locks.push(`${table} ${JSON.stringify(c._where)}${c._share ? ' share' : ''}`);
+        if (table === 'customers') return Promise.resolve({ id: 'cust-1' });
         if (table === 'scheduled_services' && c._joined) {
           const row = locations[Math.min(state.locationReads, locations.length - 1)];
           state.locationReads += 1;
@@ -503,10 +505,14 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
       expect((await run(knex)).linear_ft).toBe(220);
     });
 
-    test('the source rows are locked, visit first and then the trace row', async () => {
+    // Codex P1 r5 on #6175: a visit with no pin of its own rests on the
+    // customer's pin, so the customer row is held first (a geocode correction
+    // takes it FOR UPDATE and waits), then the visit, then the source rows.
+    test('the customer row is held first, then the visit, then the source visit and its trace row', async () => {
       const knex = makeKnex({ lock: locked() });
       await run(knex);
       expect(knex.state.locks).toEqual([
+        'customers [{"id":"cust-1"}] share',
         'scheduled_services ["scheduled_services.id","svc-1"]',
         'scheduled_services [{"id":"svc-0"}]',
         'treatment_zone_maps [{"id":"zone-0"}]',

@@ -168,6 +168,13 @@ async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, so
 // The save's locks and what is judged under them: the visit (inside the
 // technician's scope for a reuse), then a reuse's proof of place.
 async function lockForSave(conn, scheduledServiceId, { lockedScope, reuseGuard, expectedPropertyId, openVisitOnly }) {
+  // A reuse's place may rest on the CUSTOMER's pin and address (a visit with
+  // no pin of its own), so the customer row is held too: a geocode correction
+  // (customer-geocode-review.js takes the row FOR UPDATE) waits until the copy
+  // has committed, and cannot move the pin between the recheck and the insert
+  // (Codex P1 r5 on #6175). Customer first, then the visit: the parent-first
+  // order the other customer-and-visit writers take.
+  if (reuseGuard) await conn('customers').where({ id: reuseGuard.source.customerId }).forShare().first('id');
   if (lockedScope) await lockScopedVisitForTrace(conn, scheduledServiceId, lockedScope, openVisitOnly);
   else await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
   if (reuseGuard) await recheckReuseUnderLock(conn, scheduledServiceId, reuseGuard);
