@@ -215,22 +215,23 @@
     "tristar": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Hard and soft scales (including Florida wax, euonymus, tea, and Caribbean black scale) and whiteflies. Use on live finds only: armored scale crawlers or whitefly nymphs and adults.",
+      "targets": "Whiteflies, mealybugs, aphids and soft scales (Florida wax, cottony cushion). Use on live finds only, foliar only. Not for armored scale (euonymus, tea, false Florida red, oleander): use Distance, oil or a Zylam drench.",
       "apply": "Cover all plant surfaces evenly. The label sets the finished spray volume by plant size. Tank mixing with a surfactant may improve control of adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
       "rates": [
         [
           "8.5–16.5 fl oz / 100 gal",
-          "Hard and soft scales, and whiteflies. Use the higher rate when pressure is high."
+          "Whiteflies, mealybugs, aphids and soft scales. Use the higher rate when pressure is high."
         ]
       ],
       "mixes": [
         [
-          "Scale or whitefly",
+          "Whitefly or soft scale",
           0.085,
           0.165
         ]
       ],
       "limits": [
+        "Not for armored scale. Use Distance on crawlers, oil, or a Zylam drench.",
         "Do not reapply more than once every 7 days.",
         "Maximum 4 applications per calendar year; 25.3 fl oz per acre per application; 92.5 fl oz per acre per year.",
         "Group 4A neonicotinoid: count it with Merit and Zylam in the annual 4A log.",
@@ -509,26 +510,6 @@
         "hand",
         "push"
       ],
-      "summary": "Label needed"
-    },
-    "mncombo": {
-      "kind": "Plant nutrition",
-      "pending": "The exact Mn Combo manufacturer, formulation, and container label are still needed.",
-      "targetTitle": "Purpose",
-      "targets": "Pending the exact product label.",
-      "apply": "Application method and directions are not verified.",
-      "rates": [
-        [
-          "Label needed",
-          "No application recipe has been verified."
-        ]
-      ],
-      "limits": [
-        "Confirm the actual container label before adding treatment instructions."
-      ],
-      "source": "Exact product label not on file",
-      "name": "Mn Combo",
-      "equipment": [],
       "summary": "Label needed"
     },
     "sequestar": {

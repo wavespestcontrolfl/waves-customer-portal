@@ -6,14 +6,15 @@
 // freezes the answer (server/services/tree-shrub-pest-check.js).
 //
 // Agronomy: Merit 2F (imidacloprid, IRAC 4A) does not control ARMORED scale; it
-// is for soft scale, whitefly and borers. Armored scale crawlers take TriStar
-// or Distance IGR. The protocol cards say several products are for live finds
+// is for soft scale, whitefly and borers. Armored scale takes Distance IGR or
+// oil on crawlers, or a Zylam drench; TriStar is not for armored scale (owner
+// 2026-10-09). The protocol cards say several products are for live finds
 // only; a No answer beside one of them is a note, never a block.
 import PEST_CHECK from '../../../shared/tree-shrub-pest-check.json';
 
 export const INSECT_TYPES = PEST_CHECK.insectTypes;
 
-export const MERIT_BLOCK_MESSAGE = 'Merit does not control armored scale. Use TriStar or Distance on crawlers.';
+export const MERIT_BLOCK_MESSAGE = 'Merit does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
 
 // Products the protocol says to use on live finds only. Matched on the product
 // name, the same text the tech sees on the row.

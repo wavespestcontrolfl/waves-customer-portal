@@ -89,7 +89,7 @@ The owner merges; this lane stops before merge.
 
 ## Open content inputs
 
-Exact labels for 13-0-13, Mn Combo, Sequestar and Copper; KPHITE method/container
+Exact labels for 13-0-13, Sequestar and the kit copper (palm bud drench use); KPHITE method/container
 match; Mainspring program-range choice; and the later
 March/May/October/November program decisions remain unresolved. Their
 holds are visible. Talus (residential use prohibited) and Headway (turf-only
@@ -111,9 +111,23 @@ existing due gates decide what shows: the palm feed waits until 3 calendar
 months after the last feed, Snapshot waits 60 days and one per quarter, and the
 June 1 to September 30 N/P blackout still blocks 8-0-12.
 
-TriStar 8.5 SL (acetamiprid, Group 4A) is a conditional secondary line in months
-with scale or whitefly lines, for live finds only. Its label summary uses the
+TriStar 8.5 SL (acetamiprid, Group 4A) is a conditional secondary line on nine
+cards (Jan to Apr, Jun to Oct), for live finds only: whitefly, mealybug, aphid and
+soft scale (wax, cottony cushion), foliar only. It is not for armored scale (use
+Distance, oil or a Zylam drench; owner 2026-10-09). Its label summary uses the
 Cleary label 62432_4 (06/29/2021, EPA 8033-106-1001): 8.5 to 16.5 fl oz per 100
 gal for hard and soft scales and whiteflies, 4 applications a year, 7 days
 between applications, 25.3 fl oz per acre per application, 92.5 fl oz per acre
 per year. It has no catalog row yet, so Fast Complete never suggests it.
+
+## Program text changes (2026-10-09)
+
+Technician-facing text only; no gate, migration or price change. TriTek oil and
+KPHITE are conditional secondary lines on every card that offers them (live finds
+or root-rot history only), so neither is a Fast Complete suggestion any more.
+Mn Combo, Azatin O, the routine copper line and the routine ornamental fungicide
+line are gone from the T&S cards; manganese is the palm Mn sulfate secondary line
+only. The freeze policy and the joint mosquito account check live in the program
+notes. The palm chart divisor stays 105: one application stays under the 1 lb
+nitrogen per 1,000 sq ft limit in the Sarasota County fertilizer codes. The
+sold tiers are 6 and 9 visits a year.

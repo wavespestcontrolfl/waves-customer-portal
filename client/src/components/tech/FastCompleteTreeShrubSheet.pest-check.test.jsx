@@ -56,7 +56,7 @@ const BASE_CONTEXT = {
   warnings: [],
 };
 const CONTEXT = { ...BASE_CONTEXT, pestCheck: PEST_CHECK };
-const MERIT_LINE = 'Merit does not control armored scale. Use TriStar or Distance on crawlers.';
+const MERIT_LINE = 'Merit does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
 
 function makeRequest({ context = CONTEXT } = {}) {
   const calls = [];

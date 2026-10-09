@@ -12,7 +12,7 @@ describe('Merit rule', () => {
   test('armored scale only + Merit blocks, and names the Merit rows to remove', () => {
     const result = evaluatePestCheck({ found: true, types: ['armored_scale'] }, [MERIT, row('Snapshot 2.5TG')]);
     expect(result.blockMessage).toBe(MERIT_BLOCK_MESSAGE);
-    expect(MERIT_BLOCK_MESSAGE).toBe('Merit does not control armored scale. Use TriStar or Distance on crawlers.');
+    expect(MERIT_BLOCK_MESSAGE).toBe('Merit does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.');
     expect(result.meritRows).toEqual([MERIT]);
     expect(result.noteMessages).toEqual([]);
   });
