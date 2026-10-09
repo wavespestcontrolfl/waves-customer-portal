@@ -1007,7 +1007,17 @@ describe('legacy conflict candidates fit the whole moving unit', () => {
     expect(new Set(probeMoveConflicts.mock.calls[0][0].excludeServiceIds)).toEqual(new Set(['s1', 'sib1']));
   });
 
-  test('no overlap, or a standalone visit: the candidates pass through and nothing is read', async () => {
+  // A grouped visit forced off a closed day moves as a unit too (r15 P1).
+  test('a closed-day conflict gets the same whole-unit fit check', async () => {
+    probeMoveConflicts.mockResolvedValue({ rows: [conflictRow('14:00', '15:00')], snapshot: [] });
+    const next = (c) => ({ ...c, date: '2026-08-05' });
+    const drops = { slot_taken: 0 };
+    const kept = await dropSlotsTheUnitCannotTake(service, [next(oneHourGap), next(twoHourGap)], { db: jest.fn(), evalConflict: { kind: 'closed_day', date: '2026-08-04' }, groupContext }, drops);
+    expect(kept).toEqual([next(twoHourGap)]);
+    expect(drops.slot_taken).toBe(1);
+  });
+
+  test('no conflict, or a standalone visit: the candidates pass through and nothing is read', async () => {
     const cands = [oneHourGap, twoHourGap];
     expect(await dropSlotsTheUnitCannotTake(service, cands, { db: jest.fn(), evalConflict: null, groupContext }, {})).toBe(cands);
     const alone = { excludeIds: new Set(['s1']), siblings: [], visitWindowStart: null };
