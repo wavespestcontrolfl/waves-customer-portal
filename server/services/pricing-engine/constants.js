@@ -298,6 +298,12 @@ const BERMUDA_SUPPRESSION_COST_DEFAULTS = {
 // Label ceiling, not a price: at most 2 sprays a calendar year.
 const LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR = 2;
 
+const LAWN_COST_PLUS_LIST_DEFAULTS = {
+  listMargin: 0.45,
+  minimumPerVisit: 55,
+  spotMinutesPerVisit: 10,
+  materialPer1000SqftPerYear: { 6: 16.33, 9: 24.5, 12: 29.84 },
+};
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
   // Program minimum DISARMED (owner ruling 2026-07-17: "forget all floors").
@@ -371,6 +377,17 @@ const LAWN_PRICING_V2 = {
   // pricing_config lawn_pricing_v2 row (deepMerge); adder =
   // perAppBase + perAppPer1000Sqft * (turf sqft / 1000).
   bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2, cost: { ...BERMUDA_SUPPRESSION_COST_DEFAULTS } },
+  // Cost-plus list price for residential recurring lawn care (owner ruling
+  // 2026-10-09), behind GATE_LAWN_COST_PLUS_LIST (ships OFF). List price =
+  // annual cost / (1 - listMargin), never below the market table nor
+  // minimumPerVisit; discounts still stop at targetCollectedMarginFloor.
+  // Cost = the v13 whole-lawn product at SiteOne account prices 2026-10-05
+  // (9 visits $17.73, 12 visits $20.84 per 1,000 sq ft a year) plus a $0.75
+  // per 1,000 sq ft per visit spot-work reserve, and spotMinutesPerVisit
+  // more labor. One program for every grass, so no per-track table; 6 is the
+  // hidden anchor cadence at the 9-visit per-visit average. DB-editable on
+  // the lawn_pricing_v2 row (deepMerge); db-bridge rebases it every sync.
+  costPlusList: JSON.parse(JSON.stringify(LAWN_COST_PLUS_LIST_DEFAULTS)),
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: {
     DENSE: 5,
@@ -2415,7 +2432,7 @@ const INSPECTION_CREDIT = {
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, TURF_FACTORS,
-  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_COST_PLUS_LIST_DEFAULTS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
