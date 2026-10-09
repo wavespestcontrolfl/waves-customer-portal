@@ -342,6 +342,20 @@ test('a pin fixed after pass 1 raises no missing-geo notice and the visit joins 
   expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
 });
 
+// The notice is raised at the run's end: a customer archived or deactivated
+// since pass 1 gets no alert for a pin nobody needs to fix (Codex #6208 r7 P2).
+test.each([
+  ['archived', { customer_deleted_at: '2026-08-01T10:00:00Z' }],
+  ['deactivated', { customer_active: false }],
+])('a customer %s after pass 1 raises no missing-geo notice', async (_label, change) => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  let reads = 0;
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc(change)])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
 test('a failed missing-geo notice is logged and fails neither the visit nor the run', async () => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });

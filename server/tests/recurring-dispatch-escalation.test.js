@@ -24,6 +24,7 @@ let existingNoticeKeys = [];
 let resolvedNoticeKeys = [];
 let rungLast24h = [];
 const budgetSql = [];
+const budgetBindings = [];
 const query = {};
 beforeEach(() => {
   jest.clearAllMocks();
@@ -32,6 +33,7 @@ beforeEach(() => {
   resolvedNoticeKeys = [];
   rungLast24h = [];
   budgetSql.length = 0;
+  budgetBindings.length = 0;
   retire.mockResolvedValue(1);
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   db.raw = jest.fn((sql) => sql);
@@ -58,7 +60,7 @@ beforeEach(() => {
     // The 24-hour budget read (recentBudgetKeys) is told apart by its SQL.
     let budgetRead = false;
     const whereRaw = cleanup.whereRaw.bind(cleanup);
-    cleanup.whereRaw = (sql, bindings) => { if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); } return whereRaw(sql, bindings); };
+    cleanup.whereRaw = (sql, bindings) => { if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); budgetBindings.push(bindings); } return whereRaw(sql, bindings); };
     cleanup.select = jest.fn(async () => (budgetRead ? rungLast24h.map((dedupe_key) => ({ dedupe_key })) : [
       ...existingNoticeKeys.map((dedupe_key) => ({ dedupe_key })),
       ...(excludedTitle === 'Recurring visit time alert resolved' ? [] : resolvedNoticeKeys.map((dedupe_key) => ({ dedupe_key }))),
@@ -248,11 +250,14 @@ describe('recurring visit with no arrival time and no due date', () => {
     const now = new Date('2026-08-01T16:00:00Z');
     const rows = Array.from({ length: 11 }, (_, i) => ({ id: `n${i}`, customer_id: `c${i}`, scheduled_date: `2026-08-${String(10 + i).padStart(2, '0')}` }));
     rungLast24h = ['auto-dispatch-missing-geo:a:2026-08-02', 'auto-dispatch-missing-geo:b:2026-08-02', 'auto-dispatch-reminder-sync:c:2026-08-02:08:00', 'recurring-no-window:z:2026-08-03'];
+    // The watchdog's bell classes and the combined-booking check count too (r7 P1).
+    const bindings = () => budgetBindings.flat();
     query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
     notifications.notifyAdmin.mockResolvedValue({ id: 'noticeX' });
     expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(6);
     // A reopened notice keeps its created_at: the read counts the last ring
     // (metadata.rungAt), with created_at as the fallback.
+    expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'combined-booking-check:%']));
     expect(budgetSql.join(' ')).toContain("COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours'");
   });
 

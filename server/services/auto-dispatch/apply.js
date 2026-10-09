@@ -471,8 +471,8 @@ async function reminderSyncMayRing(dedupeKey) {
   }
 }
 
-// Past the budget the failure is one standing notice for the day, not a bell
-// for each visit: the cause is the reminder store, and staff fix it once.
+// Past the budget the failure is one standing Activity row for the day, not a
+// bell for each visit: the cause is the reminder store, and staff fix it once.
 async function flagReminderSyncOverflow(service, best) {
   const today = etDateString(new Date());
   logger.warn(`[auto-dispatch] reminder did not update for moved visit ${service.id} (${best.date}); over the daily notice budget`);
@@ -486,9 +486,13 @@ async function flagReminderSyncOverflow(service, best) {
     doneWhen: 'reminder_times_checked',
     who: 'person',
   }, {
+    // bell: true only so the row is written (a bell:false notice inserts
+    // nothing under GATE_ADMIN_BELL_POLICY). feed 'activity' keeps it off the
+    // bell list and its unread count: a standing count, never an eleventh
+    // ring (Codex #6208 r7 P2; the call-commitments backlog row does the same).
     bell: true,
     dedupeKey: `auto-dispatch-reminder-sync-overflow:${today}`,
-    metadata: { day: today },
+    metadata: { day: today, feed: 'activity' },
   });
 }
 

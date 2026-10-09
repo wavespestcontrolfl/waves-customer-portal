@@ -185,7 +185,14 @@ const NO_WINDOW_HORIZON_DAYS = 45;
 // combined-booking-check.js. Read from the notification rows themselves
 // (ringsLeft), so a second run or a second lane cannot ring ten more.
 const NEW_NOTICES_PER_RUN = 10;
-const BUDGET_LANE_KEYS = ['auto-dispatch-missing-geo:', 'recurring-no-window:', 'auto-dispatch-reminder-sync:'];
+// The schedule-integrity watchdog (06:40, its own job) rings under its bell
+// classes with a per-run counter (MAX_ALERTS_PER_RUN) and the combined-booking
+// check under its ops key. Their rings of the last 24 hours count here too, so
+// auto-dispatch never adds to a day those jobs already filled. The watchdog
+// itself is not reduced: its pages (unpriced series, prepay cover) outrank a
+// pin notice, and its counter lives in one run of another process.
+const WATCHDOG_BELL_KEYS = ['unpriced-series:', 'lawn-email-gap:', 'prepay-coverage:', 'accepted-schedule:', 'churned-live-work:', 'combined-booking-check:'];
+const BUDGET_LANE_KEYS = ['auto-dispatch-missing-geo:', 'recurring-no-window:', 'auto-dispatch-reminder-sync:', ...WATCHDOG_BELL_KEYS];
 // Titles a retired notice is rewritten to; the budget read must skip them.
 const NO_WINDOW_RESOLVED_TITLE = 'Recurring visit time alert resolved';
 const MISSING_GEO_RESOLVED_TITLE = 'Address pin alert resolved';

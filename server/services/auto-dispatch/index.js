@@ -687,17 +687,25 @@ async function logIneligible(run, service, elig) {
 // the visit may have moved or closed) since pass 1 skipped it. Re-read the
 // picked visits; one that now resolves a pin, or is no longer live on that
 // date, raises nothing and joins the close list (Codex #6208 r6 P2).
+// The visit is still open on that date for a customer who is still active:
+// the conditions the run's own eligibility read applies (Codex #6208 r7 P2).
+function stillLiveOn(row, date) {
+  return !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === date
+    && row.customer_active !== false && !row.customer_deleted_at;
+}
+
 async function stillMissingPin(run, picked) {
   if (!picked.length) return [];
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereIn('scheduled_services.id', picked.map((p) => p.id))
     .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
-      'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip');
+      'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
+      'customers.active as customer_active', 'customers.deleted_at as customer_deleted_at');
   const live = new Map((rows || []).map((r) => [String(r.id), r]));
   return picked.filter((p) => {
     const row = live.get(String(p.id));
-    const waiting = !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === p.date && !resolveGeo(row);
+    const waiting = stillLiveOn(row, p.date) && !resolveGeo(row);
     if (!waiting) run.pinOkIds.add(String(p.id));
     return waiting;
   });

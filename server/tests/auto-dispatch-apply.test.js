@@ -213,6 +213,8 @@ describe('reminder sync failure after a committed move', () => {
       const [, title, , opts] = notifications.notifyAdmin.mock.calls[0];
       expect(title).toContain('check the reminders on today');
       expect(opts.dedupeKey).toMatch(/^auto-dispatch-reminder-sync-overflow:\d{4}-\d{2}-\d{2}$/);
+      // Activity-only: a standing row, never an eleventh ring (Codex #6208 r7 P2).
+      expect(opts.metadata.feed).toBe('activity');
     });
 
     test('a visit whose notice already stands is re-raised and spends no budget', async () => {
