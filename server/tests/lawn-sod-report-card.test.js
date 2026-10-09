@@ -77,7 +77,7 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
     const { trx, writes } = fakeTrx();
     const { out, record } = await run(trx);
     const frozen = {
-      v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole',
+      v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole', planRan: false,
       held: [{ kind: 'fertilizer', until: '2026-11-02', rootedCheck: false }, { kind: 'weedKiller', until: '2026-11-02', rootedCheck: true }],
       swap: null,
     };
@@ -168,6 +168,16 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
     }
   });
 
+  test('"everything else ran" is frozen only when every other planned product was applied', async () => {
+    const OTHER = 'aaaaaaaa-0000-4000-8000-0000000000aa';
+    const withPlan = { ...contextOf(newSod()), plannedProducts: { items: [{ productId: PRODUCT_BAG }, { productId: OTHER }] } };
+    buildLawnFastContext.mockResolvedValue(withPlan);
+    // The held bag is not expected; the other planned product went down.
+    expect((await run(fakeTrx().trx, { appliedProducts: [{ product_id: OTHER }] })).out.planRan).toBe(true);
+    // The technician left the other planned product off.
+    expect((await run(fakeTrx().trx, { appliedProducts: [] })).out.planRan).toBe(false);
+  });
+
   test('a combined-stop lawn leg: the packet authorization reaches the context rebuild', async () => {
     buildLawnFastContext.mockResolvedValue(contextOf(newSod()));
     const allowGrouped = { packetContext: { packetId: 'packet-1' } };
@@ -216,6 +226,7 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
 
 describe('cardOf: the exact words', () => {
   const block = (extra) => ({
+    planRan: true,
     v: 1, visitDay: '2026-10-07', sodLaidOn: '2026-10-03', covers: 'whole', swap: null,
     held: [{ kind: 'fertilizer', until: '2026-11-02', rootedCheck: false }, { kind: 'weedKiller', until: '2026-11-02', rootedCheck: true }],
     ...extra,
@@ -264,6 +275,12 @@ describe('cardOf: the exact words', () => {
       swap: 'We used a fertilizer without pre-emergent in place of the usual bag.',
       close: 'Everything else ran as normal. Same visit, same price.',
     });
+  });
+
+  test('another planned product was left off: no claim about the rest of the visit', () => {
+    const out = card.cardOf(block({ covers: 'part', planRan: false }));
+    expect(out.rest).toBeNull();
+    expect(out.close).toBe('Same visit, same price.');
   });
 
   test('part of the lawn: the hold is on the new sod area (never the office name for it) and the rest ran as planned', () => {

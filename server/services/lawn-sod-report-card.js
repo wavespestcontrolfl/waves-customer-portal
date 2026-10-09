@@ -35,6 +35,8 @@ const COPY = Object.freeze({
   restPart: 'The rest of the lawn was treated as planned.',
   swap: 'We used a fertilizer without pre-emergent in place of the usual bag.',
   close: 'Everything else ran as normal. Same visit, same price.',
+  // The technician left another planned product off: the card makes no claim about the rest of the visit.
+  closePlain: 'Same visit, same price.',
 });
 
 const lowerId = (id) => String(id ?? '').toLowerCase();
@@ -90,9 +92,9 @@ function cardOf(frozenBlock) {
     title: `New sod (laid ${day(block.sodLaidOn)})`,
     lead: part ? COPY.leadPart : COPY.leadWhole,
     items,
-    rest: part ? COPY.restPart : null,
+    rest: part && block.planRan === true ? COPY.restPart : null,
     swap: block.swap ? COPY.swap : null,
-    close: COPY.close,
+    close: block.planRan === true ? COPY.close : COPY.closePlain,
   };
 }
 
@@ -130,6 +132,12 @@ async function decideFrozen(knex, { svc, lawnFast, appliedProducts, allowGrouped
     .filter((entry) => part || !(appliedKinds.has(entry.kind) || entry.productIds.some((id) => applied.has(id))))
     .map(({ kind, until, rootedCheck }) => ({ kind, until, rootedCheck }));
   if (!held.length) return null;
+  // Whether every other planned product went down (a held whole-lawn line is not expected; a part-of-lawn line still
+  // runs on the rest of the lawn). The card says "everything else ran as normal" only then.
+  const heldIds = new Set(part ? [] : sod.plannedHeld.flatMap((entry) => entry.productIds));
+  const planItems = Array.isArray(ctx.plannedProducts && ctx.plannedProducts.items) ? ctx.plannedProducts.items : null;
+  const planRan = !!planItems && planItems.map((item) => lowerId(item && item.productId))
+    .filter((id) => id && !heldIds.has(id)).every((id) => applied.has(id));
   const swapped = sod.swap && sod.swap.resolved === true && applied.has(lowerId(sod.swap.productId));
   return {
     v: 1,
@@ -137,6 +145,7 @@ async function decideFrozen(knex, { svc, lawnFast, appliedProducts, allowGrouped
     sodLaidOn: sod.sodLaidOn,
     covers: sod.covers,
     held,
+    planRan,
     swap: swapped ? { name: sod.swap.name } : null,
   };
 }

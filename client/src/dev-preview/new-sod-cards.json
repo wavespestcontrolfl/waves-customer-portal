@@ -5,6 +5,7 @@
       "visitDay": "2026-10-07",
       "sodLaidOn": "2026-10-03",
       "covers": "whole",
+      "planRan": true,
       "swap": null,
       "held": [
         {
@@ -24,6 +25,7 @@
       "visitDay": "2026-10-20",
       "sodLaidOn": "2026-08-01",
       "covers": "whole",
+      "planRan": true,
       "swap": {
         "name": "LESCO 24-0-11 with PolyPlus OPTI"
       },
@@ -40,6 +42,7 @@
       "visitDay": "2026-10-07",
       "sodLaidOn": "2026-10-03",
       "covers": "part",
+      "planRan": true,
       "swap": null,
       "held": [
         {
