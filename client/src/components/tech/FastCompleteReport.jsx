@@ -915,8 +915,22 @@ export function TypedRecordCard({ schema, record, unclear = [], scoreUnclear = f
   );
 }
 
+// The sweep chip (owner 2026-10-08): the note fills it and one tap corrects
+// it. On: "Swept eaves and webs ✕" (tap to take it off). Off: "+ Swept eaves"
+// (tap to add it). It is one chip beside the report, not a section of its own.
+export function SweepChip({ on, locked, onToggle }) {
+  return (
+    <Chip
+      disabled={locked}
+      pressed={on === true}
+      label={on ? 'Swept eaves and webs ✕' : '+ Swept eaves'}
+      onClick={onToggle}
+    />
+  );
+}
+
 export function ReportCard({
-  draft, editing, stale, locked, photoCount, traced, blogPost, pestHeard = true, onEdit, onDoneEditing, onChangeText, onWriteAgain,
+  draft, editing, stale, locked, photoCount, traced, blogPost, pestHeard = true, sweep = null, onEdit, onDoneEditing, onChangeText, onWriteAgain,
 }) {
   const textId = useId();
   const edited = draft.text.trim() !== draft.base.trim();
@@ -952,6 +966,7 @@ export function ReportCard({
       {blogPost && <p className="tech-visit-muted">At the bottom, from the Waves blog: {blogPost.title}</p>}
       {pestHeard && <HeardLine facts={draft.facts} />}
       <div className="tech-visit-tile-grid">
+        {sweep && <SweepChip on={sweep.on} locked={locked} onToggle={sweep.onToggle} />}
         <Chip disabled={locked} label={editing ? 'Done editing' : 'Edit'} onClick={editing ? onDoneEditing : onEdit} />
         <Chip disabled={locked} label="Write again" onClick={onWriteAgain} />
       </div>
