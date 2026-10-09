@@ -153,7 +153,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
   test('caterpillar jobs name Acelepryn; Mainspring is the whitefly product', () => {
     for (const month of ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug']) {
       const visit = visits.find((v) => v.month === month);
-      expect(visit.secondary).toMatch(/^Acelepryn Insecticide: 2–16 fl oz\/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; at least 7 days between sprays \(\$5\.66\)$/m);
+      expect(visit.secondary).toMatch(/^Acelepryn Insecticide: 2–16 fl oz\/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; no more than 0\.37 fl oz per 1,000 sq ft in one spray; not when rain is forecast within 48 hours; at least 7 days between sprays \(\$5\.66\)$/m);
       expect(visit.primary).not.toMatch(/acelepryn/i);
     }
     for (const visit of visits) {
@@ -178,6 +178,8 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(acelepryn.mix).toEqual([0.02, 0.16]);
     expect(acelepryn.targets).toMatch(/no whitefly use/);
     expect(acelepryn.name).toBe('Acelepryn Insecticide');
+    expect(acelepryn.limits.join(' ')).toMatch(/rain is forecast within 48 hours/);
+    expect(guide.products.distance.apply).not.toMatch(/100 gal of mix per 20,000 sq ft/);
     expect(acelepryn.limits.join(' ')).toMatch(/At least 7 days between treatments\..*38\.3 fl oz per acre/);
   });
 
@@ -189,7 +191,10 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     // drench (0.5–1% at 25 gal per 100 sq ft) is named as a limit, never offered as a rate.
     expect(reliant.source).toMatch(/residential Ornamental Applications/);
     expect(reliant.rates.map((r) => r[0])).toEqual(['Foliar: 2–4 tsp / gal']);
-    expect(reliant.mix).toEqual([0.33, 0.67]);
+    // Exact thirds of a fl oz (2 and 4 tsp), nudged inward so a rig recipe never leaves the label range.
+    expect(reliant.mix[0]).toBeGreaterThanOrEqual(1 / 3);
+    expect(reliant.mix[1]).toBeLessThanOrEqual(2 / 3);
+    expect(reliant.mix[0] * 110).toBeCloseTo(36.667, 2);
     expect(JSON.stringify(reliant)).not.toMatch(/6¼|12¾/);
     expect(reliant.limits.join(' ')).toMatch(/No soil drench on the program\..*0\.5–1% mix/);
     for (const month of ['Mar', 'Jun', 'Oct']) {
@@ -225,7 +230,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
   test('every Distance line and the guide state one scale spray a year', () => {
     const lines = visits.flatMap((v) => `${v.primary}\n${v.secondary}`.split('\n')).filter((line) => /^Distance IGR/.test(line));
     expect(lines).toHaveLength(7);
-    for (const line of lines) expect(line).toMatch(/one scale spray per property per calendar year \(\$16\.52\)$/);
+    for (const line of lines) expect(line).toMatch(/spot treatment only: no more than 0\.27 fl oz per 1,000 sq ft a year; one scale spray per property per calendar year \(\$16\.52\)$/);
     const limits = guide.products.distance.limits.join(' ');
     expect(limits).toMatch(/Scales and mealybugs: one application per calendar year\./);
     expect(limits).toMatch(/6 fl oz followed by 6 fl oz at least 21 days later/);

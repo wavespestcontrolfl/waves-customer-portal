@@ -183,6 +183,7 @@
       ],
       "limits": [
         "At least 7 days between treatments.",
+        "Do not apply when rain is forecast within 48 hours (label runoff advisory).",
         "One application: no more than 16 fl oz per acre, which is 0.37 fl oz per 1,000 sq ft.",
         "Yearly limit: 38.3 fl oz per acre, which is 0.88 fl oz per 1,000 sq ft, all chlorantraniliprole products together. Lawn Acelepryn on the same area counts.",
         "Keep people and pets out until sprays dry."
@@ -206,7 +207,7 @@
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
       "targets": "Whiteflies and scale crawlers. Scale species include black, California red, euonymus, Florida wax, San Jose, and snow scale. Mealybugs: suppression only.",
-      "apply": "Cover all plant surfaces evenly to the point of runoff. The foliar table specifies 100 gal of mix per 20,000 sq ft. Time scale treatments for crawlers.",
+      "apply": "Spot treatment: cover the infested plants evenly to the point of runoff. Measure the area treated and stay inside the yearly limit below. Time scale treatments for crawlers.",
       "rates": [
         [
           "6–8 fl oz / 100 gal",
@@ -423,8 +424,8 @@
       ],
       "summary": "",
       "mix": [
-        0.33,
-        0.67
+        0.333334,
+        0.666666
       ]
     },
     "conserve": {
