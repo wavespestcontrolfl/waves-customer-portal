@@ -28,7 +28,6 @@ function scoreStatus(value) {
   return 'needs_attention';
 }
 
-const WEED_CARD_LABEL_FIXED = 'Weed Cleanliness';
 const clamp = (v, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v));
 
 // Severity word → 0-100 "health" display (higher = healthier). Mirrors
@@ -92,7 +91,7 @@ function bandOf(status) {
  * @param {string}  input.grassLabel
  * @returns {Array} five VisualDiagnosisCategory
  */
-function buildVisualDiagnosisCategories({ scores = {}, overwateringSignal = false, waterStatus = null, grassLabel = 'lawn', copyFixes = false } = {}) {
+function buildVisualDiagnosisCategories({ scores = {}, overwateringSignal = false, waterStatus = null, grassLabel = 'lawn' } = {}) {
   const s = scores || {};
   const coverage = toScore(s.turfDensity);
   const color = toScore(s.colorHealth);
@@ -126,10 +125,7 @@ function buildVisualDiagnosisCategories({ scores = {}, overwateringSignal = fals
   return [
     mk('coverage', 'Turf Coverage', coverage),
     mk('color_vigor', 'Color & Vigor', color),
-    // GATE_LAWN_REPORT_COPY_FIXES: the value is how clear the lawn is of weeds (Strong = few
-    // weeds), so "Weed Pressure: Strong" read as strong weeds. Same scale, same status words;
-    // the name is the one the report's weed trend chart already uses.
-    mk('weed_pressure', copyFixes ? WEED_CARD_LABEL_FIXED : 'Weed Pressure', weed),
+    mk('weed_pressure', 'Weed Pressure', weed),
     mk('water_moisture_stress', 'Water / Coverage', water, {
       evidence: [
         overwateringSignal ? 'over-watering signs in photos' : null,
@@ -142,4 +138,4 @@ function buildVisualDiagnosisCategories({ scores = {}, overwateringSignal = fals
   ];
 }
 
-module.exports = { buildVisualDiagnosisCategories, WEED_CARD_LABEL_FIXED, scoreStatus, toScore, SEVERITY_DISPLAY };
+module.exports = { buildVisualDiagnosisCategories, scoreStatus, toScore, SEVERITY_DISPLAY };

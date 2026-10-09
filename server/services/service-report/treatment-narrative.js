@@ -32,11 +32,6 @@ function lawnNoTiming(serviceLine) {
   return serviceLine === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live();
 }
 
-function lawnCopyFixes(serviceLine) {
-  const gates = require('../../config/feature-gates');
-  return serviceLine === 'lawn' && typeof gates.lawnReportCopyFixesLive === 'function' && gates.lawnReportCopyFixesLive();
-}
-
 function promptVersionFor(serviceLine) {
   return lawnNoTiming(serviceLine) ? LAWN_NO_TIMING_PROMPT_VERSION : PROMPT_VERSION;
 }
@@ -194,16 +189,8 @@ async function buildTreatmentNarrative({
 } = {}) {
   // The fallback is served while generation is pending and when it fails, so
   // it follows the same no-timing rule.
-  // GATE_LAWN_REPORT_COPY_FIXES (lawn only): no active ingredient or product name in a sentence
-  // (owner 2026-10-08). The model paragraph is written in actives, so a lawn report keeps the
-  // fixed category sentence and makes no model call; its PDF key part is the '-tn0' sentinel.
-  const lawnCategoryOnly = lawnCopyFixes(serviceLine);
-  const fallback = buildTreatmentSummary(treatment, {
-    noTiming: lawnNoTiming(serviceLine),
-    ...(lawnCategoryOnly ? { categoryOnly: true } : {}),
-  });
+  const fallback = buildTreatmentSummary(treatment, { noTiming: lawnNoTiming(serviceLine) });
   if (!fallback) return null;
-  if (lawnCategoryOnly) return { text: fallback, signature: null };
   const products = (treatment?.products || []);
   if (!serviceRecordId) return { text: fallback, signature: null };
 
@@ -311,9 +298,9 @@ async function buildTreatmentNarrative({
 async function treatmentNarrativePdfSignature(serviceRecordId, knex = db, { serviceLine } = {}) {
   try {
     if (!serviceRecordId) return '';
-    // A lawn report under GATE_LAWN_REPORT_COPY_FIXES uses no model paragraph: the render's
-    // part of the key is always the sentinel, so the lookup must say the same.
-    if (lawnCopyFixes(serviceLine)) return '-tn0';
+    // A lawn report under GATE_LAWN_REPORT_COPY_FIXES uses no model paragraph (lawnTreatmentNarrative
+    // in lawn-report-copy-fixes.js): the render's part of the key is the sentinel, so the lookup says the same.
+    if (serviceLine === 'lawn' && require('./lawn-report-copy-fixes').copyFixesLive()) return '-tn0';
     const row = await knex('service_report_ai_summaries')
       .where({ service_record_id: serviceRecordId })
       // Only the version this record's render reads now (the caller resolves

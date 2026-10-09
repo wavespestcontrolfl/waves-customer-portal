@@ -23,10 +23,12 @@ jest.mock('../services/llm/call', () => {
 const history = require('../services/lawn-assessment-history');
 const featureGates = require('../config/feature-gates');
 const { buildReportV1Data, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
-const { buildLawnReportV2, mapWater } = require('../services/service-report/lawn-report-v2');
-const { buildTreatmentSummary } = require('../services/service-report/treatment-summary');
+const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
+const { lawnTreatmentNarrative, WATER_TARGET_NOTES } = require('../services/service-report/lawn-report-copy-fixes');
+const { buildTreatmentSummary, buildCategoryTreatmentSummary } = require('../services/service-report/treatment-summary');
 const { buildLawnCopyV6, resolveLawnCopyV6ForRender } = require('../services/service-report/lawn-copy-v6');
-const { buildTreatmentNarrative, treatmentNarrativePdfSignature } = require('../services/service-report/treatment-narrative');
+const treatmentNarrative = require('../services/service-report/treatment-narrative');
+const { treatmentNarrativePdfSignature } = treatmentNarrative;
 const { buildIrrigationAdvice, isKnownGrass } = require('../services/service-report/irrigation-advice');
 const { seasonalColorLineAllowed } = require('../services/service-report/lawn-seasonality');
 const tech = require('../services/service-report/lawn-tech-paragraph');
@@ -69,7 +71,7 @@ describe('fix 1: no chemical or catalog name in a sentence', () => {
   });
 
   test('category form names categories only, from the Visit Summary phrase table', () => {
-    const text = buildTreatmentSummary(treatment, { categoryOnly: true });
+    const text = buildCategoryTreatmentSummary(treatment);
     expect(text).not.toMatch(NAMES);
     expect(text).toContain(APPLIED_PHRASES.combo_pre_emergent);
     expect(text).toContain(APPLIED_PHRASES.herbicide);
@@ -79,12 +81,12 @@ describe('fix 1: no chemical or catalog name in a sentence', () => {
   });
 
   test('one product, one method says the method once; no names', () => {
-    const text = buildTreatmentSummary({ products: [BIFEN] }, { categoryOnly: true, noTiming: true });
+    const text = buildCategoryTreatmentSummary({ products: [BIFEN] }, { noTiming: true });
     expect(text).toBe('Today we applied insect control (broadcast application), targeting chinch bugs.');
   });
 
   test('a wetting agent is still a support product, never a category', () => {
-    const text = buildTreatmentSummary({ products: [BIFEN, { name: 'Nonionic Surfactant', kind: 'other', activeIngredient: 'alkylphenol ethoxylate' }] }, { categoryOnly: true });
+    const text = buildCategoryTreatmentSummary({ products: [BIFEN, { name: 'Nonionic Surfactant', kind: 'other', activeIngredient: 'alkylphenol ethoxylate' }] });
     expect(text).toMatch(/with a surfactant added/);
     expect(text).not.toMatch(/alkylphenol|nonionic/i);
   });
@@ -118,14 +120,21 @@ describe('fix 1: no chemical or catalog name in a sentence', () => {
     expect(out.copy.whatWeDid).toBe(frozenText);
   });
 
-  test('the AI treatment narrative is not used for a lawn report under the gate (no db, no model)', async () => {
+  test('the lawn narrative hook: gate on = the fixed category sentence, no database, no model; gate off = the narrative builder as before', async () => {
     const { dispatchWithFallback } = require('../services/llm/call');
+    const args = { serviceRecordId: 'svc-1', serviceLine: 'lawn', treatment: { products: [BIFEN] }, knex: () => { throw new Error('must not touch the database'); } };
     gateOn();
-    const knex = () => { throw new Error('the narrative must not touch the database'); };
-    const out = await buildTreatmentNarrative({ serviceRecordId: 'svc-1', serviceLine: 'lawn', treatment: { products: [BIFEN] }, knex });
+    const spy = jest.spyOn(treatmentNarrative, 'buildTreatmentNarrative');
+    const out = await lawnTreatmentNarrative(args);
     expect(out.signature).toBeNull();
-    expect(out.text).not.toMatch(NAMES);
+    expect(out.text).toBe('Today we applied insect control (broadcast application), targeting chinch bugs.');
+    expect(spy).not.toHaveBeenCalled();
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+    gateOff();
+    spy.mockResolvedValue({ text: 'AI text', signature: '-tnok1' });
+    expect(await lawnTreatmentNarrative(args)).toEqual({ text: 'AI text', signature: '-tnok1' });
+    expect(spy).toHaveBeenCalledWith(args);
+    spy.mockRestore();
   });
 
   test('the narrative PDF key part is the sentinel for lawn under the gate, and unchanged otherwise', async () => {
@@ -218,7 +227,6 @@ function baseAssessment(overrides = {}) {
     observations: '',
     waterContext: {
       rainfallInches7d: 0.9, irrigationInchesPerWeek: 0.7, effectiveInches7d: 1.6, targetInchesPerWeek: 0.75,
-      targetGrassKnown: true,
       irrigationAdvice: { status: 'balanced', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 0.75, targetBasis: 'evapotranspiration' },
     },
     trend: [
@@ -396,51 +404,66 @@ describe('fix 5: stale Water Gap and Mowing Height charts', () => {
 });
 
 describe('fix 6: the water target source line', () => {
-  const ctx = (basis, grass = true) => ({
-    rainfallInches7d: 0.5, irrigationInchesPerWeek: 0.5, effectiveInches7d: 1, targetInchesPerWeek: 0.75,
-    ...(grass === undefined ? {} : { targetGrassKnown: grass }),
-    irrigationAdvice: { status: 'balanced', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 0.75, targetBasis: basis },
+  const build = (basis, { grass = 'st_augustine', waterSnapshot = null, rain = 0.5, target = 0.75 } = {}) => buildLawnReportV2({
+    lawnAssessment: baseAssessment({
+      turfProfile: { grassType: grass },
+      waterContext: {
+        rainfallInches7d: rain, irrigationInchesPerWeek: 0.5, effectiveInches7d: 1, targetInchesPerWeek: target,
+        irrigationAdvice: { status: 'balanced', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: target, targetBasis: basis },
+      },
+    }),
+    waterSnapshot,
   });
 
   test('gate off: no targetNote key at all', () => {
-    expect('targetNote' in mapWater(ctx('evapotranspiration'), null)).toBe(false);
-    expect('targetNote' in mapWater(ctx('evapotranspiration'), null, { copyFixes: false })).toBe(false);
+    gateOff();
+    expect('targetNote' in build('evapotranspiration').water).toBe(false);
   });
 
   test('gate on: the four fixed sentences, each a true statement of the inputs used', () => {
+    gateOn();
     const notes = {
-      weatherGrass: mapWater(ctx('evapotranspiration', true), null, { copyFixes: true }).targetNote,
-      weather: mapWater(ctx('evapotranspiration', false), null, { copyFixes: true }).targetNote,
-      seasonGrass: mapWater(ctx('seasonal', true), null, { copyFixes: true }).targetNote,
-      season: mapWater(ctx('seasonal', false), null, { copyFixes: true }).targetNote,
+      weatherGrass: build('evapotranspiration').water.targetNote,
+      weather: build('evapotranspiration', { grass: null }).water.targetNote,
+      seasonGrass: build('seasonal').water.targetNote,
+      season: build('seasonal', { grass: 'mystery grass' }).water.targetNote,
     };
     expect(notes).toEqual({
-      weatherGrass: 'Based on the weather in your area during the week before this visit, your grass type and the time of year.',
-      weather: 'Based on the weather in your area during the week before this visit and the time of year.',
+      weatherGrass: 'Based on the weather in your area for the week ending on this visit, your grass type and the time of year.',
+      weather: 'Based on the weather in your area for the week ending on this visit and the time of year.',
       seasonGrass: 'Based on the usual weekly water need for your grass type at this time of year.',
       season: 'Based on the usual weekly water need for a lawn at this time of year.',
     });
+    expect(Object.values(WATER_TARGET_NOTES).sort()).toEqual(Object.values(notes).sort());
     for (const note of Object.values(notes)) {
       expect(customerCopyViolations(note)).toEqual([]);
-      expect(note).not.toMatch(/forecast|safe|minute|week from now/i);
+      expect(note).not.toMatch(/forecast|safe|minute|before this visit/i);
     }
   });
 
   test('the target number is untouched by the gate', () => {
-    expect(mapWater(ctx('evapotranspiration'), null, { copyFixes: true }).targetInches).toBe(mapWater(ctx('evapotranspiration'), null).targetInches);
+    gateOff();
+    const off = build('evapotranspiration').water.targetInches;
+    gateOn();
+    expect(build('evapotranspiration').water.targetInches).toBe(off);
   });
 
   test('a target read from the area snapshot gets no line (its basis is not recorded)', () => {
+    gateOn();
     const snap = { status: 'balanced', interpretation: 'balanced', rain_7day_inches: 0.5, irrigation_inches_per_week: 0.5, total_water_7day_inches: 1, target_water_inches_per_week: 0.8 };
-    const ctxNoRain = { ...ctx('evapotranspiration'), rainfallInches7d: null };
-    const water = mapWater(ctxNoRain, snap, { copyFixes: true });
+    const water = build('evapotranspiration', { rain: null, waterSnapshot: snap }).water;
     expect(water.source).toBe('area_snapshot');
     expect('targetNote' in water).toBe(false);
   });
 
   test('no target, no line', () => {
-    const none = mapWater({ ...ctx('seasonal'), targetInchesPerWeek: null }, null, { copyFixes: true });
-    expect('targetNote' in none).toBe(false);
+    gateOn();
+    expect('targetNote' in build('seasonal', { target: null }).water).toBe(false);
+  });
+
+  test('an unknown target basis gets no line', () => {
+    gateOn();
+    expect('targetNote' in build(undefined).water).toBe(false);
   });
 
   test('the advice engine names its basis and isKnownGrass matches the tables', () => {
@@ -553,16 +576,14 @@ describe('payload flag and PDF key (real report builder, in-memory reader)', () 
     require('../services/llm/call').dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
   });
 
-  test('gate off: no lawnCopyFixes key, no targetGrassKnown, no targetNote; gate on: the lawn payload gains the flag', async () => {
+  test('gate off: no lawnCopyFixes key, no targetNote; gate on: the lawn payload gains the flag', async () => {
     gateOff();
     const off = await buildReportV1Data(lawnService(), 'tok-copyfix', makeKnex(fixtures()), {});
     expect('lawnCopyFixes' in off).toBe(false);
-    expect('targetGrassKnown' in off.lawnAssessment.waterContext).toBe(false);
     expect(off.reportV2.water && 'targetNote' in off.reportV2.water).toBeFalsy();
     gateOn();
     const on = await buildReportV1Data(lawnService(), 'tok-copyfix', makeKnex(fixtures()), {});
     expect(on.lawnCopyFixes).toBe(true);
-    expect(typeof on.lawnAssessment.waterContext.targetGrassKnown).toBe('boolean');
   });
 
   test('gate on, a pest report: no flag', async () => {

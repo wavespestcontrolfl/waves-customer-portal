@@ -22,6 +22,7 @@ const { appliedFromProducts } = require('./lawn-visit-memory');
 const { keptRunRows } = require('./tip-library');
 const { PHOTO_FINDING_LABELS } = require('./lawn-photo-findings');
 const { normalizeInputs, FINDING_OF_PHOTO_LABEL } = require('./lawn-tech-paragraph');
+const { copyFixesLive } = require('./lawn-report-copy-fixes');
 
 const ALLOWED_LABELS = new Set(PHOTO_FINDING_LABELS);
 const LOW_CONFIDENCE = new Set(['low', 'unknown']);
@@ -82,9 +83,7 @@ async function gatherTechParagraphInputs({ record, data, knex }) {
     .map((f) => ({ key: FINDING_OF_PHOTO_LABEL[f.label] }));
   // GATE_LAWN_REPORT_COPY_FIXES (owner 2026-10-08): a paragraph frozen while the gate is live
   // names the product categories, never a catalog name. An older frozen entry replays as written.
-  const gates = require('../../config/feature-gates');
-  const categoryOnly = typeof gates.lawnReportCopyFixesLive === 'function' && gates.lawnReportCopyFixesLive();
-  return normalizeInputs({ technicianNote: record.technician_notes, products, findings, ...(categoryOnly ? { categoryOnly: true } : {}) });
+  return normalizeInputs({ technicianNote: record.technician_notes, products, findings, ...(copyFixesLive() ? { categoryOnly: true } : {}) });
 }
 
 module.exports = { gatherTechParagraphInputs, keptFindings };

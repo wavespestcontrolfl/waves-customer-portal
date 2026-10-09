@@ -2510,9 +2510,8 @@ payloads never change). New optional keys, absent while the gate is off:
 top-level `lawnCopyFixes: true` (the page then prints none of the pest program's
 re-service wording: the footer sentence, its booking link and the legacy re-service
 header), `reportV2.water.targetNote` (one fixed sentence from the closed table
-`WATER_TARGET_NOTES`, only when the target came from the property's own weather or
-the seasonal lookup; none for an area-snapshot target) and
-`lawnAssessment.waterContext.targetGrassKnown` (boolean). Changed values while the
+`WATER_TARGET_NOTES` in `lawn-report-copy-fixes.js`, only when the target came from the property's own weather or
+the seasonal lookup; none for an area-snapshot target). Changed values while the
 gate is live: the `weed_pressure` card's `label` reads "Weed Cleanliness";
 `reportV2.snapshot.treatmentSummary` names product categories, never an active
 ingredient or a product name (the AI treatment narrative is not called for a lawn

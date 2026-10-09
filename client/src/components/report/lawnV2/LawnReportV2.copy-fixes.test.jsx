@@ -12,9 +12,9 @@ describe('the water target source line', () => {
   const water = { rainInches: 0.9, irrigationInches: 0.7, totalInches: 1.6, targetInches: 0.75, status: 'balanced' };
 
   it('prints the server sentence directly under the Target range row', () => {
-    render(<WaterIntakeBar water={{ ...water, targetNote: 'Based on the weather in your area during the week before this visit, your grass type and the time of year.' }} />);
+    render(<WaterIntakeBar water={{ ...water, targetNote: 'Based on the weather in your area for the week ending on this visit, your grass type and the time of year.' }} />);
     const note = screen.getByTestId('lawn-water-target-note');
-    expect(note).toHaveTextContent('Based on the weather in your area during the week before this visit, your grass type and the time of year.');
+    expect(note).toHaveTextContent('Based on the weather in your area for the week ending on this visit, your grass type and the time of year.');
     expect(screen.getByText('Target range').parentElement).toContainElement(note);
     expect(screen.getByText('Target range').compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });

@@ -27,12 +27,19 @@ function isSupportProduct(p = {}) {
     .test(`${p.name || ''} ${p.activeIngredient || ''} ${p.kind || ''}`);
 }
 
-function buildTreatmentSummary(treatment, { noTiming = false, categoryOnly = false } = {}) {
+// The treatment's products split into the ones that make a treatment claim and the support
+// products (surfactants, PGRs). Null when nothing makes a claim.
+function splitProducts(treatment) {
   const products = (treatment && Array.isArray(treatment.products)) ? treatment.products : [];
-  if (!products.length) return null;
   const support = products.filter(isSupportProduct);
   const main = products.filter((p) => !isSupportProduct(p));
-  if (!main.length) return null;
+  return main.length ? { main, support } : null;
+}
+
+function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
+  const split = splitProducts(treatment);
+  if (!split) return null;
+  const { main, support } = split;
 
   // Active ingredient, not brand name (owner 2026-07-21 — brand names live
   // on the product cards; the narrative speaks in actives). Strip the label
@@ -87,19 +94,16 @@ function buildTreatmentSummary(treatment, { noTiming = false, categoryOnly = fal
     const method = sharedMethod ? null : methodOf(p);
     return `${activeName(p)}${method ? ` (${method})` : ''}`;
   });
-  let list = (names.length === 1
+  const list = (names.length === 1
     ? names[0]
     : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
     + (sharedMethod ? ` (all applied as a ${sharedMethod})` : '');
-  if (categoryOnly) {
-    // GATE_LAWN_REPORT_COPY_FIXES (owner 2026-10-08): no active ingredient or product name in a
-    // sentence, only the category words from the Visit Summary phrase table; names stay on the
-    // product cards. A method is said only when every product shares it.
-    const phrases = require('./lawn-visit-summary').appliedCategoryPhrases(main);
-    const everyMethod = methodOf(main[0]) && main.every((p) => methodOf(p) === methodOf(main[0])) ? methodOf(main[0]) : null;
-    const joined = phrases.length <= 1 ? phrases.join('') : `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}`;
-    list = joined + (everyMethod ? (main.length > 1 ? ` (all applied as a ${everyMethod})` : ` (${everyMethod})`) : '');
-  }
+  return summarySentence(list, main, support, noTiming);
+}
+
+// "Today we applied {list}", then what the products target, the surfactant clause and the
+// systemic clause. Shared by the active-ingredient form above and the category form below.
+function summarySentence(list, main, support, noTiming) {
   const targets = [...new Set(
     main.flatMap((p) => (Array.isArray(p.targets) ? p.targets : []).map((t) => String(t || '').trim().toLowerCase()).filter(Boolean)),
   )].slice(0, 3);
@@ -128,4 +132,19 @@ function buildTreatmentSummary(treatment, { noTiming = false, categoryOnly = fal
   return out;
 }
 
-module.exports = { buildTreatmentSummary, isSupportProduct, METHOD_PHRASES };
+// The same sentence naming product CATEGORIES, never an active ingredient or a product name
+// (GATE_LAWN_REPORT_COPY_FIXES, owner 2026-10-08), from the Visit Summary phrase table. A method
+// is said only when every product shares it. Chosen once by the caller; the form above is untouched.
+function buildCategoryTreatmentSummary(treatment, { noTiming = false } = {}) {
+  const split = splitProducts(treatment);
+  if (!split) return null;
+  const { main, support } = split;
+  const phrases = require('./lawn-visit-summary').appliedCategoryPhrases(main);
+  const method = METHOD_PHRASES[String(main[0].method || '').toLowerCase()] || null;
+  const shared = method && main.every((p) => METHOD_PHRASES[String(p.method || '').toLowerCase()] === method) ? method : null;
+  const joined = phrases.length <= 1 ? phrases.join('') : `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}`;
+  const tag = shared ? (main.length > 1 ? ` (all applied as a ${shared})` : ` (${shared})`) : '';
+  return summarySentence(joined + tag, main, support, noTiming);
+}
+
+module.exports = { buildTreatmentSummary, buildCategoryTreatmentSummary, isSupportProduct, METHOD_PHRASES };
