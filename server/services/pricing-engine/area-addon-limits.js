@@ -121,15 +121,20 @@ function areaAddOnLimitVerdict(key, history, { day = null } = {}) {
   if (allowedOn(limit, dates, on)) return null;
   const nextAllowedOn = nextAllowedDay(limit, dates, on);
   const lastOn = dates.filter((d) => d <= on).pop() || dates[dates.length - 1];
-  const inYear = dates.filter((d) => dayNumber(d) > dayNumber(on) - WINDOW_DAYS && dayNumber(d) <= dayNumber(on) + WINDOW_DAYS).length;
+  // Two separate counts, each a true 12-month span: on or before the candidate day, and booked after it. Summing the
+  // two would report up to 24 months of dates as "the last 12 months".
+  const before = dates.filter((d) => dayNumber(d) > dayNumber(on) - WINDOW_DAYS && dayNumber(d) <= dayNumber(on)).length;
+  const after = dates.filter((d) => dayNumber(d) > dayNumber(on) && dayNumber(d) < dayNumber(on) + WINDOW_DAYS).length;
+  const times = (n) => `${n} time${n === 1 ? '' : 's'}`;
   const product = limit.product || 'This product';
   return {
     reason: LIMIT_REACHED_REASON,
-    count: inYear,
+    count: before,
+    bookedAfter: after,
     max: limit.max,
     lastAppliedOn: lastOn,
     nextAllowedOn,
-    detail: `${product} was applied or booked ${inYear} time${inYear === 1 ? '' : 's'} at this property in the last 12 months (limit ${limitText(cfg)}). Last on ${lastOn}. The next one is allowed on ${nextAllowedOn}.`,
+    detail: `${product} was applied or booked ${times(before)} at this property in the 12 months up to ${on}${after ? `, and is booked ${times(after)} in the 12 months after it` : ''} (limit ${limitText(cfg)}). Last on ${lastOn}. The next one is allowed on ${nextAllowedOn}.`,
   };
 }
 

@@ -381,11 +381,14 @@ function impliedTotal(p) {
 
 // The fields a tagged row still lacks, in the order the form shows them; a total amount the client did not send is filled in
 // from the rate and the area (and "total amount" is a missing field when the unit has no area to multiply by).
+// The server's own quantity is the record: whenever the rate has an area basis, the total is rate x treated area and a
+// total the client sent is replaced by it (a stale or crafted total must not reach the ledger or the inventory deduction).
+// Only a rate with no area basis (a mix unit such as oz/gal) keeps the total the technician typed.
 function completeActuals(p) {
   const missing = missingActuals(p);
-  if (missing.length || positive(p.totalAmount)) return missing;
+  if (missing.length) return missing;
   const total = impliedTotal(p);
-  if (!total) return ['total amount'];
+  if (!total) return positive(p.totalAmount) ? missing : ['total amount'];
   p.totalAmount = total.amount;
   p.amountUnit = total.unit;
   return missing;
@@ -403,9 +406,9 @@ async function addOnDisplayNames(knex, keys) {
 /**
  * Checks the tagged rows of a fresh completion and fills each one's total amount. Throws the 400 (an operational error,
  * code `area_addon_actuals_required`) naming the first add-on and the fields it lacks when a tagged row does not carry its
- * actuals; returns nothing otherwise. `tags` is resolveApplicationAddOnTags' map. Mutates the submitted row (`totalAmount`,
- * `amountUnit`) only when the client sent no total, so the inventory check, the N budget and the deduction all read the same
- * amount. Not a fresh execution (a replay or resume of a committed completion), or no tag: nothing is checked and no query
+ * actuals; returns nothing otherwise. `tags` is resolveApplicationAddOnTags' map. Sets the submitted row's `totalAmount`
+ * and `amountUnit` to rate x treated area whenever the rate has an area basis (a client total is replaced), so the inventory
+ * check, the N budget, the ledger and the deduction all read the server's amount. Not a fresh execution (a replay or resume of a committed completion), or no tag: nothing is checked and no query
  * runs. The visit's OUTCOME does not matter: an incomplete visit still writes the compliance row for a product that was
  * applied, so a tagged row needs its actuals whenever it is submitted.
  */

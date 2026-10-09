@@ -71,10 +71,23 @@ describe('the rule table: each add-on at its limit and one under it', () => {
     expect(limits.areaAddOnLimitVerdict('web_sweep', hist({ web_sweep: Array.from({ length: 30 }, (_, i) => daysBefore(i)) }))).toBeNull();
   });
 
+  test('past applications and later bookings are counted as two separate 12-month spans, never summed', () => {
+    // 300 days before and 300 days after the candidate day: no 12-month window holds both.
+    const verdict = limits.areaAddOnLimitVerdict('fire_ant_yard', hist({ fire_ant_yard: [daysBefore(300), limits.addDays(TODAY, 300)] }));
+    expect(verdict).toMatchObject({ count: 1, bookedAfter: 1, max: 1 });
+    expect(verdict.detail).toContain(`was applied or booked 1 time at this property in the 12 months up to ${TODAY}, and is booked 1 time in the 12 months after it (limit 1 in 12 months)`);
+    expect(verdict.detail).not.toContain('2 times');
+    // Only a later booking: zero before, said as such.
+    const later = limits.areaAddOnLimitVerdict('fire_ant_yard', hist({ fire_ant_yard: [limits.addDays(TODAY, 30)] }));
+    expect(later).toMatchObject({ count: 0, bookedAfter: 1 });
+    expect(later.detail).toContain('0 times at this property in the 12 months up to');
+  });
+
   test('the verdict names the last application and when the next one is allowed', () => {
     const verdict = limits.areaAddOnLimitVerdict('bed_pre_emergent', hist({ bed_pre_emergent: [daysBefore(20)] }));
     expect(verdict).toMatchObject({ lastAppliedOn: daysBefore(20), nextAllowedOn: limits.addDays(daysBefore(20), 60) });
-    expect(verdict.detail).toBe(`Snapshot 2.5TG was applied or booked 1 time at this property in the last 12 months (limit 4 in 12 months, at least 60 days apart). Last on ${daysBefore(20)}. The next one is allowed on ${limits.addDays(daysBefore(20), 60)}.`);
+    expect(verdict.detail).toBe(`Snapshot 2.5TG was applied or booked 1 time at this property in the 12 months up to ${TODAY} (limit 4 in 12 months, at least 60 days apart). Last on ${daysBefore(20)}. The next one is allowed on ${limits.addDays(daysBefore(20), 60)}.`);
+    expect(verdict).toMatchObject({ count: 1, bookedAfter: 0 });
     const year = limits.areaAddOnLimitVerdict('fire_ant_yard', hist({ fire_ant_yard: [daysBefore(100)] }));
     expect(year.nextAllowedOn).toBe(limits.addDays(daysBefore(100), 365));
   });

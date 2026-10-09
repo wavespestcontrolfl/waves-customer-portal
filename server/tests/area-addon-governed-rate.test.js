@@ -255,10 +255,10 @@ describe('a row tagged to a chemical add-on must carry its application actuals',
     const p = full();
     expect(await check(p)).toBeNull();
     expect(p).toMatchObject({ totalAmount: 0.294, amountUnit: 'oz' });
-    // A total the client sent is kept, whatever the rate and area say.
+    // A total the client sent is replaced by the server's own (rate x treated area) whenever the rate has an area basis.
     const sent = full({ totalAmount: '0.3', amountUnit: 'oz' });
     expect(await check(sent)).toBeNull();
-    expect(sent).toMatchObject({ totalAmount: '0.3', amountUnit: 'oz' });
+    expect(sent).toMatchObject({ totalAmount: 0.294, amountUnit: 'oz' });
     // A per-acre rate: 160 lb per acre over 43,560 sq ft is 160 lb; a per-1,000-sq-ft unit written out is the same as a bare one.
     const acre = full({ rate: 160, rateUnit: 'lb/acre', areaValue: 43560 });
     expect(await check(acre)).toBeNull();
@@ -301,6 +301,17 @@ describe('a row tagged to a chemical add-on must carry its application actuals',
     // A replay or resume of a committed completion is not checked (the row below would be refused).
     const empty = full({ rate: '' });
     expect(await run([empty], tagOf(empty), { fresh: false })).toBeNull();
+  });
+
+  test('the server computes the total from the rate and the treated area and replaces a total the client sent', async () => {
+    // 0.147 oz per 1,000 sq ft over 1,000 sq ft is 0.147 oz, whatever the request says.
+    const crafted = full({ rate: '0.147', rateUnit: 'oz/1000sf', areaValue: '1000', areaUnit: 'sqft', totalAmount: '999', amountUnit: 'lb' });
+    expect(await check(crafted)).toBeNull();
+    expect(crafted).toMatchObject({ totalAmount: 0.147, amountUnit: 'oz' });
+    // A rate with no area basis keeps the total the technician typed, and needs one.
+    const mix = full({ rate: '1.5', rateUnit: 'oz/gal', totalAmount: '12', amountUnit: 'oz' });
+    expect(await check(mix)).toBeNull();
+    expect(mix).toMatchObject({ totalAmount: '12', amountUnit: 'oz' });
   });
 
   test('an incomplete visit is not exempt: a product that was applied needs its actuals whatever the outcome', async () => {
