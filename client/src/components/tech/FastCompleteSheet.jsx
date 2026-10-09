@@ -1878,7 +1878,7 @@ function ReportFlowForm({
 }
 
 // The report footer's trace buttons: read the trace again, remove it, or
-// "Same as last visit" (a one-tap copy of the property's last trace).
+// "Same as last visit" (a one-tap copy of the customer's last trace at this place).
 // No copy offered (a lane or typed visit, a spot visit, a trace already saved).
 const NO_REUSE = { offer: null, reusing: false, feet: null };
 

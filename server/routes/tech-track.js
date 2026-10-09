@@ -1787,8 +1787,9 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
 });
 
 // "Same as last visit" (GATE_TRACE_REUSE, dark): the Fast Complete report flow
-// copies the property's last saved spray trace onto the open visit with one
-// tap. The server picks the source trace itself (treatment-zone-maps.js,
+// copies the customer's last saved spray trace onto the open visit with one
+// tap, when the visit's own coordinates fall inside that trace's footprint.
+// The server picks the source trace itself (treatment-zone-maps.js,
 // findReusableTreatmentZone); a client never names a zone.
 const TRACE_REUSE_SVC_COLUMNS = ['id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type', 'property_id'];
 const TRACE_REUSE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, trace_exists: 409, no_reusable_trace: 409, visit_changed: 409, service_not_assigned: 403, not_found: 404, trace_image_copy_failed: 502 };

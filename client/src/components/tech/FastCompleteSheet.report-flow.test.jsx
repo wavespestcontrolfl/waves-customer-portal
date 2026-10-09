@@ -1001,6 +1001,20 @@ describe('complete and send', () => {
       expect(await screen.findByRole('dialog', { name: 'Tracer' })).toBeTruthy();
     });
 
+    // Codex P3 r4 on #6175: a failed copy's message goes once the visit has a trace by another path.
+    test('a refused copy\'s message goes when a hand trace is saved', async () => {
+      const refused = Object.assign(new Error('There is no earlier trace for this property to reuse.'), { status: 409, code: 'no_reusable_trace' });
+      const request = reusableRequest({ reuse: () => { throw refused; } });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('There is no earlier trace for this property to reuse.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Save trace' }));
+      expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
+      expect(screen.queryByText('There is no earlier trace for this property to reuse.')).toBeNull();
+    });
+
     test('while the copy saves, the button shows loading and the hand trace waits', async () => {
       let release;
       const gate = new Promise((resolve) => { release = resolve; });

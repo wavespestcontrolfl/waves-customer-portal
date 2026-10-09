@@ -117,30 +117,60 @@ async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, o
 // the lock, inside the technician's own scope (a reassigned visit is refused
 // as on the remove path), and must still be the visit the request read: same
 // customer, same service, same property, still open.
-// A property-less visit's place is its stamped address: `addressKey` is the
-// key the source was matched on, and an address corrected during the copy is
-// a move (Codex P1 r2). Any closed status refuses the copy, not only
-// completed: an administrator's lock carries no status filter (Codex P2 r2).
+// Any closed status refuses the copy, not only completed: an administrator's
+// lock carries no status filter (Codex P2 r2). Where the visit IS is judged
+// separately, by recheckReuseUnderLock.
 const TRACE_CLOSED_STATUSES = new Set(['cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled']);
-async function lockScopedVisitForTrace(conn, scheduledServiceId, { actor, visit, addressKey: expectedAddressKey = null }, openVisitOnly) {
+async function lockScopedVisitForTrace(conn, scheduledServiceId, { actor, visit }, openVisitOnly) {
   const { lockOwnedLiveVisit } = require('./technician-visit-scope');
   const locked = await lockOwnedLiveVisit(conn, actor, scheduledServiceId, [
     'property_id', 'status', 'customer_id', 'service_id', 'service_type',
-    'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
   ], { allowCompleted: true });
   if (String(locked.property_id ?? '') !== String(visit.property_id ?? '')) throw propertyChangedError();
-  if (!locked.property_id && stampedAddressKey(locked) !== expectedAddressKey) throw propertyChangedError();
   if (openVisitOnly && locked.status === 'completed') throw visitCompletedError();
   if (TRACE_CLOSED_STATUSES.has(String(locked.status || ''))) throw visitChangedError();
   const same = (key) => String(locked[key] ?? '') === String(visit[key] ?? '');
   if (!same('customer_id') || !same('service_id') || !same('service_type')) throw visitChangedError();
 }
-// The address key of a scheduled_services row's own stamped columns.
-function stampedAddressKey(row) {
-  return addressKey({
-    line1: row.service_address_line1, line2: row.service_address_line2,
-    city: row.service_address_city, state: row.service_address_state, zip: row.service_address_zip,
-  });
+
+function noReusableTraceError() {
+  return Object.assign(operationalError('There is no earlier trace for this property to reuse.', 409), { code: 'no_reusable_trace' });
+}
+
+// The copy's last look, inside the save transaction and after the target visit
+// is locked (Codex P1 r4 on #6175). Nothing read before the lock still holds:
+//  - the target's location inputs (the columns its coordinates were resolved
+//    from) must be the ones the lookup used: an address corrected during the
+//    copy moves the visit, so the trace no longer proves the place. The inputs
+//    are compared, never re-geocoded under a row lock.
+//  - the source must still be the row the lookup chose: its zone row (same id,
+//    visit and updated_at, so the same points and picture) and its visit, still
+//    completed for the same customer. Correcting a completed visit's address
+//    deletes its zone row (appointment-address.js), which ends the offer here.
+// The source rows are locked in the order that address correction takes them
+// (visit, then zone), so the two cannot deadlock.
+async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, source }) {
+  const here = await readVisitLocationRow(conn, scheduledServiceId);
+  if (!here || visitLocationKey(here) !== locationKey) throw propertyChangedError();
+  const sourceVisit = await conn('scheduled_services').where({ id: source.serviceId }).forUpdate().first('status', 'customer_id');
+  const zone = await conn('treatment_zone_maps').where({ id: source.zoneId }).forUpdate().first('id', 'scheduled_service_id', 'updated_at');
+  const sameInstant = (a, b) => Number.isFinite(new Date(a).getTime()) && new Date(a).getTime() === new Date(b).getTime();
+  if (!sourceVisit || !zone
+    || sourceVisit.status !== 'completed'
+    || String(sourceVisit.customer_id ?? '') !== String(source.customerId ?? '')
+    || String(zone.id) !== String(source.zoneId)
+    || String(zone.scheduled_service_id) !== String(source.serviceId)
+    || !sameInstant(zone.updated_at, source.updatedAt)) {
+    throw noReusableTraceError();
+  }
+}
+
+// The save's locks and what is judged under them: the visit (inside the
+// technician's scope for a reuse), then a reuse's proof of place.
+async function lockForSave(conn, scheduledServiceId, { lockedScope, reuseGuard, expectedPropertyId, openVisitOnly }) {
+  if (lockedScope) await lockScopedVisitForTrace(conn, scheduledServiceId, lockedScope, openVisitOnly);
+  else await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
+  if (reuseGuard) await recheckReuseUnderLock(conn, scheduledServiceId, reuseGuard);
 }
 
 // One visit's row: the keys it replaces, then the upsert.
@@ -188,6 +218,9 @@ async function saveTreatmentZoneMap({
   // technician's own scope and against the row the request read (see
   // lockScopedVisitForTrace).
   lockedScope = null,
+  // Reuse only: { locationKey, source } the lookup's proof of place, read again
+  // under the lock (see recheckReuseUnderLock).
+  reuseGuard,
   knex = db,
 }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
@@ -273,8 +306,7 @@ async function saveTreatmentZoneMap({
     updated_at: knex.fn.now(),
   });
   const persist = async (conn) => {
-    if (lockedScope) await lockScopedVisitForTrace(conn, scheduledServiceId, lockedScope, openVisitOnly);
-    else await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
+    await lockForSave(conn, scheduledServiceId, { lockedScope, reuseGuard, expectedPropertyId, openVisitOnly });
     if (createOnly && await conn('treatment_zone_maps').where({ scheduled_service_id: scheduledServiceId }).first('id')) {
       throw traceExistsError();
     }
@@ -286,7 +318,7 @@ async function saveTreatmentZoneMap({
     saved = await knex.transaction(persist);
   } catch (err) {
     // A refused save leaves no orphaned upload behind (best effort).
-    if (['visit_property_changed', 'visit_completed', 'trace_exists', 'visit_changed', 'service_not_assigned', 'not_found'].includes(err?.code)) {
+    if (['visit_property_changed', 'visit_completed', 'trace_exists', 'visit_changed', 'no_reusable_trace', 'service_not_assigned', 'not_found'].includes(err?.code)) {
       for (const key of [snapshotKey, maskKey].filter(Boolean)) {
         try {
           await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
@@ -446,8 +478,15 @@ async function treatmentZonePdfSignature(service, knex = db) {
 
 // ── "Same as last visit" (GATE_TRACE_REUSE) ─────────────────────────────────
 // A recurring visit re-traces the same house every quarter. The tech can copy
-// the property's last saved spray trace onto the open visit with one tap. The
+// the customer's last saved spray trace onto the open visit with one tap. The
 // server finds the source itself; a client never names a zone.
+//
+// "The same place" is proved by coordinates and nothing else: the target
+// visit's own location, resolved on the server, must fall inside the footprint
+// of the source trace. A property id or an address string cannot prove it,
+// because both are editable in place (a primary property row can move to
+// another street, an address can be re-spelled or corrected) while the visits
+// that point at them keep their old meaning (Codex P1 r4 on #6175).
 //
 // Only a 'perimeter' trace is offered. 'interior' (building footprint + the
 // inside wash) is a per-visit fact, not a standing outline; the lawn, lawn
@@ -457,59 +496,100 @@ async function treatmentZonePdfSignature(service, knex = db) {
 // visit, so a lawn or bait visit is never offered a spray outline.
 const REUSE_CAPTURE_MODE = 'perimeter';
 // Enough rows that a valid trace is never hidden behind others of the same
-// customer (Codex P2 on #6175): the length filter runs in SQL, and a
-// property-less visit's address is judged per row below.
+// customer (Codex P2 on #6175): the length filter runs in SQL, the footprint
+// is judged per row below.
 const REUSE_CANDIDATE_LIMIT = 200;
 
-// One property identity for the whole app: the canonical key the customer
-// property records use (customer-property-address-keys.js: street suffixes,
-// punctuation, ZIP+4 and unit designators all normalized, the unit kept), so
-// "123 Main St." and "123 Main Street", "Apt 4" and "Unit 4" are one place and
-// two units are two (Codex P1 r3 on #6175). No street line is no place.
-function addressKey(parts) {
-  if (!String(parts.line1 ?? '').trim()) return null;
-  const { addressKey: canonicalAddressKey } = require('./customer-property-address-keys');
-  return canonicalAddressKey({ address_line1: parts.line1, address_line2: parts.line2, city: parts.city, zip: parts.zip }) || null;
+// How far outside the traced points' bounding box the visit's location may
+// still sit and count as the same place. A visit's pin is a geocoded address
+// point (a rooftop or parcel point, often a few metres off the walls the tech
+// walked), not the centre of the drawing; 15 m takes in that offset without
+// reaching a house on the next lot.
+const REUSE_FOOTPRINT_MARGIN_M = 15;
+const METRES_PER_DEGREE_LAT = 111320;
+
+const validCoordinate = (lat, lng) => Number.isFinite(lat) && Number.isFinite(lng)
+  && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
+
+// The trace's footprint: the bounding box of its lat/lng points, grown by the
+// margin. A trace with fewer than 3 usable points has no footprint to prove a
+// place with (a point missing its lat/lng is skipped), so it is never offered.
+function traceFootprint(rawPathPoints) {
+  let points = rawPathPoints;
+  if (typeof points === 'string') {
+    try { points = JSON.parse(points); } catch { return null; }
+  }
+  if (!Array.isArray(points)) return null;
+  const usable = [];
+  for (const point of points) {
+    if (point?.latLng?.lat == null || point?.latLng?.lng == null) continue;
+    const lat = Number(point.latLng.lat);
+    const lng = Number(point.latLng.lng);
+    if (validCoordinate(lat, lng)) usable.push({ lat, lng });
+  }
+  if (usable.length < 3) return null;
+  const lats = usable.map((p) => p.lat);
+  const lngs = usable.map((p) => p.lng);
+  const latMargin = REUSE_FOOTPRINT_MARGIN_M / METRES_PER_DEGREE_LAT;
+  const midLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+  const lngMargin = latMargin / Math.max(Math.cos((midLat * Math.PI) / 180), 0.01);
+  return {
+    minLat: Math.min(...lats) - latMargin, maxLat: Math.max(...lats) + latMargin,
+    minLng: Math.min(...lngs) - lngMargin, maxLng: Math.max(...lngs) + lngMargin,
+  };
 }
 
-// The address STAMPED on the visit only, never the customer's current one: a
-// customer who moved would otherwise pass an old home's trace to the new home
-// (both visits would read today's address). A visit with no property and no
-// stamped address has no fixed place, so it neither gives nor takes a trace.
-const EFFECTIVE_ADDRESS_COLUMNS = () => [
-  'ss.service_address_line1 as addr_line1',
-  'ss.service_address_line2 as addr_line2',
-  'ss.service_address_city as addr_city',
-  'ss.service_address_state as addr_state',
-  'ss.service_address_zip as addr_zip',
-];
+function footprintContains(box, point) {
+  return !!box && point.lat >= box.minLat && point.lat <= box.maxLat
+    && point.lng >= box.minLng && point.lng <= box.maxLng;
+}
 
-async function visitAddressKey(knex, scheduledServiceId) {
-  const row = await knex('scheduled_services as ss')
-    .where('ss.id', scheduledServiceId)
-    .first(...EFFECTIVE_ADDRESS_COLUMNS());
-  return row ? addressKey({ line1: row.addr_line1, line2: row.addr_line2, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) : null;
+// What a visit's location is resolved from: the stored pin on the visit, else
+// the customer's pin when the visit's stamped address does not diverge from the
+// customer's, and the stamped-over-customer address the tracer geocodes when
+// neither holds (day-stops.js serviceLocationSelects: the one read the
+// schedule row, the route and the tracer's /geocode all use).
+async function readVisitLocationRow(conn, scheduledServiceId) {
+  const { serviceLocationSelects } = require('./scheduling/day-stops');
+  return conn('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .where('scheduled_services.id', scheduledServiceId)
+    .first(...serviceLocationSelects(conn));
+}
+
+// The inputs of that resolution, compared again under the write lock.
+function visitLocationKey(row) {
+  return JSON.stringify([row.lat, row.lng, row.address_line1, row.city, row.state, row.zip].map((v) => (v == null ? null : String(v))));
+}
+
+// The point the tracer would centre on for this visit, with the key of the
+// inputs it came from, or null (no address, geocoder miss or error): reuse is
+// then not offered, never held.
+async function resolveVisitLocation(knex, scheduledServiceId) {
+  try {
+    const row = await readVisitLocationRow(knex, scheduledServiceId);
+    if (!row) return null;
+    const { resolveServiceLocation } = require('./scheduling/day-stops');
+    const pin = await resolveServiceLocation(row);
+    const lat = pin?.lat == null ? NaN : Number(pin.lat);
+    const lng = pin?.lng == null ? NaN : Number(pin.lng);
+    return validCoordinate(lat, lng) ? { lat, lng, key: visitLocationKey(row) } : null;
+  } catch (err) {
+    logger.warn(`[treatment-zone] reuse location failed service=${scheduledServiceId}: ${err.message}`);
+    return null;
+  }
 }
 
 // The newest offerable trace for `visit` (a scheduled_services row with id,
-// customer_id, property_id, scheduled_date, service_id, service_type), or
-// null. The SQL narrows to the same customer's earlier COMPLETED visits at
-// the same property; the checks below judge each row again, so a wrong row
-// can never pass on the query alone.
+// customer_id, scheduled_date, service_id, service_type), or null. The SQL
+// narrows to the same customer's earlier COMPLETED visits; the checks below
+// judge each row again, so a wrong row can never pass on the query alone.
+// The visit's location is resolved once, and only when some row gets that far.
 async function findReusableTreatmentZone(visit, { knex = db } = {}) {
   if (!visit?.id || !visit.customer_id) return null;
   const visitDate = dateOnlyOrNull(visit.scheduled_date);
   if (!visitDate) return null;
   if (await knex('treatment_zone_maps').where({ scheduled_service_id: visit.id }).first('id')) return null;
-
-  const propertyId = visit.property_id || null;
-  // No property on this visit: only an equal, non-empty service address
-  // stands in for "same property".
-  let hereAddress = null;
-  if (!propertyId) {
-    hereAddress = await visitAddressKey(knex, visit.id);
-    if (!hereAddress) return null;
-  }
 
   const rows = await knex('scheduled_services as ss')
     .join('treatment_zone_maps as tz', 'tz.scheduled_service_id', 'ss.id')
@@ -522,18 +602,23 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     // The report draws a trace only from its picture: one with none would
     // clear the sheet's hold and show nothing (Codex P2 r3 on #6175).
     .whereNotNull('tz.snapshot_s3_key')
-    .modify((q) => (propertyId ? q.where('ss.property_id', propertyId) : q.whereNull('ss.property_id')))
     .orderBy('ss.scheduled_date', 'desc')
     .orderBy('tz.updated_at', 'desc')
     .limit(REUSE_CANDIDATE_LIMIT)
     .select('tz.*', 'ss.id as source_service_id', 'ss.customer_id as source_customer_id',
       'ss.property_id as source_property_id', 'ss.status as source_status',
       'ss.scheduled_date as source_date', 'ss.service_id as source_service_catalog_id',
-      'ss.service_type as source_service_type', ...EFFECTIVE_ADDRESS_COLUMNS());
+      'ss.service_type as source_service_type');
 
   const { traceCaptureBlockPayload } = require('./service-report/trace-eligibility');
+  let here;
   for (const row of rows) {
-    if (!reuseRowMatches(row, visit, visitDate, hereAddress)) continue;
+    if (!reuseRowMatches(row, visit, visitDate)) continue;
+    const footprint = traceFootprint(row.path_points);
+    if (!footprint) continue;
+    if (here === undefined) here = await resolveVisitLocation(knex, visit.id);
+    if (!here) return null;
+    if (!footprintContains(footprint, here)) continue;
     if (await traceCaptureBlockPayload(visit, knex, { captureMode: row.capture_mode })) continue;
     // The SOURCE visit must itself be one whose trace may be captured and
     // shown: a legacy perimeter trace saved on an inspection, a trapping or
@@ -541,7 +626,7 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     // visit that would show it (Codex P1 on #6175).
     if (await traceCaptureBlockPayload(sourceVisitOf(row), knex, { captureMode: row.capture_mode })) continue;
     if (!(await sourceTraceWasShown(row, knex))) continue;
-    return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date), addressKey: hereAddress };
+    return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date), locationKey: here.key };
   }
   return null;
 }
@@ -583,22 +668,19 @@ function sourceVisitOf(row) {
   };
 }
 
-// One candidate row against this visit: same customer, an earlier COMPLETED
-// visit that is not this one, perimeter mode with a length, and the same property (or, for
-// a property-less visit, a property-less one at an equal address).
-function reuseRowMatches(row, visit, visitDate, hereAddress) {
+// One candidate row against this visit, before its place is judged: same
+// customer, an earlier COMPLETED visit that is not this one, perimeter mode
+// with a length and a picture.
+function reuseRowMatches(row, visit, visitDate) {
   const sourceDate = dateOnlyOrNull(row.source_date);
-  if (row.source_service_id === visit.id
-    || String(row.source_customer_id) !== String(visit.customer_id)
-    || row.source_status !== 'completed'
-    || !sourceDate || sourceDate >= visitDate
-    || row.capture_mode !== REUSE_CAPTURE_MODE
+  return row.source_service_id !== visit.id
+    && String(row.source_customer_id) === String(visit.customer_id)
+    && row.source_status === 'completed'
+    && !!sourceDate && sourceDate < visitDate
+    && row.capture_mode === REUSE_CAPTURE_MODE
     // The sheet's hold clears on a length, so a trace with none is no help;
     // the report draws only a trace that has its picture.
-    || !(Number(row.linear_ft) > 0) || !row.snapshot_s3_key) return false;
-  if (visit.property_id) return String(row.source_property_id ?? '') === String(visit.property_id);
-  return !row.source_property_id
-    && addressKey({ line1: row.addr_line1, line2: row.addr_line2, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) === hereAddress;
+    && Number(row.linear_ft) > 0 && !!row.snapshot_s3_key;
 }
 
 function dateOnlyOrNull(value) {
@@ -634,7 +716,9 @@ async function readStoredImage(key) {
 }
 
 // Copies the trace onto `visit` through the normal save, so the property
-// fence, the completed-visit refusal and the one-row-per-visit lock all run.
+// fence, the completed-visit refusal and the one-row-per-visit lock all run,
+// and the proof of place (the visit's location, the source's rows) is read
+// again under that lock.
 // The pictures are read BEFORE the save: a picture that cannot be copied
 // fails the request instead of saving a zone with a missing picture.
 async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null, expectedPropertyId, openVisitOnly = false, knex = db }) {
@@ -644,9 +728,9 @@ async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null
   if (await knex('treatment_zone_maps').where({ scheduled_service_id: visit.id }).first('id')) throw traceExistsError();
   const found = await findReusableTreatmentZone(visit, { knex });
   if (!found) {
-    throw Object.assign(operationalError('There is no earlier trace for this property to reuse.', 409), { code: 'no_reusable_trace' });
+    throw noReusableTraceError();
   }
-  const { zone, sourceServiceId, addressKey: matchedAddressKey } = found;
+  const { zone, sourceServiceId, locationKey } = found;
   const snapshotPngBuffer = zone.snapshot_s3_key ? await readStoredImage(zone.snapshot_s3_key) : null;
   const maskPngBuffer = zone.mask_s3_key ? await readStoredImage(zone.mask_s3_key) : null;
   const pathPoints = typeof zone.path_points === 'string' ? JSON.parse(zone.path_points) : zone.path_points;
@@ -667,7 +751,11 @@ async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null
     ...(expectedPropertyId !== undefined ? { expectedPropertyId } : {}),
     openVisitOnly,
     createOnly: true,
-    ...(actor ? { lockedScope: { actor, visit, addressKey: matchedAddressKey } } : {}),
+    ...(actor ? { lockedScope: { actor, visit } } : {}),
+    reuseGuard: {
+      locationKey,
+      source: { zoneId: zone.id, serviceId: sourceServiceId, customerId: visit.customer_id, updatedAt: zone.updated_at },
+    },
     knex,
   });
   // No column records where a copy came from; the log line does.

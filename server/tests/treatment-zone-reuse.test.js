@@ -1,9 +1,11 @@
 /**
  * "Same as last visit" (GATE_TRACE_REUSE): the lookup that finds the trace a
  * recurring visit may copy, and the copy itself. The query narrows by
- * customer, property and completed status; the code judges every returned
- * row again, so these tests feed the lookup wrong rows and expect none to
- * be offered.
+ * customer and completed status; the code judges every returned row again,
+ * so these tests feed the lookup wrong rows and expect none to be offered.
+ * The place is proved by coordinates only: the visit's own location (resolved
+ * on the server) must fall inside the trace's footprint. No property id or
+ * address string is evidence.
  */
 
 const mockS3Send = jest.fn();
@@ -19,6 +21,11 @@ jest.mock('../config', () => ({
   s3: { bucket: 'test-bucket', region: 'us-east-1', accessKeyId: 'k', secretAccessKey: 's' },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockGeocode = jest.fn();
+jest.mock('../services/geocoder', () => ({
+  ...jest.requireActual('../services/geocoder'),
+  geocodeAddress: (...a) => mockGeocode(...a),
+}));
 
 const traceEligibility = require('../services/service-report/trace-eligibility');
 const {
@@ -43,20 +50,36 @@ const ZONE = {
   center_lat: 27.49, center_lng: -82.57, zoom: 20, address: '1 Example Ln',
   snapshot_s3_key: 'service-photos/treatment-zones/svc-0/snap.png', mask_s3_key: null, capture_mode: 'perimeter',
   source_service_id: 'svc-0', source_customer_id: 'cust-1', source_property_id: 'prop-1',
-  source_status: 'completed', source_date: '2026-07-01',
-  addr_line1: '1 Example Ln', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200',
+  source_status: 'completed', source_date: '2026-07-01', updated_at: '2026-07-02T10:00:00.000Z',
 };
 
+// The visit's location row as the resolver reads it (day-stops.js
+// serviceLocationSelects): the effective pin and the address it falls back to.
+// 27.485, -82.565 is inside POINTS' footprint.
+const PINNED = { lat: 27.485, lng: -82.565, address_line1: '1 Example Ln', city: 'Sampletown', state: 'FL', zip: '34200' };
+const UNPINNED = { ...PINNED, lat: null, lng: null };
+// The source's rows as the locked recheck reads them.
+const SOURCE_VISIT = { status: 'completed', customer_id: 'cust-1' };
+const SOURCE_ZONE = { id: 'zone-0', scheduled_service_id: 'svc-0', updated_at: '2026-07-02T10:00:00.000Z' };
+
 // A table-aware fake: the candidates query resolves to `candidates`, the
-// visit's own address to `here`, the visit's own trace to `own`.
-function makeKnex({ candidates = [ZONE], own = null, record = { id: 'rec-0', structured_notes: null }, here = { addr_line1: '1 Example Ln', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' }, lock = { property_id: 'prop-1', status: 'confirmed' } } = {}) {
-  const state = { inserted: null, wheres: [], columns: [] };
+// visit's location to the next of `locations` (the last repeats), the visit's
+// own trace to `own`, the locked rows to `lock`, `sourceVisit` and
+// `sourceZone`.
+function makeKnex({
+  candidates = [ZONE], own = null, record = { id: 'rec-0', structured_notes: null },
+  locations = [PINNED], lock = { property_id: 'prop-1', status: 'confirmed' },
+  sourceVisit = SOURCE_VISIT, sourceZone = SOURCE_ZONE,
+} = {}) {
+  const state = { inserted: null, wheres: [], columns: [], locationReads: 0, locks: [] };
   const knex = jest.fn((table) => {
     const c = {
       _lock: false,
+      _joined: false,
+      _where: null,
       join: () => c,
-      leftJoin: () => c,
-      where: (...a) => { state.wheres.push([table, ...a]); return c; },
+      leftJoin: () => { c._joined = true; return c; },
+      where: (...a) => { c._where = a; state.wheres.push([table, ...a]); return c; },
       whereNot: (...a) => { state.wheres.push([table, 'not', ...a]); return c; },
       whereNull: (...a) => { state.wheres.push([table, 'null', ...a]); return c; },
       whereNotNull: (...a) => { state.wheres.push([table, 'notnull', ...a]); return c; },
@@ -67,8 +90,16 @@ function makeKnex({ candidates = [ZONE], own = null, record = { id: 'rec-0', str
       forUpdate: () => { c._lock = true; return c; },
       first: (...columns) => {
         state.columns.push(...columns.map(String));
-        if (table === 'scheduled_services' && c._lock) return Promise.resolve(lock);
-        if (table === 'scheduled_services as ss') return Promise.resolve(here);
+        if (c._lock) state.locks.push(`${table} ${JSON.stringify(c._where)}`);
+        if (table === 'scheduled_services' && c._joined) {
+          const row = locations[Math.min(state.locationReads, locations.length - 1)];
+          state.locationReads += 1;
+          return Promise.resolve(row);
+        }
+        if (table === 'scheduled_services' && c._lock) {
+          return Promise.resolve(JSON.stringify(c._where).includes('svc-0') ? sourceVisit : lock);
+        }
+        if (table === 'treatment_zone_maps' && c._lock) return Promise.resolve(sourceZone);
         if (table === 'service_records') return Promise.resolve(record);
         return Promise.resolve(own);
       },
@@ -88,6 +119,8 @@ function makeKnex({ candidates = [ZONE], own = null, record = { id: 'rec-0', str
 }
 
 beforeEach(() => {
+  mockGeocode.mockReset();
+  mockGeocode.mockResolvedValue(null);
   mockS3Send.mockReset();
   mockS3Send.mockImplementation(async (cmd) => (cmd.commandType === 'get'
     ? { Body: { transformToByteArray: async () => new Uint8Array([1, 2, 3]) } }
@@ -98,14 +131,14 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 describe('findReusableTreatmentZone', () => {
-  test('offers the newest perimeter trace of an earlier completed visit at the same property', async () => {
+  test('offers the newest perimeter trace of an earlier completed visit whose footprint holds this visit\'s location', async () => {
     const found = await findReusableTreatmentZone(VISIT, { knex: makeKnex() });
     expect(found.sourceServiceId).toBe('svc-0');
     expect(found.capturedOn).toBe('2026-07-01');
     expect(found.zone.linear_ft).toBe(220);
   });
 
-  test('the query is narrowed to the same customer, completed visits, before this one, at this property, perimeter mode', async () => {
+  test('the query is narrowed to the same customer, completed visits, before this one, perimeter mode, and not by property', async () => {
     const knex = makeKnex();
     await findReusableTreatmentZone(VISIT, { knex });
     const wheres = knex.state.wheres.filter(([t]) => t === 'scheduled_services as ss');
@@ -114,15 +147,14 @@ describe('findReusableTreatmentZone', () => {
       ['scheduled_services as ss', 'ss.status', 'completed'],
       ['scheduled_services as ss', 'not', 'ss.id', 'svc-1'],
       ['scheduled_services as ss', 'ss.scheduled_date', '<', '2026-10-01'],
-      ['scheduled_services as ss', 'ss.property_id', 'prop-1'],
       ['scheduled_services as ss', 'tz.capture_mode', 'perimeter'],
     ]));
+    // A property id is editable in place, so it is not evidence of the place.
+    expect(knex.state.wheres.some((w) => w.includes('ss.property_id'))).toBe(false);
   });
 
   test.each([
     ['another customer', { source_customer_id: 'cust-2' }],
-    ['another property', { source_property_id: 'prop-2' }],
-    ['a property-less visit when this one has a property', { source_property_id: null }],
     ['a cancelled visit', { source_status: 'cancelled' }],
     ['a skipped visit', { source_status: 'skipped' }],
     ['a visit that is not completed', { source_status: 'on_site' }],
@@ -161,55 +193,145 @@ describe('findReusableTreatmentZone', () => {
     expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex() })).toBeNull();
     expect(traceEligibility.traceCaptureBlockPayload).toHaveBeenCalledWith(VISIT, expect.anything(), { captureMode: 'perimeter' });
   });
+});
 
-  describe('a visit with no property', () => {
-    const NO_PROP = { ...VISIT, property_id: null };
-    const sameAddress = { ...ZONE, source_property_id: null };
+// The place is proved by the trace's own geometry: the visit's location,
+// resolved on the server, inside the bounding box of the trace's lat/lng points
+// grown by 15 m (Codex P1 r4 on #6175). POINTS spans lat 27.48 to 27.49 and
+// lng -82.57 to -82.56; 15 m is about 0.000135 degrees of latitude.
+describe('findReusableTreatmentZone: the place is the trace\'s own footprint', () => {
+  const at = (lat, lng) => ({ ...PINNED, lat, lng });
 
-    test('matches an earlier property-less visit at the same address, ignoring case and spacing', async () => {
-      const knex = makeKnex({ candidates: [{ ...sameAddress, addr_line1: '1  example LN ', addr_zip: '34200-1234' }] });
-      expect((await findReusableTreatmentZone(NO_PROP, { knex }))?.sourceServiceId).toBe('svc-0');
-      expect(knex.state.wheres).toEqual(expect.arrayContaining([['scheduled_services as ss', 'null', 'ss.property_id']]));
-    });
+  test.each([
+    ['in the middle of the trace', 27.485, -82.565],
+    ['on a corner of the trace', 27.48, -82.57],
+    ['just inside the 15 m margin, north of the trace', 27.49 + 0.0001, -82.565],
+    ['just inside the 15 m margin, west of the trace', 27.485, -82.57 - 0.00012],
+  ])('offers the trace for a location %s', async (_label, lat, lng) => {
+    const found = await findReusableTreatmentZone(VISIT, { knex: makeKnex({ locations: [at(lat, lng)] }) });
+    expect(found?.sourceServiceId).toBe('svc-0');
+  });
 
-    test('does not match another unit at the same street address', async () => {
-      const here = { addr_line1: '1 Example Ln', addr_line2: 'Unit 2', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' };
-      const otherUnit = makeKnex({ candidates: [{ ...sameAddress, addr_line2: 'Unit 5' }], here });
-      expect(await findReusableTreatmentZone(NO_PROP, { knex: otherUnit })).toBeNull();
-      const noUnit = makeKnex({ candidates: [{ ...sameAddress, addr_line2: null }], here });
-      expect(await findReusableTreatmentZone(NO_PROP, { knex: noUnit })).toBeNull();
-      const sameUnit = makeKnex({ candidates: [{ ...sameAddress, addr_line2: 'unit  2' }], here });
-      expect((await findReusableTreatmentZone(NO_PROP, { knex: sameUnit }))?.sourceServiceId).toBe('svc-0');
-    });
+  test.each([
+    ['just outside the 15 m margin, north of the trace', 27.49 + 0.00016, -82.565],
+    ['just outside the 15 m margin, south of the trace', 27.48 - 0.00016, -82.565],
+    ['just outside the 15 m margin, east of the trace', 27.485, -82.56 + 0.00019],
+    ['just outside the 15 m margin, west of the trace', 27.485, -82.57 - 0.00019],
+    ['a street away', 27.4, -82.565],
+  ])('never offers the trace for a location %s', async (_label, lat, lng) => {
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ locations: [at(lat, lng)] }) })).toBeNull();
+  });
 
-    test('does not match a different address', async () => {
-      const knex = makeKnex({ candidates: [{ ...sameAddress, addr_line1: '99 Other St' }] });
-      expect(await findReusableTreatmentZone(NO_PROP, { knex })).toBeNull();
-    });
+  // Codex P1 r4 #2: syncPrimaryAddress can move a primary property row to
+  // another street in place, so an equal property_id is no proof of place.
+  test('the same property id does not offer a trace of another place', async () => {
+    const knex = makeKnex({ candidates: [{ ...ZONE, source_property_id: VISIT.property_id }], locations: [at(27.3, -82.4)] });
+    expect(await findReusableTreatmentZone(VISIT, { knex })).toBeNull();
+  });
 
-    test('does not match a prior visit that has a property', async () => {
-      expect(await findReusableTreatmentZone(NO_PROP, { knex: makeKnex({ candidates: [ZONE] }) })).toBeNull();
-    });
+  test('a different property id does not hide a trace of this place', async () => {
+    const knex = makeKnex({ candidates: [{ ...ZONE, source_property_id: 'prop-2' }] });
+    expect((await findReusableTreatmentZone(VISIT, { knex }))?.sourceServiceId).toBe('svc-0');
+    const noProperty = makeKnex({ candidates: [{ ...ZONE, source_property_id: null }] });
+    expect((await findReusableTreatmentZone({ ...VISIT, property_id: null }, { knex: noProperty }))?.sourceServiceId).toBe('svc-0');
+  });
 
-    // Pre-push P1: the customer's current address is never the evidence. A
-    // customer who moved would otherwise pass the old home's trace to the new
-    // home, since both visits would read today's address.
-    test('reads only the address stamped on each visit, never the customer\'s', async () => {
-      const knex = makeKnex({ candidates: [sameAddress] });
-      await findReusableTreatmentZone(NO_PROP, { knex });
+  test('another customer\'s trace is never offered, even at the same coordinates', async () => {
+    const knex = makeKnex({ candidates: [{ ...ZONE, source_customer_id: 'cust-2' }] });
+    expect(await findReusableTreatmentZone(VISIT, { knex })).toBeNull();
+  });
+
+  test('a trace with fewer than 3 usable lat/lng points is never offered', async () => {
+    const pt = (lat, lng) => ({ px: { x: 1, y: 1 }, latLng: { lat, lng } });
+    const noGeo = { px: { x: 1, y: 1 }, latLng: null };
+    for (const points of [
+      [], [pt(27.485, -82.565)], [pt(27.485, -82.565), pt(27.486, -82.565)],
+      [pt(27.485, -82.565), pt(27.486, -82.565), noGeo],
+      [pt(27.485, -82.565), pt(27.486, -82.565), pt('x', null)],
+      [pt(0, 0), pt(0, 0), pt(0, 0)], 'not json', null,
+    ]) {
+      const knex = makeKnex({ candidates: [{ ...ZONE, path_points: points }] });
+      expect(await findReusableTreatmentZone(VISIT, { knex })).toBeNull();
+    }
+  });
+
+  test('a trace stored as JSON text is read', async () => {
+    const knex = makeKnex({ candidates: [{ ...ZONE, path_points: JSON.stringify(POINTS) }] });
+    expect((await findReusableTreatmentZone(VISIT, { knex }))?.sourceServiceId).toBe('svc-0');
+  });
+
+  test('a trace with too few points is skipped for an older one that fits', async () => {
+    const thin = { ...ZONE, source_service_id: 'svc-9', path_points: POINTS.slice(0, 2) };
+    const older = { ...ZONE, source_service_id: 'svc-8', source_date: '2026-04-01' };
+    expect((await findReusableTreatmentZone(VISIT, { knex: makeKnex({ candidates: [thin, older] }) }))?.sourceServiceId).toBe('svc-8');
+  });
+
+  test('a trace of another place is skipped for an older one of this place', async () => {
+    const elsewhere = { ...ZONE, source_service_id: 'svc-9', path_points: POINTS.map((p) => ({ ...p, latLng: { lat: p.latLng.lat - 1, lng: p.latLng.lng } })) };
+    const older = { ...ZONE, source_service_id: 'svc-8', source_date: '2026-04-01' };
+    expect((await findReusableTreatmentZone(VISIT, { knex: makeKnex({ candidates: [elsewhere, older] }) }))?.sourceServiceId).toBe('svc-8');
+  });
+
+  describe('the visit\'s location is resolved on the server, and unresolved means nothing is offered', () => {
+    test('reads the schedule row\'s own location: the stored pin, else the customer\'s guarded one', async () => {
+      const knex = makeKnex();
+      await findReusableTreatmentZone(VISIT, { knex });
+      expect(knex.state.wheres).toEqual(expect.arrayContaining([['scheduled_services', 'scheduled_services.id', 'svc-1']]));
       const columns = knex.state.columns.join(' ');
-      expect(columns).toContain('ss.service_address_line1');
-      expect(columns).not.toMatch(/c\.address_line1|c\.city|c\.zip|COALESCE/i);
+      expect(columns).toMatch(/COALESCE\(scheduled_services\.lat, CASE WHEN NOT .*customers\.latitude/);
+      expect(columns).toMatch(/COALESCE\(scheduled_services\.service_address_line1, customers\.address_line1\)/);
+      expect(mockGeocode).not.toHaveBeenCalled();
     });
 
-    test('a prior visit with no stamped address gives no trace, whatever the customer\'s address is', async () => {
-      const knex = makeKnex({ candidates: [{ ...sameAddress, addr_line1: null, addr_city: null, addr_state: null, addr_zip: null }] });
-      expect(await findReusableTreatmentZone(NO_PROP, { knex })).toBeNull();
+    test('a visit with no pin is geocoded from its stamped-over-customer address, like the tracer', async () => {
+      mockGeocode.mockResolvedValue({ lat: 27.485, lng: -82.565 });
+      const found = await findReusableTreatmentZone(VISIT, { knex: makeKnex({ locations: [UNPINNED] }) });
+      expect(found?.sourceServiceId).toBe('svc-0');
+      expect(mockGeocode).toHaveBeenCalledWith('1 Example Ln, Sampletown, FL, 34200', { cacheOnly: false });
     });
 
-    test('a visit with no address on file is offered nothing', async () => {
-      const knex = makeKnex({ candidates: [{ ...sameAddress, addr_line1: null }], here: { addr_line1: null, addr_city: null, addr_state: null, addr_zip: null } });
-      expect(await findReusableTreatmentZone(NO_PROP, { knex })).toBeNull();
+    test('a geocode outside the trace offers nothing', async () => {
+      mockGeocode.mockResolvedValue({ lat: 27.3, lng: -82.4 });
+      expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ locations: [UNPINNED] }) })).toBeNull();
+    });
+
+    test.each([
+      ['no visit row', { locations: [null] }],
+      ['no address and no pin', { locations: [{ lat: null, lng: null, address_line1: null, city: null, state: null, zip: null }] }],
+      ['a (0, 0) pin and no address', { locations: [{ ...PINNED, lat: 0, lng: 0, address_line1: null, city: null, state: null, zip: null }] }],
+      ['an address the geocoder cannot find', { locations: [UNPINNED] }],
+    ])('%s: nothing is offered', async (_label, opts) => {
+      expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex(opts) })).toBeNull();
+    });
+
+    test('a geocoder error offers nothing and never throws', async () => {
+      mockGeocode.mockRejectedValue(new Error('quota'));
+      expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ locations: [UNPINNED] }) })).toBeNull();
+    });
+
+    test('a visit whose location read fails offers nothing', async () => {
+      const knex = makeKnex();
+      const failing = jest.fn((table) => {
+        const c = knex(table);
+        if (table === 'scheduled_services') c.first = () => Promise.reject(new Error('db down'));
+        return c;
+      });
+      Object.assign(failing, knex);
+      expect(await findReusableTreatmentZone(VISIT, { knex: failing })).toBeNull();
+    });
+
+    test('no location is looked up when no candidate gets as far as the place check', async () => {
+      const knex = makeKnex({ candidates: [{ ...ZONE, capture_mode: 'interior' }], locations: [UNPINNED] });
+      expect(await findReusableTreatmentZone(VISIT, { knex })).toBeNull();
+      expect(knex.state.locationReads).toBe(0);
+      expect(mockGeocode).not.toHaveBeenCalled();
+    });
+
+    test('the location is resolved once for any number of candidates', async () => {
+      const far = (id) => ({ ...ZONE, source_service_id: id, path_points: POINTS.map((p) => ({ ...p, latLng: { lat: p.latLng.lat - 1, lng: p.latLng.lng } })) });
+      const knex = makeKnex({ candidates: [far('svc-7'), far('svc-8'), far('svc-9')] });
+      expect(await findReusableTreatmentZone(VISIT, { knex })).toBeNull();
+      expect(knex.state.locationReads).toBe(1);
     });
   });
 });
@@ -281,15 +403,6 @@ describe('findReusableTreatmentZone: a trace its own report showed', () => {
     expect(await findReusableTreatmentZone(VISIT, { knex })).toBeNull();
     expect(knex.state.wheres).toEqual(expect.arrayContaining([['scheduled_services as ss', 'notnull', 'tz.snapshot_s3_key']]));
   });
-
-  test('a property-less address is keyed the canonical way: suffix, punctuation and unit word spellings are one place', async () => {
-    const NO_PROP = { ...VISIT, property_id: null };
-    const source = { ...ZONE, source_property_id: null, addr_line1: '123 Main Street', addr_line2: 'Unit 4', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200-1234' };
-    const here = { addr_line1: '123 Main St.', addr_line2: 'Apt 4', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' };
-    expect((await findReusableTreatmentZone(NO_PROP, { knex: makeKnex({ candidates: [source], here }) }))?.sourceServiceId).toBe('svc-0');
-    const otherUnit = { ...source, addr_line2: 'Unit 5' };
-    expect(await findReusableTreatmentZone(NO_PROP, { knex: makeKnex({ candidates: [otherUnit], here }) })).toBeNull();
-  });
 });
 
 // Codex P1 on #6175: the write reads the visit again under its lock, inside
@@ -325,28 +438,91 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
     expect(knex.state.inserted).toBeNull();
   });
 
-  describe('a property-less visit', () => {
-    const NO_PROP = { ...VISIT, property_id: null };
-    const source = { ...ZONE, source_property_id: null };
-    const stamped = (line1, line2 = null) => ({
-      service_address_line1: line1, service_address_line2: line2, service_address_city: 'Sampletown', service_address_state: 'FL', service_address_zip: '34200',
-    });
+  // Codex P1 r4 on #6175: the copy's proof of place is read again under the
+  // target's lock, never trusted from the lookup before it.
+  describe('the proof of place under the lock', () => {
+    const run = (knex, over = {}) => reuseLastTreatmentZone({ visit: VISIT, actor: admin, expectedPropertyId: 'prop-1', openVisitOnly: true, knex, ...over });
+    const deleted = () => mockS3Send.mock.calls.map(([c]) => c).filter((c) => c.commandType === 'delete');
+    const uploaded = () => mockS3Send.mock.calls.map(([c]) => c).filter((c) => c.commandType === 'put');
 
-    test('saves when the address stamped on the locked visit is still the one the source was matched on', async () => {
-      const knex = makeKnex({ candidates: [source], lock: locked({ property_id: null, ...stamped('1 EXAMPLE ln') }) });
-      const row = await reuseLastTreatmentZone({ visit: NO_PROP, actor: admin, expectedPropertyId: null, openVisitOnly: true, knex });
-      expect(row.linear_ft).toBe(220);
+    test('unchanged inputs and an unchanged source save', async () => {
+      const knex = makeKnex({ lock: locked(), locations: [PINNED, { ...PINNED }] });
+      expect((await run(knex)).linear_ft).toBe(220);
+      expect(knex.state.locationReads).toBe(2);
     });
 
     test.each([
-      ['another street address', stamped('99 Other St')],
-      ['another unit', stamped('1 Example Ln', 'Unit 4')],
-      ['no stamped address', stamped(null)],
-    ])('is refused when the locked visit now has %s', async (_label, address) => {
-      const knex = makeKnex({ candidates: [source], lock: locked({ property_id: null, ...address }) });
-      await expect(reuseLastTreatmentZone({ visit: NO_PROP, actor: admin, expectedPropertyId: null, openVisitOnly: true, knex }))
+      ['the stored pin', { lat: 27.3 }],
+      ['the stored longitude', { lng: -82.4 }],
+      ['the street address', { address_line1: '99 Other St' }],
+      ['the city', { city: 'Elsewhere' }],
+      ['the zip', { zip: '34999' }],
+      ['the pin appearing', 'pinned'],
+    ])('is refused with visit_property_changed when %s changed during the copy', async (_label, change) => {
+      const before = change === 'pinned' ? UNPINNED : PINNED;
+      mockGeocode.mockResolvedValue({ lat: 27.485, lng: -82.565 });
+      const knex = makeKnex({ lock: locked(), locations: [before, change === 'pinned' ? PINNED : { ...before, ...change }] });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'visit_property_changed', statusCode: 409 });
+      expect(knex.state.inserted).toBeNull();
+      expect(deleted()).toHaveLength(uploaded().length);
+      expect(uploaded().length).toBeGreaterThan(0);
+    });
+
+    test('the address is compared, never geocoded again under the lock', async () => {
+      mockGeocode.mockResolvedValue({ lat: 27.485, lng: -82.565 });
+      const knex = makeKnex({ lock: locked(), locations: [UNPINNED, UNPINNED] });
+      await run(knex);
+      expect(mockGeocode).toHaveBeenCalledTimes(1);
+    });
+
+    test('is refused when the visit row is gone at the recheck', async () => {
+      const knex = makeKnex({ lock: locked(), locations: [PINNED, null] });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'visit_property_changed' });
+      expect(knex.state.inserted).toBeNull();
+    });
+
+    test.each([
+      ['the source trace row is gone (its visit\'s address was corrected)', { sourceZone: null }],
+      ['the source trace was re-saved (new updated_at)', { sourceZone: { ...SOURCE_ZONE, updated_at: '2026-07-03T09:00:00.000Z' } }],
+      ['the source trace row has no updated_at', { sourceZone: { ...SOURCE_ZONE, updated_at: null } }],
+      ['the source trace row is another row', { sourceZone: { ...SOURCE_ZONE, id: 'zone-other' } }],
+      ['the source trace row belongs to another visit', { sourceZone: { ...SOURCE_ZONE, scheduled_service_id: 'svc-other' } }],
+      ['the source visit is gone', { sourceVisit: null }],
+      ['the source visit is no longer completed', { sourceVisit: { ...SOURCE_VISIT, status: 'scheduled' } }],
+      ['the source visit is another customer\'s', { sourceVisit: { ...SOURCE_VISIT, customer_id: 'cust-2' } }],
+    ])('is refused with no_reusable_trace when %s', async (_label, over) => {
+      const knex = makeKnex({ lock: locked(), ...over });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'no_reusable_trace', statusCode: 409 });
+      expect(knex.state.inserted).toBeNull();
+      expect(uploaded().length).toBeGreaterThan(0);
+      expect(deleted()).toHaveLength(uploaded().length);
+    });
+
+    test('the same updated_at as a Date object and as text is the same trace', async () => {
+      const knex = makeKnex({ candidates: [{ ...ZONE, updated_at: new Date('2026-07-02T10:00:00.000Z') }], lock: locked() });
+      expect((await run(knex)).linear_ft).toBe(220);
+    });
+
+    test('the source rows are locked, visit first and then the trace row', async () => {
+      const knex = makeKnex({ lock: locked() });
+      await run(knex);
+      expect(knex.state.locks).toEqual([
+        'scheduled_services ["scheduled_services.id","svc-1"]',
+        'scheduled_services [{"id":"svc-0"}]',
+        'treatment_zone_maps [{"id":"zone-0"}]',
+      ]);
+    });
+
+    test('a visit without an actor (no technician scope) is held to the same proof', async () => {
+      const knex = makeKnex({ locations: [PINNED, { ...PINNED, lat: 27.3 }] });
+      await expect(reuseLastTreatmentZone({ visit: VISIT, expectedPropertyId: 'prop-1', openVisitOnly: true, knex }))
         .rejects.toMatchObject({ code: 'visit_property_changed' });
       expect(knex.state.inserted).toBeNull();
+    });
+
+    test('the visit\'s own refusals come first', async () => {
+      const knex = makeKnex({ lock: locked({ status: 'completed' }), locations: [PINNED, { ...PINNED, lat: 27.3 }], sourceZone: null });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'visit_completed' });
     });
   });
 
@@ -407,6 +583,19 @@ describe('reuseLastTreatmentZone', () => {
     expect(knex.state.inserted).toBeNull();
   });
 
+  test('a visit whose location cannot be resolved is refused with no_reusable_trace, with nothing read or saved', async () => {
+    const knex = makeKnex({ locations: [UNPINNED] });
+    await expect(reuseLastTreatmentZone({ visit: VISIT, knex })).rejects.toMatchObject({ code: 'no_reusable_trace', statusCode: 409 });
+    expect(knex.state.inserted).toBeNull();
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  test('a visit with no property of its own is copied to by location', async () => {
+    const knex = makeKnex({ candidates: [{ ...ZONE, source_property_id: null }], lock: { property_id: null, status: 'confirmed' } });
+    const row = await reuseLastTreatmentZone({ visit: { ...VISIT, property_id: null }, expectedPropertyId: null, knex });
+    expect(row.linear_ft).toBe(220);
+  });
+
   test('nothing to reuse is refused with no_reusable_trace', async () => {
     await expect(reuseLastTreatmentZone({ visit: VISIT, knex: makeKnex({ candidates: [] }) }))
       .rejects.toMatchObject({ code: 'no_reusable_trace', statusCode: 409 });
@@ -434,7 +623,11 @@ describe('reuseLastTreatmentZone', () => {
       const c = base(table);
       if (table === 'treatment_zone_maps') {
         const first = c.first;
-        c.first = (...a) => { reads += 1; return reads <= 2 ? first(...a) : Promise.resolve({ id: 'zone-own' }); };
+        c.first = (...a) => {
+          if (c._lock) return first(...a);
+          reads += 1;
+          return reads <= 2 ? first(...a) : Promise.resolve({ id: 'zone-own' });
+        };
       }
       return c;
     });

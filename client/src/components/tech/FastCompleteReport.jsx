@@ -452,7 +452,7 @@ export function useVisitTrace({ serviceId, request }) {
 }
 
 // "Same as last visit" (GATE_TRACE_REUSE): is there an earlier trace of this
-// property to copy? Asked once per sheet, and only once the visit is known to
+// place to copy? Asked once per sheet, and only once the visit is known to
 // have no trace of its own (`wanted`). A read that fails, or the gate being
 // off, is "not available": it never holds the sheet. Nothing is applied by
 // the read; the tech's tap on the button is the confirmation.
@@ -491,6 +491,11 @@ export function useTraceReuse({ serviceId, request, propertyId, trace, mode, tra
   const plain = !mode && !!traceAvailable && !writing;
   const last = useLastTrace({ serviceId, request, wanted: plain && trace.loaded && !trace.failed && !trace.zone });
   const [reusing, setReusing] = useState(false);
+  // A failed copy leaves its message on the sheet; once the visit has a trace
+  // by any path (a hand trace, the copy, a read that found one) it is stale
+  // (Codex P3 r4 on #6175).
+  const hasZone = !!trace.zone;
+  useEffect(() => { if (hasZone) setError(''); }, [hasZone, setError]);
   const reuse = async () => {
     setReusing(true);
     setError('');
