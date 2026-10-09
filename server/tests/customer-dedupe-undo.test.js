@@ -1117,7 +1117,7 @@ describe('revertMerge', () => {
   });
 
   describe('undo restores the new-sod record the merge cleared on the moved preferences row', () => {
-    const BEFORE = { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'back lawn', sod_rooted_on: null };
+    const BEFORE = { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'back lawn by the pool cage', sod_rooted_on: null };
     const journalWithSod = () => {
       const journal = baseJournal();
       journal.repointed_ids.tables['property_preferences.customer_id'] = ['pp-1'];

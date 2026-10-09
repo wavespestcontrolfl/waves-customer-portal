@@ -46,7 +46,7 @@ const { pairCustomersAtSameAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
-const { NEW_SOD_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
+const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
 const { dateOnlyString } = require('../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
@@ -1366,7 +1366,11 @@ const PREF_DEFAULT_SENTINELS = {
 // column. Used for the merge's before-image so an undo can put the exact record back.
 function newSodBeforeImage(row) {
   const image = {};
-  for (const col of NEW_SOD_COLUMNS) image[col] = row[col] == null ? null : dateOnlyString(row[col]);
+  for (const col of NEW_SOD_COLUMNS) {
+    // Only the two day columns are normalized; covers and area are text and go back verbatim.
+    if (row[col] == null) image[col] = null;
+    else image[col] = NEW_SOD_DATE_COLUMNS.includes(col) ? dateOnlyString(row[col]) : row[col];
+  }
   return image;
 }
 

@@ -32,6 +32,8 @@ const { validCalendarDate, etCalendarDayOf } = require('../utils/datetime-et');
 
 // The sod record is one fact about one home: set, cleared, kept or dropped together.
 const NEW_SOD_COLUMNS = Object.freeze(['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on']);
+// The two calendar-day columns of the record (the others are text).
+const NEW_SOD_DATE_COLUMNS = Object.freeze(['sod_laid_on', 'sod_rooted_on']);
 
 const FERTILIZER_HOLD_DAYS = 30;
 const WEED_KILLER_HOLD_DAYS = 30;
@@ -283,6 +285,7 @@ function resolveSodRecord(current, input) {
 
 module.exports = {
   NEW_SOD_COLUMNS,
+  NEW_SOD_DATE_COLUMNS,
   FERTILIZER_HOLD_DAYS,
   WEED_KILLER_HOLD_DAYS,
   TETRINO_HOLD_DAYS,
