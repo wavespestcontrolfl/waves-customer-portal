@@ -1,6 +1,6 @@
 'use strict';
 // Owner-approved company facts for the texting agent (owner rulings
-// 2026-09-29/30; service knowledge added 2026-10-03). Rendered as one COMPANY FACTS section in the per-draft
+// 2026-09-29/30; service knowledge added 2026-10-03; aftercare added 2026-10-09). Rendered as one COMPANY FACTS section in the per-draft
 // facts block by sms-shadow-drafter.buildFactsBlock, ONLY while
 // GATE_SMS_REAL_ANSWERS is on (gate off: the facts block is byte-identical
 // to before). Because the verifier grounds a draft against that same block,
@@ -42,12 +42,49 @@ const COMPANY_FACTS = Object.freeze([
   'New residential lawn plans run 9 or 12 applications a year.',
   'Arrival windows are two hours and start on the hour.',
   'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
+  // Aftercare and common pest answers (owner delegated the wording 2026-10-09, text agent
+  // fix plan). Each line restates guidance the repo already carries, never a new claim
+  // (Codex #6197 r2): recap-visit-context LINE_EXPECTATIONS.pest (some activity for up to two
+  // weeks, pest only), the species catalog (drain fly traits and its fungus-gnat look-alike)
+  // and the lawn guide (chinch treatment only after the technician confirms it). Each holds
+  // for every customer it can reach and promises no visit: a return visit is the FREE
+  // RE-SERVICE fact's job, never a COMPANY FACTS line.
+  // NOT here: cleaning after a treatment. The prep guides tie it to dry surfaces and to the
+  // treatment type, which a static line cannot carry; the agent hands that question off.
+  'After a pest treatment it is normal to see some activity for up to two weeks as the treatment flushes pests out, and it fades as the products keep working. This is true of pest treatments only, not of other services. If it has not slowed down after two weeks, tell us.',
+  'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
+  'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
 ]);
 
 // The static section: fixed owner-approved policy, identical on every draft
 // (the judge's sanitizer exempts exactly this text from its size budget).
 function renderCompanyFactsSection() {
-  return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.map((f) => `- ${f}`).join('\n')}\n`;
+  return renderCompanyFactsLines(COMPANY_FACTS.length);
+}
+function renderCompanyFactsLines(count) {
+  return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.slice(0, count).map((f) => `- ${f}`).join('\n')}\n`;
+}
+
+// ---- Earlier renders still stored in message_drafts.facts_block -----------
+//
+// Lines are only ever APPENDED to COMPANY_FACTS, so an earlier render is the
+// first N lines of today's list. A stored block keeps the render it was
+// drafted with, and the READERS of stored blocks (the nightly judge's size
+// exemption, the label-facts reader behind grounding and send-time rechecks)
+// must still recognize it (Codex #6197 r1 P0): otherwise a block drafted the
+// day before a facts change loses the exemption, the company section eats the
+// judge's prefix budget, and the calls/thread evidence falls off the end.
+// Each entry is pinned by the sha256 of its render (sms-company-facts.test.js),
+// so editing one of the first N lines fails CI instead of silently orphaning
+// stored blocks. The sealed-eval CONTRACT stays exact-current on purpose
+// (hasExactCompanyFacts): an old item must never grade the new identity.
+const PRIOR_COMPANY_FACTS_RENDERS = Object.freeze([
+  // 2026-10-03 service knowledge (#5723): identities 6_cflvp, 7_m, 8_m
+  { lines: 16, sha256: 'abed23421e2f7745d97d48a70e95a496f6636a411764cc02e43360d0d9a2e1e2' },
+]);
+// Today's render first, then each earlier one, newest first.
+function knownCompanyFactsRenders() {
+  return [renderCompanyFactsSection(), ...PRIOR_COMPANY_FACTS_RENDERS.map((r) => renderCompanyFactsLines(r.lines))];
 }
 
 // ---- Trusted presence check (sealed-eval compatibility) -----------------
@@ -69,9 +106,13 @@ function exactSectionSuffix() {
 // `label`: 'optional' (a pre-LABEL-FACTS block ends at the company section),
 // 'required' (a `_cfl` block), so each is an exact-structure test, never a
 // substring one (Codex: a header typed into an SMS proves nothing).
-function exactStructureRegexSource(label) {
+// `anyRender` (readers of STORED blocks only, never the sealed contract): the
+// company part matches today's render or any earlier one.
+function exactStructureRegexSource(label, { anyRender = false } = {}) {
   const { LABEL_SECTION_REGEX_SRC, escapeRegex } = require('./sms-label-facts');
-  const company = escapeRegex(exactSectionSuffix());
+  const company = anyRender
+    ? `(?:${knownCompanyFactsRenders().map((r) => escapeRegex(`\n${r.replace(/\n$/, '')}`)).join('|')})`
+    : escapeRegex(exactSectionSuffix());
   // 'capture' = 'required' with the label section as capture group 1 (JS only).
   const tail = label === 'capture' ? `\n(${LABEL_SECTION_REGEX_SRC})`
     : (label === 'required' ? `\n${LABEL_SECTION_REGEX_SRC}` : `(?:\n${LABEL_SECTION_REGEX_SRC})?`);
@@ -95,11 +136,14 @@ function hasExactCompanyFacts(factsBlock) {
 function exactLabelFactsSection(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
   if (before === null) return '';
-  const m = new RegExp(exactStructureRegexSource('capture')).exec(before);
+  // a stored block keeps the company render it was drafted with (anyRender)
+  const m = new RegExp(exactStructureRegexSource('capture', { anyRender: true })).exec(before);
   return m ? m[1] : '';
 }
+// The sealed CONTRACT's test: today's exact render only (see hasExactCompanyFacts).
 function hasExactLabelFacts(factsBlock) {
-  return exactLabelFactsSection(factsBlock) !== '';
+  const before = textBeforeFirstBilling(factsBlock);
+  return before !== null && new RegExp(exactStructureRegexSource('required')).test(before);
 }
 
 module.exports = {
@@ -112,4 +156,6 @@ module.exports = {
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
   renderCompanyFactsSection,
+  PRIOR_COMPANY_FACTS_RENDERS,
+  knownCompanyFactsRenders,
 };

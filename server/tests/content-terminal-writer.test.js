@@ -80,8 +80,19 @@ describe('fetchTerminalDraft', () => {
     expect(gh.getBranchSha).toHaveBeenCalledWith(`terminal-writer/${ID}`);
     expect(gh.getFile).toHaveBeenCalledWith(`terminal-drafts/${ID}.json`, 'commit-1');
     expect(out).toMatchObject({ ok: true, agent_id: 'terminal-writer', session_id: null, brief_id: BRIEF, revision: 'commit-1' });
-    expect(out.draft).toEqual({ frontmatter: { title: 'Ghost Ants' }, body, schema: { '@type': 'Article' }, notes_for_reviewer: 'n' });
+    expect(out.draft).toEqual({ type: 'draft', frontmatter: { title: 'Ghost Ants' }, body, schema: { '@type': 'Article' }, notes_for_reviewer: 'n' });
     expect(typeof out.duration_ms).toBe('number');
+  });
+
+  // Live 2026-10-09: two terminal refresh drafts passed every gate and then parked as
+  // publisher_adapter_unavailable, because the publisher only takes a draft stamped type 'draft'
+  // (the agent's emit_draft handler stamps it; the terminal path did not).
+  test('a terminal draft is one the publisher takes: stamped type draft, whatever the file says', async () => {
+    const publisher = require('../services/content-astro/astro-publisher');
+    const out = await tw.fetchTerminalDraft(ID, { gh: ghWith(good({ type: 'metadata' })), expectedBriefId: BRIEF });
+    expect(out.draft.type).toBe('draft');
+    expect(publisher.canPublishRefresh(out.draft, { action_type: 'refresh_existing_page', target_url: 'https://www.wavespestcontrol.com/x/' })).toBe(true);
+    expect(publisher.canPublishDraftBrief(out.draft, { action_type: 'new_supporting_blog' })).toBe(true);
   });
 
   test('no brief handed out, no branch, no file, or a 404 is "missing"', async () => {

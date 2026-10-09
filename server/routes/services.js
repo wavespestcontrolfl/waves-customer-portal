@@ -165,13 +165,17 @@ router.get('/stats/summary', async (req, res, next) => {
     // (application-limits windowForName, the one window the cap itself counts). Per lawn like the cap: the selected property's
     // when the session is scoped to one, else the busiest lawn's.
     const scope = await resolveSessionScope(req);
-    const celsiusCount = await celsiusApplicationsThisYear(req.customerId, applicationLimits.windowForName('Celsius WG', etDateString()).start, {
+    const celsiusWindow = applicationLimits.windowForName('Celsius WG', etDateString());
+    const celsiusCount = await celsiusApplicationsThisYear(req.customerId, celsiusWindow.start, {
       propertyId: scope && scope.scoped && scope.property ? scope.property.id : null,
     });
 
     res.json({
       servicesYTD: parseInt(servicesYTD.count),
       celsiusApplicationsThisYear: celsiusCount,
+      // The window that count used, from the same windowForName call: 'rolling365' (the last 365 days, v13) or 'calendar_year'. The
+      // portal words the line from it, so the text and the count cannot disagree.
+      celsiusWindow: celsiusWindow.rolling ? 'rolling365' : 'calendar_year',
       // The one canonical reader: 2 under the v13 lawn program, 3 before it (GATE_LAWN_V13 off).
       celsiusMaxPerYear: celsiusYtdCap(),
       thatch: {

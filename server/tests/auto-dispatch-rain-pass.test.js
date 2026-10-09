@@ -21,6 +21,7 @@ const hourlyFor = (wetHours = [13, 14, 15, 16, 17]) => [0, 1, 2, 3].flatMap((d) 
 const stop = (extra = {}) => ({
   id: 'visit-1', customer_id: 'cust-1', service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_general_quarterly',
   technician_id: 'tech-1', status: 'confirmed', scheduled_date: D1, window_start: '14:00:00', window_end: '15:00:00',
+  point: { lat: 27.4, lng: -82.4 },
   ...extra,
 });
 
@@ -28,7 +29,6 @@ function deps(rows, extra = {}) {
   return {
     loadStops: jest.fn(async () => _test.groupStops(rows, extra.addOns || [])),
     withCatalogKeys: jest.fn(async (items) => items.map((item) => ({ name: item.name, serviceKey: item.serviceKey, findingsType: null }))),
-    visitPoint: jest.fn(async () => ({ lat: 27.4, lng: -82.4 })),
     hourlyRain: jest.fn(async () => hourlyFor()),
     rainOut: { loadOccupancy: jest.fn(async () => ({ rows: [] })), conflictsForTarget: jest.fn(() => []) },
     dayHours: { DAY_START_HOUR: 8, DAY_END_HOUR: 17 },
@@ -100,7 +100,8 @@ describe('auto-dispatch rain pass', () => {
     ['a dry morning visit', stop({ window_start: '09:00:00', window_end: '10:00:00' }), {}, 'not_wet'],
     ['a date past the 3 days', stop({ scheduled_date: dayOffset(3) }), {}, 'past_horizon'],
     ['no forecast', stop(), { hourlyRain: jest.fn(async () => null) }, 'no_forecast'],
-    ['no point for the visit', stop(), { visitPoint: jest.fn(async () => null) }, 'no_point'],
+    ['no point for the visit', stop({ point: null }), {}, 'no_point'],
+    ['a point outside the service area', stop({ point: { lat: 40.7, lng: -74 } }), {}, 'no_point'],
   ])('no notice for %s', async (_label, visit, extra, reason) => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
     const d = deps([visit], extra);
@@ -183,10 +184,9 @@ describe('auto-dispatch rain pass', () => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
     const key = (id) => `rain-pass:${id}:${D1}:14:00`;
     const allDry = hourlyFor([]);
-    const d = deps([stop(), stop({ id: 'visit-2' })], {
+    const d = deps([stop(), stop({ id: 'visit-2', point: { lat: 27.5, lng: -82.4 } })], {
       // visit-2's point has no reading for 15:00.
-      hourlyRain: jest.fn(async (lat) => (lat === 2 ? allDry.filter((h) => !h.startTime.startsWith(`${D1}T15`)) : allDry)),
-      visitPoint: jest.fn(async (visit) => ({ lat: visit.id === 'visit-2' ? 2 : 1, lng: -82.4 })),
+      hourlyRain: jest.fn(async (lat) => (lat === 27.5 ? allDry.filter((h) => !h.startTime.startsWith(`${D1}T15`)) : allDry)),
     });
     d.episodes.openAdminAlertKeys = jest.fn(async () => [key('visit-1'), key('visit-2')]);
     expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, noticed: 0, closed: 1 });
@@ -197,7 +197,17 @@ describe('auto-dispatch rain pass', () => {
     const wdo = stop({ service_type: 'WDO Inspection', service_key_snapshot: 'wdo_inspection' });
     const addOns = [{ scheduled_service_id: 'visit-1', service_name: 'Mosquito Treatment', service_key_snapshot: 'mosquito_one_time' }];
     expect((await planRainPass({ now: NOW, db: {}, deps: deps([wdo]) }))[0]).toMatchObject({ wet: false, reason: 'not_outdoor' });
-    expect((await planRainPass({ now: NOW, db: {}, deps: deps([wdo], { addOns }) }))[0]).toMatchObject({ wet: true });
+    expect((await planRainPass({ now: NOW, db: {}, deps: deps([wdo], { addOns }) }))[0]).toMatchObject({ wet: true, work: 'Mosquito Treatment' });
+  });
+
+  test('the notice names the service that needs dry weather, not the rain-OK visit it rides on', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const wdo = stop({ service_type: 'WDO Inspection', service_key_snapshot: 'wdo_inspection' });
+    const d = deps([wdo], { addOns: [{ scheduled_service_id: 'visit-1', service_name: 'Mosquito Treatment', service_key_snapshot: 'mosquito_one_time' }] });
+    await runRainPass({ now: NOW, db: {}, deps: d });
+    const [, spec, opts] = d.raiseAdminAlert.mock.calls[0];
+    expect(spec.why).toMatch(/^Mosquito Treatment /);
+    expect(opts.detail).toMatch(/Mosquito Treatment on /);
   });
 
   test('a standing notice is closed when its visit becomes rain-OK work', async () => {
@@ -263,6 +273,29 @@ describe('auto-dispatch rain pass', () => {
 
   test('the visit read selects what the route model needs for a stop and its minutes', () => {
     expect(_test.VISIT_COLUMNS).toEqual(expect.arrayContaining(['visit_id', 'route_order', 'created_at', 'is_recurring', 'is_callback', 'service_address_line1', 'lat', 'lng']));
+  });
+
+  test('the forecast point: the visit stamp, then a matching property, and the primary home only with no property link', () => {
+    // The query hands over the property and customer columns only while their address matches the visit stamp.
+    const home = { customer_lat: '27.40', customer_lng: '-82.40', customer_zip: '34201' };
+    const property = { property_id: 'p1', property_lat: '27.60', property_lng: '-82.60', property_zip: '34221' };
+    // Each point keeps its own ZIP: a stamped point with no stamped ZIP borrows none.
+    expect(_test.pickPoint({ ...home, ...property, stamped_lat: '27.50', stamped_lng: '-82.50' })).toEqual({ lat: 27.5, lng: -82.5, zip: null });
+    expect(_test.pickPoint({ ...home, ...property })).toEqual({ lat: 27.6, lng: -82.6, zip: '34221' });
+    // Linked to a property with no usable point: never the customer's primary home.
+    expect(_test.pickPoint({ ...home, property_id: 'p1', property_lat: null, property_lng: null })).toBeNull();
+    expect(_test.pickPoint({ ...home, property_id: null })).toEqual({ lat: 27.4, lng: -82.4, zip: '34201' });
+    // A half or zero stamp is no point: the next source gives a whole pair, never one axis.
+    expect(_test.pickPoint({ ...home, property_id: null, stamped_lat: '27.50', stamped_lng: null })).toEqual({ lat: 27.4, lng: -82.4, zip: '34201' });
+    expect(_test.pickPoint({ ...home, ...property, stamped_lat: 0, stamped_lng: 0 })).toEqual({ lat: 27.6, lng: -82.6, zip: '34221' });
+  });
+
+  test('a point in the excluded inland part of the area box needs a ZIP the area serves', async () => {
+    const { DESOTO_EXCLUSION: box } = require('../services/service-area');
+    const inland = { lat: (box.latMin + box.latMax) / 2, lng: (box.lngMin + box.lngMax) / 2 };
+    const verdict = async (zip) => (await planRainPass({ now: NOW, db: {}, deps: deps([stop({ point: { ...inland, zip } })]) }))[0];
+    expect(await verdict('34266')).toMatchObject({ wet: false, reason: 'no_point' });
+    expect(await verdict(null)).toMatchObject({ wet: false, reason: 'no_point' });
   });
 
   test('a date column value (a Date at UTC midnight) keeps its calendar date', async () => {
