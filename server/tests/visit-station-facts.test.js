@@ -706,6 +706,41 @@ describe('stationChecksWriterLines: the tech\'s statuses for the report writer',
     expect(result.observed).toContain('every station was checked and is OK');
   });
 
+  describe('the checked action needs at least one station reached', () => {
+    const inacc = (...numbers) => numbers.map((number) => ({ number, status: 'inaccessible' }));
+    const actions = (type, checks, total) => lines(type, checks, total).fallbackActions;
+    test('one of one inaccessible: attempted, not checked, and no OK remainder', () => {
+      const result = lines('termite_bait_station', inacc(1), 1);
+      expect(result.fallbackActions).toEqual(['Attempted to check the termite bait stations']);
+      expect(result.fallbackObservations).toEqual(['Could not reach station 1']);
+      expect(result.observed).not.toMatch(/checked and is OK/);
+    });
+    test('all of three inaccessible: attempted', () => {
+      expect(actions('rodent_bait_station', inacc(1, 2, 3), 3)).toEqual(['Attempted to check the rodent bait stations']);
+    });
+    test('two inaccessible and one OK: checked is kept', () => {
+      expect(actions('rodent_bait_station', inacc(1, 2), 3)).toEqual(['Checked the rodent bait stations']);
+    });
+    test('inaccessible plus serviced: checked is kept', () => {
+      const checks = [...inacc(1), { number: 2, status: 'serviced' }];
+      expect(actions('termite_bait_station', checks, 2)).toEqual(['Checked the termite bait stations', 'Serviced station 2']);
+    });
+    test('inaccessible plus activity: checked is kept', () => {
+      expect(actions('termite_bait_station', [...inacc(1), { number: 2, status: 'activity' }], 2)[0]).toBe('Checked the termite bait stations');
+    });
+    test('roster unknown and every listed exception inaccessible: attempted; with a non-inaccessible exception: checked', () => {
+      expect(actions('termite_bait_station', inacc(1, 2), null)).toEqual(['Attempted to check the termite bait stations']);
+      expect(actions('termite_bait_station', [...inacc(1), { number: 2, status: 'activity' }], null)[0]).toBe('Checked the termite bait stations');
+    });
+    test('all OK (no exceptions) is checked', () => {
+      expect(actions('termite_bait_station', [], null)).toEqual(['Checked the termite bait stations']);
+    });
+    test('gate off: nothing is added', () => {
+      process.env.GATE_STATION_FAST_COMPLETE = 'false';
+      expect(lines('termite_bait_station', inacc(1), 1)).toEqual({ completed: '', observed: '', fallbackActions: [], fallbackObservations: [] });
+    });
+  });
+
   test('adds nothing with the gate off, for a trap check or another form, or for anything that is not a clean list', () => {
     const none = { completed: '', observed: '', fallbackActions: [], fallbackObservations: [] };
     expect(lines('rodent_trapping', [{ number: 2, status: 'activity' }])).toEqual(none);

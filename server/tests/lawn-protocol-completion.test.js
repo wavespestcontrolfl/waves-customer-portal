@@ -528,6 +528,46 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
     expect(JSON.parse(completions[0].metadata).unlistedSkippedProducts).toEqual([]);
   });
 
+  // GATE_LAWN_NEW_SOD_NOTE (Codex on #6231): the new-sod bag swap is not a plan substitution; the visit hands it in.
+  describe('a substitution the visit made (visitSubstitutions: the new-sod bag swap)', () => {
+    const plan = {
+      protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] },
+        products: [{ productId: 'dim-bag', defaultInPlan: true }] } },
+      mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [{ selected: true, product: { id: 'dim-bag' } }] },
+    };
+    const swap = { id: null, originalProductId: 'dim-bag', originalProductName: 'Dimension bag', substituteProductId: 'sod-bag', substituteProductName: 'Sod bag', reason: 'New sod: no pre-emergent yet.', source: 'new_sod' };
+    const applied = { id: 'sp-7', product_id: 'sod-bag', product_name: 'Sod bag', application_rate: 2.5, rate_unit: 'lb', total_amount: 12.5, amount_unit: 'lb', application_method: 'granular_broadcast', area_value: '5000', area_unit: 'sqft' };
+    const run = async (extra) => {
+      process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+      const actuals = []; const completions = [];
+      await recordLawnProtocolCompletion(fakeTrx(completions, actuals), {
+        service: visit, serviceRecord: { id: 'record-3' }, plan, serviceProducts: [applied],
+        completionInput: { treatedSqft: 5000, skippedProducts: [{ productId: 'dim-bag', productName: 'Dimension bag' }] }, ...extra,
+      });
+      return { actuals, metadata: JSON.parse(completions[0].metadata) };
+    };
+
+    test('the swap bag is a substituted application of the bag it replaced, and that bag is not also a skipped default', async () => {
+      const { actuals, metadata } = await run({ visitSubstitutions: [swap] });
+      expect(actuals).toHaveLength(1);
+      expect(actuals[0]).toMatchObject({ status: 'substituted_applied', product_id: 'sod-bag' });
+      expect(JSON.parse(actuals[0].metadata).substitution).toMatchObject({ originalProductId: 'dim-bag', substituteProductId: 'sod-bag', source: 'new_sod' });
+      expect(metadata.substitutions).toEqual([swap]);
+    });
+
+    test('without it the completion is as before: an off-protocol application and a skipped default', async () => {
+      const { actuals, metadata } = await run({});
+      expect(actuals.map((row) => row.status).sort()).toEqual(['off_protocol_applied', 'skipped']);
+      expect(metadata.substitutions).toEqual([]);
+    });
+
+    test('withheld attribution withholds it too', async () => {
+      const { actuals, metadata } = await run({ plan: { ...plan, protocol: null }, visitSubstitutions: [swap] });
+      expect(actuals.find((row) => row.product_id === 'sod-bag').status).toBe('applied');
+      expect(metadata.substitutions).toEqual([]);
+    });
+  });
+
   test('withheld attribution also withholds the plan\'s substitution labels: the applied substitute is a plain application', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const actuals = []; const completions = [];

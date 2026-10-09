@@ -36,8 +36,10 @@ const HEAD_PRECIP_RATE_IN_PER_HR = Object.freeze({
 // The Waves owner table (owner 2026-10-09): minutes a head type runs to put down a quarter inch. The lawn
 // watering banner prints minutes from this table; the lawn report's irrigation card derives weekly inches from the
 // SAME constant (OWNER_HEAD_RATE_IN_PER_HR, below), so the card and the banner cannot disagree. The package's own
-// table above stays the default for every other reader (portal preview, weekly email); a caller opts in with
-// deriveIrrigationInchesPerWeek(..., { rates: OWNER_HEAD_RATE_IN_PER_HR }).
+// table above stays the package default; a caller opts in with
+// deriveIrrigationInchesPerWeek(..., { rates: OWNER_HEAD_RATE_IN_PER_HR }), resolveApplicationRate(..., { rates }) or
+// buildWeekPlan({ rates }). The server picks the table behind GATE_IRRIGATION_OWNER_RATES (owner 2026-10-09: one table
+// for every reader; server/services/irrigation-rates.js); this package never reads the environment.
 const OWNER_MINUTES_PER_QUARTER_INCH = Object.freeze({ spray: 15, rotor: 40 });
 const OWNER_HEAD_RATE_IN_PER_HR = Object.freeze(Object.fromEntries(
   Object.entries(OWNER_MINUTES_PER_QUARTER_INCH).map(([head, minutes]) => [head, Math.round((0.25 / (minutes / 60)) * 1000) / 1000]),
@@ -231,7 +233,7 @@ function finiteOrNull(v) {
  * system's real output; otherwise the published head-type default; null
  * when neither is available (plan degrades to events-only).
  */
-function resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDays, systemType } = {}) {
+function resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDays, systemType } = {}, { rates = HEAD_PRECIP_RATE_IN_PER_HR } = {}) {
   const inputs = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
   // A per-zone runtime needs ONE turf head type: a mixed system's zones put
   // down water at very different rates, drip doesn't irrigate turf, and an
@@ -239,7 +241,7 @@ function resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDay
   // when weekly inches were typed (a whole-system average is not a per-zone
   // minute figure).
   const turfHeads = inputs.headTypes.filter((h) => h !== 'drip');
-  if (turfHeads.length !== 1 || HEAD_PRECIP_RATE_IN_PER_HR[turfHeads[0]] == null) {
+  if (turfHeads.length !== 1 || rates[turfHeads[0]] == null) {
     return { rateInPerHr: null, rateSource: null, headType: null };
   }
   const headType = turfHeads[0];
@@ -250,7 +252,19 @@ function resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDay
       return { rateInPerHr: round2(rate), rateSource: 'measured', headType };
     }
   }
-  return { rateInPerHr: HEAD_PRECIP_RATE_IN_PER_HR[headType], rateSource: 'system_type_default', headType };
+  return { rateInPerHr: rates[headType], rateSource: 'system_type_default', headType };
+}
+
+/**
+ * Minutes a default-dose event (½") runs on each head type under a rate table, rounded to 5 like the plan's own
+ * default-rate minutes: the package table gives 20 / 60, the owner table 30 / 80. The generic "about N minutes on
+ * spray zones" sentences are built from this, never typed.
+ */
+function defaultEventMinutes(rates = HEAD_PRECIP_RATE_IN_PER_HR) {
+  return {
+    spray: roundTo5((EVENT_DEPTH_MIN_INCHES / rates.spray) * 60),
+    rotor: roundTo5((EVENT_DEPTH_MIN_INCHES / rates.rotor) * 60),
+  };
 }
 
 /**
@@ -293,6 +307,8 @@ function buildWeekPlan({
   // trusted — e.g. settings saved for a former home): same treatment as a
   // rain sensor.
   rainOnlyCarryover = false,
+  // Head rate table (in/hr) behind a default-rate plan; a MEASURED rate outranks it.
+  rates = HEAD_PRECIP_RATE_IN_PER_HR,
 } = {}) {
   const reasons = [];
   const legalMaxEvents = restriction && Number.isInteger(Number(restriction.maxDaysPerWeek)) && Number(restriction.maxDaysPerWeek) >= 0
@@ -339,7 +355,7 @@ function buildWeekPlan({
   const need = round2(Math.max(0, target - carryover));
   if (season === 'cool') reasons.push('cool_season');
 
-  const rate = resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDays, systemType });
+  const rate = resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDays, systemType }, { rates });
   const forecast = base.forecastRainInches;
   const forecastSkips = forecast != null && forecast >= RAIN_SKIP_INCHES;
   if (forecastSkips) reasons.push('forecast_rain');
@@ -405,6 +421,7 @@ function buildWeekPlan({
 module.exports = {
   buildWeekPlan,
   resolveApplicationRate,
+  defaultEventMinutes,
   WEEK_PLAN_CONSTANTS: Object.freeze({ EVENT_DEPTH_MIN_INCHES, EVENT_DEPTH_MAX_INCHES, HOLD_BELOW_INCHES, ROOT_ZONE_STORAGE_INCHES, RAIN_SKIP_INCHES, SEASONAL_MAX_EVENTS }),
   normalizeRuntimeInputs,
   DAY_ALIASES,

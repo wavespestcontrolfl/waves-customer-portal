@@ -274,16 +274,23 @@ function cleanStationChecks(checks) {
 // consumption, a station that could not be reached, the OK remainder). A few
 // short items: the fallback keeps only the first of each list.
 const FALLBACK_WORDS = {
-  termite: { checked: 'Checked the termite bait stations', activity: 'Termite activity was found at' },
-  rodent: { checked: 'Checked the rodent bait stations', activity: 'Bait consumption was found at' },
+  termite: { checked: 'Checked the termite bait stations', attempted: 'Attempted to check the termite bait stations', activity: 'Termite activity was found at' },
+  rodent: { checked: 'Checked the rodent bait stations', attempted: 'Attempted to check the rodent bait stations', activity: 'Bait consumption was found at' },
 };
+function checkedActionWord(words, checks, rest) {
+  return rest || checks.some((check) => check.status !== 'inaccessible') ? words.checked : words.attempted;
+}
 function stationFallbackItems(program, checks, rest) {
   const numbersOf = (status) => checks.filter((check) => check.status === status).map((check) => check.number).sort((a, b) => a - b);
   const named = (numbers) => `${numbers.length === 1 ? 'station' : 'stations'} ${numbers.join(', ')}`;
   const words = FALLBACK_WORDS[program];
   const [activity, serviced, blocked] = [numbersOf('activity'), numbersOf('serviced'), numbersOf('inaccessible')];
+  // "Checked" only when at least one station was reached: an exception that is not
+  // inaccessible, or a known OK remainder (`rest`). Otherwise (every station, or
+  // every listed one with the roster unknown, could not be reached) the copy says
+  // the visit attempted the check; it still counts as work for the 503 guard.
   return {
-    fallbackActions: [words.checked, ...(serviced.length ? [`Serviced ${named(serviced)}`] : [])],
+    fallbackActions: [checkedActionWord(words, checks, rest), ...(serviced.length ? [`Serviced ${named(serviced)}`] : [])],
     fallbackObservations: [
       ...(activity.length ? [`${words.activity} ${named(activity)}`] : []),
       ...(blocked.length ? [`Could not reach ${named(blocked)}`] : []),

@@ -261,10 +261,17 @@ function resolveEquipment({ plan, equipmentSystemId, calibrationId, calibrationC
 // Approved substitutions on the plan, keyed by the substitute's catalog id
 // so an applied or skipped substitute maps back to the protocol row of the
 // product it replaced.
-function resolveSubstitutions(plan) {
-  const substitutions = (plan?.mixCalculator?.items || [])
+// `visitSubstitutions`: substitutions the visit itself made that the plan does not carry, in the same shape (the
+// new-sod bag swap, lawn-sod-sheet.js sodSwapSubstitutions). A substitute the plan already names keeps the plan's.
+function resolveSubstitutions(plan, visitSubstitutions = []) {
+  const planned = (plan?.mixCalculator?.items || [])
     .map((item) => item?.substitution)
     .filter(Boolean);
+  const plannedIds = new Set(planned.map((sub) => String(sub.substituteProductId || '')));
+  const substitutions = [
+    ...planned,
+    ...(plan ? visitSubstitutions : []).filter((sub) => sub?.substituteProductId && !plannedIds.has(String(sub.substituteProductId))),
+  ];
   const bySubstituteProductId = new Map(
     substitutions
       .filter((sub) => sub.substituteProductId)
@@ -494,6 +501,7 @@ async function recordLawnProtocolCompletion(trx, {
   serviceRecord,
   plan,
   serviceProducts = [],
+  visitSubstitutions = [],
   completionInput = {},
   equipmentSystemId = null,
   calibrationId = null,
@@ -511,7 +519,7 @@ async function recordLawnProtocolCompletion(trx, {
   // substitution labels either: an applied product that happens to be the
   // calendar plan's substitute is a plain application on a visit with no
   // applicable protocol, never an approved protocol substitution (Codex #4113).
-  const { substitutions, bySubstituteProductId } = resolveSubstitutions(attribution.attributed ? plan : null);
+  const { substitutions, bySubstituteProductId } = resolveSubstitutions(attribution.attributed ? plan : null, visitSubstitutions);
   // A product the visit applied is not a skipped default, whatever the client
   // submitted: an applied and a skipped row for one product would inflate
   // Command Center's skip counts (pre-push audit P1).
