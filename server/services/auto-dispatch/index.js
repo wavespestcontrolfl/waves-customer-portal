@@ -18,6 +18,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
+const { resolveGeo } = require('./geo');
 const { scoreAppointmentPlacement } = require('./scoring');
 const {
   applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
@@ -678,11 +679,31 @@ async function logIneligible(run, service, elig) {
 // Raise the missing-pin notices pass 1 collected: a visit with a standing
 // notice is refreshed free, at most NEW_NOTICES_PER_RUN new ones ring, soonest
 // date first. The rest wait for the next run. Best-effort.
+// The notices are raised at the run's end, so staff may have fixed a pin (or
+// the visit may have moved or closed) since pass 1 skipped it. Re-read the
+// picked visits; one that now resolves a pin, or is no longer live on that
+// date, raises nothing and joins the close list (Codex #6208 r6 P2).
+async function stillMissingPin(run, picked) {
+  if (!picked.length) return [];
+  const rows = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.id', picked.map((p) => p.id))
+    .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+      'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip');
+  const live = new Map((rows || []).map((r) => [String(r.id), r]));
+  return picked.filter((p) => {
+    const row = live.get(String(p.id));
+    const waiting = !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === p.date && !resolveGeo(row);
+    if (!waiting) run.pinOkIds.add(String(p.id));
+    return waiting;
+  });
+}
+
 async function raiseMissingGeoNotices(run) {
   if (!run.missingGeoWanted.length) return;
   try {
     const picked = audit.withinRingBudget(run.missingGeoWanted, await audit.standingMissingGeoKeys(), audit.NEW_NOTICES_PER_RUN, audit.missingGeoKey);
-    for (const row of picked) await flagMissingGeo(row);
+    for (const row of await stillMissingPin(run, picked)) await flagMissingGeo(row);
   } catch (err) {
     logger.error(`[auto-dispatch] missing-geo notices failed: ${err.message}`);
   }

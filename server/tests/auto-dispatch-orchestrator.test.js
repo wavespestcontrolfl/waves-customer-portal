@@ -316,6 +316,17 @@ describe('missing-geo notice close at the end of a run', () => {
   });
 });
 
+test('a pin fixed after pass 1 raises no missing-geo notice and the visit joins the close list (Codex #6208 r6 P2)', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  // Every scheduled_services read after the load returns the row with a pin.
+  let reads = 0;
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc({ lat: 27.4, lng: -82.5 })])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
 test('a failed missing-geo notice is logged and fails neither the visit nor the run', async () => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
