@@ -227,6 +227,23 @@ describe('recurring visit with no arrival time and no due date', () => {
     }
     const keys = notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey);
     expect(keys).toEqual(['recurring-no-window:one:2026-08-20']);
+    // Only an estimate the check itself scans counts as covered: an active,
+    // not archived customer (Codex #6208 r18 P2).
+    expect(query.join).toHaveBeenCalledWith('customers as c', 'c.id', 'e.customer_id');
+    expect(query.where).toHaveBeenCalledWith('c.active', true);
+    expect(query.whereNull).toHaveBeenCalledWith('c.deleted_at');
+  });
+
+  // scheduled_services has no catalog key column; the key comes from the
+  // services row of the series root (Codex #6208 r18 P1).
+  test('the series-root service key is read through the services catalog', async () => {
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    const raws = db.raw.mock.calls.map((call) => call[0]).filter((sql) => /root_service_key/.test(sql));
+    expect(raws.length).toBeGreaterThan(0);
+    for (const sql of raws) {
+      expect(sql).toContain('left join services as cat on cat.id = p.service_id');
+      expect(sql).not.toContain('p.catalog_service_key');
+    }
   });
 
   test('with the watchdog gate off nobody else covers a combined booking, so its visit stays in this lane (Codex r5 P1)', async () => {
@@ -434,5 +451,22 @@ test('missing-pin upkeep closes a standing notice whose visit now has a pin', as
   expect(retireSql.bindings).not.toContain('v2');
   // Only an explicit false is inactive in the retire predicate.
   expect(retireSql.sql).toContain('c.active IS NOT FALSE');
+});
+
+// A lapsed plan gets no placement, so its pin needs no fix (Codex #6208 r18 P2).
+test('missing-pin upkeep closes a standing notice whose plan lapsed; an unreadable plan keeps it', async () => {
+  const audit = require('../services/auto-dispatch/audit');
+  existingNoticeKeys = ['auto-dispatch-missing-geo:v1:2026-08-20', 'auto-dispatch-missing-geo:v2:2026-08-21', 'auto-dispatch-missing-geo:v3:2026-08-22'];
+  query.select = jest.fn().mockResolvedValue(['v1', 'v2', 'v3'].map((id) => ({ id, customer_latitude: null, customer_longitude: null })));
+  query.leftJoin = jest.fn(() => query);
+  eligibility.isRecurringPlanActive
+    .mockResolvedValueOnce({ active: false })
+    .mockResolvedValueOnce({ active: true })
+    .mockRejectedValueOnce(new Error('read failed'));
+  await audit.maintainMissingGeoNotices(new Date('2026-08-01T16:00:00Z'));
+  const retireSql = retireStatements[retireStatements.length - 1];
+  expect(retireSql.bindings).toContain('v1');
+  expect(retireSql.bindings).not.toContain('v2');
+  expect(retireSql.bindings).not.toContain('v3');
 });
 

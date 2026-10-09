@@ -222,7 +222,13 @@ async function combinedBookingEstimateIds(estimateIds) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!ids.length || !isEnabled('scheduleIntegrityWatchdog') || !isEnabled('cronJobs')) return new Set();
   const { acceptedFamilies } = require('../combined-booking-check');
-  const estimates = await db('estimates').whereIn('id', ids).where('status', 'accepted').whereNull('archived_at').select('*');
+  // The check's own candidate rule (candidateQuery): an active, not archived
+  // customer. It never scans a NULL-active customer, so that customer's
+  // visits stay in this lane (Codex #6208 r18 P2).
+  const estimates = await db('estimates as e').join('customers as c', 'c.id', 'e.customer_id')
+    .whereIn('e.id', ids).where('e.status', 'accepted').whereNull('e.archived_at')
+    .where('c.active', true).whereNull('c.deleted_at')
+    .select('e.*');
   const covered = new Set();
   for (const estimate of estimates) {
     try {
@@ -276,7 +282,9 @@ async function actionableNoWindowRows(today, to) {
   const rows = await noWindowVisits(db, today, to)
     .select('s.id', 's.customer_id', 's.scheduled_date', 's.recurring_parent_id', 's.source_estimate_id',
       db.raw('(select p.source_estimate_id from scheduled_services as p where p.id = s.recurring_parent_id) as parent_estimate_id'),
-      db.raw('(select coalesce(p.catalog_service_key, p.service_key_snapshot) from scheduled_services as p where p.id = s.recurring_parent_id) as root_service_key'));
+      // The catalog key lives on `services`; scheduled_services stores only the
+      // snapshot (Codex #6208 r18 P1: the bare column does not exist).
+      db.raw('(select coalesce(cat.service_key, p.service_key_snapshot) from scheduled_services as p left join services as cat on cat.id = p.service_id where p.id = s.recurring_parent_id) as root_service_key'));
   // A seasonal mosquito series is booked with no time on purpose until the
   // office routes that season; it must have a time once inside the routing
   // horizon (combined-booking-check.js checkTimeAndTech, the same exemption;
@@ -474,7 +482,16 @@ async function maintainMissingGeoNotices(nowDate = new Date()) {
     .whereIn('scheduled_services.id', ids)
     .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
       'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip');
-  await retireMissingGeoNotices(new Set(rows.filter((r) => resolveGeo(r)).map((r) => String(r.id))), nowDate);
+  const { isRecurringPlanActive } = require('./eligibility');
+  const close = new Set();
+  for (const row of rows) {
+    // A pin that resolves, or a plan that lapsed: nobody needs to fix this
+    // pin (the run applies the same two tests; r18 P2). An unreadable plan
+    // keeps the notice.
+    const lapsed = async () => { try { return !(await isRecurringPlanActive(row, db)).active; } catch (_) { return false; } };
+    if (resolveGeo(row) || await lapsed()) close.add(String(row.id));
+  }
+  await retireMissingGeoNotices(close, nowDate);
 }
 
 // Include skipped/locked rows: unplaced due dates must not disappear behind

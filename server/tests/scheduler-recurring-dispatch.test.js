@@ -32,6 +32,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   isEnabled.mockImplementation((name) => name === 'cronJobs');
   flagUnplacedVisits.mockResolvedValue(0);
+  maintainMissingGeoNotices.mockResolvedValue(undefined);
   runAutoDispatch.mockResolvedValue({ runId: 'run-1', status: 'completed' });
 });
 
@@ -85,4 +86,13 @@ test('a gate-off alert failure reaches the job failure path', async () => {
   flagUnplacedVisits.mockRejectedValueOnce(new Error('notification store unavailable'));
   await tick();
   expect(logger.error).toHaveBeenCalledWith('Auto-Dispatch run failed: notification store unavailable');
+  // The pin-notice upkeep still ran (Codex #6208 r18 P2).
+  expect(maintainMissingGeoNotices).toHaveBeenCalledTimes(1);
+});
+
+test('a gate-off pin-notice upkeep failure reaches the job failure path after the alert pass ran', async () => {
+  maintainMissingGeoNotices.mockRejectedValueOnce(new Error('pin read failed'));
+  await tick();
+  expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
+  expect(logger.error).toHaveBeenCalledWith('Auto-Dispatch run failed: pin read failed');
 });
