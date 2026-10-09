@@ -24,12 +24,13 @@ const {
   isInjectionProduct,
   deriveTreeShrubTreatments,
 } = require('./tree-shrub-closeout');
-const { etCalendarDayOf } = require('../utils/datetime-et');
+const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
+const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
 const ROTATION_WINDOW_DAYS = 60;
@@ -485,7 +486,16 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // GATE_TS_PEST_CHECK: the "Live insects found?" block and its insect types.
     // Gate off = no key at all.
     ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
+    ...await neonicCapKey(svc, catalog, knex),
   };
+}
+
+// GATE_TS_NEONIC_CAP: what is left of each capped product at this property this year. Gate off = no
+// read and no key. The year is today's (ET), the day an ordinary completion records and /complete
+// judges, not the scheduled day: a December visit closed in January spends January's allowance. A
+// backfill is chosen at submit, after this read; /complete judges that one on its backfilled day.
+async function neonicCapKey(svc, catalog, knex) {
+  return tsNeonicCapLive() ? { neonicCap: await buildNeonicCapContext(svc, etDateString(), catalog, knex) } : {};
 }
 
 // The sheet's watch list for the visit month: key, label, signal, referOnly.

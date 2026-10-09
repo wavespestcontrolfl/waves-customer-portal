@@ -5,6 +5,8 @@
 // ============================================================
 const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2, TERMITE } = require('./constants');
 const { termiteAnnualPlanSelectionEnabled } = require('../../config/feature-gates');
+const { gateEnvValue } = require('../../config/feature-gates');
+const { resolveLawnCostPlusBasis } = require('./lawn-cost-plus-knobs');
 
 // Optional logger — the engine must stay requireable from CLI/test harnesses
 // that don't carry the server logger, so binding events log best-effort.
@@ -35,10 +37,20 @@ function guardedLineCost(item) {
     // warning while pest/tree lines do.
     const cost = Number(item.costs?.total);
     return Number.isFinite(cost)
-      ? { cost, floor: Number(LAWN_PRICING_V2.targetCollectedMarginFloor ?? GLOBAL.MARGIN_FLOOR) }
+      ? { cost, floor: Number(lawnMarginTarget(item) ?? GLOBAL.MARGIN_FLOOR) }
       : null;
   }
   return null;
+}
+
+// The collected-margin target a lawn line reports against. A cost-plus line
+// carries the target from its stamped cost basis, so a later config edit does
+// not change what a saved quote reports; every other line reads the live value.
+function lawnMarginTarget(item) {
+  // priceLawnCare puts listMargin and costFloorDetails on the selected tier row.
+  const row = item.selected || item;
+  const stamped = row.listMargin != null ? row.costFloorDetails?.targetCollectedMarginFloor : undefined;
+  return stamped ?? LAWN_PRICING_V2.targetCollectedMarginFloor;
 }
 
 // Post-discount protected annual for a lawn line: the greater of the program
@@ -499,7 +511,24 @@ function generateEstimate(input) {
   // flag or the lawn_pricing_v2.useLawnCostFloor DB key (db-bridge resets
   // it to false on every sync when absent, same kill-value pattern as
   // programMinimumMonthly).
-  const lawnCostFloorArmed = !!(
+  // Cost-plus list price (owner ruling 2026-10-09, GATE_LAWN_COST_PLUS_LIST,
+  // read at call time): same tri-state as the arm switch. A mode-on run
+  // also arms the cost floor so the 35% discount floor is enforced.
+  const lawnCostPlusListArmed = !!(
+    services.lawn?.costPlusList ?? input.lawnCostPlusList
+      ?? gateEnvValue('GATE_LAWN_COST_PLUS_LIST')
+  );
+  // The cost basis this run prices with (every non-property number behind the
+  // cost-plus annual cost, list price and discount floor), stamped beside the
+  // mode so a saved quote replays at the basis it was priced with
+  // (input.lawnCostPlusListBasis is the server-only replay snapshot). Only a
+  // usable basis is stamped; an unusable one fails closed in priceLawnCare
+  // when a lawn line is priced.
+  const lawnCostPlusListBasisResolved = lawnCostPlusListArmed ? resolveLawnCostPlusBasis(input.lawnCostPlusListBasis) : null;
+  const lawnCostPlusListBasisStamp = lawnCostPlusListBasisResolved && !lawnCostPlusListBasisResolved.error
+    ? lawnCostPlusListBasisResolved.basis
+    : null;
+  const lawnCostFloorArmed = lawnCostPlusListArmed || !!(
     services.lawn?.useLawnCostFloor ?? input.useLawnCostFloor
       ?? LAWN_PRICING_V2.useLawnCostFloor ?? false
   );
@@ -664,6 +693,10 @@ function generateEstimate(input) {
     // (estimate-public estimateLawnFloorArmed reads it first; codex P2
     // round 8 on #2827).
     lawnCostFloorArmed,
+    // Same replay rule for the cost-plus list mode: an estimate priced ON
+    // replays ON after the gate goes off, and one priced OFF stays OFF.
+    lawnCostPlusList: lawnCostPlusListArmed,
+    ...(lawnCostPlusListBasisStamp ? { lawnCostPlusListBasis: lawnCostPlusListBasisStamp } : {}),
     // Resolved program minimum + pest floor state for THIS run — same
     // replay rule as the arm state: a later global re-arm/disarm must never
     // re-price a sent quote (estimate-public reads the stamps first and
@@ -884,6 +917,8 @@ function generateEstimate(input) {
         // Default false since the 2026-07-17 owner ruling ("forget all
         // floors") — callers can still opt in explicitly for previews.
         useLawnCostFloor: lawnCostFloorArmed,
+        costPlusList: lawnCostPlusListArmed,
+        costPlusListBasis: lawnCostPlusListBasisStamp ?? input.lawnCostPlusListBasis,
         programMinimumMonthly: lawnProgramMinimumMonthlyResolved,
         targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
         routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,
@@ -2245,7 +2280,7 @@ function generateEstimate(input) {
         const finalLawnAnnual = Number(item.annualAfterDiscount);
         if (Number.isFinite(lawnCostTotal) && lawnCostTotal >= 0 && finalLawnAnnual > 0) {
           const lawnMargin = (finalLawnAnnual - lawnCostTotal) / finalLawnAnnual;
-          const lawnTarget = Number(LAWN_PRICING_V2.targetCollectedMarginFloor ?? 0.35);
+          const lawnTarget = Number(lawnMarginTarget(item) ?? 0.35);
           item.finalMargin = Math.round(lawnMargin * 1000) / 1000;
           item.belowMarginFloor = lawnMargin < lawnTarget - 1e-4;
           if (item.belowMarginFloor && (discount.effectiveDiscount || 0) > 0) {

@@ -45,6 +45,7 @@ const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRou
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
+  customerLastStart16Enabled,
 } = require('./scheduling/customer-windows');
 const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
 const { isEnabled } = require('../config/feature-gates');
@@ -1878,6 +1879,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // 2026-09-23): a result computed while noon was offerable must never be
     // served after the gate flips on (or vice versa) for the TTL's length.
     lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
+    // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
+    customerLastStart16Enabled() ? 'last_start_16' : 'last_start_17',
     // The RESOLVED bounds, not just the gate flag (Codex push-audit P1 on
     // #4663): booking_config's lunch interval / day-end override refreshes
     // on its own 60s TTL (customer-windows.js), independent of this 5-min

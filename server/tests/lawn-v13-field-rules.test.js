@@ -91,7 +91,8 @@ describe('recipe text', () => {
   });
 
   test('the tracks stay one program (identical but for the name)', () => {
-    const body = ({ name, ...rest }) => JSON.stringify(rest);
+    // The bermuda removal add-on (visit.addOns, St. Augustine and Zoysia only) is set aside.
+    const body = ({ name, visits, ...rest }) => JSON.stringify({ ...rest, visits: visits.map(({ addOns, ...visit }) => visit) });
     for (const grass of TRACKS) expect(body(v13[grass])).toBe(body(v13.st_augustine));
   });
 });

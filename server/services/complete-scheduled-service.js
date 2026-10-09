@@ -1984,8 +1984,9 @@ async function hardLimitedProductNames(database, ids) {
     .whereIn('product_id', known)
     .where({ match_type: 'product', severity: 'hard_block' })
     .whereIn('limit_type', Object.keys(HARD_COUNT_LIMIT_LABELS))
-    .select('product_id'));
-  const limited = new Set((limitRows || []).map((row) => String(row.product_id)));
+    .select('product_id', 'match_value'));
+  // The bermuda removal step's own rows (program-tagged) are not generic limits: see auditHardCountLimits.
+  const limited = new Set((limitRows || []).filter((row) => row.match_value !== 'bermuda_removal').map((row) => String(row.product_id)));
   // The v13 count caps (Arena, Certainty, Blindside, Celsius) live in code, not in a stored row.
   const { v13CapEntryFor } = require('../config/lawn-v13-count-caps');
   const found = new Map();
@@ -2913,6 +2914,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // (gate, eligible visit, confirmed assessment); nothing else in the
       // completion changes and the block itself is not stored.
       lawnFast = null,
+      // Waves Assessment Fast Complete: the sheet's read of the visit, recorded in
+      // this transaction (services/completion-consultation-outcome.js).
+      consultationOutcome = null,
       lawnProtocolCompletion = null,
       propertyServiceArea = null,
       treeShrubCompletion = null,
@@ -4691,6 +4695,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return ({ status: 422, body: internalOnlyProductsBlock });
       }
     }
+    if (claim.action === 'proceed') {
+      const outcomeBlock = require('./completion-consultation-outcome').consultationOutcomeBlockPayload({ consultationOutcome, completionProfile, visitOutcome });
+      if (outcomeBlock) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(outcomeBlock.body.code), db);
+        return outcomeBlock;
+      }
+    }
     // Oxadiazon (Ronstar) is not for home lawns (commercial turf is allowed; judged on the visit's linked property): a fresh lawn closeout that lists one is refused
     // before any write. A same-key replay or resume of a committed completion is left alone.
     // Only while GATE_LAWN_V13 is on (the check reads the gate at call time).
@@ -4775,6 +4786,40 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (lawnCompletionAreaError) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_completion_area_invalid'), db);
         return { status: 400, body: { error: 'treatedSqft must be a positive whole number, or null to clear the visit area.', code: 'lawn_completion_area_invalid' } };
+      }
+      // GATE_LAWN_BERMUDA_REMOVAL: on a visit that carries the bermuda removal step,
+      // Recognition and Fusilade II go on together; one without the other is refused
+      // before any write (the surfactant is optional). A FRESH attempt only, like the
+      // validations around it: a committed completion's retry or resume is judged by
+      // the account as it was then, never by today's flag. Any other visit, and gate
+      // off: no refusal.
+      let bermudaPairMessage;
+      let bermudaLimitMessage;
+      let bermudaAreaMessage;
+      try {
+        // Strict reads: an error reading the account or its properties fails this attempt
+        // (marked failed, nothing committed), never reads as "not requested".
+        bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
+        if (!bermudaPairMessage) bermudaLimitMessage = await require('./lawn-bermuda-removal').bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
+        if (!bermudaPairMessage) bermudaAreaMessage = await require('./lawn-bermuda-removal').bermudaAreaViolation(db, products, { serviceId: completionInput.serviceId });
+      } catch (err) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+        throw err;
+      }
+      if (bermudaPairMessage) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_pair_required'), db);
+        return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
+      }
+      // A recorded step spray states its treated area (or a rate): a spot mix has no catalog-derived amount.
+      if (bermudaAreaMessage && !bermudaLimitMessage) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_area_required'), db);
+        return { status: 400, body: { error: bermudaAreaMessage, code: 'lawn_bermuda_area_required' } };
+      }
+      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after
+      // the last one at that property), judged the way the plan judges them.
+      if (bermudaLimitMessage) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_limit_reached'), db);
+        return { status: 400, body: { error: bermudaLimitMessage, code: 'lawn_bermuda_limit_reached' } };
       }
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
@@ -6116,6 +6161,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const snapshotCustomerRow = await trx('customers')
             .where({ id: svc.customer_id })
             .forShare()
+            // A completion that records the assessment's read (consultationOutcome) takes
+            // the customer FOR NO KEY UPDATE instead (the last lock call wins), the mode
+            // recordOutcome needs: the same customer -> visit order as the office route,
+            // and no FOR SHARE -> FOR NO KEY UPDATE upgrade that two such completions
+            // for one customer would deadlock on.
+            .modify((q) => consultationOutcome != null && q.forNoKeyUpdate())
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', ...(billingModeColumnsExist ? ['billing_mode'] : []));
           if (completionPricingPlan) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
@@ -6150,6 +6201,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           if (lawnFast != null && !isIncompleteVisit) {
             await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
           }
+          // The assessment sheet's read of the visit, written under this lock so it
+          // commits or rolls back with the completion.
+          await require('./completion-consultation-outcome').recordConsultationOutcomeInCompletion({
+            trx, serviceId: svc.id, consultationOutcome, actor: completionInput.actor,
+          });
           // The trace the report flow judged (Codex #5538): a trace saved or
           // replaced since from another tab or device would publish a map the
           // record was never judged against (a perimeter over spot
@@ -8020,6 +8076,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // durable-completion resumes and retries never duplicate rows.
         // Incomplete visits are included on purpose — any product logged
         // was physically applied regardless of the visit outcome.
+        // GATE_LAWN_BERMUDA_REMOVAL: the step's limits again, under a property advisory lock
+        // on this transaction, before the application rows are written (a fresh attempt
+        // only; the preflight above cannot see a spray a concurrent completion commits).
+        if (!resumingCommittedCompletion && insertedServiceProducts.length) {
+          await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
+        }
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
@@ -8460,6 +8522,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             error: 'This visit was reassigned to another technician while it was being completed. Reload and try again.',
             code: 'service_reassigned',
           } });
+        }
+        if (err && (err.code === 'lawn_bermuda_limit_reached' || err.code === 'lawn_bermuda_pair_required')) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 400, body: { error: err.message, code: err.code } });
+        }
+        const outcomeRefusal = require('./completion-consultation-outcome').consultationOutcomeRefusalResponse(err);
+        if (outcomeRefusal) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return outcomeRefusal;
         }
         if (err && err.code === 'issued_invoice_not_reusable') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
@@ -9172,6 +9243,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const LimitChecker = require('../services/application-limits');
         const { createAlert } = require('../services/dispatch-alerts');
         const capDate = svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${svc.scheduled_date}T12:00:00`);
+        // The bermuda removal label-rate warning (Recognition's yearly maximum), read after the
+        // spray is ledgered: an advisory line in the same list, never a block.
+        const bermudaRate = await require('./lawn-bermuda-removal').rateAdvisories(connection, svc.id, ledgered.map((row) => row.product_id));
+        if (bermudaRate.length) {
+          applicationLimitAdvisory = {
+            advisory: true,
+            blocks: [...(applicationLimitAdvisory?.blocks || []), ...bermudaRate.map((message) => ({ code: 'application_limit_bermuda_annual_rate', message }))],
+          };
+        }
         const reported = new Set();
         for (const { product_id: productId } of ledgered) {
           const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection, { propertyId: svc.property_id || null });
