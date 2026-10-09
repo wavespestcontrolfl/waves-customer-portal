@@ -2975,6 +2975,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // the check. Re-checked under the visit row lock, which a description
       // change takes too (service-photos.js lockStagedPhotoForChange).
       photoCaptionsSeen,
+      // The station ids the Fast Complete station sheet checked (GATE_STATION_FAST_COMPLETE) —
+      // OPTIONAL. Undefined (the full form, every other caller) skips the check.
+      // Re-checked under the visit row lock against the registry's active stations.
+      stationRosterSeen,
     } = completionInput.body;
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
@@ -6225,6 +6229,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
             }
           }
+          // The stations the station sheet checked, against the registry now (one
+          // roster rule: visit-station-facts.js stationRosterMatches).
+          await require('./visit-station-facts').assertStationRosterUnderLock(trx, {
+            customerId: svc.customer_id, profile: completionProfile, stationRosterSeen, termiteStations,
+          });
           // The photo descriptions the report was written from (Codex P2 on
           // #5701): one changed, added or removed from another device after
           // Write would send the old report beside the new description.
@@ -7652,6 +7661,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+        // The station sheet's checks, in this transaction under the roster lock
+        // (visit-station-facts.js); the full form's sync stays post-commit.
+        await require('./visit-station-facts').writeSheetStationChecksInCompletion(trx, {
+          customerId: svc.customer_id, profile: completionProfile, serviceRecordId: record.id, visitOutcome, stationRosterSeen, termiteStations,
+        });
         // Invoice-issued closeout: the issued invoice's record link lands in
         // THIS transaction, beside the record it names (GitHub r3 P1 #4127).
         // The post-commit suppressor lookup is best-effort by contract, so a
@@ -8535,7 +8549,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 400, body: { error: err.message, code: err.code } });
         }
-        const outcomeRefusal = require('./completion-consultation-outcome').consultationOutcomeRefusalResponse(err);
+        const outcomeRefusal = require('./completion-consultation-outcome').consultationOutcomeRefusalResponse(err)
+          || require('./visit-station-facts').stationRosterRefusalResponse(err);
         if (outcomeRefusal) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return outcomeRefusal;
