@@ -90,10 +90,12 @@ describe('terminal writer hand-off', () => {
     const open = fakes({ rows, open: [pr('y')] });
     expect((await terminalWriterWork({ deps: open.deps })).due.map((r) => r.id)).toEqual([uid('a'), uid('b')]);
     // nine done this week + one merged PR not settled yet = the week is full
+    // (the clock is pinned to the day after the merge, inside the same week)
+    const now = new Date('2026-10-09T13:00:00Z');
     const merged = fakes({ rows, closed: [mergedPr('z')], doneThisWeek: 9 });
-    expect((await terminalWriterWork({ deps: merged.deps })).due).toEqual([]);
+    expect((await terminalWriterWork({ now, deps: merged.deps })).due).toEqual([]);
     // the daily run settles that merge by id
-    await terminalWriterWork({ complete: true, deps: merged.deps });
+    await terminalWriterWork({ complete: true, now, deps: merged.deps });
     expect(merged.updates.map((u) => u.where[0])).toEqual([['id', uid('z')]]);
   });
 
