@@ -188,3 +188,37 @@ describe('every mover of a booked visit\'s date or property asks it, in its own 
     expect(read('services', 'intelligence-bar', 'schedule-tools.js')).toContain("assertMovedVisitLimitsOpen(trx, { visitId: s.id, visit: s, scheduledDate: dateStr, staff: true });");
   });
 });
+
+// Codex round 24: an address change moves every row of its plan (grouped siblings, series rows), from every caller.
+describe('an address change rechecks every visit it moves, at the destination property', () => {
+  const address = require('../services/appointment-address');
+  const limitsModule = require('../services/area-addon-limits');
+  const rowsModule = require('../services/area-addon-visit-rows');
+  const A = '10000000-0000-4000-8000-00000000000a';
+  const B = '10000000-0000-4000-8000-00000000000b';
+  const C = '10000000-0000-4000-8000-00000000000c';
+
+  test('the anchor with no add-on and its sibling that carries one: the sibling is judged at the new property; rows already there are skipped', async () => {
+    const keysByVisit = jest.spyOn(rowsModule, 'areaAddOnKeysByVisit').mockResolvedValue(new Map([[B, ['area_addon_fire_ant_yard']]]));
+    const moved = jest.spyOn(limitsModule, 'assertMovedVisitLimitsOpen').mockResolvedValue(undefined);
+    try {
+      const rows = [
+        { id: A, property_id: 'old', service_key_snapshot: 'pest_control' },
+        { id: B, property_id: 'old', service_key_snapshot: 'lawn_care' },
+        { id: C, property_id: 'new', service_key_snapshot: 'area_addon_bed_pre_emergent' },
+      ];
+      await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new');
+      expect(keysByVisit).toHaveBeenCalledWith({ tag: 'trx' }, [A, B]);
+      expect(moved).toHaveBeenCalledTimes(1);
+      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, { visitId: B, visit: rows[1], propertyId: 'new', serviceKeys: ['area_addon_fire_ant_yard'], staff: true });
+    } finally { keysByVisit.mockRestore(); moved.mockRestore(); }
+  });
+
+  test('source: applyAppointmentAddress asks it on the locked rows, before any row is written', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-address.js'), 'utf8');
+    const apply = src.slice(src.indexOf('async function applyAppointmentAddress('));
+    const ask = apply.indexOf('await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId);');
+    expect(ask).toBeGreaterThan(apply.indexOf('.forUpdate()'));
+    expect(ask).toBeLessThan(apply.indexOf('const stamp = {'));
+  });
+});

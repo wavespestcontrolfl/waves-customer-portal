@@ -233,6 +233,11 @@ describe('replay: a sent estimate keeps the knobs it was priced with', () => {
     } });
     expect(areaAddOnKnobSignalForReplay({ result: { oneTime: { items: [{ service: 'one_time_pest', price: 150 }] } } })).toBeNull();
     expect(areaAddOnKnobSignalForReplay({ result: { oneTime: { specItems: [{ service: 'area_addon', addOnKey: 'web_sweep', price: null }] } } })).toBeNull();
+    // Codex round 24: a row sold through another amount field the booking reads freezes its knobs too; a custom-quote row does not.
+    for (const field of ['amount', 'total', 'priceAfterDiscount']) {
+      expect(areaAddOnKnobSignalForReplay({ result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', [field]: 89 }] } } })).toMatchObject({ targetMargin: 0.6, items: { web_sweep: expect.any(Object) } });
+    }
+    expect(areaAddOnKnobSignalForReplay({ result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', price: 89, quoteRequired: true }] } } })).toBeNull();
     expect(areaAddOnKnobSignalForReplay(null)).toBeNull();
     expect(areaAddOnKnobSignalForReplay('{not json')).toBeNull();
   });

@@ -23,8 +23,10 @@ const { storedAreaAddOnRows } = require('./estimate-result-container');
 // Every stored row of a priced area add-on, from the authoritative container (a revision's stale
 // `engineResult` never supplies a knob stamp for an add-on the revision removed).
 function pricedAddOnRows(estData) {
-  return storedAreaAddOnRows(estData).filter((row) => typeof row.addOnKey === 'string'
-    && Object.prototype.hasOwnProperty.call(DEFAULTS.items, row.addOnKey) && Number(row.price) > 0);
+  // Priced by ANY amount field the booking reads (area-addon-limits isSoldAddOnRow): a row sold through `amount`, `total` or a
+  // discounted field freezes its knobs too.
+  const { isSoldAddOnRow } = require('./area-addon-limits');
+  return storedAreaAddOnRows(estData).filter((row) => isSoldAddOnRow(row) && Object.prototype.hasOwnProperty.call(DEFAULTS.items, row.addOnKey));
 }
 
 function areaAddOnKnobSignalForReplay(estDataRaw) {

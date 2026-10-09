@@ -504,8 +504,8 @@ describe('booking time: an estimate with no customer_id of its own is checked fo
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(src).toContain('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
     // Inside the transaction the recheck reads the row that transaction locked (assertLockedEstimateAddOns), never the preflight copy.
-    expect(src).toMatch(/assertLockedEstimateAddOns\(trx, freshLinkedEstimate, \{\s+billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,\s+\}\)/);
-    expect(src).toMatch(/assertAreaAddOnLimitsOpen\(trx, \{\s+estimate, customerId, property, appliedOn, staff: true,\s+\}\)/);
+    expect(src).toMatch(/assertLockedEstimateAddOns\(trx, freshLinkedEstimate, \{\s+billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,\s+postedServiceKeys: postedAreaAddOnLines\(pricing\)\.map\(\(line\) => line\.key\)\.filter\(Boolean\),\s+\}\)/);
+    expect(src).toMatch(/assertAreaAddOnLimitsOpen\(trx, \{\s+estimate, customerId, property, appliedOn, staff: true, onlyServiceKeys: postedServiceKeys,\s+\}\)/);
   });
 
   test('Mark Won and the public accept: a booked appointment linked to the estimate names the customer and its property', async () => {
@@ -990,6 +990,18 @@ describe('the recheck finds the sold add-ons in every one-time shape the booking
 // Codex round 18 on #6135: a label limit is about the treatment PLACE, not the customer record. Two estimate links at one
 // address with two phones (two people, or one person with two numbers) are two customers, or one customer and one with
 // none yet, with two customer_properties rows of ONE address_key; the first accept's booking must stop the second.
+// Codex round 24: a staff booking judges only the add-ons it posts.
+describe('onlyServiceKeys narrows the recheck to the posted add-ons', () => {
+  const sold = { id: ESTIMATE, customer_id: CUSTOMER, property_id: PROPERTY, estimate_data: storedWith(['bed_pre_emergent']) };
+  const atLimit = () => fakeDb(world({ property_application_history: [ledger('p-snap', 3)] }));
+  test('the sold add-on at its limit stops a booking that posts it, not one that leaves it off', async () => {
+    await expect(service.assertAreaAddOnLimitsOpen(atLimit(), { estimate: sold, staff: true })).rejects.toMatchObject({ code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' });
+    await expect(service.assertAreaAddOnLimitsOpen(atLimit(), { estimate: sold, staff: true, onlyServiceKeys: ['area_addon_bed_pre_emergent'] })).rejects.toMatchObject({ code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' });
+    await expect(service.assertAreaAddOnLimitsOpen(atLimit(), { estimate: sold, staff: true, onlyServiceKeys: ['one_time_pest'] })).resolves.toBeUndefined();
+    await expect(service.assertAreaAddOnLimitsOpen(atLimit(), { estimate: sold, staff: true, onlyServiceKeys: [] })).resolves.toBeUndefined();
+  });
+});
+
 describe('the history is the place\'s, whoever the customer record is (Codex round 18)', () => {
   const { addressKey: propertyKey } = require('../services/customer-property-address-keys');
   const CUSTOMER_B = '11111111-1111-4111-8111-1111111111b2';
@@ -1057,6 +1069,11 @@ describe('the history is the place\'s, whoever the customer record is (Codex rou
       const lone = { customer_properties: props().filter((row) => row.id !== UNIT_PROPERTY) };
       await expect(check({ ...lone, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, elsewhere)).resolves.toBeUndefined();
       await expect(check({ ...lone, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER, property_id: OTHER_PROPERTY })] }, elsewhere)).rejects.toMatchObject(refused);
+      // Codex round 24: SEVERAL properties and none named. The one at the quoted address is read, never the whole customer.
+      const many = { customer_properties: props() };
+      await expect(check({ ...many, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, second({ customer_id: CUSTOMER_B, property_id: null, address: '1 Test Way, Apt 4, Bradenton, FL 34202' }))).resolves.toBeUndefined();
+      await expect(check({ ...many, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: UNIT_PROPERTY })] }, second({ customer_id: CUSTOMER_B, property_id: null, address: '1 Test Way, Apt 4, Bradenton, FL 34202' }))).rejects.toMatchObject(refused);
+      await expect(check({ ...many, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, second({ customer_id: CUSTOMER_B, property_id: null }))).rejects.toMatchObject(refused);
       // the quote at the on-file address still reads the on-file property
       await expect(check({ ...lone, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, second({ customer_id: CUSTOMER_B, property_id: null }))).rejects.toMatchObject(refused);
     });

@@ -307,10 +307,18 @@ const historyProperty = (database, customerId, propertyId) => (isUuid(customerId
 async function historySubject(database, { customerId, propertyId, prospect, address }) {
   const property = await historyProperty(database, customerId, propertyId);
   const named = isUuid(propertyId) || Boolean(prospect && prospect.propertyId);
-  const quoted = named || !isUuid(customerId) || !property ? '' : addressPlace(address).canon;
+  const quoted = named || !isUuid(customerId) ? '' : addressPlace(address).canon;
   if (!quoted) return { subject: customerId, property };
+  const AT_QUOTED_ADDRESS = { subject: null, property: null };
+  if (!property) {
+    // Several properties (or none) and none named: the one at the quoted address, else the quoted address alone. Never the
+    // customer's whole history across their other properties.
+    const mine = await database('customer_properties').where({ customer_id: customerId, address_key: quoted }).select('id', 'active');
+    const here = mine.find((row) => row.active !== false) || mine[0];
+    return here ? { subject: customerId, property: String(here.id) } : AT_QUOTED_ADDRESS;
+  }
   const onFile = await database('customer_properties').where({ id: property }).first('address_key');
-  return onFile && onFile.address_key && onFile.address_key !== quoted ? { subject: null, property: null } : { subject: customerId, property };
+  return onFile && onFile.address_key && onFile.address_key !== quoted ? AT_QUOTED_ADDRESS : { subject: customerId, property };
 }
 
 // The dates behind each wanted key: the ledger first, then the visits booked and held, sorted.
@@ -546,8 +554,9 @@ async function readLimitHistory(database, { estimate, keys, customerId, property
   return { day, history };
 }
 
-async function assertAreaAddOnLimitsOpen(database, { estimate, staff = false, ...options } = {}) {
-  const keys = recheckKeys(estimate);
+async function assertAreaAddOnLimitsOpen(database, { estimate, staff = false, onlyServiceKeys = null, ...options } = {}) {
+  // `onlyServiceKeys` (catalog keys): a staff booking judges only the add-ons it posts; one the office left off is not booked.
+  const keys = recheckKeys(estimate).filter((key) => !Array.isArray(onlyServiceKeys) || onlyServiceKeys.includes(configOf(key).serviceKey));
   if (!keys.length) return;
   let read;
   try {
@@ -778,6 +787,7 @@ module.exports = {
   applyAreaAddOnHistory,
   soldAddOnKeys,
   assertAreaAddOnLimitsOpen,
+  isSoldAddOnRow,
   areaAddOnLimitRefusal,
   fenceCustomerBookings,
   attachLimitUse,

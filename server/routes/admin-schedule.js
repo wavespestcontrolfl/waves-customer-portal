@@ -2022,13 +2022,15 @@ const LINKED_ESTIMATE_COLUMNS = Object.freeze([
 // a gated add-on whose gate is off, a recurring accept that would drop a sold add-on, and the add-ons' yearly limits under the
 // customer lock (the preflight read ran before it, so two bookings of one customer could each pass it). Nothing is left out of
 // the count: an accepted estimate booked a second time counts its first booking. Thrown as the same 409 the preflight returns.
-async function assertLockedEstimateAddOns(trx, estimate, { billingTerm, customerId, property, appliedOn }) {
+async function assertLockedEstimateAddOns(trx, estimate, { billingTerm, customerId, property, appliedOn, postedServiceKeys = null }) {
   const refusal = require('../services/estimate-manual-acceptance').persistedAddOnRefusal(estimate, {
     action: 'booking from it', billingTerm, checkRecurring: estimate.status !== 'accepted',
   });
   if (refusal) throw Object.assign(httpError(409, refusal.message), { code: refusal.code });
+  // The yearly limits of the add-ons this booking POSTS (Codex round 24): an add-on the office left off is not written to the
+  // visit, so its limit does not stop the booking. No list given = every sold add-on.
   await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
-    estimate, customerId, property, appliedOn, staff: true,
+    estimate, customerId, property, appliedOn, staff: true, onlyServiceKeys: postedServiceKeys,
   });
 }
 
@@ -8874,6 +8876,7 @@ async function scheduleCreateHandler(req, res, next) {
           lockedLinkedEstimate = freshLinkedEstimate;
           await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {
             billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,
+            postedServiceKeys: postedAreaAddOnLines(pricing).map((line) => line.key).filter(Boolean),
           });
         }
       }

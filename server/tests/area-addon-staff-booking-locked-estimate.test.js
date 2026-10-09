@@ -53,7 +53,17 @@ describe('the staff booking judges the add-ons on the estimate row its transacti
       await assertLockedEstimateAddOns(trx, locked, subject);
     });
     expect(recheck).toHaveBeenCalledTimes(1);
-    expect(recheck).toHaveBeenCalledWith(trx, { estimate: locked, customerId: 'cust-1', property: { property_id: 'prop-1' }, appliedOn: '2026-11-02', staff: true });
+    expect(recheck).toHaveBeenCalledWith(trx, { estimate: locked, customerId: 'cust-1', property: { property_id: 'prop-1' }, appliedOn: '2026-11-02', staff: true, onlyServiceKeys: null });
+  });
+
+  // Codex round 24: the office may leave a sold add-on off the booking; only the posted add-ons are limit-checked.
+  test('the posted add-on keys ride to the recheck', async () => {
+    const trx = { tag: 'trx' };
+    const locked = row();
+    await withGate('true', async () => {
+      await assertLockedEstimateAddOns(trx, locked, { ...subject, postedServiceKeys: ['one_time_pest'] });
+    });
+    expect(recheck).toHaveBeenLastCalledWith(trx, expect.objectContaining({ onlyServiceKeys: ['one_time_pest'] }));
   });
 
   test('a refusal of the recheck stops the booking with its own 409', async () => {
