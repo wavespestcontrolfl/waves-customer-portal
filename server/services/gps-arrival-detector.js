@@ -264,9 +264,9 @@ async function resolveDestination(service) {
   }
 }
 
-async function loadCurrentService(currentJobId, conn = db) {
+async function loadCurrentService(currentJobId) {
   if (!currentJobId) return null;
-  return conn('scheduled_services as s')
+  return db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('service_visits as sv', 's.visit_id', 'sv.id')
     .where('s.id', currentJobId)
@@ -411,7 +411,12 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
       // Serialized with the insert: another signal (manual, geofence, a
       // concurrent sample) can have marked the arrival since the caller's
       // snapshot. The persisted row decides, for every path.
-      const fresh = await loadCurrentService(serviceId, trx);
+      // FOR SHARE: a lifecycle write (manual, geofence, another sample) waits
+      // for this insert, so the state read and the row stay one decision.
+      // Lock order is advisory then row; lifecycle writers never take this
+      // advisory lock, so there is no cycle.
+      const fresh = await trx('scheduled_services').where({ id: serviceId }).forShare()
+        .first('arrived_at', 'completed_at', 'cancelled_at', 'track_state', 'status');
       if (!fresh || !isOpenWithoutArrival(fresh)) return;
       const existing = await trx('audit_log')
         .where({ resource_type: 'scheduled_service', action: NOT_MARKED_ACTION })

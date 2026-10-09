@@ -44,9 +44,16 @@ function auditQueryMock(existingAudit) {
 
 function installServiceLookup(service, { existingAudit } = {}) {
   const query = serviceQueryMock(service);
+  // the in-transaction FOR SHARE re-read of the lifecycle fields
+  query.locked = {
+    where: jest.fn().mockReturnThis(),
+    forShare: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue(service),
+  };
   const audit = auditQueryMock(existingAudit);
   db.mockImplementation((table) => {
     if (table === 'scheduled_services as s') return query;
+    if (table === 'scheduled_services') return query.locked;
     if (table === 'audit_log') return audit;
     throw new Error(`Unexpected table ${table}`);
   });
@@ -632,10 +639,8 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
   test('an arrival that lands between the snapshot and the write is not logged (re-read under the lock)', async () => {
     const service = baseService();
     const query = installServiceLookup(service);
-    // first load = the detector's snapshot (open); second = the in-transaction re-read (arrived)
-    query.first
-      .mockResolvedValueOnce(service)
-      .mockResolvedValueOnce({ ...service, track_state: 'on_property', arrived_at: new Date().toISOString() });
+    // the detector's snapshot is open; the locked in-transaction re-read has arrived
+    query.locked.first.mockResolvedValue({ ...service, track_state: 'on_property', arrived_at: new Date().toISOString() });
 
     const result = await detector.maybeMarkArrivedFromGps({
       techStatus: baseTechStatus(), point: basePoint({ speed_mph: 32, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG,
@@ -643,6 +648,8 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     expect(result).toMatchObject({ ok: false, reason: 'inside_radius_moving_too_fast' });
     expect(notMarkedWrites()).toHaveLength(0);
+    expect(query.locked.forShare).toHaveBeenCalled();
+    expect(query.locked.where).toHaveBeenCalledWith({ id: 'svc-1' });
   });
 
   test('a grouped stop with no stop-level en-route stamp falls back to its earliest member time', async () => {
