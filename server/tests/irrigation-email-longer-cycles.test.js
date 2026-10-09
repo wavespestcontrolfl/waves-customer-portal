@@ -225,12 +225,17 @@ describe('migration 20261009170000', () => {
   };
   const text = (version) => JSON.stringify(typeof version.blocks === 'string' ? JSON.parse(version.blocks) : version.blocks);
 
-  test('sorts after every other migration and defines both templates', () => {
+  test('sorts after the two migrations it builds on and defines both templates', () => {
     const fs = require('fs');
     const path = require('path');
     const dir = path.join(__dirname, '../models/migrations');
     const names = fs.readdirSync(dir).filter((f) => f.endsWith('.js')).sort();
-    expect(names[names.length - 1]).toBe('20261009170000_irrigation_email_longer_cycles.js');
+    const at = (name) => names.indexOf(name);
+    const mine = at('20261009170000_irrigation_email_longer_cycles.js');
+    expect(mine).toBeGreaterThan(at('20260702000001_seed_irrigation_weekly_email_templates.js'));
+    expect(mine).toBeGreaterThan(at('20260926120100_customer_copy_audit_email.js'));
+    expect(at('20260702000001_seed_irrigation_weekly_email_templates.js')).toBeGreaterThanOrEqual(0);
+    expect(at('20260926120100_customer_copy_audit_email.js')).toBeGreaterThanOrEqual(0);
     expect(migration.KEYS).toEqual([TEMPLATE_CUT_BACK, TEMPLATE_ADD_WATER]);
   });
 
