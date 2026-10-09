@@ -807,3 +807,28 @@ describe('the roster rule, one copy', () => {
     await expect(run([{ id: 'a', program: 'termite' }], ['a'], { findingsType: 'rodent_trapping' })).rejects.toMatchObject({ code: 'station_roster_changed' });
   });
 });
+
+describe('the sheet\'s station write in the completion transaction', () => {
+  const { writeSheetStationChecksInCompletion, stationRosterRefusalResponse } = require('../services/visit-station-facts');
+  const TermiteStations = require('../services/termite-stations');
+  const args = { customerId: 'c1', profile: { findingsType: 'termite_bait_station' }, serviceRecordId: 'r1', visitOutcome: 'completed', stationRosterSeen: ['a', 'b'], termiteStations: [{ id: 'a', status: 'ok' }, { id: 'b', status: 'activity', touched: true }] };
+  afterEach(() => jest.restoreAllMocks());
+
+  test('a failed write, or one that did not cover every entry, throws so the completion aborts; the answer is a retryable 503', async () => {
+    jest.spyOn(TermiteStations, 'syncStationsForCompletion').mockRejectedValue(new Error('down'));
+    await expect(writeSheetStationChecksInCompletion({}, args)).rejects.toMatchObject({ code: 'station_checks_write_failed' });
+    TermiteStations.syncStationsForCompletion.mockResolvedValue({ checksApplied: 1, skipped: ['station:b'] });
+    await expect(writeSheetStationChecksInCompletion({}, args)).rejects.toMatchObject({ code: 'station_checks_write_failed' });
+    expect(stationRosterRefusalResponse({ code: 'station_checks_write_failed' })).toMatchObject({ status: 503, body: { code: 'station_checks_write_failed' } });
+  });
+
+  test('a full write returns; the full form\'s body (no marker), a visit not performed and a body with a move or retire are left to the post-commit sync', async () => {
+    const spy = jest.spyOn(TermiteStations, 'syncStationsForCompletion').mockResolvedValue({ checksApplied: 2, skipped: [] });
+    await expect(writeSheetStationChecksInCompletion({}, args)).resolves.toMatchObject({ checksApplied: 2 });
+    spy.mockClear();
+    expect(await writeSheetStationChecksInCompletion({}, { ...args, stationRosterSeen: undefined })).toBeNull();
+    expect(await writeSheetStationChecksInCompletion({}, { ...args, visitOutcome: 'incomplete' })).toBeNull();
+    expect(await writeSheetStationChecksInCompletion({}, { ...args, termiteStations: [{ id: 'a', retire: true }] })).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+  });
+});

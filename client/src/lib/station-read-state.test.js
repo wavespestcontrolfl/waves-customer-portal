@@ -30,9 +30,17 @@ describe("readStatusFor", () => {
     expect(readStatusFor(stationReadReducer(stationReadReducer(ok, { type: "readStarted", note: N }), { type: "readFailed", note: N }), N)).toBe("ok");
   });
 
-  it("each note text keeps its own successful read", () => {
+  it("retains exactly one successful read: the note whose marks are on the sheet", () => {
     const state = run({ type: "readSucceeded", note: "a" }, { type: "readSucceeded", note: "b" });
-    expect([readStatusFor(state, "a"), readStatusFor(state, "b"), readStatusFor(state, "c")]).toEqual(["ok", "ok", "none"]);
+    expect([readStatusFor(state, "a"), readStatusFor(state, "b"), readStatusFor(state, "c")]).toEqual(["none", "ok", "none"]);
+  });
+
+  it("A read, B read, back to A with a failing refresh: A is failed, never retained", () => {
+    const state = run(
+      { type: "readSucceeded", note: "a" }, { type: "readSucceeded", note: "b" },
+      { type: "noteChanged", note: "a" }, { type: "readStarted", note: "a" }, { type: "readFailed", note: "a" },
+    );
+    expect(readStatusFor(state, "a")).toBe("failed");
   });
 
   it("the hand check stands whatever the note says, until it is cleared", () => {

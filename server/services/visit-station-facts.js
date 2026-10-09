@@ -365,19 +365,21 @@ async function assertStationRosterUnderLock(trx, { customerId, profile, stationR
 // commits. Only a performed completion from the station sheet (it sent the marker)
 // whose entries are plain checks ({ id, status }); the full form's body, with its
 // creates, moves and retires, keeps its post-commit sync untouched. The existing
-// sync function does the write (on a savepoint). The post-commit sync still runs
-// after and is idempotent; a failure here is not fatal for the same reason: it
-// rolls back the savepoint only and the post-commit sync is the fallback.
+// sync function does the write (on a savepoint). These rows are what the roster
+// guarantee rests on, so a failure, or a write that did not cover every entry,
+// ABORTS the completion (nothing commits; the sheet retries): the post-commit
+// sync is best-effort and could leave a completed visit with no check rows.
 async function writeSheetStationChecksInCompletion(trx, { customerId, profile, serviceRecordId, visitOutcome, stationRosterSeen, termiteStations }) {
   const program = stationRosterSeen === undefined || visitOutcome !== 'completed' ? null : stationSheetProgramFor(profile);
   const entries = Array.isArray(termiteStations) ? termiteStations : [];
   const plain = entries.length > 0 && entries.every((entry) => entry && entry.id != null && entry.shape == null && entry.retire !== true);
   if (!program || !plain || !serviceRecordId) return null;
+  let written = null;
   try {
-    return await require('./termite-stations').syncStationsForCompletion(trx, { customerId, serviceRecordId, entries, program });
-  } catch {
-    return null;
-  }
+    written = await require('./termite-stations').syncStationsForCompletion(trx, { customerId, serviceRecordId, entries, program });
+  } catch { written = null; }
+  if (written?.checksApplied === entries.length) return written;
+  throw Object.assign(new Error('station checks could not be saved'), { code: 'station_checks_write_failed' });
 }
 
 // The completion's answer for that refusal (null for any other error), the way
@@ -386,6 +388,10 @@ async function writeSheetStationChecksInCompletion(trx, { customerId, profile, s
 function stationRosterRefusalResponse(err) {
   if (err?.code === 'station_checks_incomplete') {
     return { status: 400, body: { error: 'termiteStations must carry one check for every station in stationRosterSeen', code: 'termite_stations_invalid' } };
+  }
+  // Retryable: the transaction rolled back, nothing was saved.
+  if (err?.code === 'station_checks_write_failed') {
+    return { status: 503, body: { error: 'Could not save the station checks. Nothing was saved. Try again in a moment.', code: 'station_checks_write_failed' } };
   }
   if (err?.code !== 'station_roster_changed') return null;
   return { status: 409, body: { error: 'The stations on this property changed, so they are loaded again. Try again.', code: 'station_roster_changed' } };

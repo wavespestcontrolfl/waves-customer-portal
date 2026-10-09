@@ -356,6 +356,42 @@ postgres('GATE_STATION_FAST_COMPLETE: the sheet\'s completion body writes the sa
       } finally { spy.mockRestore(); await cleanup(f); }
     });
 
+    // Codex P2 on #6205: the in-transaction write is what the roster guarantee
+    // rests on, so its failure aborts the completion; the retry then succeeds.
+    test('the in-transaction station write failing aborts the completion: nothing is written, and a retry after the fault clears saves every row', async () => {
+      const f = await seedVisit();
+      const original = TermiteStations.syncStationsForCompletion;
+      const spy = jest.spyOn(TermiteStations, 'syncStationsForCompletion');
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const idempotencyKey = randomUUID();
+      const completionBody = sheetBody(f, [null, 'activity', null, null], 'termite_bait_station', { ...TERMITE, stations_with_activity: '1', termite_activity: 'Active termites present', bait_consumption: 'Light feeding' });
+      const send = () => completeScheduledService({ serviceId: f.serviceId, idempotencyKey, actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: completionBody });
+      try {
+        spy.mockImplementation(async () => { throw new Error('station table down'); });
+        const failed = await send();
+        expect(failed).toMatchObject({ status: 503, body: { code: 'station_checks_write_failed' } });
+        expect(await checksByNumber(f)).toEqual([]);
+        expect(await mockPg('service_records').where({ customer_id: f.customerId })).toEqual([]);
+        expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+        // The fault clears: the same completion, same key, goes through.
+        spy.mockImplementation((...args) => original(...args));
+        const retried = await send();
+        expect(retried).toMatchObject({ status: 200 });
+        expect(await checksByNumber(f)).toEqual([[1, 'ok'], [2, 'activity'], [3, 'ok'], [4, 'ok']]);
+      } finally { spy.mockRestore(); await cleanup(f); }
+    });
+
+    test('a write that did not cover every station aborts too', async () => {
+      const f = await seedVisit();
+      const spy = jest.spyOn(TermiteStations, 'syncStationsForCompletion');
+      try {
+        spy.mockImplementation(async () => ({ created: 0, moved: 0, retired: 0, checksApplied: 3, skipped: ['station:x'] }));
+        const out = await complete(f, sheetBody(f, [], 'termite_bait_station', TERMITE));
+        expect(out).toMatchObject({ status: 503, body: { code: 'station_checks_write_failed' } });
+        expect(await mockPg('service_records').where({ customer_id: f.customerId })).toEqual([]);
+      } finally { spy.mockRestore(); await cleanup(f); }
+    });
+
     test('the full form\'s body is not written in the transaction: its sync stays post-commit', async () => {
       const f = await seedVisit();
       const spy = jest.spyOn(TermiteStations, 'syncStationsForCompletion');

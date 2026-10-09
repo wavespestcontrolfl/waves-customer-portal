@@ -734,3 +734,35 @@ describe('a station remark with no number', () => {
     expect(body.structuredFindings.values).toMatchObject({ stations_checked: '3', stations_inaccessible: '1' });
   }, 40000);
 });
+
+// Codex P2 on #6205: a retained read belongs to the marks it produced. Note A read,
+// note B read (other exceptions), back to A: A's refresh failing must hold, never
+// write the report or the completion from B's marks.
+describe('a retained read is bound to the marks on the sheet', () => {
+  const NOTE_B = 'Station 4 was buried and I could not get to it.';
+  const READ_B = { ...TERMITE_READ, stationExceptions: [{ id: 'st-termite-4', number: 4, status: 'inaccessible', quote: 'station 4 was buried' }] };
+  const failed = { ...TERMITE_READ, stationRead: 'failed', stationExceptions: [] };
+  const setNote = (value) => fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value } });
+
+  test('A ok, B ok, A again with a failing refresh: held, B\'s marks are not written for A', async () => {
+    let calls = 0;
+    const request = makeRequest({ typedFacts: () => { calls += 1; return [TERMITE_READ, READ_B][calls - 1] || failed; } });
+    await openSheet(request);
+    await generate(NOTE);
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    setNote(NOTE_B);
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    expect(within(stationsCard()).getByRole('button', { name: 'Station 4: No access' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    setNote(NOTE);
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+    // No third report, nothing asserted, no Complete.
+    expect(request.bodies('generate-report')).toHaveLength(2);
+    expect(request.bodies('/complete')).toEqual([]);
+    expect(within(stationsCard()).queryByText(/the rest OK|all OK/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+  }, 40000);
+});

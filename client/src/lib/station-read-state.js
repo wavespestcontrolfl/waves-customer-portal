@@ -7,8 +7,9 @@
 // record as a check for every station) only when the note's station read is
 // KNOWN to have succeeded for the CURRENT note text, or the tech marked the
 // stations by hand and confirmed it. The machine keeps
-//  - `reads`: the last SUCCESSFUL read per note text (a refresh in flight or
-//    failing never touches it, so a note already read stays read);
+//  - `reads`: the last SUCCESSFUL read, for the one note whose marks are on the
+//    sheet (a refresh in flight or failing never touches it, so that note stays
+//    read; a successful read of other text replaces it);
 //  - `attempt`: the read in flight or the last one that failed, for one note;
 //  - `byHand`: the tech's hand check.
 // The status of the current note is derived (readStatusFor): hand, ok, reading,
@@ -21,7 +22,10 @@ const EVENTS = {
   // A changed note drops an attempt made for other text.
   noteChanged: (state, { note }) => (state.attempt && state.attempt.note !== clean(note) ? { ...state, attempt: null } : state),
   readStarted: (state, { note }) => ({ ...state, attempt: { note: clean(note), status: 'reading' } }),
-  readSucceeded: (state, { note }) => ({ ...state, reads: { ...state.reads, [clean(note)]: 'ok' }, attempt: null }),
+  // Exactly ONE retained read: the note whose marks are applied now. A successful
+  // read lands its marks over the earlier ones, so an older note's "ok" no longer
+  // describes the marks on the sheet and is dropped (Codex P2 on #6205).
+  readSucceeded: (state, { note }) => ({ ...state, reads: { [clean(note)]: 'ok' }, attempt: null }),
   // `detail` 'unresolved': the note was read but part of what it said about the
   // stations could not be pinned down, so it is not a clean read either.
   // A newer read that found something unplaced also withdraws an earlier clean read
