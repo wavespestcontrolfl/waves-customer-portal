@@ -38,6 +38,7 @@
  */
 
 const logger = require('./logger');
+const featureGates = require('../config/feature-gates');
 const { sodHolds, SOD_SWAP_BAG, swapBagFor } = require('./lawn-sod-holds');
 const { formatDay } = require('./lawn-sod-form-summary');
 const { etCalendarDayOf, validCalendarDate } = require('../utils/datetime-et');
@@ -302,6 +303,53 @@ async function loadSodForContext({ svc, knex, readFailures, plannedProducts, rul
   }
 }
 
+/**
+ * What the sheet context takes from the new-sod holds: `{ plannedProducts, fields }`, where `fields` is
+ * spread into the context (`newSod`, or nothing).
+ *
+ * The hold-adjusted context goes ONLY to a client that says it understands it (`sodAware`, the
+ * `sodAware=1` query parameter of GET /lawn-fast/context; lawn-fast-complete.js passes it through). An old
+ * or cached sheet ignores `newSod` and would pre-select every planned item, the held Dimension bag AND
+ * the appended swap bag. So without the signal, or with the gate off, the context is the legacy one
+ * exactly: the same planned items (none appended, none removed), no `newSod`, and no read of the sod
+ * record. That client then pre-selects held products exactly as it does with the gate off today: the
+ * accepted status quo until its sheet is reloaded.
+ */
+async function sodContextParts({ sodAware, svc, knex, readFailures, plannedProducts, ruleFor }) {
+  if (sodAware !== true || !featureGates.lawnNewSodNoteLive()) return { plannedProducts, fields: {} };
+  const sod = await loadSodForContext({ svc, knex, readFailures, plannedProducts, ruleFor });
+  return { plannedProducts: sod.plannedProducts, fields: sod.newSod ? { newSod: sod.newSod } : {} };
+}
+
+const NO_PRODUCT_STALE = Object.freeze({
+  status: 409,
+  payload: { error: 'The new sod record changed. Reopen the visit.', code: 'lawn_sod_no_product_stale' },
+});
+
+/**
+ * The completion preflight's no-product check (called from preflightLawnFastCompletion; `next` is the
+ * rest of the preflight). A submission with an EMPTY product list whose technician note carries the
+ * new-sod no-product sentence says "the holds took every planned product". The server never takes that
+ * on trust: it rebuilds the sheet context (as a sod-aware sheet) and accepts only when that context sets
+ * `noProductAllowed` and its generated note is the one sent. Anything else (record cleared or changed to
+ * part of the lawn, a failed read, the gate off) is 409 lawn_sod_no_product_stale, a terminal "reopen".
+ * An empty list WITHOUT the sentence, and any list with a product, is judged exactly as before.
+ */
+async function checkNoProductNote({ knex, svc, products, technicianNotes, next }) {
+  const empty = !Array.isArray(products) || products.length === 0;
+  const notes = String(technicianNotes || '');
+  if (!empty || !notes.includes(NO_PRODUCT_NOTE_PREFIX)) return next();
+  let sod = null;
+  try {
+    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex, sodAware: true });
+    sod = ctx.ok && ctx.eligible ? ctx.newSod : null;
+  } catch (err) {
+    logger.warn(`[lawn-sod-sheet] no-product check unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+  }
+  if (sod?.noProductAllowed === true && notes.includes(sod.noProductNote)) return next();
+  return NO_PRODUCT_STALE;
+}
+
 // Every product the plan could put on this visit, with the hold classes of each (by lower-case id).
 async function classifyLines({ holds, plannedProducts, knex }) {
   const items = Array.isArray(plannedProducts?.items) ? plannedProducts.items : [];
@@ -405,9 +453,12 @@ const refusal = (status, code, error) => ({ status, body: { error, code } });
 
 /**
  * Saves sod_rooted_on = the visit's ET day (the technician's "Sod mowed twice and does
- * not lift" tick). Runs inside the caller's transaction, AFTER the customer's
- * property-preferences advisory lock and the visit row lock are taken (the lock order of
- * writeAdminPreferences). Idempotent: a day already saved is returned unchanged and never
+ * not lift" tick). Runs inside the caller's transaction, AFTER the route took the locks in
+ * this order: the customer's property-preferences advisory lock, the customer row (FOR SHARE),
+ * the scheduled visit row (customer first, then its visits, as the review-reply runner and
+ * publisher do); this function then takes the preferences row FOR UPDATE. A visit on a later
+ * ET day than today is refused (the day saved is the visit's own day, never a future one;
+ * the same future-visit check the completion flow uses). Idempotent: a day already saved is returned unchanged and never
  * moved or cleared. It only ever writes the day onto the record whose sod date is the
  * one the sheet rendered (`expectedLaidOn`), and only from the day the weed killer hold's
  * 30 days have passed (sodHolds says so: needsRootedCheck).
@@ -418,8 +469,9 @@ async function confirmSodRooted(trx, { svc, expectedLaidOn }) {
   const expected = typeof expectedLaidOn === 'string' ? validCalendarDate(expectedLaidOn.trim()) : null;
   if (!expected) return refusal(400, 'sod_date_required', 'Send the sod date shown on the sheet.');
 
-  const customer = await trx('customers').where({ id: svc.customer_id }).whereNull('deleted_at').forShare().first('id');
-  if (!customer) return refusal(404, 'not_found', 'Customer not found.');
+  if (require('./track-transitions').isFutureScheduledDate(svc.scheduled_date)) {
+    return refusal(409, 'sod_rooted_future_visit', 'This visit is on a later day. Confirm the sod on the day of the visit.');
+  }
   const prefs = await trx('property_preferences').where({ customer_id: svc.customer_id }).forUpdate().first();
   if (!prefs || ymdOrNull(prefs.sod_laid_on) !== expected) {
     return refusal(409, 'sod_record_changed', 'The sod record changed. Close this sheet and open the visit again.');
@@ -461,5 +513,7 @@ module.exports = {
   decisionFor,
   visitIsAtSodHome,
   loadSodForContext,
+  sodContextParts,
+  checkNoProductNote,
   confirmSodRooted,
 };

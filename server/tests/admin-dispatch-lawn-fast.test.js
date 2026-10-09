@@ -168,6 +168,15 @@ describe('GET lawn-fast/context', () => {
     expect(buildLawnFastContext).toHaveBeenCalledWith(VISIT, { technicianId: 'tech-1' });
   });
 
+  test('only a sheet that sends sodAware=1 asks for the new-sod context (the signal rides to the builder)', async () => {
+    mockDbCurrent = dbWithOwner('tech-1');
+    buildLawnFastContext.mockResolvedValue({ ok: true, eligible: true, reason: null, visitType: 'recurring', service: { id: 'visit-1' } });
+    await invoke('get', CONTEXT, { params, query: { sodAware: '1' }, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(buildLawnFastContext).toHaveBeenLastCalledWith(VISIT, { technicianId: 'tech-1', sodAware: true });
+    await invoke('get', CONTEXT, { params, query: { sodAware: 'true' }, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(buildLawnFastContext).toHaveBeenLastCalledWith(VISIT, { technicianId: 'tech-1' });
+  });
+
   test('an admin reads any visit; an ineligible visit is a 200 with its reason', async () => {
     mockDbCurrent = dbWithOwner('tech-2');
     buildLawnFastContext.mockResolvedValue({ ok: true, eligible: false, reason: 'lawn_re_service', service: { id: 'visit-1' } });
@@ -411,7 +420,8 @@ describe('POST lawn-fast/sod-rooted', () => {
   const today = require('../utils/datetime-et').etDateString(new Date());
   const visit = (extra = {}) => ({ id: 'visit-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: today, service_type: 'Lawn Care', ...extra });
   const tech = { techRole: 'technician', technicianId: 'tech-1' };
-  const tick = (actor = tech, body = { sodLaidOn: '2026-09-05' }) => invoke('post', ROOTED, { params, body, actor });
+  const tick = (actor = tech, body = { sodLaidOn: '2026-09-05' }, query = { sodAware: '1' }) => invoke('post', ROOTED, { params, body, actor, query });
+  let customerRow;
   const db = require('../models/db');
   const savedRaw = db.raw;
   let order;
@@ -420,7 +430,17 @@ describe('POST lawn-fast/sod-rooted', () => {
     order = [];
     db.raw = jest.fn((sql, binds) => { order.push(['raw', binds && binds[0]]); return { toString: () => sql }; });
     const base = dbWithVisit({ sequence: [visit()] }, []);
-    mockDbCurrent = (table) => { order.push(['table', table]); return base(table); };
+    customerRow = { id: 'cust-1' };
+    // The customer row read (whereNull + forShare) is recorded in the same order list as the visit reads.
+    mockDbCurrent = (table) => {
+      order.push(['table', table]);
+      if (table !== 'customers') return base(table);
+      const chain = {};
+      for (const m of ['where', 'whereNull']) chain[m] = () => chain;
+      chain.forShare = () => { order.push(['lock', 'customers']); return chain; };
+      chain.first = async () => customerRow;
+      return chain;
+    };
     resolveLawnFastEligibility.mockReset().mockResolvedValue({ ok: true, reason: null, svc: { id: VISIT, customer_id: 'cust-1' } });
     confirmSodRooted.mockReset().mockResolvedValue({ status: 200, body: { sodRootedOn: today, changed: true } });
   });
@@ -451,6 +471,35 @@ describe('POST lawn-fast/sod-rooted', () => {
     expect(confirmSodRooted).not.toHaveBeenCalled();
   });
 
+  test('a sheet that does not send sodAware=1 gets 404 {enabled:false}, nothing read or written', async () => {
+    const res = await tick(tech, { sodLaidOn: '2026-09-05' }, {});
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ enabled: false });
+    expect(order).toEqual([]);
+    expect(confirmSodRooted).not.toHaveBeenCalled();
+  });
+
+  test('lock order: advisory lock, then the customer row FOR SHARE, then the visit row; the write follows them all', async () => {
+    const res = await tick();
+    expect(res.statusCode).toBe(200);
+    const advisory = order.findIndex(([kind, value]) => kind === 'raw' && value === 'property-preferences');
+    const customerLock = order.findIndex(([kind, value]) => kind === 'lock' && value === 'customers');
+    // The visit row lock is the scheduled_services read after the customer lock (the earlier ones are the ownership read and the peek).
+    const visitLock = order.findIndex(([kind, value], i) => kind === 'table' && value === 'scheduled_services' && i > customerLock);
+    expect(advisory).toBeGreaterThan(-1);
+    expect(customerLock).toBeGreaterThan(advisory);
+    expect(visitLock).toBeGreaterThan(customerLock);
+    expect(confirmSodRooted).toHaveBeenCalledTimes(1);
+  });
+
+  test('a deleted customer: 404, nothing written', async () => {
+    customerRow = null;
+    const res = await tick();
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toMatchObject({ code: 'not_found' });
+    expect(confirmSodRooted).not.toHaveBeenCalled();
+  });
+
   test('the customer\'s preferences lock comes before the visit lock, and the write gets the rendered sod date', async () => {
     const res = await tick();
     expect(res.statusCode).toBe(200);
@@ -471,7 +520,14 @@ describe('POST lawn-fast/sod-rooted', () => {
   });
 
   test('reassigned after the ownership check: 403, nothing written', async () => {
-    mockDbCurrent = dbWithVisit({ sequence: [visit(), visit(), visit({ technician_id: 'tech-2' })] });
+    const base = dbWithVisit({ sequence: [visit(), visit(), visit({ technician_id: 'tech-2' })] });
+    mockDbCurrent = (table) => {
+      if (table !== 'customers') return base(table);
+      const chain = {};
+      for (const m of ['where', 'whereNull', 'forShare']) chain[m] = () => chain;
+      chain.first = async () => customerRow;
+      return chain;
+    };
     const res = await tick();
     expect(res.statusCode).toBe(403);
     expect(res.body.code).toBe('service_not_assigned');

@@ -4652,6 +4652,9 @@ function lawnFastProductIds(req) {
   return ids.length ? [...new Set(ids)].slice(0, 20) : undefined;
 }
 
+// GATE_LAWN_NEW_SOD_NOTE capability signal: a sheet that understands the context's `newSod` sends `sodAware=1` (query string).
+const sodAwareRequest = (req) => req.query?.sodAware === '1';
+
 // GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
 // What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
 // lawn visit type is eligible, recurring program visits first): the eligibility
@@ -4666,7 +4669,8 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
-    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(productIds ? { productIds } : {}) });
+    // GATE_LAWN_NEW_SOD_NOTE: the new-sod holds go only to a sheet that sends `sodAware=1` (it understands `newSod`).
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
     res.json({ enabled: true, ...body });
@@ -4757,19 +4761,24 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
 // body: { sodLaidOn: 'YYYY-MM-DD' } (the sod date the sheet rendered)
 // The technician's "Sod mowed twice and does not lift" tick on a home with new sod (GATE_LAWN_NEW_SOD_NOTE, 404
 // {enabled:false} while off, nothing read or written). Saves property_preferences.sod_rooted_on = the visit's ET day, from
-// day 31 of the record whose sod date the sheet rendered (a changed record is 409 sod_record_changed). Idempotent; never
-// moves or clears a saved day. The customer's property-preferences advisory lock is taken first, then the visit row lock
-// (lockOwnedLiveVisit, as the clear route above), then the customer and preferences rows: writeAdminPreferences' lock order.
+// day 31 of the record whose sod date the sheet rendered (a changed record is 409 sod_record_changed), and never for a
+// visit on a later day than today (409 sod_rooted_future_visit). Idempotent; never moves or clears a saved day. Sent only by a
+// sod-aware sheet (`?sodAware=1`; without it 404 {enabled:false}). Lock order: the customer's property-preferences advisory
+// lock, the customer row (FOR SHARE), the visit row (lockOwnedLiveVisit, as the clear route above), then the preferences row
+// FOR UPDATE: the customer before its visits, as the review-reply runner and publisher take them.
 // Technician and office only; no customer text, no report change. See services/lawn-sod-sheet.js.
 router.post('/:lawnFastServiceId/lawn-fast/sod-rooted', async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').lawnNewSodNoteLive()) return res.status(404).json({ enabled: false });
+    if (!require('../config/feature-gates').lawnNewSodNoteLive() || !sodAwareRequest(req)) return res.status(404).json({ enabled: false });
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const owner = await db('scheduled_services').where({ id: serviceId }).first('customer_id');
     if (!owner?.customer_id) return res.status(404).json({ error: 'Service not found', code: 'not_found' });
     const outcome = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(owner.customer_id)]);
+      // The customer row before its visit row.
+      const customer = await trx('customers').where({ id: owner.customer_id }).whereNull('deleted_at').forShare().first('id');
+      if (!customer) return { status: 404, body: { error: 'Customer not found.', code: 'not_found' } };
       await lockOwnedLiveVisit(trx, req, serviceId, ['id']);
       const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false });
       if (!eligibility.ok) return { status: recapStatusForReason(eligibility.reason), body: { error: eligibility.reason, code: eligibility.reason } };

@@ -396,13 +396,53 @@ describe('buildLawnFastContext: the gate', () => {
 
   test('on: the context carries newSod, and a customer with no sod record is unchanged', async () => {
     process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(prefs())) });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(prefs())), sodAware: true });
     expect(ctx.newSod).toMatchObject({ headline: 'New sod, day 5. Laid Oct 1, 2026.', noWholeLawn: sodSheet.NO_PRODUCT_TEXT, noProductAllowed: true });
     expect(ctx.newSod.lines[P_BAG24]).toMatchObject({ held: true });
     expect(ctx.readFailures).toEqual([]);
 
-    const off = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(undefined)) });
+    const off = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(undefined)), sodAware: true });
     expect(off.newSod).toBeUndefined();
+  });
+
+  describe('the capability signal: only a sod-aware sheet gets the hold-adjusted context', () => {
+    // An October visit on the Dimension combination bag, sod laid in August: the swap bag would be appended.
+    const DIM_NAME = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
+    const dimTables = () => tables(prefs({ sod_laid_on: '2026-08-01' }));
+    beforeEach(() => {
+      buildPlanForService.mockReset().mockResolvedValue({
+        completionDefaults: { items: [{ product: { id: P_DIM_BAG, name: DIM_NAME }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' } }] },
+      });
+    });
+
+    test('gate on, no signal: byte-for-byte the gate-off context (no swap bag appended, nothing removed, no newSod), sod record never read', async () => {
+      delete process.env.GATE_LAWN_NEW_SOD_NOTE;
+      const legacy = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()) });
+      process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+      const knex = fakeKnex(dimTables());
+      const unsignalled = await buildLawnFastContext(VISIT, { knex });
+      expect(JSON.stringify(unsignalled)).toBe(JSON.stringify(legacy));
+      expect(unsignalled.plannedProducts.items.map((i) => i.productId)).toEqual([P_DIM_BAG]);
+      expect(unsignalled.newSod).toBeUndefined();
+      expect(knex.mock.calls.map(([table]) => table)).not.toContain('property_preferences');
+      // Anything but the explicit boolean is no signal.
+      const truthy = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()), sodAware: 'yes' });
+      expect(JSON.stringify(truthy)).toBe(JSON.stringify(legacy));
+    });
+
+    test('gate on, signal sent: the Dimension bag is held and the swap bag is appended', async () => {
+      process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+      const aware = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()), sodAware: true });
+      expect(aware.plannedProducts.items.map((i) => i.productId)).toEqual([P_DIM_BAG, P_BAG24]);
+      expect(aware.newSod.lines[P_DIM_BAG]).toMatchObject({ held: true });
+    });
+
+    test('gate off, signal sent: still the legacy context', async () => {
+      delete process.env.GATE_LAWN_NEW_SOD_NOTE;
+      const legacy = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()) });
+      const signalled = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()), sodAware: true });
+      expect(JSON.stringify(signalled)).toBe(JSON.stringify(legacy));
+    });
   });
 });
 
@@ -453,32 +493,52 @@ describe('preflightLawnFastCompletion: an empty product list', () => {
     });
   };
 
-  test('every planned product held and the note says why: accepted with no product', async () => {
+  const STALE = { status: 409, payload: { code: 'lawn_sod_no_product_stale', error: 'The new sod record changed. Reopen the visit.' } };
+
+  test('every planned product held and the note the server generates is on the record: accepted with no product', async () => {
     expect(await run({ technicianNotes: NOTE })).toBeNull();
     expect(await run({ technicianNotes: `Dog in the yard. ${NOTE}`, products: undefined })).toBeNull();
   });
 
-  test('every planned product held and the note missing: 400, the record must say why', async () => {
-    expect(await run({ technicianNotes: '' })).toMatchObject({ status: 400, payload: { code: 'lawn_sod_no_product_note_required' } });
-    expect(await run({ technicianNotes: 'Nothing to spread.' })).toMatchObject({ status: 400, payload: { code: 'lawn_sod_no_product_note_required' } });
-  });
-
-  test('the server decides: a sheet that sent the note for a visit that is NOT all held is judged as it always was', async () => {
-    // The sod is past its holds: the plan bag is not held, so no empty list gets the new-sod path.
-    expect(await run({ record: prefs({ sod_laid_on: '2026-08-01' }), technicianNotes: '' })).toBeNull();
-    // No sod record at all.
+  test('an empty list WITHOUT the sentence keeps today\'s behavior (accepted), all held or not', async () => {
+    expect(await run({ technicianNotes: '' })).toBeNull();
+    expect(await run({ technicianNotes: 'Nothing to spread.' })).toBeNull();
     expect(await run({ record: null, technicianNotes: '' })).toBeNull();
   });
 
-  test('a part-of-lawn record keeps its lines on, so an empty list is judged as before (no new-sod path)', async () => {
-    expect(await run({ record: prefs({ sod_covers: 'part', sod_area: 'front yard' }), technicianNotes: '' })).toBeNull();
+  test('the sentence on a visit the rebuilt context does not allow: 409 lawn_sod_no_product_stale', async () => {
+    // The sod record was cleared since the sheet opened.
+    expect(await run({ record: null, technicianNotes: NOTE })).toEqual(STALE);
+    // It was changed to part of the lawn: the lines stay on, nothing is allowed empty.
+    expect(await run({ record: prefs({ sod_covers: 'part', sod_area: 'front yard' }), technicianNotes: NOTE })).toEqual(STALE);
+    // The holds on the plan's bag ended (sod laid in August): the line is no longer held.
+    expect(await run({ record: prefs({ sod_laid_on: '2026-08-01' }), technicianNotes: NOTE })).toEqual(STALE);
   });
 
-  test('a product on the list is never touched by this path', async () => {
-    expect(await run({ products: [{ productId: P_BAG24 }], technicianNotes: '' })).toBeNull();
+  test('the sentence is on the record but the generated note differs from the one sent: stale', async () => {
+    // The sheet was opened when the sod was laid on another day.
+    const old = 'No product applied: new sod is rooting (laid Sep 28, 2026). Held: fertilizer until Oct 28, 2026.';
+    expect(await run({ technicianNotes: old })).toEqual(STALE);
+    // A hand-typed prefix alone is not the generated sentence.
+    expect(await run({ technicianNotes: 'No product applied: new sod.' })).toEqual(STALE);
   });
 
-  test('gate off: an empty list is judged exactly as before, and the sod record is never read', async () => {
+  test('a failed sod read, or a failed rebuild, is stale too (never accepted on the sheet\'s word)', async () => {
+    expect(await run({ record: new Error('read failed'), technicianNotes: NOTE })).toEqual(STALE);
+  });
+
+  test('the gate off: the sentence is stale (nothing authorizes it), the sod record is never read', async () => {
+    delete process.env.GATE_LAWN_NEW_SOD_NOTE;
+    const knex = fakeKnex({
+      scheduled_services: visitRow(), customers: { billing_mode: null, has_multi_home: false }, products_catalog: CATALOG,
+      property_preferences: prefs(), customer_properties: HOME, lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [],
+    });
+    const out = await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: 'cust-1' }, lawnAssessmentId: ASSESSMENT, expectedVisit: IDENTITY, lawnFast: { visitType: 'recurring' }, products: [], technicianNotes: NOTE });
+    expect(out).toEqual(STALE);
+    expect(knex.mock.calls.map(([table]) => table)).not.toContain('property_preferences');
+  });
+
+  test('gate off and no sentence: an empty list is judged exactly as before', async () => {
     delete process.env.GATE_LAWN_NEW_SOD_NOTE;
     const knex = fakeKnex({
       scheduled_services: visitRow(), customers: { billing_mode: null, has_multi_home: false }, products_catalog: CATALOG,
@@ -489,8 +549,10 @@ describe('preflightLawnFastCompletion: an empty product list', () => {
     expect(knex.mock.calls.map(([table]) => table)).not.toContain('property_preferences');
   });
 
-  test('a failed sod read never blocks the completion (it is judged as before)', async () => {
-    expect(await run({ record: new Error('read failed'), technicianNotes: '' })).toBeNull();
+  test('a product on the list is never touched by this path', async () => {
+    expect(await run({ products: [{ productId: P_BAG24 }], technicianNotes: '' })).toBeNull();
+    // A list with a product that still carries the sentence is a normal completion: nothing to authorize.
+    expect(await run({ products: [{ productId: P_BAG24 }], technicianNotes: NOTE })).toBeNull();
   });
 });
 
@@ -535,6 +597,15 @@ describe('confirmSodRooted', () => {
     expect(out).toEqual({ status: 200, body: { sodRootedOn: '2026-10-05', changed: true } });
     expect(state.prefs.sod_rooted_on).toBe('2026-10-05');
     expect(state.updates).toEqual([{ sod_rooted_on: '2026-10-05', updated_at: 'NOW' }]);
+  });
+
+  test('a visit on a later ET day than today is refused: nothing is saved, not even an idempotent read', async () => {
+    const state = fresh();
+    const out = await run(state, { visit: { scheduled_date: '2099-01-01' } });
+    expect(out.status).toBe(409);
+    expect(out.body).toEqual({ code: 'sod_rooted_future_visit', error: 'This visit is on a later day. Confirm the sod on the day of the visit.' });
+    expect(state.updates).toEqual([]);
+    expect(state.prefs.sod_rooted_on).toBeNull();
   });
 
   test('idempotent: a second tick returns the saved day and writes nothing; a saved day is never moved or cleared', async () => {
