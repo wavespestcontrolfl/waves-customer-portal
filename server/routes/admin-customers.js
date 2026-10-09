@@ -4791,15 +4791,17 @@ function prefsRenderStamp(body) {
 // out the lock would re-read the cleared row and write the old home's sod onto
 // the new one: the lock orders the writes but says nothing about when the form
 // was rendered. Setting a sod date after a move on record therefore needs the
-// matching render stamp (an absent one fails closed). Clearing is always allowed.
+// matching render stamp (an absent one fails closed). Clearing a record that exists needs it too.
 const SOD_STALE_HOME = Object.freeze({
   ok: false,
   field: 'sodLaidOn',
-  message: 'The home on this customer changed. Reload the customer, then enter the sod record again.',
+  message: 'The home on this customer changed. Reload the customer, then make the sod change again.',
 });
 function sodWriteIsFresh(current, sodInput, renderStamp) {
+  // A clear with no record on the row changes nothing, so it is always fresh. A clear of a record that exists
+  // faces the same stamp as a set: a form rendered before a move must not delete the new home's record.
   const clears = 'sod_laid_on' in sodInput && sodInput.sod_laid_on == null;
-  if (clears) return true;
+  if (clears && !current?.sod_laid_on) return true;
   const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
   if (movedAt == null) return true;
   return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;

@@ -143,19 +143,31 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     expect(byKey.preEmergent.text).toContain('Pre-emergent is held until Oct 1, 2027');
   });
 
-  it('the history read is this home only and a date window, never a row limit', async () => {
+  it('the history read is a date window, never a row limit', async () => {
     await getNewSod();
     const q = mockState.historyQuery;
     expect(q.limit).not.toHaveBeenCalled();
     // An incomplete visit records applied products too.
     expect(q.whereIn).toHaveBeenCalledWith('sr.status', ['completed', 'incomplete']);
-    expect(q.whereRaw).toHaveBeenCalledTimes(1);
-    // A visit stamped with another address is left out; one with no stamp is kept.
-    expect(q.whereRaw.mock.calls[0][0]).toMatch(/^NOT COALESCE\(.*ss\.service_address_line1.*c\.address_line1.*, false\)$/s);
     const window = q.where.mock.calls.find((call) => call[0] === 'sr.service_date');
     expect(window[1]).toBe('>=');
     // Reaches past the oldest sod date the form accepts (24 months) plus the 12 weeks before it.
     expect(window[2] <= daysAgo(24 * 31 + 84)).toBe(true);
+  });
+
+  it('this home only: another street, another unit and another ZIP are left out; no stamp or an omitted unit is kept', async () => {
+    const home = { home_line1: '100 Sample St', home_line2: 'Unit 3', home_city: 'Testville', home_zip: '34200' };
+    const at = (days, stamp) => ({ ...DIMENSION, service_date: daysAgo(days), ...home, ...stamp });
+    const named = async (rows) => { mockState.productRows = rows; return (await getNewSod()).body.newSod.lastPreEmergent?.date || null; };
+    expect(await named([at(10, { service_address_line1: '55 Other Rd', service_address_zip: '34200' })])).toBeNull();
+    expect(await named([at(10, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 4', service_address_zip: '34200' })])).toBeNull();
+    expect(await named([at(10, { service_address_line1: '100 Sample St Unit 4' })])).toBeNull();
+    expect(await named([at(10, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 3', service_address_zip: '34999' })])).toBeNull();
+    expect(await named([at(10, { service_address_line1: null })])).toBe(daysAgo(10));
+    expect(await named([at(10, { service_address_line1: '100 Sample Street' })])).toBe(daysAgo(10));
+    expect(await named([at(10, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 3' })])).toBe(daysAgo(10));
+    // The newer visit was at another unit: the older one at this home is the one named.
+    expect(await named([at(5, { service_address_line1: '100 Sample St', service_address_line2: 'Unit 4' }), at(40, { service_address_line1: null })])).toBe(daysAgo(40));
   });
 
   it('a pre-emergent after the sod date does not hide one applied shortly before it', async () => {

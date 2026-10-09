@@ -7217,7 +7217,7 @@ function AccessPrefsSodHoldLines({ lines }) {
   );
 }
 
-function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod }) {
+function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod, sodUnchanged }) {
   const clearRecord = () =>
     setDraft((prev) => ({ ...prev, sodLaidOn: "", sodCovers: "", sodArea: "" }));
   const part = d.sodCovers === "part";
@@ -7253,7 +7253,13 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
           Clear sod record
         </button>
       )}
-      <AccessPrefsSodHoldLines lines={hasSavedSod ? sodInfo?.holdLines : null} />
+      {/* The hold lines describe the SAVED record. Once the sod fields are edited they no longer apply, so they are hidden until the save. */}
+      <AccessPrefsSodHoldLines lines={hasSavedSod && sodUnchanged ? sodInfo?.holdLines : null} />
+      {hasSavedSod && !sodUnchanged && (
+        <div className="text-ui-label text-ink-secondary" data-testid="sod-hold-lines-stale">
+          Save to see the hold dates for this change.
+        </div>
+      )}
       {sodInfo && (
         <div className="text-ui-label text-ink-secondary" data-testid="sod-last-pre-emergent">
           {last
@@ -7272,7 +7278,7 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
   );
 }
 
-function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod }) {
+function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod, sodUnchanged }) {
   const f = { d, set, fieldErrors };
   // Entering sensitivity details turns the flag on — techs only see the
   // warning when the flag is set.
@@ -7332,7 +7338,7 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets,
       <AccessPrefsTextInput {...f} multiline label="Mowing Notes" field="mowingNotes" />
 
       {isAdmin && (
-        <AccessPrefsNewSod {...f} setDraft={setDraft} sodInfo={sodInfo} hasSavedSod={hasSavedSod} />
+        <AccessPrefsNewSod {...f} setDraft={setDraft} sodInfo={sodInfo} hasSavedSod={hasSavedSod} sodUnchanged={sodUnchanged} />
       )}
 
       <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
@@ -7836,6 +7842,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           isAdmin={isAdmin}
           sodInfo={sodInfo}
           hasSavedSod={!!prefs?.sod_laid_on}
+          sodUnchanged={ACCESS_PREFS_SOD_KEYS.every((k) => (draft?.[k] ?? "") === (initialDraftRef.current?.[k] ?? ""))}
         />
       </fieldset>
       <div className="flex items-center justify-end gap-2 mt-3 pt-3 border-t border-hairline border-zinc-200">

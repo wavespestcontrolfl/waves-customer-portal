@@ -14,7 +14,7 @@
  */
 
 const { sodHolds, validateSodLaidOn, MAX_SOD_AGE_MONTHS } = require('./lawn-sod-holds');
-const { stampedDivergesSql } = require('./stamped-address');
+const { premiseStampConflicts, inheritReferenceUnit } = require('./stamped-address');
 const { isPreEmergent } = require('./service-report/lawn-watering-rule');
 const { etCalendarDayOf, validCalendarDate, etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -51,6 +51,15 @@ function daysBetween(fromYmd, toYmd) {
   return Math.round((ms(toYmd) - ms(fromYmd)) / DAY_MS);
 }
 
+// This home only: a visit stamped with another premise (a former home, a second property, another unit at the same
+// street) is not this lawn's history. The repo's one premise comparator decides (street, unit, ZIP, city); a stamp
+// that omits the unit takes the home's. A visit with no stamp is kept: nothing proves it was elsewhere.
+function atAnotherPremise(row) {
+  if (!row?.service_address_line1) return false;
+  const home = { service_address_line1: row.home_line1, service_address_line2: row.home_line2, service_address_city: row.home_city, service_address_zip: row.home_zip };
+  return premiseStampConflicts(inheritReferenceUnit(row, home), home);
+}
+
 /**
  * The newest pre-emergent application at the customer's current home (completed or incomplete visits: both
  * record what was applied).
@@ -71,9 +80,6 @@ async function lastWavesPreEmergent(knex, customerId) {
       // An incomplete visit still records the products that were applied before it stopped.
       .whereIn('sr.status', ['completed', 'incomplete'])
       .where('sr.service_date', '>=', etDateString(addETDays(new Date(), -HISTORY_DAYS_READ)))
-      // This home only: a visit stamped with another address (a former home, or a second property) is not this
-      // lawn's history. A visit with no stamp is kept: nothing proves it was elsewhere.
-      .whereRaw(`NOT COALESCE(${stampedDivergesSql('ss', 'c')}, false)`)
       .orderBy('sr.service_date', 'desc')
       .select(
         'sr.service_date',
@@ -83,6 +89,8 @@ async function lastWavesPreEmergent(knex, customerId) {
         'pc.active_ingredient as catalog_ingredient',
         'pc.category as catalog_category',
         'pc.subcategory as catalog_subcategory',
+        'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
+        'c.address_line1 as home_line1', 'c.address_line2 as home_line2', 'c.city as home_city', 'c.zip as home_zip',
       );
   } catch {
     return { unreadable: true };
@@ -91,6 +99,7 @@ async function lastWavesPreEmergent(knex, customerId) {
   // date, so every pre-emergent read is kept.
   const applications = [];
   for (const row of rows || []) {
+    if (atAnotherPremise(row)) continue;
     const date = ymdOrNull(row.service_date);
     if (!date) continue;
     const product = {

@@ -495,11 +495,23 @@ describe('the new-sod record — staff-only sodLaidOn / sodCovers / sodArea', ()
       expect(mockState.prefsRow.sod_laid_on).toBe(daysAgo(3));
     });
 
-    it('a clear needs no stamp', async () => {
-      mockState.prefsRow.sod_laid_on = daysAgo(10);
-      mockState.prefsRow.sod_covers = 'whole';
+    it('a clear with no record on the row needs no stamp (it changes nothing)', async () => {
       const res = await putPrefs({ sodLaidOn: null });
       expect(res.status).toBe(200);
+      expect(mockState.prefsRow.sod_laid_on).toBeNull();
+    });
+
+    it('a clear of a record that exists needs the stamp: a form rendered before the move cannot delete the new home\'s record', async () => {
+      mockState.prefsRow.sod_laid_on = daysAgo(10);
+      mockState.prefsRow.sod_covers = 'whole';
+      const stale = await putPrefs({ sodLaidOn: null, sodCovers: null, sodArea: null, confirmedAsOf: '2026-09-01T00:00:00.000Z' });
+      expect(stale.status).toBe(400);
+      expect(stale.body.rejected[0]).toMatchObject({ field: 'sodLaidOn', message: expect.stringMatching(/home on this customer changed/) });
+      expect(mockState.prefsRow.sod_laid_on).toBe(daysAgo(10));
+      expect((await putPrefs({ sodLaidOn: null })).status).toBe(400);
+      expect(mockState.prefsRow.sod_laid_on).toBe(daysAgo(10));
+      const fresh = await putPrefs({ sodLaidOn: null, sodCovers: null, sodArea: null, confirmedAsOf: MOVED_AT });
+      expect(fresh.status).toBe(200);
       expect(mockState.prefsRow.sod_laid_on).toBeNull();
     });
   });

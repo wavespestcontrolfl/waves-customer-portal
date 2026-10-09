@@ -176,7 +176,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
   });
 
   it('shows the server refusal under the sod date and keeps the form open', async () => {
-    const message = 'The home on this customer changed. Reload the customer, then enter the sod record again.';
+    const message = 'The home on this customer changed. Reload the customer, then make the sod change again.';
     stubFetch({
       onPut: () => response({ error: message, rejected: [{ field: 'sodLaidOn', message }] }, 400),
     });
@@ -233,6 +233,19 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     expect(screen.getByText('Pre-emergent is held until Oct 1, 2027.')).toBeInTheDocument();
     expect(screen.getByText(/Weed killer is held until Oct 31, 2026 and until the technician confirms/)).toBeInTheDocument();
     expect(await screen.findByText('Last pre-emergent by Waves: Aug 10, 2026 (LESCO Dimension 0.25% Granular)')).toBeInTheDocument();
+  });
+
+  it('the hold lines are hidden once a sod field is edited: they describe the saved record only', async () => {
+    stubFetch({
+      prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null },
+      newSod: { ...NEW_SOD, holdLines: [{ key: 'fertilizer', active: true, text: 'Fertilizer is held until Oct 31, 2026.' }] },
+      onPut: () => response({}),
+    });
+    await openEditor();
+    expect(await screen.findByTestId('sod-hold-lines')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Part of lawn'));
+    expect(screen.queryByTestId('sod-hold-lines')).not.toBeInTheDocument();
+    expect(screen.getByTestId('sod-hold-lines-stale')).toHaveTextContent('Save to see the hold dates for this change.');
   });
 
   it('the read view shows the saved record and its hold lines', async () => {
