@@ -115,6 +115,7 @@ const {
 const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { freezePestCheck } = require('./tree-shrub-pest-check');
+const { treeShrubNeonicCapBlocks, neonicCapBlockPayload, UNAVAILABLE_CODE: NEONIC_CAP_UNAVAILABLE_CODE } = require('./tree-shrub-neonic-ledger');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -4699,6 +4700,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (prohibited.length) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(prohibited[0].code), db);
         return ({ status: 400, body: lawnProhibitedProductsBlockPayload(prohibited) });
+      }
+    }
+
+    // T&S yearly neonicotinoid cap (GATE_TS_NEONIC_CAP): a fresh closeout whose entered amounts, with the
+    // property's tree & shrub year so far, pass the label cap is refused before any write. A resume or
+    // replay of a committed completion is left alone; an incomplete visit already put the product down,
+    // so it is recorded as it happened. Gate off: the check returns [] without a read.
+    if (claim.action === 'proceed' && !isIncompleteVisit && (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')) {
+      let neonicBlocks;
+      try {
+        neonicBlocks = await treeShrubNeonicCapBlocks(db, svc, products, { serviceDate: backfillPlan.active ? backfillPlan.serviceDate : svc.scheduled_date });
+      } catch (err) {
+        logger.error(`[dispatch] T&S neonic cap read failed for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(NEONIC_CAP_UNAVAILABLE_CODE), db);
+        return ({ status: 503, body: {
+          error: 'Could not check the yearly product limit for this property. Try again in a moment.',
+          code: NEONIC_CAP_UNAVAILABLE_CODE,
+        } });
+      }
+      if (neonicBlocks.length) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(neonicBlocks[0].code), db);
+        return ({ status: 400, body: neonicCapBlockPayload(neonicBlocks) });
       }
     }
 

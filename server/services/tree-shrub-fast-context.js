@@ -30,6 +30,7 @@ const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slot
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
+const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
 const ROTATION_WINDOW_DAYS = 60;
@@ -485,7 +486,14 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // GATE_TS_PEST_CHECK: the "Live insects found?" block and its insect types.
     // Gate off = no key at all.
     ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
+    ...await neonicCapKey(svc, catalog, knex),
   };
+}
+
+// GATE_TS_NEONIC_CAP: what is left of each capped product at this property this year. Gate off = no
+// read and no key.
+async function neonicCapKey(svc, catalog, knex) {
+  return tsNeonicCapLive() ? { neonicCap: await buildNeonicCapContext(svc, svc.scheduled_date, catalog, knex) } : {};
 }
 
 // The sheet's watch list for the visit month: key, label, signal, referOnly.

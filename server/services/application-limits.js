@@ -702,3 +702,4 @@ class ApplicationLimitChecker {
 
 module.exports = new ApplicationLimitChecker();
 module.exports.assertRollingIsCountOnly = assertRollingIsCountOnly;
+module.exports.scopeHistoryToTreatment = scopeHistoryToTreatment;
