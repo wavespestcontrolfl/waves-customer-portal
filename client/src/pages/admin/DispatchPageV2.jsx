@@ -94,6 +94,8 @@ import { reportFlowFields, stationMapKnownOff, stationMapKnownOn } from "../../l
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import FastCompleteComboSheet from '../../components/tech/FastCompleteComboSheet';
 import { comboMembersFor } from '../../lib/combo-fast-complete';
+import { comboDraftId, operatorScope } from '../../lib/visit-closeout-packet';
+import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 import {
   mergePostPaymentService,
   fastCompleteSheetFor,
@@ -937,6 +939,9 @@ export default function DispatchPageV2({
   const fastSheetBehindDetails = !!(detailService && (pestFastService || treeShrubFastService
     || lawnReserviceFastService || lawnFastService || assessmentFastService || comboStop));
   const closeFastSheetsBehindDetails = () => {
+    // The combo container keeps its parts' forms on the device for a reload; the visit changed, so those forms must not
+    // come back as ready when the stop is reopened.
+    if (comboStop) void deleteVisitCompletionDraft(comboDraftId(comboStop.visitId), operatorScope(fastCompleteOperatorId));
     setComboStop(null);
     setPestFastService(null);
     setTreeShrubFastService(null);

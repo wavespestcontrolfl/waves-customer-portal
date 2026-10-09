@@ -164,6 +164,10 @@ export default function MobileAppointmentDetailSheet({
   const [cancelScope, setCancelScope] = useState('this_only');
   const [showCustomer, setShowCustomer] = useState(false);
   const [showRainOut, setShowRainOut] = useState(false);
+  // A Quick Move that committed but stayed open on a warning: this sheet's row is
+  // now stale, so dismissing that warning closes Details too (no second move or
+  // text from the old row).
+  const rainOutCommitted = useRef(false);
   const [estimateSource, setEstimateSource] = useState(null);
   // Saved payment methods, shown inside the estimate provenance card so the
   // tech knows a card is on file before choosing how to collect.
@@ -1133,8 +1137,12 @@ export default function MobileAppointmentDetailSheet({
         <RainOutSheet
           service={service}
           allowRouteScope={adminActions}
-          onClose={() => setShowRainOut(false)}
+          onClose={() => {
+            setShowRainOut(false);
+            if (rainOutCommitted.current) onClose?.();
+          }}
           onDone={(result) => {
+            if (result?.movedCount > 0) rainOutCommitted.current = true;
             // Some stops moved — refresh the board regardless.
             onRescheduled?.(service);
             // Only dismiss on a clean move; a partial failure, a

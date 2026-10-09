@@ -10,6 +10,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DispatchPageV2 from './DispatchPageV2';
 import { adminFetch } from '../../utils/admin-fetch';
+import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 vi.mock('./SchedulePage', () => ({
@@ -29,6 +30,7 @@ vi.mock('../../components/tech/FastCompleteComboSheet', () => ({
     </div>
   ),
 }));
+vi.mock('../../lib/completion-resume-store', async (importOriginal) => ({ ...(await importOriginal()), deleteVisitCompletionDraft: vi.fn(async () => true) }));
 vi.mock('../../components/admin/VisitCloseoutSheet', () => ({ default: ({ visitId }) => <div>Visit closeout for {visitId}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({ default: ({ service }) => <div>Pest sheet for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({ default: ({ service }) => <div>Lawn sheet for {service.id}</div> }));
@@ -105,9 +107,12 @@ describe('Dispatch routing for a pest + lawn stop', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Details close' }));
     await waitFor(() => expect(screen.queryByText(/Details sheet for svc-lawn/)).not.toBeInTheDocument());
     expect(sheet().getAttribute('data-suspended')).toBe('false');
+    // A plain Close keeps the stop's saved forms; a cancel discards them with the container.
+    expect(deleteVisitCompletionDraft).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Combo details' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Details cancel' }));
     await waitFor(() => expect(screen.queryByText(/Combo sheet for/)).not.toBeInTheDocument());
+    expect(deleteVisitCompletionDraft).toHaveBeenCalledWith('combo:visit-1', expect.any(String));
   });
 
   it('the container\'s Full form opens the long visit closeout', async () => {
