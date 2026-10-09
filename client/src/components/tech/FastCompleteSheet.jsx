@@ -88,7 +88,7 @@ import {
   TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
   typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
-  useVisitPhotos, useVisitPromises, useVisitTrace,
+  useTraceReuse, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
@@ -696,6 +696,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   const tips = useTipLibrary({ base: `/admin/dispatch/${service?.id}`, request });
   const tipsAvailable = !!tips;
   const dictating = useDictationSources(onDictationPending);
+  const serviceId = service?.id;
   const setCustomTip = useCallback((value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId })), []);
   // What the tech tapped or said lifts the advice for it; never a pick.
   const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { pests: [...form.pests], note: form.note }), [tips, form.pests, form.note]);
@@ -783,7 +784,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             (now or added later) can end the speech session early. */}
         <fieldset className="tech-visit-form" disabled={formLocked}>
           <VoiceFillReview voice={voice} locked={formLocked} />
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={formLocked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={serviceId} locked={formLocked} />
           <OfficeNote voice={voice} locked={formLocked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
@@ -831,7 +832,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={setCustomTip}
-              mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
+              mic={{ serviceId, onPendingChange: dictating.tip }}
             />
           )}
         </fieldset>
@@ -1783,6 +1784,10 @@ function ReportFlowForm({
   // completed elsewhere) is shown and the hold stays.
   const [removingTrace, setRemovingTrace] = useState(false);
   const [traceError, setTraceError] = useState('');
+  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
+  const reuse = useTraceReuse({
+    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
+  });
   const removeTrace = async () => {
     setRemovingTrace(true);
     setTraceError('');
@@ -1835,6 +1840,7 @@ function ReportFlowForm({
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
+        reuse={reuse}
         traceError={traceError}
         sources={writerSources({
           productCount: active.length,
@@ -1899,13 +1905,38 @@ function ReportFlowForm({
   );
 }
 
+// The report footer's trace buttons: read the trace again, remove it, or
+// "Same as last visit" (a one-tap copy of the customer's last trace at this place).
+// No copy offered (a lane or typed visit, a spot visit, a trace already saved).
+const NO_REUSE = { offer: null, reusing: false, feet: null };
+
+// `traceStep`: the report step has a perimeter spray to trace (the hold the
+// copy clears); with none, the last trace is not offered.
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep }) {
+  return (
+    <>
+      {onRetryTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
+      )}
+      {onRemoveTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
+      )}
+      {traceStep && reuse.offer && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={reuse.reusing} disabled={locked} onClick={reuse.offer}>
+          {reuse.feet ? `Same as last visit · ${reuse.feet} ft` : 'Same as last visit'}
+        </Button>
+      )}
+    </>
+  );
+}
+
 // The report step: the report being written, or the report to read (edit,
 // write again), the trace, and the footer that fits: answer a completion
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, sweep = null, tipOffer = null,
+  onBackFromPrompt, sweep = null, tipOffer, reuse = NO_REUSE,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1913,12 +1944,14 @@ function ReportStep({
   let footer = (
     <CompleteFooter submission={submission} missingReason={completeMissing.reason} warn={!!completeMissing.stockRow} label="Complete & send" onSubmit={onSubmit}>
       {stockButton}
-      {onRetryTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
-      )}
-      {onRemoveTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
-      )}
+      <TraceFooterButtons
+        locked={locked}
+        onRetryTrace={onRetryTrace}
+        onRemoveTrace={onRemoveTrace}
+        removingTrace={removingTrace}
+        reuse={reuse}
+        traceStep={!!trace}
+      />
     </CompleteFooter>
   );
   if (submission.prompt) {
@@ -1956,17 +1989,13 @@ function ReportStep({
             onWriteAgain={() => { setEditing(false); onWrite(true); }}
           />
         )}
-        {showDraft && (
-          <>
-            {/* Voice fill: the product rows the note filled, each waiting on the tech's
-                ✓; a wrong one is changed back on the visit (Products, Edit). */}
-            <VoiceFillReview voice={productVoice} locked={locked} />
-            {/* The note has been read: one tip for what it heard, a tap to add. */}
-            <TipSuggestion {...(tipOffer || {})} locked={locked} />
-            {laneCard}
-          </>
-        )}
-        {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
+        {/* Voice fill: the product rows the note filled, each waiting on the tech's
+            ✓; a wrong one is changed back on the visit (Products, Edit). */}
+        {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
+        {/* The note has been read: one tip for what it heard, a tap to add. */}
+        {showDraft && <TipSuggestion {...tipOffer} locked={locked} />}
+        {showDraft && laneCard}
+        {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       {footer}

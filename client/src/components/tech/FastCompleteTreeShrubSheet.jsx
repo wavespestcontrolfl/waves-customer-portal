@@ -68,6 +68,7 @@ import {
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
 import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
 import { withPestCheck } from '../../lib/tree-shrub-pest-check';
+import { evaluateNeonicCap } from '../../lib/tree-shrub-neonic-cap';
 import { Button, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -286,6 +287,9 @@ function monthRows(data, products, lastVisit) {
 // Reasons that are a failed read, not this visit's eligibility: a retry fixes them.
 const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
 
+const firstText = (...texts) => texts.find(Boolean) || '';
+const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
+
 function contextFrom(data, service) {
   if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
     return { ...EMPTY_CONTEXT, loading: false, loadError: 'Couldn’t load this visit’s products. Try again.' };
@@ -309,12 +313,13 @@ function contextFrom(data, service) {
     warningsUnavailable: data?.warningsUnavailable === true,
     visitIdentity: recapVisitIdentity(data?.service),
     watchList: watchListFrom(data),
-    pestCheck: data?.pestCheck && typeof data.pestCheck === 'object' ? data.pestCheck : null,
+    pestCheck: objectOrNull(data?.pestCheck),
+    neonicCap: objectOrNull(data?.neonicCap),
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -576,7 +581,10 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
   const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
   const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
-  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || pestCheck.evaluation.blockMessage;
+  // GATE_TS_NEONIC_CAP: gate off (no ctx.neonicCap) = no line and no hold. The hold is the sheet's; /complete does not refuse.
+  const neonicCap = useMemo(() => evaluateNeonicCap(ctx.neonicCap, rows), [ctx.neonicCap, rows]);
+  const productBlock = firstText(pestCheck.evaluation.blockMessage, neonicCap.blockMessage);
+  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || productBlock;
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
   const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -623,7 +631,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
             />
           )}
           <PestCheckSection state={pestCheck} locked={locked} onRemoveBlocked={removeBlocked} />
-          <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} products={products} neonicLines={neonicCap.lines} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
@@ -662,7 +670,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
-        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!pestCheck.evaluation.blockMessage}
+        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!productBlock}
         label="Complete tree & shrub"
         onSubmit={submit}
         coverProps={picker.coverProps}
@@ -1022,7 +1030,7 @@ function FindingTile({ finding, rejected, locked, onToggle }) {
 }
 
 // This month's protocol products as suggestions, then anything the tech adds.
-function ProductsSection({ ctx, products, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, products, neonicLines, locked, other, popover, inlineSearch }) {
   const { rows, updateRow, removeRow } = products;
   const sectionWarnings = ctx.warnings.filter((warning) => warning.productId == null);
   return (
@@ -1043,6 +1051,7 @@ function ProductsSection({ ctx, products, locked, other, popover, inlineSearch }
           key={row.productId}
           row={row}
           warnings={ctx.warnings.filter((warning) => warning.productId != null && String(warning.productId) === String(row.productId))}
+          neonicLine={neonicLines[row.productId]}
           locked={locked}
           onChange={(patch) => updateRow(row.productId, patch)}
           onRemove={() => removeRow(row.productId)}
@@ -1074,7 +1083,7 @@ function ProductTile({ row, locked, onClick }) {
 
 // An applied product: how much (blank until the tech enters it, or last
 // time's amount, labeled), how it went down, and the server's warnings for it.
-function ProductEditor({ row, warnings, locked, onChange, onRemove }) {
+function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }) {
   const nameId = useId();
   const amountId = useId();
   const methodId = useId();
@@ -1088,6 +1097,7 @@ function ProductEditor({ row, warnings, locked, onChange, onRemove }) {
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'this month'].filter(Boolean).join(' · ')}</span>
       </div>
       <AmountEntry id={amountId} row={row} locked={locked} onChange={onChange} />
+      {neonicLine && <p className="tech-visit-muted" role="status">{neonicLine}</p>}
       {row.fromLast && <p className="tech-visit-muted">last time</p>}
       {row.added ? (
         <div>

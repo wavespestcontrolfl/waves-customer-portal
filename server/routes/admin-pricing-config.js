@@ -5,6 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { costLineFromUsage } = require('../services/product-costing');
 const { BED_BUG, TERMITE } = require('../services/pricing-engine/constants');
+const { costPlusListKnobError } = require('../services/pricing-engine/lawn-cost-plus-knobs');
 
 // Reads and the calculators (margin-check / estimate / quick-quote) stay
 // tech-or-admin — the tech portal estimators price off them. WRITES are
@@ -234,6 +235,15 @@ function validatePricingConfigData(configKey, data, oldConfig) {
   const isRatio01 = (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) < 1;
   const isPositive = (v) => Number.isFinite(num(v)) && num(v) > 0;
   const isNonNegative = (v) => Number.isFinite(num(v)) && num(v) >= 0;
+
+  // lawn_pricing_v2.costPlusList (GATE_LAWN_COST_PLUS_LIST knobs) is checked on
+  // its own, ahead of the key-specific chain below, so a sibling key (such as
+  // bermudaSuppression) in the same save can never skip it. One validator with
+  // the pricer: a save that passes here prices.
+  if (configKey === 'lawn_pricing_v2' && data?.costPlusList !== undefined) {
+    const problem = costPlusListKnobError(data.costPlusList);
+    if (problem) return fail(`lawn_pricing_v2.${problem}`);
+  }
 
   // The global_* singles must be STRICTLY positive: syncConstantsFromDB
   // applies them through truthy `?.value` checks, so a stored 0 would return
@@ -529,6 +539,32 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     }
     if (!(base + per1000 > 0)) {
       return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — these knobs only tune the price; to disable the add-on, turn off GATE_BERMUDA_SUPPRESSION');
+    }
+    // The optional spray-cost block (margin reporting for GATE_LAWN_BERMUDA_REMOVAL): every
+    // key a positive number, and no unknown key, so a typo never reads as a silent default.
+    // Nested drop protection, as for pest_base.initial_roach: PUT replaces the whole blob and the
+    // top-level drop check cannot see inside bermudaSuppression, so a payload that omits a stored
+    // cost block would silently delete tuned spray costs (db-bridge then prices margins from the
+    // code defaults). A row that never carried the block may still be saved without it.
+    const storedCost = parseConfigData(oldConfig?.data)?.bermudaSuppression?.cost;
+    if (bs.cost === undefined && storedCost && typeof storedCost === 'object') {
+      return fail('lawn_pricing_v2.bermudaSuppression drops the stored cost block: include bermudaSuppression.cost with every stored key');
+    }
+    if (bs.cost !== undefined) {
+      const cost = bs.cost;
+      const costKeys = ['recognitionPer1000', 'fusiladePer1000', 'surfactantPer1000', 'mixMinutes', 'minutesPer1000'];
+      if (!cost || typeof cost !== 'object' || Array.isArray(cost)) {
+        return fail(`lawn_pricing_v2.bermudaSuppression.cost must be an object with ${costKeys.join(', ')}`);
+      }
+      for (const key of Object.keys(cost)) {
+        if (!costKeys.includes(key)) return fail(`lawn_pricing_v2.bermudaSuppression.cost.${key} is not a known cost key`);
+      }
+      for (const key of costKeys) {
+        const value = num(cost[key]);
+        if (!Number.isFinite(value) || !(value > 0) || value > 1000) {
+          return fail(`lawn_pricing_v2.bermudaSuppression.cost.${key} must be a positive number up to 1000`);
+        }
+      }
     }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like

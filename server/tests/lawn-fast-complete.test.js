@@ -291,6 +291,52 @@ describe('buildLawnFastContext', () => {
     expect(ctx.plannedProducts.month).toBe(10);
   });
 
+  describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
+    const removal = require('../services/lawn-bermuda-removal');
+    let offered;
+    beforeEach(() => { offered = jest.spyOn(removal, 'stepOffered'); });
+    afterEach(() => offered.mockRestore());
+    const ctxFor = (profile, billingMode) => {
+      resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
+      return buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ customers: { billing_mode: billingMode }, products_catalog: [herbicide, granular] })) });
+    };
+
+    test.each([
+      ['defaults gate on, property history on, recurring', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE(), 'monthly_membership'],
+      ['completion defaults gate OFF', { GATE_LAWN_COMPLETION_DEFAULTS: undefined, GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE(), 'monthly_membership'],
+      ['property history gate OFF', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: undefined }, PROFILE(), 'monthly_membership'],
+      ['both gates off', { GATE_LAWN_COMPLETION_DEFAULTS: undefined, GATE_LAWN_PROPERTY_HISTORY: undefined }, PROFILE(), 'monthly_membership'],
+      ['a one-time visit', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), 'monthly_membership'],
+      ['a per-application visit', { GATE_LAWN_COMPLETION_DEFAULTS: 'true', GATE_LAWN_PROPERTY_HISTORY: 'true' }, PROFILE(), 'per_application'],
+    ])('%s: offered step gives the bermuda_removal handoff with no plan read', async (_label, env, profile, billingMode) => {
+      for (const [name, value] of Object.entries(env)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+      offered.mockResolvedValue(true);
+      buildPlanForService.mockClear();
+      const ctx = await ctxFor(profile, billingMode);
+      expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'bermuda_removal', needsFullForm: 'Bermuda removal mix this visit: use the full form' });
+      expect(ctx.plannedProducts).toBeUndefined();
+      expect(buildPlanForService).not.toHaveBeenCalled();
+    });
+
+    test('a read error while checking the step fails closed to the full form, never an eligible sheet', async () => {
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      offered.mockRejectedValue(Object.assign(new Error('boom'), { code: 'ECONN' }));
+      const ctx = await ctxFor(PROFILE(), 'monthly_membership');
+      expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'bermuda_removal' });
+    });
+
+    test('no step offered: the sheet works as before, with no needsFullForm anywhere', async () => {
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      offered.mockResolvedValue(false);
+      buildPlanForService.mockResolvedValue({ completionDefaults: { items: [], options: [{ product: { id: P_GRAN, name: 'x' } }] } });
+      const plain = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+      expect(plain.eligible).toBe(true);
+      expect(JSON.stringify(plain)).not.toMatch(/needsFullForm/);
+    });
+  });
+
   describe('program defaults only on a recurring program appointment', () => {
     const PLAN = {
       completionDefaults: {

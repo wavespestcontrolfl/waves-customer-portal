@@ -164,7 +164,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
 }
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const {
-  CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
+  CUSTOMER_HOUR_GRID, lunchBlockEnabled, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
@@ -4156,6 +4156,20 @@ async function createSelfBooking(payload = {}) {
           statusCode: 409,
           isOperational: true,
           code: 'SELF_SERVE_NOTICE',
+        });
+      }
+
+      // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+      // 2026-10-09): a signed 17:00 offer from before the gate flipped is
+      // refused, as the builder (customerWindowAdmits) no longer offers it.
+      // AFTER the idempotent replay above, like the notice check: a 17:00
+      // booking that committed before the flip still replays as success when
+      // its lost response is retried. No-op while unset.
+      if (pastCustomerLastStart(timeToMin(slot_start))) {
+        throw Object.assign(new Error('That time isn\'t available — please pick another slot.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_UNAVAILABLE',
         });
       }
 
