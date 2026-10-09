@@ -1886,7 +1886,18 @@ effective service mode is not one-time (an estimate with no recurring amount is 
 toggle on a mixed estimate also counts): `PUT /:token/accept` (after the quote-required and review refusals, before any
 write) and `POST /:token/reserve` (so no recurring slot is held that accept would refuse) answer HTTP 409 with
 `{ "error": "This estimate includes add-on treatments that our office schedules with you directly. Please contact our
-office to finish booking.", "code": "AREA_ADDONS_ONE_TIME_ACCEPT_ONLY" }`. The one-time accept (and its reserve) is
+office to finish booking.", "code": "AREA_ADDONS_ONE_TIME_ACCEPT_ONLY" }`. **`POST /:token/recurring-card-intent` answers the
+same 409 body (Codex round 11), before any Stripe work**: when the effective mode is recurring and the estimate carries an
+area add-on, no SetupIntent is minted or replaced and no payment method is saved (a submitted `replaceSetupIntentId` is
+retired like every other exempt answer; a park or the Bermuda/area gate still answers first, in the order above). Without
+this a checkout that bypassed `/reserve` (an add-on estimate with a linked appointment) saved the customer's card and only
+then met the accept's refusal. Every other endpoint that can mint a Stripe object or take money for an estimate is
+refused or unreachable for a recurring-mode add-on estimate before money or a payment method is touched:
+`POST /:token/card-hold-intent` owes no hold in recurring mode (`resolveCardHoldPolicy` answers `exemptReason: recurring`
+before `createCardHoldSetupIntentForEstimate`), the four `deposit-*` legs are retired 409 stubs with no Stripe code behind
+them, `PUT /:token/accept` refuses before any write (its annual-prepay, pay-after-first-visit and inline autopay-capture
+legs run after that refusal), the admin Mark Won refuses it (`persistedAddOnRefusal`), and annual prepay is never suggested
+for such an estimate (`annualPrepayBlockingAddOnReason`). No admin route sends a payment link for an estimate. The one-time accept (and its reserve) is
 unchanged in shape: one held appointment carries the one-time service mix, its catalog id is stamped by the exact
 `catalogServiceKey` on the add-on row (never by name), and the one-time total is its price. Every sold area add-on
 other than the one the appointment is stamped with becomes a structured `scheduled_service_addons` row on that same

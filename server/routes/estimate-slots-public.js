@@ -995,6 +995,13 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     // request keeps its own card-hold intent endpoint.
     const treatAsOneTime = req.body?.serviceMode === 'one_time'
       || isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // Area add-ons are booked by the one-time accept only: a recurring-mode request for an estimate that carries one can
+    // never be accepted, so no SetupIntent is minted and no payment method is saved for it (a submitted stale intent is
+    // retired like every other exempt answer). Same refusal as the reserve and the accept, before any Stripe work.
+    const recurringAddOnRefusal = recurringAreaAddOnRefusalBody(estimate, treatAsOneTime ? 'one_time' : 'recurring');
+    if (recurringAddOnRefusal) {
+      return await sendRecheckedIntentResponse(res, estimate, 409, recurringAddOnRefusal, { retireSetupIntentId: replaceSetupIntentId || null });
+    }
     // Mirror accept's contact gate BEFORE capturing a card: a recurring accept
     // with no linked customer and no phone is rejected pre-commit
     // (CUSTOMER_CONTACT_REQUIRED — accept-time customer creation is

@@ -476,6 +476,85 @@ describe('area add-ons reserve only in one-time mode (GATE_AREA_ADDONS on)', () 
   });
 });
 
+// Codex round 11 P1 on #6135: /recurring-card-intent checked the park and the quote gates but not the add-on rule, so an
+// add-on estimate with a linked appointment (checkout bypasses /reserve) minted a SetupIntent and saved the customer's card,
+// and only then did the accept refuse. The same refusal now comes first, before any Stripe work.
+describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_ADDONS on)', () => {
+  const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
+  const WITH_RECURRING = {
+    id: 'est-addon-rec', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, customer_id: 'cust-1',
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 }, oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const REFUSAL = {
+    error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+    code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+  };
+  const stripeObjects = () => {
+    const { createRecurringCardSetupIntentForEstimate, replaceRecurringCardIntent } = require('../services/recurring-card-on-file');
+    return [createRecurringCardSetupIntentForEstimate, replaceRecurringCardIntent];
+  };
+  let spies = [];
+  beforeEach(() => {
+    process.env.GATE_AREA_ADDONS = 'true';
+    const recurring = require('../services/recurring-card-on-file');
+    spies = [
+      jest.spyOn(recurring, 'createRecurringCardSetupIntentForEstimate').mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'seti_new' }),
+      jest.spyOn(recurring, 'replaceRecurringCardIntent').mockResolvedValue({ ok: true, intent: { clientSecret: 'cs', setupIntentId: 'seti_new' } }),
+    ];
+  });
+  afterEach(() => {
+    spies.forEach((spy) => spy.mockRestore());
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('a recurring-mode request for an add-on estimate answers the one-time-only 409 and creates or replaces no intent', async () => {
+    currentEstimate = WITH_RECURRING;
+    for (const body of [{}, { serviceMode: 'recurring' }, { replaceSetupIntentId: 'seti_old' }]) {
+      const res = await post('recurring-card-intent', body);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(REFUSAL);
+    }
+    for (const fn of stripeObjects()) expect(fn).not.toHaveBeenCalled();
+  });
+
+  test('a stale intent the tab submits for replacement is retired, as every other exempt answer does', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+    const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
+    const refusal = route.indexOf('recurringAreaAddOnRefusalBody(estimate,');
+    expect(refusal).toBeGreaterThan(route.indexOf('const treatAsOneTime'));
+    // Before the contact check, the policy, the replace and the mint: nothing reaches Stripe first.
+    for (const later of ['resolveRecurringCardPolicyForEstimate', 'replaceRecurringCardIntent({', 'createRecurringCardSetupIntentForEstimate(estimate)']) {
+      expect(route.indexOf(later)).toBeGreaterThan(refusal);
+    }
+    expect(route.slice(refusal, refusal + 500)).toContain("{ retireSetupIntentId: replaceSetupIntentId || null }");
+  });
+
+  test('a one-time-mode request is not refused by the rule, and an estimate with no add-on is untouched by it', async () => {
+    currentEstimate = WITH_RECURRING;
+    const oneTime = await post('recurring-card-intent', { serviceMode: 'one_time' });
+    expect(await oneTime.json()).not.toEqual(REFUSAL);
+    currentEstimate = { ...WITH_RECURRING, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }) };
+    const plain = await post('recurring-card-intent', {});
+    expect(await plain.json()).not.toEqual(REFUSAL);
+  });
+
+  test('card-hold-intent is unreachable for a recurring-mode add-on estimate: the policy owes no hold before any intent is created', async () => {
+    const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+    resolveCardHoldPolicy.mockImplementation(({ treatAsOneTime }) => (treatAsOneTime ? { required: true } : { enforced: true, required: false, exemptReason: 'recurring' }));
+    createCardHoldSetupIntentForEstimate.mockClear();
+    currentEstimate = WITH_RECURRING;
+    const res = await post('card-hold-intent', {});
+    expect(res.status).toBe(409);
+    expect((await res.json()).exemptReason).toBe('recurring');
+    expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    resolveCardHoldPolicy.mockReset();
+    createCardHoldSetupIntentForEstimate.mockReset();
+  });
+});
+
 describe('B18 park: a parked estimate (its phone belongs to another customer) cannot browse, reserve, extend or capture a card', () => {
   const { estimatePublicBlockingState } = require('../routes/estimate-public');
   const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
