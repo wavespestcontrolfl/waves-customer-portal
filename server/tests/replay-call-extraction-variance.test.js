@@ -1009,6 +1009,8 @@ describe('replay extraction gets the call facts production gives the extractor',
     const { accept } = crp.summarizePriorCall.mock.calls[0][4];
     const row = (at) => ({ ai_extraction_enriched: at ? JSON.stringify({ meta: { extracted_at: at } }) : null });
     expect(accept(row('2026-09-09T10:00:00Z'))).toBe(true);
+    // Stamped inside the lookup margin of the stored pass: its V1 record may not have been on file (r5 P2).
+    expect(accept(row('2026-09-10T14:01:00Z'))).toBe(false);
     // Reprocessed, or processed out of order, after the stored pass.
     expect(accept(row('2026-09-11T08:00:00Z'))).toBe(false);
     // No V2 record: no extraction time to prove it.
@@ -1134,6 +1136,14 @@ describe('replay extraction gets the call facts production gives the extractor',
       expect(facts.knownCaller).toBeNull();
       expect(warn.mock.calls[0][0]).toMatch(/created within 10 min of the stored extraction/);
     } finally { warn.mockRestore(); }
+  });
+
+  test('a customer created, linked and reprocessed within minutes is the known caller: the override proves it (codex #6214 r5 P2)', async () => {
+    const created = { ...customer('2026-09-11T09:01:00Z'), id: 'cust-new' };
+    const relinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-new', at: '2026-09-11T09:02:00Z' } } };
+    const crp = { ...fakeCRP(), resolveKnownCallerCustomer: jest.fn(async () => created) };
+    const facts = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: DB, callStart, storedExtractedAt: '2026-09-11T09:03:00Z' });
+    expect(facts.knownCaller).toEqual(CRP._test.summarizeKnownCaller(created));
   });
 
   test('a lead the stored first pass created after extracting is not a known caller', async () => {

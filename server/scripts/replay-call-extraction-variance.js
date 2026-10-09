@@ -1375,7 +1375,10 @@ async function priorCallForStoredExtraction({ call, contactPhone, CRP, db, store
   const accept = (row) => {
     const priorExtractedAt = parseJson(row?.ai_extraction_enriched, null)?.meta?.extracted_at;
     const priorMs = priorExtractedAt ? new Date(priorExtractedAt).getTime() : NaN;
-    return Number.isFinite(priorMs) && priorMs < cutoffMs;
+    // The same margin as the known caller: the stored pass looked up to
+    // LOOKUP_MARGIN_MS before its model answered, and the prior call's V1 record
+    // (what the lookup reads) is written a little after its V2 stamp (r5 P2).
+    return Number.isFinite(priorMs) && priorMs < cutoffMs - LOOKUP_MARGIN_MS;
   };
   return CRP.summarizePriorCall(contactPhone, call.id, db, call.created_at, { accept });
 }
@@ -1397,7 +1400,11 @@ async function productionCallFacts({ call, contactPhone, bookableServices, CRP, 
   const createdMs = linkedCustomer?.created_at ? new Date(linkedCustomer.created_at).getTime() : NaN;
   const beforeCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
   const beforeLookup = Number.isFinite(extractedMs) && Number.isFinite(createdMs) && createdMs < extractedMs - LOOKUP_MARGIN_MS;
-  const predatesCall = beforeCall || beforeLookup;
+  // An override the stored pass honored was stamped while no pass was running
+  // (the admin route refuses otherwise), so its customer was on file for that
+  // pass's lookup however recent the row is (codex #6214 r5 P2).
+  const chosenBeforePass = !!linkedCustomer && overrideReachedStoredExtraction(call, storedExtractedAt);
+  const predatesCall = beforeCall || beforeLookup || chosenBeforePass;
   if (!predatesCall && Number.isFinite(extractedMs) && Number.isFinite(createdMs) && createdMs < extractedMs) {
     console.warn(`[replay] call ${call?.id}: a customer row was created within ${LOOKUP_MARGIN_MS / 60000} min of the stored extraction; whether that pass saw it is unknown, no known caller is passed`);
   }
