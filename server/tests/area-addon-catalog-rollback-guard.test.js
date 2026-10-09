@@ -11,6 +11,7 @@ const sweepMigration = require('../models/migrations/20261008220000_area_addon_w
 const taxMarkMigration = require('../models/migrations/20261008240000_area_addon_catalog_tax_mark');
 const notesMigration = require('../models/migrations/20261010130000_area_addon_catalog_notes_fix');
 const guard = require('../models/migrations/20261010160000_area_addon_catalog_rollback_guard');
+const sweepGuard = require('../models/migrations/20261010180000_area_addon_web_sweep_edit_guard');
 
 const T0 = new Date('2026-10-08T12:00:00Z');
 const SERVICE_COLUMNS = ['id', 'service_key', 'closeout_requirements_source', 'requires_service_report', 'requires_application_log', 'required_photo_count', 'requires_customer_signature', 'requires_customer_notice'];
@@ -193,5 +194,87 @@ describe('area add-on catalog rollback guard', () => {
   test('missing tables and a missing state row skip without error', async () => {
     await expect(guard.down(fakeKnex({}))).resolves.toBeUndefined();
     await expect(guard.down(fakeKnex({ services: [], system_settings: [] }))).resolves.toBeUndefined();
+  });
+});
+
+// Codex round 18 P2: the 20261010160000 guard cannot see a web sweep edit to a field no migration wrote, because it does not
+// read the web sweep's updated_at (two migrations stamp it). 20261010180000 compares it with the finish time of the last
+// migration that writes the row, and keeps the row whenever that time cannot be read.
+describe('web sweep edit guard (20261010180000)', () => {
+  const FINISHED = new Date(T0.getTime() + 1500); // a migration finishes just after it stamps updated_at
+  const withMigrationRows = (db, rows = sweepGuard.WRITER_MIGRATIONS) => {
+    db.knex_migrations = rows.map((name) => ({ name, migration_time: FINISHED }));
+    return db;
+  };
+  const rollBackAll = async (db) => {
+    const knex = fakeKnex(db);
+    await sweepGuard.down(knex);
+    await guard.down(knex);
+    await notesMigration.down(knex);
+    await taxMarkMigration.down(knex);
+    await sweepMigration.down(knex);
+    await licenseMigration.down(knex);
+    await catalog.down(knex);
+  };
+  const LATER = new Date('2026-10-09T09:00:00Z');
+
+  test('it only reads: up() changes nothing, and an unedited web sweep still rolls back with the rest', async () => {
+    const db = withMigrationRows(await seededDb());
+    await sweepGuard.up(fakeKnex(db));
+    expect(db.services).toHaveLength(6);
+    await rollBackAll(db);
+    expect(db.services).toEqual([]);
+    expect(db.service_completion_profiles).toEqual([]);
+    expect(db.service_taxability).toEqual([]);
+    expect(db.system_settings).toEqual([]);
+  });
+
+  test('the older guard alone misses an edit to an unseeded field (the case this guard exists for)', async () => {
+    const db = await seededDb();
+    Object.assign(rowOf(db, 'services', SWEEP), { frequency: 'annual', updated_at: LATER });
+    await rollBack(db);
+    expect(keysLeft(db, 'services')).toEqual([]);
+  });
+
+  test.each([
+    ['frequency', { frequency: 'annual' }],
+    ['description', { description: 'Edited text' }],
+    ['a save that changed nothing the migrations wrote', {}],
+  ])('a web sweep saved after the migrations (%s) survives with its profile and tax row, and the other five are deleted', async (_field, edit) => {
+    const db = withMigrationRows(await seededDb());
+    Object.assign(rowOf(db, 'services', SWEEP), { ...edit, updated_at: LATER });
+    await rollBackAll(db);
+    expect(keysLeft(db, 'services')).toEqual([SWEEP]);
+    expect(keysLeft(db, 'service_completion_profiles')).toEqual([SWEEP]);
+    expect(keysLeft(db, 'service_taxability')).toEqual([SWEEP]);
+    expect(rowOf(db, 'services', SWEEP)).toMatchObject(edit);
+  });
+
+  test('a save within the clock-skew window of the last migration is not told from the migration\'s own write', async () => {
+    const db = withMigrationRows(await seededDb());
+    rowOf(db, 'services', SWEEP).updated_at = new Date(FINISHED.getTime() + 3000);
+    await rollBackAll(db);
+    expect(keysLeft(db, 'services')).toEqual([]);
+  });
+
+  test.each([
+    ['no knex_migrations table', (db) => db],
+    ['no row for one of the three migrations', (db) => withMigrationRows(db, sweepGuard.WRITER_MIGRATIONS.slice(0, 2))],
+    ['an unreadable migration_time', (db) => { withMigrationRows(db).knex_migrations[0].migration_time = 'not a date'; return db; }],
+    ['no updated_at on the web sweep', (db) => { withMigrationRows(db); rowOf(db, 'services', SWEEP).updated_at = null; return db; }],
+  ])('%s: the service is kept (when in doubt, keep the operator\'s row)', async (_case, shape) => {
+    const db = shape(await seededDb());
+    await rollBackAll(db);
+    expect(keysLeft(db, 'services')).toEqual([SWEEP]);
+  });
+
+  test('an unseeded-field edit AND an edit the older guard catches: both survive; missing tables and state skip without error', async () => {
+    const db = withMigrationRows(await seededDb());
+    Object.assign(rowOf(db, 'services', SWEEP), { frequency: 'annual', updated_at: LATER });
+    rowOf(db, 'services', CHEMICAL).base_price = 89;
+    await rollBackAll(db);
+    expect(keysLeft(db, 'services')).toEqual([CHEMICAL, SWEEP].sort());
+    await expect(sweepGuard.down(fakeKnex({}))).resolves.toBeUndefined();
+    await expect(sweepGuard.down(fakeKnex({ services: [], system_settings: [] }))).resolves.toBeUndefined();
   });
 });
