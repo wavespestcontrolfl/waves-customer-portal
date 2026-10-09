@@ -57,7 +57,7 @@ test('back-to-back stops do not overlap; a partial overlap does', async () => {
 // The place read: scheduled_services rows by id (property + service address).
 function placesDb(places) {
   return jest.fn(() => {
-    const c = { whereIn: () => c, select: async () => places };
+    const c = { leftJoin: () => c, whereIn: () => c, select: async () => places };
     return c;
   });
 }
@@ -66,8 +66,9 @@ test('the same customer\'s other service at the same place is one stop, not an o
   rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row({ customer_id: 'c1' })] });
   const sameProperty = placesDb([{ id: 's1', property_id: 'p1' }, { id: 'o1', property_id: 'p1' }]);
   expect(await currentConflict(SERVICE, { ...CTX, db: sameProperty })).toBeNull();
-  // No linked property on either row: both are the customer's primary address.
-  const primary = placesDb([{ id: 's1', property_id: null }, { id: 'o1', property_id: null }]);
+  // No linked property and no stamp: both inherit the customer's primary address.
+  const HOME = { customer_address_line1: '100 Example Street', customer_city: 'Example City', customer_zip: '00000' };
+  const primary = placesDb([{ id: 's1', property_id: null, ...HOME }, { id: 'o1', property_id: null, ...HOME }]);
   expect(await currentConflict(SERVICE, { ...CTX, db: primary })).toBeNull();
 });
 
@@ -75,11 +76,18 @@ test('the same customer at a second property in the hour IS an overlap (Codex #6
   rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row({ customer_id: 'c1' })] });
   const twoProperties = placesDb([{ id: 's1', property_id: 'p1' }, { id: 'o1', property_id: 'p2' }]);
   expect(await currentConflict(SERVICE, { ...CTX, db: twoProperties })).toMatchObject({ kind: 'overlap', with: ['o1'] });
-  const twoAddresses = placesDb([
-    { id: 's1', property_id: null, service_address_line1: '100 Example Street', service_address_zip: '00000' },
-    { id: 'o1', property_id: null, service_address_line1: '200 Sample Avenue', service_address_zip: '00001' },
-  ]);
+  const stamp = (id, over) => ({
+    id, property_id: null, service_address_line1: '100 Example Street', service_address_city: 'Example City', service_address_zip: '00000',
+    customer_address_line1: '100 Example Street', customer_city: 'Example City', customer_zip: '00000', ...over,
+  });
+  const twoAddresses = placesDb([stamp('s1'), stamp('o1', { service_address_line1: '200 Sample Avenue', service_address_zip: '00001' })]);
   expect(await currentConflict(SERVICE, { ...CTX, db: twoAddresses })).toMatchObject({ kind: 'overlap', with: ['o1'] });
+  // Two units of one building share the street line and zip (Codex r2 P1).
+  const twoUnits = placesDb([stamp('s1', { service_address_line2: 'Apt 1' }), stamp('o1', { service_address_line2: 'Apt 2' })]);
+  expect(await currentConflict(SERVICE, { ...CTX, db: twoUnits })).toMatchObject({ kind: 'overlap', with: ['o1'] });
+  // No street line anywhere: the place is unknown, and unknown is a conflict.
+  const unknown = placesDb([{ id: 's1', property_id: null }, { id: 'o1', property_id: null }]);
+  expect(await currentConflict(SERVICE, { ...CTX, db: unknown })).toMatchObject({ kind: 'overlap', with: ['o1'] });
   // A row whose place cannot be read counts as a different place.
   const unread = placesDb([{ id: 's1', property_id: 'p1' }]);
   expect(await currentConflict(SERVICE, { ...CTX, db: unread })).toMatchObject({ kind: 'overlap', with: ['o1'] });

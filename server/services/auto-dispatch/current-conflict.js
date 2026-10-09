@@ -47,28 +47,46 @@ function isOtherStop(row, service) {
   return !(row.technician_id && service.technician_id && String(row.technician_id) !== String(service.technician_id));
 }
 
-// Where a row is worked: its linked property, else its own service address,
-// else '' (the customer's primary address).
-function placeKey(row) {
-  if (row.property_id) return `p:${row.property_id}`;
-  const line = String(row.service_address_line1 || '').trim().toLowerCase();
-  return line ? `a:${line}|${String(row.service_address_zip || '').trim()}` : '';
+const PLACE_COLUMNS = [
+  'scheduled_services.id', 'scheduled_services.property_id',
+  'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+  'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+  'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2',
+  'customers.city as customer_city', 'customers.state as customer_state', 'customers.zip as customer_zip',
+];
+
+// Two rows of one customer are worked at one place when they link the same
+// property, else when their EFFECTIVE premises agree under the repo's own
+// rule (route-reorder-window-fit.js effectivePremise + stamped-address.js
+// premiseStampConflicts: street, unit from line 2 or the street line, zip,
+// city; an unstamped row inherits the customer's primary address). A premise
+// with no street line is unknown, and unknown is a different place.
+function samePlace(a, b) {
+  if (a.property_id && b.property_id) return String(a.property_id) === String(b.property_id);
+  const { effectivePremise } = require('../route-reorder-window-fit');
+  const { premiseStampConflicts } = require('../stamped-address');
+  const pa = effectivePremise(a);
+  const pb = effectivePremise(b);
+  if (!pa.service_address_line1 || !pb.service_address_line1) return false;
+  return !premiseStampConflicts(pa, pb);
 }
 
 // Ids among `rows` that are the visit's own customer at the visit's own
 // place: one stop with the visit, not a conflict. The probe's projection
 // carries no location, so the place is read here (Codex #6207 r1 P1: a
-// customer with two properties booked into one hour IS a conflict).
+// customer with two properties booked into one hour IS a conflict; r2 P1:
+// so are two units of one building).
 async function samePlaceIds(db, service, rows) {
   const ids = rows.filter((r) => sameCustomer(r, service)).map((r) => String(r.id));
   if (!ids.length) return new Set();
   const places = await db('scheduled_services')
-    .whereIn('id', [String(service.id), ...ids])
-    .select('id', 'property_id', 'service_address_line1', 'service_address_zip');
-  const byId = new Map(places.map((p) => [String(p.id), placeKey(p)]));
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.id', [String(service.id), ...ids])
+    .select(...PLACE_COLUMNS);
+  const byId = new Map(places.map((p) => [String(p.id), p]));
   const own = byId.get(String(service.id));
   // A row that cannot be read is treated as a different place (a conflict).
-  return new Set(ids.filter((id) => byId.has(id) && byId.get(id) === own));
+  return new Set(ids.filter((id) => own && byId.has(id) && samePlace(own, byId.get(id))));
 }
 
 async function overlappingStopIds(service, ctx, excludeIds, dateStr) {
@@ -106,4 +124,4 @@ async function currentConflict(service, ctx, excludeIds) {
   return ids.length ? { kind: 'overlap', date: dateStr, with: ids } : null;
 }
 
-module.exports = { currentConflict, _internals: { isOtherStop, placeKey, samePlaceIds, overlappingStopIds } };
+module.exports = { currentConflict, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds } };
