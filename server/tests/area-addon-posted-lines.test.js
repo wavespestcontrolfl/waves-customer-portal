@@ -142,10 +142,11 @@ describe('a repeating series skips an area add-on after the anchor (every copy p
 });
 
 // A tiny trx: the visit row, its add-on rows (the joined read areaAddOnKeysByVisit makes) and the source estimate.
-function fakeTrx({ visit, rowKeys = [], estimate = null, calls = [] }) {
+function fakeTrx({ visit, rowKeys = [], rowPrices = {}, estimate = null, calls = [] }) {
   const chain = (result) => {
     const q = {};
     for (const m of ['where', 'leftJoin', 'whereIn', 'select']) q[m] = () => q;
+    q.forShare = () => { calls.push('estimates FOR SHARE'); return q; };
     q.first = async () => result;
     q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
     return q;
@@ -153,7 +154,7 @@ function fakeTrx({ visit, rowKeys = [], estimate = null, calls = [] }) {
   return (table) => {
     calls.push(table);
     if (table === 'scheduled_services') return chain(visit);
-    if (table.startsWith('scheduled_service_addons')) return chain(rowKeys.map((key) => ({ scheduled_service_id: VISIT, service_key_snapshot: key, service_key: key })));
+    if (table.startsWith('scheduled_service_addons')) return chain(rowKeys.map((key) => ({ scheduled_service_id: VISIT, service_key_snapshot: key, service_key: key, base_price: rowPrices[key] ?? null, estimated_price: rowPrices[key] ?? null })));
     if (table === 'estimates') return chain(estimate);
     throw new Error(`unexpected table ${table}`);
   };
@@ -180,11 +181,39 @@ describe('Update Details: what the edit adds', () => {
     await expect(edit({ visit: visit(), estimate: sold }, { updates: { service_key_snapshot: BED }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_NOT_ON_ESTIMATE' });
   });
 
-  test('what the visit already carries is kept: re-saving the same rows reads no estimate', async () => {
+  test('what the visit already carries is kept; a save that does not touch the rows or the service reads no estimate', async () => {
     const calls = [];
-    await expect(edit({ visit: visit(), rowKeys: [WEB], calls }, { updates: {}, rowKeys: [WEB] })).resolves.toEqual({ keys: [WEB], added: [] });
     await expect(edit({ visit: visit(), rowKeys: [WEB], calls }, { updates: { notes: 'x' }, rowKeys: null })).resolves.toEqual({ keys: [WEB], added: [] });
     expect(calls).not.toContain('estimates');
+    await expect(edit({ visit: visit(), rowKeys: [WEB], estimate: sold, calls }, { updates: {}, rowKeys: [WEB] })).resolves.toEqual({ keys: [WEB], added: [] });
+    // Codex round 29: a save that replaces the rows reads the source estimate FOR SHARE (held to the end of the save).
+    expect(calls).toContain('estimates FOR SHARE');
+  });
+
+  // Codex round 29: the posted gross prices are judged too.
+  describe('prices, the cost carrier and repeats on an edit', () => {
+    const both = estimateSelling([{ key: 'web_sweep' }, { key: 'bed_pre_emergent', areaSqFt: 1000 }]);
+    test('an added add-on must carry the estimate\'s price', async () => {
+      await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: BED, price: both.prices[BED] }] }))
+        .resolves.toEqual({ keys: [WEB, BED], added: [BED] });
+      await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: BED, price: 5 }] }))
+        .rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_CHANGED' });
+    });
+    test('a kept add-on row cannot be repriced by hand', async () => {
+      const message = 'Web Sweep is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.';
+      await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: 1 }] }))
+        .rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_PRICE_LOCKED', message });
+    });
+    test('removing the add-on that carries the visit cost while another sold add-on stays is refused; removing the other one is allowed', async () => {
+      const carried = { visit: visit(), rowKeys: [WEB, BED], rowPrices: both.prices, estimate: both };
+      await expect(edit(carried, { updates: {}, rowLines: [{ key: BED, price: both.prices[BED] }] })).rejects.toMatchObject({ code: 'AREA_ADDON_CARRIER_REQUIRED' });
+      await expect(edit(carried, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }] })).resolves.toEqual({ keys: [WEB], added: [] });
+      await expect(edit(carried, { updates: {}, rowLines: [] })).resolves.toEqual({ keys: [], added: [] });
+    });
+    test('the same add-on twice after the edit is refused', async () => {
+      await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: both.prices, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: WEB, price: both.prices[WEB] }] }))
+        .rejects.toMatchObject({ code: 'AREA_ADDON_DUPLICATE' });
+    });
   });
 
   test('a repeating series never carries one: making the visit recurring, or adding to a series visit, is refused', async () => {

@@ -439,12 +439,16 @@ function assertCostCarrierKept(estimate, wanted, sold) {
  * are the catalog keys of the posted add-on rows (null when the save does not replace them). Returns { keys, added }: the area
  * add-on keys the visit carries after the edit and the ones the edit adds (both [] and no further query for a visit that has none).
  */
-async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = null } = {}) {
+async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = null, rowLines = null } = {}) {
   const visit = await trx('scheduled_services').where({ id: visitId }).first();
   if (!visit) return { keys: [], added: [] };
   const storedRowKeys = (await areaAddOnKeysByVisit(trx, [visitId])).get(String(visitId)) || [];
   const ownKey = updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : visit.service_key_snapshot;
-  const finalKeys = [ownKey, ...(rowKeys === null ? storedRowKeys : rowKeys)].filter(isAreaAddOnCatalogKey);
+  // The posted rows with their gross prices (`rowLines`), or their keys alone (`rowKeys`); null = the save keeps the rows.
+  const posted = Array.isArray(rowLines) ? rowLines.map((line) => ({ key: line && line.key, price: line ? line.price : undefined }))
+    : (rowKeys === null ? null : rowKeys.map((key) => ({ key })));
+  const rowsAfter = (posted === null ? storedRowKeys.map((key) => ({ key })) : posted).filter((line) => isAreaAddOnCatalogKey(line.key));
+  const finalKeys = [ownKey, ...rowsAfter.map((line) => line.key)].filter(isAreaAddOnCatalogKey);
   if (!finalKeys.length) return { keys: [], added: [] };
   const before = new Set([visit.service_key_snapshot, ...storedRowKeys]);
   const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
@@ -453,13 +457,39 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   if ((updates.is_recurring === true && !inSeries) || (inSeries && added.length > 0)) {
     assertPostedAreaAddOnsSold(null, [...new Set(finalKeys)].map((key) => ({ key })), { recurring: true });
   }
-  if (!added.length) return { keys: finalKeys, added };
+  // Nothing about the add-ons changes: the rows are kept and the visit's own service is the same.
+  const ownChanged = updates.service_key_snapshot !== undefined && updates.service_key_snapshot !== visit.service_key_snapshot;
+  if (posted === null && !ownChanged) return { keys: finalKeys, added };
+  // The source estimate, FOR SHARE: held to the end of the save, so a revision of the estimate waits behind this edit and
+  // the scope stamp below reads the same row (the lock Create Appointment takes).
   const estimate = visit.source_estimate_id
-    ? await trx('estimates').where({ id: visit.source_estimate_id }).first('id', 'estimate_data', 'pricing_authority', 'show_one_time_option')
+    ? await trx('estimates').where({ id: visit.source_estimate_id }).forShare().first('id', 'estimate_data', 'pricing_authority', 'show_one_time_option')
     : null;
-  // The same add-on twice on the visit after the edit (rows, or the visit's own service and a row).
-  assertPostedAreaAddOnsSold(estimate, finalKeys.filter((key) => added.includes(key)).map((key) => ({ key })), { wholeVisit: false });
+  const addedSet = new Set(added);
+  // What the edit ADDS is sold by the estimate, at the estimate's price; the same add-on never rides the visit twice.
+  const addedLines = [...(addedSet.has(ownKey) ? [{ key: ownKey }] : []), ...rowsAfter.filter((line) => addedSet.has(line.key))];
+  const repeatedKept = finalKeys.find((key, index) => finalKeys.indexOf(key) !== index);
+  if (repeatedKept) assertPostedAreaAddOnsSold(estimate, finalKeys.filter((key) => key === repeatedKept).map((key) => ({ key })), { wholeVisit: false });
+  if (addedLines.length) assertPostedAreaAddOnsSold(estimate, addedLines, { wholeVisit: false });
+  // A row the visit already carries keeps its price: an add-on is never repriced by hand.
+  await assertKeptAddOnRowPrices(trx, visitId, rowsAfter.filter((line) => !addedSet.has(line.key) && line.price != null));
+  // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
+  if (estimate) assertCostCarrierKept(estimate, finalKeys.map((key) => ({ key })), soldAreaAddOnPrices(estimate));
   return { keys: finalKeys, added };
+}
+
+// A kept area add-on row posted at a gross price other than the one it is stored with is refused.
+async function assertKeptAddOnRowPrices(trx, visitId, keptLines) {
+  if (!keptLines.length) return;
+  const stored = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId })
+    .whereIn('service_key_snapshot', keptLines.map((line) => line.key)).select('service_key_snapshot', 'base_price', 'estimated_price');
+  const storedPrice = new Map((Array.isArray(stored) ? stored : []).map((row) => [row.service_key_snapshot, row.base_price ?? row.estimated_price]));
+  for (const line of keptLines) {
+    if (!storedPrice.has(line.key) || storedPrice.get(line.key) == null) continue;
+    if (!samePrice(line.price, storedPrice.get(line.key))) {
+      throw postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(line.key)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
+    }
+  }
 }
 
 // The attached area add-on rows of these visits (a `scheduled_service_addons` row

@@ -2046,7 +2046,8 @@ const postedAreaAddOnLines = (pricing) => [
 // save's transaction before the visit is written. A visit with no area add-on after the edit costs the visit read and one row read.
 async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addressPlan }) {
   const { keys, added } = await areaAddOnRows.assertEditedAreaAddOns(trx, visitId, {
-    updates, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : null,
+    // Each posted row with its gross price: an added add-on must carry the estimate's price, a kept one its stored price.
+    updates, rowLines: Array.isArray(replaceAddons) ? replaceAddons.map((line) => ({ key: line && line.serviceKey, price: line ? line.base : undefined })) : null,
   });
   if (!keys.length) return;
   await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, {
