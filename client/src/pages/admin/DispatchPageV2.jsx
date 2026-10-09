@@ -94,6 +94,8 @@ import { reportFlowFields, stationMapKnownOff, stationMapKnownOn } from "../../l
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import FastCompleteComboSheet from '../../components/tech/FastCompleteComboSheet';
 import { comboMembersFor } from '../../lib/combo-fast-complete';
+import { comboDraftId, operatorScope } from '../../lib/visit-closeout-packet';
+import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 import {
   mergePostPaymentService,
   fastCompleteSheetFor,
@@ -500,7 +502,11 @@ export default function DispatchPageV2({
   // GATE_STATION_FAST_COMPLETE: with the map known ON, a termite or rodent bait
   // station visit also opens the sheet, which carries the station checks.
   const stationSheetOn = stationMapKnownOn(stationMap);
-  const fastCompleteOperatorId = fastCompleteOperatorOf(useOutletContext());
+  const outlet = useOutletContext();
+  const fastCompleteOperatorId = fastCompleteOperatorOf(outlet);
+  // The role AdminLayout verified; the stored copy only as a fallback (a failed
+  // cache write can leave it missing or stale), as fastCompleteOperatorOf reads.
+  const verifiedRole = (outlet?.user?.id ? outlet.user : getAdminUser())?.role || null;
   const [closingVisitId, setClosingVisitId] = useState(null);
   // A stop of one regular pest visit and one lawn visit, on the one-screen container (GATE_COMBO_FAST_COMPLETE).
   const [comboStop, setComboStop] = useState(null);
@@ -926,6 +932,23 @@ export default function DispatchPageV2({
   // mounted here uses it for the same escape.
   // A Fast Complete sheet's own close: put the sheet away, and refresh the
   // schedule when the sheet says its row may be stale.
+  // A fast sheet left mounted (suspended) behind the appointment details sheet
+  // (owner 2026-10-09). Plain Close returns to it; any action that changes the
+  // visit or leaves for another screen (move, cancel, billing, edit, checkout,
+  // treatment plan, book next) closes it too, so it never completes a stale row.
+  const fastSheetBehindDetails = !!(detailService && (pestFastService || treeShrubFastService
+    || lawnReserviceFastService || lawnFastService || assessmentFastService || comboStop));
+  const closeFastSheetsBehindDetails = () => {
+    // The combo container keeps its parts' forms on the device for a reload; the visit changed, so those forms must not
+    // come back as ready when the stop is reopened.
+    if (comboStop) void deleteVisitCompletionDraft(comboDraftId(comboStop.visitId), operatorScope(fastCompleteOperatorId));
+    setComboStop(null);
+    setPestFastService(null);
+    setTreeShrubFastService(null);
+    setLawnReserviceFastService(null);
+    setLawnFastService(null);
+    setAssessmentFastService(null);
+  };
   const closeFastSheet = (setSheetService) => (options) => {
     setSheetService(null);
     if (options?.refresh) {
@@ -1008,7 +1031,7 @@ export default function DispatchPageV2({
     // before the long visit closeout below. Anything else, or the sheet's own "Full form", falls through unchanged.
     const comboPair = comboMembersFor(service, fullForm ? null : data?.services);
     if (comboPair) {
-      setComboStop({ visitId: service.visitId, ...comboPair });
+      setComboStop({ visitId: service.visitId, row: service, ...comboPair });
       return;
     }
     if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
@@ -2014,6 +2037,9 @@ export default function DispatchPageV2({
           setComboStop(null);
           setClosingVisitId(visitId);
         }}
+        // The live row for the member the tech opened, from the stop's own load.
+        onViewDetails={(rows) => setDetailService(rows.find((row) => row.id === comboStop.row.id))}
+        suspended={!!detailService}
       />}
       {completingService && (
         <CompletionPanel
@@ -2101,6 +2127,11 @@ export default function DispatchPageV2({
             setTreeShrubFastService(null);
             handleComplete(service, { fullForm: true });
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(treeShrubFastService)}
+          suspended={!!detailService}
         />
       )}
       {lawnReserviceFastService && (
@@ -2126,6 +2157,11 @@ export default function DispatchPageV2({
             setLawnReserviceFastService(null);
             handleComplete(service, { fullForm: true });
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          suspended={!!detailService}
         />
       )}
       {lawnFastService && (
@@ -2150,13 +2186,11 @@ export default function DispatchPageV2({
             setLawnFastService(null);
             handleComplete(service, { fullForm: true });
           }}
-          // Details: the appointment details sheet (price, reschedule, cancel),
-          // the same one the full form's Details pill opens.
-          onViewDetails={() => {
-            const service = lawnFastService;
-            setLawnFastService(null);
-            setDetailService(service);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnFastService)}
+          suspended={!!detailService}
         />
       )}
       {assessmentFastService && (
@@ -2196,6 +2230,11 @@ export default function DispatchPageV2({
             setAssessmentFastService(null);
             handleComplete(service, { fullForm: true });
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(assessmentFastService)}
+          suspended={!!detailService}
         />
       )}
       {pestFastService && (
@@ -2222,6 +2261,11 @@ export default function DispatchPageV2({
             setPestFastService(null);
             handleComplete(service, { fullForm: true });
           }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(pestFastService)}
+          suspended={!!detailService}
         />
       )}
       {projectService && (
@@ -2479,12 +2523,17 @@ export default function DispatchPageV2({
       {detailService && (
         <MobileAppointmentDetailSheet
           service={detailService}
+          // A technician login (the tech portal's Edit / Book next hand-off
+          // lands here too) sees no office-only controls the server refuses.
+          adminActions={verifiedRole === "admin"}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => {
+            closeFastSheetsBehindDetails();
             setDetailService(null);
             setEditingService(svc);
           }}
           onTreatmentPlan={(svc) => {
+            closeFastSheetsBehindDetails();
             // Same trap as onReviewCheckout: TreatmentPlanPanel renders inline
             // (fixed z-1000) and would mount behind this body-level portaled
             // detail sheet. Close the detail sheet first. (Only this in-detail
@@ -2494,6 +2543,7 @@ export default function DispatchPageV2({
             setTreatmentPlanService(svc);
           }}
           onReviewCheckout={(svc) => {
+            closeFastSheetsBehindDetails();
             // Close the detail sheet before opening checkout. The detail sheet
             // portals to document.body (z-100), while the checkout sheet renders
             // inline in this tree (z-105) where an ancestor stacking context
@@ -2505,12 +2555,19 @@ export default function DispatchPageV2({
             setCheckoutService(svc);
           }}
           onCompleteService={(svc) => {
+            // Complete from Details over an open fast sheet: back to that sheet,
+            // its entries intact, rather than opening a second completion.
+            if (fastSheetBehindDetails) {
+              setDetailService(null);
+              return;
+            }
             setDetailService(null);
             if (shouldReopenCompletionAfterPayment(svc)) {
               handleComplete(svc);
             }
           }}
           onBookNext={(svc) => {
+            closeFastSheetsBehindDetails();
             setDetailService(null);
             setNewApptDefaults({
               customer: {
@@ -2529,6 +2586,7 @@ export default function DispatchPageV2({
             setShowNewAppt(true);
           }}
           onBillingChanged={() => {
+            closeFastSheetsBehindDetails();
             // The annual-prepay switch rewrote this visit's money state (lane,
             // attached invoice — possibly under a NEW invoice id after an
             // abort's restore). The open sheet still holds the pre-switch
@@ -2540,6 +2598,7 @@ export default function DispatchPageV2({
             setScheduleRefreshKey((k) => k + 1);
           }}
           onCancelled={() => {
+            closeFastSheetsBehindDetails();
             // Silent only while the project editor is mounted underneath —
             // ordinary day-row sheets keep the loud gate so a failed
             // refresh can't quietly leave the pre-mutation row active
@@ -2561,6 +2620,7 @@ export default function DispatchPageV2({
             );
           }}
           onRescheduled={async () => {
+            closeFastSheetsBehindDetails();
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.
             setScheduleRefreshKey((k) => k + 1);

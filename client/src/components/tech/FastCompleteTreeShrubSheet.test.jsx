@@ -762,3 +762,29 @@ describe('a visit already invoiced from the payment flow', () => {
     expect(body).not.toHaveProperty('invoiceAlreadySent');
   }, 20000);
 });
+
+// Details over the sheet (owner 2026-10-09, option 2): the parent keeps the sheet
+// mounted with `suspended` while the appointment details sheet is open. The sheet
+// is hidden and inert meanwhile, and what the tech entered is still there after.
+describe('suspended behind the appointment details sheet', () => {
+  test('hidden while suspended; the note and a tapped product survive the round trip', async () => {
+    const request = makeRequest();
+    const { rerender } = render(<FastCompleteTreeShrubSheet service={SERVICE} request={request} onClose={() => {}} onViewDetails={() => {}} />);
+    await screen.findByRole('button', { name: /^Merit 2F/ });
+    const NOTE = 'Treated the front hedge for scale.';
+    fireEvent.change(screen.getByPlaceholderText('What you treated, where, and what you saw'), { target: { value: NOTE } });
+    fireEvent.click(tile('Merit 2F'));
+    const pressedBefore = tile('Merit 2F').getAttribute('aria-pressed');
+
+    rerender(<FastCompleteTreeShrubSheet service={SERVICE} request={request} onClose={() => {}} onViewDetails={() => {}} suspended />);
+    const overlay = document.querySelector('.tech-visit-overlay');
+    expect(overlay.style.display).toBe('none');
+    expect(overlay.getAttribute('aria-hidden')).toBe('true');
+    expect(overlay.hasAttribute('inert')).toBe(true);
+
+    rerender(<FastCompleteTreeShrubSheet service={SERVICE} request={request} onClose={() => {}} onViewDetails={() => {}} />);
+    expect(document.querySelector('.tech-visit-overlay').style.display).toBe('');
+    expect(screen.getByPlaceholderText('What you treated, where, and what you saw').value).toBe(NOTE);
+    expect(tile('Merit 2F').getAttribute('aria-pressed')).toBe(pressedBefore);
+  });
+});

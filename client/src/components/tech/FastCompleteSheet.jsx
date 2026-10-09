@@ -102,7 +102,7 @@ import {
 import {
   AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
   SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
-  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
+  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock, detailsHandler,
 } from './FastCompleteParts';
 import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
@@ -526,11 +526,11 @@ function prepareFor(service, onPrepared) {
   return plain ? onPrepared : () => { throw new Error(PREPARE_REFUSAL); };
 }
 
-export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
+export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
-  const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
+  const dialogRef = useModalFocus(![embedded, suspended].some(Boolean), () => closeRef.current?.());
   useLockBodyScroll(!embedded);
   const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
   // As a part of a stop, every write the sheet sends is counted as work in flight (see useWriteTracking).
@@ -601,6 +601,7 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
 
   return (
     <Frame
+      suspended={suspended}
       isMobile={isMobile}
       dialogRef={dialogRef}
       titleId={titleId}
@@ -610,7 +611,7 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onClose={close} fullFormOffered={fullFormOffered} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} fullFormOffered={fullFormOffered} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} />
     </Frame>
   );

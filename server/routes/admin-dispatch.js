@@ -4532,7 +4532,7 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'scheduled_date');
+      .first('id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     // Same stale-tap guard as the tech route: the moved-first rain-out
@@ -4553,6 +4553,21 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
+    }
+    // Offer only what POST /rain-out below accepts: under
+    // GATE_COLLECTIVE_SERIES_ANCHOR it refuses a non-admin any date change on
+    // a recurring visit (the move would shift the whole series), so such a
+    // caller gets today's options only, and `sameDayOnly` tells the sheet to
+    // keep its custom date on today. The tech route (/api/tech) is a separate
+    // contract this route does not change (its options and commit stay as they
+    // were).
+    if (req.techRole !== 'admin' && process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' && svc.is_recurring) {
+      // An overdue visit (dated before today): even a later-today slot is a
+      // date change, so POST refuses every option. Say so here instead.
+      if (serviceDateOnly(svc.scheduled_date) !== etDateString()) {
+        return res.status(403).json({ error: 'Moving this overdue recurring visit would shift its whole series. Ask the office to move it.', code: 'admin_required' });
+      }
+      return res.json({ ...options, days: [], sameDayOnly: true });
     }
     return res.json(options);
   } catch (err) { next(err); }

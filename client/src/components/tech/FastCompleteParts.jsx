@@ -129,12 +129,16 @@ export function customerNameOf(visit, service) {
 // dialog (a photo manager opened over the sheet); `hiddenProps` makes the
 // dialog inert while it is up.
 // `dialogClassName` (the lawn sheet): a class on the dialog, for its scoped look.
-export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, children }) {
+// `suspended` (owner 2026-10-09): the appointment details sheet is open over
+// this visit. The sheet stays mounted, so everything entered is kept, but it is
+// hidden and inert until Details closes.
+export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, suspended = false, children }) {
   const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
     <UiSurface
       density="touch"
+      {...(suspended ? { style: { display: 'none' }, 'aria-hidden': true, inert: '' } : {})}
       className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onDismiss(); }}
     >
@@ -153,6 +157,17 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
     </>,
     document.body,
   );
+}
+
+// Details opens the appointment details sheet on the schedule row the sheet was
+// opened from. That row is trusted only once the live visit has loaded and
+// matches it: while the context is loading or failed to load, the row is
+// unverified, and when the visit drifted (customer, date, property, service or
+// status: the sheet's blockedReason) it is stale. A cancel or move there would
+// act on the current visit by id while showing the old one, so Details is
+// withheld in all three cases.
+export function detailsHandler(ctx, onViewDetails) {
+  return ctx?.loading || ctx?.loadError || ctx?.blockedReason ? undefined : onViewDetails;
 }
 
 // Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
@@ -199,19 +214,32 @@ export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, di
 
 // `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
 // form button until the sheet itself says the visit needs the full form.
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose, fullFormOffered = true }) {
+// `onViewDetails` (owner 2026-10-09): a Details pill, shown while the visit is
+// open, that opens the appointment details sheet (quick move, cancel,
+// reschedule, price edit) — the same one the full form's Details pill and the
+// lawn sheet open. Absent (the tech portal mounts no such sheet) = no pill.
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
-      <div>
+      <div className="tech-visit-header-text">
         <h2 id={titleId} className="tech-visit-title">{title}</h2>
         <p className="tech-visit-muted">
           {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && fullFormOffered && (
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+      {/* Details and Full form share one group that wraps (stacks) on a narrow
+          phone, so neither is clipped beside the title and the close button. */}
+      {!done && (onViewDetails || fullFormOffered) && (
+        <div className="tech-visit-header-actions">
+          {onViewDetails && (
+            <Button variant="ghost" className="tech-visit-action" onClick={() => onViewDetails()} disabled={locked || dictationPending}>Details</Button>
+          )}
+          {fullFormOffered && (
+            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+          )}
+        </div>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
     </header>

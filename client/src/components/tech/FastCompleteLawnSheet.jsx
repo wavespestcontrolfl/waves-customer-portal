@@ -1303,11 +1303,11 @@ function TimeOnSite({ since }) {
 // `onPrepared` (GATE_COMBO_FAST_COMPLETE; a part of a grouped stop): Complete hands the body it would have
 // posted to onPrepared(serviceId, body) and posts nothing. `sharedNote` is the stop's one note: it stands
 // in for this sheet's own, which hides. Without them the sheet is as it was.
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, onPrepared, sharedNote, embedded }) {
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, suspended = false, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
-  const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!embedded && !suspended, () => closeRef.current?.());
   useLockBodyScroll(!embedded);
   const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
   const titleId = useId();
@@ -1368,7 +1368,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const locked = submissionHolds(submission);
 
   return (
-    <Frame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
+    <Frame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
       <SheetBody operatorId={operatorId} service={service} request={stopRequest} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} sharedNote={sharedNote} />
     </Frame>
