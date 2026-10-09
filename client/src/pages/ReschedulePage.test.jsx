@@ -654,6 +654,54 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByText(/your schedule always follows your last treatment/)).not.toBeInTheDocument();
   });
 
+  it('names the next plan visit\'s new date under Confirm when the server sends it (GATE_RESCHEDULE_NEXT_VISIT_DATE)', async () => {
+    const payload = reschedulablePayload({ isRecurring: true, collectiveAnchor: true });
+    const pickedDate = payload.availability.days[0].date;
+    stubFetch({
+      get: jsonResponse({
+        ...payload,
+        nextVisit: { currentDate: '2026-10-10', byDate: { [pickedDate]: '2026-10-17' } },
+      }),
+    });
+
+    renderPage();
+
+    expect(screen.queryByTestId('next-visit-note')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    const note = await screen.findByTestId('next-visit-note');
+    expect(note).toHaveTextContent('Your next visit moves too. It is on Sat, Oct 10 now and will be due on Sat, Oct 17.');
+  });
+
+  it('says "around" when later visits are arranged within 3 days of their due dates', async () => {
+    const payload = reschedulablePayload({ isRecurring: true, collectiveAnchor: true, futurePlacementDays: 3 });
+    const pickedDate = payload.availability.days[0].date;
+    stubFetch({
+      get: jsonResponse({
+        ...payload,
+        nextVisit: { currentDate: '2026-10-10', byDate: { [pickedDate]: '2026-10-17' } },
+      }),
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    expect(await screen.findByTestId('next-visit-note')).toHaveTextContent('will be due around Sat, Oct 17.');
+  });
+
+  it('shows no next-visit line when the server names no date for the pick', async () => {
+    stubFetch({
+      get: jsonResponse({
+        ...reschedulablePayload({ isRecurring: true, collectiveAnchor: true }),
+        nextVisit: { currentDate: '2026-10-10', byDate: { '2031-01-01': '2031-04-01' } },
+      }),
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    expect(screen.queryByTestId('next-visit-note')).not.toBeInTheDocument();
+  });
+
   it('the commit POST discloses the collective scope the page rendered under (codex P1)', async () => {
     const fetchMock = stubFetch({
       get: jsonResponse(reschedulablePayload({ isRecurring: true, collectiveAnchor: true })),

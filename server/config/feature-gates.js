@@ -339,6 +339,9 @@ const gates = {
   agentSessionGuard: process.env.GATE_AGENT_SESSION_GUARD === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
+  // Customer reschedule page names the next plan visit's new date beside Confirm (dark).
+  // Registered for logGateStatus only; routes/reschedule-public.js reads the env at call time.
+  rescheduleNextVisitDate: process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
   customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).

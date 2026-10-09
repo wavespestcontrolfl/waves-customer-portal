@@ -459,6 +459,38 @@ function recurringNoteCopy(data, selectedSlot) {
     : 'Only this visit will move — the rest of your regular service schedule stays the same.';
 }
 
+// The next plan visit's new date for a picked slot (payload.nextVisit, server
+// gate GATE_RESCHEDULE_NEXT_VISIT_DATE). Null when the server named none for
+// this date or the date does not change.
+function nextVisitShiftFor(data, slotDate) {
+  const from = data?.nextVisit?.currentDate;
+  const to = data?.nextVisit?.byDate?.[String(slotDate || '')];
+  return from && to && from !== to ? { from, to } : null;
+}
+
+function shortDateLabel(dateStr) {
+  try {
+    const [y, m, d] = String(dateStr).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+function NextVisitNote({ shift, futurePlacementDays }) {
+  return (
+    <div data-glass="soft" data-testid="next-visit-note" style={{
+      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
+      padding: '10px 12px', fontSize: 14, color: '#9A3412', lineHeight: 1.5,
+    }}>
+      Your next visit moves too. It is on {shortDateLabel(shift.from)} now and will be due
+      {futurePlacementDays === 3 ? ' around ' : ' on '}{shortDateLabel(shift.to)}.
+    </div>
+  );
+}
+
 function ReanchorNote({ futurePlacementDays }) {
   return (
     <div data-glass="soft" style={{
@@ -1380,9 +1412,15 @@ const FLOWS = {
     stateChangedMessage: 'The scheduling details for your plan just updated — here is the latest.',
     // Inside the picked row so the heads-up sits directly under the Confirm
     // it applies to — never below the fold.
-    pickedNote: (data, slot) => (!data.collectiveAnchor && slotReanchors(data, slot.date)
-      ? <div className="wpk-picked-note"><ReanchorNote futurePlacementDays={data.futurePlacementDays} /></div>
-      : null),
+    pickedNote: (data, slot) => {
+      const shift = data.collectiveAnchor ? nextVisitShiftFor(data, slot.date) : null;
+      if (shift) {
+        return <div className="wpk-picked-note"><NextVisitNote shift={shift} futurePlacementDays={data.futurePlacementDays} /></div>;
+      }
+      return !data.collectiveAnchor && slotReanchors(data, slot.date)
+        ? <div className="wpk-picked-note"><ReanchorNote futurePlacementDays={data.futurePlacementDays} /></div>
+        : null;
+    },
   },
   reservice: {
     endpoint: 'reservice',

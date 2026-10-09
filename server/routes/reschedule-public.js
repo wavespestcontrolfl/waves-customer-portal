@@ -113,6 +113,29 @@ function collectiveAnchorActive() {
   return process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true';
 }
 
+// Next-visit date beside Confirm (owner 2026-10-09: show every plan shift
+// before the customer confirms). Dark until GATE_RESCHEDULE_NEXT_VISIT_DATE
+// is set; kill = unset. Read at call time.
+function nextVisitDateActive() {
+  return process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE === 'true';
+}
+
+// { currentDate, byDate: { <offered date>: <next visit's new date> } } for a
+// series visit under collective anchoring, else null. Decoration only: any
+// failure returns null and the page keeps its general plan note.
+async function loadNextVisitShift(svc, availability) {
+  if (!nextVisitDateActive() || !isSeriesVisit(svc) || !collectiveAnchorActive()) return null;
+  const dates = (availability?.days || []).map((day) => day.date).filter(Boolean);
+  if (!dates.length) return null;
+  try {
+    const shift = await SmartRebooker.projectNextVisitDates(svc.id, dates);
+    return shift && Object.keys(shift.byDate).length ? shift : null;
+  } catch (err) {
+    logger.warn(`[reschedule-public] next-visit projection failed for ${svc.id}: ${err.message}`);
+    return null;
+  }
+}
+
 // True when committing `targetDateStr` for this visit re-anchors the series.
 function shouldReanchor(svc, targetDateStr) {
   if (!isSeriesVisit(svc)) return false;
@@ -598,10 +621,13 @@ router.get('/:token', async (req, res, next) => {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
     weatherMove = await weatherMovePromise;
+    const nextVisit = await loadNextVisitShift(svc, availability);
 
     return res.json({
       ...base,
       weatherMove,
+      // Gate off / not a series / nothing to name: key omitted.
+      ...(nextVisit ? { nextVisit } : {}),
       availability: availability
         ? {
           slots: availability.slots,
@@ -1121,6 +1147,8 @@ router._test = {
   loadWeatherMove,
   WEATHER_MOVE_MAX_AGE_DAYS,
   collectiveAnchorActive,
+  nextVisitDateActive,
+  loadNextVisitShift,
   seriesScopeMismatch,
   buildAvailabilityForService,
 };

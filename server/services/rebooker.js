@@ -1240,6 +1240,42 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   return { pattern, isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate };
 }
 
+// projectNextVisitDates: the plan rows from the moved visit on, and the first
+// later row a series move would write. Null when the visit is not on a plan
+// or nothing later can move.
+async function loadNextVisitSweep(conn, serviceId) {
+  const service = await conn('scheduled_services').where({ id: serviceId }).first();
+  if (!service || service.is_recurring !== true) return null;
+  const parentId = service.recurring_parent_id || service.id;
+  const parent = await conn('scheduled_services').where({ id: parentId }).first();
+  if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) return null;
+  const siblings = await conn('scheduled_services')
+    .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
+    .where('customer_id', service.customer_id)
+    .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
+    .whereNotIn('status', ['completed', 'cancelled'])
+    .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
+    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+  const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
+  if (droppedIdx === -1) return null;
+  const swept = siblings.slice(droppedIdx);
+  const nextIdx = swept.findIndex((row, idx) => idx > 0 && RESCHEDULABLE_STATUSES.has(row.status));
+  if (nextIdx === -1) return null;
+  return { service, parent, swept, nextIdx, next: swept[nextIdx] };
+}
+
+// A later visit the customer's series move leaves where it is. An unreadable
+// reminder state counts as kept, as it does in the move.
+async function nextVisitIsKept(conn, next, now = new Date()) {
+  if (next.customer_confirmed || next.auto_dispatch_locked || next.auto_dispatch_excluded) return true;
+  try {
+    const freeze = await require('./auto-dispatch/route-tiers').loadReminderFreeze(conn, [next.id], now);
+    return !freeze || freeze.failed || freeze.frozen.has(next.id);
+  } catch {
+    return true;
+  }
+}
+
 class SmartRebooker {
   async findRescheduleOptions(serviceId, reason, opts = {}) {
     const service = await db('scheduled_services')
@@ -4321,6 +4357,38 @@ class SmartRebooker {
       });
     }
     return { ...committedResult, originalDate: service.scheduled_date, seriesMoveId };
+  }
+
+  // Read-only: where the NEXT plan visit lands for each candidate anchor
+  // date. The customer reschedule page shows it beside Confirm
+  // (GATE_RESCHEDULE_NEXT_VISIT_DATE). Same sibling selection and projector
+  // as the move, so the date named is the cadence date the move writes.
+  // Null when there is no later movable visit, or when that visit is a
+  // commitment the sweep keeps in place (customer-confirmed, dispatch-locked
+  // or excluded, reminder already sendable): the page must never name a date
+  // the move will not write.
+  async projectNextVisitDates(serviceId, candidateDates = [], options = {}) {
+    const conn = options.conn || db;
+    const sweep = await loadNextVisitSweep(conn, serviceId);
+    if (!sweep || await nextVisitIsKept(conn, sweep.next, options.now)) return null;
+    const { service, parent, swept, nextIdx, next } = sweep;
+    const currentDate = dateOnly(service.scheduled_date);
+    const byDate = {};
+    for (const raw of candidateDates) {
+      const seriesDateStr = dateOnly(raw);
+      if (!seriesDateStr || seriesDateStr === currentDate || byDate[seriesDateStr]) continue;
+      const { cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
+        service, parent, newDate: seriesDateStr, seriesDateStr, conn,
+      });
+      // Walk the rows before it in sweep order, exactly as the move does: a
+      // row that does not move still reserves its cadence slot.
+      for (let i = 0; i < nextIdx; i++) {
+        if (i === 0 || RESCHEDULABLE_STATUSES.has(swept[i].status)) projectOccurrenceDate(i, swept[i]);
+        else cadenceSlotDate(i);
+      }
+      byDate[seriesDateStr] = projectOccurrenceDate(nextIdx, next);
+    }
+    return { currentDate: dateOnly(next.scheduled_date), byDate };
   }
 
   // Read-only preview of what rescheduleSeries would touch — the server
