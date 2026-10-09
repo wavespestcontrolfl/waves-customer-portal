@@ -1542,6 +1542,10 @@ function orderFor(product, packSize, shortage, { includePricing = false } = {}) 
   };
 }
 
+// The approval engine's repeat-group findings (repeatGroupFinding): repeat_<type>_group, or the fungicide FRAC one.
+const ROTATION_CODES = /^(repeat_(moa|frac|irac|hrac)_group|fungicide_frac_rotation_approval)$/;
+const isRotationWarning = (block) => ROTATION_CODES.test(String(block?.code || ''));
+
 async function rotationNote(dbh, facts, product) {
   // MOA is a rotation group too (the approval engine's rule) — common
   // insecticides carry only that one.
@@ -1800,6 +1804,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     ]
     : [];
   const planBlocks = [...planWide, ...productBlocks];
+  const withholdingBlock = productBlocks.find((block) => !isRotationWarning(block));
   const tankMixable = isTankMixable(product);
   // The same spray check as a card product, at the same forecast.
   const coords = propertyCoords(svc.latitude, svc.longitude);
@@ -1828,7 +1833,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     // plan's turf, ordinance, stress and approval guards.
     [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
-    [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
+    // A chemical-group repeat is a warning, not a withhold (owner 2026-10-09: "show the mix amount"): it stays in
+    // planBlocks, so the card shows it, and the amount is still given. Every other product check withholds it.
+    [Boolean(withholdingBlock), clean(withholdingBlock?.message, 160)],
     [Boolean(lineFacts.labelHold), lineFacts.labelHold],
     // An area add-on dose follows the treated area sold, so it is the label rate on
     // the card, never a tank amount off the catalog default rate.
@@ -1858,6 +1865,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     sprayCheck,
     context: protocolLine ? { line: protocolLine.addon, conditional: !protocolLine.selected } : { line: null },
     ...mix,
+    // Every group repeat this product would make (Headway can repeat FRAC 3 and FRAC 11), shown beside the amount.
+    // Empty when there is none, or when the amount is withheld (the reason line speaks then).
+    rotationWarnings: permitted ? productBlocks.filter(isRotationWarning).map((block) => clean(block.message, 200)).filter(Boolean) : [],
     planBlocks,
     tank,
     // The rig the amount was computed for, so the section labels the dose

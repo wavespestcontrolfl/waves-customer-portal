@@ -706,6 +706,24 @@ describe('mixForProduct', () => {
     expect(evaluateApprovals).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ plan: cleanPlan, products: [{ productId: 'p1', name: 'Celsius WG', rate: 0.113, rateUnit: 'oz' }] }));
     // Approved by every guard → doses normally under the same plan.
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: approve() }, ...at })).amount).toBe(6.215);
+    // A chemical-group repeat is a warning (owner 2026-10-09, "show the mix amount"): the amount is given and the
+    // finding stays in planBlocks. Any other finding beside it still withholds the amount, with its own reason.
+    const repeat = { code: 'repeat_hrac_group', message: 'Celsius WG repeats HRAC 2; last matching application was Celsius WG on 2026-03-01.' };
+    const fracRepeat = { code: 'fungicide_frac_rotation_approval', message: 'Celsius WG repeats FRAC 11; last matching application was Artavia on 2026-03-01.' };
+    for (const finding of [repeat, fracRepeat]) {
+      const warned = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: jest.fn().mockResolvedValue({ blocks: [finding], warnings: [] }) }, ...at });
+      expect(warned).toMatchObject({ amount: 6.215, rotationWarnings: [finding.message], planBlocks: [{ code: finding.code, message: finding.message }] });
+    }
+    const both = jest.fn().mockResolvedValue({ blocks: [repeat, { code: 'off_protocol_product', message: 'Celsius WG is not part of the current WaveGuard protocol card.' }], warnings: [] });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: both }, ...at }))
+      .toMatchObject({ amount: null, reason: 'Celsius WG is not part of the current WaveGuard protocol card.', rotationWarnings: [], planBlocks: [{ code: 'repeat_hrac_group' }, { code: 'off_protocol_product' }] });
+    // A product that repeats two groups (Headway: FRAC 3 and FRAC 11) shows both warnings.
+    const two = jest.fn().mockResolvedValue({ blocks: [fracRepeat, { ...fracRepeat, message: 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.' }], warnings: [] });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: two }, ...at })).rotationWarnings)
+      .toEqual([fracRepeat.message, 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.']);
+    // A failed approval read is not a group repeat: it still withholds.
+    const failed = jest.fn().mockRejectedValue(new Error('rotation read failed'));
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: failed }, ...at })).amount).toBeNull();
   });
 
   test('a per-gallon pest product dilutes straight into the tank, range and all (PR r1 P2)', async () => {
