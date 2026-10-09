@@ -8,6 +8,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { CompletionPanel } from "./SchedulePage";
+import pageSource from "./SchedulePage.jsx?raw";
 import { isLawnFastCompleteEligible } from "../../lib/lawn-fast-complete";
 import { isFastCompleteReportEligible } from "../../lib/pest-fast-complete";
 import { areaAddOnRowServiceType, hostAreaAddOns, soldAreaText } from "../../lib/areaAddOns";
@@ -17,6 +18,7 @@ const catalog = [topchoice, { id: "prod-other", name: "Test general product", ca
 
 const fireAnt = { key: "area_addon_fire_ant_yard", name: "Fire Ant Yard Treatment", areaSqFt: 4200, tierSqFt: 5000, areaLabel: "lawn", grassType: null };
 const sweep = { key: "area_addon_web_sweep", name: "Web Sweep", areaSqFt: null, tierSqFt: null, areaLabel: null, grassType: null };
+const bed = { key: "area_addon_bed_pre_emergent", name: "Bed Pre-Emergent Weed Control", areaSqFt: 900, tierSqFt: 1000, areaLabel: "bed", grassType: null };
 const attached = (addOns) => ({ areaAddOnRowsAttached: true, areaAddOns: addOns });
 
 const lawnHost = { id: "host-lawn", customerId: "c1", customerName: "Synthetic Customer", serviceType: "Lawn Care", status: "on_site", scheduledDate: "2099-01-01", completionProfile: { serviceKey: "lawn", category: "lawn_care", requiresProducts: false }, lawnFastCompleteEnabled: true };
@@ -43,10 +45,20 @@ const blockText = () => screen.getByTestId("area-addon-fields");
 
 describe("which lane a visit with add-ons takes", () => {
   it("an appointment whose own service is the add-on is generic: no lawn assessment, no add-on block", async () => {
-    await mount({ ...addOnAsPrimary, ...attached([fireAnt]) });
+    await mount(addOnAsPrimary);
     expect(screen.queryByText("Lawn Assessment")).not.toBeInTheDocument();
     expect(screen.queryByTestId("area-addon-fields")).not.toBeInTheDocument();
-    expect(hostAreaAddOns({ ...addOnAsPrimary, ...attached([fireAnt]) })).toEqual([]);
+    expect(hostAreaAddOns(addOnAsPrimary)).toEqual([]);
+  });
+
+  it("an appointment whose own service is one add-on still gets product fields for the OTHER add-ons attached to it (Codex round 8)", async () => {
+    const service = { ...addOnAsPrimary, ...attached([bed]) };
+    await mount(service);
+    // The visit's own add-on is recorded in the generic list; the attached one has its own fields and tag.
+    expect(screen.queryByText("Lawn Assessment")).not.toBeInTheDocument();
+    expect(within(blockText()).getByText("Bed Pre-Emergent Weed Control")).toBeInTheDocument();
+    expect(within(blockText()).queryByText("Fire Ant Yard Treatment")).not.toBeInTheDocument();
+    expect(hostAreaAddOns(service)).toEqual([bed]);
   });
 
   it("a lawn host with an add-on keeps the full lawn form and gains the add-on fields", async () => {
@@ -122,5 +134,83 @@ describe("the row type and label helpers", () => {
     expect(soldAreaText(fireAnt)).toBe("Sold: up to 5,000 sq ft of lawn area");
     expect(soldAreaText({ areaSqFt: 900, areaLabel: "bed" })).toBe("Sold: about 900 sq ft of bed area");
     expect(soldAreaText(sweep)).toBeNull();
+  });
+});
+
+// Codex round 8 P1 on #6135: the form prefilled the catalog default rate for an add-on product. The governed rate
+// (protocols.json, carried on the schedule feed) replaces it: Arena 0.29 oz and Acelepryn 0.05 fl oz per 1,000 are
+// not the add-on rates 0.147 and 0.184.
+describe("the add-on's row starts at the GOVERNED rate, never the catalog default", () => {
+  const arena = { id: "prod-arena", name: "Arena 50 WDG", category: "insecticide", application_method: "broadcast_spray", rate_unit: "oz", default_rate_per_1000: 0.29 };
+  const acelepryn = { id: "prod-acel", name: "Acelepryn Insecticide", category: "insecticide", application_method: "broadcast_spray", rate_unit: "fl_oz", default_rate_per_1000: 0.05 };
+  const catalogWithRates = [arena, acelepryn, topchoice];
+  const spot = (governed) => ({ key: "area_addon_lawn_insect_spot", name: "Lawn Insect Spot Treatment", areaSqFt: 1800, tierSqFt: 2000, areaLabel: "treated lawn", grassType: "st_augustine", governed });
+  const arenaRate = { ratePer1000: 0.147, rateUnit: "oz", productName: "Arena 50 WDG", withheld: null };
+
+  async function mountWith(service, products = catalogWithRates, width = 1024) {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+    await act(async () => { render(<CompletionPanel service={service} products={products} onClose={() => {}} onSubmit={vi.fn()} />); });
+  }
+
+  it("a lawn host with the Arena add-on: the row prefills 0.147 oz, and the amount follows the treated area", async () => {
+    await mountWith({ ...lawnHost, ...attached([spot(arenaRate)]) });
+    expect(within(blockText()).getByText("Governed rate: 0.147 oz per 1,000 sq ft.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: arena.id } });
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(0.147);
+    fireEvent.change(screen.getByPlaceholderText("Sq ft"), { target: { value: "2000" } });
+    expect(screen.getByPlaceholderText("Total")).toHaveValue(0.29);
+  });
+
+  it("the mobile form builds the same row: 0.147 oz, not the catalog 0.29", async () => {
+    await mountWith({ ...lawnHost, ...attached([spot(arenaRate)]) }, catalogWithRates, 400);
+    expect(within(blockText()).getByText("Governed rate: 0.147 oz per 1,000 sq ft.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: arena.id } });
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(0.147);
+  });
+
+  it("the Acelepryn add-on prefills 0.184 fl oz, not the catalog 0.05", async () => {
+    const preventive = { key: "area_addon_lawn_insect_preventive", name: "Yearly Lawn Insect Preventive", areaSqFt: 4000, tierSqFt: 5000, areaLabel: "lawn", grassType: null, governed: { ratePer1000: 0.184, rateUnit: "fl_oz", productName: "Acelepryn Insecticide", withheld: null } };
+    await mountWith({ ...pestHost, ...attached([preventive]) });
+    fireEvent.change(screen.getByLabelText("Product used for Yearly Lawn Insect Preventive"), { target: { value: acelepryn.id } });
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(0.184);
+  });
+
+  it("a rate the server holds back is not filled in (and the catalog default is not used instead), with the reason", async () => {
+    const held = { ...arenaRate, withheld: "The label rate is not verified yet." };
+    await mountWith({ ...lawnHost, ...attached([spot(held)]) });
+    expect(within(blockText()).queryByText(/^Governed rate:/)).not.toBeInTheDocument();
+    expect(within(blockText()).getByText("Rate not filled in. The label rate is not verified yet. Enter the rate from the label.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: arena.id } });
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
+  });
+
+  it("a feed that carried no governed rate, or another product for the add-on, starts with no rate", async () => {
+    await mountWith({ ...lawnHost, ...attached([spot(undefined)]) });
+    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: arena.id } });
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
+    cleanup();
+    await mountWith({ ...lawnHost, ...attached([spot(arenaRate)]) });
+    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: topchoice.id } });
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
+  });
+
+  it("the add-on that IS the visit: its product from the ordinary picker prefills the governed rate too", async () => {
+    const own = { ...addOnAsPrimary, serviceType: "Yearly Lawn Insect Preventive", completionProfile: { serviceKey: "area_addon_lawn_insect_preventive", category: "lawn_care", requiresProducts: false },
+      areaAddOnOwn: { key: "area_addon_lawn_insect_preventive", governed: { ratePer1000: 0.184, rateUnit: "fl_oz", productName: "Acelepryn Insecticide", withheld: null } } };
+    await mountWith(own);
+    fireEvent.change(screen.getByPlaceholderText("Search products..."), { target: { value: "Acelepryn" } });
+    fireEvent.click(await screen.findByText("Acelepryn Insecticide"));
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(0.184);
+  });
+
+  it("a row on an ordinary visit keeps the catalog prefill exactly as before", async () => {
+    await mountWith(lawnHost);
+    fireEvent.change(screen.getByPlaceholderText("Search products..."), { target: { value: "Arena" } });
+    fireEvent.click(await screen.findByText("Arena 50 WDG"));
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(0.29);
+  });
+
+  it("the completion body carries the row's add-on tag, which the server keeps only for an add-on on the visit", () => {
+    expect(pageSource).toMatch(/areaAddOnKey: p\.areaAddOnKey,\n\s+targets: Array\.isArray\(p\.targets\) \? p\.targets : \[\],\n\s+\}\)\),\n\s+\/\/ The existing completion field/);
   });
 });

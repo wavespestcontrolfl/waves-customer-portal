@@ -1,12 +1,13 @@
-import { hostAreaAddOns, isChemicalAreaAddOnKey, soldAreaText } from "../../lib/areaAddOns";
+import { governedRateText, hostAreaAddOns, isChemicalAreaAddOnKey, soldAreaText } from "../../lib/areaAddOns";
 
-// The add-on fields on a NORMAL pest or lawn visit that has area add-ons attached
-// (GATE_AREA_ADDONS). The visit keeps its own full completion form; this block sits
-// beside it and records each chemical add-on's product, pre-labelled with what the
-// estimate sold. The product lands in the visit's ordinary product list as a row tagged
-// with the add-on (`areaAddOnKey`), where its treated square feet are entered, so the
-// server saves it like any other application row. A visit whose own service is the
-// add-on takes the generic form and never renders this.
+// The add-on fields on a visit that has area add-ons attached as rows (GATE_AREA_ADDONS).
+// The visit keeps its own full completion form; this block sits beside it and records
+// each attached chemical add-on's product, pre-labelled with what the estimate sold and
+// the governed rate. The product lands in the visit's ordinary product list as a row
+// tagged with the add-on (`areaAddOnKey`), where its treated square feet are entered, so
+// the server saves it like any other application row. The add-on that IS the visit is
+// recorded in the generic product list (an untagged row is the visit's own) and is not
+// listed here.
 export default function AreaAddOnFields({ service, selectedProducts, products, onAddProduct, disabled, colors, selectStyle, labelStyle }) {
   const addOns = hostAreaAddOns(service);
   if (addOns.length === 0) return null;
@@ -23,6 +24,8 @@ export default function AreaAddOnFields({ service, selectedProducts, products, o
             <div style={{ fontWeight: 600 }}>{addOn.name}</div>
             {sold && <div>{sold}</div>}
             {addOn.grassType === "st_augustine" && <div>Grass on the estimate: St. Augustine</div>}
+            {chemical && governedRateText(addOn.governed) && <div>Governed rate: {governedRateText(addOn.governed)}.</div>}
+            {chemical && addOn.governed?.withheld && <div style={{ color: colors.muted }}>Rate not filled in. {addOn.governed.withheld} Enter the rate from the label.</div>}
             {!chemical && <div style={{ color: colors.muted }}>No product to record for this add-on.</div>}
             {chemical && recorded.length > 0 && (
               <div>Recorded: {recorded.map((row) => row.displayName || row.name).join(", ")}. Enter the treated square feet in its product row below.</div>

@@ -1424,7 +1424,8 @@ function soldLine(governed, scope) {
 const GRASS_NAMES = { st_augustine: 'St. Augustine' };
 function governedForCard(governed, verdict, product = {}, scope = null) {
   if (!governed) return undefined;
-  const { soldAreaNoun, requiresGrass, ...facts } = governed;
+  // ratePer1000 and rateUnit are the completion form's numbers (area-addon-governed-rate.js), not card text.
+  const { soldAreaNoun: _soldAreaNoun, requiresGrass, ratePer1000: _ratePer1000, rateUnit: _rateUnit, ...facts } = governed;
   const grass = requiresGrass ? (scope?.grassType || null) : null;
   const grassName = requiresGrass ? GRASS_NAMES[requiresGrass] || requiresGrass : null;
   // Same contract as a planned amount: no actionable rate while the spray

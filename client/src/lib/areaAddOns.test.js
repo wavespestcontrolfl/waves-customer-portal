@@ -186,3 +186,64 @@ describe("isAreaAddOnPricedPerApplication", () => {
     expect(isAreaAddOnPricedPerApplication(null)).toBe(false);
   });
 });
+
+// Codex round 8 P1 on #6135: a product row for an area add-on starts at the GOVERNED rate the server carried on the
+// schedule feed, never at the catalog default.
+describe("the governed rate on an add-on's product row", () => {
+  const arena = { id: "prod-arena", name: "Arena 50 WDG" };
+  const catalogRow = { rate: 0.29, rateUnit: "oz", amountUnit: "oz", catalogRateUnit: "oz", maxLabelRatePer1000: 0.37, totalAmount: 0.58, areaValue: 2000, areaUnit: "sqft" };
+  const governed = { ratePer1000: 0.147, rateUnit: "oz", productName: "Arena 50 WDG", withheld: null };
+  const spot = { key: "area_addon_lawn_insect_spot", name: "Lawn Insect Spot Treatment", governed };
+  const host = { completionProfile: { serviceKey: "lawn_standard" }, areaAddOns: [spot] };
+  const ownVisit = { completionProfile: { serviceKey: "area_addon_lawn_insect_spot" }, areaAddOnOwn: { key: "area_addon_lawn_insect_spot", governed } };
+
+  it("a tagged row on a host visit takes the add-on's rate, unit, ceiling and the amount for its treated area", async () => {
+    const { withGovernedAddOnRate } = await import("./areaAddOns");
+    expect(withGovernedAddOnRate(host, { ...arena, areaAddOnKey: spot.key }, catalogRow)).toMatchObject({
+      rate: 0.147, rateUnit: "oz", amountUnit: "oz", catalogRateUnit: "oz", maxLabelRatePer1000: 0.147, totalAmount: 0.29,
+    });
+    // No treated area yet: no amount (the catalog's is never kept).
+    expect(withGovernedAddOnRate(host, { ...arena, areaAddOnKey: spot.key }, { ...catalogRow, areaValue: "", totalAmount: "" }).totalAmount).toBe("");
+  });
+
+  it("an untagged row on a visit whose own service is a chemical add-on takes its own", async () => {
+    const { withGovernedAddOnRate } = await import("./areaAddOns");
+    expect(withGovernedAddOnRate(ownVisit, arena, catalogRow)).toMatchObject({ rate: 0.147, maxLabelRatePer1000: 0.147 });
+  });
+
+  it("another product, a held-back rate or a feed with no governed rate: NO rate, never the catalog default", async () => {
+    const { withGovernedAddOnRate } = await import("./areaAddOns");
+    const blank = { rate: "", maxLabelRatePer1000: null, totalAmount: "" };
+    expect(withGovernedAddOnRate(host, { id: "p", name: "Topchoice", areaAddOnKey: spot.key }, catalogRow)).toMatchObject(blank);
+    expect(withGovernedAddOnRate({ ...host, areaAddOns: [{ ...spot, governed: { ...governed, withheld: "The label rate is not verified yet." } }] }, { ...arena, areaAddOnKey: spot.key }, catalogRow)).toMatchObject(blank);
+    expect(withGovernedAddOnRate({ ...host, areaAddOns: [{ key: spot.key, name: spot.name }] }, { ...arena, areaAddOnKey: spot.key }, catalogRow)).toMatchObject(blank);
+    expect(withGovernedAddOnRate({ ...ownVisit, areaAddOnOwn: undefined }, arena, catalogRow)).toMatchObject(blank);
+  });
+
+  it("a row that belongs to no add-on comes back unchanged (ordinary visits, a web sweep, an add-on the visit does not carry)", async () => {
+    const { withGovernedAddOnRate } = await import("./areaAddOns");
+    const plain = { completionProfile: { serviceKey: "pest_general_quarterly" } };
+    expect(withGovernedAddOnRate(plain, arena, catalogRow)).toBe(catalogRow);
+    expect(withGovernedAddOnRate({ completionProfile: { serviceKey: "area_addon_web_sweep" } }, arena, catalogRow)).toBe(catalogRow);
+    expect(withGovernedAddOnRate(host, { ...arena, areaAddOnKey: "area_addon_fire_ant_yard" }, catalogRow)).toBe(catalogRow);
+    expect(withGovernedAddOnRate(null, arena, catalogRow)).toBe(catalogRow);
+  });
+
+  it("the rate reads as plain words, and not at all when held back", async () => {
+    const { governedRateText } = await import("./areaAddOns");
+    expect(governedRateText(governed)).toBe("0.147 oz per 1,000 sq ft");
+    expect(governedRateText({ ratePer1000: 0.184, rateUnit: "fl_oz" })).toBe("0.184 fl oz per 1,000 sq ft");
+    expect(governedRateText({ ...governed, withheld: "x" })).toBeNull();
+    expect(governedRateText(undefined)).toBeNull();
+  });
+
+  it("the attached add-ons of any visit get fields, and a tagged chemical row is lawn family on a pest host or a web sweep visit", async () => {
+    const { hostAreaAddOns, areaAddOnRowServiceType } = await import("./areaAddOns");
+    expect(hostAreaAddOns(ownVisit)).toEqual([]);
+    expect(hostAreaAddOns({ ...ownVisit, areaAddOns: [{ key: "area_addon_bed_pre_emergent" }, { key: "pest_x" }] })).toEqual([{ key: "area_addon_bed_pre_emergent" }]);
+    const sweepVisit = { completionProfile: { serviceKey: "area_addon_web_sweep" } };
+    expect(areaAddOnRowServiceType(sweepVisit, "Web Sweep", { areaAddOnKey: "area_addon_lawn_insect_spot" })).toBe("Lawn Care");
+    expect(areaAddOnRowServiceType(sweepVisit, "Web Sweep", {})).toBe("Web Sweep");
+    expect(areaAddOnRowServiceType(ownVisit, "Lawn Insect Spot Treatment", {})).toBe("Lawn Care");
+  });
+});

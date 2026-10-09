@@ -106,6 +106,46 @@ describe('the job card resolves the program through the existing matcher', () =>
   });
 });
 
+describe('the governed rate as numbers (Codex round 8): one place, pinned to the text and to the pricer assumptions', () => {
+  const constantsSource = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'pricing-engine', 'constants.js'), 'utf8');
+  // The rate and unit cost each AREA_ADDONS comment states for the material assumption (materialPer1000).
+  const STATED = {
+    area_addon_bed_pre_emergent: { text: '3.45 lb/1,000 ($2.99/lb)', unitCost: 2.99 },
+    area_addon_lawn_insect_spot: { text: '0.147 oz/1,000 (6.4 oz/acre, $9.87/oz)', unitCost: 9.87 },
+    area_addon_fire_ant_yard: { text: '2 lb/1,000 ($1.83/lb)', unitCost: 1.83 },
+    area_addon_lawn_insect_preventive: { text: '0.184 fl oz/1,000 ($14.14/fl oz)', unitCost: 14.14 },
+    area_addon_hardscape_weed: { text: '16 fl oz/1,000 ($1.155/fl oz)', unitCost: 1.155 },
+  };
+  const { governedRateFor } = require('../services/area-addon-governed-rate');
+
+  test.each(CHEMICAL.map((cfg) => [cfg.serviceKey, cfg]))('%s: the number, the unit, the rate text and the material assumption agree', (serviceKey, cfg) => {
+    const governed = governedRateFor(serviceKey);
+    const visit = program.visits.find((v) => Object.values(v.lineMeta)[0].catalogProductHints[0] === governed.productName);
+    // The number is in the text the card prints, in the unit the text uses.
+    const unitText = governed.rateUnit.replace('_', ' ');
+    expect(visit.labelFacts.rate).toMatch(new RegExp(`(^|\\s)${governed.ratePer1000} ${unitText}\\b`));
+    expect(['lb', 'oz', 'fl_oz']).toContain(governed.rateUnit);
+    // ... and in the pricer's own comment, whose unit cost times the rate is the material cost of the tier.
+    expect(constantsSource).toContain(STATED[serviceKey].text);
+    expect(governed.ratePer1000 * STATED[serviceKey].unitCost).toBeCloseTo(cfg.materialPer1000, 1);
+    expect(Math.abs(governed.ratePer1000 * STATED[serviceKey].unitCost - cfg.materialPer1000)).toBeLessThan(0.01);
+    expect(governed.productName).toBe(cfg.limitProduct);
+  });
+
+  test('the web sweep and an unknown key have no governed rate', () => {
+    expect(governedRateFor('area_addon_web_sweep')).toBeNull();
+    expect(governedRateFor('pest_general_quarterly')).toBeNull();
+    expect(governedRateFor(undefined)).toBeNull();
+  });
+
+  test('the numeric fields exist on every chemical visit and nowhere else in the program', () => {
+    for (const visit of program.visits) {
+      expect(visit.labelFacts.ratePer1000).toEqual(expect.any(Number));
+      expect(visit.labelFacts.rateUnit).toEqual(expect.any(String));
+    }
+  });
+});
+
 describe('Codex round 8: "Once a year (April)" was declared but never enforced - April is advice, any month is allowed', () => {
   const acelepryn = program.visits.find((v) => Object.values(v.lineMeta)[0].catalogProductHints[0] === 'Acelepryn Insecticide');
 

@@ -63,20 +63,67 @@ function isChemicalAreaAddOnVisit(service) {
 // completion form and gains the add-on fields beside it (AreaAddOnFields).
 export const LAWN_AREA_SERVICE_TYPE = "Lawn Care";
 
-// The attached add-ons a host visit gains fields for: [] for an add-on visit (its
-// own form is the generic one) and for a visit with none attached.
+// The add-ons ATTACHED to the visit as rows, each of which gets product fields beside the
+// visit's own form: [] for a visit with none attached. A visit whose own service is a chemical
+// add-on records that add-on in its generic product list (an untagged row is the visit's own);
+// every other add-on on it, like every add-on on a pest or lawn host, is recorded here.
 export function hostAreaAddOns(service) {
-  if (isAreaAddOnVisit(service) || !Array.isArray(service?.areaAddOns)) return [];
+  if (!Array.isArray(service?.areaAddOns)) return [];
   return service.areaAddOns.filter((addOn) => isAreaAddOnServiceKey(addOn?.key));
 }
 
 // The service type a product row's application method and area requirement are
-// judged by. An add-on visit's rows follow the add-on's family; on a host visit
-// every row follows the host, except the rows recorded for a chemical add-on
-// (tagged `areaAddOnKey`), which are lawn-family work whatever line the host is.
+// judged by. A row recorded for a chemical add-on (tagged `areaAddOnKey`) is
+// lawn-family work whatever line the visit is; an untagged row on a visit whose own
+// service is a chemical add-on is the same; every other row follows the visit.
 export function areaAddOnRowServiceType(service, ownServiceType, row) {
-  const lawnFamily = isAreaAddOnVisit(service) ? isChemicalAreaAddOnVisit(service) : isChemicalAreaAddOnKey(row?.areaAddOnKey);
+  const lawnFamily = row?.areaAddOnKey ? isChemicalAreaAddOnKey(row.areaAddOnKey) : isAreaAddOnVisit(service) && isChemicalAreaAddOnVisit(service);
   return lawnFamily ? LAWN_AREA_SERVICE_TYPE : ownServiceType;
+}
+
+// The add-on a product row belongs to, or null: its tag when it has one (it must be attached to the
+// visit), else the visit's own add-on when the visit IS a chemical add-on. `governed` is the server's
+// governed rate for it (the schedule feed: protocols.json area_addon), or null when the feed carried none.
+export function addOnForRow(service, row) {
+  if (row?.areaAddOnKey) {
+    const attached = hostAreaAddOns(service).find((addOn) => addOn.key === row.areaAddOnKey);
+    return attached ? { key: attached.key, governed: attached.governed || null } : null;
+  }
+  const ownKey = [service?.completionProfile?.serviceKey, service?.serviceKey, service?.service_key_snapshot].find(isChemicalAreaAddOnKey);
+  return ownKey ? { key: ownKey, governed: service?.areaAddOnOwn?.key === ownKey ? service.areaAddOnOwn.governed || null : null } : null;
+}
+
+// "0.147 oz per 1,000 sq ft" for the governed rate shown beside an add-on, or null when there is none.
+export function governedRateText(governed) {
+  const rate = Number(governed?.ratePer1000);
+  if (!(rate > 0) || governed?.withheld) return null;
+  return `${rate} ${String(governed.rateUnit || "").replace("_", " ")} per 1,000 sq ft`;
+}
+
+// A product row built for an area add-on, with the GOVERNED rate in place of the catalog's default rate
+// (Arena 0.29 oz and Acelepryn 0.05 fl oz per 1,000 sq ft are not the add-on rates: 0.147 and 0.184). The
+// row prefills the governed rate and unit, and the governed rate is its ceiling for the existing high-rate
+// review. Only the add-on's own product has a governed rate: any other product on the row, a rate the
+// server holds back (unverified label, wrong grass) or a feed that carried none starts with NO rate, never the
+// catalog default. A row that belongs to no add-on comes back unchanged.
+export function withGovernedAddOnRate(service, product, row) {
+  const addOn = addOnForRow(service, product);
+  if (!addOn) return row;
+  const governed = addOn.governed;
+  const name = (value) => String(value || "").trim().toLowerCase();
+  const applies = governed && !governed.withheld && name(governed.productName) === name(product?.name);
+  const rate = applies ? Number(governed.ratePer1000) : "";
+  const unit = applies ? governed.rateUnit : row.rateUnit;
+  return {
+    ...row,
+    rate,
+    rateUnit: unit,
+    amountUnit: applies ? unit : row.amountUnit,
+    catalogRateUnit: applies ? unit : row.catalogRateUnit,
+    maxLabelRatePer1000: applies ? rate : null,
+    // The amount from the treated area, at the governed rate (the shared rate x sq ft / 1,000 rule).
+    totalAmount: applies && row.areaUnit === "sqft" && Number(row.areaValue) > 0 ? Math.round(rate * (Number(row.areaValue) / 1000) * 100) / 100 : "",
+  };
 }
 
 // What the estimate sold for an attached add-on, in plain words, or null (the web

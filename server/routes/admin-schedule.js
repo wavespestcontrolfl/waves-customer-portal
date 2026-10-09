@@ -10,6 +10,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
+const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
@@ -57,12 +58,17 @@ const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
   ].map((flag) => [flag, false])),
   areaAddOnRowsAttached: true,
 });
-async function areaAddOnVisitIdsForFeed(serviceIds) {
+// Each attached add-on carries its governed rate (area-addon-governed-rate.js), and a visit whose OWN service is
+// a chemical add-on carries its own (`own`): the completion form prefills the governed rate, never the
+// product's catalog default.
+async function areaAddOnVisitIdsForFeed(serviceRows) {
   try {
-    return await areaAddOnRows.areaAddOnSoldByVisit(db, serviceIds);
+    const byVisit = await areaAddOnRows.areaAddOnSoldByVisit(db, serviceRows.map((s) => s.id));
+    const own = await areaAddOnGovernedRate.areaAddOnFeed(db, byVisit, serviceRows);
+    return { byVisit, own };
   } catch (e) {
     logger.warn(`[schedule] area add-on row lookup failed: ${e.message}`);
-    return new Map();
+    return { byVisit: new Map(), own: new Map() };
   }
 }
 // The report flow needs a plain untyped, uncombined profile (the typed forms and
@@ -5159,7 +5165,7 @@ async function loadProjectCompletionContextByServiceId(services) {
   const treeShrubFastCompleteEnabled = tsFastCompleteLive();
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
-  const addOnVisitIds = await areaAddOnVisitIdsForFeed(rows.map((s) => s.id));
+  const addOnVisits = await areaAddOnVisitIdsForFeed(rows);
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5278,10 +5284,11 @@ async function loadProjectCompletionContextByServiceId(services) {
       // look project-free and complete on its own record.
       linkedProjectLookupFailed,
     };
-    const addOns = addOnVisitIds.get(String(service.id));
-    // areaAddOnRowsAttached keeps the lightweight flows off; the list (key, name, sold area) labels
-    // each add-on's product row on the host visit's own completion form.
-    return [service.id, addOns ? { ...entry, ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOns: addOns } : entry];
+    const addOns = addOnVisits.byVisit.get(String(service.id));
+    // areaAddOnRowsAttached keeps the lightweight flows off; the list (key, name, sold area, governed rate) labels
+    // each add-on's product row on the visit's own completion form. areaAddOnOwn is the same for the add-on that IS the visit.
+    const own = addOnVisits.own.get(String(service.id));
+    return [service.id, { ...entry, ...(own ? { areaAddOnOwn: own } : {}), ...(addOns ? { ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOns: addOns } : {}) }];
   }));
   return new Map(entries);
 }
@@ -6394,6 +6401,7 @@ router.get('/', async (req, res, next) => {
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
         areaAddOns: projectCompletionContext.areaAddOns,
+        areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
@@ -7027,6 +7035,7 @@ router.get('/week', async (req, res, next) => {
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
           areaAddOns: projectCompletionContext.areaAddOns,
+          areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,

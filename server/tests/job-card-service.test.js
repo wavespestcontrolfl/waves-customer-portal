@@ -1952,6 +1952,9 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       for (const cfg of chemical) {
         const out = await jobCard.resolveVisitLines({ facts: { serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, areaAddOnScope: SCOPE, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
         const [card] = await cardsFor(out.lines);
+        // The completion form's numbers (ratePer1000, rateUnit) are not card text.
+        expect(Object.keys(card.governed)).not.toEqual(expect.arrayContaining(['ratePer1000']));
+        expect(card.governed).not.toHaveProperty('rateUnit');
         text[cfg.serviceKey] = [card.name, card.line, card.governed.rate, card.governed.area, card.governed.limit, card.governed.safety];
       }
       expect(text).toEqual({

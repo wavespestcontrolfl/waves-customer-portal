@@ -90,7 +90,7 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
-import { areaAddOnRowServiceType, isAreaAddOnVisit } from "../../lib/areaAddOns";
+import { areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
@@ -17356,7 +17356,9 @@ export function CompletionPanel({
         : perBasisUnit || areaRequirement?.unit === "linear_ft"
           ? ""
           : derivedTotalAmount(prefillRate, prefillArea);
-    return {
+    // A row recorded for an area add-on starts at the add-on's GOVERNED rate, never the catalog default
+    // (withGovernedAddOnRate); every other row passes through unchanged.
+    return withGovernedAddOnRate(service, product, {
         productId: product.id,
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
@@ -17433,7 +17435,7 @@ export function CompletionPanel({
           ),
           allowedTargetLinesForVisit(service),
         ),
-    };
+    });
   }
   function addSubstitutionProduct(substitution) {
     if (!substitution?.substituteProductId) return;
@@ -18661,6 +18663,8 @@ export function CompletionPanel({
             (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
+          // The area add-on this row records (the server keeps it only for an add-on the visit carries).
+          areaAddOnKey: p.areaAddOnKey,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
         // The existing completion field carries the visit area into the server

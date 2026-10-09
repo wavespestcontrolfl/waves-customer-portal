@@ -202,6 +202,7 @@ An area above the largest tier returns an unpriced custom-quote line. Labor minu
 | `hardscape_weed` | "Technician instruction: apply to hard surfaces and bare ground only" | Technician instruction; not checked |
 | every chemical add-on | The governed rate per 1,000 sq ft | The completion form prefills it and treats it as the ceiling; a row recorded above it is flagged on the completion and sent to the office (never blocked) |
 
+**The governed rate as numbers.** `config/protocols.json` `area_addon` `labelFacts` holds each rate as text for the card (`rate`) and as numbers for the form (`ratePer1000`, `rateUnit`: lb, oz or fl_oz, all per 1,000 sq ft). `area-addon-governed-rate.js` reads them by the add-on's catalog key; the schedule feed carries them on each add-on of the visit (`areaAddOns[].governed`, and `areaAddOnOwn` for the add-on that is the visit); the completion form prefills them instead of the product's catalog default (Arena 0.29 oz, Acelepryn 0.05 fl oz per 1,000 sq ft). A test pins each number to the rate text and to the unit cost and material assumption in this table's comments.
 
 ## 6. Palm Injection
 

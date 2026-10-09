@@ -129,6 +129,7 @@ const CompanionCompletions = require('../services/service-report/companion-compl
 // PR #3091 found four leak shapes between them).
 const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFollowupAlert } = require('../services/typed-followup-obligation');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
+const areaAddOnGovernedRate = require('./area-addon-governed-rate');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
 // into customer-visible completion text. Three shapes: a code word near a
@@ -1939,6 +1940,9 @@ const HARD_COUNT_LIMIT_LABELS = {
   min_interval_days: 'minimum days between applications',
   annual_max_rate: 'yearly amount limit',
 };
+// What the office notification calls each kind of finding: the hard count limits, plus an area add-on row
+// recorded above the add-on's governed rate (area-addon-governed-rate.js).
+const FINDING_LIMIT_LABELS = { ...HARD_COUNT_LIMIT_LABELS, [areaAddOnGovernedRate.LIMIT_TYPE]: 'governed add-on rate' };
 const MAX_RAW_SUBMITTED_PRODUCTS = 200;
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -2056,6 +2060,7 @@ async function recordedProductLimitFindings({ svc, record, database = db } = {})
 // The office's side of a finding: one admin notification per product and finding code (deduped, so
 // a retry or a resume rings once). Never throws and never blocks the closeout.
 const limitFigure = (finding) => {
+  if (finding.limitType === areaAddOnGovernedRate.LIMIT_TYPE) return `${finding.current} per 1,000 sq ft, governed rate ${finding.max}`;
   if (finding.limitType === 'min_interval_days') return `only ${finding.current} days from another application, minimum ${finding.max}`;
   if (finding.limitType === 'annual_max_rate') return `${finding.current}% of the yearly label amount used`;
   return `${finding.current} of ${finding.max} already used`;
@@ -2074,14 +2079,16 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
       const fullText = over
-        ? `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${limitFigure(finding)}). Review it and report it if needed.`
+        ? `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[finding.limitType]} (${limitFigure(finding)}). Review it and report it if needed.`
         : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
       const why = !over ? 'A lawn visit was recorded, but its product limits could not be checked.'
-        : finding.limitType === 'min_interval_days'
-          ? `${name}: only ${finding.current} days since another application, minimum ${finding.max}.`
-          : finding.limitType === 'annual_max_rate'
-            ? `${name} is over its yearly amount limit: ${finding.current}% used.`
-            : `${name} is over its yearly limit: ${finding.current} of ${finding.max} already used.`;
+        : finding.limitType === areaAddOnGovernedRate.LIMIT_TYPE
+          ? `${name} was recorded at ${finding.current} per 1,000 sq ft, above the governed rate ${finding.max}.`
+          : finding.limitType === 'min_interval_days'
+            ? `${name}: only ${finding.current} days since another application, minimum ${finding.max}.`
+            : finding.limitType === 'annual_max_rate'
+              ? `${name} is over its yearly amount limit: ${finding.current}% used.`
+              : `${name} is over its yearly limit: ${finding.current} of ${finding.max} already used.`;
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
@@ -4354,6 +4361,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
     const serviceRecordCols = await failSoftRead(db, (k) => k('service_records').columnInfo(), {});
     const serviceProductCols = await failSoftRead(db, (k) => k('service_products').columnInfo(), {});
+    // Which area add-on each application row belongs to (service_products.area_addon_key): only an add-on the
+    // visit really carries; the closeout counts one application row for each chemical add-on.
+    const addOnTags = await areaAddOnGovernedRate.resolveApplicationAddOnTags(db, svc, products);
     const serviceFindingsAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_findings'), false);
     const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
@@ -7953,6 +7963,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
+            Object.assign(serviceProductInsert, areaAddOnGovernedRate.addOnProductColumns(serviceProductCols, addOnTags, p));
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
             insertedServiceProducts.push(serviceProduct);
 
@@ -9193,6 +9204,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
       }
     }
+
+    // An area add-on row recorded above the add-on's governed rate (protocols.json area_addon): the same
+    // flag and office notification, and the same rule: the work is done, so it never blocks.
+    applicationLimitAdvisory = await areaAddOnGovernedRate.flagRatesAboveGoverned({
+      svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings,
+    });
 
     if (!isIncompleteVisit && (!resumingCommittedCompletion || packetEffects) && products?.length) {
       const writeMoaAlerts = async (trx = null) => {

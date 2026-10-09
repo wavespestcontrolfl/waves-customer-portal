@@ -2472,6 +2472,8 @@
         "labelFacts": {
           "soldAreaNoun": "of bed",
           "rate": "3.45 lb per 1,000 sq ft of bed (label range 2.3 to 4.6). Granular; water in.",
+          "ratePer1000": 3.45,
+          "rateUnit": "lb",
           "area": "Bed square feet treated.",
           "limit": "Label limit 600 lb per acre (13.8 lb per 1,000 sq ft) in 12 months: 4 applications, counting any lawn or Tree & Shrub program application. At least 60 days between applications.",
           "safety": "Technician instruction: clear existing weeds from the beds before you apply. Snapshot does not kill weeds that are already up."
@@ -2498,6 +2500,8 @@
           "soldAreaNoun": "of treated lawn",
           "requiresGrass": "st_augustine",
           "rate": "0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal of water per 1,000 sq ft. St. Augustine only.",
+          "ratePer1000": 0.147,
+          "rateUnit": "oz",
           "area": "Treated square feet: the damaged area plus the green edge.",
           "limit": "Repeat no sooner than 8 weeks. Season limit 12.8 oz per acre (0.29 oz per 1,000 sq ft): 2 applications.",
           "safety": "Technician instruction: carry the Florida FIFRA 2(ee) sheet when you apply (it expires 2028-12-31 and is on file in Staff documents)."
@@ -2523,6 +2527,8 @@
         "labelFacts": {
           "soldAreaNoun": "of lawn",
           "rate": "2 lb per 1,000 sq ft (87 lb per acre), broadcast.",
+          "ratePer1000": 2,
+          "rateUnit": "lb",
           "area": "Lawn square feet treated.",
           "limit": "Once per 12 months.",
           "safety": "Restricted-use product: only a certified applicator applies it. Closeout checks the technician's license after the visit."
@@ -2548,6 +2554,8 @@
         "labelFacts": {
           "soldAreaNoun": "of lawn",
           "rate": "0.184 fl oz per 1,000 sq ft (8 fl oz per acre).",
+          "ratePer1000": 0.184,
+          "rateUnit": "fl_oz",
           "area": "Lawn square feet treated.",
           "limit": "Once in 12 months.",
           "safety": null
@@ -2573,6 +2581,8 @@
         "labelFacts": {
           "soldAreaNoun": "of hard surface and bare ground",
           "rate": "16 fl oz in 1 gal of water per 1,000 sq ft.",
+          "ratePer1000": 16,
+          "rateUnit": "fl_oz",
           "area": "Hard-surface and bare-ground square feet treated.",
           "limit": "Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.",
           "safety": "Carries indaziflam, up to 6 months of soil residual. Technician instruction: apply to hard surfaces and bare ground only, and keep it off lawn, planted beds and the root zones of trees and shrubs. Do not walk on it until dry."
