@@ -88,6 +88,7 @@ let rootedAnswer;
 let completeError;
 let failContextAfter;
 let contextReads;
+let guideAnswer;
 
 // A stub of the admin API the sheet talks to; each context read serves the next queued context (the last repeats).
 function makeRequest() {
@@ -103,6 +104,7 @@ function makeRequest() {
       if (rootedAnswer instanceof Error) throw rootedAnswer;
       return rootedAnswer;
     }
+    if (path.includes('/lawn-fast/treatment-guide')) return guideAnswer ?? {};
     if (path.endsWith('/property-areas')) return areasAnswer;
     if (/^\/admin\/customers\/[^/]+$/.test(path)) return { customer: { email: '' } };
     if (path.endsWith('/tech-tips')) return { available: false, groups: [] };
@@ -139,6 +141,7 @@ beforeEach(() => {
   completeError = null;
   failContextAfter = Infinity;
   contextReads = 0;
+  guideAnswer = null;
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   vi.stubGlobal('FileReader', FixtureFileReader);
   vi.stubGlobal('Image', FixtureImage);
@@ -374,6 +377,26 @@ describe('the rooted tick', () => {
     });
   });
 
+  // Codex on #6240: the footer must not complete on the rows of the old holds while the tick is saved and the holds are read again.
+  test('Complete waits while the tick is saved and the holds are read again, then works on the fresh rows', async () => {
+    const HELD_BAG = { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer waits until the sod has been mowed twice and does not lift.' };
+    await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(AFTER));
+    await confirmAssessment();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    let release;
+    rootedAnswer = new Promise((resolve) => { release = () => resolve({ enabled: true, sodRootedOn: '2026-10-05', changed: true }); });
+    fireEvent.click(within(banner()).getByRole('checkbox'));
+    await waitFor(() => expect(completeButton().disabled).toBe(true));
+    expect(screen.getByText('Checking the new sod holds. Wait a moment.')).toBeTruthy();
+    fireEvent.click(completeButton());
+    expect(completeCalls()).toHaveLength(0);
+    release();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls().length).toBe(1));
+    expect(completeCalls()[0].body.products.map((p) => p.productId)).toEqual([P_NUTRA, P_BAG24]);
+  });
+
   test('a tick that saved but whose re-read failed says so, and ticking again is safe', async () => {
     failContextAfter = 1;
     await openSheet(context(DAY31));
@@ -496,3 +519,30 @@ describe('a sod record that could not be read', () => {
     expect(screen.getByRole('group', { name: 'Test 24-0-11 Bag' })).toBeTruthy();
   });
 });
+
+// Codex on #6240: a guide card that names a held product says so before its action.
+describe('a treatment-guide card for a product the new sod holds', () => {
+  const CARD = {
+    kind: 'weeds', title: 'Weed spots', finding: 'Photos show weeds on about 18% of the lawn.', check: null, detail: 'Test Celsius', note: null,
+    productIds: [P_CELSIUS], items: [addOn(P_CELSIUS, 'Test Celsius')], actionLabel: 'Add weed spots', dismissLabel: null,
+  };
+  const card = () => screen.getByRole('group', { name: 'Weed spots suggestion' });
+  const open = async (newSod) => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [CARD] };
+    await openSheet({ ...context(newSod), treatmentGuide: true });
+    await confirmAssessment();
+    await waitFor(() => expect(card()).toBeTruthy());
+  };
+
+  test('the card shows the hold reason before its action; the action still works (warn, not block)', async () => {
+    await open(WHOLE_DAY5);
+    expect(within(card()).getByText(HELD_WEED)).toBeTruthy();
+    expect(within(card()).getByRole('button', { name: 'Add weed spots' }).disabled).toBe(false);
+  });
+
+  test('no hold on the product: the card is as before', async () => {
+    await open({ ...WHOLE_DAY5, lines: { [P_BAG24]: WHOLE_DAY5.lines[P_BAG24] } });
+    expect(within(card()).queryByText(/Held: new sod/)).toBeNull();
+  });
+});
+

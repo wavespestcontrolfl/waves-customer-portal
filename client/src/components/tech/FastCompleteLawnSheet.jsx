@@ -286,6 +286,7 @@ const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 // add the swap bag and offer the rooted tick. Sent on the context reads that feed the holds and on the tick. A context read
 // without it is the legacy context, so the sheet then has no holds to show.
 const SOD_AWARE = 'sodAware=1';
+const SOD_BUSY_MESSAGE = 'Checking the new sod holds. Wait a moment.';
 const SOD_REREAD_MESSAGE = 'Saved. The sheet could not reload the holds. Tap the box again.';
 
 // What each entry of the context's `readFailures` means for the sheet:
@@ -1477,7 +1478,9 @@ function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }
 // (`sodFresh`; `undefined` = the context's own).
 function useSodHolds({ ctx, request, base, releasePlanned }) {
   const [sodFresh, setSodFresh] = useState(undefined);
-  const confirmSodRooted = useCallback(async (sodLaidOn) => {
+  // True from the tick until the holds are read again: the sheet does not complete on the rows of the old holds.
+  const [sodBusy, setSodBusy] = useState(false);
+  const saveSodRooted = useCallback(async (sodLaidOn) => {
     await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
     // The weed lines un-hold on this re-read: the server's own words, not a guess here.
     let data;
@@ -1493,7 +1496,11 @@ function useSodHolds({ ctx, request, base, releasePlanned }) {
     // A planned default the hold kept off the sheet comes back; an add-on is a plain "Add" again on its own.
     releasePlanned(releasedPlanned(uniquePlanned(ctx.planned), ctx.newSod, fresh));
   }, [request, base, ctx, releasePlanned]);
-  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, confirmSodRooted };
+  const confirmSodRooted = useCallback(async (sodLaidOn) => {
+    setSodBusy(true);
+    try { await saveSodRooted(sodLaidOn); } finally { setSodBusy(false); }
+  }, [saveSodRooted]);
+  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, confirmSodRooted, sodBusy };
 }
 
 function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
@@ -1506,7 +1513,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads them again (`undefined` = the context's own).
-  const { newSod, confirmSodRooted } = useSodHolds({ ctx, request, base, releasePlanned: products.releasePlanned });
+  const { newSod, confirmSodRooted, sodBusy } = useSodHolds({ ctx, request, base, releasePlanned: products.releasePlanned });
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
@@ -1626,7 +1633,8 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   });
 
   const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
-  const missingReason = missingRequirement({ noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
+  const missingReason = sodBusy ? SOD_BUSY_MESSAGE : missingRequirement({ noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
@@ -1796,7 +1804,7 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
         </React.Fragment>
       ))}
       {areas && <KnownTroubleAreas known={areas.known} unavailable={areas.knownUnavailable} locked={locked} clear={onClearArea} />}
-      <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} areas={areas} onWeedPlace={onWeedPlace} />
+      <TreatmentGuide newSod={newSod} guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} areas={areas} onWeedPlace={onWeedPlace} />
       {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
       <HeldLines items={splitHeldPlanned(uniquePlanned(ctx.planned), newSod).held} newSod={newSod} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       <ProtocolAddOns newSod={newSod} addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} areas={areas} onWeedPlace={onWeedPlace} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} markChinch={ctx.lawnReportTies ? { tapped: chinchTap, onTap: onChinchTap } : null} />
@@ -2035,7 +2043,13 @@ const cardOnSheet = (card, on) => {
 // check asks the tech to do it first: "Found at the edge. Add it" opens the product as a spot row (the
 // same path as a single add-on tap) and "Nothing found" dismisses the card. The weed card is the
 // Weed spots entry's own tap. Nothing is added by itself.
-function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd, areas = null, onWeedPlace }) {
+// The new-sod words for a guide card: the hold reason (or the part-of-lawn note) of every product the card can add, each once.
+function sodCardWords(card, newSod) {
+  const items = [...(card.items || []), ...Object.values(card.byPlace || {}).flatMap((decision) => decision?.items || [])];
+  return [...new Set(items.map((item) => sodWords(sodLineOf(newSod, item.productId))).filter(Boolean))];
+}
+
+function TreatmentGuide({ newSod = null, guide, checks, onCheck, rows, catalog, locked, onAdd, areas = null, onWeedPlace }) {
   const titleId = useId();
   const cards = guideCardsOf(guide);
   if (!cards) return null;
@@ -2082,6 +2096,8 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd, 
             {card.detail && <p className="tech-visit-muted">{card.detail}</p>}
             {gateNotesOf(card.items).map((gateNote) => <p key={gateNote} className="tech-visit-muted">{gateNote}</p>)}
             {card.note && <p className="tech-visit-muted" role="status">{card.note}</p>}
+            {/* GATE_LAWN_NEW_SOD_NOTE: what the new-sod holds say about a product this card names, before its action. */}
+            {!onSheet && sodCardWords(card, newSod).map((words) => <p key={words} className="tech-visit-status--warn" role="status">{words}</p>)}
             {placeSets(card, areas).map((line) => <p key={line} className="tech-visit-muted">{line}</p>)}
             {/* A check-only card (take-all, no trouble area on file) has no product to add. */}
             <div className="tech-guide-actions">
