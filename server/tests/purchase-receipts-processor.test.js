@@ -121,7 +121,10 @@ describe('lineDisposition', () => {
 
   test('an unmatched held line keeps its own classification, and is never handed to the agent', () => {
     const unmatched = { status: 'unmatched', productId: null };
-    expect(lineDisposition(unmatched, { holdAs: 'returned' }, { agentOn: true })).toBe(unmatched);
+    expect(lineDisposition(unmatched, { holdAs: 'returned' }, { agentOn: true }))
+      .toEqual({ status: 'unmatched', productId: null, unmatchedHold: 'returned' });
+    expect(lineDisposition(unmatched, { holdAs: 'unverified' }, { agentOn: true }))
+      .toEqual({ status: 'unmatched', productId: null, unmatchedHold: 'unverified' });
   });
 
   test('with the agent on, the three statuses it resolves are handed off, keeping where they came from', () => {
@@ -252,6 +255,41 @@ describe('classifyItem — SiteOne invoice descriptions', () => {
 
   test('a unit of measure other than EA (a case) is a pack claim -> size_mismatch', async () => {
     expect(await classifyItem({ title: 'CSI-Pest Taurus SC 78 fl oz. Bottle (QGCY) UOM:CS', quantity: 1 })).toMatchObject({ status: 'size_mismatch' });
+  });
+});
+
+// A real SiteOne invoice: "6.2 G" is the granular
+// formulation code, "500 GM." is grams.
+describe('classifyItem — granular formulation codes and "GM"', () => {
+  const granular = (containerSize) => ({ matched: true, product: { id: 'p-gran', name: 'Dylox 6.2 G Granular Insecticide', container_size: containerSize } });
+
+  test('"6.2 G" ahead of the bag size on a granular title is not a second size', async () => {
+    mockState.match = granular('30 lb');
+    expect(await classifyItem({ title: 'DYLOX 6.2 G CONTACT GRANULAR INSECTICIDE 30 LB. BAG', quantity: 2 }))
+      .toMatchObject({ status: 'logged', receivedQty: 60, receivedUnit: 'lb' });
+  });
+
+  test.each([
+    ['no granular wording', 'Dylox 6.2 G Contact Insecticide 30 LB. BAG', '30 lb'],
+    ['a later weight under 100 times bigger', 'Granular Bait 30 g Station 5 lb', '5 lb'],
+    ['the gram claim after the big one', 'Granular Insecticide 30 LB. BAG 6.2 G', '30 lb'],
+    ['grams spelled out', 'Granular Insecticide 6.2 grams 30 LB. BAG', '30 lb'],
+    ['a number of 100 or more', 'Granular Insecticide 100 G 50 LB. BAG', '50 lb'],
+  ])('a gram claim stays a real, conflicting size with %s', async (_label, title, containerSize) => {
+    mockState.match = granular(containerSize);
+    expect(await classifyItem({ title, quantity: 1 })).toMatchObject({ status: 'size_mismatch' });
+  });
+
+  test('a description that carries UOM:BG sizes like one that carries UOM:EA', async () => {
+    mockState.match = { matched: true, product: { id: 'p-dim', name: 'LESCO Dimension 0.21% 18-0-10', container_size: '50 lb' } };
+    expect(await classifyItem({ title: 'LESCO DIMENSION 0.21% 18-0-10 PRE-EMERGENT GRANULAR HERBICIDE PLUS FERTILIZER 50 LB. BAG UOM:BG', quantity: 3 }))
+      .toMatchObject({ status: 'logged', receivedQty: 150, receivedUnit: 'lb' });
+  });
+
+  test('"500 GM." reads as 500 grams', async () => {
+    mockState.match = { matched: true, product: { id: 'p-wsg', name: 'Alpine WSG', container_size: '500 g' } };
+    expect(await classifyItem({ title: 'ANTAPEX WSG WATER DISPERSIBLE GRANULE (WDG/WG) INSECTICIDE 500 GM. BOTTLE', quantity: 1 }))
+      .toMatchObject({ status: 'logged', receivedQty: 500, receivedUnit: 'g' });
   });
 });
 

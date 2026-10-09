@@ -14,7 +14,15 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockState = { outcomes: [], emails: [], whereCalls: [], siteOneEmails: [], siteOneInvoice: null, otherCopy: undefined, copyBeforeCutoff: undefined };
 // Like the real processor, a recorded outcome's bell is rung through the
 // ringBell callback on the line's transaction ('trx-stub' here).
+// raiseAdminAlert (the unmatched-unverified bell) rings through the real
+// notification service, required at call time; every other bell here goes
+// through the notifier each test injects.
+const mockNotifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
 jest.mock('../services/purchase-receipts/receipt-processor', () => ({
+  // The pure title parsers the sweep's own unit check reads stay real.
+  parseMultipack: jest.requireActual('../services/purchase-receipts/receipt-processor').parseMultipack,
+  PACK_CLAIM_RE: jest.requireActual('../services/purchase-receipts/receipt-processor').PACK_CLAIM_RE,
   processReceiptLine: jest.fn(async (params) => {
     const outcome = mockState.outcomes.shift();
     if (outcome?.status) await params.ringBell(outcome, 'trx-stub');
@@ -69,6 +77,7 @@ function openGates() {
 }
 
 beforeEach(() => {
+  mockNotifyAdmin.mockClear();
   mockState.outcomes = [];
   mockState.emails = [];
   mockState.whereCalls = [];
@@ -384,6 +393,80 @@ describe('SiteOne invoices in the sweep', () => {
     mockState.outcomes = [{ status: 'unverified', product: taurus, inserted: true, lineId: 'line-s1' }];
     await run();
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ lineNo: 1, holdAs: 'unverified' });
+  });
+
+  test.each([
+    ['a title that names one bag', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent Granular Herbicide Plus Fertilizer 50 LB. BAG', undefined],
+    ['a title that names no bag', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent Granular Herbicide Plus Fertilizer 50 LB.', 'unverified'],
+    ['a title that names several bags', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 4 Bags 50 LB. BAG', 'unverified'],
+    ['a title with a pack marker', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 2-Pack 50 LB. BAG', 'unverified'],
+    ['a title with count wording', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 50 LB. BAG (2)', 'unverified'],
+    ['a description that also says UOM:BG', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 50 LB. BAG UOM:BG', undefined],
+  ])('a reconciled line sold by the bag (BG) on %s', async (_label, title, holdAs) => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines: [{ title, quantity: 3, lineNo: 1, uom: 'BG' }] };
+    mockState.outcomes = [{ status: 'unmatched', product: null, inserted: true, lineId: 'line-s1' }];
+    await run();
+    expect(processReceiptLine.mock.calls[0][0].holdAs).toBe(holdAs);
+  });
+
+  test('an unverified line no catalog product matches still rings a bell that names it', async () => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines: [{ title: 'Some Granular Herbicide Plus Fertilizer', quantity: 3, lineNo: 1, uom: 'CS' }] };
+    mockState.outcomes = [{ status: 'unmatched', product: null, inserted: true, lineId: 'line-s1', unmatchedHold: 'unverified' }];
+    const notify = jest.fn(async () => ({}));
+    await runPurchaseReceiptRestockSweep({ notify });
+    // Raised through raiseAdminAlert, not the lane's injected notifier.
+    expect(notify).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, options] = mockNotifyAdmin.mock.calls[0];
+    expect([category, title]).toEqual(['inventory', 'Inventory — log a SiteOne invoice line by hand']);
+    expect(body).toBe('3 × Some Granular Herbicide Plus Fertilizer matched no catalog product and its unit could not be checked.');
+    expect(options).toMatchObject({
+      bell: true, dedupeKey: 'purchase-receipt:line-s1', trx: 'trx-stub', link: '/admin/inventory?tab=products',
+      detail: expect.stringContaining('SiteOne invoice 900000001-001: "Some Granular Herbicide Plus Fertilizer" ×3 wasn\'t added.'),
+      metadata: {
+        status: 'unmatched', unmatchedHold: 'unverified', area: 'Inventory', severity: 'needs-you', who: 'person',
+        subject: { type: 'check', id: 'purchase-receipt:line-s1' }, doneWhen: 'line_logged_by_hand',
+      },
+    });
+  });
+
+  test('a title that would break the one-sentence rule names the invoice instead, and keeps the title in detail', async () => {
+    const title = 'LESCO DIMENSION 0.21% 18-0-10 50% POLYPLUS OPTI45 MOP PRE-EMERGENT GRANULAR HERBICIDE PLUS FERTILIZER 50 LB. BAG';
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines: [{ title: '50 LB. BAG Granular Herbicide', quantity: 1, lineNo: 1, uom: 'CS' }, { title, quantity: 3, lineNo: 2, uom: 'CS' }] };
+    mockState.outcomes = [
+      { status: 'unmatched', product: null, inserted: true, lineId: 'line-s1', unmatchedHold: 'unverified' },
+      { status: 'unmatched', product: null, inserted: true, lineId: 'line-s2', unmatchedHold: 'unverified' },
+    ];
+    await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
+    expect(mockNotifyAdmin.mock.calls[0][2]).toBe('A line on SiteOne invoice 900000001-001 matched no catalog product and its unit could not be checked.');
+    expect(mockNotifyAdmin.mock.calls[1][2]).toMatch(/^3 × LESCO DIMENSION 0\.21% 18-0-10 50% POLYPLUS.* matched no catalog product and its unit could not be checked\.$/);
+    expect(mockNotifyAdmin.mock.calls[1][2].length).toBeLessThanOrEqual(110);
+    expect(mockNotifyAdmin.mock.calls[1][3].detail).toContain(`"${title}" ×3`);
+  });
+
+  test('an unmatched Amazon item with an unreadable quantity stays silent', async () => {
+    mockState.outcomes = [{ status: 'unmatched', product: null, inserted: true, lineId: 'line-a1', unmatchedHold: 'unverified' }];
+    const notify = jest.fn(async () => ({}));
+    await processReceiptEmail({ ...deliveredEmail, body_text: 'Order # 900-1000001-1000001\n\n* Desk Lamp\n  Quantity: unknown\n' }, { notify });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ holdAs: 'unverified' });
+    expect(notify).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an unmatched line with no hold', undefined],
+    ['an unmatched return', 'returned'],
+  ])('%s rings nothing', async (_label, unmatchedHold) => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines: [{ title: 'Nitrile Gloves', quantity: 1, lineNo: 1, uom: 'EA' }] };
+    mockState.outcomes = [{ status: 'unmatched', product: null, inserted: true, lineId: 'line-s1', ...(unmatchedHold ? { unmatchedHold } : {}) }];
+    const notify = jest.fn(async () => ({}));
+    await runPurchaseReceiptRestockSweep({ notify });
+    expect(notify).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('an invoice never read into lines gets one unreadable placeholder and a bell', async () => {
