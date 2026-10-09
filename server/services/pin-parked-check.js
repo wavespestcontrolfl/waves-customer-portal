@@ -47,6 +47,8 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const LOG = '[pin-parked-check]';
 const REPORT_MIN_STOP_MINUTES = 10;
 const MAX_STOP_DISTANCE_M = 1500;
+// How far back a visit's scheduled or worked day may be before its truck evidence is not read (the visit is skipped).
+const MAX_LOOKBACK_DAYS = 7;
 const HOME_LOOKBACK_DAYS = 30;
 const HOME_MIN_DAYS = 3;
 const FENCE_TYPES = ['business', 'personal', 'supplier'];
@@ -81,7 +83,7 @@ async function loadCompletedVisits(conn, { fromMs, toMs }) {
     .whereRaw("NULLIF(btrim(t.bouncie_imei), '') IS NOT NULL")
     .orderBy('s.completed_at', 'desc').orderBy('s.id')
     .select(
-      's.id', 's.customer_id', 's.technician_id', 's.visit_id', 's.property_id', 's.completed_at',
+      's.id', 's.customer_id', 's.technician_id', 's.visit_id', 's.property_id', 's.completed_at', 's.en_route_at', 's.arrived_at',
       conn.raw('s.scheduled_date::text as scheduled_day'),
       's.lat as service_lat', 's.lng as service_lng',
       's.service_address_line1', 's.service_address_city', 's.service_address_zip',
@@ -159,10 +161,25 @@ async function loadHomeBase(conn, imei, now) {
 
 // ---------- the flag rules (pure) ----------
 
-/** The days a visit's stops may come from: its scheduled ET day and the ET day it was completed. */
+/**
+ * The ET days a visit's truck evidence may come from: the day it was scheduled and every day it was worked
+ * (en route, arrived, completed). A visit done on one day and closed out on a later one needs both.
+ */
 function visitDays(visit) {
-  return [...new Set([String(visit.scheduled_day || '').slice(0, 10), etDateString(new Date(visit.completed_at))]
-    .filter(Boolean))];
+  const stamped = ['en_route_at', 'arrived_at', 'completed_at'].map((key) => (visit[key] ? etDateString(new Date(visit[key])) : null));
+  return [...new Set([String(visit.scheduled_day || '').slice(0, 10), ...stamped].filter(Boolean))];
+}
+
+/**
+ * The days of a visit that must be read before it can be judged: its visitDays up to today (a day still ahead has
+ * no truck data to read). `tooOld` when any of them is before the lookback cap: that evidence is not loaded, so the
+ * visit is not judged at all.
+ */
+function requiredDays(visit, now) {
+  const today = etDateString(now);
+  const cap = etDateString(addETDays(now, -MAX_LOOKBACK_DAYS));
+  const days = visitDays(visit).filter((day) => day <= today);
+  return { days, tooOld: days.some((day) => day < cap) };
 }
 
 /** Where the visit was supposed to be: its own pin, else the customer's. Null for another property or no pin. */
@@ -409,23 +426,34 @@ const neighbourPins = (visit, visits) => visits
 
 const tallyKey = (tally, key) => { tally[key] = (tally[key] || 0) + 1; };
 
-/** Each vehicle's stops and home base, read once. A vehicle whose stops cannot be read maps to null. */
+/**
+ * Each vehicle's stops and home base. One paged read per vehicle over the union of every day its visits need
+ * (visitDays, capped at MAX_LOOKBACK_DAYS back). A vehicle whose stops cannot be read maps to null; a vehicle
+ * none of whose visits can be judged is not read at all.
+ */
 async function loadVehicles(conn, visits, window) {
   const vehicles = new Map();
   for (const imei of new Set(visits.map((visit) => visit.bouncie_imei))) {
-    const stops = await stopsFor(conn, imei, window);
+    const needed = visits.filter((visit) => visit.bouncie_imei === imei)
+      .map((visit) => requiredDays(visit, window.now)).filter((r) => !r.tooOld).flatMap((r) => r.days).sort();
+    if (!needed.length) { vehicles.set(imei, { stops: [], home: null }); continue; }
+    const stops = await stopsFor(conn, imei, { ...window, fromMs: etDayBounds(needed[0]).startMs });
     vehicles.set(imei, stops ? { stops, home: await loadHomeBase(conn, imei, window.now).catch(() => null) } : null);
   }
   return vehicles;
 }
 
-/** One verdict per visit, judged against its own technician's truck. An unreadable vehicle is `unknown`, not "no stop". */
-function judgeVisits(visits, vehicles, { radius, fences }) {
+/**
+ * One verdict per visit, judged against its own technician's truck. A visit whose truck data could not be read, or
+ * one of whose required days is before the lookback cap, is `unknown`: no suggestion, nothing closed from it.
+ */
+function judgeVisits(visits, vehicles, { radius, fences, now }) {
   return visits.map((visit) => {
     const vehicle = vehicles.get(visit.bouncie_imei);
+    const required = requiredDays(visit, now);
+    if (required.tooOld) return { visit, verdict: { flag: false, reason: 'days_not_loaded', unknown: true } };
     if (!vehicle) return { visit, verdict: { flag: false, reason: 'stops_unreadable', unknown: true } };
-    const mine = visitDays(visit);
-    const stops = vehicle.stops.filter((stop) => mine.includes(etDateString(new Date(stop.startMs))));
+    const stops = vehicle.stops.filter((stop) => required.days.includes(etDateString(new Date(stop.startMs))));
     const context = { home: vehicle.home, fences, neighbours: neighbourPins(visit, visits) };
     return { visit, verdict: judgeVisit({ visit, stops, radius, context }) };
   });
@@ -476,7 +504,7 @@ async function runPinParkedCheck({ now = new Date(), conn = db } = {}) {
   const openByCustomer = new Map((await conn('customer_pin_suggestions').where({ status: 'open' }).select(store.COLUMNS))
     .map((row) => [String(row.customer_id), row]));
   const vehicles = await loadVehicles(conn, visits, window);
-  const judged = judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn) });
+  const judged = judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn), now });
   for (const { verdict } of judged) tallyKey(tally, verdict.flag ? 'flagged' : verdict.reason);
   const byCustomer = new Map();
   for (const j of judged) byCustomer.set(String(j.visit.customer_id), [...(byCustomer.get(String(j.visit.customer_id)) || []), j]);
@@ -496,7 +524,7 @@ module.exports = {
   runPinParkedCheck,
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
-    alertDetail, settledReason, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    alertDetail, settledReason, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

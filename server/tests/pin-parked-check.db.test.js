@@ -470,6 +470,82 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     });
   });
 
+  describe('the truck evidence covers every day the decision uses', () => {
+    const loader = () => jest.spyOn(require('../services/bouncie-truck-stops'), 'loadTruckStops');
+    // Scheduled and worked on Oct 7, closed out on Oct 8 (the window is Oct 8 and 9).
+    const LATE_CLOSE = { scheduled_date: '2026-10-07', completed_at: new Date('2026-10-08T15:30:00Z') };
+
+    test("a visit done on Oct 7 and closed on Oct 8 is judged by its real Oct 7 stop, not an unrelated Oct 8 one", async () => {
+      const spy = loader();
+      try {
+        const techId = await technician();
+        const customerId = await customer();
+        await completedVisit(customerId, techId, LATE_CLOSE);
+        await truckStopsAt(north(40), 30, { at: '2026-10-07T14:20:00Z' }); // the real visit, at the pin
+        await truckStopsAt(north(540), 30); // Oct 8: the truck was somewhere nearby for another reason
+        const result = await run();
+        expect(result).toMatchObject({ created: 0, stop_at_pin: 1 });
+        expect(await all(customerId)).toHaveLength(0);
+        // One read for the vehicle, from the start of the earliest day needed (Oct 7, 00:00 ET).
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy.mock.calls[0][2].fromMs).toBe(Date.parse('2026-10-07T04:00:00Z'));
+      } finally { spy.mockRestore(); }
+    });
+
+    test('the day the technician arrived counts too', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, { arrived_at: new Date('2026-10-07T14:30:00Z') });
+      await truckStopsAt(north(40), 30, { at: '2026-10-07T14:20:00Z' });
+      await truckStopsAt(north(540), 30);
+      expect((await run()).created).toBe(0);
+    });
+
+    test('with no stop at the pin on the extra day, the visit is judged as before', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, LATE_CLOSE);
+      await truckStopsAt(north(540), 30);
+      expect((await run()).created).toBe(1);
+    });
+
+    test('seven days back is read; eight is not, and that visit gets no suggestion and closes nothing', async () => {
+      const spy = loader();
+      try {
+        const techId = await technician();
+        const readable = await customer();
+        await completedVisit(readable, techId, { scheduled_date: '2026-10-02', completed_at: new Date('2026-10-08T15:30:00Z') });
+        await truckStopsAt(north(40), 30, { at: '2026-10-02T14:20:00Z' });
+        await truckStopsAt(north(540), 30);
+        expect((await run()).created).toBe(0); // the Oct 2 stop at the pin was read
+        expect(spy.mock.calls[0][2].fromMs).toBe(Date.parse('2026-10-02T04:00:00Z'));
+      } finally { spy.mockRestore(); }
+
+      const stale = await customer();
+      await completedVisit(stale, (await technician('TESTIMEI0003')), { scheduled_date: '2026-10-01', completed_at: new Date('2026-10-08T15:30:00Z') });
+      await truckStopsAt(north(540), 30, { imei: 'TESTIMEI0003' }); // would look like an off-pin stop
+      const [made] = await mockPg('customer_pin_suggestions').insert({
+        customer_id: stale, visit_date: '2026-10-08', pin_lat: PIN.lat, pin_lng: PIN.lng, parked_lat: 1, parked_lng: 1, distance_m: 1, stop_minutes: 1,
+      }).returning('id');
+      const result = await run();
+      expect(result).toMatchObject({ days_not_loaded: 1 });
+      expect((await mockPg('customer_pin_suggestions').where({ id: made.id }).first()).status).toBe('open'); // nothing closed
+      expect(await all(stale)).toHaveLength(1); // and nothing created
+    });
+
+    test('a vehicle none of whose visits can be judged is not read at all', async () => {
+      const spy = loader();
+      try {
+        const techId = await technician();
+        const customerId = await customer();
+        await completedVisit(customerId, techId, { scheduled_date: '2026-09-20', completed_at: new Date('2026-10-08T15:30:00Z') });
+        await truckStopsAt(north(540), 30);
+        expect(await run()).toMatchObject({ created: 0, days_not_loaded: 1 });
+        expect(spy).not.toHaveBeenCalled();
+      } finally { spy.mockRestore(); }
+    });
+  });
+
   describe('one decision per customer, from every visit in the window', () => {
     const OLD_VISIT = {}; // Oct 8, 11:30 ET, truck parked 540 m away at 10:20 ET
     const NEW_VISIT = { scheduled_date: '2026-10-09', completed_at: new Date('2026-10-09T11:00:00Z') }; // Oct 9, 7:00 ET

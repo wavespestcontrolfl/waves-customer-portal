@@ -139,6 +139,29 @@ describe('days, grouped visits and neighbours', () => {
     expect(p.visitDays(visit({ scheduled_day: '2026-10-08', completed_at: new Date('2026-10-09T01:30:00Z') }))).toEqual(['2026-10-08']);
   });
 
+  test('every day a visit was scheduled or worked is a day of evidence (en route, arrived, completed)', () => {
+    const days = p.visitDays(visit({
+      scheduled_day: '2026-10-06', en_route_at: new Date('2026-10-07T13:00:00Z'), arrived_at: new Date('2026-10-07T14:00:00Z'),
+      completed_at: new Date('2026-10-08T15:30:00Z'),
+    }));
+    expect(days.sort()).toEqual(['2026-10-06', '2026-10-07', '2026-10-08']);
+  });
+
+  describe('requiredDays: what must be read before a visit can be judged', () => {
+    const NOW = new Date('2026-10-09T12:00:00Z');
+    test('a visit done on Oct 7 and closed out on Oct 8 needs both days', () => {
+      const r = p.requiredDays(visit({ scheduled_day: '2026-10-07', completed_at: new Date('2026-10-08T15:30:00Z') }), NOW);
+      expect(r).toEqual({ days: ['2026-10-07', '2026-10-08'], tooOld: false });
+    });
+    test('7 days back is still loaded; 8 is not, and the visit is not judged', () => {
+      expect(p.requiredDays(visit({ scheduled_day: '2026-10-02' }), NOW).tooOld).toBe(false);
+      expect(p.requiredDays(visit({ scheduled_day: '2026-10-01' }), NOW).tooOld).toBe(true);
+    });
+    test('a day still ahead has no truck data to read and is not required', () => {
+      expect(p.requiredDays(visit({ scheduled_day: '2026-10-12' }), NOW).days).toEqual(['2026-10-08']);
+    });
+  });
+
   test('grouped partners (one visit_id) are ONE visit', () => {
     const rows = [visit({ id: 'a', visit_id: 'v1' }), visit({ id: 'b', visit_id: 'v1' }), visit({ id: 'c', visit_id: null }), visit({ id: 'd', visit_id: null })];
     expect(p.oneRowPerVisit(rows).map((r) => r.id)).toEqual(['a', 'c', 'd']);
