@@ -4708,6 +4708,28 @@ router.get('/:lawnFastServiceId/lawn-fast/treatment-guide', async (req, res, nex
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear
+// A technician clears one known trouble area of the visit's lawn (the sheet's Clear, after its confirm). Dark behind
+// GATE_LAWN_TROUBLE_AREAS (404 {enabled:false} while off, nothing read or written). The area must be an ACTIVE one of the
+// visit's own property, so an id from another lawn clears nothing (404). Technician and office only; no customer text, no
+// report change. See services/lawn-trouble-areas.js.
+router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').lawnTroubleAreasLive()) return res.status(404).json({ enabled: false });
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const visit = await db('scheduled_services').where({ id: serviceId }).first('id', 'property_id', 'status');
+    if (!visit) return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    const cleared = await require('../services/lawn-trouble-areas').clearArea(db, {
+      areaId: req.params.areaId,
+      propertyId: visit.property_id,
+      technicianId: req.technicianId || null,
+    });
+    if (!cleared) return res.status(404).json({ error: 'That trouble area is not on this lawn.', code: 'trouble_area_not_found' });
+    res.json({ enabled: true, cleared: { id: cleared.id, place: cleared.place, type: cleared.type } });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip
 // multipart: audio (the recording), sheet: 'pest_reservice', duration_seconds
 // Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL). Owner

@@ -65,7 +65,15 @@ function sizingNote(unsized, estimated) {
 // visit's own ledger rows out. `table` is the history table or its alias in the query.
 // A row whose property is unknown (no visit, or a visit with no property) cannot be proven
 // elsewhere, so it still counts. No option, no change.
-function scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId } = {}, table) {
+// GATE_LAWN_TROUBLE_AREAS: `place` narrows the history to one place of the lawn. A row with no place on
+// record (every row before the gate, and every whole-lawn row) counts at EVERY place, so it stays in.
+// Ignored unless the gate is live, so a caller cannot change a gate-off read by passing one.
+function scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId, place } = {}, table) {
+  if (place && require('../config/feature-gates').lawnTroubleAreasLive()) {
+    query.where(function placedHereOrUnplacedInLawn() {
+      this.whereNull(`${table}.treated_place`).orWhere(`${table}.treated_place`, place);
+    });
+  }
   if (propertyId) {
     // The row's treated property is the one frozen on the ledger when it was written (an address
     // correction on the visit later must not move it). A row placed elsewhere is out; a legacy row
@@ -104,6 +112,10 @@ class ApplicationLimitChecker {
   // history and the shared cap, for a plan rebuilt after the visit completed. opts.propertyId
   // limits both to the treated property (no property: every property of the customer).
   // Both read applications up to the proposed ET day only.
+  // opts.place (GATE_LAWN_TROUBLE_AREAS; a place id of lawn-trouble-areas.js) judges the product's own history, its yearly
+  // count and its minimum interval (and the v13 yearly amount) at that PLACE of the lawn: the rows placed elsewhere on the
+  // lawn are left out, a row with no place on record still counts. The shared active-ingredient cap, the MOA rotation and
+  // every limit that is not about this product's own applications stay lawn-wide.
   async checkLimits(customerId, productId, proposedDate = new Date(), database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };
@@ -354,7 +366,7 @@ class ApplicationLimitChecker {
       .whereNull('pah.retracted_at')
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
         'pah.property_id', 'pah.service_record_id', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
-    scopeHistoryToTreatment(query, database, { propertyId: ctx.propertyId, excludeScheduledServiceId: ctx.excludeScheduledServiceId }, 'pah');
+    scopeHistoryToTreatment(query, database, { propertyId: ctx.propertyId, excludeScheduledServiceId: ctx.excludeScheduledServiceId, place: ctx.place }, 'pah');
     const { share: used, estimated } = await this.lawnAmountShare(database, await query, limit, { propertyId: ctx.propertyId });
     const cap = Number(limit.limit_value);
     const amountUsed = Math.round(used * cap * 10000) / 10000;
@@ -536,7 +548,7 @@ class ApplicationLimitChecker {
     const base = () => database('property_application_history as pah').leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id');
     const others = await scopeHistoryToTreatment(yearRows(base()), database, opts, 'pah');
     const own = opts.excludeScheduledServiceId
-      ? await scopeHistoryToTreatment(yearRows(base()), database, { propertyId: opts.propertyId }, 'pah')
+      ? await scopeHistoryToTreatment(yearRows(base()), database, { propertyId: opts.propertyId, place: opts.place }, 'pah')
         .whereIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
       : [];
     // Per lawn: with no treated property the busiest property of the customer is judged (this visit's rows count where it was done).

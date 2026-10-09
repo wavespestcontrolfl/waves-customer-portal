@@ -82,6 +82,8 @@ const { buildCompletionAdvisory, approvedReportProductFacts, withApplicationHold
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+// GATE_LAWN_TROUBLE_AREAS, read at call time (lawn-trouble-areas.js).
+const lawnTroubleAreasLive = () => require('../config/feature-gates').lawnTroubleAreasLive();
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
@@ -1998,10 +2000,11 @@ async function hardLimitedProductNames(database, ids) {
 // interval are reported separately), or one 'unavailable' finding when the audit read fails. The audit
 // covers the whole calendar year of the service date and the nearest applications on both sides,
 // so a backdated closeout is judged against the applications recorded after it too.
-async function productLimitFindings({ svc, productId, productName, serviceDate, database }) {
+async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null }) {
   try {
+    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries a place is audited at that place (the yearly limits are per place).
     const violations = await savepointRead(database, (k) => require('../services/application-limits')
-      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }));
+      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id, ...(place ? { place } : {}) }));
     return violations.map((violation) => overLimitFinding(productId, productName, violation));
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
@@ -2011,7 +2014,7 @@ async function productLimitFindings({ svc, productId, productName, serviceDate, 
 
 // Every finding for the products a closeout recorded (ids from its ledger rows or its submitted
 // list). Never throws: a failed batch read is one 'unavailable' finding.
-async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db } = {}) {
+async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db, places = null } = {}) {
   if (!svc || require('../config/feature-gates').lawnV13Live?.() !== true) return [];
   if (detectServiceLine(svc.service_type) !== 'lawn') return [];
   const ids = [...new Set((productIds || []).filter(Boolean).map(String))].filter((id) => UUID_SHAPE.test(id));
@@ -2026,7 +2029,7 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
   const day = serviceDateOnly(serviceDate || svc.scheduled_date);
   const findings = [];
   for (const [productId, productName] of limited) {
-    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database }));
+    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database, place: places?.get(String(productId)) || null }));
   }
   return findings;
 }
@@ -2039,13 +2042,16 @@ async function recordedProductLimitFindings({ svc, record, database = db } = {})
   if (!svc || !record?.id) return [];
   if (require('../config/feature-gates').lawnV13Live?.() !== true || detectServiceLine(svc.service_type) !== 'lawn') return [];
   try {
+    // GATE_LAWN_TROUBLE_AREAS: the place each spot application was recorded at, so the audit judges it there.
+    const placed = require('../config/feature-gates').lawnTroubleAreasLive();
     const rows = await savepointRead(database, (k) => k('property_application_history')
-      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id'));
+      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place'] : ['product_id'])));
     return await submittedProductLimitFindings({
       svc,
       productIds: (rows || []).map((row) => row.product_id),
       serviceDate: serviceDateOnly(record.service_date),
       database,
+      ...(placed ? { places: new Map((rows || []).filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
     });
   } catch (err) {
     logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
@@ -4712,6 +4718,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           isIncompleteVisit,
           expectedVisit,
           lawnFast,
+          products,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(
@@ -7953,6 +7960,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
+            // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went (lawn-trouble-areas.js), beside the product record and,
+            // through the ledger writer, on the application ledger. Only a spot row, only a closed-list place; the key is not
+            // written at all otherwise, so a gate-off insert is the same statement as before.
+            if (lawnTroubleAreasLive() && serviceProductCols.treated_place) {
+              const place = require('../services/lawn-trouble-areas').storedPlace(applicationMethod, typeof p.areaPlace === 'string' ? p.areaPlace.trim() : null);
+              if (place) serviceProductInsert.treated_place = place;
+            }
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
             insertedServiceProducts.push(serviceProduct);
 
@@ -7996,6 +8010,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
+          // GATE_LAWN_TROUBLE_AREAS: the lawn's trouble-area store, from the spot rows that carry a place. Secondary to the
+          // completion: a failed write is logged and the visit still saves (savepointScope keeps the transaction usable).
+          if (lawnTroubleAreasLive() && insertedServiceProducts.some((sp) => sp.treated_place)) {
+            const areas = require('../services/lawn-trouble-areas');
+            try {
+              await savepointScope(trx, (k) => areas.recordFromCompletion(k, {
+                svc,
+                record,
+                rows: areas.areaRowsOf({ requestRows: products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById }),
+              }));
+            } catch (err) {
+              logger.warn(`[dispatch] trouble-area store write failed (non-blocking) for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+            }
+          }
         }
 
         // Ledger row: legacy = completed WaveGuard visits with a structured

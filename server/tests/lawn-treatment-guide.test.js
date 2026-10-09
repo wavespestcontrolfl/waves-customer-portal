@@ -466,6 +466,55 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
     expect(engine.v13VisitLimits).not.toHaveBeenCalled();
   });
 
+  // GATE_LAWN_TROUBLE_AREAS: the same ladder at each place of the lawn.
+  describe('with places', () => {
+    const PLACES = ['front', 'back', 'left_side', 'right_side'];
+    const withPlaces = () => resolveChinch({ svc, structured: STRUCTURED, knex: fakeKnex(ROWS()), places: PLACES });
+    const cappedAt = (...places) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(!options?.place || places.includes(options.place) ? [[P_ARENA, CAP]] : []), warnings: [], blocks: [],
+    }));
+
+    test('no places asked: no byPlace, and the limit reader gets the five arguments it always did', async () => {
+      const found = await run();
+      expect('byPlace' in found).toBe(false);
+      expect(engine.v13VisitLimits.mock.calls.every((call) => call.length === 5)).toBe(true);
+    });
+
+    test('nothing capped: every place takes Arena and the reader is asked once', async () => {
+      const found = await withPlaces();
+      expect(Object.keys(found.byPlace)).toEqual(PLACES);
+      for (const place of PLACES) expect(found.byPlace[place]).toMatchObject({ productId: P_ARENA, note: null });
+      expect(found).toMatchObject({ productId: P_ARENA });
+      expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);
+    });
+
+    test('Arena at its yearly count at the front only: the front gets the bifenthrin product, the others Arena; the top level is the first place with a product', async () => {
+      cappedAt('front');
+      const found = await withPlaces();
+      expect(found.byPlace.front).toMatchObject({ productId: P_TALAK, note: 'Arena yearly limit reached; Atticus is used in its place.', blockedIds: [P_ARENA] });
+      expect(found.byPlace.back).toMatchObject({ productId: P_ARENA, note: null });
+      expect(found).toMatchObject({ productId: P_TALAK });
+      expect(engine.v13VisitLimits.mock.calls.map((call) => call[5]?.place)).toEqual([undefined, 'front', 'back', 'left_side', 'right_side']);
+    });
+
+    test('both rungs capped at every place: nothing anywhere, and why', async () => {
+      engine.v13VisitLimits.mockImplementation(async () => ({ capped: new Map([[P_ARENA, CAP], [P_TALAK, CAP]]), warnings: [], blocks: [] }));
+      const found = await withPlaces();
+      for (const place of PLACES) expect(found.byPlace[place]).toMatchObject({ productId: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.' });
+      expect(found).toMatchObject({ productId: null });
+    });
+
+    test('a place whose limit read throws is unreadable for that place (never "open"), the others judge on their own', async () => {
+      engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+        if (options?.place === 'back') throw new Error('db down');
+        return { capped: new Map([[P_ARENA, CAP]]), warnings: [], blocks: [] };
+      });
+      const found = await withPlaces();
+      expect(found.byPlace.back).toMatchObject({ productId: null, unreadableIds: [P_ARENA, P_TALAK] });
+      expect(found.byPlace.front).toMatchObject({ productId: P_TALAK });
+    });
+  });
+
   // Three cases, kept apart: (1) the lookup succeeded and stages no chinch row = null; (2) the lookup
   // threw = the error propagates (never a "successful" answer with no rungs); (3) rows found but the
   // LIMIT read failed = unreadable (the rungs are known, released to the search, with the note).

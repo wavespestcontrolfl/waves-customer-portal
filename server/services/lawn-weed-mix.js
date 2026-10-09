@@ -93,7 +93,7 @@ async function currentTempF(svc) {
 const isSurfactant = (item) => !!item.gates?.concentration;
 
 // Lead mode: the lead and its open members, with the surfactant judged by the air temperature.
-async function leadMix({ base, lead, members, isCapped, svc }) {
+async function leadMix({ base, lead, members, isCapped, svc, readTemp = () => currentTempF(svc) }) {
   // A member at its own yearly cap stays off the tap, as the lead does.
   const open = members.filter((item) => !isCapped(item));
   const surfactant = open.find(isSurfactant) || null;
@@ -101,7 +101,7 @@ async function leadMix({ base, lead, members, isCapped, svc }) {
   let surfactantNote = null;
   let included = !!surfactant;
   if (surfactant) {
-    tempF = await currentTempF(svc);
+    tempF = await readTemp();
     if (tempF == null) surfactantNote = SURFACTANT_CHECK_NOTE;
     else if (tempF >= SURFACTANT_MAX_TEMP_F) { included = false; surfactantNote = SURFACTANT_LEFT_OUT; }
   }
@@ -129,10 +129,15 @@ async function leadMix({ base, lead, members, isCapped, svc }) {
  *   noAreaProductIds members whose rate is not per area (a concentration): they figure no amount
  *                   and need no area
  *   tempF           the air temperature used, or null when unknown / not read
+ *   byPlace         (`places: true`, GATE_LAWN_TROUBLE_AREAS) the same decision for each place of the lawn,
+ *                   `{ [placeId]: { mode, productIds, note, surfactant, tempF } }`: the yearly limits are
+ *                   judged per place for a spot application, so one place can be at the cap while another
+ *                   still takes the lead. The top-level fields then follow the first place that can take the
+ *                   lead, else the first that can take the replacement, else the lawn-wide decision.
  * `addOns` are the plan's raw add-on items; `svc` the visit row (customer_id, property_id, id,
  * scheduled_date); `structured` the plan's structured protocol.
  */
-async function buildWeedMix({ addOns, svc, structured, knex }) {
+async function buildWeedMix({ addOns, svc, structured, knex, places = null }) {
   const group = weedMixGroup(addOns);
   if (!group) return null;
   const { lead, members, replacement } = group;
@@ -142,16 +147,52 @@ async function buildWeedMix({ addOns, svc, structured, knex }) {
     mode: 'none', productIds: [], groupProductIds, replacementProductId: replacement ? idOf(replacement) : null,
     note: null, surfactant: null, noAreaProductIds: members.filter(isSurfactant).map(idOf), tempF: null,
   };
+  const readLimits = async (place) => {
+    const engine = require('./waveguard-plan-engine');
+    const rows = engine.v13ProtocolRows(structured);
+    const selected = all.map((item) => ({ selected: true, product: item.product }));
+    return (await engine.v13VisitLimits(knex, svc, selected, rows, {}, ...(place ? [{ place }] : []))).capped;
+  };
   let capped;
   try {
-    const engine = require('./waveguard-plan-engine');
-    ({ capped } = await engine.v13VisitLimits(knex, svc, all.map((item) => ({ selected: true, product: item.product })), engine.v13ProtocolRows(structured), {}));
+    capped = await readLimits(null);
   } catch (err) {
     logger.warn(`[lawn-weed-mix] limits unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return { ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: [] };
   }
-  // v13VisitLimits fails closed per product: a read that failed comes back as a block with no
-  // limit type (a real limit always names one). That is not a reached cap, so nothing is offered.
+  // The air temperature is read once, however many places are judged.
+  let tempRead = null;
+  const readTemp = () => (tempRead = tempRead || currentTempF(svc));
+  const wide = await decideMix({ base, lead, members, replacement, all, capped, svc, readTemp });
+  if (!places || !places.length) return wide;
+  // A place judged on its own can only be more open than the lawn: with nothing capped lawn-wide, every place
+  // takes the lawn-wide decision as it is.
+  const byPlace = {};
+  for (const place of places) {
+    byPlace[place] = capped.size
+      ? await decideAtPlace({ place, base, lead, members, replacement, all, svc, readTemp, readLimits })
+      : wide;
+  }
+  const best = places.find((place) => byPlace[place].mode === 'lead') || places.find((place) => byPlace[place].mode === 'replacement');
+  return { ...(best ? byPlace[best] : wide), byPlace };
+}
+
+// One place's decision: its own limit read, failing closed (unavailable) when the read throws.
+async function decideAtPlace({ place, base, lead, members, replacement, all, svc, readTemp, readLimits }) {
+  let here;
+  try {
+    here = await readLimits(place);
+  } catch (err) {
+    logger.warn(`[lawn-weed-mix] limits unavailable at ${place} for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return { ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: [] };
+  }
+  return decideMix({ base, lead, members, replacement, all, capped: here, svc, readTemp });
+}
+
+// One decision from one limit read (see buildWeedMix): the mode, what the tap adds and the line under the entry.
+async function decideMix({ base, lead, members, replacement, all, capped, svc, readTemp }) {
+  // v13VisitLimits fails closed per product: a read that failed comes back as a block with no limit type (a real limit
+  // always names one). That is not a reached cap, so nothing is offered.
   const blocksOf = (item) => capped.get(idOf(item)) || [];
   // `blockedIds` (additive, read by the treatment guide only): the members whose limit WAS read as a named
   // limit, so a sibling's failed read never releases them. The mix is withheld as a whole either way.
@@ -174,7 +215,7 @@ async function buildWeedMix({ addOns, svc, structured, knex }) {
     }
     return { ...base, note: WEED_LIMIT_REACHED };
   }
-  return leadMix({ base, lead, members, isCapped, svc });
+  return leadMix({ base, lead, members, isCapped, svc, readTemp });
 }
 
 module.exports = { SURFACTANT_MAX_TEMP_F, weedMixGroup, buildWeedMix, currentTempF };

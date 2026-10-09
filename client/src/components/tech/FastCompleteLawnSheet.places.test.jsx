@@ -1,0 +1,567 @@
+// @vitest-environment jsdom
+// The place of a spot treatment and the lawn's known trouble areas on the lawn Fast Complete sheet
+// (GATE_LAWN_TROUBLE_AREAS, owner 2026-10-09). The server sends the closed list of places, the known
+// areas, what each yearly limit closes where, and a decision per place for the Weed spots and chinch
+// entries; the sheet only renders and enforces what it is given. With no `troubleAreas` it renders
+// exactly as before. Synthetic data only; no real provider is ever called (every request is a stub).
+import React from 'react';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import FastCompleteLawnSheet from './FastCompleteLawnSheet';
+
+vi.mock('./TechTreatmentZoneModal', () => ({
+  default: ({ onClose, onSaved, lawnMode, serviceId, openVisitOnly }) => (
+    <div role="dialog" aria-label="Tracer" data-lawn={String(!!lawnMode)} data-service={serviceId} data-open-only={String(openVisitOnly === true)}>
+      <button type="button" onClick={() => onSaved({ id: 'zone-1' })}>Save trace</button>
+      <button type="button" onClick={onClose}>Close tracer</button>
+    </div>
+  ),
+}));
+
+// Each test mounts the whole sheet and taps through it: slow on a busy runner.
+vi.setConfig({ testTimeout: 30000 });
+
+const P_TALAK = 'aaaaaaaa-0000-4000-8000-000000000001';
+const P_IRON = 'aaaaaaaa-0000-4000-8000-000000000002';
+const P_GRANULE = 'aaaaaaaa-0000-4000-8000-000000000003';
+const CATALOG = [
+  { id: P_TALAK, name: 'Talak 7.9%', category: 'insecticide', formulation: 'SC', service_lines: ['lawn', 'pest'] },
+  { id: P_IRON, name: 'Iron Plus', category: 'micronutrient', formulation: 'SC' },
+  { id: P_GRANULE, name: 'Green Granules', category: 'fertilizer', formulation: 'granular' },
+];
+
+// The context's whole `service` object, nulls included (what /complete wants back).
+const VISIT = {
+  id: 'svc-lawn',
+  customerId: 'cust-1',
+  customerName: 'Pat Jones',
+  serviceType: 'Lawn Care',
+  status: 'confirmed',
+  scheduledDate: '2026-10-04T13:00:00.000Z',
+  propertyId: 'prop-1',
+  catalogServiceId: null,
+  address: { line1: '123 Main St', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' },
+  hasPhone: true,
+  category: 'lawn_care',
+  serviceKey: 'lawn_care_recurring',
+  isCallback: false,
+  technicianId: null,
+};
+const SERVICE = {
+  id: 'svc-lawn',
+  customerName: 'Pat Jones',
+  serviceType: 'Lawn Care',
+  address: '123 Main St',
+  timeLabel: '2:00 PM',
+  findingsType: null,
+  routedCustomerId: 'cust-1',
+  routedScheduledDate: '2026-10-04',
+  routedPropertyId: 'prop-1',
+  routedAddress: '123 Main St',
+};
+
+const PLANNED = [
+  { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'broadcast_spray', amount: 6.4, amountUnit: 'fl_oz', treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1.07, rateUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'Water in', mowHoldDays: null },
+  { productId: P_IRON, name: 'Iron Plus', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'No rule', mowHoldDays: null },
+];
+
+const context = (overrides = {}) => ({
+  enabled: true,
+  eligible: true,
+  reason: null,
+  visitType: 'recurring',
+  findingsType: null,
+  service: VISIT,
+  visitDate: '2026-10-04',
+  turfHeightCapture: false,
+  plannedProducts: { source: 'plan', items: PLANNED },
+  plannedProductsUnavailable: null,
+  // The server's method list (lawn-reservice-fast-context LAWN_METHODS), trimmed.
+  methods: [
+    { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
+    { value: 'broadcast_spray', label: 'Broadcast spray', common: true, requiresSqft: true },
+    { value: 'granular_broadcast', label: 'Granular broadcast', common: true, requiresSqft: true },
+    { value: 'soil_drench', label: 'Soil drench', common: false, requiresSqft: false },
+  ],
+  assessment: { exists: false, id: null, confirmed: false },
+  photoStatus: null,
+  previousFrontPhoto: null,
+  readFailures: [],
+  ...overrides,
+});
+
+const SCORES = { turf_density: 80, weed_suppression: 70, color_health: 60, stress_damage: 50 };
+const ASSESSED = { id: 'assessment-1', confirmed_by_tech: false, ...SCORES };
+const REVIEW = { status: 'complete', findings: [{ finding_id: 'f-1', name: 'Dollarweed', confidence: 'high' }], photoQuality: [] };
+
+// GET /admin/schedule/:id/property-areas for the visit's own property.
+const VERSION = 'a'.repeat(64);
+const areasAnswer = (areas, extra = {}) => ({ enabled: true, propertyId: 'prop-1', customerId: 'cust-1', addressKey: 'k', version: VERSION, areas: { beds: null, lawn: null, mosquito: null, ...areas }, ...extra });
+
+const refusal = (status, code, message, details = {}) => Object.assign(new Error(message), { status, code, details: { code, error: message, ...details } });
+
+let requests;
+let completeErrors;
+let lookup;
+let propertyAreasAnswer;
+let tips;
+let blogAnswer;
+let customerAnswer;
+let catalogAnswer;
+let assessAnswer;
+let confirmAnswer;
+let guideAnswer;
+
+// A stub of the whole admin API the sheet talks to.
+function makeRequest({ ctx = context(), contextError = null } = {}) {
+  return vi.fn(async (path, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ path, options, body });
+    if (path.endsWith('/lawn-fast/context')) {
+      if (contextError) throw contextError;
+      return ctx;
+    }
+    if (path.endsWith('/property-areas')) {
+      const answer = typeof propertyAreasAnswer === 'function' ? await propertyAreasAnswer() : propertyAreasAnswer;
+      if (answer instanceof Error) throw answer;
+      return answer;
+    }
+    if (/^\/admin\/customers\/[^/]+$/.test(path)) return customerAnswer;
+    if (path.endsWith('/tech-tips')) { if (tips instanceof Error) throw tips; return tips; }
+    if (path.includes('/blog-posts')) { if (blogAnswer instanceof Error) throw blogAnswer; return typeof blogAnswer === 'function' ? blogAnswer(path) : blogAnswer; }
+    if (path.includes('/lawn-fast/treatment-guide')) {
+      if (guideAnswer instanceof Error) throw guideAnswer;
+      return typeof guideAnswer === 'function' ? guideAnswer() : (guideAnswer ?? {});
+    }
+    if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
+    if (path.includes('/lawn-assessment/service/')) {
+      if (lookup instanceof Error) throw lookup;
+      return lookup;
+    }
+    if (path.endsWith('/lawn-assessment/assess')) return assessAnswer;
+    if (path.endsWith('/lawn-assessment/confirm')) {
+      const answer = typeof confirmAnswer === 'function' ? confirmAnswer(body) : confirmAnswer;
+      if (answer instanceof Error) throw answer;
+      return answer;
+    }
+    if (path.endsWith('/complete')) {
+      const error = completeErrors.shift();
+      if (error) throw error;
+      return { success: true, invoiceId: null };
+    }
+    return {};
+  });
+}
+
+class FixtureFileReader {
+  readAsDataURL() {
+    this.result = 'data:image/jpeg;base64,cGhvdG8=';
+    this.onload({ target: { result: this.result } });
+  }
+}
+class FixtureImage {
+  set src(_value) {
+    this.width = 800;
+    this.height = 600;
+    this.onload();
+  }
+}
+
+beforeEach(() => {
+  requests = [];
+  completeErrors = [];
+  guideAnswer = null;
+  lookup = { shotListEnabled: true, assessment: null };
+  propertyAreasAnswer = areasAnswer({ lawn: { sqft: 5000, source: 'recorded', reviewedAt: null } });
+  tips = { available: false, groups: [] };
+  blogAnswer = { available: false, posts: [] };
+  customerAnswer = { customer: { email: '' } };
+  catalogAnswer = { products: CATALOG };
+  assessAnswer = { success: true, assessment: ASSESSED, visitAssessment: REVIEW, adjustedScores: SCORES, observations: 'Synthetic observation' };
+  confirmAnswer = { success: true, confirmed: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+  vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+  vi.stubGlobal('FileReader', FixtureFileReader);
+  vi.stubGlobal('Image', FixtureImage);
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+async function openSheet({ request = makeRequest(), props = {} } = {}) {
+  const onFullForm = props.onFullForm || vi.fn();
+  const onCompleted = props.onCompleted || vi.fn();
+  render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onCompleted={onCompleted} onFullForm={onFullForm} {...props} />);
+  await screen.findByRole('heading', { name: 'Lawn assessment' });
+  return { request, onFullForm, onCompleted };
+}
+
+async function addPhoto() {
+  const input = await screen.findByLabelText('Add turf photos');
+  await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+  fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
+  await screen.findByLabelText('Slot for photo 1');
+}
+// Photos in, then Analyze lawn: the four scores show (each a box). Nothing is confirmed yet.
+async function analyzeOnly() {
+  await addPhoto();
+  fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+  await screen.findByLabelText('Density score');
+}
+
+const completeButton = () => document.querySelector('.tech-visit-footer .tech-visit-complete');
+const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
+const editorFor = (name) => screen.getByRole('group', { name });
+const footerNote = () => document.querySelector('.tech-visit-footer [role="status"]')?.textContent || '';
+
+async function submit() {
+  fireEvent.click(completeButton());
+  await waitFor(() => expect(completeCalls().length).toBeGreaterThan(0));
+}
+// Confirm assessment: the button the full form has too.
+async function confirm() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm assessment' }));
+  await screen.findByText('Assessment confirmed');
+}
+// Photos, Analyze lawn, Confirm assessment.
+async function analyze() {
+  await analyzeOnly();
+  await confirm();
+}
+// ... then Complete.
+async function analyzeAndComplete() {
+  await analyze();
+  await waitFor(() => expect(completeButton().disabled).toBe(false));
+  await submit();
+}
+
+
+const P_LEAD = 'bbbbbbbb-0000-4000-8000-000000000001';
+const P_CERT = 'bbbbbbbb-0000-4000-8000-000000000002';
+const P_SURF = 'bbbbbbbb-0000-4000-8000-000000000003';
+const P_BLIND = 'bbbbbbbb-0000-4000-8000-000000000004';
+const P_FUNG = 'cccccccc-0000-4000-8000-000000000001';
+const P_ARENA = 'cccccccc-0000-4000-8000-000000000002';
+const P_BIF = 'cccccccc-0000-4000-8000-000000000003';
+const PLACE_LIST = [{ id: 'front', label: 'Front' }, { id: 'back', label: 'Back' }, { id: 'left_side', label: 'Left side' }, { id: 'right_side', label: 'Right side' }];
+const CAT = [
+  { id: P_LEAD, name: 'Lead WG', category: 'herbicide', formulation: 'WG', default_rate_per_1000: 2, default_unit: 'oz' },
+  { id: P_CERT, name: 'Cert Herbicide', category: 'herbicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
+  { id: P_SURF, name: 'Tank Surfactant', category: 'adjuvant', formulation: 'SL', default_rate_per_1000: 1, default_unit: 'fl_oz' },
+  { id: P_BLIND, name: 'Blind Herbicide', category: 'herbicide', formulation: 'SC', default_rate_per_1000: 1, default_unit: 'fl_oz' },
+  { id: P_FUNG, name: 'Spot Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 1, default_unit: 'fl_oz' },
+  { id: P_ARENA, name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', default_rate_per_1000: 0.147, default_unit: 'oz' },
+  { id: P_BIF, name: 'Atticus Talak 7.9 F', category: 'insecticide', formulation: 'SC', default_rate_per_1000: 0.2, default_unit: 'fl_oz' },
+  ...CATALOG,
+];
+const addOn = (productId, name, extra = {}) => ({ productId, name, applicationMethod: 'spot_treatment', amount: null, amountUnit: 'oz', line: null, substituteFor: null, gateNotes: [], ...extra });
+const ADD_ONS = [addOn(P_LEAD, 'Lead WG'), addOn(P_CERT, 'Cert Herbicide'), addOn(P_SURF, 'Tank Surfactant'), addOn(P_BLIND, 'Blind Herbicide'), addOn(P_FUNG, 'Spot Fungicide', { ratePer1000: 1, rateUnit: 'fl_oz' })];
+const LEAD_SET = { mode: 'lead', productIds: [P_LEAD, P_CERT, P_SURF], note: null, surfactant: { productId: P_SURF, included: true, note: null }, tempF: 82 };
+const BLIND_SET = { mode: 'replacement', productIds: [P_BLIND], note: 'Lead yearly limit reached; Blind is used in its place.', surfactant: null, tempF: null };
+const NONE_SET = { mode: 'none', productIds: [], note: 'The yearly weed-spray limit is reached for this lawn.', surfactant: null, tempF: null };
+const MIX = (byPlace, top = LEAD_SET) => ({
+  ...top, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF], byPlace,
+});
+const ALL = (set) => Object.fromEntries(PLACE_LIST.map((place) => [place.id, set]));
+const areasBlock = (extra = {}) => ({ v: 1, places: PLACE_LIST, known: [], knownUnavailable: false, blocked: {}, ...extra });
+const KNOWN_FUNGUS_BACK = { id: 'area-1', place: 'back', placeLabel: 'Back', type: 'fungus', typeLabel: 'Fungus', lastTreatedOn: '2026-09-12' };
+
+const placeContext = ({ troubleAreas = areasBlock(), weedMix = null, planned = [], chinch, treatmentGuide = false, addOns = ADD_ONS } = {}) => context({
+  spotRules: true,
+  ...(troubleAreas ? { troubleAreas } : {}),
+  ...(treatmentGuide ? { treatmentGuide: true } : {}),
+  plannedProducts: { source: 'plan', items: planned, addOns, month: 10, ...(weedMix ? { weedMix } : {}), ...(chinch ? { chinch } : {}) },
+});
+const open = (ctx) => openSheet({ request: makeRequest({ ctx }), props: { catalog: CAT } });
+const addons = () => screen.getByRole('group', { name: 'Also in October’s protocol' });
+const sent = (id) => completeCalls()[0].body.products.find((p) => p.productId === id);
+const placeGroup = (name) => screen.getByRole('group', { name });
+const chipOf = (group, label) => within(group).getByRole('button', { name: label });
+const pressed = (group) => within(group).getAllByRole('button').filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.textContent);
+const addFungicide = () => fireEvent.click(within(addons()).getByRole('button', { name: 'Add Spot Fungicide' }));
+const typeArea = (group, size) => fireEvent.click(within(group).getByRole('button', { name: `${size} sq ft` }));
+
+describe('a place on every spot row', () => {
+  test('no troubleAreas in the context (gate off, older server): no place anywhere, and the body carries none', async () => {
+    await open(placeContext({ troubleAreas: null }));
+    addFungicide();
+    typeArea(screen.getByRole('group', { name: 'Spot Fungicide' }), '100');
+    expect(screen.queryByText('Where on the lawn')).toBeNull();
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).not.toHaveProperty('areaPlace');
+    expect(sent(P_FUNG)).not.toHaveProperty('troubleType');
+  });
+
+  test('a spot row asks WHERE in one tap, and Complete waits for it the way it waits for the area', async () => {
+    await open(placeContext());
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    typeArea(row, '100');
+    // The place group sits under the area, one chip per place of the server's closed list.
+    const where = within(row).getByRole('group', { name: 'Place for Spot Fungicide' });
+    expect(within(where).getAllByRole('button').map((b) => b.textContent)).toEqual(['Front', 'Back', 'Left side', 'Right side']);
+    await analyze();
+    await waitFor(() => expect(footerNote() || completeButton().textContent).toMatch(/Pick where on the lawn Spot Fungicide went\./));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(chipOf(where, 'Left side'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_FUNG)).toMatchObject({ applicationMethod: 'spot_treatment', areaPlace: 'left_side', areaValue: 100, areaUnit: 'sqft', troubleType: 'fungus', troubleSource: 'tech_tap' });
+  });
+
+  test('a whole-lawn row asks for no place and sends none', async () => {
+    await open(placeContext({ planned: [PLANNED[0]] }));
+    expect(screen.queryByText('Where on the lawn')).toBeNull();
+    await analyzeAndComplete();
+    expect(sent(P_TALAK)).not.toHaveProperty('areaPlace');
+  });
+
+  test('the place can be changed with one tap', async () => {
+    await open(placeContext());
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    typeArea(row, '100');
+    const where = within(row).getByRole('group', { name: 'Place for Spot Fungicide' });
+    fireEvent.click(chipOf(where, 'Front'));
+    expect(pressed(where)).toEqual(['Front']);
+    fireEvent.click(chipOf(where, 'Right side'));
+    expect(pressed(where)).toEqual(['Right side']);
+    await analyzeAndComplete();
+    expect(sent(P_FUNG).areaPlace).toBe('right_side');
+  });
+});
+
+describe('a known trouble area', () => {
+  test('the lawn\'s single known area of the row\'s type is the default place: no extra tap, and the tech can change it', async () => {
+    await open(placeContext({ troubleAreas: areasBlock({ known: [KNOWN_FUNGUS_BACK] }) }));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    typeArea(row, '100');
+    const where = within(row).getByRole('group', { name: 'Place for Spot Fungicide' });
+    expect(pressed(where)).toEqual(['Back · known']);
+    expect(within(where).getByText('Set from the known trouble area. Tap another place to change it.')).toBeTruthy();
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'back', troubleType: 'fungus' });
+  });
+
+  test('two known areas of the type, or one of another type, choose nothing for the tech', async () => {
+    await open(placeContext({ troubleAreas: areasBlock({ known: [KNOWN_FUNGUS_BACK, { ...KNOWN_FUNGUS_BACK, id: 'area-2', place: 'front', placeLabel: 'Front' }, { ...KNOWN_FUNGUS_BACK, id: 'area-3', place: 'left_side', type: 'weeds', typeLabel: 'Weeds' }] }) }));
+    addFungicide();
+    const where = within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
+    expect(pressed(where)).toEqual([]);
+  });
+
+  test('the line shows place, type and the last treatment; Clear asks once, then the area is gone', async () => {
+    const request = makeRequest({ ctx: placeContext({ troubleAreas: areasBlock({ known: [KNOWN_FUNGUS_BACK] }) }) });
+    await openSheet({ request, props: { catalog: CAT } });
+    const line = screen.getByRole('group', { name: 'Known trouble areas' });
+    expect(within(line).getByText('Back · Fungus')).toBeTruthy();
+    expect(within(line).getByText('Last treated Sep 12')).toBeTruthy();
+    fireEvent.click(within(line).getByRole('button', { name: 'Clear Back, fungus' }));
+    expect(within(line).getByText('Clear Back, fungus?')).toBeTruthy();
+    // Keep puts it back without a request.
+    fireEvent.click(within(line).getByRole('button', { name: 'Keep' }));
+    expect(requests.some((r) => r.path.includes('/trouble-areas/'))).toBe(false);
+    fireEvent.click(within(line).getByRole('button', { name: 'Clear Back, fungus' }));
+    fireEvent.click(within(line).getByRole('button', { name: 'Confirm clear Back, fungus' }));
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Known trouble areas' })).toBeNull());
+    expect(requests.filter((r) => r.path.includes('/trouble-areas/'))).toEqual([expect.objectContaining({ path: '/admin/dispatch/svc-lawn/lawn-fast/trouble-areas/area-1/clear', options: expect.objectContaining({ method: 'POST' }) })]);
+  });
+
+  test('a clear the server refuses leaves the area and says so', async () => {
+    const request = vi.fn(async (path, options = {}) => {
+      if (path.includes('/trouble-areas/')) throw refusal(404, 'trouble_area_not_found', 'That trouble area is not on this lawn.');
+      return makeRequest({ ctx: placeContext({ troubleAreas: areasBlock({ known: [KNOWN_FUNGUS_BACK] }) }) })(path, options);
+    });
+    await openSheet({ request, props: { catalog: CAT } });
+    const line = screen.getByRole('group', { name: 'Known trouble areas' });
+    fireEvent.click(within(line).getByRole('button', { name: 'Clear Back, fungus' }));
+    fireEvent.click(within(line).getByRole('button', { name: 'Confirm clear Back, fungus' }));
+    await within(line).findByText('Could not clear it. Try again.');
+    expect(within(line).getByText('Back · Fungus')).toBeTruthy();
+  });
+
+  test('no known area and no read failure: no line; a failed read says so', async () => {
+    await open(placeContext());
+    expect(screen.queryByRole('group', { name: 'Known trouble areas' })).toBeNull();
+    cleanup();
+    await open(placeContext({ troubleAreas: areasBlock({ knownUnavailable: true }) }));
+    expect(within(screen.getByRole('group', { name: 'Known trouble areas' })).getByText('The known trouble areas could not be loaded.')).toBeTruthy();
+  });
+});
+
+describe('the yearly limits close a place', () => {
+  const CLOSED = (extra = {}) => areasBlock({ blocked: { [P_FUNG]: { front: 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.' } }, ...extra });
+
+  test('a closed place is off for the row, with the limit\'s own words; the other places stay', async () => {
+    await open(placeContext({ troubleAreas: CLOSED() }));
+    addFungicide();
+    const where = within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
+    expect(chipOf(where, 'Front').disabled).toBe(true);
+    expect(chipOf(where, 'Back').disabled).toBe(false);
+  });
+
+  test('a known area at a closed place is not the default (the open place stays the tech\'s choice)', async () => {
+    await open(placeContext({ troubleAreas: CLOSED({ known: [{ ...KNOWN_FUNGUS_BACK, place: 'front', placeLabel: 'Front' }] }) }));
+    addFungicide();
+    const where = within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
+    expect(pressed(where)).toEqual([]);
+  });
+
+  test('a row with every place closed says it cannot go anywhere and holds Complete until it is removed', async () => {
+    const every = Object.fromEntries(PLACE_LIST.map((place) => [place.id, 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED.']));
+    await open(placeContext({ troubleAreas: areasBlock({ blocked: { [P_FUNG]: every } }) }));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    typeArea(row, '100');
+    expect(within(row).getByText(/Spot Fungicide cannot go anywhere on this lawn right now\. Spot Fungicide: 2\/2/)).toBeTruthy();
+    await analyze();
+    await waitFor(() => expect(footerNote() || completeButton().textContent).toMatch(/Remove Spot Fungicide: /));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(within(row).getByRole('button', { name: 'Remove' }));
+    expect(screen.queryByRole('group', { name: 'Spot Fungicide' })).toBeNull();
+  });
+
+  test('the server\'s own refusal of a place reads as the server worded it and the sheet stays editable', async () => {
+    await open(placeContext());
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    typeArea(row, '100');
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Front'));
+    completeErrors.push(refusal(400, 'lawn_place_limit', 'Spot Fungicide: 2/2 applications this year — LIMIT REACHED. Choose another place, or take it off the sheet.'));
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await screen.findByText(/Choose another place, or take it off the sheet\./);
+    // A correctable refusal: pick another place and complete again.
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    expect(completeCalls()[1].body.products.find((p) => p.productId === P_FUNG).areaPlace).toBe('back');
+  });
+});
+
+describe('Weed spots: the entry is one tap per place', () => {
+  const CHOICES = (byPlace, top) => placeContext({ weedMix: MIX(byPlace, top) });
+  const addWeedAt = (label) => fireEvent.click(within(addons()).getByRole('button', { name: `Add weed spots: ${label}` }));
+
+  test('every place open: one button per place, and the tap adds the mix AND names the place (no extra tap)', async () => {
+    await open(CHOICES(ALL(LEAD_SET)));
+    const group = within(addons()).getByRole('group', { name: 'Add weed spots place' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Front', 'Back', 'Left side', 'Right side']);
+    addWeedAt('Back');
+    for (const name of ['Lead WG', 'Cert Herbicide', 'Tank Surfactant']) expect(within(editorFor(name)).getByText(/from the protocol/)).toBeTruthy();
+    // The one shared control for the rows says where.
+    expect(pressed(screen.getByRole('group', { name: 'Weed spots place' }))).toEqual(['Back']);
+    expect(within(addons()).getByRole('button', { name: 'Weed spots are on the sheet' }).disabled).toBe(true);
+    fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '500 sq ft' }));
+    await analyzeAndComplete();
+    for (const id of [P_LEAD, P_CERT, P_SURF]) expect(sent(id)).toMatchObject({ areaPlace: 'back', troubleType: 'weeds', troubleSource: 'tech_tap' });
+  });
+
+  test('a place at the lead\'s limit takes the replacement; the others take the lead; the line says which place', async () => {
+    await open(CHOICES({ ...ALL(LEAD_SET), front: BLIND_SET }));
+    expect(within(addons()).getByText(/Front: Lead yearly limit reached; Blind is used in its place\./)).toBeTruthy();
+    addWeedAt('Front');
+    expect(screen.getByRole('group', { name: 'Blind Herbicide' })).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Lead WG' })).toBeNull();
+    expect(pressed(screen.getByRole('group', { name: 'Weed spots place' }))).toEqual(['Front']);
+  });
+
+  test('the place chips of the rows follow the server: a place that does not take the rows on the sheet is off', async () => {
+    await open(CHOICES({ ...ALL(LEAD_SET), front: BLIND_SET }));
+    addWeedAt('Back');
+    const where = screen.getByRole('group', { name: 'Weed spots place' });
+    expect(chipOf(where, 'Back').disabled).toBe(false);
+    expect(chipOf(where, 'Front').disabled).toBe(true);
+    expect(within(where).queryByText(/./, { selector: '[role="status"]' })).toBeNull();
+    fireEvent.click(chipOf(where, 'Right side'));
+    expect(pressed(where)).toEqual(['Right side']);
+  });
+
+  test('a place at the limit for both is not offered; with every place closed the entry is a line only', async () => {
+    await open(CHOICES({ ...ALL(LEAD_SET), left_side: NONE_SET }));
+    const group = within(addons()).getByRole('group', { name: 'Add weed spots place' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Front', 'Back', 'Right side']);
+    expect(within(addons()).getByText(/Left side: The yearly weed-spray limit is reached for this lawn\./)).toBeTruthy();
+    cleanup();
+    await open(CHOICES(ALL(NONE_SET), NONE_SET));
+    expect(within(addons()).getByText('The yearly weed-spray limit is reached for this lawn.')).toBeTruthy();
+    expect(within(addons()).queryByRole('button', { name: /weed spots/i })).toBeNull();
+  });
+
+  test('a known weed area leads the buttons and is marked', async () => {
+    await open(placeContext({ weedMix: MIX(ALL(LEAD_SET)), troubleAreas: areasBlock({ known: [{ ...KNOWN_FUNGUS_BACK, type: 'weeds', typeLabel: 'Weeds', place: 'right_side', placeLabel: 'Right side' }] }) }));
+    const group = within(addons()).getByRole('group', { name: 'Add weed spots place' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Right side · known', 'Front', 'Back', 'Left side']);
+  });
+
+  test('no byPlace on the mix (the guide answer without places): the one tap as before, and the rows ask for their place on the shared control', async () => {
+    await open(placeContext({ weedMix: { ...LEAD_SET, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF] } }));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const where = screen.getByRole('group', { name: 'Weed spots place' });
+    expect(pressed(where)).toEqual([]);
+    fireEvent.click(chipOf(where, 'Front'));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '500 sq ft' }));
+    await analyzeAndComplete();
+    expect(sent(P_LEAD).areaPlace).toBe('front');
+  });
+
+  test('the surfactant rides the weed place: no place of its own to pick', async () => {
+    await open(CHOICES(ALL(LEAD_SET)));
+    addWeedAt('Back');
+    expect(within(editorFor('Tank Surfactant')).queryByText('Where on the lawn')).toBeNull();
+    expect(screen.getAllByText('Where on the lawn')).toHaveLength(1);
+  });
+});
+
+describe('Chinch bugs found: the entry is one tap per place', () => {
+  const CAP_NOTE = 'Arena yearly limit reached; Atticus is used in its place.';
+  const ARENA_ITEM = { productId: P_ARENA, name: 'Arena 50 WDG', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: 0.147, rateUnit: 'oz', gateNotes: [] };
+  const BIF_ITEM = { productId: P_BIF, name: 'Atticus Talak 7.9 F', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: null, rateUnit: null, gateNotes: [] };
+  const CHINCH = {
+    item: BIF_ITEM, note: CAP_NOTE, rungIds: [P_ARENA, P_BIF], unreadableIds: [],
+    byPlace: {
+      front: { item: BIF_ITEM, note: CAP_NOTE, unreadableIds: [] },
+      back: { item: ARENA_ITEM, note: null, unreadableIds: [] },
+      left_side: { item: ARENA_ITEM, note: null, unreadableIds: [] },
+      right_side: { item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', unreadableIds: [] },
+    },
+  };
+  const openChinch = async (chinch = CHINCH, troubleAreas = areasBlock()) => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [] };
+    await open(placeContext({ treatmentGuide: true, chinch, troubleAreas }));
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+  };
+
+  test('the buttons are the places that have a product; the tap adds the product that place takes and names the place', async () => {
+    await openChinch();
+    const group = within(addons()).getByRole('group', { name: 'Add chinch bug treatment place' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Front', 'Back', 'Left side']);
+    expect(within(addons()).getByText(/Right side: The yearly limit is reached for the chinch bug products on this lawn\./)).toBeTruthy();
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment: Front' }));
+    const row = screen.getByRole('group', { name: 'Atticus Talak 7.9 F' });
+    expect(pressed(within(row).getByRole('group', { name: 'Place for Atticus Talak 7.9 F' }))).toEqual(['Front']);
+    expect(within(addons()).getByRole('button', { name: 'Chinch bug treatment is on the sheet' }).disabled).toBe(true);
+    typeArea(row, '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_BIF)).toMatchObject({ areaPlace: 'front', troubleType: 'chinch', troubleSource: 'tech_tap' });
+  });
+
+  test('on the sheet at one place, the row cannot be moved to a place that takes the other product', async () => {
+    await openChinch();
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment: Back' }));
+    const where = within(screen.getByRole('group', { name: 'Arena 50 WDG' })).getByRole('group', { name: 'Place for Arena 50 WDG' });
+    expect(chipOf(where, 'Front').disabled).toBe(true);
+    expect(chipOf(where, 'Right side').disabled).toBe(true);
+    expect(chipOf(where, 'Left side').disabled).toBe(false);
+    fireEvent.click(chipOf(where, 'Left side'));
+    expect(pressed(where)).toEqual(['Left side']);
+  });
+});

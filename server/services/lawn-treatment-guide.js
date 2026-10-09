@@ -171,10 +171,10 @@ function pickAddOns(candidates, rows) {
 
 // The plan's own limit reader over some products as selected lines: the hard blocks by product id,
 // or null when the read failed (nothing is then suggested).
-async function readCaps({ products, rows, svc, knex }) {
+async function readCaps({ products, rows, svc, knex, place = null }) {
   try {
     const engine = require('./waveguard-plan-engine');
-    return (await engine.v13VisitLimits(knex, svc, products.map((product) => ({ selected: true, product })), rows, {})).capped;
+    return (await engine.v13VisitLimits(knex, svc, products.map((product) => ({ selected: true, product })), rows, {}, ...(place ? [{ place }] : []))).capped;
   } catch (err) {
     logger.warn(`[lawn-guide] limits unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return null;
@@ -254,7 +254,7 @@ function weedOffer(weedMix, items) {
  * `rungIds` are all the rungs' products (governed by the guide whether offered or not); `blockedIds` the ones
  * a limit that was read kept out; `unreadableIds` all of them when the limit read failed.
  */
-async function resolveChinch({ svc, structured, knex }) {
+async function resolveChinch({ svc, structured, knex, places = null }) {
   const engine = require('./waveguard-plan-engine');
   const rows = engine.v13ProtocolRows(structured);
   if (!rows || !rows.size || !structured?.id) return null;
@@ -264,8 +264,23 @@ async function resolveChinch({ svc, structured, knex }) {
   // rungs" the sheet cannot tell from case 1; (3) rows found but the LIMIT read failed: unreadable.
   const products = chinchProducts(await stagedChinchRows({ structured, knex }));
   if (!products.length) return null;
-  const capped = await readCaps({ products: products.map((p) => ({ id: p.productId, name: p.name })), rows, svc, knex });
-  return withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
+  const lines = products.map((p) => ({ id: p.productId, name: p.name }));
+  const capped = await readCaps({ products: lines, rows, svc, knex });
+  const wide = withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
+  if (!places || !places.length) return wide;
+  // GATE_LAWN_TROUBLE_AREAS: the same ladder walked at each place of the lawn (the yearly count, the interval and the
+  // yearly amount are judged per place for a spot treatment), `byPlace[place]` shaped like the lawn-wide answer. A place
+  // can only be more open than the lawn, so with nothing capped lawn-wide every place takes the lawn-wide answer; a limit
+  // read that failed lawn-wide is read again per place, each failing closed on its own. The top-level answer is the first
+  // place that has a product to add, else the lawn-wide one.
+  const byPlace = {};
+  for (const place of places) {
+    if (capped && !capped.size) { byPlace[place] = wide; continue; }
+    const here = await readCaps({ products: lines, rows, svc, knex, place });
+    byPlace[place] = withRungs(here ? chooseChinch(products, here) : unreadableChinch(), products);
+  }
+  const best = places.find((place) => byPlace[place].productId);
+  return { ...(best ? byPlace[best] : wide), byPlace };
 }
 
 // Every rung's product id (all of them are governed by the guide, offered or not). The rungs a READ limit

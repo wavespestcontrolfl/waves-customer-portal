@@ -331,6 +331,10 @@ const ComplianceService = {
         notes: sp.notes || null,
       };
 
+      // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went, frozen on the ledger beside its property. Present only when
+      // the product record carries one (the completion writes it while the gate is live), so every other row inserts as before.
+      if (sp.treated_place) record.treated_place = sp.treated_place;
+
       // Catch-all DO NOTHING (no conflict target): a race can conflict on
       // EITHER unique index — the exact product-row link
       // (service_product_id, migration ...000401) or the stable identity
