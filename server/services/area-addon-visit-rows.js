@@ -426,6 +426,8 @@ function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, 
   // booking cost on the estimate must stay when any other sold add-on is booked. The others are priced as additional add-ons,
   // so a visit of only those would be sold with no trip cost in its price.
   if (wholeVisit) assertCostCarrierKept(estimate, wanted, sold);
+  // ... and an add-on sold for the SAME visit as a host service (no drive in its price) rides a visit that keeps a host.
+  if (wholeVisit) assertSameVisitHostKept(estimate, wanted.map((line) => line.key), posted.some((line) => line && line.key && !isAreaAddOnCatalogKey(line.key)));
 }
 
 // The catalog keys of the sold add-ons that carry the visit's one drive or its one booking-and-invoicing charge.
@@ -434,6 +436,22 @@ function costCarrierServiceKeys(estimate) {
   const rows = require('./estimate-result-container').storedAreaAddOnRows(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
   return [...new Set(rows.filter((row) => row && (row.carriesVisitDrive === true || row.carriesJobAdmin === true))
     .map((row) => row.catalogServiceKey || (AREA_ADDONS.items[row.addOnKey] || {}).serviceKey).filter(Boolean))];
+}
+
+// The catalog keys of the sold add-ons priced for the same visit as a host service (`visitContext: 'sameTripAddOn'`).
+function sameVisitServiceKeys(estimate) {
+  if (!estimate) return [];
+  const rows = require('./estimate-result-container').storedAreaAddOnRows(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
+  return [...new Set(rows.filter((row) => row && row.visitContext === 'sameTripAddOn')
+    .map((row) => row.catalogServiceKey || (AREA_ADDONS.items[row.addOnKey] || {}).serviceKey).filter(Boolean))];
+}
+
+// A same-visit add-on's price has no drive in it: the visit that carries it must keep a service that is not an area add-on.
+function assertSameVisitHostKept(estimate, addOnKeys, hasHost) {
+  if (hasHost) return;
+  const sameVisit = sameVisitServiceKeys(estimate).find((key) => addOnKeys.includes(key));
+  if (!sameVisit) return;
+  throw postedRefusal('AREA_ADDON_HOST_REQUIRED', `${nameOfServiceKey(sameVisit)} was sold as a same-visit add-on, priced without a trip of its own. Keep the main service on this appointment, or build a new estimate that sells it as its own visit.`);
 }
 
 function assertCostCarrierKept(estimate, wanted, sold) {
@@ -461,7 +479,9 @@ function editedAddOnPlan(visit, storedRowKeys, updates, posted) {
   const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
   // A save that writes a primary price for a visit whose own service is an add-on touches the add-on too (a price-only edit).
   const ownPriced = isAreaAddOnCatalogKey(ownKey) && updates.primary_line_price !== undefined;
-  return { ownKey, rowsAfter, finalKeys, added, touched: posted !== null || ownKey !== visit.service_key_snapshot || ownPriced };
+  // A host: the visit's own service is not an area add-on. (A non-add-on ROW is an extra line, not the visit's host.)
+  const hasHost = Boolean(ownKey) && !isAreaAddOnCatalogKey(ownKey);
+  return { ownKey, rowsAfter, finalKeys, added, hasHost, touched: posted !== null || ownKey !== visit.service_key_snapshot || ownPriced };
 }
 
 // The lines the edit ADDS, each with the gross price the save writes. The visit's own service moved to an add-on is judged at
@@ -527,6 +547,8 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   if (keptOwnAddOnRepriced(plan, visit, updates, sold)) throw priceLocked(plan.ownKey);
   // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
   if (estimate) assertCostCarrierKept(estimate, plan.finalKeys.map((key) => ({ key })), sold);
+  // ... and a same-visit add-on stays on a visit whose own service is a host.
+  assertSameVisitHostKept(estimate, plan.finalKeys, plan.hasHost);
   return result;
 }
 

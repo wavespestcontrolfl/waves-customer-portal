@@ -58,6 +58,34 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
     expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: BED }], { wholeVisit: false })).not.toThrow();
   });
 
+  // Codex round 41: a same-visit add-on is priced with no drive; it cannot become a visit of its own.
+  describe('an add-on sold for the same visit as a host service', () => {
+    const sameVisit = {
+      id: 'est-3', pricing_authority: null,
+      estimate_data: { result: { oneTime: { total: 209, items: [
+        { service: 'one_time_pest', name: 'One-Time Pest Control', price: 150 },
+        { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: WEB, name: 'Web Sweep', price: 59, visitContext: 'sameTripAddOn', carriesJobAdmin: true },
+      ] } } },
+    };
+    const message = 'Web Sweep was sold as a same-visit add-on, priced without a trip of its own. Keep the main service on this appointment, or build a new estimate that sells it as its own visit.';
+    test('booked with its host: allowed; booked alone: refused', () => {
+      expect(() => rows.assertPostedAreaAddOnsSold(sameVisit, [{ key: 'one_time_pest', price: 150 }, { key: WEB, price: 59 }])).not.toThrow();
+      expect(() => rows.assertPostedAreaAddOnsSold(sameVisit, [{ key: WEB, price: 59 }])).toThrow(expect.objectContaining({ status: 409, code: 'AREA_ADDON_HOST_REQUIRED', message }));
+    });
+    test('an add-on sold for its own visit is booked alone as before', () => {
+      expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB, price: both.prices[WEB] }])).not.toThrow();
+    });
+    test('Update Details: moving the visit\'s own service to the same-visit add-on is refused; keeping the host is allowed', async () => {
+      const trxFor = (v) => { const fake = (table) => { const q = {}; for (const m of ['where', 'leftJoin', 'whereIn', 'select', 'forShare']) q[m] = () => q;
+        const result = table === 'scheduled_services' ? v : (table === 'estimates' ? sameVisit : (table.startsWith('scheduled_service_addons') ? [{ scheduled_service_id: VISIT, service_key_snapshot: WEB, service_key: WEB, base_price: 59, estimated_price: 59 }] : null));
+        q.first = async () => result; q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject); return q; }; return fake; };
+      const hosted = { id: VISIT, service_key_snapshot: 'one_time_pest', is_recurring: false, recurring_parent_id: null, source_estimate_id: 'est-3', primary_line_price: 150 };
+      await expect(rows.assertEditedAreaAddOns(trxFor(hosted), VISIT, { updates: {}, rowLines: [{ key: WEB, price: 59 }] })).resolves.toEqual({ keys: [WEB], added: [] });
+      await expect(rows.assertEditedAreaAddOns(trxFor(hosted), VISIT, { updates: { service_key_snapshot: WEB, primary_line_price: 59 }, rowLines: [] }))
+        .rejects.toMatchObject({ code: 'AREA_ADDON_HOST_REQUIRED' });
+    });
+  });
+
   // Codex round 28: one estimate sells one application of an add-on.
   test('the same add-on twice (two lines, or the visit\'s own service and a line) is refused', () => {
     const message = 'Bed Pre-Emergent Weed Control is on this appointment more than once. An estimate sells one application: remove the extra line.';
