@@ -228,6 +228,29 @@ postgres('closeout: the place of a spot treatment', () => {
     }
   });
 
+  // The deliberate Search path maps a NEW take-all area: accepted at an unmapped place, the area created with source tech_tap; a card row there is refused.
+  test('a take-all row: Search at an unmapped place is accepted and maps it (tech_tap); the card row at that place is refused and nothing is stored', async () => {
+    const f = await seedLawnVisit();
+    const [fungicide] = await mockPg('products_catalog').insert({ name: `Take-all fixture ${randomUUID().slice(0, 6)}`, category: 'fungicide', default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*');
+    try {
+      jest.spyOn(require('../services/lawn-fast-complete'), 'troubleTypeIdsFor').mockResolvedValue({ takeAll: new Set([fungicide.id.toLowerCase()]), chinch: new Set() });
+      const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+      const row = (source) => spot(f, { productId: fungicide.id, areaPlace: 'front', troubleType: 'take_all', troubleSource: source });
+      const areas = require('../services/lawn-trouble-areas');
+      expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [row('guide_card')] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
+      expect(await areasOf(f)).toEqual([]);
+      expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [row('tech_tap')] })).toBeNull();
+      const out = await complete(f, { products: [row('tech_tap')] });
+      expect(out.status).toBe(200);
+      expect((await areasOf(f)).map((a) => [a.place, a.type, a.source])).toEqual([['front', 'take_all', 'tech_tap']]);
+      // The place is now mapped: the card row passes there.
+      expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [row('guide_card')] })).toBeNull();
+    } finally {
+      await cleanup(f);
+      await mockPg('products_catalog').where({ id: fungicide.id }).del().catch(() => {});
+    }
+  });
+
   test('no take_all claim: the take-all lookup is not made', async () => {
     const f = await seedLawnVisit();
     try {

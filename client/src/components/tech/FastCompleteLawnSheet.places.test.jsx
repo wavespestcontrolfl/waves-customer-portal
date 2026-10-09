@@ -1081,3 +1081,44 @@ describe('places beside the report ties and the spot-area marker', () => {
     expect(body.lawnFast.treatmentGuide.cards).toEqual([{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ARENA], place: 'front' }]);
   });
 });
+
+// ── a take-all card is held to the mapped places; Search maps a new one ─────────────────────────────────────────────
+describe('take-all: the card offers only the mapped places, Search maps a new one', () => {
+  const TAKE_ALL = ADD_ONS[4];
+  const MAPPED_BACK = { id: 'area-t', place: 'back', placeLabel: 'Back', type: 'take_all', typeLabel: 'Take-all', lastTreatedOn: '2026-06-01' };
+  const takeAllCard = () => ({ kind: 'fungus', title: 'Fungus', finding: 'Finding for fungus.', check: null, detail: null, note: 'Take-all area on file: Back.', productIds: [P_FUNG], items: [TAKE_ALL], allowedPlaces: ['back'], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found' });
+  const ctx = () => placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: areasBlock({ known: [MAPPED_BACK] }) });
+  const chips = () => within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
+  const open2 = async (c = ctx()) => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [takeAllCard()], takeAllProductIds: [P_FUNG] };
+    await open({ ...c, plannedProducts: { ...c.plannedProducts, takeAllProductIds: [P_FUNG] } });
+    await analyze();
+  };
+
+  test('the card row starts on the mapped place and cannot be moved to another; the body names the card as its source', async () => {
+    await open2();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    expect(pressed(chips())).toEqual(['Back · known']);
+    expect(chipOf(chips(), 'Front').disabled).toBe(true);
+    expect(chipOf(chips(), 'Right side').disabled).toBe(true);
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'back', troubleType: 'take_all', troubleSource: 'guide_card' });
+  });
+
+  test('a take-all product added through Search (tech_tap) may take any open place', async () => {
+    await open2();
+    fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Spot Fungicide' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Spot Fungicide/ }));
+    const method = within(placeGroup('Spot Fungicide')).getByRole('combobox', { name: /^Method for / });
+    fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === 'Spot treatment').value } });
+    expect(chipOf(chips(), 'Front').disabled).toBe(false);
+    fireEvent.click(chipOf(chips(), 'Front'));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'front', troubleType: 'take_all', troubleSource: 'tech_tap' });
+  });
+});
+

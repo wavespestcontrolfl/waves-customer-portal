@@ -344,6 +344,75 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       });
     });
 
+    // The method is resolved by the very function the completion stores it with (real catalog rows, real SQL).
+    describe('which rows are spot rows', () => {
+      const svcRow = async () => svcOf();
+      const row = (extra) => ({ productId: catalog[CELSIUS].id, name: CELSIUS, ...extra });
+
+      test('no method on a herbicide (the lawn default is spot), and the `method` alias: a place is required; an explicit non-spot method on it, or a non-herbicide, is not a spot row', async () => {
+        const svc = await svcRow();
+        const go = (rows) => areas.preflightPlaces({ knex, svc, products: rows });
+        expect(await go([row({})])).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
+        expect(await go([row({ method: 'Spot treatment' })])).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
+        expect(await go([row({ areaPlace: 'roof' })])).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
+        expect(await go([row({ applicationMethod: 'broadcast_spray' }), row({ method: 'Granular broadcast' })])).toBeNull();
+        // A fungicide with no method defaults to a broadcast on the lawn line: no place asked.
+        expect(await go([{ productId: catalog['Plain Spot Fungicide'].id, name: 'Plain Spot Fungicide' }])).toBeNull();
+      });
+
+      test('the limit is read for an inferred spot row at its place', async () => {
+        await applied(CELSIUS, { place: 'front' });
+        await applied(CELSIUS, { place: 'front', daysAgo: 20 });
+        const svc = await svcRow();
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back' })] })).toBeNull();
+      });
+    });
+
+    // A take-all row opened by the guide CARD may go only on a mapped take-all place; a Search row maps a new one.
+    describe('take-all rows and the mapped places', () => {
+      const lawnFast = require('../services/lawn-fast-complete');
+      const row = (extra) => ({ productId: catalog['Plain Spot Fungicide'].id, name: 'Plain Spot Fungicide', applicationMethod: 'spot_treatment', troubleType: 'take_all', ...extra });
+      const mapBack = async () => {
+        const visit = await world.visit(-10);
+        const record = await world.record(visit);
+        await knex.transaction((trx) => areas.recordFromCompletion(trx, { svc: visit, record, rows: [{ place: 'back', type: 'take_all', source: 'tech_tap' }] }));
+      };
+      const confirm = (...ids) => jest.spyOn(lawnFast, 'troubleTypeIdsFor').mockResolvedValue({ takeAll: new Set(ids), chinch: new Set() });
+      afterEach(() => jest.restoreAllMocks());
+
+      test('a card row at the mapped place passes; at an unmapped place it is refused with the reason; a Search row at an unmapped place passes', async () => {
+        await mapBack();
+        confirm(catalog['Plain Spot Fungicide'].id.toLowerCase());
+        const svc = await svcOf();
+        const go = (extra) => areas.preflightPlaces({ knex, svc, products: [row(extra)] });
+        expect(await go({ areaPlace: 'back', troubleSource: 'guide_card' })).toBeNull();
+        expect(await go({ areaPlace: 'front', troubleSource: 'guide_card' })).toMatchObject({
+          status: 400, payload: { code: 'lawn_place_not_mapped', place: 'front', error: expect.stringMatching(/mapped take-all areas only/) },
+        });
+        expect(await go({ areaPlace: 'front', troubleSource: 'tech_tap' })).toBeNull();
+        expect(await go({ areaPlace: 'front' })).toBeNull();
+      });
+
+      test('a cleared area is not mapped; a claim on a product the server does not identify as take-all enforces nothing; no area on file maps nothing', async () => {
+        await mapBack();
+        const svc = await svcOf();
+        const [area] = await knex('lawn_trouble_areas').where({ place: 'back', type: 'take_all' });
+        await areas.clearArea(knex, { areaId: area.id, propertyId: world.property.id });
+        confirm(catalog['Plain Spot Fungicide'].id.toLowerCase());
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back', troubleSource: 'guide_card' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
+        jest.restoreAllMocks();
+        confirm();
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front', troubleSource: 'guide_card' })] })).toBeNull();
+      });
+
+      test('a failed take-all lookup enforces nothing (the claim is unconfirmed, so it is stored as plain fungus)', async () => {
+        jest.spyOn(lawnFast, 'troubleTypeIdsFor').mockRejectedValue(new Error('plan unavailable'));
+        const svc = await svcOf();
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front', troubleSource: 'guide_card' })] })).toBeNull();
+      });
+    });
+
     test('the closeout audit judges a recorded spot application at its place, not the lawn', async () => {
       await applied(CELSIUS, { place: 'front' });
       await applied(CELSIUS, { place: 'front', daysAgo: 20 });

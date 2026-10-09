@@ -502,7 +502,8 @@ function fungusCard({ s, offers, troubleAreas }) {
   return cardFor('fungus', {
     title: 'Fungus', finding, check: CHECKS.fungus, detail: protocolLine(item), productIds: [item.productId], items: [item],
     // A take-all card offered because the lawn has take-all areas on file names them (GATE_LAWN_TROUBLE_AREAS).
-    ...(takeAll ? { note: `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.` } : {}),
+    // GATE_LAWN_TROUBLE_AREAS: the card's row may go only on these mapped places (the sheet offers only them; /complete enforces it for a card row).
+    ...(takeAll ? { note: `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.`, allowedPlaces: [...new Set(troubleAreas.map((area) => area.place))] } : {}),
     actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
   });
 }

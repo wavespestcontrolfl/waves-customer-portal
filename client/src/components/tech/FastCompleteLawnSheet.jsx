@@ -873,10 +873,13 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
 // GATE_LAWN_TROUBLE_AREAS: every spot row (the ones withSpotArea marked) also carries its place: the tech's tap (the weed
 // entry's rows share `weedPlace`), else the lawn's single known trouble area of its type, with the places the yearly limits
 // close for it. See lib/lawn-trouble-places.js.
-function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlace, takeAll }) {
+// The places a take-all row from the guide card may go on: the card's own mapped places, else the lawn's known take-all areas.
+const takeAllPlacesOf = (guide, areas) => new Set(((guide?.cards || []).find((card) => Array.isArray(card.allowedPlaces))?.allowedPlaces) || (areas?.known || []).filter((area) => area.type === 'take_all').map((area) => area.place));
+
+function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlace, takeAll, takeAllPlaces }) {
   const weedRows = rows.filter((row) => row.spotRule && row.weedGroup);
   return rows.map((row) => (row.spotRule
-    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlace : row.pickedPlace, weedMix, chinch, weedRows, takeAll })
+    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlace : row.pickedPlace, weedMix, chinch, weedRows, takeAll, takeAllPlaces })
     : row));
 }
 
@@ -1426,10 +1429,10 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const rows = useMemo(
     () => {
       const spotted = products.rows.map((row) => withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }));
-      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace, takeAll: gov.takeAll }) : spotted;
+      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
       return placed.map((row) => withDerivedAmount(row, lawnSqft));
     },
-    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, areas, chinchDecision, weedPlace, gov.takeAll],
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, areas, chinchDecision, weedPlace, gov.takeAll, guide],
   );
   // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
   searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));

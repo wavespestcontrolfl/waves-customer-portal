@@ -301,6 +301,44 @@ async function searchedPlaceBlocks({ knex, svc, rows, ids }) {
 
 // ── the /complete preflight ─────────────────────────────────────────────────
 
+/**
+ * The submitted rows the completion will record as SPOT treatments, by the very function the persistence uses
+ * (complete-scheduled-service inferServiceReportApplicationMethod, same inputs: the catalog row, the submitted row with its `method` alias,
+ * the lawn service line), so a row that omits its method, uses the alias or rides the catalog default is judged exactly as it will be stored.
+ */
+async function spotRowsOf(knex, products) {
+  const { inferServiceReportApplicationMethod } = require('./complete-scheduled-service');
+  const rows = (Array.isArray(products) ? products : []).filter((row) => row && typeof row === 'object');
+  const ids = [...new Set(rows.map((row) => String(row.productId || '').toLowerCase()).filter((id) => UUID_RE.test(id)))];
+  const catalog = new Map((ids.length ? await knex('products_catalog').whereIn('id', ids).select('*') : []).map((row) => [String(row.id).toLowerCase(), row]));
+  return rows.filter((row) => inferServiceReportApplicationMethod(catalog.get(String(row.productId || '').toLowerCase()) || {}, row, 'lawn') === 'spot_treatment');
+}
+
+const UNMAPPED_REASON = 'Take-all is treated on mapped take-all areas only. Pick a mapped place, or add the fungicide through Search to map a new one.';
+
+/**
+ * The mapped-places rule for a take-all row that came from the guide CARD (`troubleSource: 'guide_card'`, the deliberate card the sheet
+ * offers for the lawn's mapped areas): its place must hold an active take_all area of the property (400 lawn_place_not_mapped). A take-all row
+ * that came through Search (`troubleSource: 'tech_tap'`) is the deliberate path that maps a NEW area and is not held to it. Only a product the
+ * server itself identifies as a take-all row counts, so a mislabelled claim on any other product enforces nothing.
+ */
+async function unmappedRefusal({ knex, svc, spots }) {
+  const claims = spots.filter((row) => row.troubleType === 'take_all' && row.troubleSource === 'guide_card' && isPlace(String(row.areaPlace || '').trim()));
+  if (!claims.length) return null;
+  let takeAll;
+  try {
+    takeAll = (await require('./lawn-fast-complete').troubleTypeIdsFor(svc, knex)).takeAll;
+  } catch (err) {
+    logger.warn(`[lawn-trouble-areas] take-all products unavailable at completion for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
+  const rows = claims.filter((row) => takeAll.has(String(row.productId || '').toLowerCase()));
+  if (!rows.length) return null;
+  const mapped = new Set((await loadActive(knex, svc.property_id)).filter((area) => area.type === 'take_all').map((area) => area.place));
+  const bad = rows.find((row) => !mapped.has(row.areaPlace.trim()));
+  return bad ? { status: 400, payload: { error: UNMAPPED_REASON, code: 'lawn_place_not_mapped', productId: String(bad.productId).toLowerCase(), place: bad.areaPlace.trim() } } : null;
+}
+
 // Every spot row names a closed-list place, or the first refusal.
 function placeRefusal(spots) {
   for (const row of spots) {
@@ -354,11 +392,11 @@ function refusesAtPlace(block) {
  */
 async function preflightPlaces({ knex = db, svc, products }) {
   if (!live()) return null;
-  const { normalizeServiceReportApplicationMethod } = require('./complete-scheduled-service');
-  const spots = (Array.isArray(products) ? products : [])
-    .filter((row) => row && typeof row === 'object' && normalizeServiceReportApplicationMethod(row.applicationMethod) === 'spot_treatment');
+  const spots = await spotRowsOf(knex, products);
   const missing = placeRefusal(spots);
   if (missing) return missing;
+  const unmapped = await unmappedRefusal({ knex, svc, spots });
+  if (unmapped) return unmapped;
   const limits = require('./application-limits');
   const day = !svc.scheduled_date ? new Date() : svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${etCalendarDayOf(svc.scheduled_date)}T12:00:00`);
   const seen = new Set();

@@ -1176,7 +1176,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
         takeAllMonth();
         const result = await read([AREA]);
-        expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [P_ART], actionLabel: 'I checked. Add it', note: 'Take-all area on file: Back.' });
+        expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [P_ART], actionLabel: 'I checked. Add it', note: 'Take-all area on file: Back.', allowedPlaces: ['back'] });
         // Still governed: the answer lists it as a take-all product, so the sheet never lists it with the plain add-ons.
         expect(result.takeAllProductIds).toEqual([P_ART]);
       });
@@ -1198,7 +1198,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         }));
         expect((await read([AREA])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
         // The same product capped at the back but a second stored area at the front: the card stands, naming the front only.
-        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], note: 'Take-all area on file: Front.' });
+        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], note: 'Take-all area on file: Front.', allowedPlaces: ['front'] });
       });
 
       test('gate on: a failed read of the store is the check only, never a guess', async () => {

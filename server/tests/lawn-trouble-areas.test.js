@@ -5,9 +5,16 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/application-limits', () => ({ checkLimits: jest.fn() }));
 jest.mock('../services/waveguard-plan-engine', () => ({ v13VisitLimits: jest.fn() }));
-jest.mock('../services/complete-scheduled-service', () => ({
-  normalizeServiceReportApplicationMethod: (value) => String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_'),
-}));
+// The real method resolution is proven in the Postgres suites; here a stand-in with the same inputs (the catalog row, the submitted row with its
+// `method` alias, the line) and the rule the lawn line uses: the explicit method, else a herbicide is a spot treatment and anything else a broadcast.
+jest.mock('../services/complete-scheduled-service', () => {
+  const normalize = (value) => String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return {
+    normalizeServiceReportApplicationMethod: normalize,
+    inferServiceReportApplicationMethod: (product = {}, input = {}) => normalize(input.applicationMethod || input.method || product.application_method)
+      || (String(product.category || '').includes('herb') ? 'spot_treatment' : 'broadcast_spray'),
+  };
+});
 
 const limits = require('../services/application-limits');
 const engine = require('../services/waveguard-plan-engine');
@@ -183,12 +190,35 @@ describe('cappedByPlace: the plan\'s own limit reader, once for the lawn and aga
 
 describe('preflightPlaces: the /complete check of the places', () => {
   const spot = (extra = {}) => ({ productId: P_CEL, name: 'Celsius WG', applicationMethod: 'spot_treatment', ...extra });
-  const run = (products) => areas.preflightPlaces({ knex: {}, svc, products });
+  // The catalog the preflight reads for the method default: the fixture product is an insecticide (broadcast by default) unless a test says so.
+  let catalogRows;
+  const knex = () => ({ whereIn: () => ({ select: async () => catalogRows }) });
+  beforeEach(() => { catalogRows = [{ id: P_CEL, category: 'insecticide' }, { id: uuid(2), category: 'insecticide' }]; });
+  const run = (products) => areas.preflightPlaces({ knex, svc, products });
 
   test('gate off: nothing is looked at', async () => {
     delete process.env.GATE_LAWN_TROUBLE_AREAS;
     expect(await run([spot()])).toBeNull();
     expect(limits.checkLimits).not.toHaveBeenCalled();
+  });
+
+  test('the method is resolved as the completion resolves it: a missing method on a spot-default product, and the `method` alias, are spot rows; an explicit non-spot method on a spot-default product is not', async () => {
+    catalogRows = [{ id: P_CEL, category: 'herbicide' }];
+    // No method, herbicide default (spot): a place is required, and a bad one is refused.
+    expect(await run([{ productId: P_CEL, name: 'Celsius WG' }])).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
+    expect(await run([{ productId: P_CEL, name: 'Celsius WG', areaPlace: 'roof' }])).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
+    // The `method` alias.
+    expect(await run([{ productId: P_CEL, name: 'Celsius WG', method: 'Spot treatment' }])).toMatchObject({ status: 400, payload: { code: 'lawn_place_required' } });
+    // The limits are read for it too.
+    limits.checkLimits.mockResolvedValue({ allowed: false, blocks: [{ type: 'annual_max_apps', matchType: 'product', message: 'closed' }], warnings: [] });
+    expect(await run([{ productId: P_CEL, name: 'Celsius WG', areaPlace: 'front' }])).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit' } });
+    // An explicit non-spot method on the spot-default product is not a spot row: no place, no limit read.
+    limits.checkLimits.mockClear();
+    expect(await run([{ productId: P_CEL, name: 'Celsius WG', applicationMethod: 'broadcast_spray' }, { productId: P_CEL, method: 'Granular broadcast' }])).toBeNull();
+    expect(limits.checkLimits).not.toHaveBeenCalled();
+    // A non-herbicide with no method is a broadcast by default.
+    catalogRows = [{ id: P_CEL, category: 'fertilizer' }];
+    expect(await run([{ productId: P_CEL, name: 'Feed' }])).toBeNull();
   });
 
   test('a spot row needs a place on the list', async () => {
@@ -206,8 +236,8 @@ describe('preflightPlaces: the /complete check of the places', () => {
   test('the limit reader is asked at the place, as a proposal on the visit\'s date, the visit\'s own rows left out, with the row as the ledger will hold it', async () => {
     expect(await run([spot({ areaPlace: 'back', rate: 0.147, rateUnit: 'oz', totalAmount: 0.05, amountUnit: 'oz', areaValue: 100.4, areaUnit: 'sqft' })])).toBeNull();
     expect(limits.checkLimits).toHaveBeenCalledTimes(1);
-    const [customerId, productId, day, knex, options] = limits.checkLimits.mock.calls[0];
-    expect([customerId, productId, knex]).toEqual(['cust-1', P_CEL, {}]);
+    const [customerId, productId, day, passedKnex, options] = limits.checkLimits.mock.calls[0];
+    expect([customerId, productId, passedKnex]).toEqual(['cust-1', P_CEL, knex]);
     expect(day.getUTCFullYear()).toBe(2026);
     expect(options).toEqual({
       propertyId: svc.property_id, place: 'back', proposal: true, excludeScheduledServiceId: svc.id,

@@ -235,3 +235,27 @@ describe('what /complete refused is authoritative', () => {
   });
 });
 
+describe('a take-all row from the guide card is held to the mapped places', () => {
+  const areas = troubleAreasOf(data({ known: [{ id: 'a', place: 'back', type: 'take_all', typeLabel: 't', placeLabel: 'Back' }] }));
+  const fungicide = (extra = {}) => row({ productId: 'T1', troubleSource: 'guide_card', ...extra });
+  const mapped = new Set(['back']);
+
+  test('the card row has only the mapped place open; the others carry the reason', () => {
+    const out = withPlace(fungicide(), { areas, chosen: '', takeAll: new Set(['t1']), takeAllPlaces: mapped });
+    expect(out.placeProblems).toEqual({ front: expect.stringMatching(/mapped take-all areas only/), back: null });
+    expect(out.place).toBe('back');
+    // Moved to an unmapped place, the row says so and Complete holds on it.
+    const moved = withPlace(fungicide(), { areas, chosen: 'front', takeAll: new Set(['t1']), takeAllPlaces: mapped });
+    expect(moved.placeBlock).toMatch(/mapped take-all areas only/);
+  });
+
+  test('a Search-added take-all row (tech_tap) may map any open place; so may a row with no allowlist', () => {
+    expect(withPlace(fungicide({ troubleSource: 'tech_tap' }), { areas, chosen: 'front', takeAll: new Set(['t1']), takeAllPlaces: mapped }).placeBlock).toBeNull();
+    expect(withPlace(fungicide(), { areas, chosen: 'front', takeAll: new Set(['t1']), takeAllPlaces: null }).placeBlock).toBeNull();
+  });
+
+  test('only a take-all product is held: a plain fungicide from a card is not', () => {
+    expect(withPlace(fungicide(), { areas, chosen: 'front', takeAll: new Set(), takeAllPlaces: mapped }).placeBlock).toBeNull();
+  });
+});
+

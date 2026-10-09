@@ -49,10 +49,10 @@ const reasonText = (value, fallback) => text(value) || fallback;
  * by the products a limit closes at a place. A decision whose limits could not be read ('unavailable') closes nothing:
  * the unknown is not "forbidden" (completion records it and flags the office). `weedRows` are the rows of the weed entry.
  */
-export function placeProblems(row, { areas, weedMix = null, chinch = null, weedRows = [] }) {
+export function placeProblems(row, { areas, weedMix = null, chinch = null, weedRows = [], takeAllPlaces = null }) {
   const out = {};
   for (const place of areas.places) {
-    out[place.id] = problemAt(place.id, row, { areas, weedMix, chinch, weedRows });
+    out[place.id] = problemAt(place.id, row, { areas, weedMix, chinch, weedRows, takeAllPlaces });
   }
   return out;
 }
@@ -65,10 +65,15 @@ const inChinchLadder = (row, chinch) => row.guided === 'chinch' || lowerIds(chin
 // A tank-mix member with no capped rate (the surfactant) closes no place.
 const uncapped = (row, weedMix) => lowerIds(weedMix?.noAreaProductIds).includes(String(row.productId).toLowerCase());
 
-function problemAt(placeId, row, { areas, weedMix, chinch, weedRows }) {
+const unmappedTakeAll = (row, placeId, places) => !!(row.takeAllRow && row.troubleSource === 'guide_card' && places && !places.has(placeId));
+const NOT_MAPPED = 'Take-all is treated on mapped take-all areas only. Pick a mapped place, or add the fungicide through Search to map a new one.';
+
+function problemAt(placeId, row, { areas, weedMix, chinch, weedRows, takeAllPlaces }) {
   // What /complete itself refused for this product at this place is authoritative, whatever any map says.
   const refused = areas.refused?.[String(row.productId).toLowerCase()]?.[placeId];
   if (refused) return reasonText(refused, 'A yearly limit is reached at this place.');
+  // A take-all row the guide CARD opened may go only on a mapped take-all place; one added through Search maps a new place (the server enforces the same).
+  if (unmappedTakeAll(row, placeId, takeAllPlaces)) return NOT_MAPPED;
   if (weedMix?.byPlace && inWeedGroup(row, weedMix)) {
     if (uncapped(row, weedMix)) return null;
     // The rows of the entry share one set; a group product that is on the sheet on its own is judged on its own.
@@ -135,17 +140,17 @@ export const knownPlacesOfType = (areas, type) => new Set(areas.known.filter((ar
  * What a row's place is, given the tech's own tap (`chosen`, '' when none): the tap, else the default. The row's
  * `placeRule` says the server asks for one; `place` is '' while it is missing.
  */
-export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows, takeAll = null }) {
+export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows, takeAll = null, takeAllPlaces = null }) {
   // `takeAll`: the guide's take-all product ids (a Set of lower-case ids); the row stands for a take-all area, not plain fungus.
   const takeAllRow = !!takeAll?.has(String(row.productId).toLowerCase());
   const chinchRow = !takeAllRow && (chinch?.chinchOnlyIds || []).some((id) => sameId(id, row.productId));
-  const out = placed({ ...row, ...(takeAllRow ? { takeAllRow } : {}), ...(chinchRow ? { chinchRow } : {}) }, { areas, chosen, weedMix, chinch, weedRows });
+  const out = placed({ ...row, ...(takeAllRow ? { takeAllRow } : {}), ...(chinchRow ? { chinchRow } : {}) }, { areas, chosen, weedMix, chinch, weedRows, takeAllPlaces });
   const decided = chinch?.byPlace?.[out.place]?.item;
   return !out.takeAllRow && !out.chinchRow && decided && sameId(decided.productId, row.productId) ? { ...out, chinchRow: true } : out;
 }
 
-function placed(row, { areas, chosen, weedMix, chinch, weedRows }) {
-  const problems = placeProblems(row, { areas, weedMix, chinch, weedRows });
+function placed(row, { areas, chosen, weedMix, chinch, weedRows, takeAllPlaces }) {
+  const problems = placeProblems(row, { areas, weedMix, chinch, weedRows, takeAllPlaces });
   const picked = chosen && areas.places.some((place) => place.id === chosen) ? chosen : '';
   const place = picked || defaultPlaceFor(row, { areas, problems });
   return {
