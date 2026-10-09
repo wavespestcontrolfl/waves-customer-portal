@@ -69,6 +69,20 @@ export function unsentTipsFirst(tips, lastSent) {
   return [...tips.filter((tip) => !lastSent[tip.id]), ...tips.filter((tip) => lastSent[tip.id])];
 }
 
+// The picker's groups with that order (owner 2026-10-09). A lawn visit keeps
+// the server's order, which ranks by today's findings.
+export function rotatedTipGroups(library) {
+  const groups = library?.groups || [];
+  if (library?.line === "lawn") return groups;
+  return groups.map((group) => ({ ...group, tips: unsentTipsFirst(group.tips || [], library?.lastSent) }));
+}
+
+// Every id a pick may hold: the visit's list and `more`, the tips a search of
+// the whole library reaches.
+export function pickableTipIds(library) {
+  return new Set([...(library?.groups || []).flatMap((group) => group.tips || []), ...(library?.more || [])].map((tip) => tip.id));
+}
+
 // The pest sheet's chips as a note names them (the note is read here only to
 // rank tips; the server's own read fills the record).
 const NOTE_PESTS = [
@@ -83,8 +97,11 @@ const NOTE_PESTS = [
   ["Centipedes", /\bcentipedes?\b/],
 ];
 
-// "No roaches seen" names no pest: a negated phrase is dropped before the read.
-const NEGATED_PEST_RE = /\b(?:no|not|zero|without)\s+(?:(?:seeing|finding|see|find)\s+)?(?:(?:signs?|evidence)\s+of\s+|live\s+|new\s+|more\s+|any\s+)?[a-z]+\b/g;
+// "No roaches seen" names no pest. A negation rules out the rest of its
+// clause ("no German roaches", "no ants or roaches", "without any evidence of
+// roaches"), up to the next punctuation mark or "but". The lift is a
+// suggestion, so dropping too much of a run-on note only loses a suggestion.
+const NEGATED_PEST_RE = /\b(?:no|not|zero|without)\b[^.;,!?\n]*?(?=\bbut\b|[.;,!?\n]|$)/g;
 
 const withoutNegated = (note) => String(note || "").toLowerCase().replace(NEGATED_PEST_RE, " ");
 

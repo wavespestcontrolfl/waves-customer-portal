@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pestSheetTipIds, pestsInNote, unsentTipsFirst } from './tech-tips';
+import { pestSheetTipIds, pestsInNote, pickableTipIds, rotatedTipGroups, unsentTipsFirst } from './tech-tips';
 
 const tip = (id, extra = {}) => ({ id, label: id, copy: 'Advice.', keywords: [], ...extra });
 const LIBRARY = {
@@ -15,6 +15,8 @@ describe('pestsInNote', () => {
   it('does not name a pest the note rules out', () => {
     expect(pestsInNote('No roaches seen. No signs of ants. Spiders on the lanai.')).toEqual(['Spiders']);
     expect(pestsInNote('Not seeing any fleas, without live wasps.')).toEqual([]);
+    expect(pestsInNote('No German roaches. No ants or roaches inside; without any evidence of fleas.')).toEqual([]);
+    expect(pestsInNote('No roaches inside but ants at the back door.')).toEqual(['Ants']);
   });
 });
 
@@ -23,6 +25,18 @@ describe('unsentTipsFirst', () => {
     const tips = [tip('a'), tip('b'), tip('c')];
     expect(unsentTipsFirst(tips, { a: '2026-09-01' }).map((t) => t.id)).toEqual(['b', 'c', 'a']);
     expect(unsentTipsFirst(tips, null)).toBe(tips);
+  });
+});
+
+describe('the admin picker helpers', () => {
+  it('a searched off-list tip is a pick the picker keeps', () => {
+    expect([...pickableTipIds(LIBRARY)].sort()).toEqual(['bait_spots', 'drains', 'drip', 'fan', 'flea_yard', 'mats']);
+    expect(pickableTipIds(null).size).toBe(0);
+  });
+  it('puts tips sent lately last in each group, except on a lawn visit', () => {
+    const sent = { ...LIBRARY, lastSent: { drains: '2026-09-20' } };
+    expect(rotatedTipGroups(sent)[0].tips.map((t) => t.id)).toEqual(['drip', 'mats', 'fan', 'drains']);
+    expect(rotatedTipGroups({ ...sent, line: 'lawn' })[0].tips.map((t) => t.id)).toEqual(['drains', 'drip', 'mats', 'fan']);
   });
 });
 

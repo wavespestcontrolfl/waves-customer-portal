@@ -330,11 +330,11 @@ describe('tipsForVisit', () => {
     expect(bedBug.groups[0].tips.map((tip) => tip.id)).toEqual(['bb_dryer_heat', 'bb_stay_put', 'bb_no_foggers', 'bb_encasements', 'bb_travel', 'bb_clutter']);
     expect(bedBug.groups.slice(1).flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
     const quarterly = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-02' });
-    expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+    expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains', 'gp_sprinkler_off_wall', 'gp_first_days', 'gp_garage_dusk', 'gp_pressure_wash_first', 'gp_garage_floor_edge']);
     // The one-time pest identity is one_time_pest_control in prod and
     // pest_initial_cleanout in migration-built databases (Codex #5582).
     for (const serviceKey of ['one_time_pest_control', 'pest_initial_cleanout']) {
-      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains', 'gp_sprinkler_off_wall', 'gp_first_days', 'gp_garage_dusk', 'gp_pressure_wash_first', 'gp_garage_floor_edge']);
     }
     for (const serviceKey of [null, 'lawn_care', 'not_a_service']) {
       const visit = tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' });
@@ -407,7 +407,7 @@ describe('tipsForVisit', () => {
 
   test('every service tip names catalog-shaped service keys', () => {
     const withServices = TIPS.filter((tip) => tip.services);
-    expect(withServices).toHaveLength(50);
+    expect(withServices).toHaveLength(88);
     for (const tip of withServices) {
       expect(tip.services.length).toBeGreaterThan(0);
       expect(new Set(tip.services).size).toBe(tip.services.length);
@@ -483,7 +483,11 @@ describe('lawn tip library', () => {
   // timelines, no watering or mowing-height numbers beyond the seed's two
   // (a third; half an inch), and the business is Waves Pest Control.
   // (The portal tip is the pre-existing, separately approved one: "about two minutes" is the form, not a result.)
-  test.each(LAWN.filter((t) => t.id !== 'lawn_irrigation_portal').map((t) => [t.id, t.copy]))('%s keeps to the lawn copy rulings', (id, copy) => {
+  // These are the lawn PROGRAM's tips. A tip written for a one-off job
+  // (`services`: plugging, top dressing, dethatching, pest knockdown; owner
+  // approved the wording 2026-10-09) is that job's aftercare: it names the
+  // job and how long the lawn takes to recover from it.
+  test.each(LAWN.filter((t) => t.id !== 'lawn_irrigation_portal' && !t.services).map((t) => [t.id, t.copy]))('%s keeps to the lawn copy rulings', (id, copy) => {
     expect(copy).not.toMatch(/\b(?:sod(?!\s+webworm)|aerat\w*|dethatch\w*|track [A-D]|Lawn Care)\b/i);
     expect(copy).not.toMatch(/\b\d+(?:\.\d+)?\s*(?:-|to)?\s*\d*\s*(?:days?|weeks?|months?|hours?|minutes?|inch(?:es)?|in\b|")/i);
     expect(copy).not.toMatch(/\b(?:two|three|four|five|six|seven|ten|fourteen|twenty)\s+(?:days?|weeks?|months?|hours?|minutes?)\b/i);

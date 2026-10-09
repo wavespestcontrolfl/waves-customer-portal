@@ -160,7 +160,7 @@ import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
-import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
@@ -14903,7 +14903,7 @@ export function CompletionPanel({
   // changes, so this never loops).
   useEffect(() => {
     if (techTips?.available !== true) return;
-    const known = new Set((techTips.groups || []).flatMap((g) => (g.tips || []).map((t) => t.id)));
+    const known = pickableTipIds(techTips);
     setSelectedTipIds((prev) => {
       const kept = prev.filter((id) => known.has(id));
       return kept.length === prev.length ? prev : kept;
@@ -25107,7 +25107,7 @@ function TechTipPicker({
     if (String(customTip || "").trim()) setShowCustom(true);
   }, [customTip]);
   const listId = useMemo(() => `tech-tips-${Math.random().toString(36).slice(2, 8)}`, []);
-  const groups = library?.groups || [];
+  const groups = useMemo(() => rotatedTipGroups(library), [library]);
   const allTips = useMemo(
     () => groups.flatMap((g) => (g.tips || []).map((t) => ({ ...t, groupLabel: g.label }))),
     [groups],

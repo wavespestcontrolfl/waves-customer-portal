@@ -735,17 +735,15 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false, sentLast = true }) {
-  const [query, setQuery] = useState('');
-  const [showAll, setShowAll] = useState(false);
-  const [writing, setWriting] = useState(false);
+// The picker's lists for one render: the lifted tips, the tips under them, and
+// the row set on screen (a search reads the whole library).
+function useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast, q, showAll }) {
   const allTips = useMemo(
     () => (library?.groups || []).flatMap((group) => group.tips || []),
     [library],
   );
   const everyTip = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
   const lastSent = sentLast ? library?.lastSent : null;
-  const q = query.trim().toLowerCase();
   const priority = useMemo(() => {
     if (!priorityTipIds?.length) return [];
     const ids = new Set(priorityTipIds);
@@ -762,6 +760,15 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
   const { tips: visible, noMatch } = visibleTips(rest, {
     query: q, showAll, tipId, searchable: everyTip, pinnable: lifted ? everyTip.filter((tip) => !priority.includes(tip)) : everyTip,
   });
+  return { priority, lifted, rest, visible, noMatch };
+}
+
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false, sentLast = true }) {
+  const [query, setQuery] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const q = query.trim().toLowerCase();
+  const { priority, lifted, rest, visible, noMatch } = useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast, q, showAll });
   const hasPick = !!tipId || !!customTip.trim();
   const writingOwn = writing || !!customTip;
   return (
