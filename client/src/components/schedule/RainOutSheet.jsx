@@ -874,12 +874,18 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             {/* Best-times chips: tappable only while the custom picker is
                 active (they set the custom start); a preset target is fixed,
                 so the chips go display-only. */}
+            {/* sameDayOnly (GET /rain-out-options): a suggestion on another day
+                would submit a move POST /rain-out refuses this login, so only
+                today's slots are taken and the date-changing pick is off. */}
             <AvailabilityStrip
               availability={availability}
               currentDate={landingDate}
               currentStart={isCustom ? customStart : selected?.window?.start}
               currentTechnicianId={service.technicianId || service.technician_id}
-              onPick={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
+              onPick={isCustom ? (slot) => {
+                if (options?.sameDayOnly && slot.date !== todayStr) return;
+                setCustomDate(slot.date); setCustomStart(slot.start);
+              } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
               bestRows
             />
@@ -891,7 +897,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               currentDate={landingDate}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}
-              onPickDate={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
+              onPickDate={isCustom && !options?.sameDayOnly ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
             />
 
