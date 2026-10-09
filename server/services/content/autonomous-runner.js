@@ -1557,6 +1557,12 @@ class AutonomousRunner {
    * cap actual live output per action type.
    */
   async runDaily({ limit = null, actionType = null } = {}) {
+    // GATE_CONTENT_WRITER_TERMINAL: the batch does not draft. The due posts
+    // go to the owner's terminal as one admin item (terminal-writer.js).
+    const terminalWriter = require('./terminal-writer');
+    if (terminalWriter.terminalWriterLive()) {
+      return this._withEngineLock('runDaily', () => terminalWriter.handOffToTerminal());
+    }
     // Serialize the whole batch behind the engine lock so a long batch that
     // spills past the next cron, a manual --live run, or another instance can't
     // publish concurrently and blow past the per-day/week caps.
@@ -1583,6 +1589,11 @@ class AutonomousRunner {
   async runCatchUp({ limit = null } = {}) {
     if (!envBool('AUTONOMOUS_CONTENT_CATCHUP', true)) {
       return { outcome: 'skipped_disabled', skipped: true, reason: 'catchup_disabled', count: 0, runs: [] };
+    }
+    // The catch-up exists to rescue a drafting batch that died. With the
+    // terminal writer on there is no batch, and the 9am admin item stands.
+    if (require('./terminal-writer').terminalWriterLive()) {
+      return { outcome: 'skipped_terminal_writer', skipped: true, reason: 'terminal_writer', count: 0, runs: [] };
     }
     // Everything below runs under the engine lock (Codex r2): stale-claim
     // recovery inside the probe MUTATES queue state, and recovering while a
