@@ -579,8 +579,14 @@ async function visitStatusReason(conn, signature, customerId, refs) {
   return unseen ? 'commitment_appeared' : null;
 }
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
-async function scheduleFactsReason(scheduleFacts, customerId, dbh) {
+async function scheduleFactsReason(scheduleFacts, customerId, dbh, now = new Date()) {
   if (!customerId || typeof scheduleFacts.signature !== 'string' || !scheduleFacts.signature) return 'schedule_unverifiable';
+  // Same ET day as the draft (Codex #6232 r3): the signature holds absolute days, but the
+  // reply may say "today" / "tomorrow"; after midnight ET those words mean another day.
+  const draftedAt = new Date(scheduleFacts.at);
+  const { etDateString } = require('../utils/datetime-et');
+  if (Number.isNaN(draftedAt.getTime())) return 'schedule_unverifiable';
+  if (etDateString(draftedAt) !== etDateString(now)) return 'schedule_day_changed';
   try {
     // on the caller's connection when it has one (the provider-boundary handoff transaction)
     const now = await require('./context-aggregator').upcomingScheduleSignature(customerId, dbh || require('../models/db'));
@@ -606,7 +612,7 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
   // immediate send, the queued-send fire, the provider boundary) covers it. Fail closed.
   const scheduleFacts = objectOrNull(snapshot.schedule_facts);
   if (scheduleFacts) {
-    const reason = await scheduleFactsReason(scheduleFacts, customerId, dbh);
+    const reason = await scheduleFactsReason(scheduleFacts, customerId, dbh, now);
     if (reason) return reason;
   }
   if (!refs.length && !status) return null;

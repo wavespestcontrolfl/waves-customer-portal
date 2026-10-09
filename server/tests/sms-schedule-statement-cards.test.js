@@ -15,6 +15,7 @@ beforeEach(() => { for (const g of GATES) { prior[g] = process.env[g]; delete pr
 afterEach(() => { for (const g of GATES) { if (prior[g] === undefined) delete process.env[g]; else process.env[g] = prior[g]; } });
 
 const STAMP = { signature: 'sig-1', at: '2026-10-09T15:00:00.000Z' };
+const SAME_DAY = new Date('2026-10-09T20:00:00.000Z'); // 4 PM ET, the stamp's ET day
 const base = { reply: 'You are on for Tuesday 9-11.', customerId: 'c1', smsLogId: 's1', intent: 'general_customer_sms_needs_review', schedulingIntent: true };
 
 describe('suggestionEligible: a scheduling answer with no new time', () => {
@@ -100,38 +101,50 @@ describe('send seams: openLoopsBlockReason rechecks the stored schedule signatur
     const sig = jest.fn().mockResolvedValue('sig-1');
     const checks = load(sig);
     const trx = jest.fn();
-    await checks.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }), dbh: trx });
+    await checks.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }), dbh: trx, now: SAME_DAY });
     expect(sig).toHaveBeenCalledWith('c1', trx);
   });
 
   test('unchanged schedule: no block; a moved, added or removed visit: schedule_changed', async () => {
     const same = load(async () => 'sig-1');
-    expect(await same.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }) })).toBeNull();
+    expect(await same.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }), now: SAME_DAY })).toBeNull();
     jest.resetModules();
     const moved = load(async () => 'sig-2');
-    expect(await moved.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }) })).toBe('schedule_changed');
+    expect(await moved.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }), now: SAME_DAY })).toBe('schedule_changed');
   });
 
   test('fail closed: no customer or an empty signature is schedule_unverifiable; an unreadable schedule is the retryable verdict', async () => {
     const ok = load(async () => 'sig-1');
-    expect(await ok.openLoopsBlockReason({ decision: { customer_id: null, input_snapshot: JSON.stringify({ schedule_facts: STAMP }) } })).toBe('schedule_unverifiable');
-    expect(await ok.openLoopsBlockReason({ decision: decision({ schedule_facts: { signature: '', at: STAMP.at } }) })).toBe('schedule_unverifiable');
+    expect(await ok.openLoopsBlockReason({ decision: { customer_id: null, input_snapshot: JSON.stringify({ schedule_facts: STAMP }) }, now: SAME_DAY })).toBe('schedule_unverifiable');
+    expect(await ok.openLoopsBlockReason({ decision: decision({ schedule_facts: { signature: '', at: STAMP.at } }), now: SAME_DAY })).toBe('schedule_unverifiable');
     jest.resetModules();
     const failing = load(async () => { throw new Error('db down'); });
-    expect(await failing.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }) })).toBe('open_loops_recheck_failed');
+    expect(await failing.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }), now: SAME_DAY })).toBe('open_loops_recheck_failed');
+  });
+
+  test('a card from an earlier ET day is refused before any read: "tomorrow" no longer means the same day (Codex r3 P1)', async () => {
+    const sig = jest.fn().mockResolvedValue('sig-1');
+    const checks = load(sig);
+    // drafted 11:50 PM ET on Oct 9, sent 12:10 AM ET on Oct 10
+    const late = { signature: 'sig-1', at: '2026-10-10T03:50:00.000Z' };
+    expect(await checks.openLoopsBlockReason({ decision: decision({ schedule_facts: late }), now: new Date('2026-10-10T04:10:00.000Z') })).toBe('schedule_day_changed');
+    expect(sig).not.toHaveBeenCalled();
+    expect(await checks.openLoopsBlockReason({ decision: decision({ schedule_facts: late }), now: new Date('2026-10-10T03:59:00.000Z') })).toBeNull();
+    expect(await checks.openLoopsBlockReason({ decision: decision({ schedule_facts: { signature: 'sig-1', at: 'not a date' } }), now: SAME_DAY })).toBe('schedule_unverifiable');
   });
 
   test('a decision with no schedule_facts is untouched (no schedule read at all)', async () => {
     const sig = jest.fn();
     const checks = load(sig);
-    expect(await checks.openLoopsBlockReason({ decision: decision({}) })).toBeNull();
+    expect(await checks.openLoopsBlockReason({ decision: decision({}), now: SAME_DAY })).toBeNull();
     expect(sig).not.toHaveBeenCalled();
   });
 
   test('the immediate send path reports it through agentDecisionSendBlockReason', async () => {
     const moved = load(async () => 'sig-2');
     const reason = await moved.agentDecisionSendBlockReason({
-      decision: { ...decision({ schedule_facts: STAMP }), suggested_message: base.reply, prompt_version: 'house_voice_v11' },
+      // this path reads the real clock, so the stamp is taken now
+      decision: { ...decision({ schedule_facts: { signature: 'sig-1', at: new Date().toISOString() } }), suggested_message: base.reply, prompt_version: 'house_voice_v11' },
       outgoingBody: base.reply,
     });
     expect(reason).toBe('open-loop facts stale (schedule_changed)');
