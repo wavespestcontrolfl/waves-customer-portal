@@ -38,10 +38,39 @@ function callReplayOnChangeLive() {
 
 const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
+// The code that turns the model's answer into the fields the replay grades:
+// the prompt and schema module, the validator, the normaliser and the replay
+// itself, whole. call-recording-processor.js is far too large and too busy to
+// hash whole (every unrelated call change would ask for a check), so only the
+// source of its two extraction functions is taken.
+const PIPELINE_FILES = Object.freeze([
+  ['services', 'prompts', 'call-extraction-v1.js'],
+  ['schemas', 'validate-extraction.js'],
+  ['schemas', 'call-extraction.model-output.schema.json'],
+  ['schemas', 'call-extraction.persisted.schema.json'],
+  ['utils', 'normalize-extraction-v2.js'],
+  ['scripts', 'replay-call-extraction-variance.js'],
+]);
+const PIPELINE_FUNCTIONS = Object.freeze(['extractCallDataV2', 'finalizeV2Extraction']);
+
+function pipelineSources() {
+  const serverDir = path.join(__dirname, '..', '..');
+  const internals = require('../call-recording-processor')._test;
+  return [
+    ...PIPELINE_FILES.map((parts) => fs.readFileSync(path.join(serverDir, ...parts), 'utf8')),
+    ...PIPELINE_FUNCTIONS.map((name) => {
+      if (typeof internals[name] !== 'function') throw new Error(`call-recording-processor does not expose ${name}`);
+      return internals[name].toString();
+    }),
+  ];
+}
+
 /**
- * What decides the answers the REPLAY can see, as one short id: only inputs
- * the replay exercises, so a recorded fingerprint never claims a check that
- * did not happen. Left out on purpose:
+ * What decides the answers the REPLAY can see, as one short id: the prompt,
+ * the models, the reviewed calls, and the code between the model's answer and
+ * the graded fields (`pipeline`). Only inputs the replay exercises, so a
+ * recorded fingerprint never claims a check that did not happen. Left out on
+ * purpose:
  *   - the agent-proposed-slot prompt variant: the replay calls the extractor
  *     without it, so a change there is neither asked for nor marked checked;
  *   - the catalog of bookable service names: it is data, it changes without
@@ -58,6 +87,7 @@ function extractorFingerprint({ fixturePath = DEFAULT_FIXTURE_PATH, deps = {} } 
     primary: leg(route.primary),
     fallback: leg(route.fallback),
     fixture: sha(fs.readFileSync(fixturePath)).slice(0, 12),
+    pipeline: sha((deps.pipelineSources || pipelineSources)().join('\n\u0000\n')).slice(0, 12),
   };
   return { fingerprint: sha(JSON.stringify(parts)).slice(0, 16), parts };
 }
@@ -83,15 +113,20 @@ async function markChecked(fingerprint, { conn = db, now = new Date() } = {}) {
 async function checkCallReplayDue({ now = new Date(), deps = {} } = {}) {
   const conn = deps.db || db;
   const episodes = deps.episodes || require('../admin-alert-episodes');
+  // ALERT_EPISODES is the shared kill switch for close / reopen. Killed: an
+  // ordinary deduped item per fingerprint, and nothing is closed here.
+  const episodesLive = deps.episodesLive ?? require('../../config/feature-gates').alertEpisodesLive();
   const { fingerprint, parts } = deps.fingerprint || extractorFingerprint();
   const checked = await checkedFingerprint(conn);
   const due = checked !== fingerprint;
   const key = `${ALERT_KEY_PREFIX}${fingerprint}`;
-  const stale = (await episodes.openAdminAlertKeys(conn, ALERT_KEY_PREFIX)).filter((k) => !due || k !== key);
-  await episodes.closeAdminAlertKeys(conn, stale, 'call_check_run', { now, resolution: 'Cleared: the call check ran on this version of the extractor' });
+  if (episodesLive) {
+    const stale = (await episodes.openAdminAlertKeys(conn, ALERT_KEY_PREFIX)).filter((k) => !due || k !== key);
+    await episodes.closeAdminAlertKeys(conn, stale, 'call_check_run', { now, resolution: 'Cleared: the call check ran on this version of the extractor' });
+  }
   if (!due) return { due: false, fingerprint };
 
-  const composed = require('../admin-alert-compose').composeAdminAlert({
+  const spec = {
     area: 'System',
     action: 'run the call check in the terminal',
     why: checked
@@ -102,11 +137,13 @@ async function checkCallReplayDue({ now = new Date(), deps = {} } = {}) {
     subject: { type: 'check', id: 'call-extraction-replay' },
     doneWhen: 'call_check_run',
     who: 'either',
-  });
-  await episodes.raiseAdminAlertWithReopen('system', composed.headline, composed.why, {
-    link: composed.link,
-    metadata: composed.metadata,
+  };
+  const opts = {
     dedupeKey: key,
+    // `system` is not on the bell policy's default list. With this gate on
+    // the weekly replay is off, so this item is the only request for the
+    // check: it rings unless the owner turned the category off.
+    bellDefault: true,
     detail: [
       'Run this from the repo, with the production environment: npm run eval:call-replay',
       'It replays the reviewed calls through the live extractor (about 27 model calls) and ends this item when it reaches a verdict.',
@@ -114,7 +151,14 @@ async function checkCallReplayDue({ now = new Date(), deps = {} } = {}) {
       `Prompt version: ${parts.prompt}`,
       `Models: ${parts.primary}, then ${parts.fallback}`,
     ].join('\n'),
-  });
+  };
+  const alerts = deps.alerts || require('../admin-alert-compose');
+  if (episodesLive) {
+    const composed = alerts.composeAdminAlert(spec);
+    await episodes.raiseAdminAlertWithReopen('system', composed.headline, composed.why, { ...opts, link: composed.link, metadata: composed.metadata });
+  } else {
+    await alerts.raiseAdminAlert('system', spec, opts);
+  }
   logger.info(`[call-replay-on-change] call check due for extractor ${fingerprint}`);
   return { due: true, fingerprint };
 }

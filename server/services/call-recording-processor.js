@@ -23467,6 +23467,7 @@ CallRecordingProcessor._test = {
   emailPassEvidence,
   transcribeRecording,
   extractCallDataV2,
+  finalizeV2Extraction,
   callTimeETString,
   CALL_EXTRACTION_ROUTE,
   normalizeOpenAISegments,

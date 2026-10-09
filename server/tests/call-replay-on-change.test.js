@@ -17,7 +17,7 @@ const fixture = (text) => {
 };
 const prompts = (version = 'v9-aaaa') => ({ extractionPromptVersion: (names, opts = {}) => (opts.agentProposedSlotCommitment ? `${version}a` : version) });
 const route = (primary = 'gpt-x', fallback = 'claude-y') => ({ primary: { provider: 'openai', model: primary }, fallback: { provider: 'anthropic', model: fallback } });
-const print = (over = {}) => onChange.extractorFingerprint({ fixturePath: over.fixturePath || fixture('[1]'), deps: { prompts: over.prompts || prompts(), route: over.route || route() } }).fingerprint;
+const print = (over = {}) => onChange.extractorFingerprint({ fixturePath: over.fixturePath || fixture('[1]'), deps: { prompts: over.prompts || prompts(), route: over.route || route(), pipelineSources: () => over.pipeline || ['normalise v1', 'finalize v1'] } }).fingerprint;
 
 describe('gate', () => {
   const saved = { ...process.env };
@@ -40,6 +40,7 @@ describe('extractorFingerprint', () => {
     ['the primary model', { route: route('gpt-z') }],
     ['the fallback model', { route: route('gpt-x', 'claude-z') }],
     ['the reviewed-call fixture', { fixturePath: fixture('[1,2]') }],
+    ['the code after the model (normaliser, validator, finalize)', { pipeline: ['normalise v2', 'finalize v1'] }],
   ])('changes when %s changes', (_label, over) => {
     expect(print(over)).not.toBe(print());
   });
@@ -56,15 +57,19 @@ describe('extractorFingerprint', () => {
     const { fingerprint, parts } = onChange.extractorFingerprint();
     expect(fingerprint).toMatch(/^[0-9a-f]{16}$/);
     expect(parts.prompt).toBeTruthy();
+    // the real normaliser, validator, prompt module, replay script and both extraction functions were read
+    expect(parts.pipeline).toMatch(/^[0-9a-f]{12}$/);
     expect(parts.primary).toMatch(/^(openai|anthropic|gemini)\/.+/);
   });
 });
 
 describe('checkCallReplayDue', () => {
   const now = new Date('2026-10-09T07:45:00Z');
-  function deps({ checked, openKeys = [] }) {
+  function deps({ checked, openKeys = [], episodesLive = true }) {
     return {
       fingerprint: { fingerprint: 'fp-new', parts: { prompt: 'v9-aaaa', primary: 'openai/gpt-x', fallback: 'anthropic/claude-y' } },
+      episodesLive,
+      alerts: { composeAdminAlert: jest.requireActual('../services/admin-alert-compose').composeAdminAlert, raiseAdminAlert: jest.fn(async () => ({ id: 'n2' })) },
       db: () => ({ where: () => ({ first: async () => (checked ? { value: checked } : undefined) }) }),
       episodes: {
         openAdminAlertKeys: jest.fn(async () => openKeys),
@@ -81,7 +86,8 @@ describe('checkCallReplayDue', () => {
     const [category, title, why, opts] = d.episodes.raiseAdminAlertWithReopen.mock.calls[0];
     expect([category, title]).toEqual(['system', 'System — run the call check in the terminal']);
     expect(why).toBe('The call extractor changed and the reviewed-call check has not run on the new version.');
-    expect(opts).toMatchObject({ dedupeKey: 'call-replay-due:fp-new', link: '/admin/agents' });
+    // bellDefault: with the weekly replay off this item is the only request for the check
+    expect(opts).toMatchObject({ dedupeKey: 'call-replay-due:fp-new', link: '/admin/agents', bellDefault: true });
     expect(opts.metadata).toMatchObject({ severity: 'needs-you', doneWhen: 'call_check_run' });
     expect(opts.detail).toContain('openai/gpt-x, then anthropic/claude-y');
     expect(opts.detail).toContain('npm run eval:call-replay');
@@ -91,6 +97,18 @@ describe('checkCallReplayDue', () => {
     const d = deps({ checked: null });
     await onChange.checkCallReplayDue({ now, deps: d });
     expect(d.episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('The reviewed-call check has not run on this version of the call extractor.');
+  });
+
+  test('ALERT_EPISODES off: an ordinary deduped item, and nothing is closed or reopened', async () => {
+    const d = deps({ checked: 'fp-old', openKeys: ['call-replay-due:fp-old'], episodesLive: false });
+    expect(await onChange.checkCallReplayDue({ now, deps: d })).toEqual({ due: true, fingerprint: 'fp-new' });
+    expect(d.episodes.openAdminAlertKeys).not.toHaveBeenCalled();
+    expect(d.episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(d.episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    const [category, spec, opts] = d.alerts.raiseAdminAlert.mock.calls[0];
+    expect(category).toBe('system');
+    expect(spec.action).toBe('run the call check in the terminal');
+    expect(opts).toMatchObject({ dedupeKey: 'call-replay-due:fp-new', bellDefault: true });
   });
 
   test('the replay already ran on this version: nothing is raised and the open item is closed', async () => {
