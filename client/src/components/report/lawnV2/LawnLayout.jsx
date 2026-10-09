@@ -12,6 +12,7 @@
 // re-entry card (its sentence moves into "Your part"). The PDF document never uses this file.
 
 import { Fragment } from 'react';
+import ReportText from '../ReportSections';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import { usePrintRequested } from '../usePrintRequested';
@@ -39,15 +40,15 @@ import {
 } from './LawnReportV2';
 import {
   LAYOUT_COPY,
-  bannerCarriesWatering,
+  bannerRepeatsAftercare,
   bannerShowsAnything,
   insightsWithoutRepeats,
   lawnLayoutActive,
   mowingLine,
   planShowsNextVisit,
-  techParagraphWithoutApplied,
   watchingLine,
   whenToCallLines,
+  withoutRepeatedApplied,
   yourPartIsEmpty,
 } from './lawnLayoutRules';
 
@@ -103,8 +104,8 @@ export function LawnYourPartCard({ banner = null, reentry = null, lines = [], st
                 valueSize={16}
                 value={(
                   <>
-                    <div>{reentry.text}</div>
-                    {reentry.pets ? <div style={{ marginTop: 4 }}>{reentry.pets}</div> : null}
+                    {reentry.text ? <div>{reentry.text}</div> : null}
+                    {reentry.pets ? <div style={reentry.text ? { marginTop: 4 } : null}>{reentry.pets}</div> : null}
                   </>
                 )}
               />
@@ -143,8 +144,11 @@ function WhatWeDid({ data, slots }) {
   const v2 = data.reportV2;
   const { lead } = v2;
   const sinceLast = Array.isArray(lead.sinceLast?.lines) ? lead.sinceLast.lines.filter(Boolean) : [];
-  const tech = techParagraphWithoutApplied(lead.techParagraph, lead.applied);
-  const showFallback = !lead.applied && Boolean(data.summary);
+  const tech = withoutRepeatedApplied(lead.techParagraph, lead.applied);
+  // The Visit Summary paragraph stays (it carries the season, the photo read and the next-visit topics);
+  // only an applied sentence the lead's own sentence already says in full is left out of it.
+  const summary = slots.visitSummary;
+  const summaryText = summary ? withoutRepeatedApplied(summary.text, lead.applied) : null;
   return (
     <>
       {sinceLast.length || lead.applied || tech ? (
@@ -158,10 +162,10 @@ function WhatWeDid({ data, slots }) {
           {tech ? <LeadBox label="From your technician" testId="lawn-lead-tech">{tech}</LeadBox> : null}
         </Card>
       ) : null}
-      {showFallback ? (
+      {summaryText ? (
         <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
           <h2>Visit Summary</h2>
-          {slots.visitSummary}
+          <ReportText text={summaryText} sections={summary.sections} nextVisitLabel={summary.nextVisitLabel} />
         </section>
       ) : null}
       <LawnProgramLine snapshot={v2.snapshot} />
@@ -313,19 +317,18 @@ const SECTIONS = {
 const LAYOUT_CSS = `
   /* The Weather call block is not part of the lawn layout (hidden, not deleted). */
   .lawn-layout .hero-conditions { display: none; }
-  /* The "Your part" card prints the watering instruction, so the water card's restatements of it
-     (the line inside the weekly plan's condition note, and the "After today's visit" note) are
-     hidden, not deleted. Only while the banner carries watering lines. */
+  /* The water card's copy of the watering instruction (the line inside the weekly plan's condition note)
+     is hidden, not deleted, only when every sentence of it is a sentence "Your part" prints from the
+     banner (bannerRepeatsAftercare). The "After today's visit" note also carries the label's re-entry
+     text, so it is never hidden. */
   .lawn-layout-banner [data-testid="lawn-week-plan-condition"] > div { display: none; }
-  .lawn-layout-banner .lawn-callout-after { display: none; }
-  .lawn-layout-banner details:has(> .lawn-callout-after):not(:has(> p)) { display: none; }
   /* The products section's own heading is the summary line above it. */
   .lawn-layout-products .applied-products-header { display: none; }
   .lawn-layout-collapse > summary::-webkit-details-marker { display: none; }
 `;
 
 export function LawnLayoutBody({ data, slots }) {
-  const banner = bannerCarriesWatering(data.reportV2?.banner) ? ' lawn-layout-banner' : '';
+  const banner = bannerRepeatsAftercare(data.reportV2?.banner, data.reportV2?.aftercare) ? ' lawn-layout-banner' : '';
   return (
     <PrintContext.Provider value={false}>
       <div className={`lawn-layout${banner}`} style={{ display: 'contents' }}>

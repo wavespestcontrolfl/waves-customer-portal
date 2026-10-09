@@ -43,7 +43,7 @@ const { lawnLayoutPayload } = require('../server/services/service-report/lawn-re
 
 const COMPLETED_AT = '2026-10-09T14:56:39.602Z';
 const VISIT_DAY = '2026-10-09';
-const NEXT_VISIT = { label: 'Fri, Oct 23', source: 'scheduled' };
+const NEXT_VISIT = { label: 'Friday, October 23', source: 'scheduled' };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 

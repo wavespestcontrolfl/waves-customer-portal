@@ -148,20 +148,32 @@ describe('gate on: the phone order', () => {
     expect(screen.queryByTestId('lawn-watering-banner')).toBeNull();
   });
 
-  it('prints each fact once: a finding step that restates the banner is dropped, and the applied sentence is not repeated', async () => {
+  it('prints each fact once, and never drops a distinct instruction', async () => {
     const payload = clone(spotOn);
-    const [line] = payload.reportV2.banner.lines;
-    payload.reportV2.insights[0].customerAction = `${line} ${payload.reportV2.banner.lines[1]}`;
-    payload.reportV2.lead.techParagraph = 'Our technician saw thin turf in the front yard. Today we applied a disease control product.';
+    const [line, second] = payload.reportV2.banner.lines;
+    // a finding step that mixes the banner's own sentences with a distinct one keeps the distinct one
+    payload.reportV2.insights[1].customerAction = `${line} ${second} Fix the broken head on the shaded side zone.`;
+    // the paragraph's applied sentence lists only what the lead's applied sentence says
+    payload.reportV2.lead.techParagraph = 'Our technician saw thin turf in the front yard. Today we applied azoxystrobin and propiconazole.';
     const { container } = renderReport(payload);
     await waitForReport();
     // the banner's own heading is the one place the instruction prints
     expect(screen.getAllByText(line)).toHaveLength(1);
+    expect(text(container)).toContain('Fix the broken head on the shaded side zone.');
+    expect(text(container)).not.toContain(second.replace(/\.$/, '') + '. Fix');
+    // the finding's own distinct step is untouched
+    expect(text(container)).toContain('Check that the sprinkler zone by the driveway reaches the edge evenly.');
     expect(screen.getByTestId('lawn-lead-tech')).toHaveTextContent('Our technician saw thin turf in the front yard.');
     expect(screen.getByTestId('lawn-lead-tech')).not.toHaveTextContent('Today we applied');
     expect(count(container, 'What we applied today')).toBe(1);
-    // the finding keeps its other lines
-    expect(text(container)).toContain('Thin turf along the driveway edge');
+  });
+
+  it('an applied sentence the lead does not fully say stays in the technician paragraph', async () => {
+    const payload = clone(spotOn);
+    payload.reportV2.lead.techParagraph = 'Today we applied a disease control product.';
+    renderReport(payload);
+    await waitForReport();
+    expect(screen.getByTestId('lawn-lead-tech')).toHaveTextContent('Today we applied a disease control product.');
   });
 
   it('the Watching line that only repeats the findings is dropped', async () => {
@@ -206,16 +218,52 @@ describe('gate on: the phone order', () => {
     expect(block).toHaveTextContent('Call or text us if you see new damage in your lawn.');
   });
 
-  it('no Visit Summary paragraph while the lead carries what we applied; the paragraph stands in when it does not', async () => {
+  it('the Visit Summary paragraph stays; only an applied sentence the lead says in full is left out of it', async () => {
     const { container } = renderReport(clone(spotOn));
     await waitForReport();
-    expect(container.querySelector('#visit-summary')).toBeNull();
+    expect(container.querySelector('#visit-summary')).not.toBeNull();
+    expect(container.querySelector('#visit-summary')).toHaveTextContent('We visited today and treated your front, back, and side yards');
     cleanup();
-    const noApplied = clone(spotOn);
-    delete noApplied.reportV2.lead.applied;
-    const second = renderReport(noApplied);
+    const covered = clone(spotOn);
+    covered.summary = 'Today we applied azoxystrobin and propiconazole. The photos read as thin turf in the front yard.';
+    renderReport(covered);
     await waitForReport();
-    expect(second.container.querySelector('#visit-summary')).not.toBeNull();
+    expect(document.querySelector('#visit-summary')).toHaveTextContent('The photos read as thin turf in the front yard.');
+    expect(document.querySelector('#visit-summary')).not.toHaveTextContent('Today we applied');
+    cleanup();
+    const seasonal = clone(spotOn);
+    seasonal.summary = 'Today we applied azoxystrobin and propiconazole, which fits the fall season.';
+    renderReport(seasonal);
+    await waitForReport();
+    expect(document.querySelector('#visit-summary')).toHaveTextContent('which fits the fall season');
+  });
+
+  it('the lead\'s next-visit date is dropped only when Your plan prints that lawn visit', async () => {
+    const { container } = renderReport(clone(spotOn));
+    await waitForReport();
+    expect(text(container)).toContain('Lawn Care · Fri, Oct 23');
+    expect(text(container)).not.toContain('Friday, October 23');
+    cleanup();
+    const pestOnly = clone(spotOn);
+    pestOnly.upcomingVisitsCard.visits[0].serviceType = 'Quarterly Pest Control';
+    const second = renderReport(pestOnly);
+    await waitForReport();
+    expect(text(second.container)).toContain('Friday, October 23');
+    cleanup();
+    const empty = clone(spotOn);
+    empty.upcomingVisitsCard = { visits: [], merged: true };
+    const third = renderReport(empty);
+    await waitForReport();
+    expect(text(third.container)).toContain('Friday, October 23');
+  });
+
+  it('a finished re-entry keeps its pet advisory in Your part', async () => {
+    const payload = clone(cleanOn);
+    payload.dynamicContext.reentry.petAdvisory = 'Keep pets off treated turf until it is fully dry.';
+    renderReport(payload);
+    await waitForReport();
+    expect(screen.getByTestId('lawn-your-part')).toHaveTextContent('Keep pets off treated turf until it is fully dry.');
+    expect(screen.getByTestId('lawn-your-part')).not.toHaveTextContent('Nothing for you to do');
   });
 });
 

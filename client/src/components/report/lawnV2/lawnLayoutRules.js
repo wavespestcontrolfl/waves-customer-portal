@@ -44,18 +44,23 @@ function bannerWateringLines(banner) {
   return Array.isArray(banner?.lines) ? banner.lines.filter(isText) : [];
 }
 
-/** True when the banner carries watering lines (not only a mow hold): the water card then drops its restatements. */
-export function bannerCarriesWatering(banner) {
-  return bannerWateringLines(banner).length > 0;
-}
-
-/** The re-entry content the card prints, from the re-entry builder's own sentence (timed or condition). */
+/**
+ * The re-entry content the card prints, from the re-entry builder's own sentence (timed or condition)
+ * and its pet advisory. The old card printed the same two things, plus tiles that restate the sentence:
+ *  - a sentence the builder wrote is printed as written;
+ *  - with no sentence, only a real "Ready after <time>" status stands in (never a status label);
+ *  - a finished re-entry prints no sentence but still keeps a pet advisory the old card printed;
+ *  - nothing real to say = null, and the card says nothing about re-entry.
+ */
 export function reentryRow(context, readiness) {
-  if (!context || !readiness || readiness.allReady) return null;
-  const text = isText(context.customerSummary) ? context.customerSummary.trim() : (readiness.status || null);
-  if (!isText(text)) return null;
+  if (!context || !readiness) return null;
   const pets = isText(context.petAdvisory) ? context.petAdvisory.trim() : null;
-  return { text, pets };
+  let text = null;
+  if (!readiness.allReady) {
+    if (isText(context.customerSummary)) text = context.customerSummary.trim();
+    else if (/^Ready after /.test(readiness.status || '')) text = readiness.status;
+  }
+  return text || pets ? { text, pets } : null;
 }
 
 /** The lead's own homeowner steps (the top issue's action), as printed lines. */
@@ -69,30 +74,63 @@ export function yourPartIsEmpty({ banner, reentry, lines }) {
 }
 
 // ── Dedupe ──────────────────────────────────────────────────────────────────
-// Mirror of CREDITED_WATER_IN_PHRASE in server/services/service-report/lawn-report-insights.js.
-const CREDITED_WATER_IN_PHRASE = 'Water in today’s application as directed';
-
-function restatesWatering(card, known) {
-  const action = card && card.customerAction;
-  if (!isText(action)) return false;
-  return known.some((text) => action.includes(text)) || (card.category === 'water' && action.includes(CREDITED_WATER_IN_PHRASE));
-}
-
-/**
- * A finding's "Your next step" that restates the watering instruction is dropped: the "Your part"
- * card prints that instruction once. Only while the banner carries watering lines (otherwise the
- * finding is the one place the step appears).
- */
-export function insightsWithoutRepeats(insights, { banner, aftercare } = {}) {
-  const list = Array.isArray(insights) ? insights : [];
-  const lines = bannerWateringLines(banner);
-  if (!lines.length) return list;
-  const known = [...lines, aftercare?.holdTask, aftercare?.waterInTask, aftercare?.customerTask].filter(isText);
-  return list.map((card) => (restatesWatering(card, known) ? { ...card, customerAction: null } : card));
-}
+// A fact is left off a block only when the block that carries it is on the page and says the same
+// thing. Every rule below proves that from the payload; without the proof the original stays.
 
 // No lookbehind (older iOS Safari rejects it): mark each sentence end, then split on the mark.
 const sentencesOf = (text) => String(text || '').replace(/([.!?])\s+/g, '$1\u0000').split('\u0000').filter(isText);
+// A sentence as compared: one apostrophe, one space, no closing punctuation.
+const norm = (text) => String(text || '').replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '');
+const sentenceSet = (texts) => new Set(texts.flatMap(sentencesOf).map(norm).filter(Boolean));
+
+// Remove the sentences `drop` approves from the original text (kept as written, line breaks included).
+// Nothing approved = the text itself. Everything removed = null.
+function withoutSentences(text, drop) {
+  const dropped = sentencesOf(text).filter(drop);
+  if (!dropped.length) return text;
+  let out = String(text);
+  dropped.forEach((sentence) => { out = out.replace(sentence, ''); });
+  out = out.replace(/[ \t]{2,}/g, ' ').trim();
+  return out || null;
+}
+
+/**
+ * True when the "Your part" card prints the banner's watering lines: the banner has lines and has not
+ * ended (an ended banner prints one fine-print note instead of its lines, the way LawnWateringBanner reads it).
+ */
+export function bannerCarriesWatering(banner, nowMs = Date.now()) {
+  if (!bannerWateringLines(banner).length) return false;
+  const expiresMs = banner.expiresAt ? Date.parse(banner.expiresAt) : NaN;
+  return !(Number.isFinite(expiresMs) && nowMs > expiresMs);
+}
+
+/**
+ * A finding's "Your next step" loses ONLY the sentences that are the banner's own sentences, or the
+ * aftercare's hold / water-in task sentences, word for word (apostrophe, spacing and closing punctuation
+ * aside). Any other sentence stays: a sprinkler check, a mowing or irrigation-repair step, or the rest of a
+ * mixed step. A step that is entirely repeats becomes empty. Only while the card prints the banner's lines.
+ */
+export function insightsWithoutRepeats(insights, { banner, aftercare, nowMs } = {}) {
+  const list = Array.isArray(insights) ? insights : [];
+  if (!bannerCarriesWatering(banner, nowMs)) return list;
+  const known = sentenceSet([...bannerWateringLines(banner), aftercare?.holdTask, aftercare?.waterInTask, aftercare?.customerTask].filter(isText));
+  return list.map((card) => {
+    if (!card || !isText(card.customerAction)) return card;
+    const kept = withoutSentences(card.customerAction, (sentence) => known.has(norm(sentence)));
+    return kept === card.customerAction ? card : { ...card, customerAction: kept };
+  });
+}
+
+/**
+ * True when the water card's own copy of the watering instruction (the line inside the weekly plan's
+ * condition note) says nothing the banner does not: every sentence of aftercare.watering is one of the
+ * banner's sentences, and the banner carries them.
+ */
+export function bannerRepeatsAftercare(banner, aftercare, nowMs) {
+  if (!bannerCarriesWatering(banner, nowMs) || !isText(aftercare?.watering)) return false;
+  const shown = sentenceSet(bannerWateringLines(banner));
+  return sentencesOf(aftercare.watering).every((sentence) => shown.has(norm(sentence)));
+}
 
 // The v6 copy's fixed "watching" sentence (lawn-copy-v6.js buildWatching).
 const WATCHING_SENTENCE = /^We are also keeping an eye on\b/;
@@ -100,37 +138,66 @@ const WATCHING_SENTENCE = /^We are also keeping an eye on\b/;
 const FINDING_CARD_LIMIT = 3;
 
 /**
- * The lead's Watching line, minus the v6 sentence when every watched topic already has a finding card
- * on the page. Any other sentence in the field (the rainfast note) stays.
+ * The lead's Watching line, minus the v6 sentence once the findings block is on the page with a card for
+ * EVERY watched finding: the block prints (LawnInsightCards prints nothing when all its cards are the
+ * healthy "overall" one) and every watch / needs-attention finding is among the cards it prints.
+ * Any other sentence in the field (the rainfast note) stays.
  */
 export function watchingLine(lead, insights) {
   if (!isText(lead?.watching)) return null;
   const cards = (Array.isArray(insights) ? insights : []).filter(Boolean);
   const shown = [...cards].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)).slice(0, FINDING_CARD_LIMIT);
+  const blockPrints = shown.length > 0 && !shown.every((card) => card.category === 'overall');
   const watched = cards.filter((card) => card.status === 'watch' || card.status === 'needs_attention');
-  const repeatsFindings = watched.every((card) => shown.includes(card));
+  const repeatsFindings = blockPrints && watched.length > 0 && watched.every((card) => shown.includes(card));
   const kept = sentencesOf(lead.watching).filter((sentence) => !(repeatsFindings && WATCHING_SENTENCE.test(sentence)));
   return kept.length ? kept.join(' ') : null;
 }
 
 const APPLIED_SENTENCE = /^Today we applied\b/;
+const APPLIED_LEAD_IN = /^Today we applied\s+/i;
+
+// An applied sentence is covered when everything it lists (products or categories) is in the lead's
+// applied sentence. A trailing clause the lead does not carry ("which fits the fall season") is not
+// covered, so that sentence stays.
+function appliedCovered(sentence, applied) {
+  const items = norm(sentence).replace(APPLIED_LEAD_IN, '').split(/,\s*(?:and\s+)?|\s+and\s+/i).map((item) => item.trim().toLowerCase()).filter(Boolean);
+  const said = norm(applied).toLowerCase();
+  return items.length > 0 && items.every((item) => said.includes(item));
+}
 
 /**
- * "What we applied today" prints once: the technician paragraph's own "Today we applied ..."
- * sentence is left out while the lead's applied sentence is on the page.
+ * "What we applied today" prints once: an "Today we applied ..." sentence is left out of the technician
+ * paragraph (or the Visit Summary) only while the lead's own applied sentence is printed and says everything
+ * that sentence lists. Anything else in the text stays, as written.
  */
-export function techParagraphWithoutApplied(text, applied) {
+export function withoutRepeatedApplied(text, applied) {
   if (!isText(text)) return null;
   if (!isText(applied)) return text;
-  const kept = sentencesOf(text).filter((sentence) => !APPLIED_SENTENCE.test(sentence));
-  return kept.length ? kept.join(' ') : null;
+  return withoutSentences(text, (sentence) => APPLIED_SENTENCE.test(sentence) && appliedCovered(sentence, applied));
 }
 
 // ── Next visit ──────────────────────────────────────────────────────────────
-/** True when "Your plan" (or the standalone visits card) already prints the next visit's date. */
+const longDay = (ymd, withYear) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
+  weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC', ...(withYear ? { year: 'numeric' } : {}),
+});
+
+/**
+ * True only when "Your plan" (or the standalone visits card) PRINTS the visit the lead's date names: the
+ * lead's next visit is a scheduled booking, and the card lists a lawn visit on that same calendar day.
+ * A pest visit, a visit on another day, a cadence estimate or an empty list keeps the lead's own date.
+ * (The server scopes the card to this report's property.)
+ */
 export function planShowsNextVisit(data) {
+  const next = data?.reportV2?.snapshot?.nextVisit;
   const visits = data?.upcomingVisitsCard?.visits;
-  return Array.isArray(visits) && visits.length > 0;
+  if (!next || next.source !== 'scheduled' || !isText(next.label) || !Array.isArray(visits)) return false;
+  const label = norm(next.label);
+  return visits.some((visit) => {
+    const ymd = /^\d{4}-\d{2}-\d{2}/.exec(String(visit?.scheduledDate || ''));
+    if (!ymd || !/lawn|turf/i.test(String(visit.serviceType || ''))) return false;
+    return [longDay(ymd[0], false), longDay(ymd[0], true)].some((day) => norm(day) === label);
+  });
 }
 
 // ── Mowing height ───────────────────────────────────────────────────────────

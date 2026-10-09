@@ -12,7 +12,8 @@ import {
   mowingLine,
   planShowsNextVisit,
   reentryRow,
-  techParagraphWithoutApplied,
+  withoutRepeatedApplied,
+  bannerRepeatsAftercare,
   watchingLine,
   whenToCallLines,
   yourPartIsEmpty,
@@ -67,23 +68,27 @@ describe('the "Your part" rules', () => {
     expect(bannerCarriesWatering({ state: null, lines: [], mowHold: { line: 'x' } })).toBe(false);
   });
 
-  it('the re-entry row reads the re-entry builder sentence, timed or condition, and skips a finished one', () => {
+  it('the re-entry row reads the re-entry builder sentence, timed or condition', () => {
     const timed = { customerSummary: 'Lawn areas ready at 4:30 PM.', petAdvisory: 'Keep pets off treated turf until it is fully dry.' };
     expect(reentryRow(timed, { allReady: false, status: 'Ready after 4:30 PM' })).toEqual({ text: 'Lawn areas ready at 4:30 PM.', pets: 'Keep pets off treated turf until it is fully dry.' });
     // A frozen condition has no clock; the builder puts its sentence in customerSummary.
     const condition = { customerSummary: 'Ready to walk on once today’s treatment has dried.', petAdvisory: 'Keep people and pets off the lawn until then.', targets: [], condition: { text: 'Ready to walk on once today’s treatment has dried.' } };
     expect(reentryRow(condition, { allReady: false, status: 'Once dry' }).text).toBe('Ready to walk on once today’s treatment has dried.');
-    expect(reentryRow(timed, { allReady: true })).toBeNull();
+  });
+
+  it('a finished re-entry prints no sentence but keeps the pet advisory the old card printed', () => {
+    const done = { customerSummary: 'Treated areas are ready for normal use.', petAdvisory: 'Keep pets off treated turf until it is fully dry.' };
+    expect(reentryRow(done, { allReady: true })).toEqual({ text: null, pets: 'Keep pets off treated turf until it is fully dry.' });
+    expect(reentryRow({ customerSummary: 'x.' }, { allReady: true })).toBeNull();
     expect(reentryRow(null, { allReady: false })).toBeNull();
   });
 
-  it('no sentence from the builder falls back to the readiness status, never a made-up line', () => {
+  it('no sentence from the builder: a real "Ready after" status stands in, a status label never does', () => {
     expect(reentryRow({ targets: [] }, { allReady: false, status: 'Ready after 4:30 PM' })).toEqual({ text: 'Ready after 4:30 PM', pets: null });
-    expect(reentryRow({ targets: [] }, { allReady: false, status: '' })).toBeNull();
-  });
-
-  it('"None listed" is not a pet advisory the card prints', () => {
-    expect(reentryRow({ customerSummary: 'x.' }, { allReady: false }).pets).toBeNull();
+    for (const status of ['Once dry', 'Ready time pending', 'See advisory', '']) {
+      expect(reentryRow({ targets: [] }, { allReady: false, status })).toBeNull();
+    }
+    expect(reentryRow({ petAdvisory: 'Keep pets off.' }, { allReady: false, status: 'See advisory' })).toEqual({ text: null, pets: 'Keep pets off.' });
   });
 
   it('the lead steps are the lead\'s own lines, blanks dropped', () => {
@@ -101,29 +106,68 @@ describe('the "Your part" rules', () => {
 
 describe('insightsWithoutRepeats', () => {
   const banner = { lines: ['Water in today’s treatment with about ½ inch by Sat 10 AM.', 'Run it even if it is not your usual day.'] };
-  const own = { category: 'coverage', headline: 'Thin turf', customerAction: 'Check that the sprinkler zone by the driveway reaches the edge evenly.' };
-  const pasted = { category: 'water', headline: 'Water balance', customerAction: `${banner.lines[0]} ${banner.lines[1]}` };
+  const aftercare = { holdTask: 'Skip your turf watering until today’s treatment has dried. That gives today’s treatment time to work.' };
 
-  it('drops a next step that restates the banner and keeps the finding itself', () => {
-    const out = insightsWithoutRepeats([own, pasted], { banner, aftercare: {} });
-    expect(out[0]).toBe(own);
-    expect(out[1].customerAction).toBeNull();
-    expect(out[1].headline).toBe('Water balance');
+  it('an identical restatement of the banner is dropped, leaving the finding itself', () => {
+    const pasted = { category: 'water', headline: 'Water balance', customerAction: `${banner.lines[0]} ${banner.lines[1]}` };
+    const out = insightsWithoutRepeats([pasted], { banner, aftercare: {} });
+    expect(out[0].customerAction).toBeNull();
+    expect(out[0].headline).toBe('Water balance');
   });
 
-  it('also catches the aftercare task and the credited water-in phrase', () => {
-    const aftercare = { holdTask: 'Skip your turf watering until today’s treatment has dried.' };
-    const hold = { category: 'water', customerAction: `${aftercare.holdTask} Then check the zone.` };
-    const credited = { category: 'water', customerAction: 'Water in today’s application as directed by the label.' };
-    const out = insightsWithoutRepeats([hold, credited], { banner, aftercare });
-    expect(out.map((c) => c.customerAction)).toEqual([null, null]);
+  it('a distinct instruction is never touched, even a sprinkler, mowing or irrigation-repair step', () => {
+    const steps = [
+      'Check that the sprinkler zone by the driveway reaches the edge evenly.',
+      'Raise the mower one setting.',
+      'Fix the broken head on the side zone and water by hand until then.',
+      'Water the dry strip by hand each morning.',
+    ];
+    const cards = steps.map((customerAction) => ({ category: 'water', customerAction }));
+    const out = insightsWithoutRepeats(cards, { banner, aftercare });
+    out.forEach((card, i) => expect(card).toBe(cards[i]));
   });
 
-  it('without watering lines in the banner the finding is the one place the step appears', () => {
-    const list = [pasted];
-    expect(insightsWithoutRepeats(list, { banner: { lines: [], mowHold: { line: 'x' } }, aftercare: {} })).toBe(list);
-    expect(insightsWithoutRepeats(list, { banner: null })).toBe(list);
+  it('a mixed step keeps its distinct sentences and loses only the banner\'s own', () => {
+    const mixed = { category: 'water', customerAction: `${banner.lines[0]} Check that the sprinkler zone by the driveway reaches the edge evenly. ${banner.lines[1]} Raise the mower one setting.` };
+    const out = insightsWithoutRepeats([mixed], { banner, aftercare: {} });
+    expect(out[0].customerAction).toBe('Check that the sprinkler zone by the driveway reaches the edge evenly. Raise the mower one setting.');
+  });
+
+  it('matches the aftercare hold task sentence by sentence, apostrophes and closing punctuation aside', () => {
+    const hold = { category: 'water', customerAction: "Skip your turf watering until today's treatment has dried. Then check the zone by the fence" };
+    expect(insightsWithoutRepeats([hold], { banner, aftercare })[0].customerAction).toBe('Then check the zone by the fence');
+  });
+
+  it('a near match, a keyword match or the credited phrase inside a longer sentence is NOT a restatement', () => {
+    const cards = [
+      { category: 'water', customerAction: 'Water in today’s treatment with about 1 inch by Sat 10 AM.' },
+      { category: 'water', customerAction: 'Water in today’s application as directed, then follow this week’s watering plan below.' },
+      { category: 'water', customerAction: 'Water in today’s treatment with about ½ inch by Sat 10 AM and then again on Tuesday.' },
+    ];
+    const out = insightsWithoutRepeats(cards, { banner, aftercare: {} });
+    out.forEach((card, i) => expect(card).toBe(cards[i]));
+  });
+
+  it('nothing is dropped while the banner has no watering lines, or has ended (the card prints a note, not the lines)', () => {
+    const pasted = [{ category: 'water', customerAction: banner.lines[0] }];
+    expect(insightsWithoutRepeats(pasted, { banner: { lines: [], mowHold: { line: 'x' } }, aftercare: {} })).toBe(pasted);
+    expect(insightsWithoutRepeats(pasted, { banner: null })).toBe(pasted);
+    const ended = { ...banner, expiresAt: '2026-10-09T10:00:00.000Z' };
+    expect(insightsWithoutRepeats(pasted, { banner: ended, aftercare: {}, nowMs: Date.parse('2026-10-09T15:00:00Z') })).toBe(pasted);
+    expect(insightsWithoutRepeats(pasted, { banner: ended, aftercare: {}, nowMs: Date.parse('2026-10-09T09:00:00Z') })[0].customerAction).toBeNull();
     expect(insightsWithoutRepeats(undefined, { banner })).toEqual([]);
+  });
+});
+
+describe('bannerRepeatsAftercare', () => {
+  const banner = { lines: ['Skip your turf watering until today’s treatment has dried.', 'That gives today’s treatment time to work.', 'Then follow this week’s plan below.'] };
+
+  it('true only when every sentence of the water card\'s copy is a sentence the banner prints', () => {
+    expect(bannerRepeatsAftercare(banner, { watering: 'Skip your turf watering until today’s treatment has dried. That gives today’s treatment time to work.' })).toBe(true);
+    expect(bannerRepeatsAftercare(banner, { watering: 'Skip your turf watering until today’s treatment has dried. Also hold the sprinkler timer.' })).toBe(false);
+    expect(bannerRepeatsAftercare(banner, { watering: '' })).toBe(false);
+    expect(bannerRepeatsAftercare(null, { watering: 'x.' })).toBe(false);
+    expect(bannerRepeatsAftercare({ ...banner, expiresAt: '2026-10-09T10:00:00.000Z' }, { watering: banner.lines[0] }, Date.parse('2026-10-09T15:00:00Z'))).toBe(false);
   });
 });
 
@@ -145,34 +189,80 @@ describe('watchingLine', () => {
     expect(watchingLine({ watching: `${v6} ${rainfast}` }, [card(1, 'watch')])).toBe(rainfast);
   });
 
+  it('keeps the v6 sentence when the findings block would print nothing (only the healthy overall card)', () => {
+    const overall = { priority: 1, status: 'watch', category: 'overall' };
+    expect(watchingLine({ watching: v6 }, [overall])).toBe(v6);
+  });
+
+  it('keeps the v6 sentence when no finding is watched (nothing on the page backs it)', () => {
+    expect(watchingLine({ watching: v6 }, [card(1, 'healthy')])).toBe(v6);
+    expect(watchingLine({ watching: v6 }, [])).toBe(v6);
+  });
+
   it('no watching text, no line', () => {
     expect(watchingLine({}, [])).toBeNull();
     expect(watchingLine(undefined, undefined)).toBeNull();
   });
 });
 
-describe('techParagraphWithoutApplied', () => {
+describe('withoutRepeatedApplied', () => {
   const paragraph = 'Our technician saw thin turf in the front yard. Today we applied a feeding and weed control.';
 
-  it('drops the paragraph\'s own applied sentence while the lead\'s applied sentence is on the page', () => {
-    expect(techParagraphWithoutApplied(paragraph, 'Today we applied a feeding.')).toBe('Our technician saw thin turf in the front yard.');
+  it('drops an applied sentence the lead\'s applied sentence says in full', () => {
+    expect(withoutRepeatedApplied(paragraph, 'Today we applied a feeding and weed control, targeting dollarweed.')).toBe('Our technician saw thin turf in the front yard.');
   });
 
-  it('keeps it when nothing else says what was applied', () => {
-    expect(techParagraphWithoutApplied(paragraph, null)).toBe(paragraph);
+  it('keeps it when the lead does not say everything it lists, or when nothing else says what was applied', () => {
+    expect(withoutRepeatedApplied(paragraph, 'Today we applied a feeding.')).toBe(paragraph);
+    expect(withoutRepeatedApplied(paragraph, null)).toBe(paragraph);
   });
 
-  it('a paragraph that was only the applied sentence prints nothing', () => {
-    expect(techParagraphWithoutApplied('Today we applied a feeding.', 'Today we applied a feeding.')).toBeNull();
-    expect(techParagraphWithoutApplied('', 'x')).toBeNull();
+  it('keeps a sentence with a clause the lead does not carry (the season)', () => {
+    const summary = 'Today we applied a feeding, which fits the fall season.';
+    expect(withoutRepeatedApplied(summary, 'Today we applied a feeding.')).toBe(summary);
+  });
+
+  it('keeps line breaks and the other sentences of the text as written', () => {
+    const text = 'Today we applied a feeding.\n\nThe photos read as thin turf in the front yard.';
+    expect(withoutRepeatedApplied(text, 'Today we applied a feeding.')).toBe('The photos read as thin turf in the front yard.');
+  });
+
+  it('a text that was only the covered applied sentence prints nothing', () => {
+    expect(withoutRepeatedApplied('Today we applied a feeding.', 'Today we applied a feeding.')).toBeNull();
+    expect(withoutRepeatedApplied('', 'x')).toBeNull();
   });
 });
 
 describe('planShowsNextVisit', () => {
-  it('is true once the plan or the standalone card lists a visit', () => {
-    expect(planShowsNextVisit({ upcomingVisitsCard: { visits: [{ scheduledDate: '2026-10-23' }] } })).toBe(true);
-    expect(planShowsNextVisit({ upcomingVisitsCard: { visits: [] } })).toBe(false);
+  const lead = { reportV2: { snapshot: { nextVisit: { label: 'Friday, October 23', source: 'scheduled' } } } };
+  const withVisits = (visits, extra = {}) => ({ ...lead, upcomingVisitsCard: { visits }, ...extra });
+
+  it('true when the card lists a lawn visit on the lead\'s own day', () => {
+    expect(planShowsNextVisit(withVisits([{ serviceType: 'Lawn Care Treatment Program', scheduledDate: '2026-10-23' }]))).toBe(true);
+    expect(planShowsNextVisit(withVisits([{ serviceType: 'Pest Control', scheduledDate: '2026-10-20' }, { serviceType: 'Turf Treatment', scheduledDate: '2026-10-23' }]))).toBe(true);
+  });
+
+  it('the year form of the label (a date outside this year) matches too', () => {
+    const next = { reportV2: { snapshot: { nextVisit: { label: 'Saturday, January 9, 2027', source: 'scheduled' } } }, upcomingVisitsCard: { visits: [{ serviceType: 'Lawn Care', scheduledDate: '2027-01-09' }] } };
+    expect(planShowsNextVisit(next)).toBe(true);
+  });
+
+  it('false when the card lists only a pest visit, even on the same day', () => {
+    expect(planShowsNextVisit(withVisits([{ serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-23' }]))).toBe(false);
+  });
+
+  it('false when the lawn visit is on another day (another property, or a past-dated row)', () => {
+    expect(planShowsNextVisit(withVisits([{ serviceType: 'Lawn Care', scheduledDate: '2026-10-30' }]))).toBe(false);
+    expect(planShowsNextVisit(withVisits([{ serviceType: 'Lawn Care', scheduledDate: '2026-09-25' }]))).toBe(false);
+  });
+
+  it('false when the card is empty or absent, or the lead\'s date is only an estimate', () => {
+    expect(planShowsNextVisit(withVisits([]))).toBe(false);
+    expect(planShowsNextVisit(lead)).toBe(false);
     expect(planShowsNextVisit({})).toBe(false);
+    const estimate = { reportV2: { snapshot: { nextVisit: { label: 'Friday, October 23', source: 'estimated' } } }, upcomingVisitsCard: { visits: [{ serviceType: 'Lawn Care', scheduledDate: '2026-10-23' }] } };
+    expect(planShowsNextVisit(estimate)).toBe(false);
+    expect(planShowsNextVisit(withVisits([{ serviceType: 'Lawn Care', scheduledDate: 'not a date' }]))).toBe(false);
   });
 });
 

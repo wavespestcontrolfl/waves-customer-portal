@@ -9582,7 +9582,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 yourPart: <LawnYourPart data={data} mode={mode} />,
                 recap: <RecapVideoCard recap={data.recap} token={token} />,
                 recordedFindings: recordedFindingsList,
-                visitSummary: <ReportText text={visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })} sections={reportSections} nextVisitLabel={nextSameServiceLabel} />,
+                visitSummary: { text: visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary }), sections: reportSections, nextVisitLabel: nextSameServiceLabel },
                 recommendations: <RecommendationsSection data={data} />,
                 tracedMap: tracedMapMount,
                 techNote: <TechNoteCard data={data} mode={mode} />,
