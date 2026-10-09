@@ -180,6 +180,7 @@ describe('the gate-off recipe (protocols.json) carries the same Topchoice label 
         'its own pass, not blended with the visit\'s other products (the label says not to apply it in combination with other materials)',
         'one application per lawn per year',
         'water in after application, within 24 hours',
+        'not when rain is predicted in the next 24 hours',
         'not within 15 ft of fresh water or 60 ft of tidal water',
         'restricted use product, a certified applicator applies or supervises',
       ]) expect({ where, has: text.includes(part) }).toEqual({ where, has: true });
@@ -194,10 +195,27 @@ describe('the gate-off recipe (protocols.json) carries the same Topchoice label 
     expect(joined).not.toMatch(/\d\s*lb per/);
   });
 
-  test('the v13 recipe, the legacy recipe and the migration agree on the watering window and the buffers', () => {
-    for (const text of [...lawnTexts().map((entry) => entry.text), addOnLines('st_augustine', 'Apr')[0]]) {
-      expect(text).toMatch(/water in after application, within 24 hours/);
-      expect(text).toMatch(/not within 15 ft of fresh water or 60 ft of tidal water/);
+  // Every restriction clause the Topchoice lines state. The gate-on (v13) lines and the gate-off (legacy) lines must carry ALL of them,
+  // so a clause dropped from either recipe fails here, not in review.
+  const CLAUSES = {
+    'its own pass': 'own pass',
+    'not combined with other materials (label)': 'the label says not to apply it in combination with other materials',
+    'one application a year': 'one application per lawn per year',
+    'water in within 24 hours': 'water in after application, within 24 hours',
+    'rain hold': 'not when rain is predicted in the next 24 hours',
+    'fresh and tidal water buffers': 'not within 15 ft of fresh water or 60 ft of tidal water',
+    'restricted use': 'restricted use product, a certified applicator applies or supervises',
+  };
+
+  test('the v13 recipe (every track, April and October) and every legacy Topchoice string carry every restriction clause', () => {
+    const legacyTexts = lawnTexts().map((entry) => ({ where: entry.where, text: entry.text }));
+    const v13Texts = TRACKS.flatMap((track) => ['Apr', 'Oct'].map((month) => ({ where: `v13/${track}/${month}`, text: addOnLines(track, month)[0] })));
+    expect(legacyTexts).toHaveLength(5);
+    expect(v13Texts).toHaveLength(6);
+    const missing = [];
+    for (const { where, text } of [...legacyTexts, ...v13Texts]) {
+      for (const [name, clause] of Object.entries(CLAUSES)) if (!String(text).includes(clause)) missing.push(`${where}: ${name}`);
     }
+    expect(missing).toEqual([]);
   });
 });
