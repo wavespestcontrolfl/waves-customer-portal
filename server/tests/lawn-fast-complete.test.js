@@ -724,6 +724,8 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         rungIds: [P_ARENA, P_TALAK],
         blockedIds: [],
         unreadableIds: [],
+        // No rung's own limit forbids it: the sheet's search lists both.
+        limitedIds: [],
       });
       expect(ctx.plannedProducts.addOns.map((a) => a.productId)).toEqual([P_LEAD, P_CERT, P_ART, P_ACE, P_DISP]);
     });
@@ -804,7 +806,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
     test('both at their cap: a line and no product', async () => {
       live();
       capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: YEARLY });
-      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK], unreadableIds: [] });
+      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK], unreadableIds: [], limitedIds: [P_ARENA, P_TALAK] });
     });
 
     test('a product the month\'s plan holds is the plan\'s own add-on', async () => {

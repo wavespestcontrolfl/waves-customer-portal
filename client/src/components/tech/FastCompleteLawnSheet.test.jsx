@@ -2156,15 +2156,15 @@ describe('weed spots and the spot area', () => {
     expect(screen.queryByRole('button', { name: /^Cert Herbicide/ })).toBeNull();
   });
 
-  test('lead at its yearly limit: the search lists the replacement and not the products the limit forbids', async () => {
-    await open(weedContext(MIX({ mode: 'replacement', productIds: [P_BLIND], surfactant: null, note: 'Lead yearly limit reached; Blind is used in its place.' })));
+  test('lead at its yearly limit: the search leaves out the lead only; the replacement and the members with no limit of their own are listed', async () => {
+    await open(weedContext(MIX({ mode: 'replacement', productIds: [P_BLIND], blockedIds: [P_LEAD], surfactant: null, note: 'Lead yearly limit reached; Blind is used in its place.' })));
     const search = await screen.findByLabelText('Search products');
-    fireEvent.change(search, { target: { value: 'Blind Herbicide' } });
-    expect(await screen.findByRole('button', { name: /^Blind Herbicide/ })).toBeTruthy();
-    for (const name of ['Lead WG', 'Tank Surfactant']) {
+    for (const name of ['Blind Herbicide', 'Tank Surfactant']) {
       fireEvent.change(search, { target: { value: name } });
-      expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
     }
+    fireEvent.change(search, { target: { value: 'Lead WG' } });
+    expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
   });
 
   test('when the limits could not be read the search lists the weed products again', async () => {
@@ -3287,7 +3287,7 @@ describe('suggested from this lawn', () => {
       }, { art: 'hidden', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'hidden', chinchEntry: 'hidden', weedCard: 'addable', chinchCard: 'addable', fungusCard: 'addable', catCard: 'addable', dryCard: 'addable' }],
       ['answered, everything blocked', async () => {
         const note = 'The yearly weed-spray limit is reached for this lawn.';
-        guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
+        guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note, blockedIds: [P_LEAD, P_CERT, P_BLIND] }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
         await mxOpen(); await analyze(); await suggested();
       }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
       ['answered, no finding and nothing blocked', async () => {
@@ -3436,7 +3436,7 @@ describe('suggested from this lawn', () => {
       for (const name of ['Art Fungicide', 'Lead WG', 'Vel Fungicide']) expect(present(name)).toBe(true);
       await retake();
       // Now the read succeeds and forbids them.
-      guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [] }, CLEAN_CHINCH, [P_ART, P_LEAD, P_CERT, P_BLIND]);
+      guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], blockedIds: [P_LEAD, P_CERT, P_BLIND] }, CLEAN_CHINCH, [P_ART, P_LEAD, P_CERT, P_BLIND]);
       await analyze();
       await screen.findByText('Removed: Art Fungicide, Lead WG. The limits changed.');
       expect(present('Art Fungicide')).toBe(false);
