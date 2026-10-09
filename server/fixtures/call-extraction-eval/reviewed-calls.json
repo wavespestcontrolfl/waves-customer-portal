@@ -526,7 +526,7 @@
       "id": "wrong-number-robocall-stays-blocked",
       "call_log_id": "bb77c2a4-9583-43a1-a40b-06129fd8727d",
       "reviewed_at": "2026-07-30",
-      "reviewed_outcome": "Automated school-attendance robocall left on the line (wrong number). A July 2026 mining pass mislabeled it a spam false positive; owner review confirmed the block is correct and must keep firing. Re-reviewed 2026-10-09: the block is the spam_or_wrong_number flag, which fires from is_spam OR lead_quality wrong_number. The call is both a robocall and a wrong number, and the extraction rules send a wrong number to is_spam=false with lead_quality wrong_number, so is_spam alone has no single right answer here and is no longer in the answer key (all six models in the 2026-10-08 comparison answered false). The flag, no auto-route and call_nature expectations still pin the block.",
+      "reviewed_outcome": "Automated school-attendance robocall left on the line (wrong number). A July 2026 mining pass mislabeled it a spam false positive; owner review confirmed the block is correct and must keep firing. Re-reviewed 2026-10-09: the block is the spam_or_wrong_number flag, which fires from is_spam OR lead_quality wrong_number. The call is both a robocall and a wrong number, and the extraction rules send a wrong number to is_spam=false with lead_quality wrong_number, and the message solicits nothing, so the answer key is now is_spam=false (it was true; all six models in the 2026-10-08 comparison answered false). The flag, no auto-route and call_nature expectations still pin the block.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false,
@@ -541,6 +541,7 @@
       },
       "gold_reviewed_at": "2026-10-09",
       "gold": {
+        "is_spam": false,
         "call_nature": [
           "wrong_number",
           "spam_solicitation",
