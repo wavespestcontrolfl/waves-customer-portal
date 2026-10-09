@@ -2003,11 +2003,11 @@ async function hardLimitedProductNames(database, ids) {
 // interval are reported separately), or one 'unavailable' finding when the audit read fails. The audit
 // covers the whole calendar year of the service date and the nearest applications on both sides,
 // so a backdated closeout is judged against the applications recorded after it too.
-async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null }) {
+async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null, addOnRows }) {
   try {
     // GATE_LAWN_TROUBLE_AREAS: a spot application that carries a place is audited at that place (the yearly limits are per place).
     const violations = await savepointRead(database, async (k) => require('../services/application-limits')
-      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (place && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, ...(place ? { place } : {}) }));
+      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (place && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, addOnRows, ...(place ? { place } : {}) }));
     return violations.map((violation) => overLimitFinding(productId, productName, violation));
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
@@ -2017,7 +2017,7 @@ async function productLimitFindings({ svc, productId, productName, serviceDate, 
 
 // Every finding for the products a closeout recorded (ids from its ledger rows or its submitted
 // list). Never throws: a failed batch read is one 'unavailable' finding.
-async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db, places = null } = {}) {
+async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db, places = null, addOnRows } = {}) {
   if (!svc || require('../config/feature-gates').lawnV13Live?.() !== true) return [];
   if (detectServiceLine(svc.service_type) !== 'lawn') return [];
   const ids = [...new Set((productIds || []).filter(Boolean).map(String))].filter((id) => UUID_SHAPE.test(id));
@@ -2032,7 +2032,7 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
   const day = serviceDateOnly(serviceDate || svc.scheduled_date);
   const findings = [];
   for (const [productId, productName] of limited) {
-    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database, place: places?.get(String(productId)) || null }));
+    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database, place: places?.get(String(productId)) || null, addOnRows }));
   }
   return findings;
 }
@@ -2041,7 +2041,7 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
 // resume re-derives them). Lawn visits under GATE_LAWN_V13 only. Never throws: ANY failure on the
 // way (the ledger lookup included) is one 'unavailable' finding, so the closeout still carries the
 // flag and the office still hears about it.
-async function recordedProductLimitFindings({ svc, record, database = db } = {}) {
+async function recordedProductLimitFindings({ svc, record, database = db, addOnRows } = {}) {
   if (!svc || !record?.id) return [];
   if (require('../config/feature-gates').lawnV13Live?.() !== true || detectServiceLine(svc.service_type) !== 'lawn') return [];
   try {
@@ -2054,6 +2054,7 @@ async function recordedProductLimitFindings({ svc, record, database = db } = {})
       productIds: (rows || []).map((row) => row.product_id),
       serviceDate: serviceDateOnly(record.service_date),
       database,
+      addOnRows,
       ...(placed ? { places: new Map((rows || []).filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
     });
   } catch (err) {
@@ -9250,7 +9251,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never an instruction to remove anything) and sent to the office as an admin notification
     // (deduped per record, so a retry or a resume rings once). Never blocks.
     if (record?.id && !issuedInvoiceCloseout) {
-      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db });
+      // addOnRows: false when no row of this closeout is tagged to an add-on (the duplicate-application read is then skipped); the audit never asks the gate.
+      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db, addOnRows: addOnTags.size > 0 });
       if (limitFindings.length) {
         applicationLimitAdvisory = {
           advisory: true,
