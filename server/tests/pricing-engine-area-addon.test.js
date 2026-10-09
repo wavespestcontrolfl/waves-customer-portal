@@ -350,6 +350,48 @@ describe('same-visit area add-ons need a host visit on the same estimate', () =>
     expect(() => run(SWEEP, { pest: { frequency: 'quarterly', roachType: 'german' }, ...SAME })).toThrow(HOST_ERROR);
   });
 
+  test('the Cockroach Treatment sold ALONE is priced field work and hosts; the same service key as a fee on a recurring plan does not', () => {
+    // standalone: true, its own booked visit
+    const alone = run(SWEEP, { pestInitialRoach: { roachType: 'regular' }, ...SAME });
+    expect(alone.lineItems.some((l) => l.service === 'pest_initial_roach' && l.standalone === true && l.price > 0)).toBe(true);
+    expect(addOnLines(alone).map((l) => [l.visitContext, l.price])).toEqual([['sameTripAddOn', 59]]);
+    // the engine's first-visit fee on a recurring pest plan: not a visit, no host (German and native)
+    for (const roachType of ['german', 'regular']) {
+      const feeOnly = { pest: { frequency: 'quarterly', roachType }, ...SAME };
+      expect(() => run(SWEEP, feeOnly)).toThrow(HOST_ERROR);
+    }
+  });
+
+  test.each([
+    // [engine line, is a host]. Priced field work booked as a visit hosts; a fee, bond, rental, rider, surcharge, setup or retainer does not.
+    [{ service: 'one_time_pest', price: 150 }, true],
+    [{ service: 'one_time_lawn', price: 150 }, true],
+    [{ service: 'one_time_mosquito', price: 150 }, true],
+    [{ service: 'dethatching', price: 200 }, true],
+    [{ service: 'wdo_inspection', price: 125 }, true],
+    [{ service: 'rodent_guarantee_combo', price: 900 }, true],
+    [{ service: 'pest_initial_roach', price: 225, standalone: true }, true],
+    [{ service: 'pest_initial_roach', price: 225, standalone: false, autoFiredFromRecurringPest: true }, false],
+    [{ service: 'rodent_guarantee', price: 300 }, false],
+    [{ service: 'rodent_bait_setup', price: 99 }, false],
+    [{ service: 'rodent_trapping_emergency_surcharge', price: 75 }, false],
+    [{ service: 'trap_only_retainer', price: 480 }, false],
+    [{ service: 'trap_only_setup', price: 95 }, false],
+    [{ service: 'trap_only_extra_callback', price: 60 }, false],
+    [{ service: 'termite_bond', annual: 240 }, false],
+    [{ service: 'termite_station_rental', annual: 240 }, false],
+    [{ service: 'waveguard_setup', price: 99 }, false],
+    [{ service: 'manual_discount', price: 25 }, false],
+    [{ service: 'rodent_bundle_discount', price: 25 }, false],
+    [{ service: 'pest_control', price: 150 }, false],
+    [{ service: 'one_time_pest', price: 150, quoteRequired: true }, false],
+    [{ service: 'one_time_pest', price: 0 }, false],
+  ])('host classification of %j is %s', (line, hosts) => {
+    const { assertAreaAddOnHostVisit } = require('../services/pricing-engine/service-pricing');
+    const call = () => assertAreaAddOnHostVisit({ visit: 'sameTripAddOn', requests: [{}] }, [line]);
+    if (hosts) expect(call).not.toThrow(); else expect(call).toThrow(HOST_ERROR);
+  });
+
   test('another one-time service is a host', () => {
     const estimate = run(SWEEP, { oneTimePest: true, ...SAME });
     expect(estimate.lineItems.some((l) => l.service === 'one_time_pest' && l.price > 0)).toBe(true);

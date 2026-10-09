@@ -8823,25 +8823,35 @@ function areaAddOnCatalog() {
 
 // Same-visit area add-ons ride a host visit: the price drops the drive
 // minutes, which is only true when the accepted visit is a priced SERVICE that
-// shares the estimate. The host is a priced ONE-TIME service line that is not
-// an area add-on (one_time_pest, another specialty): the add-ons are booked
-// by the ONE-TIME acceptance (a recurring accept is refused when the estimate
-// carries an add-on, AREA_ADDONS_ONE_TIME_ACCEPT_ONLY), so a recurring service
-// cannot host them until a recurring-host booking path exists. A recurring
-// line, a fee that rides a recurring plan, a discount row and an unpriced line
-// (custom quote, commercial manual quote) are never a host, and an add-on never
-// hosts add-ons. A pest estimate that only OFFERS a one-time choice has no
-// one-time line here and is refused too, so the customer's choice can never change which
-// price applies. Call it on the FINAL line list.
+// shares the estimate. The host is priced FIELD WORK on a ONE-TIME line (it
+// survives the one-time acceptance profile, oneTimeProfileServices, and is
+// booked as a visit): the add-ons are booked by the ONE-TIME acceptance (a
+// recurring accept is refused when the estimate carries an add-on,
+// AREA_ADDONS_ONE_TIME_ACCEPT_ONLY), so a recurring service cannot host them
+// until a recurring-host booking path exists. Never a host: a recurring line, a
+// fee, bond, rental, rider or surcharge that rides another line, a setup fee, a
+// discount row, an unpriced line (custom quote, commercial manual quote), an
+// add-on (it never hosts add-ons), and the roach fee that rides a recurring pest
+// plan. The STANDALONE Cockroach Treatment is priced field work booked as its own
+// visit, so it hosts. A pest estimate that only OFFERS a one-time choice has no
+// one-time line here and is refused too, so the customer's choice can never change
+// which price applies. Call it on the FINAL line list.
 const AREA_ADDON_NON_HOST_SERVICES = new Set([
-  'area_addon', 'waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee', 'pest_initial_roach',
+  'area_addon', 'waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee',
+  // Fees, riders and agreements that ride another line (no visit of their own).
+  'rodent_bait_setup', 'rodent_trapping_emergency_surcharge', 'termite_bond', 'termite_station_rental',
+  'trap_only_retainer', 'trap_only_setup', 'trap_only_extra_callback',
 ]);
+// pest_initial_roach is one service key for two lines: the first-visit fee the engine adds to a recurring pest plan
+// (`standalone: false`, no visit of its own) and the sold-alone Cockroach Treatment (`standalone: true`, a booked visit).
+const isRecurringPlanRoachFee = (line) => line.service === 'pest_initial_roach' && line.standalone !== true;
 const AREA_ADDON_HOST_MISSING_MESSAGE = 'Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.';
 function assertAreaAddOnHostVisit({ visit, requests }, lineItems) {
   if (visit !== 'sameTripAddOn' || requests.length === 0) return;
   const { RECURRING_SERVICES } = require('./v1-legacy-mapper');
   const isHost = (line) => !!line
     && !AREA_ADDON_NON_HOST_SERVICES.has(line.service)
+    && !isRecurringPlanRoachFee(line)
     && !RECURRING_SERVICES.has(line.service)
     && line.quoteRequired !== true
     && line.requiresCustomQuote !== true
