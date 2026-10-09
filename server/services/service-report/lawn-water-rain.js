@@ -39,6 +39,9 @@ const fill = (text, values) => text.replace(/\{(\w+)\}/g, (_, key) => values[key
 // The deficit advice alone (the insight card says it too, so the card and the insight never differ).
 const deficitAction = () => fill(COPY.deficitAction, { wiltSigns: WILT_SIGNS });
 
+// The root cause line for the same week: the plain finding, then the card's own advice, so the three never differ.
+const deficitRootCause = () => `${COPY.deficitRootCauseLead} ${deficitAction()}`;
+
 /**
  * R1. The rain the card STATUS counts: the measured total less, for each day, the part above MAX_INCHES_PER_DAY.
  * The weekly total stays the base, so a total from another source than the daily series is not re-derived.
@@ -153,5 +156,6 @@ module.exports = {
   waterStatusFor,
   rainCardDecision,
   deficitAction,
+  deficitRootCause,
   COPY,
 };

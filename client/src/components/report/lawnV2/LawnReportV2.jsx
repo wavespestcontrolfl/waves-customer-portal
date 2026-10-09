@@ -17,6 +17,7 @@ import { usePrintRequested } from '../usePrintRequested';
 import Icon from '../../Icon';
 import POLISH_COPY from '../../../../../shared/lawn-report-polish-copy.json';
 import RAIN_COPY from '../../../../../shared/lawn-water-rain-copy.json';
+import { weekPlanOnCard } from '@lawn-water-card';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -1158,7 +1159,7 @@ function LongerCyclesLine({ water }) {
 // schedule on file the irrigation-flavored prose is withheld alongside the "Not on file" row. The rain card's sentences
 // (water.rainCard, GATE_LAWN_WATER_RAIN) are about the week's rain and stand without a schedule.
 function explanationPrinted(water, irrOnFile) {
-  if (!water.explanation || (water.weekPlan && water.weekPlan.title)) return false;
+  if (!water.explanation || weekPlanOnCard(water)) return false;
   return water.rainCard === true || irrOnFile || !/irrigat|schedul|sprinkler|total|combined/i.test(water.explanation);
 }
 

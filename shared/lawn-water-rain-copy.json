@@ -5,5 +5,6 @@
   "surplus": "Rain and your sprinklers together put down more than your lawn can use this week. Skip a watering day rather than shortening your runs — longer runs reach the roots better than short ones.",
   "sensorLine": "Florida law requires a rain shutoff device on an automatic sprinkler system. If yours skipped a run this week, it is working.",
   "deficitLead": "Your weekly water is below {target}.",
+  "deficitRootCauseLead": "The lawn is simply running a little dry.",
   "deficitAction": "If the grass shows {wiltSigns}, run one full cycle on your next allowed watering day."
 }

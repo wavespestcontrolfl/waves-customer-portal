@@ -51,6 +51,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { validateCustomerCopy } = require('./customer-copy-forbidden');
 const { isWateringRecommendation, wateringRestricted } = require('./report-assistant');
 const { writerRulesRejection } = require('./report-writer-rules');
+const { weekPlanOnCard } = require('../../../shared/lawn-water-card.cjs');
 
 const PROMPT_VERSION = 'report-ask-v2';
 // Total wall-clock budget for the whole chain, and the cap on the first leg so
@@ -788,7 +789,9 @@ function lawnWaterFacts(water, text, aftercare) {
     total_inches_7_days: scheduleShown ? inchesOf(water.totalInches) : null,
     target_inches_per_week: inchesOf(water.targetInches),
     status: water.status === 'unknown' ? null : cleanText(water.status),
-    explanation: text(water.explanation, 300),
+    // GATE_LAWN_WATER_RAIN: a weekly plan on the card is the sole watering instruction and the page prints no rain-card
+    // sentence beside it, so the model is not handed the hidden one either (the status stays). One shared predicate.
+    explanation: water.rainCard === true && weekPlanOnCard(water) ? null : text(water.explanation, 300),
     week_plan: text([plan.title, plan.detail].filter(Boolean).join(': '), 300),
   }));
 }

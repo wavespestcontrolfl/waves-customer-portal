@@ -22,7 +22,7 @@ const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSea
 const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { waterPolishFields, snapshotForCard } = require('./lawn-report-polish');
-const { withCappedRain, rainCardAllowed, applyRainCard, waterStatusFor } = require('./lawn-water-rain');
+const { withCappedRain, rainCardAllowed, applyRainCard, waterStatusFor, deficitRootCause } = require('./lawn-water-rain');
 const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
@@ -412,7 +412,7 @@ function statusHeadline(overallStatus, topIssue) {
 
 // Cross-signal root cause — a small deterministic decision table that connects the
 // separate signals into ONE driver, so the report reads like an expert wrote it.
-function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan = null }) {
+function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan = null, rainCard = false }) {
   const mowShort = mowing && mowing.status === 'too_short';
   const damage = (diagnosis || []).find((c) => c.key === 'damage_disease_signals');
   const damageBad = damage && (damage.status === 'needs_attention' || damage.status === 'watch');
@@ -436,6 +436,8 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
     if (planRuns) return 'The lawn is simply running a little dry — this week’s watering plan below sets the runs to close that gap.';
     if (hasPlan) return 'The lawn is simply running a little dry — this week’s watering plan below weighs that against the week’s rain, so follow it as written.';
+    // GATE_LAWN_WATER_RAIN (water.rainCard): the card says to water only when the wilt signs show, so the root cause says it too.
+    if (rainCard) return deficitRootCause();
     return 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
   }
   if (coverageWatch && mowShort) {
@@ -789,7 +791,7 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
-  const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
+  const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, rainCard: !!(water && water.rainCard === true), weekPlan: water ? water.weekPlan : null });
   // GATE_LAWN_EXPECTATIONS (P9): while live, snapshot.seasonalNote is the
   // month's lawn program v13 line, anchored on the same noon-UTC visit month
   // the dormancy guard uses (host-timezone safe, stable for a permanent token).

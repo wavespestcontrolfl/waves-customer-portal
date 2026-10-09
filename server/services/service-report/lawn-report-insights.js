@@ -17,6 +17,7 @@
 const { hasCreditableWaterIn, normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
 const { lawnReportLeadLive } = require('../../config/feature-gates');
 const { deficitAction } = require('./lawn-water-rain');
+const { surplusAdvice: SURPLUS_ADVICE } = require('../../../shared/watering-copy.json');
 
 // The water/damp cards below phrase a CREDITED watering-in generically
 // ("Water in today's application as directed…") rather than quoting the
@@ -95,7 +96,8 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
           : 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.')
         : (waterInRequired
           ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
-          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.')),
+          // GATE_LAWN_WATER_RAIN: the card's own surplus advice (skip a day, never shorten the runs), so the two never differ.
+          : (water.rainCard ? SURPLUS_ADVICE : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'))),
       nextVisitPlan: hasPlan
         ? 'Recheck moisture and fungus signs next visit against this week’s watering plan.'
         : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
@@ -119,7 +121,8 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
           : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
         // GATE_LAWN_WATER_RAIN: the same advice as the card (the amount per run stays fixed; the wilt signs decide).
         : deficitAdvice(water, grassLabel)),
-      nextVisitPlan: hasPlan
+      // A rain card does not add water (the wilt signs decide), so there is no added water to confirm.
+      nextVisitPlan: hasPlan || water.rainCard
         ? 'Recheck moisture and color next visit.'
         : 'Recheck moisture and color next visit to confirm the added water is landing.',
     });

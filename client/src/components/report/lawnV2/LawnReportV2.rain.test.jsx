@@ -87,6 +87,17 @@ describe('the new deficit and surplus sentences', () => {
   });
 });
 
+describe('a weekly plan on the card', () => {
+  it('stays the sole watering instruction: no rain-card sentence prints beside it (the server predicate is the same one)', () => {
+    const plan = { title: 'This week: run once', detail: 'Run one full cycle.', action: 'run' };
+    const withPlan = render(<WaterIntakeBar water={{ ...covered, weekPlan: plan }} />).container;
+    expect(withPlan).not.toHaveTextContent(COVERED);
+    cleanup();
+    const noPlan = render(<WaterIntakeBar water={covered} />).container;
+    expect(noPlan).toHaveTextContent(COVERED);
+  });
+});
+
 describe('without the rain card the card is what it was', () => {
   it('no rainCard key: the irrigation-word screen still hides a schedule sentence beside "Not on file"', () => {
     const none = { rainInches: 1.2, targetInches: 1, status: 'unknown', confidence: 'low', scheduleOnFile: false, irrigationInches: null, totalInches: 1.2, explanation: 'We don’t have your irrigation schedule on file yet. The seasonal target for your lawn is about 1"/wk.' };
