@@ -24,11 +24,11 @@ import granularOn from './__fixtures__/lawn-layout/granular-on.json';
 const clone = (value) => structuredClone(value);
 const KEEP_OFF = 'Keep people and pets off the lawn until then.';
 
-function renderReport(payload) {
-  window.history.pushState({}, '', '/report/tok-polish');
+function renderReport(payload, search = '') {
+  window.history.pushState({}, '', `/report/tok-polish${search}`);
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => payload })));
   return render(
-    <MemoryRouter initialEntries={['/report/tok-polish']}>
+    <MemoryRouter initialEntries={[`/report/tok-polish${search}`]}>
       <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
     </MemoryRouter>,
   );
@@ -186,6 +186,67 @@ describe('the status card keep-off line', () => {
     const hero = container.querySelector('#service-status').textContent;
     expect(hero).toContain('Ready to walk on');
     expect(hero).toContain(KEEP_OFF);
+  });
+});
+
+describe('the status card keep-off line in the static render', () => {
+  const heroOf = (container) => container.querySelector('#service-status').textContent;
+  const MODES = ['static'];
+
+  it.each(MODES)('%s, layout payload, a result of its own: the keep-off line is left off the status card (as on the live page)', async (mode) => {
+    const { container } = renderReport({ ...clone(granularOn), lawnPolish: true }, `?mode=${mode}`);
+    await waitForReport();
+    expect(heroOf(container)).not.toContain(KEEP_OFF);
+  });
+
+  it.each(MODES)('%s, standard page, a result of its own: no stray keep-off line', async (mode) => {
+    const payload = { ...clone(granularOff), lawnPolish: true };
+    expect(typeof payload.reportV2.todaysResult).toBe('string');
+    const { container } = renderReport(payload, `?mode=${mode}`);
+    await waitForReport();
+    expect(heroOf(container)).not.toContain(KEEP_OFF);
+  });
+
+  it.each(MODES)('%s, no result of its own: the condition sentence is the result and the keep-off line follows it, once', async (mode) => {
+    const payload = { ...clone(granularOff), lawnPolish: true };
+    payload.reportV2.todaysResult = null;
+    const { container } = renderReport(payload, `?mode=${mode}`);
+    await waitForReport();
+    const hero = heroOf(container);
+    expect(hero.split(KEEP_OFF).length - 1).toBe(1);
+    expect(hero.indexOf('Ready to walk on')).toBeLessThan(hero.indexOf(KEEP_OFF));
+  });
+
+  it('static, layout, no result of its own: the hero headline substitution stays live-only (condition sentence and keep-off line stay together)', async () => {
+    const payload = { ...clone(granularOn), lawnPolish: true };
+    payload.reportV2.todaysResult = null;
+    const { container } = renderReport(payload, '?mode=static');
+    await waitForReport();
+    const hero = heroOf(container);
+    expect(hero).toContain('Ready to walk on');
+    expect(hero.split(KEEP_OFF).length - 1).toBe(1);
+  });
+
+  it('gate off, static: unchanged', async () => {
+    const { container } = renderReport(clone(granularOn), '?mode=static');
+    await waitForReport();
+    expect(heroOf(container)).toContain(KEEP_OFF);
+  });
+});
+
+describe('the PDF document (mode=pdf renders ServiceReportDocument, not the status card)', () => {
+  it('the keep-off line has its condition sentence right above it in the one Re-entry section, and appears once', async () => {
+    const payload = { ...clone(granularOn), lawnPolish: true };
+    const { container } = renderReport(payload, '?mode=pdf');
+    await screen.findByText(/Re-entry & precautions/);
+    const section = [...container.querySelectorAll('.doc-keep')].find((el) => el.textContent.includes('Re-entry & precautions'));
+    const bullets = [...section.querySelectorAll('li, p, div')].map((el) => el.textContent);
+    expect(section.textContent).toContain('Ready to walk on once today’s treatment has dried');
+    expect(section.textContent.split(KEEP_OFF).length - 1).toBe(1);
+    expect(section.textContent.indexOf('Ready to walk on')).toBeLessThan(section.textContent.indexOf(KEEP_OFF));
+    expect(bullets.length).toBeGreaterThan(0);
+    // the document has no status card, so the keep-off line is printed nowhere else
+    expect(container.textContent.split(KEEP_OFF).length - 1).toBe(1);
   });
 });
 

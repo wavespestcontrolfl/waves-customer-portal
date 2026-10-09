@@ -268,6 +268,42 @@ describe('an area water snapshot is used only when its irrigation figure is the 
     expect(JSON.stringify(water)).not.toMatch(/0\.38|0\.88/);
   });
 
+  // A snapshot computed from rainfall alone: no irrigation figure, yet a status.
+  const rainOnlySnapshot = (status = 'high') => ({
+    status, interpretation: 'irrigation_unknown', confidence: 'low', rain_7day_inches: 3, adjusted_rain_7day_inches: 3,
+    irrigation_inches_per_week: null, total_water_7day_inches: 3, target_water_inches_per_week: 1,
+  });
+
+  test('mixed heads + a rain-only snapshot with status "high": the card is state B, status unknown, nothing of the snapshot used', () => {
+    gateOn();
+    const water = mapWater(context(prefs({ irrigation_system_type: ['rotor', 'spray'] })), rainOnlySnapshot('high'));
+    expect(water).toMatchObject({ source: 'irrigation_advice', scheduleKind: 'runtime_only', status: 'unknown', scheduleOnFile: false });
+    expect(water.confidence).toBe('low');
+    expect(water.rainInches).toBeNull(); // the property has no rainfall of its own in this context; the snapshot's 3" is not borrowed
+    expect(water.irrigationInches).toBeNull();
+  });
+
+  test('nothing on file + a rain-only snapshot: state C, status unknown', () => {
+    gateOn();
+    const water = mapWater(buildLawnWaterContext({ propertyPrefs: null, serviceDate: '2026-10-09' }), rainOnlySnapshot('low'));
+    expect(water).toMatchObject({ source: 'irrigation_advice', scheduleKind: 'none', status: 'unknown' });
+  });
+
+  test('mixed heads + a rain-only snapshot: the diagnosis and the insights agree with the card (no water status from the snapshot)', () => {
+    gateOn();
+    const waterContext = context(prefs({ irrigation_system_type: ['rotor', 'spray'] }));
+    const report = buildLawnReportV2({ lawnAssessment: { scores: {}, waterContext }, applications: [], waterSnapshot: { ...rainOnlySnapshot('high'), interpretation: 'wet_condition_watch' } });
+    expect(report.water).toMatchObject({ scheduleKind: 'runtime_only', status: 'unknown' });
+    const text = JSON.stringify([report.diagnosis, report.insights]);
+    expect(text).not.toMatch(/overwater|too much water|above target|wet_condition/i);
+  });
+
+  test('gate off: a rain-only snapshot is used exactly as before', () => {
+    gateOff();
+    const water = mapWater(context(prefs({ irrigation_system_type: ['rotor', 'spray'] })), rainOnlySnapshot('high'));
+    expect(water).toMatchObject({ source: 'area_snapshot', status: 'high' });
+  });
+
   test('gate off: the snapshot passes through exactly as before, whatever its figure', () => {
     gateOff();
     const water = mapWater(context(prefs()), snapshot(0.99));

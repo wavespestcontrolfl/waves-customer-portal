@@ -193,14 +193,19 @@ const positiveOrNull = (value) => {
  * inches as the customer entered them, else the figure derived on the banner's table, else a turf or assessment
  * reading). An older snapshot made on the package's default table, or one made before the customer changed the
  * schedule, disagrees: its balance and total would print a number of unknown origin, so the card falls to the live
- * context, which prints the current figure with its basis, or the third state when none can be derived.
+ * context, which prints the current figure with its basis, or the third state when none can be derived. When the
+ * report has NO usable figure now (state B or C), no snapshot is used at all: its status can come from rainfall alone
+ * (interpretation irrigation_unknown), and the snapshot's rain figure is not kept either, so nothing of its balance
+ * leaks into a card that promises the balance stays unknown; the card reads the property's own rainfall.
  * Gate off (the context carries no polish key): the snapshot passes through unchanged.
  */
 function snapshotForCard(waterContext, waterSnapshot) {
   if (!waterSnapshot || !waterContext || !waterContext.scheduleKind) return waterSnapshot;
   const stored = positiveOrNull(waterSnapshot.irrigation_inches_per_week);
   const current = positiveOrNull(waterContext.irrigationInchesPerWeek);
-  if (stored == null || current == null) return stored == null && current == null ? waterSnapshot : null;
+  // No usable figure now (states B and C): a snapshot may still carry a status from rainfall alone, which would
+  // drive the card, the diagnosis and the insights while the card promises the balance stays unknown.
+  if (current == null || stored == null) return null;
   return Math.abs(stored - current) <= 0.01 ? waterSnapshot : null;
 }
 

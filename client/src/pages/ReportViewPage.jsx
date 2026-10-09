@@ -2728,9 +2728,11 @@ function RecommendationsSection({ data }) {
 // lead's status headline instead of the walk-on rule that "Your part" states) the keep-off line has no condition
 // above it, so it is left off the card. The layout hero is changed only when the lead has a headline to print.
 function polishStatusProps(data, mode, override, layout) {
-  const condition = data.lawnPolish === true && mode === 'live' ? reentryCondition(data.dynamicContext?.reentry) : null;
+  const condition = data.lawnPolish === true ? reentryCondition(data.dynamicContext?.reentry) : null;
   if (!condition) return { data, override };
-  const headline = !override && layout && smartStatusSummary(data, mode, Date.now()).result === condition.text
+  // The page's own result line over the condition drops the keep-off line in every mode (live, PDF, static). Only the
+  // layout hero's headline substitution is live-only.
+  const headline = !override && layout && mode === 'live' && smartStatusSummary(data, mode, Date.now()).result === condition.text
     ? data.reportV2?.lead?.headline || null : null;
   const result = override || headline;
   return result ? { data: { ...data, statusResultOverridden: true }, override: result } : { data, override };
