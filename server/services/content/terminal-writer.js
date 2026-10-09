@@ -114,15 +114,20 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
   const inProgress = pending.filter((r) => !prs.merged.has(r.id) && prs.open.has(r.id)).map((r) => ({ ...r, pr_url: prs.open.get(r.id) }));
   const candidates = pending.filter((r) => !prs.merged.has(r.id) && !prs.open.has(r.id));
 
+  // Merged PRs whose row is still pending, read by id and not from the rows
+  // above: a merged post uses a weekly slot even when its row has since
+  // dropped out of the claimable window.
+  const mergedIds = [...prs.merged.keys()];
+  const unsettled = mergedIds.length
+    ? (await conn('opportunity_queue').whereIn('id', mergedIds).where('status', 'pending').select('id')).map((r) => r.id)
+    : [];
   if (complete) {
-    // By PR, not by the rows read above: a merged post is settled even when
-    // its row has since dropped out of the claimable window.
-    for (const [id, url] of prs.merged) {
+    for (const id of unsettled) {
       const updated = await conn('opportunity_queue')
         .where('id', id)
         .where('status', 'pending')
         .update({ status: 'done', completed_at: now, updated_at: now });
-      if (updated) logger.info(`[terminal-writer] done ${id}: merged ${url}`);
+      if (updated) logger.info(`[terminal-writer] done ${id}: merged ${prs.merged.get(id)}`);
     }
   }
 
@@ -134,7 +139,7 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
     .count({ n: '*' })
     .first();
   // Merged rows this pass did not mark done (read-only) still used a slot.
-  const doneThisWeek = Number(doneRow?.n || 0) + (complete ? 0 : merged.length);
+  const doneThisWeek = Number(doneRow?.n || 0) + (complete ? 0 : unsettled.length);
   // Every open terminal PR holds a slot, whether or not its row was read above.
   const openCount = prs.open.size;
   const room = Math.max(0, Math.min(perDay - openCount, perWeek - doneThisWeek - openCount));

@@ -22,6 +22,8 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0 }) {
     const q = {
       where: (...a) => { calls.push(a); return q; },
       whereIn: () => q,
+      // pending rows among the merged PR ids, whatever their score
+      select: async () => closed.filter((p) => p.merged_at).map((p) => ({ id: p.head.ref.split('/')[1] })).filter((m) => rows.some((r) => r.id === m.id && r.status === 'pending')),
       update: async (patch) => { updates.push({ where: calls, patch }); return 1; },
       count: () => q,
       first: async () => ({ n: doneThisWeek }),
@@ -31,7 +33,7 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0 }) {
   return {
     updates,
     deps: {
-      queue: { peek: jest.fn(async ({ actionType }) => rows.filter((r) => r.action_type === actionType)) },
+      queue: { peek: jest.fn(async ({ actionType, minScore }) => rows.filter((r) => r.action_type === actionType && r.score >= minScore)) },
       gh: {
         env: () => ({ owner: 'acme', repo: 'site' }),
         ghFetchPaginated: jest.fn(async (path) => (path.includes('state=open') ? [...open, { head: { ref: 'content/other-pr' }, state: 'open' }, { head: { ref: 'terminal-writer/not-an-id' }, state: 'open' }] : closed)),
@@ -83,13 +85,16 @@ describe('terminal writer hand-off', () => {
     expect((await terminalWriterWork({ deps: f.deps })).due.map((r) => r.id)).toEqual([uid('c')]);
   });
 
-  test('an open or merged PR on a low-scored row still counts', async () => {
-    const rows = ['a', 'b', 'c', 'd'].map((c) => row(c)).concat([row('y', { score: 10 }), row('z', { score: 5 })]);
-    const f = fakes({ rows, open: [pr('y')], closed: [mergedPr('z')] });
-    const work = await terminalWriterWork({ deps: f.deps });
-    expect(work.inProgress.map((r) => r.id)).toEqual([uid('y')]);
-    expect(work.merged.map((r) => r.id)).toEqual([uid('z')]);
-    expect(work.due.map((r) => r.id)).toEqual([uid('a'), uid('b')]);
+  test('an open or merged PR on a row below the score floor still uses its slot', async () => {
+    const rows = ['a', 'b', 'c', 'd'].map((c) => row(c)).concat([row('y', { score: 1 }), row('z', { score: 1 })]);
+    const open = fakes({ rows, open: [pr('y')] });
+    expect((await terminalWriterWork({ deps: open.deps })).due.map((r) => r.id)).toEqual([uid('a'), uid('b')]);
+    // nine done this week + one merged PR not settled yet = the week is full
+    const merged = fakes({ rows, closed: [mergedPr('z')], doneThisWeek: 9 });
+    expect((await terminalWriterWork({ deps: merged.deps })).due).toEqual([]);
+    // the daily run settles that merge by id
+    await terminalWriterWork({ complete: true, deps: merged.deps });
+    expect(merged.updates.map((u) => u.where[0])).toEqual([['id', uid('z')]]);
   });
 
   test('other queue rows cannot hide a writing row: each writing action is read on its own', async () => {
