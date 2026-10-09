@@ -1,6 +1,7 @@
 import { isTreeShrubFastCompleteEligible } from "./tree-shrub-fast-complete";
 import { isLawnFastCompleteEligible, isLawnReserviceFastCompleteEligible, LAWN_FINDINGS_TYPE } from "./lawn-fast-complete";
 import { isFastCompleteReportEligible, isLaneReportEligible, isTypedReportEligible } from "./pest-fast-complete";
+import { isAssessmentFastCompleteEligible } from "./assessment-fast-complete";
 
 export const TERMINAL_VISIT_STATUSES = new Set([
   "completed",
@@ -122,6 +123,17 @@ export function shouldOpenSpecialtyFastComplete(service, { stationMapOff = false
     && !service?.checkoutInvoiceToken;
 }
 
+// Admin Dispatch opens the Waves Assessment's one-screen sheet for a visit the
+// shared rule makes eligible (GATE_ASSESSMENT_FAST_COMPLETE), on the same terms
+// as the sheets above: not a visit returning from the payment flow, and not a
+// row with no `propertyId` key (the sheet sends the row's premise for the
+// server to check, and a row without it has none).
+export function shouldOpenAssessmentFastComplete(service) {
+  return isAssessmentFastCompleteEligible(service)
+    && "propertyId" in service
+    && !returningFromPayment(service);
+}
+
 // Which one-screen sheet admin Dispatch opens for a visit, or null for the
 // full form. Order matters: a lawn re-service is a typed lawn visit, so it is
 // asked first (as on the technician home) and no later rule may claim it.
@@ -130,6 +142,7 @@ export function fastCompleteSheetFor(service, { stationMapOff = false } = {}) {
   if (shouldOpenLawnReserviceFastComplete(service)) return "lawn_reservice";
   if (shouldOpenTreeShrubFastComplete(service)) return "tree_shrub";
   if (shouldOpenLawnFastComplete(service)) return "lawn";
+  if (shouldOpenAssessmentFastComplete(service)) return "assessment";
   if (shouldOpenPestFastComplete(service) || shouldOpenSpecialtyFastComplete(service, { stationMapOff })) return "pest";
   return null;
 }

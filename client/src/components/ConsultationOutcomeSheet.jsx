@@ -82,7 +82,7 @@ function parseInterests(value) {
   return [];
 }
 
-function formFromRow(row) {
+export function formFromRow(row) {
   return {
     outcome: row?.outcome || '',
     lostReason: row?.lost_reason || '',
@@ -128,7 +128,7 @@ export function buildOutcomePayload(form, { followUpTouched = false, loadedRow =
   };
 }
 
-function readOnlyReason(row) {
+export function readOnlyReason(row) {
   if (!row) return null;
   if (row.outcome === 'won') {
     const when = row.won_at ? ` on ${etDateOf(row.won_at)}` : '';
@@ -157,7 +157,7 @@ function sheetStyles(c) {
   };
 }
 
-function validationErrorOf(form) {
+export function validationErrorOf(form) {
   if (!form.outcome) return 'Pick warm, cold or lost';
   if (form.outcome === 'lost' && !form.lostReason) return 'Pick why it was lost';
   return null;
@@ -264,7 +264,7 @@ function OutcomeFields({ form, set, onFollowUpChange, st }) {
 // Loads the recorded outcome. A 404 means nothing is recorded yet (the save
 // reports a missing visit itself); any other failure is shown, never
 // silently treated as a blank form.
-function useRecordedOutcome(serviceId, request) {
+export function useRecordedOutcome(serviceId, request) {
   const [state, setState] = useState({ loading: true, error: '', row: null });
   useEffect(() => {
     let cancelled = false;
