@@ -30,6 +30,15 @@ describeDb('compliance page: the yearly count window', () => {
     }
     return f.customerId;
   }
+  async function lawnRows(customerId, product, dates) {
+    const property = await db('customer_properties').where({ customer_id: customerId }).first();
+    for (const date of dates) {
+      const [visit] = await db('scheduled_services').insert({ customer_id: customerId, property_id: property.id, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await db('service_records').insert({ customer_id: customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+      made.records.push(record.id);
+      await db('property_application_history').insert({ customer_id: customerId, product_id: product.id, application_date: date, application_rate: 0.085, rate_unit: 'oz', service_record_id: record.id, property_id: property.id });
+    }
+  }
   const countRow = async (customerId, productId) => (await ComplianceService.getProductLimits(customerId)).limits
     .find((limit) => limit.limitType === 'annual_max_apps' && limit.productId === productId);
 
@@ -82,6 +91,47 @@ describeDb('compliance page: the yearly count window', () => {
     expect(status.totalApplications).toBe(0); // the calendar-year total and the nitrogen budget still start on 1 January
     const other = await lawnWith(calendarProduct, ['2025-12-05', '2025-12-20']);
     expect((await applicationLimits.getPropertyComplianceStatus(other)).products).toEqual([]);
+  });
+
+  // Both directions of the history read in getPropertyComplianceStatus: it starts at the earlier of 1 January and the rolling start,
+  // and each product is then judged over its own window.
+  test('early January: a calendar-year product ignores last year\'s rows, Celsius counts them, the totals stay on this year', async () => {
+    const customerId = await lawnWith(celsius, ['2025-12-05', '2025-12-20', '2026-01-05']);
+    await lawnRows(customerId, calendarProduct, ['2025-12-05', '2025-12-20', '2026-01-05']);
+    const status = await applicationLimits.getPropertyComplianceStatus(customerId);
+    const byId = Object.fromEntries(status.products.map((p) => [p.productId, p.applicationsThisYear]));
+    expect(byId).toEqual({ [celsius.id]: 3, [calendarProduct.id]: 1 });
+    expect(status.totalApplications).toBe(2); // the two 2026 rows, one per product
+  });
+
+  test('30-31 December of a leap year: the rolling start is 2 January, later than 1 January, yet the calendar-year product still counts 1 January', async () => {
+    jest.setSystemTime(new Date('2028-12-31T17:00:00Z'));
+    expect(applicationLimits.windowFor('2028-12-31', 'rolling365').start).toBe('2028-01-02');
+    expect(applicationLimits.windowFor('2027-12-31', 'rolling365').start).toBe('2027-01-01');
+    const customerId = await lawnWith(calendarProduct, ['2028-01-01', '2028-06-01']);
+    await lawnRows(customerId, celsius, ['2028-01-01', '2028-06-01']);
+    const status = await applicationLimits.getPropertyComplianceStatus(customerId);
+    const byId = Object.fromEntries(status.products.map((p) => [p.productId, p.applicationsThisYear]));
+    expect(byId).toEqual({ [celsius.id]: 1, [calendarProduct.id]: 2 }); // Celsius: 1 January is outside its 365 days; the calendar product keeps it
+    expect(status.totalApplications).toBe(4); // calendar-year total: all four rows
+  });
+
+  test('late December, ordinary year: both kinds count what they should and the totals are the calendar year', async () => {
+    jest.setSystemTime(new Date('2026-12-15T17:00:00Z'));
+    const customerId = await lawnWith(celsius, ['2025-12-20', '2026-03-01']);
+    await lawnRows(customerId, calendarProduct, ['2025-12-20', '2026-03-01']);
+    const status = await applicationLimits.getPropertyComplianceStatus(customerId);
+    const byId = Object.fromEntries(status.products.map((p) => [p.productId, p.applicationsThisYear]));
+    expect(byId).toEqual({ [celsius.id]: 2, [calendarProduct.id]: 1 });
+    expect(status.totalApplications).toBe(2);
+  });
+
+  test('getProductLimits on 31 December of a leap year: the calendar-year product counts 1 January, Celsius does not', async () => {
+    jest.setSystemTime(new Date('2028-12-31T17:00:00Z'));
+    const customerId = await lawnWith(calendarProduct, ['2028-01-01', '2028-06-01']);
+    await lawnRows(customerId, celsius, ['2028-01-01', '2028-06-01']);
+    expect(await countRow(customerId, calendarProduct.id)).toMatchObject({ currentUsage: 2, status: 'exceeded' });
+    expect(await countRow(customerId, celsius.id)).toMatchObject({ currentUsage: 1 });
   });
 
   test('gate off: the stored row and the calendar year (nothing counted on 12 January)', async () => {

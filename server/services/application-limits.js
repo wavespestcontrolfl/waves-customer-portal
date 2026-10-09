@@ -487,10 +487,12 @@ class ApplicationLimitChecker {
     const yearStart = this.getYearStart(new Date());
     const today = etCalendarDayOf(new Date());
 
-    // Read back to the start of the longest window any product counts (the rolling 365 days always reaches before January 1), then
-    // judge each product over its own window: the calendar year, or the 365 days of a rolling product (countWindow).
+    // Read from the EARLIER of January 1 and the rolling window's start (the rolling start is before January 1 for most of the year, but
+    // on 30 and 31 December of a leap year it is 1 or 2 January), then judge each product over its own window: the calendar year, or
+    // the 365 days of a rolling product (countWindow). The totals and the nitrogen budget below stay on the calendar year.
+    const rollingStart = this.windowFor(today, ROLLING_365).start;
     const loaded = await db('property_application_history')
-      .where({ customer_id: customerId }).where('application_date', '>=', this.windowFor(today, ROLLING_365).start)
+      .where({ customer_id: customerId }).where('application_date', '>=', rollingStart < yearStart ? rollingStart : yearStart)
       .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .select('property_application_history.*', 'products_catalog.name as product_name')
