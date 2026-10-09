@@ -4747,6 +4747,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           expectedVisit,
           lawnFast,
           products,
+          technicianNotes,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(
@@ -6095,6 +6096,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // this visit either commits first — and the caller's locked guard
           // sees it — or waits until this completion has committed (Codex r5
           // P1 #5903).
+          // GATE_LAWN_NEW_SOD_NOTE: a lawn sheet completing with NO product because the new sod holds every planned product
+          // has that claim re-judged below, under the sod record's own advisory lock. The lock is taken FIRST, ahead of every
+          // other lock here, as the sod record's writers (writeAdminPreferences, the rooted tick) take it before their customer
+          // and visit locks. False (nothing taken) for every other completion.
+          const sodNoProductClaim = await require('./lawn-sod-sheet').lockSodRecordForNoProduct(trx, {
+            customerId: svc.customer_id, lawnFast, isIncompleteVisit, products, technicianNotes,
+          });
           if (systemQuietCloseout) {
             await require('../services/scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, svc.id);
           }
@@ -6204,6 +6212,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
           if (lawnFast != null && !isIncompleteVisit) {
             await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
+            // The new-sod no-product claim, re-judged with the advisory lock, the customer and the visit all held.
+            if (sodNoProductClaim) await require('./lawn-sod-sheet').assertNoProductUnderLock(trx, { svc, technicianNotes });
           }
           // The assessment sheet's read of the visit, written under this lock so it
           // commits or rolls back with the completion.
@@ -8134,6 +8144,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
+            // GATE_LAWN_NEW_SOD_NOTE: the new-sod bag swap as a substitution, so the ledger ties the swap bag to the bag it replaced.
+            visitSubstitutions: await require('./lawn-sod-sheet').sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts: insertedServiceProducts }),
             completionInput: {
               ...(lawnProtocolCompletion || {}),
               // Under a consumer gate the writer receives the validated visit
@@ -8569,6 +8581,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             code: 'visit_identity_changed',
             ...(err.reason ? { reason: err.reason } : {}),
           } });
+        }
+        if (err && err.code === 'lawn_sod_no_product_stale') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: require('./lawn-sod-sheet').NO_PRODUCT_STALE.payload });
         }
         if (err && err.code === 'lawn_fast_visit_type_unavailable') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
