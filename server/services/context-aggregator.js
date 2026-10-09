@@ -15,7 +15,7 @@ const {
 } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
-const { etDateString, formatETTime } = require('../utils/datetime-et');
+const { etDateString, formatETTime, dateOnlyString } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 // LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
@@ -989,6 +989,22 @@ async function stampSeriesExclusive(customer, rows, baseQuery = upcomingServices
   }
   for (const r of rows) r.series_exclusive = exclusive;
   return rows;
+}
+// A signature of EVERY upcoming visit's occurrence (uncapped; the same base query as
+// the drafter's UPCOMING SERVICES): which visits exist, on which day, in which window.
+// A texting-AI card that only STATES the booked schedule stores it at draft time and
+// the send seams re-read it (agent-decision-send-checks scheduleFactsReason): a visit
+// moved, added, completed or cancelled since changes it. Status is left out on purpose
+// (pending -> confirmed is not a schedule change; a terminal status drops the row).
+// Throws on a failed read: callers fail closed.
+async function upcomingScheduleSignature(customerId) {
+  if (!customerId) return null;
+  const rows = await upcomingServicesBase({ id: customerId })
+    .select('ss.id', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window');
+  const parts = rows
+    .map((r) => [r.id, dateOnlyString(r.scheduled_date), r.window_start, r.window_end, r.window_display, r.time_window].map((x) => (x == null ? '' : String(x))).join('|'))
+    .sort();
+  return require('node:crypto').createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 async function loadUpcomingServices(customer, includeLiveEta) {
   const limited = await upcomingServicesBase(customer).orderBy('ss.scheduled_date').limit(3).select(...UPCOMING_SERVICE_COLUMNS);
@@ -1999,6 +2015,7 @@ module.exports.perVisitLiveEtas = perVisitLiveEtas;
 module.exports.buildLiveEtaGroups = buildLiveEtaGroups;
 module.exports.mergeLiveUpcoming = mergeLiveUpcoming;
 module.exports.loadUpcomingServices = loadUpcomingServices;
+module.exports.upcomingScheduleSignature = upcomingScheduleSignature;
 module.exports.seriesKeyOfRow = seriesKeyOfRow;
 module.exports.stampSeriesExclusive = stampSeriesExclusive;
 module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

@@ -4983,6 +4983,29 @@ function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null, off
 // The section was rendered, so the snapshot is persisted even when nothing
 // time-sensitive showed ({ signature: null }): a delay, passed window or missed
 // visit that appears while the card waits changes the live signature and refuses.
+// Draft time: { signature, at } for a schedule-statement card, or null. Both gates the card
+// needs must be on, so a gate-off deployment makes no extra read.
+async function draftScheduleFacts(customer) {
+  if (!customer?.id || !gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_SCHEDULING_SUGGEST')) return null;
+  try {
+    const signature = await require('./context-aggregator').upcomingScheduleSignature(customer.id);
+    return signature ? { signature, at: new Date().toISOString() } : null;
+  } catch (err) {
+    logger.warn(`[sms-shadow] upcoming-schedule signature failed (${err.message}); no schedule-statement card`);
+    return null;
+  }
+}
+// A scheduling-intent reply that offers NO new time and promises nothing but a hand-off.
+// Anything else (offered times, a picker snapshot, a booking / payment / link action) keeps
+// its own path: the picker card or silent shadow.
+const SCHEDULE_STATEMENT_ACTIONS = new Set(['none', 'escalate']);
+function scheduleStatementOnly({ schedulingIntent, openTimesSnapshot, parsed }) {
+  if (!schedulingIntent || openTimesSnapshot) return false;
+  if (Array.isArray(parsed?.offered_times) && parsed.offered_times.length) return false;
+  const actions = Array.isArray(parsed?.intended_actions) ? parsed.intended_actions : [];
+  return actions.every((a) => a && SCHEDULE_STATEMENT_ACTIONS.has(a.type));
+}
+
 function visitLoopStatus(context, factsBlock) {
   if (!factsCarryVisitLoops(factsBlock)) return null;
   return { signature: require('./visit-loops-facts').visitStatusSignature(context && context.visitLoops) };
@@ -6195,6 +6218,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // older than its fingerprint: a change landing in between makes the
     // send-time comparison fail, which keeps the text with staff.
     const unansweredFacts = await require('./sms-unanswered-reply').draftFactsFingerprint(customer);
+    // Schedule-statement cards (owner 2026-10-09; sms-suggest-mode schedulingStatementSuggestible):
+    // the signature of this customer's upcoming schedule, read BEFORE the drafting context for the
+    // same reason as the fingerprint above. null = no card for a scheduling answer (gates off, no
+    // customer, or an unreadable schedule).
+    const scheduleFacts = await draftScheduleFacts(customer);
     let context = await loadContext(includeLiveEta);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
@@ -6251,6 +6279,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // anything without a customer + inbound link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
     const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft);
+    // The signature backs a card ONLY for a reply that offers no new time and promises no
+    // action beyond a hand-off: it states the booked schedule, which the send seams recheck.
+    const scheduleStatementFacts = scheduleStatementOnly({ schedulingIntent, openTimesSnapshot, parsed }) ? scheduleFacts : null;
     const deliveryMode = await suggestMode.resolveDeliveryMode({
       reply: parsed.reply,
       customerId: customer?.id || null,
@@ -6260,6 +6291,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       // GATE_SMS_SCHEDULING_SUGGEST: a scheduling draft whose times came from a
       // booking picker may reach the staff card (never auto-send).
       openTimesSnapshot,
+      scheduleFacts: scheduleStatementFacts,
       // Any draft whose facts list something owed goes to a person: no check can
       // prove a non-empty reply actually addressed it (openLoopThanks is the
       // demoted-gratitude case of the same rule).
@@ -6487,6 +6519,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             intent: intentName,
             schedulingIntent,
             openTimesSnapshot,
+            scheduleFacts: scheduleStatementFacts,
           });
           if (fallbackMode === 'suggest' || fallbackMode === suggestMode.AUTO_SEND_MODE) {
             const decisionId = await suggestMode.publishSuggestion({
@@ -6501,6 +6534,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               promptVersion,
               lintFailures: lint.failures,
               openTimesSnapshot,
+              scheduleFacts: scheduleStatementFacts,
               paymentStatusSnapshot,
               labelFactsSnapshot,
               intendedActions: parsed.intended_actions,
@@ -6545,6 +6579,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             intent: intentName,
             schedulingIntent,
             openTimesSnapshot,
+            scheduleFacts: scheduleStatementFacts,
           });
           publishDemotedCard = freshMode === 'suggest' || freshMode === suggestMode.AUTO_SEND_MODE;
           if (publishDemotedCard) {
@@ -6566,6 +6601,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             promptVersion,
             lintFailures: lint.failures,
             openTimesSnapshot,
+            scheduleFacts: scheduleStatementFacts,
             paymentStatusSnapshot,
             labelFactsSnapshot,
             intendedActions: parsed.intended_actions,
@@ -6630,6 +6666,8 @@ module.exports = {
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
   visitLoopStatus,
+  draftScheduleFacts,
+  scheduleStatementOnly,
   visitLoopsNeedAnswer,
   validateOpenLoopAnswer,
   factsListOpenLoop,
