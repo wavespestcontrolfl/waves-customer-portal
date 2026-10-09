@@ -665,10 +665,10 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(recordStreamedMessage).not.toHaveBeenCalled();
 
     // the provider finished and billed the response, but it held nothing usable
-    const billedRound = { id: 'resp_x', model: 'served', usage: { input_tokens: 500, output_tokens: 256 } };
+    const billedRound = { id: 'resp_x', model: 'served', usage: { input_tokens: 500, output_tokens: 256 }, errorCode: 'openai_incomplete' };
     const billed = build(async () => { throw Object.assign(new Error('no usable output'), { billedRound }); });
     await billed._runLoop('hi').catch(() => {});
-    expect(recordStreamedMessage).toHaveBeenCalledWith(expect.objectContaining({ message: billedRound, errorCode: 'openai_unusable_response', laneId: 'voice_relay' }));
+    expect(recordStreamedMessage).toHaveBeenCalledWith(expect.objectContaining({ message: billedRound, errorCode: 'openai_incomplete', laneId: 'voice_relay' }));
 
     // the eval replay refuses database writes while a conversation runs: nothing is recorded
     recordStreamedMessage.mockClear();

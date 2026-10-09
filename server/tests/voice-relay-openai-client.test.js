@@ -358,9 +358,23 @@ describe('OpenAIRelayClient.messages.stream — full SSE round trips', () => {
     const err = await stream.finalMessage().catch((e) => e);
     expect(err.message).toMatch(/no usable output/);
     expect(err.billedRound).toEqual({
-      id: 'r9', model: 'gpt-6-sol',
+      id: 'r9', model: 'gpt-6-sol', errorCode: 'empty_text',
       usage: { input_tokens: 400, cache_read_input_tokens: 100, cache_creation_input_tokens: 0, output_tokens: 256, reasoning_tokens: 256 },
     });
+  });
+
+  // The ledger files a billed round under the reason the response was unusable,
+  // and the taxonomy turns that into a quality class, not a plumbing fault.
+  test.each([
+    ['cut off by max_output_tokens', { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [{ type: 'reasoning', summary: [] }] }, 'openai_incomplete', 'incomplete'],
+    ['a refusal', { status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] }, 'openai_refusal', 'instruction'],
+    ['nothing usable', { status: 'completed', output: [] }, 'empty_text', 'incomplete'],
+    ['tool arguments that are not JSON', { status: 'completed', output: [{ type: 'function_call', id: 'f1', call_id: 'c1', name: 'lookup', status: 'completed', arguments: '{nope' }] }, 'function_arguments_invalid', 'instruction'],
+  ])('%s carries its own ledger code', (_label, response, code, failureClass) => {
+    let thrown;
+    try { mapResponseToMessage(response, 'gpt-6-sol'); } catch (e) { thrown = e; }
+    expect(thrown.ledgerCode).toBe(code);
+    expect(require('../services/agent-control/taxonomy').classifyFailure(code)).toBe(failureClass);
   });
 
   test('a tool_use round: content_block_start fires with type tool_use, finalMessage resolves the tool_use block', async () => {

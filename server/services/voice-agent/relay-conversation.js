@@ -3488,8 +3488,8 @@ class RelayConversation {
     } catch (err) {
       // A response OpenAI finished and billed but the relay could not use
       // (relay-openai-client attaches what was billed) is a failed round on
-      // the ledger, not a missing one.
-      if (err?.billedRound) this._ledgerRound(err.billedRound, modelStartAt, 'openai_unusable_response');
+      // the ledger, not a missing one, under the client's own failure code.
+      if (err?.billedRound) this._ledgerRound(err.billedRound, modelStartAt, err.billedRound.errorCode);
       return { err, streamState, timedOut };
     } finally {
       clearTimeout(streamTimer);
