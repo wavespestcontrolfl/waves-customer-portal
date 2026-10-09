@@ -1728,9 +1728,11 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
       capped.set(id, [{ ...prohibited }]);
       continue;
     }
+    // Every product here is selected, i.e. about to be applied: a proposal. A product with no row in this visit's window (Arena in
+    // October, a search-added product) has no stated dose here; the limit reader then counts the product's staged v13 dose.
     const row = rows.get(id);
     const proposed = v13ProposedApplication(item.product, row, targets);
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, proposal: true, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };

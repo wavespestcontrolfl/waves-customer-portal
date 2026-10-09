@@ -84,7 +84,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
       lawn_protocol_window_id: window.id, product_id: catalog['Tetrino Insecticide'].id, product_name: 'Tetrino Insecticide', role: 'insecticide', application_mode: 'broadcast',
       default_in_plan: true, rate_per_1000: 0.367, rate_unit: 'fl oz', gates: JSON.stringify({}),
     });
-    for (const [row, rate, unit, gates] of [[catalog[ARENA], null, 'label_rate', { trigger: 'chinch' }], [catalog[CELSIUS], 0.085, 'oz', {}], [surfactant, null, 'label_rate', { concentration: '0.25% v/v' }]]) {
+    for (const [row, rate, unit, gates] of [[catalog[ARENA], 0.147, 'oz', { trigger: 'chinch' }], [catalog[CELSIUS], 0.085, 'oz', {}], [surfactant, null, 'label_rate', { concentration: '0.25% v/v' }]]) {
       await knex('lawn_protocol_products').insert({
         lawn_protocol_window_id: window.id, product_id: row.id, product_name: row.name, role: 'post_emergent_spot', application_mode: 'spot',
         default_in_plan: false, rate_per_1000: rate, rate_unit: unit, carrier_gal_per_1000: 4, gates: JSON.stringify(gates),
@@ -671,7 +671,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
         const trx = await knex.transaction();
         try {
           const result = await within(buildPlanForService(visit.id, { db: trx, selectedConditionalProductNames: [ARENA] }), 20000);
-          expect(result.propertyGate.blocks.filter((b) => b.code === 'lawn_v13_annual_limit')).toHaveLength(1);
+          expect(result.propertyGate.blocks.filter((b) => b.code === 'lawn_v13_annual_limit' && /applications this year/.test(b.message))).toHaveLength(1);
         } finally { await trx.rollback(); }
       });
     });
@@ -1278,7 +1278,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
       for (const [index, date] of dates.entries()) {
         const [past] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: visitA.property_id, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
         const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
-        const recorded = index in rates ? rates[index] : 0.085;
+        const recorded = index in rates ? rates[index] : (name === ARENA ? 0.147 : 0.085);
         await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[name].id, application_date: date, service_record_id: record.id, ...(recorded !== null && typeof recorded === 'object' ? recorded : { application_rate: recorded, rate_unit: 'oz' }) });
       }
       return { visitA, visitB };
@@ -1288,13 +1288,15 @@ describeDb('v13 count caps through PostgreSQL', () => {
       return buildPlanForService(visit.id, { db: knex, selectedConditionalProductNames: [name] });
     };
     const limitBlocks = (result) => result.propertyGate.blocks.filter((b) => b.code === 'lawn_v13_annual_limit');
+    // The yearly COUNT block alone: Arena's staged dose (0.147) also makes a 3rd pass an amount block, which has its own tests.
+    const countBlocks = (result) => limitBlocks(result).filter((b) => /applications this year/.test(b.message));
 
     test.each([CELSIUS, ARENA])('%s: a third application in the year at the same property is blocked; one at another property is not', async (name) => {
       const { visitA, visitB } = await twoProperties(name, ['2026-02-02', '2026-03-16']);
       const resultA = await plan(visitA, name);
-      expect(limitBlocks(resultA)).toHaveLength(1);
-      expect(limitBlocks(resultA)[0]).toMatchObject({ productName: name });
-      expect(limitBlocks(resultA)[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+      expect(countBlocks(resultA)).toHaveLength(1);
+      expect(countBlocks(resultA)[0]).toMatchObject({ productName: name });
+      expect(countBlocks(resultA)[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
       expect(resultA.status).toBe('blocked');
       const resultB = await plan(visitB, name);
       expect(limitBlocks(resultB)).toEqual([]);
@@ -1318,7 +1320,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
       await knex('product_limits').where({ product_id: catalog[name].id }).del();
       try {
         const two = await twoProperties(name, ['2026-02-02', '2026-03-16']);
-        const blocked = limitBlocks(await plan(two.visitA, name));
+        const blocked = countBlocks(await plan(two.visitA, name));
         expect(blocked).toHaveLength(1);
         expect(blocked[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
         expect(limitBlocks(await plan(two.visitB, name))).toEqual([]);
@@ -1347,7 +1349,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
 
       test('a third in the year is blocked by the count even when the gap is long enough', async () => {
         const { visitA } = await twoProperties(ARENA, ['2026-01-05', '2026-03-17']);
-        const blocks = limitBlocks(await plan(visitA, ARENA));
+        const blocks = countBlocks(await plan(visitA, ARENA));
         expect(blocks).toHaveLength(1);
         expect(blocks[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
       });
@@ -1404,7 +1406,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
     describe('Arena yearly amount of 0.294 oz per 1,000 sq ft (v13 only, by product id)', () => {
       const amountBlocks = (result) => limitBlocks(result).filter((b) => /yearly label amount/.test(b.message));
       beforeAll(async () => { await knex('lawn_protocol_products').where({ product_name: ARENA }).update({ rate_per_1000: 0.147, rate_unit: 'oz' }); });
-      afterAll(async () => { await knex('lawn_protocol_products').where({ product_name: ARENA }).update({ rate_per_1000: null, rate_unit: 'label_rate' }); });
+      afterAll(async () => { await knex('lawn_protocol_products').where({ product_name: ARENA }).update({ rate_per_1000: 0.147, rate_unit: 'oz' }); });
 
       test('a prior 0.29 oz application blocks a second at 60 days (0.147 more would pass the yearly amount), though the count and the gap allow it', async () => {
         const { visitA, visitB } = await twoProperties(ARENA, ['2026-03-13'], [0.29]);
@@ -1440,6 +1442,125 @@ describeDb('v13 count caps through PostgreSQL', () => {
         } finally {
           await knex('products_catalog').where({ id: catalog[ARENA].id }).update({ default_rate_per_1000: 0.29 });
         }
+      });
+
+      test('an unreadable prior pass counts at the FIXED 0.29, never at the catalog default: with the default changed to 0.147 a second 0.147 is still blocked', async () => {
+        await knex('products_catalog').where({ id: catalog[ARENA].id }).update({ default_rate_per_1000: 0.147 });
+        try {
+          const { visitA } = await twoProperties(ARENA, ['2026-03-13'], [{ application_rate: null, rate_unit: null }]);
+          const blocks = amountBlocks(await plan(visitA, ARENA));
+          expect(blocks).toHaveLength(1);
+          expect(blocks[0].message).toMatch(/total 98\.6%.*brings it to 148\.6%/);
+          // The ledger's own readings are still the only ones: a recorded quantity over its area sizes the row.
+          const sized = await twoProperties(ARENA, ['2026-03-13'], [{ application_rate: null, rate_unit: null, quantity_applied: 4.1, quantity_unit: 'g', area_treated_sqft: 1000 }]);
+          expect(amountBlocks(await plan(sized.visitA, ARENA))).toEqual([]);
+        } finally {
+          await knex('products_catalog').where({ id: catalog[ARENA].id }).update({ default_rate_per_1000: 0.29 });
+        }
+      });
+
+      // A PROPOSAL check that names no dose (POST /api/admin/compliance/check-limits) adds the program's dose; a status read adds none.
+      describe('a proposal check without a dose (opts.proposal)', () => {
+        const applicationLimits = require('../services/application-limits');
+        const check = async (customerId, opts = {}) => {
+          process.env.GATE_LAWN_V13 = 'true';
+          return applicationLimits.checkLimits(customerId, catalog[ARENA].id, new Date('2026-05-12T16:00:00Z'), knex, opts);
+        };
+        const amount = (result) => result.blocks.filter((b) => b.type === 'annual_max_rate');
+
+        test('after a prior 0.29 it is not allowed (148.6%); after a prior 0.147 it is allowed; after two it is blocked', async () => {
+          const old = await twoProperties(ARENA, ['2026-03-13'], [0.29]);
+          const blocked = await check(old.visitA.customer_id, { propertyId: old.visitA.property_id, proposal: true });
+          expect(blocked.allowed).toBe(false);
+          expect(amount(blocked)).toHaveLength(1);
+          expect(amount(blocked)[0].message).toMatch(/total 98\.6%.*brings it to 148\.6% — THIS APPLICATION WOULD EXCEED IT/);
+          const half = await twoProperties(ARENA, ['2026-03-13'], [0.147]);
+          const fits = await check(half.visitA.customer_id, { propertyId: half.visitA.property_id, proposal: true });
+          expect(amount(fits)).toEqual([]);
+          const full = await twoProperties(ARENA, ['2026-01-05', '2026-03-13'], [0.147, 0.147]);
+          expect(amount(await check(full.visitA.customer_id, { propertyId: full.visitA.property_id, proposal: true }))).toHaveLength(1);
+        });
+
+        test('a readable proposed dose is counted as given, under either key (`unit` as the plan spells it, `rateUnit`): 98.6% + 0.147 reads 148.6%, never 197.3%', async () => {
+          const old = await twoProperties(ARENA, ['2026-03-13'], [0.29]);
+          for (const proposed of [{ ratePer1000: 0.147, unit: 'oz' }, { ratePer1000: 0.147, rateUnit: 'oz' }]) {
+            const blocks = amount(await check(old.visitA.customer_id, { propertyId: old.visitA.property_id, proposed }));
+            expect(blocks).toHaveLength(1);
+            expect(blocks[0].message).toMatch(/total 98\.6%.*brings it to 148\.6%/);
+            expect(blocks[0].message).not.toMatch(/197/);
+          }
+          // An unreadable named dose is the fixed fallback (a full 0.29 more).
+          const unreadable = amount(await check(old.visitA.customer_id, { propertyId: old.visitA.property_id, proposed: { ratePer1000: 0.147 } }));
+          expect(unreadable[0].message).toMatch(/brings it to 197\.3%/);
+          // The plan sends { ratePer1000, unit } (v13ProposedApplication). A key the reader does not know (`rate`) is no dose: the fixed 0.29.
+          const wrongKey = amount(await check(old.visitA.customer_id, { propertyId: old.visitA.property_id, proposed: { rate: 0.147, rateUnit: 'oz' } }));
+          expect(wrongKey[0].message).toMatch(/brings it to 197\.3%/);
+          // With proposal: true as well, a readable named dose is the only dose (the program dose is not added on top).
+          const both = amount(await check(old.visitA.customer_id, { propertyId: old.visitA.property_id, proposal: true, proposed: { ratePer1000: 0.1, unit: 'oz' } }));
+          expect(both[0].message).toMatch(/total 98\.6%.*brings it to 132\.7%/);
+        });
+
+        test('a proposal whose named dose is missing counts the staged dose from ANY window; the plan\'s v13VisitLimits does so for a product with no row in the visit\'s window (Arena on an October visit)', async () => {
+          const planEngine = require('../services/waveguard-plan-engine');
+          process.env.GATE_LAWN_V13 = 'true';
+          const october = async (rates, dates) => {
+            const f = await twoProperties(ARENA, dates, rates);
+            await knex('scheduled_services').where({ id: f.visitA.id }).update({ scheduled_date: '2026-10-08' });
+            const service = await knex('scheduled_services').where({ id: f.visitA.id }).first();
+            // The October window carries no Arena row: the rows map is empty for it.
+            const found = await planEngine.v13VisitLimits(knex, service, [{ selected: true, product: { id: catalog[ARENA].id, name: ARENA } }], new Map());
+            return found.capped.get(String(catalog[ARENA].id)) || [];
+          };
+          const blocked = await october([0.29], ['2026-07-05']);
+          expect(blocked).toHaveLength(1);
+          expect(blocked[0]).toMatchObject({ type: 'annual_max_rate', productName: ARENA });
+          expect(blocked[0].message).toMatch(/total 98\.6%.*brings it to 148\.6% — THIS APPLICATION WOULD EXCEED IT/);
+          // 0.147 sixty days earlier: 50% + the staged 0.147 = 100%, past the 56-day gap: allowed.
+          expect(await october([0.147], ['2026-08-09'])).toEqual([]);
+          // Two full 0.147 passes this year: blocked whatever the window says.
+          expect((await october([0.147, 0.147], ['2026-03-01', '2026-08-09'])).map((block) => block.type).sort()).toEqual(['annual_max_apps', 'annual_max_rate']);
+          // No staged rate anywhere: the fixed 0.29 is the dose.
+          await knex('lawn_protocol_products').where({ product_name: ARENA }).update({ rate_per_1000: null, rate_unit: 'label_rate' });
+          try {
+            expect((await october([0.147], ['2026-08-09'])).some((block) => block.type === 'annual_max_rate')).toBe(true);
+          } finally {
+            await knex('lawn_protocol_products').where({ product_name: ARENA }).update({ rate_per_1000: 0.147, rate_unit: 'oz' });
+          }
+          // A status read of the same lawn (no proposal) adds nothing.
+          const f = await twoProperties(ARENA, ['2026-07-05'], [0.29]);
+          const status = await check(f.visitA.customer_id, { propertyId: f.visitA.property_id });
+          expect(amount(status)).toEqual([]);
+        });
+
+        test('the same check without opts.proposal is a status read: it adds no dose (98.6% is a warning, allowed)', async () => {
+          const old = await twoProperties(ARENA, ['2026-03-13'], [0.29]);
+          const status = await check(old.visitA.customer_id, { propertyId: old.visitA.property_id });
+          expect(amount(status)).toEqual([]);
+          expect(status.warnings.some((w) => w.type === 'annual_max_rate' && /98\.6%/.test(w.message))).toBe(true);
+        });
+
+        test('the dose is the staged v13 row\'s by product id; with no staged rate it is the fixed 0.29, so a proposal never reads as fitting when it does not', async () => {
+          expect(await applicationLimits.programDose(knex, catalog[ARENA].id)).toEqual({ ratePer1000: 0.147, unit: 'oz' });
+          await knex('lawn_protocol_products').where({ product_name: ARENA }).update({ rate_per_1000: null, rate_unit: 'label_rate' });
+          try {
+            expect(await applicationLimits.programDose(knex, catalog[ARENA].id)).toEqual({ ratePer1000: null, unit: null });
+            const half = await twoProperties(ARENA, ['2026-03-13'], [0.147]);
+            const result = await check(half.visitA.customer_id, { propertyId: half.visitA.property_id, proposal: true });
+            expect(amount(result)).toHaveLength(1); // 0.147 + the fixed 0.29 would exceed
+          } finally {
+            await knex('lawn_protocol_products').where({ product_name: ARENA }).update({ rate_per_1000: 0.147, rate_unit: 'oz' });
+          }
+        });
+
+        test('a named dose wins over the program dose, and gate off adds nothing', async () => {
+          const half = await twoProperties(ARENA, ['2026-03-13'], [0.147]);
+          const small = await check(half.visitA.customer_id, { propertyId: half.visitA.property_id, proposal: true, proposed: { ratePer1000: 0.1, unit: 'oz' } });
+          expect(amount(small)).toEqual([]);
+          const old = await twoProperties(ARENA, ['2026-03-13'], [0.29]);
+          delete process.env.GATE_LAWN_V13;
+          const off = await applicationLimits.checkLimits(old.visitA.customer_id, catalog[ARENA].id, new Date('2026-05-12T16:00:00Z'), knex, { propertyId: old.visitA.property_id, proposal: true });
+          expect(off.blocks).toEqual([]);
+        });
       });
 
       test('a prior application recorded as a quantity over its area is sized from it (4.1 g over 1,000 sq ft is about 0.145 oz, so 0.145 + 0.147 fits)', async () => {

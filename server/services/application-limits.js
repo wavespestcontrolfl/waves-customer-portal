@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
 const { applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
+const V13_VERSION = '2026.10-v13';
 const { worstPropertyCount, worstPropertyTotal } = require('../utils/property-counts');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
@@ -42,10 +43,11 @@ function capShare(row) {
 }
 
 // One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
-// capShare's reading (recorded rate, else quantity over area, else the catalog default), and when none of
-// those can size it the row's fallback rate (Arena: the old 0.29 oz, the whole year) - never left uncounted.
+// the ledger's own reading only (the recorded rate, else the quantity over the treated area), and when the
+// ledger cannot size it the row's FIXED fallback rate (Arena: the old 0.29 oz, the whole year) - never the
+// catalog default, which an admin can change (to the new 0.147) and so halve what an unreadable full-rate pass counts.
 function v13AmountShare(row, limit) {
-  const sized = capShare({ ...row, limit_value: limit.limit_value, limit_unit: limit.limit_unit });
+  const sized = capShare({ ...row, default_rate_per_1000: null, limit_value: limit.limit_value, limit_unit: limit.limit_unit });
   if (sized) return sized;
   return { share: Number(limit.fallback_rate) / Number(limit.limit_value), estimated: true };
 }
@@ -95,6 +97,9 @@ class ApplicationLimitChecker {
   // cap shared across formulations counts it with the season's earlier ones. A
   // caller that reads AFTER the application was ledgered (completion, the compliance
   // page) passes none, so the application is never counted twice.
+  // opts.proposal (true) marks a PROPOSAL check that names no dose (POST /api/admin/compliance/check-limits): a v13 yearly
+  // amount cap then counts the program's dose for the product with the season's earlier applications. A status-only read
+  // (the compliance page, a read after the ledger write) passes neither and adds nothing.
   // opts.excludeScheduledServiceId leaves that visit's own ledger rows out of the product
   // history and the shared cap, for a plan rebuilt after the visit completed. opts.propertyId
   // limits both to the treated property (no property: every property of the customer).
@@ -322,6 +327,19 @@ class ApplicationLimitChecker {
     return { violated: false, current: pct(used), max: 100 };
   }
 
+  // The program's dose of a product, by product id: the highest rate any staged v13 protocol row states for it (the plan's
+  // own rows; Arena 0.147 oz). { ratePer1000: null } when no row states one: the caller counts the cap's fallback rate.
+  async programDose(database, productId) {
+    const row = await database('lawn_protocol_products as p')
+      .join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+      .join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+      .where({ 'p.product_id': productId, 'l.version': V13_VERSION })
+      .where('p.rate_per_1000', '>', 0)
+      .orderBy('p.rate_per_1000', 'desc')
+      .first('p.rate_per_1000', 'p.rate_unit');
+    return row ? { ratePer1000: Number(row.rate_per_1000), unit: row.rate_unit } : { ratePer1000: null, unit: null };
+  }
+
   // The v13 yearly AMOUNT cap on one product (Arena: 0.294 oz per 1,000 sq ft, GATE_LAWN_V13): the lawn's
   // recorded applications of this product this year, each as a share of the cap (an unreadable one counts
   // at the cap row's fallback rate), plus the application being planned. Per 1,000 sq ft of the treated
@@ -340,9 +358,19 @@ class ApplicationLimitChecker {
     const { share: used, estimated } = await this.lawnAmountShare(database, await query, limit, { propertyId: ctx.propertyId });
     const cap = Number(limit.limit_value);
     const amountUsed = Math.round(used * cap * 10000) / 10000;
-    const sizedProposal = ctx.proposed ? rateInUnit(ctx.proposed.ratePer1000, ctx.proposed.unit, capUnitOf(limit.limit_unit)) : null;
-    // A planned application that cannot be sized counts at the fallback rate: fail closed.
-    const adds = !ctx.proposed ? 0 : (sizedProposal > 0 ? sizedProposal : Number(limit.fallback_rate)) / cap;
+    // The application being planned. A named dose is read in the cap's unit (`unit`, or `rateUnit` as the plan rows spell it). A
+    // proposal (opts.proposal: the compliance route, the plan's selected products) whose dose is missing or unreadable counts the
+    // program's own dose for the product, by product id, from ANY staged v13 window (Arena 0.147 oz even in October, a month
+    // that has no Arena row), and failing that the fixed fallback rate: a proposal never reads as fitting when it does not.
+    // A status read (the compliance page, a read after the ledger write) names no dose, is no proposal, and adds nothing.
+    const capUnit = capUnitOf(limit.limit_unit);
+    const readable = (dose) => {
+      const size = dose ? rateInUnit(dose.ratePer1000, dose.unit ?? dose.rateUnit, capUnit) : null;
+      return size > 0 ? size : null;
+    };
+    let dose = readable(ctx.proposed);
+    if (dose == null && ctx.proposal) dose = readable(await this.programDose(database, product.id));
+    const adds = dose != null ? dose / cap : ((ctx.proposed || ctx.proposal) ? Number(limit.fallback_rate) / cap : 0);
     const total = used + adds;
     const detail = estimated ? ` (${estimated} earlier application${estimated === 1 ? '' : 's'} sized at the standard rate)` : '';
     const label = `${product.name}: this year's applications on the lawn total ${pct(used)}% of the yearly label amount (${limit.limit_value} ${capUnitOf(limit.limit_unit)} per 1,000 sq ft)`;
