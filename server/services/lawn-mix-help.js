@@ -32,12 +32,12 @@ const OZ_PER_LB = 16;
 
 const live = () => require('../config/feature-gates').lawnMixHelpLive();
 
-// The Celsius WG label on file (EPA Reg. No. 432-1507, the EPA-stamped 2021-09-01 version), word for word. Keyed by EPA registration
+// The Celsius WG label on file (EPA Reg. No. 432-1507, the EPA-stamped 2021-09-01 version), word for word, the stricter instruction first. Keyed by EPA registration
 // number so a rename of the catalog product changes nothing and no product is matched by its name.
 const LABEL_LINES = Object.freeze({
   '432-1507': Object.freeze([
-    Object.freeze({ text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Celsius WG label, Precautions, item 3' }),
     Object.freeze({ text: 'Prepare only as much spray mixture as needed for application on the same day.', source: 'Celsius WG label, Mixing Instructions' }),
+    Object.freeze({ text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Celsius WG label, Precautions, item 3' }),
   ]),
 });
 

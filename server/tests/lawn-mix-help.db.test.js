@@ -122,7 +122,7 @@ describeDb('mix help through PostgreSQL', () => {
       expect(rows[catalog[NIS].id].perTank['2'].text).toBe('0.64 fl oz (18.9 mL)');
       expect(rows[catalog[ARENA].id]).toMatchObject({ carrierGalPer1000: 4 });
       expect(rows[catalog[ARENA].id].perTank['4'].text).toBe('0.15 oz (4.17 g)');
-      expect(rows[catalog[CELSIUS].id].labelLines.map((line) => line.source)).toEqual(['Celsius WG label, Precautions, item 3', 'Celsius WG label, Mixing Instructions']);
+      expect(rows[catalog[CELSIUS].id].labelLines.map((line) => line.source)).toEqual(['Celsius WG label, Mixing Instructions', 'Celsius WG label, Precautions, item 3']);
       expect(out.mixHelp.weedOrder).toEqual([catalog[CELSIUS].id, catalog[CERTAINTY].id, catalog[NIS].id]);
     });
 

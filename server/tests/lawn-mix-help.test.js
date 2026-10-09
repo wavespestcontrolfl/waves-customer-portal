@@ -76,8 +76,8 @@ describe('entryFor', () => {
     const staged = { ratePer1000: 0.085, rateUnit: 'oz', carrierGalPer1000: 1 };
     const celsius = help.entryFor(staged, { name: 'Renamed in the catalog', epa_reg_number: '432-1507' });
     expect(celsius.labelLines).toEqual([
-      { text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Celsius WG label, Precautions, item 3' },
       { text: 'Prepare only as much spray mixture as needed for application on the same day.', source: 'Celsius WG label, Mixing Instructions' },
+      { text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Celsius WG label, Precautions, item 3' },
     ]);
     expect(help.entryFor(staged, { name: 'Celsius WG', epa_reg_number: '59639-226' })).not.toHaveProperty('labelLines');
     expect(help.entryFor(staged, { name: 'Celsius WG' })).not.toHaveProperty('labelLines');
