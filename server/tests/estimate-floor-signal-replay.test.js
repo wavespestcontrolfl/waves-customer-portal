@@ -63,13 +63,13 @@ describe('savedFloorReplaySignals — tri-state', () => {
   it('cost-plus list: a stamp on a priced lawn replays as stamped, with its knob snapshot', () => {
     const knobs = { listMargin: 0.5 };
     expect(savedFloorReplaySignals({
-      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: true, lawnCostPlusListKnobs: knobs } },
-    })).toMatchObject({ lawnCostPlusList: true, lawnCostPlusListKnobs: knobs });
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: true, lawnCostPlusListBasis: knobs } },
+    })).toMatchObject({ lawnCostPlusList: true, lawnCostPlusListBasis: knobs });
     const off = savedFloorReplaySignals({
-      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: false, lawnCostPlusListKnobs: knobs } },
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: false, lawnCostPlusListBasis: knobs } },
     });
     expect(off.lawnCostPlusList).toBe(false);
-    expect('lawnCostPlusListKnobs' in off).toBe(false);
+    expect('lawnCostPlusListBasis' in off).toBe(false);
   });
 
   it('cost-plus list: priced lawn with no stamp pins OFF; no lawn line pins nothing', () => {

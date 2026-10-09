@@ -92,7 +92,7 @@ function savedLawnCostPlusSignal(estData) {
   const stamp = roots.flatMap((r) => [r.pricingMetadata, r.routingMetadata])
     .find((m) => typeof m?.lawnCostPlusList === 'boolean');
   const on = stamp?.lawnCostPlusList === true;
-  return { lawnCostPlusList: on, ...(on && stamp.lawnCostPlusListKnobs ? { lawnCostPlusListKnobs: stamp.lawnCostPlusListKnobs } : {}) };
+  return { lawnCostPlusList: on, ...(on && stamp.lawnCostPlusListBasis ? { lawnCostPlusListBasis: stamp.lawnCostPlusListBasis } : {}) };
 }
 
 // Legacy pre-disarm estimates (engine armed the cost floor by default, so

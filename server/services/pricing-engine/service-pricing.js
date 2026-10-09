@@ -10,7 +10,7 @@ const {
   BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
-const { costPlusListKnobError } = require('./lawn-cost-plus-knobs');
+const { resolveLawnCostPlusBasis, costPlusFloorTuning } = require('./lawn-cost-plus-knobs');
 const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
@@ -2025,29 +2025,35 @@ function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track = 'st_augustine') 
   return { monthly: brackets[brackets.length - 1][tierIndex + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
 }
 
-function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, options = {}) {
-  const turfK = lawnSqFt / 1000;
-  const materialCostPerK = Number.isFinite(Number(options.lawnMaterialCostPerK))
-    ? Math.max(0, Number(options.lawnMaterialCostPerK))
-    : 8;
-  const laborMinutesBase = Number.isFinite(Number(options.lawnLaborMinutesBase))
-    ? Math.max(0, Number(options.lawnLaborMinutesBase))
-    : LAWN_PRICING_V2.laborMinutesBase;
-  const laborMinutesPerK = Number.isFinite(Number(options.lawnLaborMinutesPerK))
-    ? Math.max(0, Number(options.lawnLaborMinutesPerK))
-    : LAWN_PRICING_V2.laborMinutesPer1000Sqft;
+// The tuning numbers behind one cadence's cost floor. In cost-plus mode
+// (options.costPlusBasis) they come ONLY from the resolved basis and every
+// caller option is ignored; otherwise the caller options override the live
+// config exactly as before.
+function lawnCostFloorTuning(visits, property, options) {
+  if (options.costPlusBasis) return costPlusFloorTuning(options.costPlusBasis, visits, property);
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : fallback);
   const routeDensity = String(options.routeDensity || property.routeDensity || LAWN_PRICING_V2.defaultRouteDensity)
     .toUpperCase();
-  const routeDriveMinutes = Number.isFinite(Number(options.routeDriveMinutes))
-    ? Math.max(0, Number(options.routeDriveMinutes))
-    : (Number.isFinite(Number(property.routeDriveMinutes))
-      ? Math.max(0, Number(property.routeDriveMinutes))
-      : (LAWN_PRICING_V2.routeDensityMinutes[routeDensity] ?? LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity]));
-  const targetGrossMargin = Number.isFinite(Number(options.targetLawnGrossMargin))
-    && Number(options.targetLawnGrossMargin) > 0
-    && Number(options.targetLawnGrossMargin) < 1
-    ? Number(options.targetLawnGrossMargin)
-    : LAWN_PRICING_V2.targetCollectedMarginFloor;
+  const margin = Number(options.targetLawnGrossMargin);
+  return {
+    materialCostPerK: num(options.lawnMaterialCostPerK, 8),
+    annualMaterialBudget: Number.isFinite(Number(options.annualMaterialBudget)) ? Number(options.annualMaterialBudget) : null,
+    laborMinutesBase: num(options.lawnLaborMinutesBase, LAWN_PRICING_V2.laborMinutesBase),
+    laborMinutesPerK: num(options.lawnLaborMinutesPerK, LAWN_PRICING_V2.laborMinutesPer1000Sqft),
+    routeDensity,
+    routeDriveMinutes: num(options.routeDriveMinutes, num(property.routeDriveMinutes,
+      LAWN_PRICING_V2.routeDensityMinutes[routeDensity] ?? LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity])),
+    targetGrossMargin: margin > 0 && margin < 1 ? margin : LAWN_PRICING_V2.targetCollectedMarginFloor,
+    annualAdmin: num(options.adminAnnual, LAWN_PRICING_V2.adminAnnualDefault),
+    laborRate: LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE,
+    callbackReserveDefault: LAWN_PRICING_V2.callbackReservePerVisitDefault,
+    equipmentReserve: LAWN_PRICING_V2.equipmentReservePerVisit,
+  };
+}
+
+function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, options = {}) {
+  const turfK = lawnSqFt / 1000;
+  const tune = lawnCostFloorTuning(visits, property, options);
   const features = property.features || {};
   const complexity = String(features.complexity || property.landscapeComplexity || '').toLowerCase();
   const shrubs = String(features.shrubs || property.shrubDensity || '').toLowerCase();
@@ -2060,35 +2066,27 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
       .toString().toLowerCase().includes('privacy'),
   });
   const callbackReservePerVisit =
-    LAWN_PRICING_V2.callbackReservePerVisitDefault +
+    tune.callbackReserveDefault +
     (['POOR', 'DEFERRED'].includes(maintenance) ? 5 : 0) +
     (['HIGH', 'SEVERE', 'VERY_HIGH'].includes(pressure) ? 5 : 0);
 
-  const annualMaterialBudget = Number.isFinite(Number(options.annualMaterialBudget))
-    ? Number(options.annualMaterialBudget)
-    : null;
   // Material-per-visit: shared (unclamped) budget scaling, or the $/K fallback.
-  const materialCostPerVisit = annualMaterialBudget !== null
-    ? lawnMaterialCostPerVisit(annualMaterialBudget, lawnSqFt, visits)
-    : turfK * materialCostPerK;
-  const laborRate = LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE;
-  const annualAdmin = Number.isFinite(Number(options.adminAnnual))
-    ? Math.max(0, Number(options.adminAnnual))
-    : LAWN_PRICING_V2.adminAnnualDefault;
-
+  const materialCostPerVisit = tune.annualMaterialBudget !== null
+    ? lawnMaterialCostPerVisit(tune.annualMaterialBudget, lawnSqFt, visits)
+    : turfK * tune.materialCostPerK;
   const floor = computeLawnCostFloor({
     lawnSqFt,
     visits,
     materialCostPerVisit,
-    laborMinutesBase,
-    laborMinutesPer1000Sqft: laborMinutesPerK,
+    laborMinutesBase: tune.laborMinutesBase,
+    laborMinutesPer1000Sqft: tune.laborMinutesPerK,
     complexityMinutes,
-    laborRate,
-    routeDriveMinutes,
+    laborRate: tune.laborRate,
+    routeDriveMinutes: tune.routeDriveMinutes,
     callbackReservePerVisit,
-    equipmentReservePerVisit: LAWN_PRICING_V2.equipmentReservePerVisit,
-    adminAnnual: annualAdmin,
-    targetGrossMargin,
+    equipmentReservePerVisit: tune.equipmentReserve,
+    adminAnnual: tune.annualAdmin,
+    targetGrossMargin: tune.targetGrossMargin,
   });
   return {
     annualMaterial: roundMoney(floor.annualMaterial),
@@ -2100,9 +2098,9 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
     annualCost: roundMoney(floor.annualCost),
     minimumCollectedAnnualPrice: floor.minimumCollectedAnnualPrice,
     laborMinutesPerVisit: roundMoney(floor.laborMinutesPerVisit),
-    routeDriveMinutes,
-    routeDensity,
-    targetCollectedMarginFloor: targetGrossMargin,
+    routeDriveMinutes: tune.routeDriveMinutes,
+    routeDensity: tune.routeDensity,
+    targetCollectedMarginFloor: tune.targetGrossMargin,
     pricingMode: LAWN_PRICING_V2.pricingMode,
     pricingVersion: LAWN_PRICING_V2.pricingVersion,
   };
@@ -2112,23 +2110,22 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
   return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPrice;
 }
 
-// Validated cost-plus list knobs. options.costPlusListKnobs is the server-only
-// snapshot a saved estimate was priced with; without it the live
-// lawn_pricing_v2.costPlusList row applies. A malformed object under an ON mode
-// fails the calculation instead of silently pricing off the market table (same
-// posture as the Bermuda knob error); persistence rethrows failClosed errors
-// rather than CLIENT_FALLBACK.
-function lawnCostPlusListKnobs(options = {}) {
-  const cfg = options.costPlusListKnobs ?? LAWN_PRICING_V2.costPlusList;
-  const problem = costPlusListKnobError(cfg);
-  if (problem) {
-    const err = new Error(`Lawn cost-plus list pricing knobs are invalid (lawn_pricing_v2.costPlusList): ${problem}. The mode never silently prices off the market table.`);
+// The cost basis cost-plus mode prices from. options.costPlusListBasis is the
+// server-only snapshot a saved estimate was priced with; without it the live
+// server config is resolved. An unusable basis under an ON mode fails the
+// calculation instead of silently pricing off the market table (same posture
+// as the Bermuda knob error); persistence rethrows failClosed errors rather
+// than CLIENT_FALLBACK.
+function lawnCostPlusBasis(options = {}) {
+  const { basis, error } = resolveLawnCostPlusBasis(options.costPlusListBasis);
+  if (error) {
+    const err = new Error(`Lawn cost-plus list cost basis is invalid: ${error}. The mode never silently prices off the market table.`);
     err.statusCode = 400;
     err.code = 'LAWN_COST_PLUS_LIST_KNOBS_INVALID';
     err.failClosed = true;
     throw err;
   }
-  return { ...cfg, materialPerK: cfg.materialPer1000SqftPerYear };
+  return basis;
 }
 
 function priceLawnCare(property, options = {}) {
@@ -2169,7 +2166,8 @@ function priceLawnCare(property, options = {}) {
   const costPlusListOn = costPlusListOption == null
     ? require('../../config/feature-gates').gateEnvValue('GATE_LAWN_COST_PLUS_LIST')
     : costPlusListOption === true;
-  const costPlusKnobs = costPlusListOn ? lawnCostPlusListKnobs(options) : null;
+  const costPlusBasis = costPlusListOn ? lawnCostPlusBasis(options) : null;
+  const costPlusKnobs = costPlusBasis && costPlusBasis.costPlusList;
 
   const requestedGrassType = String(track || '').trim();
   const matchedTrack = matchGrassTrack(track);
@@ -2279,20 +2277,11 @@ function priceLawnCare(property, options = {}) {
     const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack);
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);
-    const costFloorOpts = { ...options };
-    if (costPlusKnobs) {
-      // v13 whole-lawn product cost: dollars per 1,000 sq ft per VISIT, plus
-      // the spot-work minutes. An explicit caller override still wins.
-      if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
-        costFloorOpts.lawnMaterialCostPerK = costPlusKnobs.materialPerK[tc.freq] / tc.freq;
-        delete costFloorOpts.annualMaterialBudget;
-      }
-      if (!Number.isFinite(Number(options.lawnLaborMinutesBase))) {
-        costFloorOpts.lawnLaborMinutesBase = LAWN_PRICING_V2.laborMinutesBase + costPlusKnobs.spotMinutesPerVisit;
-      }
-    } else if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
-      costFloorOpts.annualMaterialBudget = tierAnnualBudget;
-    }
+    // Cost-plus mode: the basis is the ONLY source of tuning numbers; the
+    // caller's options are not passed on.
+    const costFloorOpts = costPlusBasis
+      ? { costPlusBasis }
+      : { ...options, ...(Number.isFinite(Number(options.lawnMaterialCostPerK)) ? {} : { annualMaterialBudget: tierAnnualBudget }) };
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPrice;
     const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;

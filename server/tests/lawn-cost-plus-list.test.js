@@ -189,11 +189,14 @@ describe('gate ON: cost-plus list price', () => {
     expect(lawn.margin).toBeCloseTo((selected.annual - selected.costFloorDetails.annualCost) / selected.annual, 3);
   });
 
-  test('explicit caller cost overrides still win over the v13 cost', () => {
-    const base = byVisits(price(4500, ON))[9].costFloorDetails;
-    const override = byVisits(price(4500, { ...ON, lawnMaterialCostPerK: 40, lawnLaborMinutesBase: 40 }))[9].costFloorDetails;
-    expect(override.annualMaterial).toBeCloseTo(40 * 4.5 * 9, 1);
-    expect(override.annualLabor).toBeGreaterThan(base.annualLabor);
+  test('caller cost overrides are ignored in this mode (priceLawnCare)', () => {
+    const base = byVisits(price(4500, ON))[9];
+    const zeros = byVisits(price(4500, {
+      ...ON, targetLawnGrossMargin: 0.9, lawnMaterialCostPerK: 0, lawnLaborMinutesBase: 0,
+      lawnLaborMinutesPerK: 0, routeDriveMinutes: 0, adminAnnual: 0, annualMaterialBudget: 1,
+    }))[9];
+    expect(zeros.annual).toBe(base.annual);
+    expect(zeros.costFloorDetails).toEqual(base.costFloorDetails);
   });
 
   test('the one-time lawn anchor stays on the market table', () => {
@@ -337,34 +340,133 @@ describe('saved estimates replay as they were priced', () => {
   });
 });
 
-describe('replay at the knobs a quote was priced with', () => {
-  let liveKnobs;
-  beforeEach(() => { liveKnobs = JSON.parse(JSON.stringify(LAWN_PRICING_V2.costPlusList)); });
-  afterEach(() => { LAWN_PRICING_V2.costPlusList = liveKnobs; });
+describe('replay at the cost basis a quote was priced with', () => {
+  let liveCostPlus;
+  beforeEach(() => { liveCostPlus = JSON.parse(JSON.stringify(LAWN_PRICING_V2.costPlusList)); });
+  afterEach(() => { LAWN_PRICING_V2.costPlusList = liveCostPlus; });
 
   test('an admin knob edit moves a fresh quote, not a saved one', () => {
     process.env[GATE] = 'true';
     const input = estimateInput({ lawn: lawnService() });
     const saved = generateEstimate(input);
-    expect(saved.pricingMetadata.lawnCostPlusListKnobs).toEqual(liveKnobs);
+    expect(saved.pricingMetadata.lawnCostPlusListBasis.costPlusList).toEqual(liveCostPlus);
     LAWN_PRICING_V2.costPlusList.listMargin = 0.5;
     const signals = savedFloorReplaySignals({ result: saved });
-    expect(signals.lawnCostPlusListKnobs.listMargin).toBe(0.45);
+    expect(signals.lawnCostPlusListBasis.costPlusList.listMargin).toBe(0.45);
     expect(lawnLine(generateEstimate({ ...input, ...signals })).annual).toBe(693);
     const fresh = lawnLine(generateEstimate(input)).annual;
     expect(fresh).toBeGreaterThan(693);
   });
 
-  test('an ON stamp with no snapshot falls back to the live knobs; a bad snapshot fails closed', () => {
+  test('an ON stamp with no snapshot falls back to the live basis; a bad snapshot fails closed', () => {
     const input = estimateInput({ lawn: lawnService() });
     expect(lawnLine(generateEstimate({ ...input, lawnCostPlusList: true })).annual).toBe(693);
-    expect(() => generateEstimate({ ...input, lawnCostPlusList: true, lawnCostPlusListKnobs: { listMargin: 5 } }))
-      .toThrow(/cost-plus list pricing knobs are invalid/);
+    expect(() => generateEstimate({ ...input, lawnCostPlusList: true, lawnCostPlusListBasis: { version: 1, listMargin: 5 } }))
+      .toThrow(/cost-plus list cost basis is invalid/);
   });
 
   test('knobs are not stamped when the mode is off', () => {
     const off = generateEstimate(estimateInput({ lawn: lawnService() }));
-    expect(off.pricingMetadata).not.toHaveProperty('lawnCostPlusListKnobs');
+    expect(off.pricingMetadata).not.toHaveProperty('lawnCostPlusListBasis');
+  });
+});
+
+describe('the whole cost basis is snapshotted and request-proof', () => {
+  const live = () => ({
+    laborMinutesBase: LAWN_PRICING_V2.laborMinutesBase,
+    laborRateLoaded: LAWN_PRICING_V2.laborRateLoaded,
+    adminAnnualDefault: LAWN_PRICING_V2.adminAnnualDefault,
+    callbackReservePerVisitDefault: LAWN_PRICING_V2.callbackReservePerVisitDefault,
+    equipmentReservePerVisit: LAWN_PRICING_V2.equipmentReservePerVisit,
+    routeDensityMinutes: { ...LAWN_PRICING_V2.routeDensityMinutes },
+    targetCollectedMarginFloor: LAWN_PRICING_V2.targetCollectedMarginFloor,
+  });
+  let before;
+  beforeEach(() => { before = live(); });
+  afterEach(() => { Object.assign(LAWN_PRICING_V2, before); });
+
+  test('editing any live labor, drive, reserve or admin number moves a fresh quote, never a saved one', () => {
+    process.env[GATE] = 'true';
+    const input = estimateInput({ lawn: lawnService() });
+    const saved = generateEstimate(input);
+    const basis = saved.pricingMetadata.lawnCostPlusListBasis;
+    expect(basis).toMatchObject({
+      version: 1, laborMinutesBase: 12, laborRateLoaded: 35, adminAnnual: 51,
+      callbackReservePerVisitDefault: 2, equipmentReservePerVisit: 0, collectedMarginFloor: 0.35,
+    });
+    const signals = savedFloorReplaySignals({ result: saved });
+    const edits = [
+      () => { LAWN_PRICING_V2.laborMinutesBase = 30; },
+      () => { LAWN_PRICING_V2.laborRateLoaded = 60; },
+      () => { LAWN_PRICING_V2.adminAnnualDefault = 200; },
+      () => { LAWN_PRICING_V2.callbackReservePerVisitDefault = 12; },
+      () => { LAWN_PRICING_V2.routeDensityMinutes.DENSE = 40; },
+    ];
+    for (const edit of edits) {
+      Object.assign(LAWN_PRICING_V2, before, { routeDensityMinutes: { ...before.routeDensityMinutes } });
+      edit();
+      expect(lawnLine(generateEstimate({ ...input, ...signals })).annual).toBe(693);
+      expect(lawnLine(generateEstimate(input)).annual).toBeGreaterThan(693);
+    }
+  });
+
+  const zeroed = {
+    targetLawnGrossMargin: 0.9, lawnMaterialCostPerK: 0, lawnLaborMinutesBase: 0, lawnLaborMinutesPerK: 0, routeDriveMinutes: 0,
+  };
+
+  test('posted tuning numbers (top level or per service) change nothing with the gate on', () => {
+    process.env[GATE] = 'true';
+    for (const input of [
+      estimateInput({ lawn: lawnService() }, zeroed),
+      estimateInput({ lawn: lawnService(zeroed) }),
+    ]) {
+      const line = lawnLine(generateEstimate(input));
+      expect(line.annual).toBe(693);
+      expect(line.costs.total).toBeCloseTo(380.06, 2);
+    }
+  });
+
+  test('the same posted numbers behave as before with the gate off', () => {
+    const plain = lawnLine(generateEstimate(estimateInput({ lawn: lawnService() })));
+    const posted = lawnLine(generateEstimate(estimateInput({ lawn: lawnService() }, { ...zeroed, useLawnCostFloor: true })));
+    expect(plain.annual).toBe(576);
+    expect(posted.costs.total).toBeLessThan(plain.costs.total);
+  });
+
+  test('the calculate-estimate request adapter: posted tuning options reach the engine and change nothing', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    process.env[GATE] = 'true';
+    const profile = { homeSqFt: 2000, stories: 1, lotSqFt: 10000, propertyType: 'single_family', lawnSqFt: 4500, measuredTurfSf: 4500, features: {}, grassType: 'st_augustine' };
+    const v1 = translateV2CallToV1Input(profile, ['LAWN'], { lawnFreq: 9, ...zeroed });
+    expect(v1.services.lawn).toMatchObject({ lawnMaterialCostPerK: 0, routeDriveMinutes: 0 });
+    const line = lawnLine(generateEstimate(v1));
+    expect(line.annual).toBe(693);
+    expect(line.costs.total).toBeCloseTo(380.06, 2);
+  });
+
+  test('property facts stay live: a poor-condition lawn still adds its callback reserve', () => {
+    const base = byVisits(price(4500, ON))[9].costFloorDetails.annualCallbackReserve;
+    const poor = priceLawnCare({ lawnSqFt: 4500, maintenanceCondition: 'POOR' }, { track: 'st_augustine', includeHiddenTiers: true, ...ON });
+    expect(byVisits(poor)[9].costFloorDetails.annualCallbackReserve).toBeGreaterThan(base);
+  });
+
+  test('the resolver validates a snapshot as strictly as the live config', () => {
+    const { resolveLawnCostPlusBasis } = require('../services/pricing-engine/lawn-cost-plus-knobs');
+    const { basis, error } = resolveLawnCostPlusBasis();
+    expect(error).toBeNull();
+    for (const mutate of [
+      (b) => { b.laborMinutesBase = 241; },
+      (b) => { b.laborRateLoaded = 0; },
+      (b) => { b.adminAnnual = 1001; },
+      (b) => { b.collectedMarginFloor = 0.9; },
+      (b) => { b.routeDensityMinutes.DENSE = -1; },
+      (b) => { b.version = 2; },
+      (b) => { b.surprise = 1; },
+    ]) {
+      const copy = JSON.parse(JSON.stringify(basis));
+      mutate(copy);
+      expect(resolveLawnCostPlusBasis(copy).error).toBeTruthy();
+    }
   });
 });
 
@@ -372,7 +474,7 @@ describe('a posted value never beats the gate', () => {
   const posted = (flag) => sanitizeClientIdentityFields({
     ...estimateInput({ lawn: lawnService({ costPlusList: flag }) }),
     lawnCostPlusList: flag,
-    lawnCostPlusListKnobs: { listMargin: 0.5 },
+    lawnCostPlusListBasis: { version: 1, listMargin: 0.5 },
   });
 
   test('gate off + posted true prices market; gate on + posted false prices cost-plus', () => {
@@ -383,7 +485,7 @@ describe('a posted value never beats the gate', () => {
 
   test('the sanitizer strips the top-level and per-service copies without mutating the caller', () => {
     const lawn = { track: 'st_augustine', costPlusList: true };
-    const input = { services: { lawn }, lawnCostPlusList: true, lawnCostPlusListKnobs: {} };
+    const input = { services: { lawn }, lawnCostPlusList: true, lawnCostPlusListBasis: {} };
     const out = sanitizeClientIdentityFields({ ...input });
     expect(out).toEqual({ services: { lawn: { track: 'st_augustine' } } });
     expect(lawn.costPlusList).toBe(true);
@@ -468,6 +570,12 @@ describe('admin write boundary validates costPlusList on its own', () => {
     'a cadence zero': (c) => { c.materialPer1000SqftPerYear[9] = 0; return c; },
     'an unknown cadence': (c) => { c.materialPer1000SqftPerYear[4] = 10; return c; },
     'an unknown key': (c) => { c.extra = 1; return c; },
+    'listMargin 0.9': (c) => { c.listMargin = 0.9; return c; },
+    'minimumPerVisit 5500': (c) => { c.minimumPerVisit = 5500; return c; },
+    'minimumPerVisit with 3 decimals': (c) => { c.minimumPerVisit = 55.005; return c; },
+    'spotMinutesPerVisit 10000': (c) => { c.spotMinutesPerVisit = 10000; return c; },
+    'a material above 500': (c) => { c.materialPer1000SqftPerYear[9] = 501; return c; },
+    'a material with 3 decimals': (c) => { c.materialPer1000SqftPerYear[9] = 60.123; return c; },
   };
   for (const [name, mutate] of Object.entries(bad)) {
     test(`rejects ${name}, even beside a valid bermudaSuppression`, () => {
@@ -493,7 +601,7 @@ describe('public ranges rebuild when the gate flips', () => {
   });
 });
 
-describe('invalid knobs fail closed under an ON mode', () => {
+describe('invalid cost basis fails closed under an ON mode', () => {
   let saved;
   beforeEach(() => { saved = JSON.parse(JSON.stringify(LAWN_PRICING_V2.costPlusList)); });
   afterEach(() => { LAWN_PRICING_V2.costPlusList = saved; });
@@ -507,6 +615,10 @@ describe('invalid knobs fail closed under an ON mode', () => {
     'spotMinutesPerVisit not a number': (cfg) => { cfg.spotMinutesPerVisit = 'abc'; },
     'a cadence material of 0': (cfg) => { cfg.materialPer1000SqftPerYear[9] = 0; },
     'a cadence material missing': (cfg) => { delete cfg.materialPer1000SqftPerYear[12]; },
+    'listMargin of 0.9': (cfg) => { cfg.listMargin = 0.9; },
+    'minimumPerVisit of 5500': (cfg) => { cfg.minimumPerVisit = 5500; },
+    'spotMinutesPerVisit of 10000': (cfg) => { cfg.spotMinutesPerVisit = 10000; },
+    'a 3-decimal minimumPerVisit': (cfg) => { cfg.minimumPerVisit = 55.005; },
   };
 
   for (const [name, mutate] of Object.entries(bad)) {
@@ -529,7 +641,7 @@ describe('invalid knobs fail closed under an ON mode', () => {
   test('generateEstimate surfaces the failure instead of pricing market', () => {
     LAWN_PRICING_V2.costPlusList.listMargin = 7;
     expect(() => generateEstimate(estimateInput({ lawn: lawnService({ costPlusList: true }) })))
-      .toThrow(/cost-plus list pricing knobs are invalid/);
+      .toThrow(/cost-plus list cost basis is invalid/);
   });
 });
 

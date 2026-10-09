@@ -119,11 +119,25 @@ residential recurring lawn care only. Off, everything above is unchanged. On:
   `minimumCollectedAnnualPrice` = `annualCost / 0.65` (a 35% margin).
 - Tier rows read `pricingSource` `COST_PLUS_LIST` or `MINIMUM_PER_VISIT` (else the usual
   labels) and carry `costPlusListApplied`, `listMargin` and `costPlusListAnnual`.
+- Cost basis: `lawn-cost-plus-knobs.js` `resolveLawnCostPlusBasis(snapshot)` returns one validated object
+  (`version` 1) with every non-property number behind the cost, list price and floor: `costPlusList`,
+  collected-margin floor, labor minutes (base and per 1,000 sq ft), loaded labor rate, drive minutes per
+  route density, callback and equipment reserves, admin cost. In this mode `priceLawnCare` takes tuning
+  numbers ONLY from the basis. The caller options `targetLawnGrossMargin`, `lawnMaterialCostPerK`,
+  `lawnLaborMinutesBase`, `lawnLaborMinutesPerK`, `routeDriveMinutes`, `adminAnnual` and
+  `annualMaterialBudget` are IGNORED, whoever sends them (an earlier "explicit caller override still wins"
+  rule is withdrawn). Property facts stay live: lawn size, complexity minutes, maintenance and pest-pressure
+  callback adders, property route density. Off mode keeps its overrides bit for bit.
+- Bounds (one table, one validator for the pricer, the replay snapshot and the admin save): `listMargin`
+  0.05 to 0.75; `minimumPerVisit` 0 to 500, 2 decimals; `spotMinutesPerVisit` 0 to 120; material above 0
+  to 500 per 1,000 sq ft a year, 2 decimals; loaded labor rate above 0 to 500; minutes 0 to 240; reserves
+  and admin 0 to 1,000.
 - Resolution: `services.lawn.costPlusList ?? input.lawnCostPlusList ?? gate` (server-set only), stamped as
-  `pricingMetadata.lawnCostPlusList` plus the knob snapshot. A saved estimate replays as stamped at those
-  knobs; a priced lawn with no stamp means OFF; no priced lawn pins nothing. Posted values are stripped.
+  `pricingMetadata.lawnCostPlusList` plus the full basis (`lawnCostPlusListBasis`). A saved estimate replays as
+  stamped on that basis; an ON stamp with no basis uses the live one; a priced lawn with no stamp means OFF;
+  no priced lawn pins nothing. Posted values are stripped.
   The one-time lawn anchor stays on the market table; commercial lawn is untouched.
-- Invalid `costPlusList` knobs fail the calculation closed (400 `LAWN_COST_PLUS_LIST_KNOBS_INVALID`).
+- An invalid basis or `costPlusList` fails the calculation closed (400 `LAWN_COST_PLUS_LIST_KNOBS_INVALID`).
 
 ---
 

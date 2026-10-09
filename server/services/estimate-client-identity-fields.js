@@ -32,7 +32,7 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   // engine's pricingMetadata stamp and injected by the saved-estimate replay.
   // A posted copy (here or as services.lawn.costPlusList) must never beat the gate.
   'lawnCostPlusList',
-  'lawnCostPlusListKnobs',
+  'lawnCostPlusListBasis',
 ]);
 
 // Deletes every server-owned field from `obj` IN PLACE (plain objects only;
