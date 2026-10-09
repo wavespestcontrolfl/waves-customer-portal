@@ -452,6 +452,14 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
     expect(evidence).toMatch(/scheduling\.callback_window_start \/ _end when set/);
   });
 
+  test('the end description lets a deadline stand alone, as the prompt rule asks (codex #6215 r5 P1)', () => {
+    for (const file of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
+      const description = field(file, 'callback_window_end').description;
+      expect(description).toMatch(/A deadline with no start is set here alone/);
+      expect(description).not.toMatch(/Null when the caller gave one time or none/);
+    }
+  });
+
   test('null stays valid in both schemas', () => {
     expect(formErrors(validateModelOutput(withWindow(null)))).toEqual([]);
     expect(formErrors(validatePersisted(withWindow(null)))).toEqual([]);

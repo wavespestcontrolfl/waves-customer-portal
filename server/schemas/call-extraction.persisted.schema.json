@@ -1407,7 +1407,7 @@
             "null"
           ],
           "pattern": "^(\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d(:[0-5]\\d(\\.\\d+)?)?(-0[45]:00)?|([01]\\d|2[0-3]):[0-5]\\d(:([0-5]\\d|60)(\\.\\d+)?)?([zZ]|[+-]\\d{2}(:?\\d{2})?)?)$",
-          "description": "The latest time of the callback window the caller gave, in the same form as callback_window_start (\"before four\" -> \"16:00\"). Null when the caller gave one time or none. Rows written before schema 1.27.0 may hold a time with seconds and an offset (\"14:00:00-04:00\")."
+          "description": "The latest time of the callback window the caller gave, in the same form as callback_window_start A deadline with no start is set here alone (\"before four\" -> end \"16:00\", start null). Null only when no latest time was stated: one exact time (\"at two\") goes in callback_window_start. Rows written before schema 1.27.0 may hold a time with seconds and an offset (\"14:00:00-04:00\")."
         },
         "follow_up_mentioned": {
           "type": [

@@ -387,7 +387,11 @@ function callbackDueAt(value, callStartedAt) {
     const dated = DATED_WALL_RE.exec(text);
     if (!dated || !realWallDate(text)) return null;
     const due = isoOrNull(`${dated[1]}${dated[3] || ''}`);
-    return due && oneETWallClock(due, dated[2]) ? due : null;
+    if (!due) return null;
+    // A written Eastern offset already says WHICH 1:30 on the fall-back night:
+    // the instant stands (isoOrNull keeps a valid offset as written). Only an
+    // offset-free clock can be missing or repeated (codex #6215 r5 P2).
+    return dated[3] || oneETWallClock(due, dated[2]) ? due : null;
   }
   const start = callStartedAt ? new Date(callStartedAt) : null;
   if (!start || Number.isNaN(start.getTime())) return null;
