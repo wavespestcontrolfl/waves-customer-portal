@@ -579,37 +579,75 @@ describe('generate and read', () => {
   });
 });
 
-// "Swept eaves and webs" (owner 2026-10-05, "sweep on fast form"): the full
-// form's one protocol action, so the report's spider section can read it.
+// "Swept eaves and webs" (owner 2026-10-08): the short sheet has no box for it.
+// The note carries it: the voice read says whether the tech swept webs today,
+// and a sweep heard sends the full form's one protocol action, so the report's
+// spider section can read it. This replaces the 10-05 box.
 const SWEEP_LABEL = 'Swept eaves, window frames, door frames, and lanai';
 const sweepBox = () => screen.queryByRole('checkbox', { name: 'Swept eaves and webs' });
+const SWEPT_FACTS = { ...FACTS, sweptEaves: true };
 
-describe('the swept eaves and webs box', () => {
-  test('shows once, unchecked, on a regular pest visit', async () => {
+// Owner 2026-10-08: the note fills the sweep and one chip corrects it.
+const sweepOn = () => screen.queryByRole('button', { name: 'Swept eaves and webs ✕' });
+const sweepOff = () => screen.queryByRole('button', { name: '+ Swept eaves' });
+describe('the swept eaves and webs, read from the note', () => {
+  test('the short sheet shows no box or section for it, only a chip beside the report once it is written', async () => {
     await openSheet(makeRequest());
-    expect(screen.getAllByRole('checkbox', { name: 'Swept eaves and webs' })).toHaveLength(1);
-    expect(sweepBox().checked).toBe(false);
-  });
-
-  test('an initial cleanout gets no box, as on the full form (not a regular pest visit)', async () => {
-    const request = makeRequest({ service: { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' } });
-    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
-    await screen.findByRole('button', { name: 'Generate AI report' });
     expect(sweepBox()).toBeNull();
+    expect(screen.queryByText('Swept eaves and webs')).toBeNull();
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(sweepOn()).toBeNull();
+    expect(sweepOff()).toBeNull();
+    await generate();
+    expect(sweepOff()).toBeTruthy();
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });
 
-  test('shows on a pest re-service too, as it does on the full form', async () => {
-    await openSheet(makeRequest({ service: RESERVICE }), { ...SERVICE, serviceType: 'Pest Control Re-Service' });
-    expect(sweepBox().checked).toBe(false);
+  test('a sweep the read heard wrongly comes off with one tap: the report is written again without it and none is sent', async () => {
+    const request = makeRequest({ facts: SWEPT_FACTS });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(sweepOn());
+    expect(sweepOff()).toBeTruthy();
+    // The report was written with the sweep: it must be written again.
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
+    expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([]);
+    // The writer is told so in so many words, over whatever the note says.
+    expect(request.bodies('/generate-report')[1].sweepNotDone).toBe(true);
+    expect(request.bodies('/generate-report')[0]).not.toHaveProperty('sweepNotDone');
+    // The read still says swept; the tech's word stands.
+    expect(sweepOff()).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body).not.toHaveProperty('protocolActionsCompleted');
+    expect(body).not.toHaveProperty('protocolActionScopesCompleted');
   });
 
-  test('checked: the writer and the completion carry the label with its exterior, no-treatment scope', async () => {
+  test('a sweep the read missed goes on with one tap: the report is written again with it and it is sent', async () => {
     const request = makeRequest();
     await openSheet(request);
-    fireEvent.click(sweepBox());
-    expect(sweepBox().checked).toBe(true);
+    await generate();
+    fireEvent.click(sweepOff());
+    expect(sweepOn()).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
+    expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([SWEEP_LABEL]);
+    expect(request.bodies('/generate-report')[1]).not.toHaveProperty('sweepNotDone');
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body.protocolActionsCompleted).toEqual([SWEEP_LABEL]);
+    expect(body.protocolActionScopesCompleted).toEqual([{ label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false }]);
+  });
+
+  test('a sweep heard: the writer and the completion carry the label with its exterior, no-treatment scope, and the chip shows it', async () => {
+    const request = makeRequest({ facts: SWEPT_FACTS });
+    await openSheet(request);
     await generate();
     expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([SWEEP_LABEL]);
+    expect(sweepOn().getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');
@@ -617,29 +655,45 @@ describe('the swept eaves and webs box', () => {
     expect(body.protocolActionScopesCompleted).toEqual([{ label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false }]);
   });
 
-  test('unchecked: no protocol action goes to the writer or the completion', async () => {
-    const request = makeRequest();
-    await openSheet(request);
-    await generate();
-    // The full form's shape: an empty list, which the writer reads as none.
-    expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
-    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
-    await screen.findByTestId('fast-complete-sent');
-    const [body] = request.bodies('/complete');
-    expect(body).not.toHaveProperty('protocolActionsCompleted');
-    expect(body).not.toHaveProperty('protocolActionScopesCompleted');
+  test('no sweep heard (or an older server that sends no field): no protocol action goes to the writer or the completion', async () => {
+    for (const facts of [FACTS, { ...FACTS, sweptEaves: false }]) {
+      const request = makeRequest({ facts });
+      await openSheet(request);
+      await generate();
+      // The full form's shape: an empty list, which the writer reads as none.
+      expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
+      expect(sweepOff().getAttribute('aria-pressed')).toBe('false');
+      fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+      await screen.findByTestId('fast-complete-sent');
+      const [body] = request.bodies('/complete');
+      expect(body).not.toHaveProperty('protocolActionsCompleted');
+      expect(body).not.toHaveProperty('protocolActionScopesCompleted');
+      cleanup();
+    }
   });
 
-  test('ticking it after the report was written makes the report stale until it is written again with the action', async () => {
-    const request = makeRequest();
+  test('a read that failed sends no sweep', async () => {
+    const request = makeRequest({ facts: { available: true, status: 'failed', sweptEaves: true } });
     await openSheet(request);
     await generate();
-    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
-    fireEvent.click(sweepBox());
-    expect(screen.queryByRole('button', { name: 'Back to the report' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
-    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
-    expect(request.bodies('/generate-report')[1]).toMatchObject({ actionsCompleted: [SWEEP_LABEL], fresh: true });
+    expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
+  });
+
+  test('a sweep heard on an initial cleanout is not recorded or shown, as the full form has no box there', async () => {
+    const products = [...CATALOG, { id: 'tritek', name: 'TriTek', category: 'Insecticide', application_method: 'foliar_spray' }];
+    const cleanout = { ...REGULAR, serviceType: 'Pest Initial Cleanout', serviceKey: 'pest_initial_cleanout' };
+    const request = makeRequest({ service: cleanout, products, facts: SWEPT_FACTS });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Pest Initial Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /^TriTek\b/ }));
+    fireEvent.change(within(screen.getByRole('group', { name: 'TriTek' })).getByLabelText('How much?'), { target: { value: '1' } });
+    expect(sweepBox()).toBeNull();
+    await generate();
+    expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
+    // No chip either: an initial cleanout records no sweep.
+    expect(sweepOn()).toBeNull();
+    expect(sweepOff()).toBeNull();
   });
 });
 

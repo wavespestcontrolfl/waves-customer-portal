@@ -56,7 +56,14 @@ function redactCli(value) {
     // the daily cron uses — a manual --live run must not overlap the 9am batch
     // and race the per-day/week caps. Dry runs never publish, so they skip the lock.
     const runOnce = () => runner.runNext({ dryRun: !LIVE, minScore: MIN_SCORE });
-    const result = LIVE ? await runner._withEngineLock('manual-runNext', runOnce) : await runOnce();
+    // The live path ends with the terminal writer's after-run step, as the
+    // daily batch does (clean up a draft this run took, update the item).
+    const runLive = async () => {
+      const run = await runOnce();
+      await runner.settleTerminalWork([run]);
+      return run;
+    };
+    const result = LIVE ? await runner._withEngineLock('manual-runNext', runLive) : await runOnce();
 
     console.log(`Outcome:           ${result.outcome}`);
     if (result.skip_reason) console.log(`Skip reason:       ${redactCli(result.skip_reason)}`);

@@ -22,6 +22,7 @@
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
+ *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
  *   GATE_MULTI_TECH_TEXT_TIMES=true (the lead reply agent's next-available check, the text drafter's open-times fallback and the estimate converter's first service day read the website booking engine (per technician, route-aware) instead of the old by-city engine; a lead with only a city is placed at that city's centre; read at call time via multiTechTextTimesLive(), dark by default; customer-facing; off = the old by-city engine, byte-identical)
  *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
@@ -3454,6 +3455,17 @@ const gates = {
   // Kill switch: unset.
   callBookingRainFlag: gateEnvValue('GATE_CALL_BOOKING_RAIN_FLAG'),
 
+  // Auto-dispatch rain pass (owner 2026-10-08): the 04:10 run never moves a
+  // visit inside 72 hours and the hourly rain forecast is good for 3 dates,
+  // so the run cannot see rain. This pass reads the booked visits on those 3
+  // dates every hour of the working day; an outdoor visit whose hourly chance reaches 70% from
+  // its start through 2 h after its end gets one admin notification on the
+  // 'schedule' channel, naming a dry open hour on the same date when there
+  // is one. Nothing is moved and no customer is texted. OFF in every
+  // environment; auto-dispatch/rain-pass.js reads it through gateEnvValue()
+  // at call time. Kill switch: unset.
+  autoDispatchRainPass: gateEnvValue('GATE_AUTO_DISPATCH_RAIN_PASS'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -4428,6 +4440,14 @@ function seriesMoveCarriesVisitLive() {
 // Unset = the text goes out the moment the move commits, byte-identical to
 // before. A held text already waiting when the gate is turned off goes out at
 // the next pass (the 15-minute reconciler).
+// GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND read at CALL time — strict `=== 'true'`
+// (server/services/estimate-draft-retire.js via the scheduler). Owner
+// 2026-10-06: once a customer's estimate is sent, older untouched drafts for
+// that customer are archived. Unset = kill, no redeploy.
+function estimateDraftRetireOnSendLive() {
+  return process.env.GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND === 'true';
+}
+
 function seriesMoveTextCoalesceLive() {
   return process.env.GATE_SERIES_MOVE_TEXT_COALESCE === 'true';
 }
@@ -6059,6 +6079,8 @@ module.exports.fastCompleteReportLive = fastCompleteReportLive;
 module.exports.kbCustomerAudienceLive = kbCustomerAudienceLive;
 // GATE_SERIES_MOVE_TEXT_COALESCE reader, on its own line.
 module.exports.seriesMoveTextCoalesceLive = seriesMoveTextCoalesceLive;
+// GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND reader. Kept here, away from the end of the file, so gate PRs appending there never conflict with it.
+module.exports.estimateDraftRetireOnSendLive = estimateDraftRetireOnSendLive;
 // GATE_SMS_UNANSWERED_REPLY reader, on its own line.
 module.exports.smsUnansweredReplyLive = smsUnansweredReplyLive;
 // GATE_NEIGHBORHOOD_ACCESS reader, on its own line.

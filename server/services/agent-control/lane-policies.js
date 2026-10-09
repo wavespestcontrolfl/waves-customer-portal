@@ -154,7 +154,8 @@ const LANE_RUNTIME = {
   // offline: streams from Anthropic only with a canned spoken error — no second provider (Codex r12).
   // direct_sdk: both relay implementations stream through the Anthropic SDK, not llm/call.js (Codex r14).
   // M3 (Codex r19): replies go straight to the caller mid-call; the ordered transcript is written back to call_log on close.
-  voice_relay: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
+  // ledger 'call': relay-conversation.js records each finished model round through recordStreamedMessage (the stream itself stays outside ledgerCall).
+  voice_relay: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
   // Same runtime shape as voice_relay (same offline direct-SDK stream, same
   // customer-visible risk, same M3 maturity) — collections-conversation.js
   // is the other relay implementation the comment above already covers.

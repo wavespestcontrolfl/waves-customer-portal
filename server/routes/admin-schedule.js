@@ -25620,6 +25620,36 @@ function buildTypedFindingsPromptBlock({
 }
 
 // POST /api/admin/schedule/generate-report — AI customer-facing service report copy
+// The sweep chip's correction for the report writer (owner 2026-10-08): the
+// technician's tap stands over the note, so a note that says "swept the eaves"
+// is not completed-work evidence for the sweep. Added only when the sheet says
+// so; every other request's prompt is as it was.
+const SWEEP_NOT_DONE_LINE = 'Technician correction: the eaves and webs were NOT swept on this visit. Do not say that eaves, webs or cobwebs were swept, brushed, knocked down or removed, whatever the note says.';
+// A draft that still claims the sweep after that correction is refused like any
+// other wording the report may not carry (Codex P2 on #6147), judged one
+// sentence at a time (linear).
+// A web takes any removal word, the particle next to its verb or after the
+// web ("knocked the cobwebs down"). An eave alone is a claim only with a
+// sweeping word and no nest or wasp in the sentence: other work at the eaves
+// ("removed a wasp nest from the eaves") stays on the report.
+const SWEEP_CLAIM_BRUSH = String.raw`swe(?:ep|pt|eping)|brush(?:ed|ing)?|knock(?:ed|ing)?\s+(?:\S+\s+){0,4}?(?:down|off|out)|de-?webb?(?:ed|ing)?`;
+const SWEEP_CLAIM_BRUSH_RE = new RegExp(String.raw`\b(?:${SWEEP_CLAIM_BRUSH})\b`, 'i');
+const SWEEP_CLAIM_REMOVAL_RE = new RegExp(String.raw`\b(?:${SWEEP_CLAIM_BRUSH}|remov(?:ed|ing|al)|clear(?:ed|ing)|clean(?:ed|ing)|wip(?:ed|ing)|took\s+(?:\S+\s+){0,4}?down)\b`, 'i');
+const SWEEP_CLAIM_WEB_RE = /\b(?:spider\s?webs?|cobwebs?|webs?|webbing)\b/i;
+const SWEEP_CLAIM_EAVE_RE = /\b(?:eaves?|soffits?)\b/i;
+const SWEEP_CLAIM_NEST_RE = /\b(?:nests?|hives?|wasps?|hornets?|bees?|daubers?)\b/i;
+function sentenceClaimsSweep(sentence) {
+  if (SWEEP_CLAIM_WEB_RE.test(sentence)) return SWEEP_CLAIM_REMOVAL_RE.test(sentence) || /\bde-?webb?(?:ed|ing)?\b/i.test(sentence);
+  if (/\bde-?webb?(?:ed|ing)?\b/i.test(sentence)) return true;
+  // The nest exception is each action's own: "removed a wasp nest and swept
+  // the eaves" still claims the sweep (Codex round 8 on #6147).
+  return sentence.split(/[,;]|\b(?:and|then|but)\b/i)
+    .some((part) => SWEEP_CLAIM_EAVE_RE.test(part) && SWEEP_CLAIM_BRUSH_RE.test(part) && !SWEEP_CLAIM_NEST_RE.test(part));
+}
+function reportClaimsSweep(text) {
+  return String(text || '').split(/[.!?\n]+/).some(sentenceClaimsSweep);
+}
+
 router.post('/generate-report', async (req, res) => {
   try {
     const crypto = require('crypto');
@@ -25638,6 +25668,9 @@ router.post('/generate-report', async (req, res) => {
       // "Write again" (Fast Complete): a fresh draft for the same inputs, so
       // the cached one is not read back. The new draft still replaces it.
       fresh,
+      // The Fast Complete sweep chip (owner 2026-10-08): an exact true means
+      // the technician tapped the sweep OFF, over whatever the note says.
+      sweepNotDone,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -26575,7 +26608,7 @@ Arrival Time: ${arrivalTime || 'Not specified'}
 ${writerRulesOn
     ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
 ${writerRulesOn
     ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)
@@ -26737,7 +26770,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // A cached draft is served only if it still passes both screens as they
     // read now: a product, alias or active ingredient added since it was
     // cached must not ride out on the cache.
-    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached)) {
+    // The chip tapped off: a draft that still claims the sweep is never served.
+    const sweepClaimRefused = (text) => sweepNotDone === true && reportClaimsSweep(text);
+    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached) && !sweepClaimRefused(cached)) {
       return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
     }
     // The same wall-clock ceiling the provider chain keeps: the last-resort
@@ -26750,7 +26785,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // 2026-10-03): the pattern screen exempts watering / mowing clauses, so
       // a result promise phrased around watering needs a reader. Fails open.
       extraRejection: async (text, { remainingMs } = {}) => {
-        const cheap = (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text);
+        const cheap = (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text)
+          || (sweepClaimRefused(text) ? 'sweep_not_done' : null);
         if (cheap || !lawnTimingCheckOn) return cheap;
         // The flag describes the draft this call judges: the accepted draft
         // is always the last one checked.
@@ -26814,7 +26850,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       const fallbackTiming = report && !fallbackScreened && lawnTimingCheckOn
         ? await lawnDraftTimingRejection(report, { remainingMs: reportChainDeadline - Date.now() })
         : null;
-      const fallbackReport = report && (fallbackScreened || fallbackTiming) ? null : report;
+      // The sweep chip's correction screens the last-resort copy too (its own
+      // term: the line above is read as written by lawn-draft-timing-check.test.js).
+      const fallbackReport = report && (fallbackScreened || fallbackTiming || sweepClaimRefused(report)) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,

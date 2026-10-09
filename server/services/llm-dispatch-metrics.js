@@ -428,6 +428,53 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
   }
 }
 
+/**
+ * Record one finished round of a STREAMED call whose Message has the
+ * Anthropic usage shape. ledgerCall wraps a call that resolves once; a live
+ * voice turn streams, is aborted by barge-in as a matter of course, and must
+ * not wait on the ledger, so the voice relay records each round it finished
+ * here instead. Fire-and-forget like recordCall: never throws, never awaited.
+ * With `errorCode` the round is recorded as a failed call: with its usage
+ * when the provider finished and billed a response the caller could not use,
+ * with none (`message` null) when the request itself failed.
+ *
+ * `provider` is the provider that served the round. The OpenAI relay client
+ * maps its usage to the Anthropic shape (input_tokens excludes cached reads);
+ * the ledger stores OpenAI rows with cached reads INSIDE input_tokens
+ * (extractUsage, and llm-cost's pricing), so that is restored here.
+ */
+function recordStreamedMessage({ provider, requestedModel, message, latencyMs = null, laneId, errorCode = null }) {
+  try {
+    // A round that resolved can still be a failed one, exactly as ledgerCall
+    // files it: the model declined, the answer was cut off, or it said nothing.
+    const code = errorCode
+      || (message?.stop_reason === 'refusal' ? `${provider}_refusal` : null)
+      || (message?.stop_reason === 'max_tokens' ? `${provider}_incomplete` : null)
+      || (endedWithoutText(message) ? 'empty_text' : null);
+    const usage = extractUsage('anthropic', message);
+    if (provider === 'openai') {
+      if (usage.input_tokens != null) usage.input_tokens += usage.cached_input_tokens || 0;
+      usage.cache_write_tokens = null;
+      // the relay client carries OpenAI's reasoning count beside the mapped fields
+      usage.reasoning_tokens = toCount(message?.usage?.reasoning_tokens);
+    }
+    void recordCall({
+      provider,
+      requestedModel,
+      servedModel: message?.model,
+      ok: !code,
+      errorCode: code,
+      usage,
+      latencyMs,
+      providerRef: message?.id,
+      laneId,
+      policyLabel: applyReplayLane(laneId),
+    });
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] recordStreamedMessage skipped: ${err.message}`);
+  }
+}
+
 // ledgerCall's recorded row per returned object, so a direct SDK caller whose
 // own parse or schema check rejects the answer can flip that row — the
 // adapter's rejectLedgerCall, for sites outside llm/call.js (Codex on #4884).
@@ -1171,6 +1218,7 @@ module.exports = {
   recordCall,
   failCall,
   ledgerCall,
+  recordStreamedMessage,
   ledgerCallRejected,
   recordSessionUsage,
   recordTrace,

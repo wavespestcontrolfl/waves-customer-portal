@@ -136,7 +136,8 @@ const pick = (field, option, card = recordCard()) => {
 };
 const sendButton = () => screen.getByRole('button', { name: 'Complete & send' });
 
-// Owner 2026-10-05: the "Swept eaves and webs" box is a plain pest visit's.
+// Owner 2026-10-08: no short sheet has a "Swept eaves and webs" box; a plain pest
+// visit's sweep is read from its note, and a typed visit records none.
 describe('the swept eaves and webs box on a typed visit', () => {
   test('is not on the visit step', async () => {
     const request = makeRequest();
