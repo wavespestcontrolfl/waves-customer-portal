@@ -192,7 +192,12 @@ const NEW_NOTICES_PER_RUN = 10;
 // itself is not reduced: its pages (unpriced series, prepay cover) outrank a
 // pin notice, and its counter lives in one run of another process.
 const WATCHDOG_BELL_KEYS = ['unpriced-series:', 'lawn-email-gap:', 'prepay-coverage:', 'accepted-schedule:', 'churned-live-work:', 'combined-booking-check:'];
-const BUDGET_LANE_KEYS = ['auto-dispatch-missing-geo:', 'recurring-no-window:', 'auto-dispatch-reminder-sync:', ...WATCHDOG_BELL_KEYS];
+// The due-date notice ('recurring-dispatch:', flagUnplacedVisits' first loop)
+// is counted and NOT capped: it is for a visit within three days of its due
+// date with no time, the time-critical field work the budget rule exempts
+// (docs/admin-notifications.md). The lanes below run after it and see its rings.
+const DUE_DATE_KEY = 'recurring-dispatch:';
+const BUDGET_LANE_KEYS = ['auto-dispatch-missing-geo:', 'recurring-no-window:', 'auto-dispatch-reminder-sync:', DUE_DATE_KEY, ...WATCHDOG_BELL_KEYS];
 // Titles a retired notice is rewritten to; the budget read must skip them.
 const NO_WINDOW_RESOLVED_TITLE = 'Recurring visit time alert resolved';
 const MISSING_GEO_RESOLVED_TITLE = 'Address pin alert resolved';
@@ -362,6 +367,9 @@ async function flagNoWindowVisits(candidates, today, to) {
         .forNoKeyUpdate('s')
         .first('s.id');
       if (!current) return null;
+      // The plan may have lapsed since actionableNoWindowRows read it; the
+      // visit's row lock does not hold recurring_plan_alerts (Codex #6208 r9 P2).
+      if (!(await require('./eligibility').isRecurringPlanActive(row, trx)).active) return null;
       const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
         area: 'Schedule',
         action: 'set an arrival time for a recurring visit',

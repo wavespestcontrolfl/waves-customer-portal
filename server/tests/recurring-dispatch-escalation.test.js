@@ -221,6 +221,15 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['recurring-no-window:two:2026-08-21']);
   });
 
+  // The plan lapsed after the candidate read and before the locked recheck:
+  // no notice (Codex #6208 r9 P2).
+  test('a plan that lapses before the locked recheck raises nothing', async () => {
+    query.select = jest.fn().mockResolvedValueOnce([{ id: 'n1', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20' }]).mockResolvedValue([]);
+    eligibility.isRecurringPlanActive.mockResolvedValueOnce({ active: true }).mockResolvedValueOnce({ active: false });
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'))).toBe(0);
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('rings at most 10 new notices a run, soonest date first; the rest wait for the next run', async () => {
     const rows = Array.from({ length: 11 }, (_, i) => ({
       id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(30 - i).padStart(2, '0')}`,
@@ -264,7 +273,7 @@ describe('recurring visit with no arrival time and no due date', () => {
     // (metadata.rungAt), with created_at as the fallback.
     // No category filter: the watchdog rings under 'alert' (r8 P1).
     expect(budgetWhere).toEqual([{ recipient_type: 'admin' }]);
-    expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'combined-booking-check:%']));
+    expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'combined-booking-check:%', 'recurring-dispatch:%']));
     expect(budgetSql.join(' ')).toContain("COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours'");
   });
 

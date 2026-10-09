@@ -249,6 +249,19 @@ describe('missing-geo notice budget (Codex #6208 r3)', () => {
     expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g10:2026-08-20');
   });
 
+  // The recheck runs BEFORE the budget picks: the soonest visit's pin was
+  // fixed since pass 1, so the eleventh visit takes its slot (Codex #6208 r9 P2).
+  test('a visit fixed since pass 1 frees its slot for a later visit', async () => {
+    visitsWithoutPin(11);
+    let reads = 0;
+    const fixedFirst = () => servicesResult.map((r, i) => (i === 0 ? { ...r, lat: 27.4, lng: -82.5 } : r));
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? servicesResult : fixedFirst())));
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(keysRung()).toHaveLength(10);
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g0:2026-08-10');
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+  });
+
   test('a visit with a standing notice is refreshed and spends no budget', async () => {
     visitsWithoutPin(12);
     audit.standingMissingGeoKeys.mockResolvedValue(new Set(['auto-dispatch-missing-geo:g11:2026-08-21']));
