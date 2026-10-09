@@ -201,7 +201,11 @@ function placePart(part, plan, name, toAssessment) {
   } else if (part.kind === 'other') {
     name(part.name);
   } else if (part.kind === 'catalog') {
-    if (plan.assessmentBooked && part.topic && !part.topic.fixed) toAssessment(part.topic.short);
+    // Beside a booked assessment only the recurring work it will look at
+    // (or a termite inspection, which is the visit) joins the brackets; a
+    // one-job catalog pick such as Rodent Trapping Service keeps its name.
+    const assessed = part.topic && (part.frequency === 'recurring' || part.topic.key === 'termite_inspection');
+    if (plan.assessmentBooked && assessed) toAssessment(part.topic.short);
     // Recurring wins for the whole lead: a one-time catalog row beside a
     // recurring request reads as that topic's recurring service.
     else if (plan.recurring && part.frequency === 'one_time' && part.topic?.recurring) name(part.topic.recurring);

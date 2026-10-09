@@ -88,6 +88,8 @@ describe('leadServiceDisplay', () => {
     ['Termite inspection for a closing', 'Waves Assessment (Termite)'],
     ['Quarterly Pest Control Service + Bee / Wasp Nest Removal Service', 'Quarterly Pest Control Service + Bee / Wasp Nest Removal Service'],
     ['Waves Assessment + WDO Inspection Service', 'Waves Assessment + WDO Inspection Service'],
+    ['Waves Assessment + Rodent Trapping Service', 'Waves Assessment + Rodent Trapping Service'],
+    ['Waves Assessment + Cockroach Treatment Service', 'Waves Assessment + Cockroach Treatment Service'],
     ['Ongoing lawn treatment, including fertilizer, weed, pest, and disease treatments', 'Monthly Lawn Care Service'],
     ['Commercial Service', 'Commercial Service'],
   ])('one-job services and unknown text keep their name: %s → %s', (text, expected) => {
