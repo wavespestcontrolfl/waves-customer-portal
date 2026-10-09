@@ -939,7 +939,12 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await check([entry({ id: String(rec.id).toUpperCase() }), entry({ id: String(fus.id).toUpperCase() })])).toBe(MESSAGE);
       // Not a step visit, no step product, nothing submitted, or the gate off: never refused.
       const plain = await lawn({ date: '2026-06-20' });
-      expect(await check([entry(rec), entry(fus)], plain.visit)).toBeNull();
+      // On a visit that is not a step visit, Recognition is still counted by the caps, so it must be
+      // sizable there too (codex r47 P1); Fusilade II alone there is not judged.
+      expect(await check([entry(rec), entry(fus)], plain.visit)).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'fl_oz' })], plain.visit)).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus)], plain.visit)).toBeNull();
+      expect(await check([entry(fus)], plain.visit)).toBeNull();
       expect(await check([entry(nis)])).toBeNull();
       expect(await check([])).toBeNull();
       setGates({ removal: false });

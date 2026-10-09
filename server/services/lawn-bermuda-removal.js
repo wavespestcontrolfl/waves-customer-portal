@@ -382,16 +382,19 @@ async function bermudaPairViolation(knex, products, { serviceId } = {}) {
 // A recorded step spray needs a sizable amount: its treated area TOGETHER with the amount used, or a
 // stated rate with a valid unit. A spot mix has no catalog-derived amount, so an area alone (or an
 // amount alone) cannot be sized per 1,000 sq ft, and the application history and the label-rate cap
-// would count nothing. Refused on a step visit only, on a fresh attempt only (the caller). Returns
+// would count nothing. Both herbicides on a step visit, Recognition alone on any other visit; on a fresh attempt only (the caller). Returns
 // the message, or null.
 const AREA_REQUIRED_MESSAGE = 'Enter the area treated and the amount used for the bermuda mix.';
 async function bermudaAreaViolation(knex, submittedEntries, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return null;
   const products = canonicalEntries(submittedEntries);
   const { recognition, fusilade } = await submittedStepProducts(knex, products);
-  const stepIds = [recognition, fusilade].filter(Boolean).map((row) => String(row.id).toLowerCase());
+  // On a step visit both herbicides are judged. On any other visit only Recognition is: every
+  // Recognition spray enters the history the caps count (enforceStepLimitsInTransaction), so it
+  // must be sizable wherever it is recorded; Fusilade II alone there is bed or border work.
+  const onStepVisit = !!(recognition || fusilade) && !!(await stepVisitOf(knex, serviceId, { strict: true }));
+  const stepIds = (onStepVisit ? [recognition, fusilade] : [recognition]).filter(Boolean).map((row) => String(row.id).toLowerCase());
   if (!stepIds.length) return null;
-  if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
   const positive = (value) => Number(value) > 0;
   const { isValidRateUnit } = require('./inventory-units');
   const sized = (p) => (positive(p.areaValue) && positive(p.totalAmount)) || (positive(p.rate) && isValidRateUnit(p.rateUnit));
