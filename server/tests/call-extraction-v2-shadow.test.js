@@ -428,10 +428,18 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
       expect(field('call-extraction.model-output.schema.json', name).pattern).toBe(pattern);
       expect(field('call-extraction.persisted.schema.json', name).pattern).toBe(pattern);
     }
-    for (const value of ['14:00:00Z', '14:00:00-04:00', '14:00:00+02:00', '00:00:00.5Z', '23:59:59-05:00']) {
-      expect(oldForm(value)).toBe(true);
-      expect(new RegExp(pattern).test(value)).toBe(true);
+    // Generated over the old format's whole grammar (codex #6215 r4 P1): seconds with or
+    // without a fraction, and every offset spelling (z, Z, +hh, +hhmm, +hh:mm).
+    const values = [];
+    for (const hms of ['00:00:00', '14:00:00', '23:59:59', '09:05:07']) {
+      for (const frac of ['', '.5', '.000']) {
+        for (const zone of ['Z', 'z', '-04:00', '+02:00', '+0200', '-0500', '+02', '-04']) values.push(`${hms}${frac}${zone}`);
+      }
     }
+    values.push('23:59:60Z', '18:59:60-05:00');
+    const accepted = values.filter((value) => oldForm(value));
+    expect(accepted.length).toBeGreaterThan(80);
+    for (const value of accepted) expect([value, new RegExp(pattern).test(value)]).toEqual([value, true]);
   });
 
   test('the callback fields are on the evidence pinning list, with the agent quote (codex #6215 r2 P1)', () => {

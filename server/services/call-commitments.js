@@ -417,8 +417,10 @@ function callbackDeadline(sched = {}, callStartedAt) {
   if (end) {
     const endTime = TIME_ONLY_RE.exec(end);
     const startDate = WALL_DATE_RE.exec(start);
+    // Through callbackDueAt, so the built end gets the same real-date and
+    // one-wall-clock checks as a dated end the model wrote (codex #6215 r4 P2).
     const endDue = endTime && startDate
-      ? realWallDate(start) && isoOrNull(`${startDate[1]}T${endTime[1].padStart(2, '0')}:${endTime[2]}`)
+      ? callbackDueAt(`${startDate[1]}T${endTime[1].padStart(2, '0')}:${endTime[2]}`, callStartedAt)
       : callbackDueAt(end, callStartedAt);
     if (endDue) return { asked: true, dueAt: endDue, basis: endTime && startDate ? 'stated' : basisOf(end), field, words };
   }

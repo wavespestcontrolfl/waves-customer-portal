@@ -257,6 +257,11 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
       expect(cbFor('2026-11-01T09:30', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T09:30:00-05:00').toISOString());
     });
 
+    test('a bare end beside a dated start gets the same DST checks; the start then stands (codex #6215 r4 P2)', () => {
+      expect(cbFor('2026-03-08T01:00', '02:30', '2026-03-06T09:00:00-05:00').due_at).toBe(new Date('2026-03-08T01:00:00-05:00').toISOString());
+      expect(cbFor('2026-11-01T00:30', '01:30', '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T00:30:00-04:00').toISOString());
+    });
+
     test('an unreadable end falls back to the start', () => {
       expect(cbFor('09:00', '11:00:00Z')).toMatchObject({ due_at: et('2026-09-02T09:00:00'), due_basis: 'suggested' });
     });
