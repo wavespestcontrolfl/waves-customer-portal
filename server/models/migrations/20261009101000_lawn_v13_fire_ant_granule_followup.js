@@ -24,17 +24,15 @@
  * Idempotent: a second run changes nothing. One 'v13_fire_ant_granule_followup' audit row records the limit written (for a
  * tightened row, every field before) and, for each protocol row, its gates before and after.
  *
- * down(), exact-equality guarded. It runs BEFORE the frozen down of 20261009100000, so the two must agree on what a
- * rollback keeps. In order:
- *   a. each ownPass row goes back to its gates before, only while its gates still equal exactly what this wrote, and only on
- *      a protocol no visit or completion references; a row staff edited since, or on a referenced protocol, is left as it is
- *      (a row already back at its gates before needs nothing);
- *   b. 20261009100000 leaves a protocol (and so the catalog changes, among them the annual_max_apps limit) when a visit or
- *      completion references it or when staff edited its inserted Topchoice row or its retired Advion row. After step a the
- *      rows this wrote are back at that migration's snapshot, so this asks the same questions of the same audit rows
- *      (mirrored below, the frozen file exports none of them). When it will keep anything, or step a left a row, the limit and
- *      this audit row stay beside the count limit that stays. Otherwise the limit this inserted is deleted only while every field
- *      still reads as written, and a tightened row goes back only while it holds the written values.
+ * down(), exact-equality guarded. It runs BEFORE the frozen down of 20261009100000, so it decides first and acts second:
+ *   1. it reads its audit rows and decides, per protocol, whether the frozen down will leave that protocol (a visit or completion
+ *      references it, a completion actual points at a Topchoice row, staff edited an inserted Topchoice row or a retired Advion
+ *      row), judging each ownPass row that still holds exactly what this wrote at its gates before; nothing is written yet;
+ *   2. it takes ownPass off the rows of the protocols the frozen down will fully restore (each only while its gates still equal
+ *      exactly what this wrote), so the frozen down finds them at its snapshot;
+ *   3. when the frozen down will leave any protocol, it stops: the ownPass note stays on every protocol that stays, and so do the
+ *      365-day interval and this audit row, beside the count limit that stays; otherwise the interval this inserted is deleted
+ *      only while every field still reads as written (a tightened row goes back only while it holds the written values).
  * In order (this, then 20261009100000) every row, limit and audit row is restored. The frozen down alone, with this applied,
  * finds ownPass in the gates of every Topchoice row, sees a row that no longer matches its snapshot and keeps the protocol whole.
  * Knex rolls back newest first, so that order does not occur through a rollback.
@@ -188,14 +186,16 @@ async function protocolReferenced(knex, protocol) {
   return Boolean(completion);
 }
 
-// Mirror of 20261009100000's planRollback: whether one protocol's audit record would be left by its down.
-async function recordBlocked(knex, record) {
+// Mirror of 20261009100000's planRollback: whether one protocol's audit record would be left by its down. `gatesOf(rowId, gates)`
+// maps a row's gates to what that down will compare once this migration's own rollback is done: the gates before for a row
+// that still holds exactly what this wrote (ownPass normalized out), the gates as they are for anything else.
+async function recordBlocked(knex, record, gatesOf) {
   const hasActuals = await knex.schema.hasTable('lawn_protocol_product_actuals');
   for (const made of record.inserted || []) {
     const row = await knex('lawn_protocol_products').where({ id: made.id }).first(OWNED_COLUMNS);
     if (!row) continue;
     if (hasActuals && await knex('lawn_protocol_product_actuals').where({ protocol_product_id: made.id }).first('id')) return true;
-    if (!made.owned || !OWNED_COLUMNS.every((column) => same(row[column], made.owned[column]))) return true;
+    if (!made.owned || !OWNED_COLUMNS.every((column) => same(column === 'gates' ? gatesOf(made.id, row.gates) : row[column], made.owned[column]))) return true;
   }
   for (const entry of record.retired || []) {
     const row = await knex('lawn_protocol_products').where({ id: entry.rowId }).first('id', 'product_name', 'gates');
@@ -205,15 +205,23 @@ async function recordBlocked(knex, record) {
   return false;
 }
 
-// True when the frozen down of 20261009100000 will leave a protocol (and so the catalog changes, the count limit included).
-async function frozenDownKeepsSomething(knex) {
+// DECIDE FIRST: the protocols the frozen down of 20261009100000 will leave, judged as if this migration's ownPass were already
+// gone (each row this wrote that still holds exactly what it wrote counts at its gates before). A protocol is left when a visit
+// or completion references it, a completion actual points at a Topchoice row, or staff edited an inserted Topchoice row or a
+// retired Advion row. Returns a Set of protocol ids (as strings). Nothing is written here.
+async function protocolsFrozenDownLeaves(knex, ownPassRows) {
+  const byRow = new Map(ownPassRows.map((entry) => [String(entry.rowId), entry]));
+  const gatesOf = (rowId, gates) => {
+    const entry = byRow.get(String(rowId));
+    return entry && same(gates, entry.gatesAfter) ? entry.gatesBefore : gates;
+  };
+  const left = new Set();
   const logs = await knex('lawn_protocol_audit_log').where({ action: first.ACTION }).select('lawn_protocol_id', 'after_snapshot');
   for (const log of logs) {
     const protocol = log.lawn_protocol_id ? await knex('lawn_protocols').where({ id: log.lawn_protocol_id }).first('id', 'protocol_key') : null;
-    if (protocol && await protocolReferenced(knex, protocol)) return true;
-    if (await recordBlocked(knex, asObject(log.after_snapshot))) return true;
+    if ((protocol && await protocolReferenced(knex, protocol)) || await recordBlocked(knex, asObject(log.after_snapshot), gatesOf)) left.add(String(log.lawn_protocol_id));
   }
-  return false;
+  return left;
 }
 
 async function revertLimits(knex, limits) {
@@ -229,30 +237,30 @@ async function revertLimits(knex, limits) {
   }
 }
 
-// Step a: each ownPass row back to its gates before, only on an unreferenced protocol and only while the gates still equal
-// what this wrote. Returns true when a row was left.
-async function revertOwnPass(knex, rows) {
-  let left = false;
-  for (const entry of rows) {
-    const protocol = entry.protocolId ? await knex('lawn_protocols').where({ id: entry.protocolId }).first('id', 'protocol_key') : null;
-    if (protocol && await protocolReferenced(knex, protocol)) { left = true; continue; }
-    const row = await knex('lawn_protocol_products').where({ id: entry.rowId }).first('id', 'gates');
-    if (!row) continue;
-    if (same(row.gates, entry.gatesBefore)) continue;
-    if (!same(row.gates, entry.gatesAfter)) { left = true; continue; }
-    await knex('lawn_protocol_products').where({ id: row.id }).update({ gates: JSON.stringify(entry.gatesBefore), updated_at: knex.fn.now() });
-  }
-  return left;
+// ACT: one ownPass row back to its gates before, only while its gates still equal what this wrote (a row already back at its
+// gates before needs nothing; anything else is staff's and stays).
+async function revertOwnPassRow(knex, entry) {
+  const row = await knex('lawn_protocol_products').where({ id: entry.rowId }).first('id', 'gates');
+  if (!row || same(row.gates, entry.gatesBefore) || !same(row.gates, entry.gatesAfter)) return;
+  await knex('lawn_protocol_products').where({ id: row.id }).update({ gates: JSON.stringify(entry.gatesBefore), updated_at: knex.fn.now() });
 }
 
+// Order of operations: (1) read every audit row; (2) decide which protocols the frozen down will leave, writing nothing;
+// (3) take ownPass off only the rows of protocols that down will fully restore, so it then finds them at its snapshot; (4) when
+// any protocol is left, stop: the 365-day interval, this audit row and the ownPass rows of every left protocol stay as they
+// are (the note must not vanish from a protocol that stays in the plan); otherwise delete the interval this inserted and the
+// audit rows.
 exports.down = async function down(knex) {
   if (!(await hasAll(knex))) return;
   const logs = await knex('lawn_protocol_audit_log').where({ action: ACTION }).select('id', 'after_snapshot');
   if (!logs.length) return;
-  let left = false;
-  for (const log of logs) if (await revertOwnPass(knex, asObject(log.after_snapshot).rows || [])) left = true;
-  if (left || await frozenDownKeepsSomething(knex)) {
-    console.log('[lawn-v13-fire-ant-granule-followup] a protocol still uses Topchoice as the fire ant add-on: the 365-day interval stays beside the count limit');
+  const ownPassRows = logs.flatMap((log) => asObject(log.after_snapshot).rows || []);
+  const left = await protocolsFrozenDownLeaves(knex, ownPassRows);
+  for (const entry of ownPassRows) {
+    if (!left.has(String(entry.protocolId))) await revertOwnPassRow(knex, entry);
+  }
+  if (left.size) {
+    console.log('[lawn-v13-fire-ant-granule-followup] a protocol still uses Topchoice as the fire ant add-on: its ownPass note and the 365-day interval stay beside the count limit');
     return;
   }
   for (const log of logs) {

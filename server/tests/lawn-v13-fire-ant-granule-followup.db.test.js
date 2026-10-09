@@ -8,6 +8,7 @@
 // Pinned: a hard 365-day interval is inserted beside the count limit (a weaker row is tightened, a row that already holds it is
 // left alone); an October application then an April one is blocked, one 365 days after the last is allowed; a second up changes
 // nothing; down removes only what up wrote; the in-order rollback (this, then 20261009100000) restores every row; a pinned protocol or a staff-edited Topchoice row keeps the interval beside the count limit that stays.
+const { isDeepStrictEqual } = require('node:util');
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const first = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 const followup = require('../models/migrations/20261009101000_lawn_v13_fire_ant_granule_followup');
@@ -65,6 +66,12 @@ describeDb('v13 Topchoice rolling-year interval through PostgreSQL', () => {
   const intervalRows = () => knex('product_limits').where({ product_id: ids.top, limit_type: 'min_interval_days' });
   const ours = () => knex('lawn_protocol_audit_log').whereIn('action', [first.ACTION, first.CATALOG_ACTION, followup.ACTION]);
   const granuleRows = () => knex('lawn_protocol_products').where({ product_name: GRANULE }).orderBy('id');
+  // The Topchoice rows by protocol key, with their gates.
+  const granuleByProtocol = async () => {
+    const rows = await knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+      .where({ 'p.product_name': GRANULE }).orderBy('p.id').select('p.id', 'p.gates', 'p.rate_per_1000', 'l.protocol_key');
+    return rows.reduce((acc, row) => ({ ...acc, [row.protocol_key]: [...(acc[row.protocol_key] || []), row] }), {});
+  };
   const clean = (state) => JSON.stringify(state, (key, value) => (key === 'updated_at' ? undefined : value));
   async function snapshot() {
     return clean([
@@ -276,34 +283,68 @@ describeDb('v13 Topchoice rolling-year interval through PostgreSQL', () => {
         expect((await knex('product_limits').where({ product_id: ids.top, limit_type: 'annual_max_apps' }))).toHaveLength(1);
         expect(await knex('lawn_protocol_audit_log').where({ action: followup.ACTION })).toHaveLength(1);
         expect((await granuleRows()).length).toBe(2);
-        expect(log).toHaveBeenCalledWith(expect.stringContaining('the 365-day interval stays'));
+        expect(log).toHaveBeenCalledWith(expect.stringContaining('its ownPass note and the 365-day interval stay'));
       } finally {
         log.mockRestore();
         await knex('scheduled_services').where({ id: pinned.id }).update({ lawn_protocol_key: null, lawn_protocol_version: null });
       }
     });
 
-    test('a staff edit on an inserted Topchoice row (the rate, name unchanged): the interval stays and so does the protocol', async () => {
+    test('a staff edit on an inserted Topchoice row (the rate, name unchanged): that protocol stays whole WITH ownPass on every Topchoice row, the interval and audit stay, the other protocol goes back', async () => {
       const log = jest.spyOn(console, 'log').mockImplementation(() => {});
       await first.up(knex); await followup.up(knex);
       const [row] = await granuleRows();
+      const key = (await knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+        .where({ 'p.id': row.id }).first('l.protocol_key')).protocol_key;
       await knex('lawn_protocol_products').where({ id: row.id }).update({ rate_per_1000: 1.5 });
       try {
         await followup.down(knex);
         await first.down(knex);
       } finally { log.mockRestore(); }
+      const byProtocol = await granuleByProtocol();
+      expect(Object.keys(byProtocol)).toEqual([key]);
+      // Both Topchoice rows of the kept protocol (the edited one and its sibling in the other window) still carry the note.
+      expect(byProtocol[key]).toHaveLength(2);
+      for (const kept of byProtocol[key]) expect(kept.gates).toEqual(OWN_PASS_GATES);
+      expect(Number(byProtocol[key].find((r) => r.id === row.id).rate_per_1000)).toBe(1.5);
       expect(await intervalRows()).toHaveLength(1);
-      expect(Number((await knex('lawn_protocol_products').where({ id: row.id }).first()).rate_per_1000)).toBe(1.5);
+      expect(await knex('lawn_protocol_audit_log').where({ action: followup.ACTION })).toHaveLength(1);
+      expect(await knex('lawn_protocol_audit_log').where({ action: first.ACTION })).toHaveLength(1);
       expect((await knex('products_catalog').where({ id: ids.top }).first()).restricted_use).toBe(true);
     });
 
-    test('a staff edit on a retired Advion row keeps the interval too', async () => {
+    test('a staff edit on a retired Advion row: that protocol keeps ownPass on both Topchoice rows, the interval and the audit rows; the other protocol goes back', async () => {
       const log = jest.spyOn(console, 'log').mockImplementation(() => {});
       await first.up(knex); await followup.up(knex);
-      const advion = await knex('lawn_protocol_products').where({ product_name: ADVION }).orderBy('id').first();
+      const advion = await knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+        .where({ 'p.product_name': ADVION }).orderBy('p.id').first('p.id', 'l.protocol_key');
       await knex('lawn_protocol_products').where({ id: advion.id }).update({ gates: JSON.stringify({ ...ADVION_GATES, retired: true, edited: true }) });
-      try { await followup.down(knex); } finally { log.mockRestore(); }
+      try {
+        await followup.down(knex);
+        await first.down(knex);
+      } finally { log.mockRestore(); }
+      const byProtocol = await granuleByProtocol();
+      expect(Object.keys(byProtocol)).toEqual([advion.protocol_key]);
+      expect(byProtocol[advion.protocol_key]).toHaveLength(2);
+      for (const kept of byProtocol[advion.protocol_key]) expect(kept.gates).toEqual(OWN_PASS_GATES);
       expect(await intervalRows()).toHaveLength(1);
+      expect(await knex('lawn_protocol_audit_log').where({ action: followup.ACTION })).toHaveLength(1);
+      expect(await knex('lawn_protocol_audit_log').where({ action: first.ACTION })).toHaveLength(1);
+    });
+
+    test('a retained protocol and a restored one in the same rollback: ownPass leaves only the restored protocol, before the first down runs', async () => {
+      const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+      await first.up(knex); await followup.up(knex);
+      const [row] = await granuleRows();
+      await knex('lawn_protocol_products').where({ id: row.id }).update({ rate_per_1000: 1.5 });
+      try { await followup.down(knex); } finally { log.mockRestore(); }
+      // After this down alone: the edited row's protocol still has ownPass on all its rows; the other protocol is at the snapshot.
+      const byProtocol = await granuleByProtocol();
+      const allGates = (rows, gates) => rows.every((r) => isDeepStrictEqual(r.gates, gates));
+      const sets = Object.values(byProtocol);
+      expect(sets).toHaveLength(2);
+      expect(sets.filter((rows) => allGates(rows, OWN_PASS_GATES))).toHaveLength(1);
+      expect(sets.filter((rows) => allGates(rows, ADVION_GATES))).toHaveLength(1);
     });
 
     test('after this down the Topchoice rows are exactly the first migration\'s snapshot (that is what lets its down delete them)', async () => {
@@ -332,6 +373,10 @@ describeDb('v13 Topchoice rolling-year interval through PostgreSQL', () => {
       const keys = (await granuleRows()).map((r) => r.id);
       expect(keys).toContain(row.id);
       expect(keys.length).toBe(2);
+      // The sibling row of the kept protocol still carries the note.
+      const sibling = (await granuleRows()).find((r) => r.id !== row.id);
+      expect(sibling.gates).toEqual(OWN_PASS_GATES);
+      expect(await knex('lawn_protocol_audit_log').where({ action: followup.ACTION })).toHaveLength(1);
     });
 
     test('ownPass removed by staff after it was written: the first down sees the snapshot again and rolls back normally', async () => {
@@ -360,6 +405,11 @@ describeDb('v13 Topchoice rolling-year interval through PostgreSQL', () => {
         await first.down(knex);
         expect((await granuleRows()).length).toBe(2);
         expect(await intervalRows()).toHaveLength(1);
+        // After both downs the pinned protocol still carries the note on both rows; the other protocol is gone.
+        const byProtocol = await granuleByProtocol();
+        expect(Object.keys(byProtocol)).toEqual([KEYS[0]]);
+        for (const kept of byProtocol[KEYS[0]]) expect(kept.gates).toEqual(OWN_PASS_GATES);
+        expect(await knex('lawn_protocol_audit_log').where({ action: followup.ACTION })).toHaveLength(1);
       } finally {
         log.mockRestore();
         await knex('scheduled_services').where({ id: pinned.id }).update({ lawn_protocol_key: null, lawn_protocol_version: null });
