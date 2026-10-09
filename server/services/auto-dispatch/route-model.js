@@ -225,5 +225,6 @@ module.exports = {
   chainDriveMinutes,
   routeCost,
   clusterShare,
+  physicalStops,
   _internals: { physicalStops, chainWithVisit, groupUnit, sumPlanningMinutes },
 };

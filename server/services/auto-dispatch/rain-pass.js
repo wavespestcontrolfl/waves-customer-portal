@@ -43,8 +43,15 @@ const MAX_NOTICES_PER_RUN = 10;
 // 'rescheduled' rows wait for a new place: their date and window are stale.
 // A NULL status is a live row too (rebooker.js, visit-groups.js).
 const LIVE_STATUSES = ['pending', 'confirmed'];
-const VISIT_COLUMNS = ['id', 'customer_id', 'property_id', 'lat', 'lng', 'service_type', 'service_key_snapshot',
-  'visit_id', 'technician_id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes'];
+// What the route model reads to build a physical stop and its minutes (the
+// arrival-route.js column list: sequence, premise identity, planning-minute
+// inputs), plus what this pass reads itself.
+const VISIT_COLUMNS = ['id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
+  'estimated_duration_minutes', 'status', 'route_order', 'created_at', 'visit_id', 'time_window',
+  'service_type', 'service_id', 'source_estimate_id',
+  'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+  'reservation_service_mix', 'reservation_policy_version', 'is_recurring', 'is_callback',
+  'property_id', 'lat', 'lng', 'service_key_snapshot'];
 
 const toMin = (hhmm) => {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
@@ -71,18 +78,6 @@ function spanRain(hourly, date, startMin, endMin) {
   return { peak, complete };
 }
 
-// One service row's reach on its date, in minutes, by the route's own
-// duration rule (route-reorder-window-fit.js workDuration: the longer of the
-// stored window and the estimate, or the owner's planning minutes). null
-// without a readable start.
-function rowReach(row, deps) {
-  const start = toMin(row.window_start);
-  if (start == null) return null;
-  const workMin = (deps.workDuration || require('../route-reorder-window-fit').workDuration)(row, 60);
-  const end = Math.max(start + 60, toMin(row.window_end) ?? 0, start + workMin);
-  return { startMin: start, endMin: Math.min(end, 24 * 60), workMin };
-}
-
 // The dry, open start on the same date that is nearest the visit's own
 // start, or null. Dry: every hour of the moved stop and its drying time
 // reads below DRY_PCT. Open: no other stop of that technician overlaps it.
@@ -104,7 +99,7 @@ function dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin, dayEn
 // Live visits on the dates the forecast can read, one row per stop: services
 // that share a stop (visit_id) move as one. Only these live rows and their
 // add-ons make the stop: a parked or closed sibling is not work at it.
-async function loadStops(db, from, to, deps = {}) {
+async function loadStops(db, from, to) {
   const rows = await db('scheduled_services')
     .whereBetween('scheduled_date', [from, to])
     .where((q) => q.whereNull('status').orWhereIn('status', LIVE_STATUSES))
@@ -116,39 +111,56 @@ async function loadStops(db, from, to, deps = {}) {
     ? await db('scheduled_service_addons').whereIn('scheduled_service_id', rows.map((row) => row.id))
       .select('scheduled_service_id', 'service_name', 'service_key_snapshot')
     : [];
-  return groupStops(rows, addOns, deps);
+  return groupStops(rows, addOns);
 }
 
-// The earliest row stands for the stop (rows arrive in start order). The
-// stop's reach covers every member's own window, and never less than the
-// members' work added together from the stop's start: services on one stop
-// are done one after the other, whatever their stored windows say (the sum
-// visit-groups.js visitSummariesForRows and route-model.js use).
-function groupStops(rows, addOns = [], deps = {}) {
-  const stops = new Map();
+// The day's rows as PHYSICAL stops, by the route model's own rule
+// (route-model.js physicalStops): a visit_id group is one stop with its
+// members' minutes added together, a legacy co-visit (same customer, window,
+// premise and point, no visit_id) is one stop without a phantom hour, and
+// each stop's minutes come from the route's duration rule. This pass adds
+// only what it needs on top: every member's id and services, and the stop's
+// reach on the clock.
+function groupStops(rows, addOns = []) {
+  const { physicalStops, stopPlanningMinutes } = require('./route-model');
+  const days = new Map();
   for (const row of rows) {
-    const reach = rowReach(row, deps);
-    if (!reach) continue;
-    const services = [
-      { name: row.service_type, serviceKey: row.service_key_snapshot || null },
-      ...addOns.filter((a) => String(a.scheduled_service_id) === String(row.id))
-        .map((a) => ({ name: a.service_name, serviceKey: a.service_key_snapshot || null })),
-    ];
-    const key = row.visit_id ? `stop:${row.visit_id}` : `row:${row.id}`;
-    const stop = stops.get(key);
-    if (!stop) {
-      stops.set(key, { ...row, memberIds: [String(row.id)], services, reach: { ...reach, ownStartMin: reach.startMin } });
-    } else {
-      stop.memberIds.push(String(row.id));
-      stop.services.push(...services);
-      stop.reach.workMin += reach.workMin;
-      stop.reach.endMin = Math.max(stop.reach.endMin, reach.endMin);
+    if (toMin(row.window_start) == null) continue;
+    const key = `${dateOnly(row.scheduled_date)}|${row.technician_id || ''}`;
+    if (!days.has(key)) days.set(key, []);
+    days.get(key).push(row);
+  }
+  const servicesOf = (row) => [
+    { name: row.service_type, serviceKey: row.service_key_snapshot || null },
+    ...addOns.filter((a) => String(a.scheduled_service_id) === String(row.id))
+      .map((a) => ({ name: a.service_name, serviceKey: a.service_key_snapshot || null })),
+  ];
+  const stops = [];
+  for (const dayRows of days.values()) {
+    const byId = new Map(dayRows.map((row) => [String(row.id), row]));
+    const units = physicalStops(dayRows);
+    const taken = new Set(units.flatMap((unit) => (unit.memberIds || [unit.id]).map(String)));
+    for (const unit of units) {
+      const members = (unit.memberIds || [unit.id]).map((id) => byId.get(String(id))).filter(Boolean);
+      // Rows the model folded into this stop as a co-visit are not in its
+      // output: they are this customer's untaken rows at the same start.
+      if (unit.coChain) {
+        members.push(...dayRows.filter((row) => !taken.has(String(row.id)) && row.visit_id == null
+          && String(row.customer_id) === String(unit.customer_id)
+          && toMin(row.window_start) === toMin(unit.window_start)));
+      }
+      const startMin = Math.min(...members.map((m) => toMin(m.window_start)));
+      // The stop's minutes from its start, and never before a later member's own work is done.
+      const endMin = Math.max(startMin + unit.minutes, ...members.map((m) => toMin(m.window_start) + stopPlanningMinutes(m)));
+      stops.push({
+        ...byId.get(String(unit.id)),
+        memberIds: members.map((m) => String(m.id)),
+        services: members.flatMap(servicesOf),
+        reach: { startMin, endMin: Math.min(24 * 60, endMin), ownStartMin: toMin(unit.window_start) },
+      });
     }
   }
-  for (const stop of stops.values()) {
-    stop.reach.endMin = Math.min(24 * 60, Math.max(stop.reach.endMin, stop.reach.startMin + stop.reach.workMin));
-  }
-  return [...stops.values()];
+  return stops;
 }
 
 // One stop's verdict: { wet: false, reason } or { wet: true, peak, proposal }.
@@ -206,7 +218,7 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   const last = etDateString(addETDays(parseETDateTime(`${today}T12:00`), RAIN_DAYS - 1));
   const parts = etParts(now);
   const withDeps = { visitPoint: require('../call-booking-rain-flag').visitPoint, ...deps };
-  const stops = await (deps.loadStops || loadStops)(db, today, last, deps);
+  const stops = await (deps.loadStops || loadStops)(db, today, last);
   const ctx = {
     db, deps: withDeps, today, nowMin: parts.hour * 60 + parts.minute,
     occupancy: await loadDayOccupancy(today, last, withDeps), day: serviceDay(withDeps),
@@ -261,24 +273,27 @@ async function sendNotice(row, { db, deps, reopen = null }) {
       // hour that has since turned wet or been taken.
       dedupeKey: noticeKey(row),
       refreshOnDedupe: true,
-      // The one refresh that rings: a notice this pass closed when the
-      // forecast dried, and the rain is back. `reopen` (set only for a key
-      // with no standing notice) makes that refresh happen even when the
-      // chance and the dry hour read the same as before.
-      ringOnRefresh: (_existing, meta) => meta?.autoCleared === true,
+      // The one refresh that rings: a notice that was closed (by this pass
+      // when the forecast dried, or by the relevance sweep when the visit
+      // moved away) and whose visit sits in rain at this slot again.
+      // `reopen` (set only for a key with no standing notice) makes that
+      // refresh happen even when the chance and the dry hour read the same
+      // as before.
+      ringOnRefresh: (_existing, meta) => meta?.autoCleared === true || !!meta?.retired,
       ...(reopen ? { dedupeVersion: reopen } : {}),
       detail: `${name || 'A customer'}: ${service} on ${date} at ${start}. `
         + `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `
         + (proposal ? `${proposal} that day reads below ${DRY_PCT}% and no other stop is in it. ` : `No hour that day is both below ${DRY_PCT}% and open. `)
         + 'Nothing was moved and the customer was not contacted. Move it with Quick Move.',
-      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false },
+      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false, retired: null },
     },
   );
 }
 
 /**
  * The cron entry. Resolves to { ran, checked, wet, noticed, deferred, closed } (for logs and
- * tests); never rejects.
+ * tests); never rejects: a failed run resolves { ran: false, reason: 'error' }
+ * and the scheduler turns that into a failed job.
  */
 async function runRainPass({ now = new Date(), db = require('../../models/db'), deps = {} } = {}) {
   try {
@@ -287,7 +302,10 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
     const rows = await planRainPass({ now, db, deps });
     const wet = rows.filter((row) => row.wet);
     const episodes = deps.episodes || require('../admin-alert-episodes');
-    const standing = new Set(rows.length ? await episodes.openAdminAlertKeys(db, KEY_PREFIX) : []);
+    // Standing: not closed by this pass (autoCleared, which the read leaves
+    // out) and not retired by the relevance sweep.
+    const open = rows.length ? await episodes.openAdminAlertMetadata(db, KEY_PREFIX) : [];
+    const standing = new Set(open.filter((meta) => meta.dedupeKey && !meta.retired).map((meta) => meta.dedupeKey));
     // A standing notice is closed when its visit now reads dry in every
     // hour, or is no longer outdoor work (a service edit): the office must
     // not move a visit for rain that no longer matters to it. An unread
@@ -314,8 +332,8 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
     return { ran: true, checked: rows.length, wet: wet.length, noticed, deferred, closed: dried.length };
   } catch (err) {
     logger.warn(`[rain-pass] run skipped: ${err.message}`);
-    return { ran: false, reason: 'error' };
+    return { ran: false, reason: 'error', error: err.message };
   }
 }
 
-module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_RUN, _test: { spanRain, dryStart, groupStops } };
+module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_RUN, _test: { spanRain, dryStart, groupStops, VISIT_COLUMNS } };

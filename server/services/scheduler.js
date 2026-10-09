@@ -4125,7 +4125,10 @@ function initScheduledJobs() {
     try {
       await runExclusive('auto-dispatch-rain-pass', async () => {
         const { runRainPass } = require('./auto-dispatch/rain-pass');
-        await runRainPass();
+        const result = await runRainPass();
+        // The pass never rejects; a run that could not finish must still
+        // fail job health instead of reading as a green run with no notices.
+        if (result.reason === 'error') throw new Error(result.error || 'run did not finish');
       });
     } catch (err) {
       logger.error(`Auto-dispatch rain pass failed: ${err.message}`);

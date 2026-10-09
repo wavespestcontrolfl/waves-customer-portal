@@ -423,6 +423,15 @@ function callBookingRainSettled(s) {
   return DATE_RE.test(day) && day < s.todayET ? 'Visit date has passed' : null;
 }
 
+// A rain-pass notice (auto-dispatch/rain-pass.js) carries the same metadata
+// and settles the same way, and also when the visit is parked for a new time
+// ('rescheduled' keeps its old date and window, and the pass no longer reads
+// the row, so nothing else would close it).
+function rainPassSettled(s) {
+  if (s.visit && String(s.visit.status) === 'rescheduled') return 'Visit is waiting for a new time';
+  return callBookingRainSettled(s);
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -455,10 +464,10 @@ const CLASSES = [
     key: 'call_booking_rain', categories: ['schedule'], prefix: 'call-booking-rain:', rule: callBookingRainSettled,
   },
   { // auto-dispatch/rain-pass.js — one notice per visit at a date and start;
-    // the same metadata, so the same rule: closed, moved, or the date passed.
-    // Never put back here: a visit back on its old slot says nothing about
-    // the forecast, and the pass itself closes and re-rings by the weather.
-    key: 'rain_pass', categories: ['schedule'], prefix: 'rain-pass:', rule: callBookingRainSettled, rearm: false,
+    // closed, parked, moved, or the date passed. Never put back here: a visit
+    // back on its old slot says nothing about the forecast, and the pass
+    // itself re-rings a retired notice when that slot is wet again.
+    key: 'rain_pass', categories: ['schedule'], prefix: 'rain-pass:', rule: rainPassSettled, rearm: false,
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
