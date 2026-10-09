@@ -777,7 +777,9 @@ blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
 on the shared customer grid (09:00–17:00 ET, `scheduling/customer-windows.js`;
 09:00–16:00 while `GATE_CUSTOMER_LAST_START_16` is set, owner 2026-10-09: the
 17:00 start is not offered, and a 17:00 offer signed before the gate was set
-is refused when taken. Two exceptions keep a time the customer already has:
+is refused when taken. The assistant booking engine (`services/availability.js`
+`getAvailableSlots` and `confirmBooking`, used by the portal assistant and
+text open-time drafts) applies the same rule at offer and at commit. Two exceptions keep a time the customer already has:
 an existing estimate hold on 17:00 is returned by a repeat `/reserve` and
 committed at acceptance, and a `/api/booking/confirm` retry of a 17:00
 booking that already committed replays that booking;
