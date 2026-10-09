@@ -115,7 +115,7 @@ describe('the tie sentences (fixed, chosen from the facts)', () => {
     expect(text).not.toContain('stress we are keeping an eye on');
   });
 
-  test('ties come after the findings and before the results and next-visit lines; at most two print', () => {
+  test('ties come after the findings; at most two print; the results line is the first to give way to them under the cap', () => {
     const text = summary.render(summary.buildSlots({
       season: 'fall',
       applied: [{ name: 'x', kind: 'fungicide' }],
@@ -126,11 +126,87 @@ describe('the tie sentences (fixed, chosen from the facts)', () => {
       nextVisitBooked: true,
       watchNext: ['weeds'],
     }));
-    const order = ['Today we applied', 'In the photos we noticed', 'Today’s photos showed gray leaf spot', 'Your technician found chinch bugs', 'Results from treatments', 'At the next visit'];
+    const order = ['Today we applied', 'In the photos we noticed', 'Today’s photos showed gray leaf spot', 'Your technician found chinch bugs', 'At the next visit'];
     const at = order.map((s) => text.indexOf(s));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(text).not.toContain('Results from treatments');
     expect(text).not.toContain('weed pressure in one area');
+    expect(splitSentences(text).length).toBeLessThanOrEqual(summary.MAX_SENTENCES);
+  });
+
+  describe('the six-sentence cap counts individual sentences, and a tie is never cut in half', () => {
+    // Two ties of two sentences each, with every other part present: nine sentences before the cap
+    // (applied 1, area read 1, finding 1, tie 2, tie 2, results 1, next visit 1).
+    const full = {
+      season: 'winter',
+      applied: ['fungicide'],
+      areas: [{ key: 'coverage', band: 'healthy' }],
+      findings: [{ label: 'thinning turf', hedged: true }],
+      ties: [
+        { t: 'photo', kind: 'fungus', label: 'gray leaf spot', sure: true, product: 'fungicide' },
+        { t: 'photo', kind: 'insects', label: 'chinch bug activity', sure: false, product: null },
+      ],
+      recurring: true,
+      nextVisit: true,
+      watch: ['weeds'],
+    };
+    const count = (text) => splitSentences(text).length;
+    const TIE1 = 'Today’s photos showed gray leaf spot in one area. We treated that spot with a fungicide today.';
+    const TIE2 = 'Today’s photos showed what may be chinch bug activity in one area. We will check it by hand at the next visit.';
+
+    test('nine sentences before the cap, at most six after, in every combination of the optional parts', () => {
+      for (const recurring of [true, false]) {
+        for (const nextVisit of [true, false]) {
+          for (const withAreas of [true, false]) {
+            const slots = { ...full, recurring, nextVisit, areas: withAreas ? full.areas : [] };
+            expect(count(summary.render(slots))).toBeLessThanOrEqual(summary.MAX_SENTENCES);
+          }
+        }
+      }
+    });
+
+    test('drop order: the results line, then the next-visit line, then the area read; both ties survive whole at six sentences', () => {
+      const text = summary.render(full);
+      expect(text).not.toContain('Results from treatments');
+      expect(text).not.toContain('At the next visit we will look at');
+      expect(text).not.toContain('Our photo read shows');
+      expect(text).toContain('In the photos we noticed');
+      expect(text).toContain(TIE1);
+      expect(text).toContain(TIE2);
+      expect(count(text)).toBe(6);
+      // Each drop is made only while the paragraph is over the cap: take the finding away (eight sentences) and the
+      // area read stays, the next-visit and results lines still go.
+      const eight = summary.render({ ...full, findings: [] });
+      expect(eight).toContain('Our photo read shows');
+      expect(eight).not.toContain('At the next visit we will look at');
+      expect(eight).not.toContain('Results from treatments');
+      expect(count(eight)).toBe(6);
+    });
+
+    test('both ties print whole when the count allows (no area read, no results, no next visit line)', () => {
+      const text = summary.render({ ...full, areas: [], recurring: false, nextVisit: false });
+      expect(text).toContain(TIE1);
+      expect(text).toContain(TIE2);
+      expect(count(text)).toBe(6);
+    });
+
+    test('a tie is whole or absent: never one sentence of a two-sentence tie', () => {
+      for (const slots of [full, { ...full, areas: [] }, { ...full, recurring: false }, { ...full, ties: [full.ties[1], full.ties[0]] }]) {
+        const text = summary.render(slots);
+        for (const tie of [TIE1, TIE2]) {
+          const [first, second] = tie.split('. ').map((x, i) => (i ? x : `${x}.`));
+          expect(text.includes(first)).toBe(text.includes(second));
+        }
+      }
+    });
+
+    test('a frozen v4 entry with two long ties reads back exactly (text == render(slots)); nothing was cut after the fact', () => {
+      const text = summary.render(full);
+      const guard = summary._test.frozenEntryProblem({ v: 4, assessmentId: '77', text, slots: full });
+      expect(guard).toBeNull();
+      expect(summary._test.frozenEntryProblem({ v: 4, assessmentId: '77', text: `${text} ${TIE2}`, slots: full })).toBe('drift');
+    });
   });
 
   test('a visit with only a tie (nothing else grounded) still composes', () => {
@@ -209,7 +285,7 @@ describe('the closed tie tables', () => {
       watch: ['weeds', 'thin', 'color'],
     };
     const text = summary.render(slots);
-    expect(splitSentences(text).length).toBeLessThanOrEqual(8);
+    expect(splitSentences(text).length).toBeLessThanOrEqual(summary.MAX_SENTENCES);
     expect(text.length).toBeLessThanOrEqual(summary.MAX_TEXT_CHARS);
     expect(summary._test.textProblem(text)).toBeNull();
   });

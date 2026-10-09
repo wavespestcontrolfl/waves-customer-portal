@@ -514,6 +514,115 @@ describe('ties: a finding and what was applied', () => {
   });
 });
 
+describe('a preventive-locked product never counts as treating a finding (the tie and "What to expect" read one classification)', () => {
+  const ASSESSMENT = { id: 'as-1', customer_id: 'c-1', confirmed_by_tech: true };
+  const run = (label) => ({ assessment_id: 'as-1', customer_id: 'c-1', reviewed_at: '2026-10-08T15:00:00Z', reviewed_findings: [{ finding_id: 'f', keep: true, label, confidence: 'high', severity: 'moderate', can_determine: true }] });
+  const ACELEPRYN = row('ac1', 'spot_treatment', { name: 'Acelepryn Xtra', category: 'insecticide' });
+  const ACELEPRYN_PLAIN = row('ac2', 'spot_treatment', { name: 'Acelepryn Insecticide', category: 'insecticide' });
+  const ARENA = row('ar', 'spot_treatment', { name: 'Arena 50 WDG', category: 'insecticide' });
+
+  test('Acelepryn is no product kind at all', () => {
+    expect(facts._test.rowProductKind(ACELEPRYN)).toBeNull();
+    expect(facts._test.rowProductKind(ACELEPRYN_PLAIN)).toBeNull();
+    expect(facts._test.rowProductKind(ARENA)).toBe('insecticide');
+    expect(facts._test.rowProductKind(row('x', 'spot_treatment', { name: 'Anything', category: 'insecticide', facts: { ...approved(rule('none')), name: 'Acelepryn Xtra' } }))).toBeNull();
+  });
+
+  test('an insect photo finding beside only Acelepryn is unanswered (product null), and no family becomes curative', () => {
+    for (const rows of [[ACELEPRYN], [ACELEPRYN_PLAIN]]) {
+      const out = facts.buildTies({ rows, run: run('chinch bug activity'), assessment: ASSESSMENT });
+      expect(out).toEqual([{ source: 'photo', kind: 'insects', label: 'chinch bug activity', sure: true, product: null }]);
+    }
+  });
+
+  test('the technician\'s chinch or caterpillar tap with only Acelepryn makes no tie', () => {
+    expect(facts.buildTies({ rows: [ACELEPRYN], run: null, assessment: null, techFindings: [{ kind: 'chinch' }, { kind: 'caterpillars' }] })).toEqual([]);
+  });
+
+  test('another insecticide on the same visit still answers the finding', () => {
+    const out = facts.buildTies({ rows: [ACELEPRYN, ARENA], run: run('chinch bug activity'), assessment: ASSESSMENT, techFindings: [] });
+    expect(out[0].product).toBe('insecticide');
+  });
+
+  test('the expectation engine keeps Acelepryn preventive for any tie: the tie and the line cannot disagree', () => {
+    const { buildLawnExpectations } = require('../services/service-report/lawn-expectations');
+    const lines = (tied) => buildLawnExpectations({ applications: [{ name: 'Acelepryn Xtra' }], tiedFamilies: tied }).lines;
+    expect(lines(['insecticide'])).toEqual(lines([]));
+  });
+});
+
+describe('verifiedTechFindings: the echo is checked before a find can reach the customer', () => {
+  const P_FUNG = '00000000-0000-4000-8000-000000000031';
+  const P_ARENA = '00000000-0000-4000-8000-000000000032';
+  const P_CATERPILLAR = '00000000-0000-4000-8000-000000000033';
+  const P_OTHER_INSECT = '00000000-0000-4000-8000-000000000034';
+  const P_ABSENT = '00000000-0000-4000-8000-000000000035';
+  const rowFor = (id, name, category, method = 'spot_treatment') => ({ ...row(`sp-${name}`, method, { name, category }), product_id: id });
+  const ROWS = [
+    rowFor(P_FUNG, 'Torque SC', 'fungicide'),
+    rowFor(P_ARENA, 'Arena 50 WDG', 'insecticide'),
+    rowFor(P_CATERPILLAR, 'Caterpillar Insecticide', 'insecticide'),
+    rowFor(P_OTHER_INSECT, 'Other Insecticide', 'insecticide'),
+  ];
+  const STAGED = [
+    { product_id: P_FUNG, role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } },
+    { product_id: P_ARENA, role: 'insecticide_spot', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
+    { product_id: P_CATERPILLAR, role: 'insecticide_spot', gates: JSON.stringify({ trigger: 'caterpillars' }) },
+  ];
+  const stagedKnex = (rows = STAGED, { fail = false } = {}) => () => {
+    const q = {};
+    q.whereRaw = () => q;
+    q.whereIn = (_k, ids) => { q.ids = ids; return q; };
+    q.select = () => (fail ? Promise.reject(new Error('down')) : Promise.resolve(rows.filter((r) => q.ids.includes(r.product_id))));
+    return q;
+  };
+  const CONFIRMED = { id: 'as-1', customer_id: 'c-1', confirmed_by_tech: true };
+  const runWith = (severities) => ({ assessment_id: 'as-1', customer_id: 'c-1', severities: JSON.stringify(severities) });
+  const FUNGUS_RUN = runWith({ fungal_activity: { level: 'moderate' } });
+  const INSECT_RUN = runWith({ insect_damage: { level: 'severe' } });
+  const verify = (taps, { assessment = CONFIRMED, run = null, knex = stagedKnex() } = {}) => facts._test.verifiedTechFindings({ taps, rows: ROWS, assessment, run, knex });
+
+  test('the standing chinch tap: offered every month, so it needs no finding, only a chinch rung that was applied', async () => {
+    expect(await verify([{ kind: 'chinch', productIds: [P_ARENA] }], { assessment: null })).toEqual([{ kind: 'chinch' }]);
+  });
+
+  test('a fungus card needs a fungus finding on the confirmed assessment AND its own staged fungicide, applied', async () => {
+    expect(await verify([{ kind: 'fungus', productIds: [P_FUNG] }], { run: FUNGUS_RUN })).toEqual([{ kind: 'fungus' }]);
+    expect(await verify([{ kind: 'fungus', productIds: [P_FUNG] }], { run: runWith({ fungal_activity: { level: 'none' } }) })).toEqual([]);
+    expect(await verify([{ kind: 'fungus', productIds: [P_FUNG] }], { run: null })).toEqual([]);
+    expect(await verify([{ kind: 'fungus', productIds: [P_FUNG] }], { assessment: null, run: FUNGUS_RUN })).toEqual([]);
+    expect(await verify([{ kind: 'fungus', productIds: [P_FUNG] }], { assessment: { ...CONFIRMED, confirmed_by_tech: false }, run: FUNGUS_RUN })).toEqual([]);
+  });
+
+  test('a caterpillar card needs moderate or worse insect damage and the caterpillar row (a trigger stored as JSON text reads too)', async () => {
+    expect(await verify([{ kind: 'caterpillars', productIds: [P_CATERPILLAR] }], { run: INSECT_RUN })).toEqual([{ kind: 'caterpillars' }]);
+    expect(await verify([{ kind: 'caterpillars', productIds: [P_CATERPILLAR] }], { run: runWith({ insect_damage: { level: 'minor' } }) })).toEqual([]);
+  });
+
+  test('a modified echo is refused: a product not applied, an applied product the program does not stage for the card, the wrong kind, no ids', async () => {
+    expect(await verify([{ kind: 'chinch', productIds: [P_ABSENT] }])).toEqual([]);
+    expect(await verify([{ kind: 'chinch', productIds: [P_OTHER_INSECT] }])).toEqual([]);
+    expect(await verify([{ kind: 'chinch', productIds: [P_FUNG] }])).toEqual([]);
+    expect(await verify([{ kind: 'fungus', productIds: [P_ARENA] }], { run: FUNGUS_RUN })).toEqual([]);
+    expect(await verify([{ kind: 'chinch', productIds: [] }])).toEqual([]);
+    expect(await verify([{ kind: 'chinch', productIds: ['not-a-uuid'] }])).toEqual([]);
+    expect(await verify([{ kind: 'chinch', productIds: [P_ARENA, P_ABSENT] }])).toEqual([]);
+    expect(await verify([{ kind: 'weeds', productIds: [P_ARENA] }])).toEqual([]);
+  });
+
+  test('fail closed: a failed program read verifies nothing and never throws', async () => {
+    expect(await verify([{ kind: 'chinch', productIds: [P_ARENA] }], { knex: stagedKnex(STAGED, { fail: true }) })).toEqual([]);
+    expect(await verify(undefined)).toEqual([]);
+  });
+
+  test('a verified find becomes a customer tie; an unverified one never does', async () => {
+    const good = await verify([{ kind: 'chinch', productIds: [P_ARENA] }]);
+    expect(facts.buildTies({ rows: ROWS, run: null, assessment: null, techFindings: good })).toEqual([{ source: 'technician', kind: 'chinch', product: 'insecticide' }]);
+    const bad = await verify([{ kind: 'chinch', productIds: [P_OTHER_INSECT] }]);
+    expect(facts.buildTies({ rows: ROWS, run: null, assessment: null, techFindings: bad })).toEqual([]);
+  });
+});
+
 describe('the frozen block is read strictly, and only from the record', () => {
   const block = (extra = {}) => ({
     v: 1,

@@ -31,18 +31,19 @@ const productRow = (n, id, method, extra = {}) => ({
 function fakeKnex(tables, { failTable = null, record = {} } = {}) {
   const state = { notes: { ...(record.notes || {}) }, writes: 0 };
   const knex = (table) => {
-    if (failTable === table) {
+    if (failTable === String(table).split(' as ')[0]) {
       const dead = { where: () => dead, orderBy: () => dead, whereIn: () => dead, select: () => dead, first: () => Promise.reject(new Error('down')), catch: (fn) => Promise.resolve(fn(new Error('down'))), then: (r, j) => Promise.reject(new Error('down')).then(r, j) };
       return dead;
     }
-    let rows = [...(tables[table] || [])];
+    const base = String(table).split(' as ')[0];
+    let rows = [...(tables[base] || [])];
     const q = {};
     q.where = (criteria, value) => {
       if (criteria && typeof criteria === 'object') rows = rows.filter((row) => Object.entries(criteria).every(([key, val]) => row[key] === val));
       else if (typeof criteria === 'string' && value !== undefined) rows = rows.filter((row) => row[criteria] === value);
       return q;
     };
-    q.whereIn = (key, values) => { rows = rows.filter((row) => values.includes(row[key])); return q; };
+    q.whereIn = (key, values) => { const col = key.split('.').pop(); rows = rows.filter((row) => values.includes(row[col])); return q; };
     q.whereRaw = () => q;
     q.orderBy = () => q;
     q.select = () => q;
@@ -61,8 +62,14 @@ function fakeKnex(tables, { failTable = null, record = {} } = {}) {
   return { knex, state };
 }
 
+// The program's staged rows the guide resolves its products from (lawn-treatment-guide.js): a fungicide, the
+// caterpillar row, a chinch rung.
+const STAGED = [
+  { product_id: UUID(3), role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } },
+  { product_id: UUID(4), role: 'insecticide_spot', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
+];
 const tables = (productRows, extra = {}) => ({
-  service_products: productRows, products_catalog: CATALOG, lawn_assessments: [ASSESSMENT], lawn_assessment_runs: [RUN], ...extra,
+  service_products: productRows, products_catalog: CATALOG, lawn_assessments: [ASSESSMENT], lawn_assessment_runs: [RUN], lawn_protocol_products: STAGED, ...extra,
 });
 const record = (notes = {}) => ({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: JSON.stringify(notes) });
 

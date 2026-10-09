@@ -357,11 +357,14 @@ function buildSlots(rawFacts) {
   };
 }
 
-const MAX_SENTENCES = 6; // six parts exist today; the cap is a guard against a future template edit
+const MAX_SENTENCES = 6; // counted in SENTENCES, not parts: a tie can be two sentences
 // Reading order, and the order parts are dropped in when a paragraph would pass the cap: the
 // results line first, then the next-visit line, then the area read.
-const SENTENCE_ORDER = Object.freeze(['applied', 'photoRead', 'findings', 'ties', 'results', 'nextVisit']);
-const DROP_ORDER = Object.freeze(['results', 'nextVisit', 'photoRead']);
+const SENTENCE_ORDER = Object.freeze(['applied', 'photoRead', 'findings', 'tie1', 'tie2', 'results', 'nextVisit']);
+// What drops first when the paragraph would pass the cap: the results line, then the next-visit line, then the area
+// read, then the SECOND tie. A part is a unit: a tie's sentences stay together or both go, so a tie is never cut
+// in half, and the first tie (the strongest finding) is the last thing to leave.
+const DROP_ORDER = Object.freeze(['results', 'nextVisit', 'photoRead', 'tie2']);
 
 // ── Render: slots -> sentences (a closed set; nothing else is ever printed) ──
 
@@ -407,10 +410,13 @@ function tieSentence(tie) {
   return (tie.sure === true ? SENTENCE.tieSure : SENTENCE.tieHedged)(tie.label, TIE_PRODUCT_PHRASES[tie.product]);
 }
 
-function tiesSentence(slots) {
-  const sentences = (Array.isArray(slots.ties) ? slots.ties : []).slice(0, MAX_TIES).map(tieSentence).filter(Boolean);
-  return sentences.length ? sentences.join(' ') : null;
+// The tie sentences of a slots object, one entry per tie (a tie may be two sentences).
+function tieSentences(slots) {
+  return (Array.isArray(slots.ties) ? slots.ties : []).slice(0, MAX_TIES).map(tieSentence).filter(Boolean);
 }
+
+// How many sentences a part holds: every template sentence ends in one full stop, followed by a space or the end.
+const sentenceCount = (text) => (String(text).match(/\.(?:\s|$)/g) || []).length;
 
 function nextVisitSentence(slots) {
   if (slots.nextVisit !== true) return null;
@@ -422,18 +428,21 @@ function nextVisitSentence(slots) {
 function renderSentences(slots) {
   if (!slots || typeof slots !== 'object' || Array.isArray(slots)) return [];
   const applied = appliedSentence(slots);
+  const ties = tieSentences(slots);
   const parts = {
     applied,
     photoRead: photoReadSentence(slots),
     findings: findingsSentence(slots),
-    ties: tiesSentence(slots),
+    tie1: ties[0] || null,
+    tie2: ties[1] || null,
     results: applied && slots.recurring === true ? SENTENCE.results : null,
     nextVisit: nextVisitSentence(slots),
   };
-  // Every template is ONE sentence; the cap is enforced here anyway, dropping the lowest-priority
-  // parts first, so a template edit cannot break it.
+  // The cap counts SENTENCES (a tie can be two), dropping whole parts in DROP_ORDER until it holds, so a template
+  // edit or two long ties cannot break it and a tie is never cut in half.
   const kept = new Set(SENTENCE_ORDER.filter((id) => parts[id]));
-  for (const id of DROP_ORDER) if (kept.size > MAX_SENTENCES) kept.delete(id);
+  const total = () => [...kept].reduce((sum, id) => sum + sentenceCount(parts[id]), 0);
+  for (const id of DROP_ORDER) if (total() > MAX_SENTENCES) kept.delete(id);
   return SENTENCE_ORDER.filter((id) => kept.has(id)).map((id) => parts[id]);
 }
 

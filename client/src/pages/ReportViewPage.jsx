@@ -917,8 +917,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     if (conditionLine) {
       return {
         heading: reservice.heading || 'about your visit',
-        status: 'Service complete',
-        statusTone: 'neutral',
+        // The same pending status the timed incomplete branch uses, with the condition's word in place of a clock.
+        status: condition.statusLabel || 'Once dry',
+        statusTone: 'pending',
         result: condition.text,
         completedLine: reservice.completedFallback || 'The visit was not completed.',
         detail: [condition.pets, reservice.expectation || null, reservice.billingLine || null].filter(Boolean).join(' '),

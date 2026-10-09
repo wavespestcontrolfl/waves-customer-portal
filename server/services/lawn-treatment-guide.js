@@ -474,18 +474,61 @@ function treatmentGuideFreeze(lawnFast) {
 
 // The technician's own finds, read back from the record for the lawn report's finding-to-product tie
 // (service-report/lawn-report-facts.js, GATE_LAWN_REPORT_FACTS): the cards whose check was answered
-// "found" and whose product was taken. Only the kinds that name something the technician saw
-// (fungus, chinch bugs, caterpillars). The one deliberate reader of the record besides the freeze
-// above; it hands back kinds only, never the product ids. Pure.
+// "found" and whose product was taken, with the product ids the card named. Only the kinds that name
+// something the technician saw (fungus, chinch bugs, caterpillars). The one deliberate reader of the record
+// besides the freeze above. The echo came from the client, so a find reaches a customer only after
+// verifyGuideFind below has checked it. Pure.
 const TECH_FIND_KINDS = Object.freeze(['fungus', 'chinch', 'caterpillars']);
 function guideTakenFindings(structuredNotes) {
   const notes = parseJson(structuredNotes);
   const block = notes && notes.lawnTreatmentGuide;
   if (!block || typeof block !== 'object' || block.v !== 1 || !Array.isArray(block.cards)) return [];
-  const kinds = block.cards
-    .filter((card) => card && card.checked === 'found' && card.taken === true && TECH_FIND_KINDS.includes(card.kind))
-    .map((card) => card.kind);
-  return [...new Set(kinds)].map((kind) => ({ kind }));
+  const seen = new Set();
+  const finds = [];
+  for (const card of block.cards) {
+    if (!card || card.checked !== 'found' || card.taken !== true || !TECH_FIND_KINDS.includes(card.kind) || seen.has(card.kind)) continue;
+    seen.add(card.kind);
+    finds.push({ kind: card.kind, productIds: Array.isArray(card.productIds) ? card.productIds.map((id) => String(id).toLowerCase()) : [] });
+  }
+  return finds;
+}
+
+// What the program's staged rows say each find's product must be (the same definitions the cards use above):
+// the fungus card's fungicide (role), the caterpillar row (gates.trigger), the chinch rungs (gates.trigger).
+const FIND_ROW_TEST = Object.freeze({
+  fungus: (row) => row.role === FUNGICIDE_ROLE,
+  caterpillars: (row, gates) => gates.trigger === CATERPILLAR_TRIGGER,
+  chinch: (row, gates) => CHINCH_TRIGGERS.includes(gates.trigger),
+});
+
+/**
+ * Whether a technician's recorded find is real enough to be told to the customer. Fail closed: false on any
+ * doubt (a missing id, a failed read), and the find stays on the technician record only.
+ *   - every product id the card named is a uuid and a staged program row of the card's own kind (a fungicide
+ *     row for fungus, the caterpillar row, a chinch rung), so a modified echo cannot name any product it likes;
+ *   - a fungus card also needs the confirmed assessment to read fungus minor or worse, a caterpillar card insect
+ *     damage moderate or worse (the live guide's own thresholds, from `signals`); the standing chinch tap is
+ *     offered in every month by design, so chinch is checked against its rungs alone.
+ * `signals` is signalsFromAssessment(assessment, run) of the confirmed assessment, or null (fungus and
+ * caterpillars then fail). The applied-product side (that those products really went down on the visit, and are
+ * of the right kind) is checked by the caller against the visit's rows.
+ */
+async function verifyGuideFind({ kind, productIds, signals, knex }) {
+  try {
+    const test = FIND_ROW_TEST[kind];
+    const ids = Array.isArray(productIds) ? productIds : [];
+    if (!test || !ids.length || !ids.every((id) => UUID_RE.test(id))) return false;
+    if (kind === 'fungus' && !(signals && atLeast(signals.fungus, 'minor'))) return false;
+    if (kind === 'caterpillars' && !(signals && atLeast(signals.insect, 'moderate'))) return false;
+    const { activeProtocolProducts } = require('./lawn-protocol-retired');
+    const staged = await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
+      .whereIn('lpp.product_id', ids)
+      .select('lpp.product_id', 'lpp.role', 'lpp.gates');
+    return ids.every((id) => staged.some((row) => String(row.product_id).toLowerCase() === id && test(row, parseJson(row.gates) || {})));
+  } catch (err) {
+    logger.warn(`[lawn-guide] find not verified: ${err?.code || err?.name || 'Error'}`);
+    return false;
+  }
 }
 
 module.exports = {
@@ -504,4 +547,5 @@ module.exports = {
   buildCards,
   treatmentGuideFreeze,
   guideTakenFindings,
+  verifyGuideFind,
 };

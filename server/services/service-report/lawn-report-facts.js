@@ -254,14 +254,27 @@ const SURE_CONFIDENCES = new Set(['high', 'moderate']);
 const SEVERITY_ORDER = Object.freeze({ severe: 0, moderate: 1, mild: 2 });
 const MAX_TIES = 4;
 
+// The kind of one applied row for tie purposes, or null. A product the expectations classification locks to
+// "preventive" (Acelepryn, lawn-expectations.js modeLock) is never a treatment of a finding: its "What to
+// expect" line stays preventive, so a tie could only contradict it. The tie and the expectation therefore read
+// the same classification.
+function rowProductKind(row) {
+  const { classifyLawnProduct } = require('./lawn-expectations');
+  const facts = row.approved_report_product_facts;
+  const names = [row.product_name, facts && facts.name];
+  if (names.some((name) => name && classifyLawnProduct(name)?.modeLock === 'preventive')) return null;
+  const { classifyProduct } = require('./lawn-report-v2');
+  const text = `${row.product_category || ''} ${row.product_name || ''} ${(facts && facts.category) || ''}`;
+  const kind = /wetting/i.test(text) ? 'wetting_agent' : classifyProduct(row).kind;
+  return PRODUCT_KINDS.includes(kind) ? kind : null;
+}
+
 // What kinds of product a visit's rows hold: { fungicide: {any, spot}, ... }.
 function productKinds(rows) {
   const held = {};
-  const { classifyProduct } = require('./lawn-report-v2');
   for (const row of Array.isArray(rows) ? rows : []) {
-    const text = `${row.product_category || ''} ${row.product_name || ''} ${(row.approved_report_product_facts && row.approved_report_product_facts.category) || ''}`;
-    const kind = /wetting/i.test(text) ? 'wetting_agent' : classifyProduct(row).kind;
-    if (!PRODUCT_KINDS.includes(kind)) continue;
+    const kind = rowProductKind(row);
+    if (!kind) continue;
     const seen = held[kind] || { any: false, spot: false };
     seen.any = true;
     if (methodOf(row) === 'spot_treatment') seen.spot = true;
@@ -326,6 +339,26 @@ function buildTies({ rows, run, assessment, techFindings = [] }) {
     });
   }
   return items.slice(0, MAX_TIES);
+}
+
+// The technician's recorded finds that may reach the customer. The echo came from the client, so each find is
+// checked here before it can become a tie, and an unverifiable one stays on the technician record only:
+//   - the card's product ids are really applied on this visit, each of the card's own kind (and not
+//     preventive-locked), the products the card named, not any product of the kind;
+//   - the live guide's own definitions agree (lawn-treatment-guide.js verifyGuideFind): the ids are staged
+//     program rows of that card kind, and a fungus or caterpillar card matches a finding on the confirmed
+//     assessment. The standing chinch tap is offered every month, so it is checked against its rungs alone.
+async function verifiedTechFindings({ taps, rows, assessment, run, knex }) {
+  const guide = require('../lawn-treatment-guide');
+  const byId = new Map((Array.isArray(rows) ? rows : []).filter((row) => row.product_id).map((row) => [String(row.product_id).toLowerCase(), row]));
+  const signals = assessment && assessment.confirmed_by_tech === true ? guide.signalsFromAssessment(assessment, run) : null;
+  const verified = [];
+  for (const tap of Array.isArray(taps) ? taps : []) {
+    if (!TECH_KINDS.includes(tap.kind) || !Array.isArray(tap.productIds) || !tap.productIds.length) continue;
+    const applied = tap.productIds.every((id) => byId.has(id) && rowProductKind(byId.get(id)) === TECH_PRODUCT[tap.kind]);
+    if (applied && await guide.verifyGuideFind({ kind: tap.kind, productIds: tap.productIds, signals, knex })) verified.push({ kind: tap.kind });
+  }
+  return verified;
 }
 
 function cleanTie(raw) {
@@ -499,7 +532,8 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now 
     const rows = await loadRows(record, knex);
     if (!rows || !rows.length) return null;
     const { assessment, run } = withTies ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
-    const techFindings = withTies ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
+    const taps = withTies ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
+    const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
     const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies, now });
     return await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
   } catch (err) {
@@ -534,5 +568,5 @@ module.exports = {
   freezeReportFacts,
   gatherAndFreezeReportFacts,
   cleanTies,
-  _test: { methodOf, labelIsPlainUntilDry, labelIsPlainUntilWateredInAndDry, roundedSqft, photoFindingsByKind, productKinds },
+  _test: { methodOf, rowProductKind, verifiedTechFindings, labelIsPlainUntilDry, labelIsPlainUntilWateredInAndDry, roundedSqft, photoFindingsByKind, productKinds },
 };

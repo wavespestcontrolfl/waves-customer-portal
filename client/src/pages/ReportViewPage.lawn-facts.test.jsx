@@ -187,6 +187,10 @@ describe('the condition rides every branch that used to carry the timed warning'
     const reservice = { outcome: 'incomplete', heading: 'we came back', completedFallback: 'The visit was not completed.', expectation: 'We will finish soon.' };
     const summary = smartStatusSummary(lawn({ reserviceReport: reservice }), 'live', NOW);
     expect(summary.result).toBe(SPRAY);
+    // Not "Service complete": the visit was not completed, so it takes the pending status the timed branch uses.
+    expect(summary.status).toBe('Once dry');
+    expect(summary.statusTone).toBe('pending');
+    expect(summary.status).not.toMatch(/complete/i);
     expect(summary.detail).toContain(PETS);
     expect(summary.detail).toContain('We will finish soon.');
     expect(summary.completedLine).toBe('The visit was not completed.');

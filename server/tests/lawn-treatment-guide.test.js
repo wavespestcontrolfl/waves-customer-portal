@@ -582,8 +582,10 @@ describe('guideTakenFindings: the one deliberate reader of the record besides th
   const notes = (cards, v = 1) => JSON.stringify({ lawnTreatmentGuide: { v, cards } });
   const card = (extra = {}) => ({ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [P_ART], ...extra });
 
-  test('a find that was taken: kinds only, never the product ids', () => {
-    expect(guideTakenFindings(notes([card(), card({ kind: 'fungus' }), card({ kind: 'caterpillars' })]))).toEqual([{ kind: 'chinch' }, { kind: 'fungus' }, { kind: 'caterpillars' }]);
+  test('a find that was taken: its kind and the product ids the card named (for the caller to verify)', () => {
+    expect(guideTakenFindings(notes([card(), card({ kind: 'fungus' }), card({ kind: 'caterpillars' })]))).toEqual([
+      { kind: 'chinch', productIds: [P_ART] }, { kind: 'fungus', productIds: [P_ART] }, { kind: 'caterpillars', productIds: [P_ART] },
+    ]);
   });
 
   test('only found AND taken counts; "nothing found", unchecked and not-taken cards do not', () => {
@@ -595,7 +597,7 @@ describe('guideTakenFindings: the one deliberate reader of the record besides th
   });
 
   test('a repeat is one find; a wrong version, a missing block or a malformed one is nothing', () => {
-    expect(guideTakenFindings(notes([card(), card()]))).toEqual([{ kind: 'chinch' }]);
+    expect(guideTakenFindings(notes([card(), card()]))).toEqual([{ kind: 'chinch', productIds: [P_ART] }]);
     expect(guideTakenFindings(notes([card()], 2))).toEqual([]);
     expect(guideTakenFindings('{}')).toEqual([]);
     expect(guideTakenFindings(null)).toEqual([]);
@@ -611,7 +613,7 @@ describe('the record never leaves the technician side', () => {
     entry.isDirectory() ? files(path.join(dir, entry.name)) : (entry.name.endsWith('.js') ? [path.join(dir, entry.name)] : [])));
 
   // The lawn report's finding-to-product tie (GATE_LAWN_REPORT_FACTS) is a second reader, and a deliberate one: it
-  // goes through guideTakenFindings, which hands back kinds only, so the key still has ONE owner.
+  // goes through guideTakenFindings, which hands back kinds and the product ids only, so the key still has ONE owner.
   test('only the guide module names the structured_notes key: no report, public or customer path reads it', () => {
     const readers = [...files('routes'), ...files('services')]
       .filter((file) => file !== path.join('services', 'lawn-treatment-guide.js'))
