@@ -1,0 +1,293 @@
+// client/src/components/tech/FastCompleteAssessmentSheet.jsx
+//
+// Fast Complete for the WAVES ASSESSMENT (GATE_ASSESSMENT_FAST_COMPLETE, owner
+// 2026-10-09): one phone screen instead of the long full form. An assessment is
+// an internal-only consultation (completion_mode 'internal_only'): the server
+// forces delivery off, sends no text and no review ask, refuses products and a
+// rating. So the sheet asks for what the tech has to say and nothing else:
+//
+//   - a talk note, with the mic (the shared VisitNote and its dictation);
+//   - photos, staged on the visit by the photo manager the pest sheet opens and
+//     promoted into the record by the server at completion (no body field);
+//   - how it went (warm, cold or lost, and why when lost) and what is
+//     recommended (the interest chips): the consultation outcome of
+//     ConsultationOutcomeSheet.jsx, whose options and payload builder are
+//     imported from there, never copied;
+//   - the $75 inspection credit toggle, only where the full form shows it.
+//
+// Required before Complete: a note and an outcome pick. Nothing else blocks.
+//
+// ONE write. The read of the visit rides the /complete body as
+// `consultationOutcome` (the payload ConsultationOutcomeSheet's own
+// buildOutcomePayload builds), and the server records it through recordOutcome
+// inside the completion's transaction, under the visit lock it already holds
+// (services/completion-consultation-outcome.js). So the read commits with the
+// completion and rolls back with it: a visit rescheduled or retyped by someone
+// else mid-completion leaves no outcome row behind, and every refusal (a changed
+// visit, a dead status, a reassigned visit) arrives as the completion's own
+// failure. The completion retries under one idempotency key, resending the SAME
+// body, which records the same read again. The only separate request is the
+// read of the recorded outcome that seeds the form.
+//
+// Nothing about the visit is read live: the pest, lawn and tree & shrub sheets
+// open their visit through a context route, and none of them takes an
+// assessment (the pest recap context answers 409 not_pest_control). The visit
+// identity the tech tapped (customer, property, service type, day) goes with
+// the completion as `expectedVisit`, and the server compares it with the locked
+// visit row, so a visit moved or retyped since the schedule loaded is refused
+// (visit_identity_changed) and the tech reopens it.
+import React, { useCallback, useId, useRef, useState } from 'react';
+import useIsMobile from '../../hooks/useIsMobile';
+import useModalFocus from '../../hooks/useModalFocus';
+import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
+import {
+  INTEREST_OPTIONS, LOST_REASON_OPTIONS, OUTCOME_OPTIONS,
+  buildOutcomePayload, formFromRow, readOnlyReason, useRecordedOutcome, validationErrorOf,
+} from '../ConsultationOutcomeSheet';
+import { offersInspectionCredit } from '../../lib/pest-fast-complete';
+import { InspectionCreditToggle, PhotoStripSection, useVisitPhotos } from './FastCompleteReport';
+import {
+  Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, RecoveredCompletion, SavedView, SheetHeader, VisitNote,
+  refusalWithoutContext, submissionHolds, toggleInSet, usePhotoManager,
+} from './FastCompleteParts';
+import TechServicePhotosModal from './TechServicePhotosModal';
+import { ActionFeedback } from '../ui';
+import '../../styles/tech-workflow.css';
+
+// The visit the tech tapped, in the keys the server compares under its row
+// lock (pest-recap.js recapVisitIdentityChanged). A key the row does not carry
+// is left out, so nothing is compared that the sheet never saw; the address is
+// left out too, since the schedule row holds it only as one line of text.
+export function assessmentVisitIdentity(service) {
+  const identity = {
+    customerId: service?.routedCustomerId || undefined,
+    propertyId: service?.routedPropertyId,
+    serviceType: service?.routedServiceType || undefined,
+    scheduledDate: service?.routedScheduledDate || undefined,
+  };
+  return recapVisitIdentity(identity);
+}
+
+// The complete body: what the tech said and nothing the assessment cannot take.
+// `offerCredit` is null when the toggle is not shown, and then the field is not
+// sent at all (the server's default-on applies, as for a hidden toggle on the
+// full form), so a value the tech never saw is never sent.
+export function assessmentCompletionBody({ note, offerCredit, expectedVisit, consultationOutcome }) {
+  return {
+    visitOutcome: 'completed',
+    ...(expectedVisit && Object.keys(expectedVisit).length ? { expectedVisit } : {}),
+    // Null for a consultation that already converted (won): its read stays.
+    ...(consultationOutcome ? { consultationOutcome } : {}),
+    technicianNotes: String(note || '').trim(),
+    ...(offerCredit === true || offerCredit === false ? { offerInspectionCredit: offerCredit } : {}),
+    sendCompletionSms: false,
+    requestReview: false,
+  };
+}
+
+export default function FastCompleteAssessmentSheet({ service, request, operatorId, onClose, onCompleted, onFullForm }) {
+  const isMobile = useIsMobile();
+  const closeRef = useRef(null);
+  const dialogRef = useModalFocus(true, () => closeRef.current?.());
+  useLockBodyScroll(true);
+  const titleId = useId();
+  const base = `/admin/dispatch/${service?.id}`;
+  const recorded = useRecordedOutcome(service?.id, request);
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
+  const { submitting, done } = submission;
+  const photoManager = usePhotoManager();
+  // A recorded dictation clip still being taken or transcribed: the full form
+  // carries nothing over, so Full form waits for it, like Complete.
+  const [dictationPending, setDictationPending] = useState(false);
+
+  const close = useCallback(() => {
+    if (submitting) return;
+    // The completion response rides along: admin Dispatch reads it for its bookkeeping.
+    if (done) onCompleted?.(done.response || null);
+    // A refused or unknown completion, or a recorded read that could not be loaded
+    // (the visit may have been reassigned or changed), leaves the schedule row stale.
+    else onClose?.(submission.failure || recorded.error ? { refresh: true } : undefined);
+  }, [submitting, done, submission.failure, recorded.error, onClose, onCompleted]);
+  closeRef.current = close;
+  // Nothing is editable while a save is in flight, unresolved or refused for
+  // good; the full form cannot resume a /complete attempt.
+  const locked = submissionHolds(submission);
+
+  return (
+    <FastCompleteFrame
+      isMobile={isMobile}
+      dialogRef={dialogRef}
+      titleId={titleId}
+      onDismiss={close}
+      hiddenProps={photoManager.hiddenProps}
+      overlay={photoManager.isOpen && (
+        <TechServicePhotosModal serviceId={service?.id} customerName={service?.customerName} onClose={photoManager.close} />
+      )}
+    >
+      <SheetHeader
+        titleId={titleId}
+        title={done ? 'Assessment complete' : 'Complete assessment'}
+        service={service}
+        visit={null}
+        done={!!done}
+        locked={locked}
+        dictationPending={dictationPending}
+        submitting={submitting}
+        onFullForm={onFullForm}
+        onClose={close}
+      />
+      <SheetBody
+        service={service}
+        request={request}
+        recorded={recorded}
+        submission={submission}
+        locked={locked}
+        photos={photoManager}
+        dictationPending={dictationPending}
+        onDictationPending={setDictationPending}
+        onCompleted={onCompleted}
+      />
+    </FastCompleteFrame>
+  );
+}
+
+function SheetBody({ service, request, recorded, submission, locked, photos, dictationPending, onDictationPending, onCompleted }) {
+  if (submission.done) {
+    return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+  }
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  const noContext = { loading: recorded.loading, loadError: recorded.error, blockedReason: '' };
+  const refusal = refusalWithoutContext(submission, noContext);
+  if (refusal) return refusal;
+  if (recorded.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
+  if (recorded.error) {
+    return <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{`${recorded.error} — close and reopen this visit, or use Full form.`}</ActionFeedback>;
+  }
+  return (
+    <AssessmentForm
+      service={service}
+      request={request}
+      row={recorded.row}
+      submission={submission}
+      locked={locked}
+      photos={photos}
+      dictationPending={dictationPending}
+      onDictationPending={onDictationPending}
+    />
+  );
+}
+
+function AssessmentForm({ service, request, row, submission, locked, photos, dictationPending, onDictationPending }) {
+  // The outcome form starts from the recorded read (a tech who completes
+  // again, or the office, may have recorded one already), so a soft quote or a
+  // follow-up date saved earlier rides through the upsert unchanged.
+  const [outcomeForm, setOutcomeForm] = useState(() => formFromRow(row));
+  const [note, setNote] = useState('');
+  // The credit toggle: shown exactly where the full form shows it (an
+  // inspection profile, the credit lane live, the profile read answered).
+  const creditShown = offersInspectionCredit(service) && service?.completionProfileLookupFailed !== true;
+  const [offerCredit, setOfferCredit] = useState(true);
+  const visitPhotos = useVisitPhotos({ serviceId: service?.id, request, version: photos.version });
+
+  // A won consultation (the sale closed first) keeps its read: the sheet shows
+  // it and writes nothing.
+  const locksOutcome = readOnlyReason(row);
+  const setOutcome = (patch) => setOutcomeForm((prev) => ({ ...prev, ...patch }));
+  const appendNote = useCallback((text) => {
+    setNote((prev) => (prev.trim() ? `${prev.trimEnd()} ${text}` : text));
+  }, []);
+
+  const missingReason = (() => {
+    if (dictationPending) return 'Finish dictating before you complete.';
+    if (!note.trim()) return 'Tell me about the visit.';
+    return locksOutcome ? '' : validationErrorOf(outcomeForm) || '';
+  })();
+
+  const submit = () => {
+    // A held completion (a retry) resends as it is.
+    if (submission.hasPendingBody()) {
+      submission.retry();
+      return;
+    }
+    if (missingReason) return;
+    submission.submit(
+      () => assessmentCompletionBody({
+        note,
+        offerCredit: creditShown ? offerCredit : null,
+        expectedVisit: assessmentVisitIdentity(service),
+        consultationOutcome: locksOutcome ? null : buildOutcomePayload(outcomeForm, { followUpTouched: false, loadedRow: row }),
+      }),
+      `Assessment · ${locksOutcome ? 'won' : outcomeForm.outcome}`,
+    );
+  };
+
+  const formLocked = locked || dictationPending;
+
+  return (
+    <div className="tech-visit-form-area">
+      <div className="tech-visit-body">
+        <fieldset className="tech-visit-form" disabled={locked}>
+          <VisitNote note={note} onChange={setNote} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
+          <PhotoStripSection photos={visitPhotos.photos} locked={formLocked} onOpen={photos.open} />
+          {locksOutcome ? (
+            <section className="tech-visit-choice-section">
+              <div className="tech-visit-section-head">
+                <h3 className="tech-visit-section-title">How did it go</h3>
+              </div>
+              <p className="tech-visit-muted" role="status">{locksOutcome}</p>
+            </section>
+          ) : (
+            <>
+              <ChoiceSection title="How did it go" columns={3}>
+                {OUTCOME_OPTIONS.map((option) => (
+                  <Chip
+                    key={option.value}
+                    disabled={locked}
+                    label={option.label}
+                    pressed={outcomeForm.outcome === option.value}
+                    onClick={() => setOutcome({ outcome: option.value })}
+                  />
+                ))}
+              </ChoiceSection>
+              {outcomeForm.outcome === 'lost' && (
+                <ChoiceSection title="Why" columns={3}>
+                  {LOST_REASON_OPTIONS.map((option) => (
+                    <Chip
+                      key={option.value}
+                      disabled={locked}
+                      label={option.label}
+                      pressed={outcomeForm.lostReason === option.value}
+                      onClick={() => setOutcome({ lostReason: option.value })}
+                    />
+                  ))}
+                </ChoiceSection>
+              )}
+              <ChoiceSection title="Recommended" columns={2}>
+                {INTEREST_OPTIONS.map((option) => (
+                  <Chip
+                    key={option.value}
+                    disabled={locked}
+                    label={option.label}
+                    pressed={outcomeForm.interests.includes(option.value)}
+                    onClick={() => setOutcome({ interests: [...toggleInSet(new Set(outcomeForm.interests), option.value)] })}
+                  />
+                ))}
+              </ChoiceSection>
+            </>
+          )}
+          {creditShown && <InspectionCreditToggle checked={offerCredit} locked={locked} onChange={setOfferCredit} />}
+        </fieldset>
+        {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
+      </div>
+      <CompleteFooter
+        submission={submission}
+        missingReason={missingReason}
+        label="Complete assessment"
+        onSubmit={submit}
+      />
+    </div>
+  );
+}
