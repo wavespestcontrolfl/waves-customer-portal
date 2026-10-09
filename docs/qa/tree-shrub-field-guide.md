@@ -119,6 +119,14 @@ gal for hard and soft scales and whiteflies, 4 applications a year, 7 days
 between applications, 25.3 fl oz per acre per application, 92.5 fl oz per acre
 per year. It has no catalog row yet, so Fast Complete never suggests it.
 
+Zylam Liquid (PBI-Gordon, EPA 2217-937) now lists the soil-drench dose beside the
+foliar rate: 0.18 to 0.4 fl oz per foot of plant height, for single shrubs and
+sagos. A sago is measured from the soil to the frond tip, never by trunk
+diameter (3 to 5 times the dose), and a hedge is never drenched. The yearly limit
+is 78.9 fl oz per acre, or 1.81 fl oz per 1,000 sq ft of bed area (Waves' reading),
+sprays and drenches together. The per-foot dose is a rate row only: the tank
+calculator still uses the foliar per-gallon range.
+
 ## Program text changes (2026-10-09)
 
 Technician-facing text only; no gate, migration or price change. TriTek oil and
