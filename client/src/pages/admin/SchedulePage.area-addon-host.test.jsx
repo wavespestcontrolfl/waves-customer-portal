@@ -170,10 +170,14 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
   });
 
   it("the completion asks for an add-on row's rate, unit and treated square feet before it submits, except on an incomplete visit", () => {
-    const check = pageSource.indexOf("addOnActualsProblem(service, selectedProducts)");
-    expect(check).toBeGreaterThan(pageSource.indexOf("alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);"));
-    expect(check).toBeLessThan(pageSource.indexOf("setSubmitting(true);", check));
-    expect(pageSource.slice(check - 40, check)).toContain("isIncompleteVisit ? null :");
+    const call = pageSource.indexOf("completionProductRowProblem(service, selectedProducts, typeFor)");
+    expect(call).toBeGreaterThan(0);
+    expect(pageSource.slice(call - 60, call)).toContain("isIncompleteVisit ? null :");
+    expect(pageSource.indexOf("setSubmitting(true);", call) - call).toBeLessThan(300);
+    // the one helper: the method's treated-area rule first (unchanged sentence), then the add-on row's actuals
+    const helper = pageSource.slice(pageSource.indexOf("function completionProductRowProblem("), pageSource.indexOf("function productApplicationMethod("));
+    expect(helper).toContain("`Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.`");
+    expect(helper).toContain("addOnActualsProblem(service, rows)");
   });
 
   it("the completion body sends both rows: the host's untagged, the add-on's tagged (one row each, never merged)", () => {

@@ -10470,6 +10470,20 @@ function effectiveApplicationMethod(method) {
   return normalizeApplicationMethod(method) || "perimeter_spray";
 }
 
+// The first product row of a completion that cannot be saved yet, as the sentence to show, or null: a row whose method
+// needs a treated area that is missing, and a row recorded for a chemical area add-on without its rate, unit, treated square
+// feet or amount (the server refuses it too, the row being that add-on's application record). `typeFor` is the row's service type.
+function completionProductRowProblem(service, rows, typeFor) {
+  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p));
+  const missingArea = rows.find((p) => {
+    const requirement = areaOf(p);
+    if (!requirement) return false;
+    const value = Number(p.areaValue);
+    return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
+  });
+  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : addOnActualsProblem(service, rows);
+}
+
 function productApplicationMethod(product = {}, serviceType = "") {
   if (product.lawnPlanDefaults && product.applicationMethod === "") return "";
   return normalizeApplicationMethod(product.applicationMethod) ||
@@ -18531,28 +18545,9 @@ export function CompletionPanel({
         return;
       }
     }
-      const missingRequiredAreaProduct = selectedProducts.find((p) => {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, typeFor(p)),
-          typeFor(p),
-        );
-      if (!areaRequirement) return false;
-      const value = Number(p.areaValue);
-      return !Number.isFinite(value) || value <= 0 || p.areaUnit !== areaRequirement.unit;
-    });
-    if (!isIncompleteVisit && missingRequiredAreaProduct) {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(missingRequiredAreaProduct, typeFor(missingRequiredAreaProduct)),
-          typeFor(missingRequiredAreaProduct),
-        );
-      alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
-      return;
-    }
-    // A row recorded for a chemical area add-on is that add-on's application record: the server refuses it without
-    // its rate, treated square feet and amount, so ask here first (the same on the desktop and the mobile form).
-    const addOnActualsMessage = isIncompleteVisit ? null : addOnActualsProblem(service, selectedProducts);
-    if (addOnActualsMessage) {
-      alert(addOnActualsMessage);
+    const productRowProblem = isIncompleteVisit ? null : completionProductRowProblem(service, selectedProducts, typeFor);
+    if (productRowProblem) {
+      alert(productRowProblem);
       return;
     }
     setSubmitting(true);

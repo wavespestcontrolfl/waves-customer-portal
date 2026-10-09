@@ -524,12 +524,12 @@ describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_AD
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
     const refusal = route.indexOf('recurringAreaAddOnRefusalBody(estimate,');
-    expect(refusal).toBeGreaterThan(route.indexOf('const treatAsOneTime'));
+    expect(refusal).toBeGreaterThan(route.indexOf('const serviceMode = resolveSlotServiceMode('));
     // Before the contact check, the policy, the replace and the mint: nothing reaches Stripe first.
     for (const later of ['resolveRecurringCardPolicyForEstimate', 'replaceRecurringCardIntent({', 'createRecurringCardSetupIntentForEstimate(estimate)']) {
       expect(route.indexOf(later)).toBeGreaterThan(refusal);
     }
-    expect(route.slice(refusal, refusal + 500)).toContain("{ retireSetupIntentId: replaceSetupIntentId || null }");
+    expect(route.slice(refusal, refusal + 500)).toContain('{ retireSetupIntentId: replaceSetupIntentId }');
   });
 
   test('a one-time-mode request is not refused by the rule, and an estimate with no add-on is untouched by it', async () => {

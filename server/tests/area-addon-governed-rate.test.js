@@ -174,7 +174,8 @@ describe('a row tagged to a chemical add-on must carry its application actuals',
   const tagOf = (p, key = ARENA) => new Map([[governed.productRowKey(p), key]]);
   const names = fakeKnex({ services: [{ service_key: ARENA, name: 'Lawn Insect Spot Treatment' }] });
   const full = (over = {}) => ({ productId: 'p-arena', name: 'Arena 50 WDG', areaAddOnKey: ARENA, rate: '0.147', rateUnit: 'oz', areaValue: '2000', areaUnit: 'sqft', ...over });
-  const check = (p, key) => governed.requireAddOnActuals(names, [p], tagOf(p, key));
+  // The refusal is a thrown operational 400 (the completion's other post-claim refusals are thrown the same way); null when the row passes.
+  const check = (p, key, opts) => governed.requireAddOnActuals(names, [p], tagOf(p, key), opts).then(() => null, (err) => err);
 
   test('a row with every actual passes, and a missing total is filled from the rate and the area', async () => {
     const p = full();
@@ -204,45 +205,51 @@ describe('a row tagged to a chemical add-on must carry its application actuals',
     ['an area with no unit', { areaUnit: undefined }, 'treated square feet'],
   ])('%s is a 400 naming the add-on and the field', async (_label, over, field) => {
     const out = await check(full(over));
-    expect(out).toMatchObject({ code: 'area_addon_actuals_required', addOnKey: ARENA });
-    expect(out.error).toBe(`Lawn Insect Spot Treatment add-on: enter the ${field} for Arena 50 WDG, then complete the visit.`);
+    expect(out).toMatchObject({ statusCode: 400, isOperational: true, code: 'area_addon_actuals_required', addOnKey: ARENA });
+    expect(out.message).toBe(`Lawn Insect Spot Treatment add-on: enter the ${field} for Arena 50 WDG, then complete the visit.`);
   });
 
   test('every missing field is named, and a mix-concentration rate with no total asks for the total', async () => {
-    expect((await check(full({ rate: '', areaValue: '' }))).error).toBe('Lawn Insect Spot Treatment add-on: enter the application rate and treated square feet for Arena 50 WDG, then complete the visit.');
+    expect((await check(full({ rate: '', areaValue: '' }))).message).toBe('Lawn Insect Spot Treatment add-on: enter the application rate and treated square feet for Arena 50 WDG, then complete the visit.');
     // oz/gal has no area to multiply by: the total must come from the technician.
-    expect((await check(full({ rateUnit: 'oz/gal' }))).error).toBe('Lawn Insect Spot Treatment add-on: enter the total amount for Arena 50 WDG, then complete the visit.');
+    expect((await check(full({ rateUnit: 'oz/gal' }))).message).toBe('Lawn Insect Spot Treatment add-on: enter the total amount for Arena 50 WDG, then complete the visit.');
     expect(await check(full({ rateUnit: 'oz/gal', totalAmount: 4 }))).toBeNull();
   });
 
   test('an untagged row, a row the visit does not carry, and an ordinary completion are not checked and run no query', async () => {
     const never = () => { throw new Error('must not query'); };
     const bare = { productId: 'p', rate: '', areaValue: '' };
-    expect(await governed.requireAddOnActuals(never, [bare], new Map())).toBeNull();
-    expect(await governed.requireAddOnActuals(never, [bare], tagOf({ productId: 'other' }))).toBeNull();
-    expect(await governed.requireAddOnActuals(never, undefined, tagOf(bare))).toBeNull();
-    expect(await governed.requireAddOnActuals(never, [full()], new Map())).toBeNull();
+    const run = (...args) => governed.requireAddOnActuals(never, ...args).then(() => null, (err) => err);
+    expect(await run([bare], new Map())).toBeNull();
+    expect(await run([bare], tagOf({ productId: 'other' }))).toBeNull();
+    expect(await run(undefined, tagOf(bare))).toBeNull();
+    expect(await run([full()], new Map())).toBeNull();
+    // A replay or resume of a committed completion, and an incomplete visit, are not checked (the row below would be refused).
+    const empty = full({ rate: '' });
+    expect(await run([empty], tagOf(empty), { fresh: false })).toBeNull();
+    expect(await run([empty], tagOf(empty), { incomplete: true })).toBeNull();
   });
 
   test('the host\'s untagged row of the same product is not an add-on row', async () => {
     const host = { productId: 'p-snap', rate: '', areaValue: '' };
     const addOn = { productId: 'p-snap', areaAddOnKey: SNAP, name: 'Snapshot 2.5TG', rate: 3.45, rateUnit: 'lb', areaValue: 1000, areaUnit: 'sqft' };
-    expect(await governed.requireAddOnActuals(names, [host, addOn], tagOf(addOn, SNAP))).toBeNull();
+    expect(await governed.requireAddOnActuals(names, [host, addOn], tagOf(addOn, SNAP))).toBeUndefined();
     expect(host.totalAmount).toBeUndefined();
     expect(addOn.totalAmount).toBe(3.45);
   });
 
   test('a failed name lookup still names the add-on', async () => {
-    const out = await governed.requireAddOnActuals(fakeKnex({ services: new Error('offline') }), [full({ rate: '' })], tagOf(full()));
-    expect(out.error).toBe('Lawn Insect Spot add-on: enter the application rate for Arena 50 WDG, then complete the visit.');
+    const out = await governed.requireAddOnActuals(fakeKnex({ services: new Error('offline') }), [full({ rate: '' })], tagOf(full())).catch((err) => err);
+    expect(out.message).toBe('Lawn Insect Spot add-on: enter the application rate for Arena 50 WDG, then complete the visit.');
   });
 
-  test('the completion refuses a fresh closeout before any write, skips an incomplete visit, and the office alert reads the new finding', () => {
+  test('the completion refuses a fresh closeout before any write, and the office alert reads the new finding', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
-    const refuse = src.indexOf('await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags)');
+    const refuse = src.indexOf("await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });");
     expect(refuse).toBeGreaterThan(src.indexOf('areaAddOnGovernedRate.resolveApplicationAddOnTags(db, svc, products)'));
+    // before the inventory preflight and the insert read the amount it fills in
+    expect(refuse).toBeLessThan(src.indexOf('await actualProductInventoryBlocks(products, db)'));
     expect(refuse).toBeLessThan(src.indexOf('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);'));
-    expect(src.slice(refuse - 120, refuse)).toContain("claim.action === 'proceed' && !isIncompleteVisit");
     expect(src).toContain('[areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: areaAddOnGovernedRate.uncheckedRateSentence');
   });
 });

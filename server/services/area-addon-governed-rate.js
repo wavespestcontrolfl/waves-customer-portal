@@ -310,6 +310,18 @@ function impliedTotal(p) {
   return { amount: Math.round(Number(p.rate) * (Number(p.areaValue) / parts.sqft) * 10000) / 10000, unit: parts.base };
 }
 
+// The fields a tagged row still lacks, in the order the form shows them; a total amount the client did not send is filled in
+// from the rate and the area (and "total amount" is a missing field when the unit has no area to multiply by).
+function completeActuals(p) {
+  const missing = missingActuals(p);
+  if (missing.length || positive(p.totalAmount)) return missing;
+  const total = impliedTotal(p);
+  if (!total) return ['total amount'];
+  p.totalAmount = total.amount;
+  p.amountUnit = total.unit;
+  return missing;
+}
+
 async function addOnDisplayNames(knex, keys) {
   const names = new Map(keys.map((key) => [key, humanize(key)]));
   try {
@@ -320,33 +332,22 @@ async function addOnDisplayNames(knex, keys) {
 }
 
 /**
- * Checks the tagged rows of a fresh completion and fills each one's total amount. Returns null when every tagged row
- * carries its actuals, else `{ error, code }` for the 400 naming the first add-on and the fields it lacks. `tags` is
- * resolveApplicationAddOnTags' map. Mutates the submitted row (`totalAmount`, `amountUnit`) only when the client sent
- * no total, so the inventory check, the N budget and the deduction all read the same amount. No tag, no check, no query.
+ * Checks the tagged rows of a fresh completion and fills each one's total amount. Throws the 400 (an operational error,
+ * code `area_addon_actuals_required`) naming the first add-on and the fields it lacks when a tagged row does not carry its
+ * actuals; returns nothing otherwise. `tags` is resolveApplicationAddOnTags' map. Mutates the submitted row (`totalAmount`,
+ * `amountUnit`) only when the client sent no total, so the inventory check, the N budget and the deduction all read the same
+ * amount. Not a fresh execution (a replay or resume of a committed completion), an incomplete visit, no tag: nothing is checked
+ * and no query runs.
  */
-async function requireAddOnActuals(knex, products, tags) {
-  if (!tags?.size || !Array.isArray(products)) return null;
-  const problems = [];
-  for (const p of products) {
-    const tag = p && p.productId ? tags.get(productRowKey(p)) : null;
-    if (!tag) continue;
-    const missing = missingActuals(p);
-    const total = missing.length ? null : impliedTotal(p);
-    if (!missing.length && !positive(p.totalAmount) && !total) missing.push('total amount');
-    if (missing.length) problems.push({ tag, p, missing });
-    else if (!positive(p.totalAmount)) { p.totalAmount = total.amount; p.amountUnit = total.unit; }
-  }
-  if (!problems.length) return null;
-  const { tag, p, missing } = problems[0];
-  const names = await addOnDisplayNames(knex, [tag]);
-  const product = p.name || 'the product';
-  return {
-    error: `${names.get(tag)} add-on: enter the ${missing.join(' and ')} for ${product}, then complete the visit.`,
-    code: ACTUALS_CODE,
-    addOnKey: tag,
-    missing,
-  };
+async function requireAddOnActuals(knex, products, tags, { fresh = true, incomplete = false } = {}) {
+  if (!fresh || incomplete || !tags?.size || !Array.isArray(products)) return;
+  const rows = products.filter((p) => p && p.productId && tags.has(productRowKey(p)));
+  const problem = rows.map((p) => ({ p, tag: tags.get(productRowKey(p)), missing: completeActuals(p) })).find((row) => row.missing.length);
+  if (!problem) return;
+  const names = await addOnDisplayNames(knex, [problem.tag]);
+  throw Object.assign(new Error(`${names.get(problem.tag)} add-on: enter the ${problem.missing.join(' and ')} for ${problem.p.name || 'the product'}, then complete the visit.`), {
+    statusCode: 400, isOperational: true, code: ACTUALS_CODE, addOnKey: problem.tag, missing: problem.missing,
+  });
 }
 
 /**
