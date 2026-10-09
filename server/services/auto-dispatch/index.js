@@ -632,8 +632,10 @@ async function flagMissingGeo(service) {
       refreshOnDedupe: true,
       metadata: { scheduledServiceId: service.id, customerId: service.customer_id, scheduledDate: date },
     });
+    return true;
   } catch (err) {
     logger.warn(`[auto-dispatch] missing-geo notice failed for ${service && service.id}: ${err.message}`);
+    return false;
   }
 }
 
@@ -730,8 +732,9 @@ async function raiseMissingGeoNotices(run) {
       const isStanding = standing.has(audit.missingGeoKey(row));
       if (!isStanding && left <= 0) continue;
       if (!(await missingGeoNoticeWanted(row))) { run.pinOkIds.add(String(row.id)); continue; }
-      await flagMissingGeo(row);
-      if (!isStanding) left -= 1;
+      // A failed write rang nothing and spends no slot (r13 P2).
+      const raised = await flagMissingGeo(row);
+      if (raised && !isStanding) left -= 1;
     }
   } catch (err) {
     logger.error(`[auto-dispatch] missing-geo notices failed: ${err.message}`);

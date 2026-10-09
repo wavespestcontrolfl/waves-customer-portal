@@ -442,7 +442,16 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
   }, nowDate);
   const today = etDateString(nowDate);
   const noWindowEnd = etDateString(addETDays(nowDate, NO_WINDOW_HORIZON_DAYS));
-  const noWindowRows = await prepareNoWindowNotices(nowDate, today, noWindowEnd);
+  // The no-window lane must not take the due-date lane down with it: a
+  // failure here is held until the time-critical due-date notices below are
+  // out, then thrown so the run still reports it (Codex #6208 r13 P2).
+  let noWindowRows = [];
+  let noWindowError = null;
+  try {
+    noWindowRows = await prepareNoWindowNotices(nowDate, today, noWindowEnd);
+  } catch (err) {
+    noWindowError = err;
+  }
   const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
   const rows = await db('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
@@ -490,6 +499,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     });
     if (notice) flagged += 1;
   }
+  if (noWindowError) throw noWindowError;
   return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
 }
 

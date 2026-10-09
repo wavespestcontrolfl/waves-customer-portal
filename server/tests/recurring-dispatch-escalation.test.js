@@ -259,6 +259,17 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(keys).toContain('recurring-no-window:n10:2026-08-20');
   });
 
+  // A failed no-window read must not stop the due-date notices; the failure
+  // is thrown after they are out (Codex #6208 r13 P2).
+  test('a no-window read failure still raises the due-date notices, then throws', async () => {
+    query.select = jest.fn()
+      .mockRejectedValueOnce(new Error('no-window scan timed out'))
+      .mockResolvedValueOnce([{ id: 'd1', customer_id: 'c1', recurring_dispatch_due_date: '2026-08-03' }]);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice1' });
+    await expect(flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'))).rejects.toThrow('no-window scan timed out');
+    expect(notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['recurring-dispatch:d1:2026-08-03']);
+  });
+
   test('rings at most 10 new notices a run, soonest date first; the rest wait for the next run', async () => {
     const rows = Array.from({ length: 11 }, (_, i) => ({
       id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(30 - i).padStart(2, '0')}`,
