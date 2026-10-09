@@ -388,7 +388,17 @@ class AgentDispatcher {
         // agent_did_not_emit_draft even though the agent was about to
         // continue. Only end_turn (handled below) is the real terminal.
         if (isSessionTerminal(event, data)) return;
-        if (isBudgetReached(data)) throw Object.assign(new Error(`session ${sessionId} reached its spend cap`), { code: 'budget_exhausted' });
+        if (isBudgetReached(data)) {
+          // The cap is checked between model requests, so the request that
+          // crossed it can be the one that emitted the draft. A captured
+          // draft ships, like the cut-off wind-down below; the session is
+          // already paused, so there is nothing to interrupt.
+          if (getDraft(sessionId)) {
+            logger.warn(`[agent-dispatcher] session ${sessionId} reached its spend cap after the draft was captured`);
+            return undefined;
+          }
+          throw Object.assign(new Error(`session ${sessionId} reached its spend cap`), { code: 'budget_exhausted' });
+        }
         if (isSessionError(event)) {
           // Don't mask infrastructure failures as a content-quality
           // outcome — throw so runWithBrief surfaces streaming_failed

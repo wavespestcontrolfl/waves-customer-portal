@@ -134,6 +134,21 @@ describe('agent dispatcher — a captured draft leaves on the terminal event', (
     expect(drafts.get('sess-draft-slow')).toEqual({ body: 'x' });
   });
 
+  const AT_CAP = { event: 'session.status_idle', data: { stop_reason: { type: 'budget_reached' } } };
+
+  it('the spend cap reached after the draft keeps the draft: resolves, not budget_exhausted', async () => {
+    global.fetch = fetchFor([TOOL_USE, AT_CAP]);
+    const dispatcher = loadWithSink();
+    await expect(dispatcher._streamAndExecute('sess-draft-cap', 5_000)).resolves.toBeUndefined();
+    expect(drafts.get('sess-draft-cap')).toEqual({ body: 'x' });
+  });
+
+  it('the spend cap reached with no draft is budget_exhausted', async () => {
+    global.fetch = fetchFor([{ event: 'assistant', data: { text: 'researching' } }, AT_CAP]);
+    const err = await loadWithSink()._streamAndExecute('sess-cap', 5_000).catch((e) => e);
+    expect(err.code).toBe('budget_exhausted');
+  });
+
   it('without a draft the same EOF / deadline still fail (the r7 / r11 contracts hold)', async () => {
     global.fetch = fetchFor([{ event: 'assistant', data: { text: 'no sink' } }]);
     const err = await loadWithSink()._streamAndExecute('sess-nodraft', 5_000).catch((e) => e);
