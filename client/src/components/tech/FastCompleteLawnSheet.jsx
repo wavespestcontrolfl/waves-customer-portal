@@ -993,7 +993,8 @@ function footerFor({ barAction, missingReason, submission, submit }) {
   const complete = { missingReason, reasonInButton: LABEL_REASONS.has(missingReason), label: 'Complete service', onSubmit: submit };
   if (!barAction || !missingReason || submission.failure || submission.retryPending) return complete;
   if (barAction.disabled) return { ...complete, missingReason: barAction.label, reasonInButton: true };
-  return { missingReason: null, reasonInButton: false, label: barAction.label, onSubmit: barAction.onClick };
+  // The bar's own step (Analyze, Confirm, ...), not the completion: never relabelled as a save.
+  return { missingReason: null, reasonInButton: false, label: barAction.label, onSubmit: barAction.onClick, isAction: true };
 }
 
 function barActionFor({ missingReason, dictationPending, progress, block }) {
@@ -1561,13 +1562,17 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const missingReason = missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const buildBody = () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap });
+  // Prepare mode: a part is prepared only while it could be prepared right now, exactly when nothing is missing
+  // (the Complete button; the confirmed assessment, a product, the areas and stock are all in missingReason).
+  const canPrepare = !missingReason;
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
-    submission.submit(buildBody, [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '));
+    submission.submit(buildBody, [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '), { valid: canPrepare });
   };
-  // A part of a stop (prepare mode): a change behind the handed-over body revokes it.
-  useEffect(() => { submission.revokeIfChanged(buildBody); });
+  // A part of a stop (prepare mode): a change behind the handed-over body, or a part that can no longer be prepared
+  // (an unconfirmed assessment after an edit), revokes it.
+  useEffect(() => { submission.revokeIfChanged(buildBody, { valid: canPrepare }); });
   // The tracer opens over the sheet, as the pest sheet's does.
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal

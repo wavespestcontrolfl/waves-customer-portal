@@ -229,4 +229,56 @@ describe('prepare mode', () => {
     expect(view.result.current.error).toBe('');
     expect(slowState.calls.length).toBeLessThanOrEqual(2);
   });
+
+  test('prepare refuses when the part is not valid, and a valid:false check revokes even with the same body', async () => {
+    const onPrepared = vi.fn();
+    const view = mount({ onPrepared });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ a: 1 }), 's', { valid: false }); });
+    expect(onPrepared).not.toHaveBeenCalled();
+    expect(view.result.current.error).toBe('This visit cannot be part of a combined stop. Use the full form.');
+    expect(view.result.current.prepared).toBeNull();
+    await act(async () => { await view.result.current.submit(() => ({ a: 1 }), 's', { valid: true }); });
+    expect(view.result.current.prepared).not.toBeNull();
+    onPrepared.mockClear();
+    act(() => view.result.current.revokeIfChanged(() => ({ a: 1 }), { valid: true }));
+    expect(view.result.current.prepared).not.toBeNull();
+    act(() => view.result.current.revokeIfChanged(() => ({ a: 1 }), { valid: false }));
+    await waitFor(() => expect(view.result.current.prepared).toBeNull());
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null, expect.any(Number));
+  });
+
+  test('switching a mounted sheet into prepare mode clears a restored saved attempt, and Retry can never POST /complete', async () => {
+    await putFastCompletionAttempt('svc-a', 'op-a', { body: { idempotencyKey: 'old-key', technicianNotes: 'older send' }, summary: 's' });
+    const request = vi.fn(async () => ({ success: true }));
+    const base = { base: '/admin/dispatch/svc-a', request, serviceId: 'svc-a', operatorId: 'op-a' };
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: base });
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    expect(view.result.current.hasPendingBody()).toBe(true);
+    view.rerender({ ...base, onPrepared: vi.fn() });
+    await waitFor(() => expect(view.result.current.restored).toBe(false));
+    expect(view.result.current.hasPendingBody()).toBe(false);
+    expect(view.result.current.failure).toBeNull();
+    await act(async () => { await view.result.current.retry(); await view.result.current.confirm(); });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  test('switching out of prepare mode drops the prepared state and hydrates a saved attempt', async () => {
+    const onPrepared = vi.fn();
+    const request = vi.fn(async () => ({}));
+    const base = { base: '/admin/dispatch/svc-a', request, serviceId: 'svc-a', operatorId: 'op-a' };
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: { ...base, onPrepared } });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ a: 1 }), 's'); });
+    expect(view.result.current.prepared).not.toBeNull();
+    await putFastCompletionAttempt('svc-a', 'op-a', { body: { idempotencyKey: 'saved-key', technicianNotes: 'saved' }, summary: 's' });
+    view.rerender(base);
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    expect(view.result.current.prepared).toBeNull();
+    expect(view.result.current.preparing).toBe(false);
+    // The stale prepared signature is gone: nothing is revoked or sent by a check.
+    act(() => view.result.current.revokeIfChanged(() => ({ a: 2 })));
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+  });
 });

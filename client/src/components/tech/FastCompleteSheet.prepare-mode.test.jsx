@@ -151,6 +151,45 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(request.calls.filter((call) => call.path.split('?')[0].endsWith('/pest-recap/context')).length).toBe(reads || 1);
   });
 
+  test('a changed shared note after the handoff makes the report stale: revoked, the container told, Generate needed again', async () => {
+    const onPrepared = vi.fn();
+    const request = makeRequest();
+    const element = (note) => <FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} onPrepared={onPrepared} sharedNote={note} />;
+    const { rerender } = render(element(NOTE));
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    await generate({ type: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Save for this stop' }));
+    await screen.findByText('Saved for this stop');
+    rerender(element(`${NOTE} A wasp nest by the garage.`));
+    await waitFor(() => expect(onPrepared).toHaveBeenCalledTimes(2));
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-1', null, expect.any(Number));
+    expect(screen.queryByText('Saved for this stop')).toBeNull();
+    expect(screen.queryByRole('button', { name: /this stop/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Write it again' })).toBeTruthy();
+  });
+
+  test('a re-service in the report flow cannot be prepared: the message shows and the container is never given a body', async () => {
+    const onPrepared = vi.fn();
+    const reservice = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' };
+    const request = makeRequest({ service: reservice });
+    await openSheet(request, { onPrepared, sharedNote: NOTE }, { ...SERVICE, serviceType: 'Pest Control Re-Service' });
+    await generate({ type: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Save for this stop' }));
+    await screen.findByText('This visit cannot be part of a combined stop. Use the full form.');
+    expect(onPrepared).not.toHaveBeenCalled();
+    expect(request.bodies('/complete')).toHaveLength(0);
+  });
+
+  test('a callback in the report flow cannot be prepared either', async () => {
+    const onPrepared = vi.fn();
+    const request = makeRequest({ service: { ...REGULAR, isCallback: true } });
+    await openSheet(request, { onPrepared, sharedNote: NOTE });
+    await generate({ type: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Save for this stop' }));
+    await screen.findByText('This visit cannot be part of a combined stop. Use the full form.');
+    expect(onPrepared).not.toHaveBeenCalled();
+  });
+
   test('a visit that is not the plain pest report flow refuses to prepare and never posts', async () => {
     const onPrepared = vi.fn();
     const request = makeRequest({ service: { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' } });

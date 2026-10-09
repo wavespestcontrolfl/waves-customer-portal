@@ -57,6 +57,11 @@
 //   - A returned promise that rejects (or a throw) means "not applied": the part stays not prepared, and shows
 //     "Could not update this stop. Try again." until a later call succeeds. A failed revocation is not swallowed.
 //   - A part that is switched away from (another service) is no longer called; a late settle touches nothing.
+// A part is prepared only while the sheet could prepare it right now: each sheet passes `{ valid }` (the same boolean
+// that enables its "Save for this stop" button) with its body builder. prepare() refuses when valid is false, and
+// revokeIfChanged revokes when the body differs OR valid is false (a stale report, an unconfirmed assessment, a
+// re-service). Prepare mode is part of the scope: switching a mounted sheet into or out of it resets recovery,
+// hydration, the signature and the queue as a service change does, and nothing in prepare mode can reach /complete.
 // Without onPrepared the hook is exactly as above.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { shouldResetCompletionIdempotencyKey } from '../lib/completion-idempotency';
@@ -70,6 +75,7 @@ import {
 // One counter for the whole page, so a seq only increases across parts and across remounts of the same part.
 let preparedSeq = 0;
 const UNPREPARE_FAILED = 'Could not update this stop. Try again.';
+export const PREPARE_REFUSAL = 'This visit cannot be part of a combined stop. Use the full form.';
 
 const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch']);
 const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
@@ -258,7 +264,7 @@ export default function useFastCompleteSubmit({
       setRecovering(false);
     });
     return () => { active = false; };
-  }, [serviceId, operatorId, readTick]);
+  }, [serviceId, operatorId, readTick, preparing]);
 
   // Removes exactly the row a send or discard stood on, captured before its
   // network call or storage read: never whatever row is current when a late
@@ -467,9 +473,13 @@ export default function useFastCompleteSubmit({
     return next;
   }, []);
 
-  const prepare = useCallback(async (buildBody) => {
+  const prepare = useCallback(async (buildBody, _summary, options) => {
     if (inFlight.current || recovering) return;
     const scope = scopeRef.current;
+    if (options?.valid === false) {
+      setError(PREPARE_REFUSAL);
+      return;
+    }
     const body = { idempotencyKey: keyRef.current, ...buildBody(), ...(invoiceFieldsRef.current || {}) };
     inFlight.current = true;
     setSubmitting(true);
@@ -495,11 +505,11 @@ export default function useFastCompleteSubmit({
   // Prepare mode: has anything behind the prepared body changed? Builds the body the sheet would submit now and
   // compares it with the one handed over (structurally, whatever field moved); a change, or a body that can no
   // longer be built, revokes the prepared state and tells the container (onPrepared(serviceId, null)).
-  const revokeIfChanged = useCallback((buildBody) => {
+  const revokeIfChanged = useCallback((buildBody, options) => {
     if (!preparedSignatureRef.current || inFlight.current) return;
     let now = null;
     try { now = bodySignature({ ...buildBody(), ...(invoiceFieldsRef.current || {}) }); } catch { now = null; }
-    if (now === preparedSignatureRef.current) return;
+    if (now === preparedSignatureRef.current && options?.valid !== false) return;
     const scope = scopeRef.current;
     preparedSignatureRef.current = '';
     setPrepared(null);
@@ -508,7 +518,8 @@ export default function useFastCompleteSubmit({
   }, [callPrepared]);
 
   const retry = useCallback(() => {
-    if (!pendingBodyRef.current) return;
+    // Prepare mode never sends: the only /complete POST is in submit, and nothing reaches it from here.
+    if (!pendingBodyRef.current || typeof onPreparedRef.current === 'function') return;
     return submit(() => ({}), pendingSummaryRef.current);
   }, [submit]);
 
@@ -517,7 +528,7 @@ export default function useFastCompleteSubmit({
   const confirm = useCallback(() => {
     const held = pendingBodyRef.current;
     const flag = CONFIRM_FLAGS[prompt?.code];
-    if (!held || !flag) return;
+    if (!held || !flag || typeof onPreparedRef.current === 'function') return;
     pendingBodyRef.current = { ...held, [flag]: true };
     return submit(() => ({}), pendingSummaryRef.current);
   }, [prompt, submit]);

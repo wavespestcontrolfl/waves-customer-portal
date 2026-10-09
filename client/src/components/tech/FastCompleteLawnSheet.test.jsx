@@ -3882,6 +3882,28 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(contextReads()).toBe(before);
   });
 
+  test('retaking the photos after the handoff (the assessment no longer confirmed) revokes the part', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+    await waitFor(() => expect(screen.queryByText('Saved for this stop')).toBeNull());
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null, expect.any(Number));
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a part that cannot be prepared at mount is never prepared', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    // The footer asks for the next missing step (photos), not for a save.
+    expect(completeButton().textContent).not.toMatch(/this stop/);
+    fireEvent.click(completeButton());
+    expect(onPrepared).not.toHaveBeenCalled();
+    expect(screen.queryByText('Saved for this stop')).toBeNull();
+  });
+
   test('a refused hand-over shows its message and leaves the sheet editable', async () => {
     const onPrepared = vi.fn(async () => { throw new Error('Could not save this on the device'); });
     await openSheet({ props: { operatorId: 'op-1', onPrepared } });

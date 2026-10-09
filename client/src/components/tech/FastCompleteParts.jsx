@@ -489,7 +489,7 @@ const preparedLabel = (submission, label) => {
   return submission.prepared ? 'Update for this stop' : 'Save for this stop';
 };
 
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false }) {
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
@@ -506,7 +506,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           loading={submission.submitting}
           disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : preparedLabel(submission, label)}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : (isAction ? label : preparedLabel(submission, label))}
         </Button>
       </div>
     </footer>

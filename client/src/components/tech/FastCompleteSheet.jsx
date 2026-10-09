@@ -78,7 +78,7 @@ import {
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import { pestSweepActions, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
-import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import useFastCompleteSubmit, { PREPARE_REFUSAL } from '../../hooks/useFastCompleteSubmit';
 import { isReserviceVisit } from '../../lib/pest-fast-complete';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import TechServicePhotosModal from './TechServicePhotosModal';
@@ -520,7 +520,6 @@ function fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow = fa
 // `onPrepared(serviceId, body)` instead of posting /complete, and `sharedNote` is the stop's one note,
 // which drives this sheet's note. Only the plain pest report flow can be a part: a lane, typed or
 // re-service sheet refuses to prepare, so it can never post a completion for a stop member.
-const PREPARE_REFUSAL = 'This visit cannot be part of a combined stop. Use the full form.';
 function prepareFor(service, onPrepared) {
   if (typeof onPrepared !== 'function') return null;
   const plain = service?.reportFlow === true && !routedLaneOf(service) && !routedTypedOf(service);
@@ -1912,12 +1911,17 @@ function ReportFlowForm({
     traceOnReport: ctx.traceOnReport,
     photos: visitPhotos.photos,
   });
+  // Prepare mode: a part is prepared only while it could be prepared right now. Exactly when the Complete button is
+  // there and enabled: the report is fresh for the current note and inputs (no write action), nothing is waiting on
+  // a prompt or a hold, and the visit is the plain pest report flow (no re-service, callback, lane or typed record).
+  const canPrepare = [!action, !submission.prompt, !completeMissing.reason, !mode, !isReserviceVisit(ctx.visit)].every(Boolean);
   const submit = () => {
     if (completeMissing.reason && !submission.hasPendingBody()) return;
-    submission.submit(buildBody, summary());
+    submission.submit(buildBody, summary(), { valid: canPrepare });
   };
-  // A part of a stop (prepare mode): a change behind the handed-over body revokes it.
-  useEffect(() => { submission.revokeIfChanged(buildBody); });
+  // A part of a stop (prepare mode): a change behind the handed-over body, or a part that can no longer be prepared
+  // (a stale report, a hold), revokes it.
+  useEffect(() => { submission.revokeIfChanged(buildBody, { valid: canPrepare }); });
   // The tracer opens over the sheet, the way the photo manager does.
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal
