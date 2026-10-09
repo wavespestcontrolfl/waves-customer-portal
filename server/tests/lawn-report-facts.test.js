@@ -769,6 +769,47 @@ describe('the frozen block is read strictly, and only from the record', () => {
     expect(facts.frozenTiedFamilies(notes(b))).toEqual([]);
   });
 
+  describe('tied families follow the card status a photo tie needs to print (round 7)', () => {
+    const diagnosis = (o) => Object.entries(o).map(([key, status]) => ({ key, status }));
+    const ties = (items) => notes(block({ ties: { assessmentId: '77', items } }));
+    const fungus = { source: 'photo', kind: 'fungus', label: 'gray leaf spot', sure: true, product: 'fungicide' };
+    const weeds = { source: 'photo', kind: 'weeds', label: 'weed pressure', sure: true, product: 'herbicide' };
+    const chinchTap = { source: 'technician', kind: 'chinch', product: 'insecticide' };
+    const drought = { source: 'photo', kind: 'drought', label: 'drought stress', sure: true, product: 'wetting_agent' };
+
+    test('a healthy card with a matching product: no curative family (the line and the tie never disagree)', () => {
+      const n = ties([fungus, weeds]);
+      expect(facts.frozenTiedFamilies(n, '77', diagnosis({ damage_disease_signals: 'healthy', weed_pressure: 'strong' }))).toEqual([]);
+      expect(facts.frozenTiedFamilies(n, '77', [])).toEqual([]);
+    });
+
+    test('a watch or needs-attention card keeps the family', () => {
+      const n = ties([fungus, weeds]);
+      expect(facts.frozenTiedFamilies(n, '77', diagnosis({ damage_disease_signals: 'watch', weed_pressure: 'needs_attention' })).sort()).toEqual(['fungicide']); // herbicide has no curative family
+      expect(facts.frozenTiedFamilies(n, '77', diagnosis({ damage_disease_signals: 'watch', weed_pressure: 'healthy' }))).toEqual(['fungicide']);
+    });
+
+    test('a technician tap stays authoritative over a healthy card', () => {
+      expect(facts.frozenTiedFamilies(ties([chinchTap]), '77', diagnosis({ damage_disease_signals: 'healthy' }))).toEqual(['insecticide']);
+      expect(facts.frozenTiedFamilies(ties([chinchTap]), '77', [])).toEqual(['insecticide']);
+    });
+
+    test('a photo drought tie has no card, so the card read does not gate it; no diagnosis passed keeps the old answer', () => {
+      expect(facts.frozenTiedFamilies(ties([drought]), '77', [])).toEqual(facts.frozenTiedFamilies(ties([drought]), '77'));
+      expect(facts.frozenTiedFamilies(ties([fungus]), '77')).toEqual(['fungicide']);
+      expect(facts.frozenTiedFamilies(ties([fungus]), '77', undefined)).toEqual(['fungicide']);
+    });
+
+    test('matchedTiePrints and cardStatusMap: only the two concern statuses print; junk rows are ignored', () => {
+      const status = facts.cardStatusMap([{ key: 'damage_disease_signals', status: 'watch' }, null, { status: 'watch' }, 'x']);
+      expect([...status.keys()]).toEqual(['damage_disease_signals']);
+      expect(facts.matchedTiePrints(fungus, status)).toBe(true);
+      expect(facts.matchedTiePrints(weeds, status)).toBe(false);
+      expect(facts.matchedTiePrints(chinchTap, new Map())).toBe(true);
+      expect(facts.cardStatusMap('nope').size).toBe(0);
+    });
+  });
+
   test('an ADMIN correction of the re-entry minutes (structured_notes.reentryAdjusted) keeps the clock; a technician stepper never overrides the condition', () => {
     const record = { structured_notes: notes(block()) };
     expect(facts.frozenReentryForRecord(record)).toMatchObject({ rule: 'dry' });

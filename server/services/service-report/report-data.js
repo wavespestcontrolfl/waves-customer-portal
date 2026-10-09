@@ -6040,7 +6040,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             serviceRecordId: service.id,
             assessmentId: lawnAssessment.assessmentId,
             reportV2,
-            ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays, nextVisitIso: lawnCopyGapDays == null ? null : lawnCopyNextVisitIso, tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes, lawnAssessment.assessmentId) },
+            ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays, nextVisitIso: lawnCopyGapDays == null ? null : lawnCopyNextVisitIso, tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes, lawnAssessment.assessmentId, reportV2.diagnosis) },
             // Never CREATE the first-writer-wins entry from a degraded read
             // (any input read that failed is in readFailures) or from
             // unverifiable treatment data; a stored entry still replays first.

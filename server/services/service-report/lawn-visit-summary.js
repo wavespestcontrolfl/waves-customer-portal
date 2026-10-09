@@ -54,7 +54,7 @@ const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { lawnResultTimingViolation } = require('./report-writer-rules');
 const { CARD_FOR_LABEL, CARD_STATUSES_THAT_PRINT, PHOTO_FINDING_LABELS } = require('./lawn-photo-findings');
-const { cleanTies, KIND_BY_LABEL, PRODUCT_FOR_KIND, TECH_PRODUCT } = require('./lawn-report-facts');
+const { cleanTies, matchedTiePrints, CARD_FOR_TIE_KIND, KIND_BY_LABEL, PRODUCT_FOR_KIND, TECH_PRODUCT } = require('./lawn-report-facts');
 
 const COMPOSER_VERSION = 'lawn_visit_summary_fixed_v1';
 const FREEZE_KEY = 'lawnVisitSummary';
@@ -157,9 +157,8 @@ const TIE_PRODUCT_PHRASES = Object.freeze({
 });
 const TECH_FOUND_PHRASES = Object.freeze({ chinch: 'chinch bugs', caterpillars: 'caterpillars', fungus: 'signs of fungus' });
 const MAX_TIES = 2;
-// An unmatched finding prints only while the report's own card for its topic shows a concern, like a
-// finding in the list above. Drought stress belongs to the watering banner and never prints unmatched.
-const CARD_FOR_TIE_KIND = Object.freeze({ fungus: 'damage_disease_signals', insects: 'damage_disease_signals', weeds: 'weed_pressure' });
+// An unmatched finding prints only while the report's own card for its topic shows a concern (CARD_FOR_TIE_KIND, lawn-report-facts.js),
+// and a matched PHOTO tie by the same rule (matchedTiePrints); drought stress never prints unmatched (the watering banner owns water).
 // The technician's finds (chinch bugs, caterpillars, signs of fungus) are all stress / damage topics.
 const TECH_CARD_KIND = Object.freeze({ chinch: 'insects', caterpillars: 'insects', fungus: 'fungus' });
 
@@ -327,11 +326,11 @@ function tieSlots(facts) {
   const checkable = facts.recurring && facts.nextVisitBooked;
   const slots = [];
   for (const tie of facts.ties || []) {
+    // A photo tie is decided from the same card reads the findings sentence uses; a technician's own find always stands.
+    if (!matchedTiePrints(tie, status)) continue;
     if (tie.source === 'technician') slots.push({ t: 'tech', kind: tie.kind });
     else if (tie.product) slots.push({ t: 'photo', kind: tie.kind, label: tie.label, sure: tie.sure === true, product: tie.product });
-    else if (checkable && CARD_FOR_TIE_KIND[tie.kind] && CARD_STATUSES_THAT_PRINT.includes(status.get(CARD_FOR_TIE_KIND[tie.kind]))) {
-      slots.push({ t: 'photo', kind: tie.kind, label: tie.label, sure: false, product: null });
-    }
+    else if (checkable && CARD_FOR_TIE_KIND[tie.kind]) slots.push({ t: 'photo', kind: tie.kind, label: tie.label, sure: false, product: null });
   }
   return slots.slice(0, MAX_TIES);
 }

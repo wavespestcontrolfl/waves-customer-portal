@@ -497,9 +497,37 @@ function hasFrozenTieBlock(structuredNotes, assessmentId) {
   return !!(facts && facts.ties && assessmentId != null && facts.ties.assessmentId === String(assessmentId));
 }
 
-/** The expectation families a frozen tie of THIS assessment makes curative (none for another assessment, after a retake). */
-function frozenTiedFamilies(structuredNotes, assessmentId) {
-  const items = frozenTies(structuredNotes, assessmentId);
+// The report's own score card (reportV2.diagnosis key) a PHOTO tie is about. Drought stress has no card here (the
+// watering banner owns water), so a matched drought tie is not card-gated.
+const CARD_FOR_TIE_KIND = Object.freeze({ fungus: 'damage_disease_signals', insects: 'damage_disease_signals', weeds: 'weed_pressure' });
+const CARD_STATUSES_THAT_PRINT = Object.freeze(['watch', 'needs_attention']);
+
+/**
+ * Whether a tie may be told, given the report's own card statuses (a Map card key -> status). A technician-confirmed
+ * tie (the tap, a guide card) is authoritative and always stands. A PHOTO tie with a matching product stands only while
+ * the card for its topic shows a concern, the same rule that keeps an ordinary photo finding off the page when its card
+ * reads healthy; a kind with no card (drought) is not card-gated. One rule for the Visit Summary and for the "What to
+ * expect" family, both decided from the same card reads, so a suppressed tie is suppressed everywhere.
+ */
+function matchedTiePrints(tie, cardStatuses) {
+  if (tie.source === 'technician') return true;
+  const card = CARD_FOR_TIE_KIND[tie.kind];
+  return !card || CARD_STATUSES_THAT_PRINT.includes(cardStatuses.get(card));
+}
+
+/** Map card key -> status from a reportV2.diagnosis list. */
+function cardStatusMap(diagnosis) {
+  return new Map((Array.isArray(diagnosis) ? diagnosis : []).filter((d) => d && d.key).map((d) => [d.key, d.status]));
+}
+
+/**
+ * The expectation families a frozen tie of THIS assessment makes curative (none for another assessment, after a retake).
+ * With `diagnosis` (the report's cards) a photo tie whose card shows no concern makes nothing curative, exactly as the
+ * Visit Summary leaves its sentence out. Without it every frozen tie counts (the unfiltered record).
+ */
+function frozenTiedFamilies(structuredNotes, assessmentId, diagnosis) {
+  const statuses = diagnosis === undefined ? null : cardStatusMap(diagnosis);
+  const items = frozenTies(structuredNotes, assessmentId).filter((t) => !statuses || matchedTiePrints(t, statuses));
   return [...new Set(items.filter((t) => t.product && FAMILY_FOR_PRODUCT[t.product]).map((t) => FAMILY_FOR_PRODUCT[t.product]))];
 }
 
@@ -708,6 +736,9 @@ module.exports = {
   frozenTies,
   hasFrozenTieBlock,
   frozenTiedFamilies,
+  matchedTiePrints,
+  cardStatusMap,
+  CARD_FOR_TIE_KIND,
   frozenReportFactsStamp,
   reentryCondition,
   freezeReportFacts,

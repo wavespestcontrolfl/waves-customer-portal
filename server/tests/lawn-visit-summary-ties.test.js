@@ -12,18 +12,22 @@ const { lawnResultTimingViolation } = require('../services/service-report/report
 const { splitSentences } = require('../services/service-report/next-visit-claims');
 
 const areas = (o) => Object.entries(o).map(([key, status]) => ({ key, status }));
+// The report's own cards show a concern for the topics the photo ties are about.
+const CARD = { fungus: 'damage_disease_signals', insects: 'damage_disease_signals', weeds: 'weed_pressure' };
+// Only the card a tie is about; the tie states that topic, so the area read does not repeat it.
+const concern = (kind, status = 'watch') => (CARD[kind] ? areas({ [CARD[kind]]: status }) : []);
 const photo = (kind, label, product, sure = true) => ({ source: 'photo', kind, label, sure, product });
 const tech = (kind, product) => ({ source: 'technician', kind, product });
 const compose = (facts) => summary.composeVisitSummary({ season: 'fall', applied: [{ name: 'x', kind: 'fungicide' }], areas: [], findings: [], ...facts });
 
 describe('the tie sentences (fixed, chosen from the facts)', () => {
   test('matched and confident', () => {
-    expect(summary.render(summary.buildSlots({ applied: [], ties: [photo('fungus', 'gray leaf spot', 'fungicide')] })))
+    expect(summary.render(summary.buildSlots({ applied: [], areas: concern('fungus'), ties: [photo('fungus', 'gray leaf spot', 'fungicide')] })))
       .toBe('Today’s photos showed gray leaf spot in one area. Today’s visit included a fungicide treatment.');
   });
 
   test('matched, low confidence: hedged, and it says what was done', () => {
-    expect(summary.render(summary.buildSlots({ applied: [], ties: [photo('weeds', 'weed pressure', 'herbicide', false)] })))
+    expect(summary.render(summary.buildSlots({ applied: [], areas: concern('weeds'), ties: [photo('weeds', 'weed pressure', 'herbicide', false)] })))
       .toBe('Today’s photos showed what may be weed pressure in one area, and today’s visit included a spot treatment for weeds.');
   });
 
@@ -33,7 +37,7 @@ describe('the tie sentences (fixed, chosen from the facts)', () => {
     ['insects', 'chinch bug activity', 'insecticide', 'a spot treatment for insects'],
     ['drought', 'drought stress', 'wetting_agent', 'a wetting agent treatment'],
   ])('%s <-> %s', (kind, label, product, phrase) => {
-    const text = summary.render(summary.buildSlots({ applied: [], ties: [photo(kind, label, product)] }));
+    const text = summary.render(summary.buildSlots({ applied: [], areas: concern(kind), ties: [photo(kind, label, product)] }));
     expect(text).toBe(`Today’s photos showed ${label} in one area. Today’s visit included ${phrase}.`);
   });
 
@@ -83,7 +87,7 @@ describe('the tie sentences (fixed, chosen from the facts)', () => {
 
   test('the technician\'s tap: found and treated', () => {
     for (const [kind, product, found] of [['chinch', 'insecticide', 'chinch bugs'], ['caterpillars', 'insecticide', 'caterpillars'], ['fungus', 'fungicide', 'signs of fungus']]) {
-      expect(summary.render(summary.buildSlots({ applied: [], ties: [tech(kind, product)] })))
+      expect(summary.render(summary.buildSlots({ applied: [], areas: concern(kind), ties: [tech(kind, product)] })))
         .toBe(`Your technician found ${found} and treated that spot today.`);
     }
   });
@@ -105,6 +109,48 @@ describe('the tie sentences (fixed, chosen from the facts)', () => {
     expect(withThin.findings.map((f) => f.label)).toEqual(['thinning turf']);
   });
 
+  describe('a matched PHOTO tie needs its card to show a concern (round 7)', () => {
+    test.each([
+      ['fungus', 'gray leaf spot', 'fungicide'],
+      ['insects', 'chinch bug activity', 'insecticide'],
+      ['weeds', 'weed pressure', 'herbicide'],
+    ])('%s: a healthy, strong or missing card prints no tie; watch and needs_attention print it', (kind, label, product) => {
+      const slotsFor = (cards) => summary.buildSlots({ applied: [], areas: cards, ties: [photo(kind, label, product)] });
+      for (const cards of [concern(kind, 'healthy'), concern(kind, 'strong'), []]) {
+        expect((slotsFor(cards) || {}).ties).toBeUndefined();
+      }
+      for (const status of ['watch', 'needs_attention']) {
+        expect(slotsFor(concern(kind, status)).ties).toEqual([{ t: 'photo', kind, label, sure: true, product }]);
+      }
+    });
+
+    test('the contradiction in the finding: a 75/healthy damage read never says both "no clear stress" and "photos showed gray leaf spot"', () => {
+      const text = summary.composeVisitSummary({
+        season: 'fall', applied: [{ name: 'x', kind: 'fungicide' }], areas: areas({ damage_disease_signals: 'healthy' }),
+        findings: [], ties: [photo('fungus', 'gray leaf spot', 'fungicide')],
+      });
+      expect(text).not.toContain('gray leaf spot');
+      expect(text).not.toContain('Today’s photos showed');
+    });
+
+    test('a technician tap with a healthy card keeps the tie; a drought photo tie has no card and keeps its tie', () => {
+      expect(summary.buildSlots({ applied: [], areas: concern('insects', 'healthy'), ties: [tech('chinch', 'insecticide')] }).ties)
+        .toEqual([{ t: 'tech', kind: 'chinch' }]);
+      expect(summary.buildSlots({ applied: [], areas: [], ties: [photo('drought', 'drought stress', 'wetting_agent')] }).ties)
+        .toEqual([{ t: 'photo', kind: 'drought', label: 'drought stress', sure: true, product: 'wetting_agent' }]);
+    });
+
+    test('one tie suppressed, one kept: the kept tie still prints and render(slots) is its text', () => {
+      const slots = summary.buildSlots({
+        applied: [], areas: areas({ damage_disease_signals: 'healthy', weed_pressure: 'watch' }),
+        ties: [photo('fungus', 'gray leaf spot', 'fungicide'), photo('weeds', 'weed pressure', 'herbicide')],
+      });
+      expect(slots.ties.map((t) => t.kind)).toEqual(['weeds']);
+      expect(summary.render(slots)).toContain('weed pressure');
+      expect(summary.render(slots)).not.toContain('gray leaf spot');
+    });
+  });
+
   test('a score card whose topic a tie already states is not read out again; other cards still are', () => {
     const text = summary.render(summary.buildSlots({
       applied: [{ name: 'x', kind: 'fungicide' }],
@@ -119,7 +165,7 @@ describe('the tie sentences (fixed, chosen from the facts)', () => {
     const text = summary.render(summary.buildSlots({
       season: 'fall',
       applied: [{ name: 'x', kind: 'fungicide' }],
-      areas: areas({ coverage: 'watch' }),
+      areas: areas({ coverage: 'watch', damage_disease_signals: 'watch' }), // the weeds card shows no concern, so that photo tie has nothing to say
       findings: [{ label: 'thinning turf', confidence: 'high' }],
       ties: [photo('fungus', 'gray leaf spot', 'fungicide'), tech('chinch', 'insecticide'), photo('weeds', 'weed pressure', 'herbicide')],
       recurring: true,
@@ -275,13 +321,13 @@ describe('the closed tie tables', () => {
       const label = { fungus: 'gray leaf spot', weeds: 'weed pressure', insects: 'chinch bug activity', drought: 'drought stress' }[kind];
       const product = { fungus: 'fungicide', weeds: 'herbicide', insects: 'insecticide', drought: 'wetting_agent' }[kind];
       for (const sure of [true, false]) {
-        const text = summary.render(summary.buildSlots({ applied: [], ties: [photo(kind, label, product, sure)] }));
+        const text = summary.render(summary.buildSlots({ applied: [], areas: concern(kind), ties: [photo(kind, label, product, sure)] }));
         expect(text).not.toMatch(/\b(that|the) (spot|area)\b.*\b(treat|applied)/i);
         expect(text).not.toMatch(/treated (that|the) (spot|area)/i);
         expect(text).toMatch(/today’s visit included/i);
       }
     }
-    expect(summary.render(summary.buildSlots({ applied: [], ties: [tech('chinch', 'insecticide')] }))).toContain('treated that spot today');
+    expect(summary.render(summary.buildSlots({ applied: [], areas: concern('insects'), ties: [tech('chinch', 'insecticide')] }))).toContain('treated that spot today');
   });
 
   test('the longest paragraph any valid slots can render fits the cap and the screens', () => {
@@ -324,7 +370,7 @@ describe('freeze: version 4 with the tie, version 3 as before', () => {
     knex.raw = (sql, bindings) => ({ sql, bindings });
     return { knex, state };
   }
-  const FACTS = { season: 'fall', applied: [{ name: 'x', kind: 'fungicide' }], areas: [], findings: [], ties: [photo('fungus', 'gray leaf spot', 'fungicide')] };
+  const FACTS = { season: 'fall', applied: [{ name: 'x', kind: 'fungicide' }], areas: areas({ damage_disease_signals: 'watch' }), findings: [], ties: [photo('fungus', 'gray leaf spot', 'fungicide')] };
   const freeze = (knex, args = {}) => summary.createAndFreezeVisitSummary({
     serviceRecordId: 's1', assessmentId: 77, getStructuredNotes: async () => (await knex('x').first()).structured_notes, gatherInputs: async () => FACTS, knex, ...args,
   });
@@ -362,7 +408,7 @@ describe('freeze: version 4 with the tie, version 3 as before', () => {
     }
     delete process.env.GATE_LAWN_REPORT_FACTS;
     expect(reads[0]).toEqual(reads[1]);
-    expect(reads[0][0]).toBe('Today we applied disease protection, which fits the fall season.');
+    expect(reads[0][0]).toBe('Today we applied disease protection, which fits the fall season. Our photo read shows a few areas showing stress we are keeping an eye on.');
     expect(reads[0][1]).toContain('Today’s photos showed gray leaf spot in one area.');
   });
 

@@ -325,7 +325,7 @@ describe('the completion path folds the freeze back in', () => {
     const fs = require('fs');
     const path = require('path');
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
-    expect(source).toContain('tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes, lawnAssessment.assessmentId)');
+    expect(source).toContain('tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes, lawnAssessment.assessmentId, reportV2.diagnosis)');
   });
 
   test('an incomplete closeout never reaches the lawn write gate (it returns before the report path), so no facts are frozen for it', () => {
