@@ -139,7 +139,9 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // that inspector. Schema text changes the output contract: a new cohort.
 // v26: scheduling.callback_window_start/_end had no rule and a schema form the model
 // missed on most callback calls (schema 1.27.0; found by the reviewed-call replay,
-// 2026-10-09). The rule now gives the form. New instruction: a new cohort.
+// 2026-10-09). The rule now gives the form, and the two fields join the evidence
+// pinning list (the callback promise is recorded only with the agent's quote under
+// that path; codex #6215 r2 P1). New instructions: a new cohort.
 const PROMPT_VERSION = 'v26';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
@@ -453,6 +455,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - For a reschedule, each of the scheduling quotes above is ONE speaker's words from ONE turn, copied verbatim: no "Agent:"/"Caller:" labels, never two turns stitched together. The /scheduling/confirmed_start_at quote states the agreed time: quote only the words that state the agreed day and time (a verbatim part of one turn, e.g. "Thursday at two"), not other times said around them ("I have an appointment at four"). When the reschedule keeps the appointment's day and changes only the time ("can you make it noon instead of 9?"), a quote with the agreed time alone is enough.
 - When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values (day, hour, period) verbatim. When scheduling.moved_appointment_words is set, the /scheduling/moved_appointment_date quote must contain it verbatim.
 - scheduling.follow_up_start_at (when set)
+- scheduling.callback_window_start / callback_window_end (when either is set — pin BOTH under /scheduling/callback_window_start: the words that state the callback time, whoever said them, AND the AGENT's own words agreeing that Waves will call back; speaker "agent" for that one. Without the agent's quote the callback promise is not recorded)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
 - secondary_contact.wants_appointment_texts (when true — quote the caller agreeing this person gets the appointment texts/reminders/tracking link) and secondary_contact.on_site (when true — quote the words saying this person will be at the property for the visit); the field_path is the JSON pointer /secondary_contact/wants_appointment_texts and /secondary_contact/on_site, and for each secondary_contacts[] entry /secondary_contacts/<index>/wants_appointment_texts and /secondary_contacts/<index>/on_site. Each quote must be the CALLER's own words (speaker "caller"), copied verbatim from ONE caller turn — not the agent's offer: when the agent proposed it and the caller agreed, quote the caller's agreement ("Yeah."). Always give one when a flag is true
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)

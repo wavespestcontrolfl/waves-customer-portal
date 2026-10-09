@@ -230,6 +230,14 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
       expect(cb.description).toContain('asked by 16:00');
     });
 
+    test('a date that does not exist gives no due time, never a rolled-forward day (codex #6215 r2 P2)', () => {
+      expect(cbFor('2026-02-30T14:00', null)).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-13-40T14:00', null)).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-02-30T09:00', '11:00')).toMatchObject({ due_at: null, due_basis: null });
+      // A real date still reads.
+      expect(cbFor('2028-02-29T14:00', null).due_at).toBe(new Date('2028-02-29T14:00:00-05:00').toISOString());
+    });
+
     test('an unreadable end falls back to the start', () => {
       expect(cbFor('09:00', '11:00:00Z')).toMatchObject({ due_at: et('2026-09-02T09:00:00'), due_basis: 'suggested' });
     });

@@ -403,16 +403,43 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
 
   // The old offset form stays valid for the model too (codex #6215 r1 P1): a provider
   // that still writes it must not fail the whole extraction.
-  test.each(['14:00', '09:30', '14:00:00', '2026-10-12T14:00', '2026-10-12T09:00:00', '14:00:00-04:00', '09:00:00-05:00', '2026-10-12T14:00:00-04:00'])('the model output accepts %s', (value) => {
+  test.each(['14:00', '09:30', '14:00:00', '2026-10-12T14:00', '2026-10-12T09:00:00', '14:00:00-04:00', '09:00:00-05:00', '2026-10-12T14:00:00-04:00', '14:00:00Z', '14:00:00+02:00', '14:00:00.000Z'])('the model output accepts %s', (value) => {
     expect(formErrors(validateModelOutput(withWindow(value, value)))).toEqual([]);
   });
 
-  test.each(['2 PM', '14', '25:00', '14:00Z', '14:00:00Z', '14:00:00+02:00', '2026-10-12T14:00:00Z', '2026-10-12', 'afternoon'])('the model output rejects %s', (value) => {
+  test.each(['2 PM', '14', '25:00', '2:00', '2026-10-12', '2026-10-12 14:00', 'afternoon'])('the model output rejects %s', (value) => {
     expect(formErrors(validateModelOutput(withWindow(value))).length).toBeGreaterThan(0);
   });
 
   test.each(['14:00', '2026-10-12T14:00', '14:00:00-04:00', '14:00:00Z', '09:00:00.000-05:00', '2026-09-02T09:00:00-04:00'])('the persisted schema accepts %s (new form and older rows)', (value) => {
     expect(formErrors(validatePersisted(withWindow(value, value)))).toEqual([]);
+  });
+
+  // Every value the old `time` format accepted still validates (codex #6215 r2 P1).
+  test('the two schemas share one pattern, a superset of the old `time` format', () => {
+    const Ajv = require('ajv');
+    const addFormats = require('ajv-formats');
+    const ajv = new Ajv(); addFormats(ajv);
+    const oldForm = ajv.compile({ type: 'string', format: 'time' });
+    const pattern = field('call-extraction.model-output.schema.json', 'callback_window_start').pattern;
+    for (const name of ['callback_window_start', 'callback_window_end']) {
+      expect(field('call-extraction.model-output.schema.json', name).pattern).toBe(pattern);
+      expect(field('call-extraction.persisted.schema.json', name).pattern).toBe(pattern);
+    }
+    for (const value of ['14:00:00Z', '14:00:00-04:00', '14:00:00+02:00', '00:00:00.5Z', '23:59:59-05:00']) {
+      expect(oldForm(value)).toBe(true);
+      expect(new RegExp(pattern).test(value)).toBe(true);
+    }
+  });
+
+  test('the callback fields are on the evidence pinning list, with the agent quote (codex #6215 r2 P1)', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    const pinning = prompt.slice(prompt.indexOf('EVIDENCE PINNING'), prompt.indexOf('CONFIDENCE SCORES'));
+    expect(pinning).toMatch(/scheduling\.callback_window_start \/ callback_window_end \(when either is set/);
+    expect(pinning).toMatch(/AGENT's own words agreeing that Waves will call back/);
+    const evidence = require('../schemas/call-extraction.model-output.schema.json').properties.evidence.description;
+    expect(evidence).toMatch(/scheduling\.callback_window_start \/ _end when set/);
   });
 
   test('null stays valid in both schemas', () => {

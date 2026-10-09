@@ -352,11 +352,22 @@ function isoOrNull(value) {
 // it spells (the isoOrNull rule above), so it reads as the bare time. Any
 // other offset is not a bare ET time and falls through.
 const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:-0[45]:?00)?$/;
+// The schema checks a dated callback time as digits only. A date that does
+// not exist ("2026-02-30T14:00") would be rolled forward by the ET parser's
+// Date.UTC into a real-looking deadline on another day: no due time instead
+// (codex #6215 r2 P2). A value with no leading date is left to isoOrNull.
+function realWallDate(text) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T/.exec(text);
+  if (!m) return true;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === mo - 1 && probe.getUTCDate() === d;
+}
 function callbackDueAt(value, callStartedAt) {
   if (value == null || value === '') return null;
   const text = String(value).trim();
   const time = TIME_ONLY_RE.exec(text);
-  if (!time) return isoOrNull(text);
+  if (!time) return realWallDate(text) ? isoOrNull(text) : null;
   const start = callStartedAt ? new Date(callStartedAt) : null;
   if (!start || Number.isNaN(start.getTime())) return null;
   const hhmm = `${time[1].padStart(2, '0')}:${time[2]}`;
@@ -385,7 +396,7 @@ function callbackDeadline(sched = {}, callStartedAt) {
     const endTime = TIME_ONLY_RE.exec(end);
     const startDate = WALL_DATE_RE.exec(start);
     const endDue = endTime && startDate
-      ? isoOrNull(`${startDate[1]}T${endTime[1].padStart(2, '0')}:${endTime[2]}`)
+      ? realWallDate(start) && isoOrNull(`${startDate[1]}T${endTime[1].padStart(2, '0')}:${endTime[2]}`)
       : callbackDueAt(end, callStartedAt);
     if (endDue) return { asked: true, dueAt: endDue, basis: endTime && startDate ? 'stated' : basisOf(end), field, words };
   }
