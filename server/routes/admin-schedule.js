@@ -2040,11 +2040,16 @@ const postedAreaAddOnLines = (pricing) => [
 ];
 
 // The Update Details save and the area add-ons (Codex round 18 P1): what the edit ADDS must be sold by the visit's source estimate
-// and never joins a repeating series (area-addon-visit-rows assertEditedAreaAddOns), inside the save's transaction before the
-// visit is written. A visit with no area add-on after the edit costs the visit read and one row read.
-async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons }) {
-  await areaAddOnRows.assertEditedAreaAddOns(trx, visitId, {
+// and never joins a repeating series (area-addon-visit-rows assertEditedAreaAddOns), and a visit that carries a limited add-on is
+// rechecked for the new day, the new property, or a newly added add-on (area-addon-limits assertMovedVisitLimitsOpen), inside the
+// save's transaction before the visit is written. A visit with no area add-on after the edit costs the visit read and one row read.
+async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addressPlan }) {
+  const { keys, added } = await areaAddOnRows.assertEditedAreaAddOns(trx, visitId, {
     updates, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : null,
+  });
+  if (!keys.length) return;
+  await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, {
+    visitId, scheduledDate: updates.scheduled_date, propertyId: addressPlan ? addressPlan.propertyId : null, serviceKeys: keys, force: Boolean(addressPlan) || added.length > 0, staff: true,
   });
 }
 
@@ -10641,6 +10646,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
+              // A visit carrying a limited area add-on is judged for the NEW day (this row is locked by the CAS above); a limit reached
+              // fails this id with the staff detail and the batch goes on (the loop's catch reports it).
+              await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: id, visit: svc, scheduledDate: bulkTargetDate, staff: true });
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
                 const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;

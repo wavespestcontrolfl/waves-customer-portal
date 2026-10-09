@@ -4002,6 +4002,9 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // above is only a fast refusal).
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
         'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
+      // A visit carrying a limited area add-on is judged for the new day at its place (a limit reached refuses the move; nothing
+      // is changed). A same-day change and a visit with no limited add-on cost nothing.
+      await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: appointment_id, visit: appt, scheduledDate: dateStr, staff: true });
       const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)

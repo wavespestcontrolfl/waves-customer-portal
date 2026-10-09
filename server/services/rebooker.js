@@ -2163,6 +2163,12 @@ class SmartRebooker {
         });
       }
 
+      // A visit that carries a limited area add-on keeps no verdict from its old day: the add-on's yearly limit is judged on the NEW
+      // day at the place, with this row's CAS write holding it locked (a limit reached rolls the whole move back; a time-only move,
+      // a same-day move and a visit with no limited add-on cost nothing). Staff get the dates; a customer, SMS, voice or automatic
+      // caller gets the office hand-off (area-addon-limits.js assertMovedVisitLimitsOpen).
+      await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: serviceId, visit: service, scheduledDate: newDateStr, staff: initiatedBy === 'admin' });
+
       // Apply the certified order now that the row's own CAS write landed —
       // persistArrivalOrder re-numbers every stop in the verified order,
       // THIS row included, overwriting the route_order the clear above just

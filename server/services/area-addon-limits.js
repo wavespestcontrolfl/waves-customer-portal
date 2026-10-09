@@ -540,6 +540,81 @@ async function areaAddOnLimitRefusal(database, options) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// A booked visit that MOVES (Codex round 18 P1): the booking verdict belongs to the day and the place it was made for.
+//
+// A visit that carries a limited area add-on (its own service, or an add-on row) keeps the verdict of its old date and place when
+// it is moved, so a visit booked before the limit was reached elsewhere, or moved beside another application of the product, would
+// break the add-on's yearly limit. Every mover of a booked visit's date or property calls this inside its own transaction, before
+// it writes: the same place-based history the booking reads (loadAreaAddOnHistory), this visit left out, judged on the NEW day.
+// Nothing is read for a visit that carries no limited add-on (one query) or that stays on its day and place. Keyed on the data,
+// never on GATE_AREA_ADDONS: a visit booked gate-on is moved gate-off. Staff get the dates; a customer-facing caller gets the
+// office hand-off, never the dates. A time-of-day or technician change is not a move and is not asked.
+// ---------------------------------------------------------------------------------------------------------------------
+const MOVE_CUSTOMER_MESSAGE = 'An add-on treatment on this appointment cannot be moved to that day. Please contact our office and we will find a day that works.';
+const MOVE_HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not be read, so the add-on yearly limits cannot be confirmed for the new day. Try again.';
+
+// The catalog keys of the add-on rows on one visit ([] when none). A read failure is the caller's (fail closed).
+async function visitRowServiceKeys(database, visitId) {
+  const rows = await database('scheduled_service_addons').where({ scheduled_service_id: visitId }).select('service_key_snapshot');
+  return rows.map((row) => row.service_key_snapshot).filter(Boolean);
+}
+
+// The place of a visit that has no property of its own: its source estimate's address stands in (or null).
+async function visitProspect(database, visit, property) {
+  if (isUuid(property) || !isUuid(visit.source_estimate_id)) return null;
+  const estimate = await database('estimates').where({ id: visit.source_estimate_id }).first('id', 'address', 'property_id', 'customer_phone');
+  return estimate ? { estimate, prospect: prospectOf(estimate) } : null;
+}
+
+async function movedVisitHistory(database, { visit, visitId, property, keys }) {
+  const found = await visitProspect(database, visit, property);
+  // Two requests for one place share this key, and a move waits behind a booking of the same place.
+  await lockProspectIdentity(database, found ? found.estimate : { property_id: isUuid(property) ? property : null }, { named: true, seeds: [property] });
+  return savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
+    customerId: visit.customer_id, propertyId: isUuid(property) ? property : null, keys, excludeVisitIds: [visitId], prospect: found ? found.prospect : null,
+  }));
+}
+
+// What a move asks about: { row, day, property, keys } (the visit, the day and property it lands on, the LIMITED add-on keys it
+// carries), or null when there is nothing to ask (no such visit, the same day and place, no limited add-on).
+async function movedVisitSubject(database, options) {
+  const { visitId, scheduledDate, propertyId, serviceKeys, force } = options;
+  if (!isUuid(visitId)) return null;
+  const row = options.visit || await database('scheduled_services').where({ id: visitId }).first('customer_id', 'property_id', 'scheduled_date', 'source_estimate_id', 'service_key_snapshot');
+  if (!row) return null;
+  const day = dayOf(scheduledDate || row.scheduled_date);
+  const property = propertyId || row.property_id || null;
+  if (!force && day === dayOf(row.scheduled_date) && String(property || '') === String(row.property_id || '')) return null;
+  const carried = serviceKeys || [row.service_key_snapshot, ...(await visitRowServiceKeys(database, visitId))];
+  const keys = limitedKeys(carried.map((serviceKey) => limitKeyOfServiceKey(serviceKey)).filter(Boolean));
+  return keys.length ? { row, day, property, keys } : null;
+}
+
+/**
+ * Refuses (409) a move of a booked visit onto a day (or a property) where a limited add-on it carries is at its limit. Options:
+ * `visitId`; `visit`, the visit's row when the caller holds it ({ customer_id, property_id, scheduled_date, source_estimate_id,
+ * service_key_snapshot }; else it is read); `scheduledDate` / `propertyId`, the new day and property (default: the visit's own);
+ * `serviceKeys`, the catalog keys the visit will carry (default: its own service and its add-on rows); `force`, ask even when day
+ * and property are unchanged (an edit that adds an add-on); `staff`, the detail names dates (otherwise the office hand-off).
+ */
+async function assertMovedVisitLimitsOpen(database, options = {}) {
+  const subject = await movedVisitSubject(database, options);
+  if (!subject) return;
+  const { row, day, property, keys } = subject;
+  let history;
+  try {
+    history = await movedVisitHistory(database, { visit: row, visitId: options.visitId, property, keys });
+  } catch (err) {
+    logger.warn(`[area-addon-limits] move recheck history unavailable for visit ${options.visitId}: ${err.code || err.name}: ${err.message}`);
+    throw limitError(409, HISTORY_CODE, options.staff ? MOVE_HISTORY_STAFF_MESSAGE : MOVE_CUSTOMER_MESSAGE);
+  }
+  const reached = keys
+    .map((key) => ({ key, verdict: areaAddOnLimitVerdict(key, history, { day }) }))
+    .find(({ verdict }) => verdict && verdict.reason === LIMIT_REACHED_REASON);
+  if (reached) throw limitError(409, LIMIT_CODE, options.staff ? reached.verdict.detail : MOVE_CUSTOMER_MESSAGE, { addOnKey: reached.key, limit: reached.verdict });
+}
+
 // The limit key (AREA_ADDONS.items key) of a catalog service key, or null when the add-on has no limit.
 const limitKeyOfServiceKey = (serviceKey) => limitedKeys(Object.keys(AREA_ADDONS.items)).find((key) => configOf(key).serviceKey === serviceKey) || null;
 
@@ -648,6 +723,8 @@ async function flagAddOnYearlyLimits({ svc, record, database, advisory, notify, 
 }
 
 module.exports = {
+  MOVE_CUSTOMER_MESSAGE,
+  assertMovedVisitLimitsOpen,
   YEARLY_LIMIT_TYPE,
   flagAddOnYearlyLimits,
   LIMIT_CODE,
