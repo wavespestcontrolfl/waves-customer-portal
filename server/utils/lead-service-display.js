@@ -54,6 +54,13 @@ const NOT_CATALOG = new Set([
   'tree & shrub care service', 'rodent control service', 'wildlife control service',
 ]);
 
+// Quote-wizard labels (buildPublicQuoteServiceInterest) for a standalone
+// one-time job whose text carries no "one-time" word.
+const ONE_TIME_LABELS = {
+  'lawn pest control': 'Lawn Pest Knockdown Service',
+  'rodent sanitation': 'Rodent Sanitation Service',
+};
+
 const SHORT_ORDER = ['Pest', 'Lawn', 'Termite', 'Rodent', 'Mosquito', 'Tree & Shrub', 'Bed Bug', 'Bee / Wasp', 'Wildlife', 'WDO'];
 
 const RECURRING_RE = /\b(?:recurring|ongoing|quarterly|monthly|bi[-\s]?monthly|every\s+\d+\s+weeks?|every\s+(?:other\s+)?(?:month|quarter)|semi[-\s]?annual(?:ly)?|annual(?:ly)?|seasonal|year[-\s]round|bait\s+stations?|monitoring|per\s+(?:quarter|month|year)|times?\s+(?:a|per)\s+year)\b/i;
@@ -80,6 +87,8 @@ function topicsFor(text) {
   const hits = TOPICS.filter((topic) => topic.re.test(text) && !(topic.not && topic.not.test(text)));
   const keys = new Set(hits.map((topic) => topic.key));
   const namesPestControl = /\bpest\s+control\b/i.test(text);
+  // Names come out in the order the person said them.
+  hits.sort((x, y) => text.search(x.re) - text.search(y.re));
   return hits.filter((topic) => {
     // An inspection covers the word "termite", but termite TREATMENT named
     // beside it is its own job and stays visible.
@@ -87,7 +96,7 @@ function topicsFor(text) {
       && !keys.has('pre_slab') && !keys.has('wood_treatment');
     if (!keepsTermiteWork && (COVERED_BY[topic.key] || []).some((key) => keys.has(key))) return false;
     // "lawn treatment for weeds, pests and disease" is a lawn request.
-    if (topic.key === 'pest' && !namesPestControl && (keys.has('lawn') || keys.has('bed_bug'))) return false;
+    if (topic.key === 'pest' && !namesPestControl && ['lawn', 'bed_bug', 'stinging'].some((key) => keys.has(key))) return false;
     // "termite bait stations" is termite work; bait stations are rodent
     // wording only when a rodent is named or no termite is.
     if (topic.key === 'rodent' && keys.has('termite') && !RODENT_NAMED_RE.test(text)) return false;
@@ -112,6 +121,8 @@ function catalogNameIndex(names) {
 
 function classify(part, catalogNames) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
+  const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
+  if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: topicsFor(part)[0] || null };
   const frequency = statesRecurring(part) ? 'recurring' : ONE_TIME_RE.test(part) ? 'one_time' : null;
   const catalogName = catalogMatch(part, catalogNames);
   const topics = topicsFor(part);
@@ -145,8 +156,19 @@ function statesRecurring(text) {
 // The topic's recurring service at the stated cadence when the catalog has
 // that row ("Monthly pest control" → Monthly Pest Control Service); the
 // topic's default cadence when none is stated or no such row exists.
+// The cadence stated for THIS topic: the one in the topic's own clause, or
+// the only one in the text. Two cadences that cannot be tied to a clause
+// ("pest and lawn, monthly or quarterly") state none.
+function statedCadence(topic, text) {
+  const inText = CADENCES.filter(([, re]) => re.test(text));
+  if (inText.length <= 1) return inText[0] || null;
+  const clause = text.split(/,|;|&|\+|\band\b|\bplus\b/i).find((piece) => topic.re.test(piece)) || '';
+  const inClause = CADENCES.filter(([, re]) => re.test(clause));
+  return inClause.length === 1 ? inClause[0] : null;
+}
+
 function recurringName(topic, text, catalogNames) {
-  const stated = CADENCES.find(([, re]) => re.test(text));
+  const stated = statedCadence(topic, text);
   if (!stated || !catalogNames || !CADENCE_PREFIX_RE.test(topic.recurring)) return topic.recurring;
   const wanted = topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `);
   return catalogNames.get(wanted.toLowerCase()) || topic.recurring;

@@ -64,6 +64,9 @@ describe('leadServiceDisplay', () => {
     ['One-Time Spider & Wasp Control', 'One-Time Pest Control Service'],
     ['One-Time Tree & Shrub Care', 'One-Time Tree & Shrub Care Service'],
     ['One-Time Termite Inspection', 'Termite Inspection Service'],
+    ['Lawn Pest Control', 'Lawn Pest Knockdown Service'], // quote wizard
+    ['Rodent Sanitation', 'Rodent Sanitation Service'], // quote wizard
+    ['One-Time Wasp & Hornet Control', 'Bee / Wasp Nest Removal Service'],
     ['One-Time Pest Control + Termite Inspection', 'One-Time Pest Control Service + Termite Inspection Service'],
     ['Waves Assessment + One-Time Pest Control', 'One-Time Pest Control Service'],
     ['One-Time Pest Control + Lawn Care', 'One-Time Pest Control Service + One-Time Lawn Care Service'],
@@ -75,6 +78,7 @@ describe('leadServiceDisplay', () => {
   test.each([
     ['WDO Inspection Service', 'WDO Inspection Service'],
     ['WDO inspection and report', 'WDO Inspection Service'],
+    ['Wasp & Hornet Control', 'Bee / Wasp Nest Removal Service'],
     ['One-Time WDO inspection and termite treatment', 'WDO Inspection Service + Termite Liquid Treatment Service'],
     ['Termite inspection for a closing', 'Waves Assessment (Termite)'],
     ['Quarterly Pest Control Service + Bee / Wasp Nest Removal Service', 'Quarterly Pest Control Service + Bee / Wasp Nest Removal Service'],
@@ -92,6 +96,9 @@ describe('leadServiceDisplay', () => {
     ['Pest control twice a year', 'Semiannual Pest Control Service'],
     ['Lawn care every six weeks', 'Every 6 Weeks Lawn Care Service'],
     ['Pest control every two months', 'Quarterly Pest Control Service'], // no bi-monthly row in this catalog
+    ['Quarterly pest control and monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
+    ['Monthly lawn care and quarterly pest control', 'Monthly Lawn Care Service + Quarterly Pest Control Service'],
+    ['Pest control and lawn care, monthly or quarterly', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
     ['Recurring Pest Control', 'Quarterly Pest Control Service'],
   ])('a stated cadence is kept when the catalog has that service: %s → %s', (text, expected) => {
     expect(name(text)).toBe(expected);
