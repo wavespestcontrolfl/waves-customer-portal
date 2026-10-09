@@ -11,7 +11,8 @@
  * (admin-estimate-persistence#serverRecomputeFromEstimateData).
  *
  *  - a priced add-on row carries `pricingKnobs` (stamped by the pricer): they replay verbatim;
- *  - a priced add-on row with NO stamp predates the stamp, so it was priced with the in-code defaults: they replay;
+ *  - a priced add-on row with NO stamp predates the stamp, so it was priced with the in-code defaults: they replay
+ *    (the labor rate and the drive minutes were never in the defaults: they replay as current at replay);
  *  - an estimate with no priced add-on row returns null (inject nothing), so fresh quotes resolve the live config.
  * Only the keys the estimate actually sold are in the signal: an add-on added later prices off the live row.
  */
@@ -45,7 +46,9 @@ function areaAddOnKnobSignalForReplay(estDataRaw) {
     const knobs = stamp ? areaAddOnKnobsFor(row.addOnKey, { ...stamp, items: { [row.addOnKey]: stamp } }) : DEFAULTS.items[row.addOnKey];
     items[row.addOnKey] = { materialPer1000: knobs.materialPer1000, setupMin: knobs.setupMin, minPer1000: knobs.minPer1000, tiers: knobs.tiers ? [...knobs.tiers] : null };
   }
-  return { targetMargin: group.targetMargin, adminPerJob: group.adminPerJob, items };
+  // laborRate and driveMinutes are the labor cost's two global inputs. A stamped row freezes them; a row with no stamp
+  // (priced before the stamp) leaves them out, so it replays the values current at replay (its other knobs replay the in-code defaults).
+  return { targetMargin: group.targetMargin, adminPerJob: group.adminPerJob, laborRate: group.laborRate, driveMinutes: group.driveMinutes, items };
 }
 
 // The input fields a replay adds: { areaAddOnPricingKnobs } for a stored estimate that sold an add-on, else {}.

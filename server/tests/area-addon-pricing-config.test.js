@@ -203,7 +203,7 @@ describe('replay: a sent estimate keeps the knobs it was priced with', () => {
   test('the priced line carries the knobs it used, and so does the mapped row; the public boundary strips them', () => {
     const { engineResult, result } = quote();
     const line = engineResult.lineItems.find((l) => l.addOnKey === 'bed_pre_emergent');
-    expect(line.pricingKnobs).toEqual({ targetMargin: 0.6, adminPerJob: 8, materialPer1000: 10.32, setupMin: 6, minPer1000: 8, tiers: [1000, 2000, 3500] });
+    expect(line.pricingKnobs).toEqual({ targetMargin: 0.6, adminPerJob: 8, laborRate: constants.GLOBAL.LABOR_RATE, driveMinutes: constants.GLOBAL.DRIVE_TIME, materialPer1000: 10.32, setupMin: 6, minPer1000: 8, tiers: [1000, 2000, 3500] });
     expect(result.oneTime.items.find((i) => i.addOnKey === 'bed_pre_emergent').pricingKnobs).toEqual(line.pricingKnobs);
     const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     expect(route).toMatch(/ONE_TIME_ITEM_REVIEW_FIELDS = \[[^\]]*'pricingKnobs'\]/);
@@ -226,7 +226,8 @@ describe('replay: a sent estimate keeps the knobs it was priced with', () => {
     const { result } = quote();
     const unstamped = JSON.parse(JSON.stringify(result));
     for (const item of unstamped.oneTime.items) delete item.pricingKnobs;
-    expect(areaAddOnKnobSignalForReplay({ result: unstamped })).toEqual({ targetMargin: 0.6, adminPerJob: 8, items: {
+    // (the labor rate and the drive minutes are left out: with no stamp they replay as current at replay)
+    expect(areaAddOnKnobSignalForReplay({ result: unstamped })).toEqual({ targetMargin: 0.6, adminPerJob: 8, laborRate: undefined, driveMinutes: undefined, items: {
       bed_pre_emergent: { materialPer1000: 10.32, setupMin: 6, minPer1000: 8, tiers: [1000, 2000, 3500] },
       fire_ant_yard: { materialPer1000: 3.66, setupMin: 6, minPer1000: 2.5, tiers: [3000, 5000, 8000] },
     } });
@@ -234,6 +235,68 @@ describe('replay: a sent estimate keeps the knobs it was priced with', () => {
     expect(areaAddOnKnobSignalForReplay({ result: { oneTime: { specItems: [{ service: 'area_addon', addOnKey: 'web_sweep', price: null }] } } })).toBeNull();
     expect(areaAddOnKnobSignalForReplay(null)).toBeNull();
     expect(areaAddOnKnobSignalForReplay('{not json')).toBeNull();
+  });
+
+  // Codex round 11 P1 on #6135: the stamp froze the margin, admin charge, material, minutes and tiers, but the labor rate and
+  // the drive minutes come from pricing_config rows (global_labor_rate, global_drive_time) an admin can edit, so a sent
+  // estimate re-priced differently after either changed.
+  describe('the global labor rate and drive minutes', () => {
+    const savedGlobals = { rate: constants.GLOBAL.LABOR_RATE, drive: constants.GLOBAL.DRIVE_TIME };
+    afterEach(() => { constants.GLOBAL.LABOR_RATE = savedGlobals.rate; constants.GLOBAL.DRIVE_TIME = savedGlobals.drive; });
+    const list = [{ key: 'bed_pre_emergent', areaSqFt: 1500 }, { key: 'fire_ant_yard', areaSqFt: 5000 }];
+    const prices = (result) => mapV1ToLegacyShape(result).oneTime.items.map((i) => i.price);
+
+    test('the stamp carries both, and the replay keeps the sent price after either changes', () => {
+      const sent = quote(list);
+      const sentPrices = prices(sent.engineResult);
+      const signal = areaAddOnKnobSignalForReplay({ result: sent.result });
+      expect(signal).toMatchObject({ laborRate: savedGlobals.rate, driveMinutes: savedGlobals.drive });
+      constants.GLOBAL.LABOR_RATE = savedGlobals.rate * 2;
+      constants.GLOBAL.DRIVE_TIME = savedGlobals.drive * 3;
+      expect(prices(quote(list).engineResult)).not.toEqual(sentPrices);
+      const replay = generateEstimate({ ...HOME, services: { areaAddOns: list }, areaAddOnPricingKnobs: signal });
+      expect(prices(replay)).toEqual(sentPrices);
+      // Each one alone moves a fresh quote and none moves the replay.
+      constants.GLOBAL.DRIVE_TIME = savedGlobals.drive;
+      expect(prices(quote(list).engineResult)).not.toEqual(sentPrices);
+      constants.GLOBAL.LABOR_RATE = savedGlobals.rate;
+      constants.GLOBAL.DRIVE_TIME = savedGlobals.drive * 3;
+      expect(prices(quote(list).engineResult)).not.toEqual(sentPrices);
+      expect(prices(generateEstimate({ ...HOME, services: { areaAddOns: list }, areaAddOnPricingKnobs: signal }))).toEqual(sentPrices);
+    });
+
+    test('a stored row with no stamp replays the values current at replay, and a damaged stamp falls back to them', () => {
+      const { result } = quote(list);
+      const unstamped = JSON.parse(JSON.stringify(result));
+      for (const item of unstamped.oneTime.items) delete item.pricingKnobs;
+      const signal = areaAddOnKnobSignalForReplay({ result: unstamped });
+      expect(signal.laborRate).toBeUndefined();
+      expect(signal.driveMinutes).toBeUndefined();
+      constants.GLOBAL.LABOR_RATE = savedGlobals.rate * 2;
+      const live = prices(quote(list).engineResult);
+      expect(prices(generateEstimate({ ...HOME, services: { areaAddOns: list }, areaAddOnPricingKnobs: signal }))).toEqual(live);
+      for (const bad of [{ laborRate: -5 }, { laborRate: 0 }, { laborRate: '35' }, { laborRate: null }, { driveMinutes: -1 }, { driveMinutes: 'x' }]) {
+        expect(prices(generateEstimate({ ...HOME, services: { areaAddOns: list }, areaAddOnPricingKnobs: { ...signal, ...bad } }))).toEqual(live);
+      }
+    });
+
+    test('the pricer reads both from the knobs, never from GLOBAL directly', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'pricing-engine', 'service-pricing.js'), 'utf8');
+      const start = src.indexOf('function priceAreaAddOn(addOnKey');
+      const body = src.slice(start, src.indexOf('// The estimate\'s grass for an entry that does not carry one.', start));
+      expect(body).not.toMatch(/GLOBAL\./);
+      expect(body).toContain('knobs.driveMinutes');
+      expect(body).toContain('knobs.laborRate');
+    });
+
+    test('which add-on carries the one drive and the one admin charge is NOT frozen: it follows the list being priced', () => {
+      const sent = quote(list);
+      const signal = areaAddOnKnobSignalForReplay({ result: sent.result });
+      // Removing the first add-on (a revise) moves the drive and the admin charge to the next one.
+      const revised = generateEstimate({ ...HOME, services: { areaAddOns: [list[1]] }, areaAddOnPricingKnobs: signal });
+      const line = revised.lineItems.find((l) => l.addOnKey === 'fire_ant_yard');
+      expect(line).toMatchObject({ carriesVisitDrive: true, carriesJobAdmin: true });
+    });
   });
 
   test('both replay paths inject it; a posted copy is stripped as a server-owned field', () => {

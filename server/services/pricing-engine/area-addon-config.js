@@ -20,7 +20,7 @@
  * code defaults stand (never a half-applied row). Every sync rebases AREA_ADDONS onto the defaults first, so a deleted
  * or invalid row restores them on the next sync, never the previous edit.
  */
-const { AREA_ADDONS, areaAddOnPricingDefaults } = require('./constants');
+const { AREA_ADDONS, GLOBAL, areaAddOnPricingDefaults } = require('./constants');
 
 const DEFAULTS = areaAddOnPricingDefaults();
 
@@ -125,16 +125,24 @@ function syncAreaAddOnPricingConfig(row, target = AREA_ADDONS) {
 }
 
 // The knobs one add-on line was priced with, as stamped on the line (pricingKnobs) and replayed from the stored
-// estimate: the group's margin and admin charge, and this add-on's own cost knobs and tiers. `replay` is the stored
-// signal (areaAddOnPricingKnobs: { targetMargin, adminPerJob, items: { <key>: {...} } }); a field it lacks is the live value.
+// estimate: the group's margin and admin charge, this add-on's own cost knobs and tiers, and the two global inputs of
+// the labor cost (the loaded labor rate and the drive minutes, pricing_config global_labor_rate / global_drive_time).
+// `replay` is the stored signal (areaAddOnPricingKnobs: { targetMargin, adminPerJob, laborRate, driveMinutes, items:
+// { <key>: {...} } }). A field it lacks is the value current at replay: that is how every knob of a line stored before
+// it was stamped replays, and the other lines' globals (GLOBAL.LABOR_RATE) are never frozen at all. The drive and
+// admin carriers (which add-on of a group carries the one drive and the one admin charge) are NOT knobs: they follow
+// the list being priced, so removing the add-on that carried them moves them to the next one.
 function areaAddOnKnobsFor(addOnKey, replay = null) {
   const cfg = AREA_ADDONS.items[addOnKey];
   const stored = replay && isPlain(replay.items) && isPlain(replay.items[addOnKey]) ? replay.items[addOnKey] : {};
   const num = (field, value, live) => (inBounds(field, value) ? value : live);
   const tiers = cfg.tiers && Array.isArray(stored.tiers) && stored.tiers.length && stored.tiers.every((t) => isNum(t) && t > 0) ? [...stored.tiers] : (cfg.tiers ? [...cfg.tiers] : null);
+  const globalOr = (value, ok, live) => (isNum(value) && ok(value) ? value : live);
   return {
     targetMargin: num('targetMargin', replay && replay.targetMargin, AREA_ADDONS.targetMargin),
     adminPerJob: num('adminPerJob', replay && replay.adminPerJob, AREA_ADDONS.adminPerJob),
+    laborRate: globalOr(replay && replay.laborRate, (v) => v > 0, GLOBAL.LABOR_RATE),
+    driveMinutes: globalOr(replay && replay.driveMinutes, (v) => v >= 0, GLOBAL.DRIVE_TIME),
     materialPer1000: num('materialPer1000', stored.materialPer1000, cfg.materialPer1000),
     setupMin: num('setupMin', stored.setupMin, cfg.setupMin),
     minPer1000: num('minPer1000', stored.minPer1000, cfg.minPer1000),

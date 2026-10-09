@@ -8598,8 +8598,8 @@ function priceAreaAddOn(addOnKey, options = {}) {
   const tierK = (tierSqFt || 0) / 1000;
   const materialCost = tierK * knobs.materialPer1000;
   const onSiteMin = knobs.setupMin + knobs.minPer1000 * tierK;
-  const driveMin = visitContext === 'standalone' && carriesDrive ? GLOBAL.DRIVE_TIME : 0;
-  const laborCost = (onSiteMin + driveMin) * GLOBAL.LABOR_RATE / 60;
+  const driveMin = visitContext === 'standalone' && carriesDrive ? knobs.driveMinutes : 0;
+  const laborCost = (onSiteMin + driveMin) * knobs.laborRate / 60;
   const adminCost = carriesAdmin ? knobs.adminPerJob : 0;
   const cost = materialCost + laborCost + adminCost;
   const price = roundUpToNine(cost / (1 - knobs.targetMargin));
