@@ -834,8 +834,9 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
 
 describe('Blindside in the recipe', () => {
   // Owner 2026-10-08: Blindside is a November-through-March product, and February is Celsius alone
-  // (20261008130000 retires the staged rows): of the Celsius windows only January, March and December list it.
-  const BLINDSIDE_MONTHS = [1, 3, 12];
+  // (20261008130000 retires the staged rows): of the Celsius windows only January, March and December list it. The v13 final pass
+  // (20261009150000) gives November the December weed lines, so November lists it too.
+  const BLINDSIDE_MONTHS = [1, 3, 11, 12];
 
   test('every Celsius spot window lists Blindside by its exact catalog name, after the Celsius lines, and the line stays a spot line; none in February or April through October', () => {
     for (const month of MONTHS) {
@@ -867,8 +868,19 @@ describe('Blindside in the recipe', () => {
     }
   });
 
-  test('November has no weed lines (none added)', () => {
-    expect(lines(visitFor(11).secondary).filter((l) => /Celsius|Certainty|Blindside|Nonionic/.test(l))).toEqual([]);
+  test('November carries the same four weed lines as December (v13 final pass), Blindside at 0.149 oz', () => {
+    const weed = (month) => lines(visitFor(month).secondary).filter((l) => /^(Celsius|Certainty|Blindside|LESCO 90\/10 Nonionic)/.test(l));
+    expect(weed(11)).toHaveLength(4);
+    expect(weed(11)).toEqual(weed(12));
+    expect(weed(11).find((l) => l.startsWith(BLINDSIDE))).toContain('0.149 oz per 1,000 sq ft');
+  });
+
+  test('every Blindside line states 0.149 oz per 1,000 sq ft, one application per lawn per year (the label\'s warm-season rate; 0.23 oz is the yearly limit)', () => {
+    for (const grass of V13_GRASSES) {
+      const blind = v13[grass].visits.flatMap((visit) => lines(visit.secondary)).filter((l) => l.startsWith(`${BLINDSIDE} — `));
+      expect(blind).toHaveLength(4);
+      for (const line of blind) expect(line).toContain('0.149 oz per 1,000 sq ft, one application per lawn per year');
+    }
   });
 });
 

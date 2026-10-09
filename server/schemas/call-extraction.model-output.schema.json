@@ -33,7 +33,7 @@
         },
         "is_spam": {
           "type": "boolean",
-          "description": "True if the call is spam, solicitation, robocall, or wrong number."
+          "description": "Solicitation or robocall. A wrong number is not spam: set false and sentiment_and_lead.lead_quality \"wrong_number\"."
         },
         "transcript_word_count": {
           "type": "integer",

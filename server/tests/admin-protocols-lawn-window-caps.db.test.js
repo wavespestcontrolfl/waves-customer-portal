@@ -30,15 +30,17 @@ describeDb('GET /lawn/window carries the v13 count caps', () => {
     return res;
   }
 
-  test.each(['2026-02-10', '2026-05-12', '2026-06-16'])('%s: every capped product in the window carries annualMaxApps 2 and maxApplications 2', async (date) => {
+  test.each(['2026-02-10', '2026-05-12', '2026-06-16'])('%s: every capped product in the window carries annualMaxApps and maxApplications 2 (Blindside 1)', async (date) => {
     process.env.GATE_LAWN_V13 = 'true';
     const res = await windowFor(date, 'st_augustine');
     expect(res.statusCode).toBe(200);
     const products = res.body.context.products.filter((p) => CAPPED.includes(p.protocolProductName));
     expect(products.length).toBeGreaterThan(0);
     for (const product of products) {
-      expect(product.gates.annualMaxApps).toBe(2);
-      expect(product.annualCounter.maxApplications).toBe(2);
+      // Blindside is held to one application a year (effectiveCap 1, v13 final pass); Celsius, Certainty and Arena stay at 2.
+      const shown = product.protocolProductName === 'Blindside Herbicide' ? 1 : 2;
+      expect(product.gates.annualMaxApps).toBe(shown);
+      expect(product.annualCounter.maxApplications).toBe(shown);
     }
   });
 
@@ -49,8 +51,8 @@ describeDb('GET /lawn/window carries the v13 count caps', () => {
     expect(names).toContain('Celsius WG');
     const blindside = res.body.context.products.find((p) => p.protocolProductName === 'Blindside Herbicide');
     expect(blindside).toMatchObject({ role: 'post_emergent_spot', applicationMode: 'spot', defaultInPlan: false });
-    expect(blindside.gates).toMatchObject({ trigger: 'celsius_annual_cap_reached', annualMaxApps: 2 });
-    expect(blindside.annualCounter.maxApplications).toBe(2);
+    expect(blindside.gates).toMatchObject({ trigger: 'celsius_annual_cap_reached', annualMaxApps: 1 });
+    expect(blindside.annualCounter.maxApplications).toBe(1);
   });
 
   // Owner 2026-10-08 (20261008130000): February weed spots are Celsius alone; Blindside is a November-through-March product.

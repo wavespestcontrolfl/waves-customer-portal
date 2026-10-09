@@ -13,12 +13,14 @@ const SLUG = migration._KB_SLUG;
 const [FLAG, CERTAINTY] = migration._REPLACEMENTS;
 const AUDIT = migration._AUDIT_ACTION;
 const AUDIT_DOWN = migration._AUDIT_ACTION_DOWN;
+const blindsideOneAYear = require('../models/migrations/20261009152000_lawn_v13_celsius_kb_blindside_one_a_year');
 const seedScript = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'seed-knowledge-base.js'), 'utf8');
 
 function seedArticle() {
   const start = seedScript.indexOf(`slug: '${SLUG}'`);
   const open = seedScript.indexOf('content: `', start) + 'content: `'.length;
-  return seedScript.slice(open, seedScript.indexOf('`,', open));
+  // The seed as it stood when this migration ran: 20261009152000 later changed the Blindside statement of the Flag line (its own test pins the seed).
+  return seedScript.slice(open, seedScript.indexOf('`,', open)).replace(blindsideOneAYear._NEXT, () => blindsideOneAYear._OLD);
 }
 // The article as 173000 left it.
 const afterFirst = () => migration._REPLACEMENTS.reduce((content, row) => content.replace(row.next, () => row.old), seedArticle());

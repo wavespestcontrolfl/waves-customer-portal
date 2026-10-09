@@ -95,6 +95,7 @@ import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import {
   mergePostPaymentService,
   fastCompleteSheetFor,
+  invoicedSheetResponse,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
@@ -395,6 +396,9 @@ function lawnReserviceSheetService(row) {
     routedScheduledDate: row.scheduledDate || row.scheduled_date || null,
     routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
     routedAddress: typeof row.address === "string" ? row.address : null,
+    // Already invoiced from the payment flow: the sheet posts the full form's
+    // invoiceAlreadySent (lib/completion-invoice-fields.js).
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
   };
 }
 
@@ -1025,9 +1029,12 @@ export default function DispatchPageV2({
         ["service_complete_with_invoice", "service_report_v1_with_invoice"].includes(r?.completionSmsType) &&
         r?.completionSmsStatus === "sent";
       const invoiceWasAlreadyPaid = r?.invoiceStatus === "paid";
+      // A Fast Complete sheet passes the visit it completed as fallbackService
+      // (and no body): its invoice was already sent on the same terms.
       const invoiceWasAlreadySent =
         !!body?.invoiceAlreadySent ||
-        !!completingService?.completionInvoiceAlreadySent;
+        !!completingService?.completionInvoiceAlreadySent ||
+        !!fallbackService?.completionInvoiceAlreadySent;
       if (
         isMobile &&
         r?.invoiceId &&
@@ -1979,6 +1986,7 @@ export default function DispatchPageV2({
             routedScheduledDate: treeShrubFastService.scheduledDate || treeShrubFastService.scheduled_date || null,
             routedPropertyId: "propertyId" in treeShrubFastService ? treeShrubFastService.propertyId : undefined,
             routedAddress: typeof treeShrubFastService.address === "string" ? treeShrubFastService.address : null,
+            completionInvoiceAlreadySent: !!treeShrubFastService.completionInvoiceAlreadySent,
           }}
           request={adminFetch}
           operatorId={fastCompleteOperatorId}
@@ -2007,12 +2015,13 @@ export default function DispatchPageV2({
           operatorId={fastCompleteOperatorId}
           voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
           onClose={closeFastSheet(setLawnReserviceFastService)}
-          onCompleted={() => {
-            // As the pest sheet below: flip the row to completed, invalidate
-            // the mobile week cache, refetch.
+          onCompleted={(response) => {
+            // As the lawn sheet below: flip the row to completed, invalidate
+            // the mobile week cache, stage the payment handoff for an unpaid
+            // invoice, refetch.
             const service = lawnReserviceFastService;
             setLawnReserviceFastService(null);
-            applyCompletionResult(service.id, null, null, service);
+            applyCompletionResult(service.id, invoicedSheetResponse(service, response), null, service);
             void fetchSchedule(date, { silent: true });
           }}
           // The sheet's "Full form" button: the long form for this visit.
@@ -2052,6 +2061,7 @@ export default function DispatchPageV2({
             // Checked against the live visit: the office may have changed the service since.
             routedServiceType: lawnFastService.serviceTypeRaw || null,
             routedCatalogServiceId: lawnFastService.catalogServiceId || null,
+            completionInvoiceAlreadySent: !!lawnFastService.completionInvoiceAlreadySent,
           }}
           request={adminFetch}
           operatorId={fastCompleteOperatorId}
@@ -2097,6 +2107,7 @@ export default function DispatchPageV2({
             routedAddress: typeof pestFastService.address === "string" ? pestFastService.address : null,
             routedServiceType: pestFastService.serviceTypeRaw ?? null,
             routedServiceKey: pestFastService.completionProfile?.serviceKey || null,
+            completionInvoiceAlreadySent: !!pestFastService.completionInvoiceAlreadySent,
             // Only an exact true turns the customer recap on (see the sheet).
             recapEnabled: pestFastService.fastCompleteRecapEnabled === true,
             // The report flow, with what the sheet reads of it from the row
@@ -2115,13 +2126,14 @@ export default function DispatchPageV2({
           operatorId={fastCompleteOperatorId}
           voiceFillEnabled={pestFastService.fastCompleteVoiceFillEnabled === true}
           onClose={closeFastSheet(setPestFastService)}
-          onCompleted={() => {
-            // The sheet sends the response nowhere, so only the bookkeeping
-            // that needs none runs: flip the row to completed, invalidate the
-            // mobile week cache, refetch.
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the row
+            // to completed, invalidate the mobile week cache, stage the payment
+            // handoff for an unpaid invoice (the lane and typed flows too),
+            // refetch.
             const service = pestFastService;
             setPestFastService(null);
-            applyCompletionResult(service.id, null, null, service);
+            applyCompletionResult(service.id, invoicedSheetResponse(service, response), null, service);
             void fetchSchedule(date, { silent: true });
           }}
           // The sheet's "Full form" button: the long form for this visit.
