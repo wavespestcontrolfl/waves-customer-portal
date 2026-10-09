@@ -589,12 +589,13 @@ describe('booking time: an estimate with no customer_id of its own is checked fo
     expect(call).toContain('customerId: acceptPreLockedCommsId,');
     expect(call).toContain('appliedOn: acceptPreLockedDate,');
     expect(call).toContain('excludeVisitIds: rowIds(capacityHold, existingAppointmentRow),');
-    expect(call).toContain('resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate, acceptPreLockedCommsId),');
+    expect(call).toContain('resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate),');
+    expect(call).toContain('fenceCustomer: (id) => fenceAcceptLimitCustomer(trx, id, acceptPreLockedCommsId),');
     expect(call).not.toContain('excludeEstimateId');
-    // the resolver: the account step's own authoritative phone match, fenced by its non-blocking customer take
+    // the resolver: the account step's own authoritative phone match; the fence: its non-blocking customer take
     const resolver = src.slice(src.indexOf('async function resolveAcceptLimitCustomer'), src.indexOf('// B18 park: the accept cannot complete self-serve when the estimate'));
     expect(resolver).toContain('matchAcceptCustomerByPhone(estimate, trx, { authoritative: true, afterSiblingResolution: true })');
-    expect(resolver).toContain('tryLockCustomerComms(trx, match.id)');
+    expect(resolver).toContain('tryLockCustomerComms(trx, customerId)');
     expect(resolver).toContain("code: 'CUSTOMER_BUSY_RETRY'");
   });
 
@@ -675,6 +676,24 @@ describe('a customer who does not exist yet: the holds of the same person count,
     const booked = ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5));
     const db = fakeDb(world({ scheduled_services: [booked] }));
     await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: lead(['bed_pre_emergent']), resolveCustomer: async () => CUSTOMER })).rejects.toMatchObject(refusal);
+  });
+
+  test('a customer the check found for itself (phone match, group owner, linked appointment) is fenced by the caller before the read; a named one is not', async () => {
+    const GROUP = '55555555-5555-4555-8555-555555555555';
+    const fence = jest.fn(async () => {});
+    const grouped = world({ estimates: [{ estimate_group_id: GROUP, id: '66666666-6666-4666-8666-666666666666', customer_id: CUSTOMER, accepted_at: '2026-10-01' }], customers: [{ id: CUSTOMER, deleted_at: null }] });
+    await service.assertAreaAddOnLimitsOpen(fakeDb(grouped), { estimate: lead(['bed_pre_emergent'], { estimate_group_id: GROUP }), fenceCustomer: fence });
+    expect(fence).toHaveBeenCalledWith(CUSTOMER);
+    fence.mockClear();
+    await service.assertAreaAddOnLimitsOpen(fakeDb(world()), { estimate: lead(['bed_pre_emergent']), resolveCustomer: async () => CUSTOMER, fenceCustomer: fence });
+    expect(fence).toHaveBeenCalledWith(CUSTOMER);
+    fence.mockClear();
+    await service.assertAreaAddOnLimitsOpen(fakeDb(world()), { estimate: lead(['bed_pre_emergent'], { customer_id: CUSTOMER }), fenceCustomer: fence });
+    await service.assertAreaAddOnLimitsOpen(fakeDb(world()), { estimate: lead(['bed_pre_emergent']), customerId: CUSTOMER, fenceCustomer: fence });
+    expect(fence).not.toHaveBeenCalled();
+    // a busy account is the caller's own answer
+    const busy = Object.assign(new Error('busy'), { status: 409, code: 'CUSTOMER_BUSY_RETRY' });
+    await expect(service.assertAreaAddOnLimitsOpen(fakeDb(world()), { estimate: lead(['bed_pre_emergent']), resolveCustomer: async () => CUSTOMER, fenceCustomer: async () => { throw busy; } })).rejects.toBe(busy);
   });
 
   test('a retry-later answer from the resolver is the caller\'s own, not a "history unavailable" refusal', async () => {

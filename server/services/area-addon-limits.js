@@ -313,11 +313,11 @@ const HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not
  * estimate with no priced add-on, with the gate off (the gated guards own that), or when no customer is
  * known at all (limitSubject). `customerId` and `property` ({ property_id }) are what the caller has verified (the
  * booking's customer and property); `resolveCustomer` is the caller's last resort for an unowned estimate
- * (the phone match), called only when nothing else names a customer. `appliedOn` is the day the add-on will
+ * (the phone match), called only when nothing else names a customer; `fenceCustomer(id)` is the caller's lock for a customer found that way. `appliedOn` is the day the add-on will
  * be applied (the booked visit); default the earliest day of `excludeVisitIds` (the rows being committed), else today. `database` should be the accept transaction. Staff get the
  * dates; the customer gets the office hand-off.
  */
-async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null, property = null, resolveCustomer = null, appliedOn = null, staff = false, excludeVisitIds = [] } = {}) {
+async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null, property = null, resolveCustomer = null, fenceCustomer = null, appliedOn = null, staff = false, excludeVisitIds = [] } = {}) {
   const keys = recheckKeys(estimate);
   if (!keys.length) return;
   let history;
@@ -330,6 +330,9 @@ async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null
     // customer lock every booking of that customer takes.
     if (![customerId, estimate.customer_id].some(isUuid)) await lockProspectIdentity(database, estimate);
     const subject = await limitSubject(database, estimate, { customerId, propertyId: property && property.property_id, resolveCustomer });
+    // A customer this check found for itself (the group's owner, a linked appointment's, the phone match) is not one the caller
+    // has locked: the caller's own fence takes the lock that serializes that customer's bookings before the read.
+    if (fenceCustomer && subject.customerId && ![customerId, estimate.customer_id].includes(subject.customerId)) await fenceCustomer(subject.customerId);
     // In a savepoint: a failed read must not poison the transaction it runs inside (the 409 below is the answer).
     history = await savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
       customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeVisitIds, prospect: prospectOf(estimate),

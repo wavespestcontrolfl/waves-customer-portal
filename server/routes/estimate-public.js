@@ -645,15 +645,18 @@ function rowIds(...rows) {
 }
 
 // The customer the add-on limit recheck reads for an accept with no customer named yet: the phone match the account step below
-// makes (authoritative, in the accept transaction). The customer it finds is fenced by the same non-blocking take the account
-// step makes (a blocking one could deadlock against a merge-undo, which locks the customer and then the estimate this
-// transaction holds); a busy account is the accept's own retryable 409.
-async function resolveAcceptLimitCustomer(trx, estimate, preLockedCustomerId) {
+// makes (authoritative, in the accept transaction).
+async function resolveAcceptLimitCustomer(trx, estimate) {
   const { match } = await matchAcceptCustomerByPhone(estimate, trx, { authoritative: true, afterSiblingResolution: true });
-  if (match && match.id !== preLockedCustomerId && !(await tryLockCustomerComms(trx, match.id))) {
-    throw Object.assign(new Error('This account is being updated right now — please retry your acceptance in a moment.'), { status: 409, isOperational: true, code: 'CUSTOMER_BUSY_RETRY' });
-  }
   return match ? match.id : null;
+}
+
+// A customer the recheck found for itself (the phone match, the group's owner, a linked appointment's) is fenced by the same
+// non-blocking take the account step makes (a blocking one could deadlock against a merge-undo, which locks the customer and
+// then the estimate this transaction holds); a busy account is the accept's own retryable 409.
+async function fenceAcceptLimitCustomer(trx, customerId, preLockedCustomerId) {
+  if (customerId === preLockedCustomerId || await tryLockCustomerComms(trx, customerId)) return;
+  throw Object.assign(new Error('This account is being updated right now — please retry your acceptance in a moment.'), { status: 409, isOperational: true, code: 'CUSTOMER_BUSY_RETRY' });
 }
 
 // B18 park: the accept cannot complete self-serve when the estimate's phone belongs to another customer, so
@@ -12056,7 +12059,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         customerId: acceptPreLockedCommsId,
         appliedOn: acceptPreLockedDate,
         excludeVisitIds: rowIds(capacityHold, existingAppointmentRow),
-        resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate, acceptPreLockedCommsId),
+        resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate),
+        fenceCustomer: (id) => fenceAcceptLimitCustomer(trx, id, acceptPreLockedCommsId),
       });
       // Bind the accept to the SetupIntent it verified (Codex #3723 r2 P1):
       // the setup_intent.succeeded backstop enrolls ONLY this intent — a
