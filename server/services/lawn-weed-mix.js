@@ -122,7 +122,8 @@ async function leadMix({ base, lead, members, isCapped, svc, readTemp = () => cu
  *                   replacement alone), 'none' (the yearly limit is reached, nothing to add) or
  *                   'unavailable' (the limits could not be read: nothing is offered)
  *   productIds      what the tap adds, in order
- *   groupProductIds every product the entry stands for; the sheet lists none of them on its own
+ *   groupProductIds every product the entry stands for; the add-ons list shows none of them on its own
+ *                   (the search lists the ones no read limit forbids)
  *   replacementProductId  the replacement's id, or null
  *   note            the one line under the entry, or null
  *   surfactant      { productId, included, note } in lead mode, else null

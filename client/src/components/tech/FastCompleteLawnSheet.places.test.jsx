@@ -732,9 +732,9 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
       back: { item: null, note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.', unreadableIds: [P_ARENA] },
     },
   });
-  const openWithArenaRow = async (fresh) => {
+  const openWithArenaRow = async (fresh, blockedProductIds = []) => {
     // Arena is a planned row; the sheet opened with the context's own chinch decision.
-    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: fresh };
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: fresh, blockedProductIds };
     await open(placeContext({
       treatmentGuide: true, chinch: FRESH_CHINCH([]), planned: [{ ...ARENA_ITEM, treatedSqft: null }], addOns: [],
     }));
@@ -753,8 +753,8 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
     expect(chipOf(where, 'Back').disabled).toBe(false);
   });
 
-  test('the same answer without the unreadable id drops the row (proving the test can fail): Complete is held on the row', async () => {
-    await openWithArenaRow(FRESH_CHINCH([]));
+  test('the same answer with Arena read as at its limit drops the row (proving the test can fail): Complete is held on the row', async () => {
+    await openWithArenaRow({ ...FRESH_CHINCH([]), blockedIds: [P_ARENA] }, [P_ARENA]);
     // The first answer reconciles nothing (the taps were locked until it came); the same test holds Complete on the row.
     await waitFor(() => expect(footerNote() + completeButton().textContent).toMatch(/Remove Arena 50 WDG: it is not offered for this lawn right now\./));
   });

@@ -523,11 +523,13 @@ function cardOwnedIds(guide, checks) {
 // What the guide governs for this visit, and what the LATEST decision does with it. ONE invariant:
 // a product that belongs to a guide-governed kind (the weed group, the chinch rungs, and the month's
 // fungicide, caterpillar and dry-spot picks) may be ON the sheet only if the latest decision offers
-// it, and may be ADDED only through the entry or card the latest decision offers. The latest
+// it. The entry or card the latest decision offers adds the program's own row; the search adds a plain
+// row of any governed product a limit that was READ does not forbid (owner 2026-10-09). The latest
 // decision is the fresh guide answer, or, when the read failed, the context's own decisions.
 //   governed  every such product            offered  what the latest decision lets onto the sheet
-//   hidden    kept out of the add-ons list and the search (every governed product that is not
-//             released to the generic list)   locked   no decision yet: the taps wait
+//   hidden    kept out of the add-ons list (every governed product that is not released to the
+//             generic list)                   locked   no decision yet: the taps wait
+//   searchable  what the search lists of the governed products (searchReach)
 // A pick is RELEASED to the generic list when nothing blocked or holds it and no visible card owns
 // it: a clean answer with no finding for it ("the technician can still treat what he sees"), or a
 // card he dismissed. A blocked pick (a limit or a city hold that was READ) never is.
@@ -535,7 +537,7 @@ function cardOwnedIds(guide, checks) {
 // cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
 // is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
 // leave no way to record a real application. Completion records the visit and flags it to the office.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
 
 // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
 function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
@@ -556,10 +558,32 @@ function takeAllReach({ ctx, guide, settled, blocked }) {
   return { takeAll, searchOnly: settled ? takeAll.filter((id) => !blocked.includes(id)) : [] };
 }
 
-// The governed ids kept out of the list AND the search: not released to the generic list, or a card owns
+// The governed ids kept out of the add-ons list: not released to the generic list, or a card owns
 // them; a take-all product the search may reach is not.
 function hiddenIds({ governed, searchOnly, free, unreadable, owned }) {
   return governed.filter((id) => !searchOnly.includes(id) && ((!free.includes(id) && !unreadable.includes(id)) || owned.includes(id)));
+}
+
+// The weed-group and chinch products a limit that was READ forbids, by the context's own decisions (the
+// rule the guide answer's blockedProductIds uses): the weed members read as forbidding when the mix is
+// withheld, the whole group but what the tap adds once the lead is past its limit, and the chinch rungs
+// a limit kept out. A product whose limit could not be read is not forbidden.
+function readForbiddenIds({ weedMix, chinch }) {
+  const unreadable = lowerIds([...(weedMix?.unreadableIds || []), ...(chinch?.unreadableIds || [])]);
+  const adds = lowerIds(weedMix?.productIds);
+  const weed = !weedMix ? [] : weedMix.mode === 'unavailable' ? lowerIds(weedMix.blockedIds)
+    : weedMix.mode !== 'lead' ? lowerIds(weedMix.groupProductIds).filter((id) => !adds.includes(id)) : [];
+  return [...weed, ...lowerIds(chinch?.blockedIds)].filter((id) => !unreadable.includes(id));
+}
+
+// Every lawn product is in the search (owner 2026-10-09): once the decision is in, the search reaches
+// every governed product a limit that was READ does not forbid, whether or not an entry or a card also
+// offers it. The row it opens is a plain row; the entry and the card still add the program's own rows.
+// A product a check-only card holds (take-all found: check, do not treat) stays out as well.
+function searchReach({ governed, settled, answered, blocked, cardHeld, weedMix, chinch }) {
+  if (!settled) return [];
+  const forbidden = [...(answered ? blocked : readForbiddenIds({ weedMix, chinch })), ...cardHeld];
+  return governed.filter((id) => !forbidden.includes(id));
 }
 
 function guideGovernance({ ctx, guide, status, checks }) {
@@ -587,17 +611,22 @@ function guideGovernance({ ctx, guide, status, checks }) {
   // forbids it. The row it opens carries TAKE_ALL_ROW_NOTE.
   const { takeAll, searchOnly } = takeAllReach({ ctx, guide: fresh, settled, blocked });
   // Held from the generic list: a check-only card's product, and every take-all product.
-  const held = [...lowerIds(cards.flatMap((card) => card.heldProductIds || [])), ...takeAll];
+  const cardHeld = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
+  const held = [...cardHeld, ...takeAll];
   const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
   const owned = cardOwnedIds(fresh, checks);
   const governed = [...picks, ...takeAll, ...weedGroup, ...lowerIds(chinch?.rungIds), ...chinchItem];
+  // A take-all product the search may reach stays reachable whatever a check-only card holds.
+  const searchable = [...searchReach({ governed, settled, answered, blocked, cardHeld, weedMix, chinch }), ...searchOnly];
   return {
     enabled: true,
     locked: !settled,
     governed: new Set(governed),
-    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable, ...searchOnly]),
-    // Hidden from the add-ons list AND the search; a take-all product reachable by the search is not.
+    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable, ...searchOnly, ...searchable]),
+    // Hidden from the add-ons list; a take-all product reachable by the search is not.
     hidden: new Set(hiddenIds({ governed, searchOnly, free, unreadable, owned })),
+    // What the search lists of the governed products (searchReach).
+    searchable: new Set(searchable),
     takeAll: new Set(takeAll),
     unreadable: new Set(unreadable),
     unreadableNote: answered ? guide.unreadableNote : '',
@@ -1682,17 +1711,17 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
-  // The weed group's products come through the Weed spots entry only, so the search lists none of
-  // them: not the ones the tap adds (one shared area), and not the ones the server held back (the
-  // surfactant in the heat, a member or the lead at its yearly limit, the replacement before its
-  // turn). Only when the limits could not be read does the entry send the tech to the search.
+  // Every lawn product is in the search (owner 2026-10-09). The search leaves out only a governed product
+  // a limit that was READ forbids (the lead at its yearly limit, a chinch rung at its limit) and, before
+  // the guide has answered, every governed product: the taps wait, and so does the search.
   const searchCatalog = useMemo(() => {
-    const unreadable = lowerIds(weedMix?.unreadableIds);
-    const held = weedMix && weedMix.mode !== 'unavailable' ? (weedMix.groupProductIds || []).filter((id) => !unreadable.includes(String(id).toLowerCase())) : [];
-    // Every guide-governed product that is not released to the generic list comes through its entry
-    // or card only (and, before the guide has answered, not at all).
-    const hidden = (product) => gov.hidden.has(String(product.id).toLowerCase()) || held.some((id) => sameId(id, product.id));
-    return held.length || gov.hidden.size ? catalog.filter((product) => !hidden(product)) : catalog;
+    // With no guide for the visit the weed group follows the context's own decision.
+    const held = gov.enabled ? [] : readForbiddenIds({ weedMix, chinch: null });
+    const hidden = (product) => {
+      const id = String(product.id).toLowerCase();
+      return (gov.governed.has(id) && !gov.searchable.has(id)) || held.includes(id);
+    };
+    return held.length || gov.governed.size ? catalog.filter((product) => !hidden(product)) : catalog;
   }, [catalog, weedMix, gov]);
   const picker = useProductPicker({
     line: 'lawn',
