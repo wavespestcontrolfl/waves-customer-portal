@@ -58,6 +58,7 @@ const CHECKS = Object.freeze({
 // and no product until a trouble area is on file for the lawn.
 const TAKE_ALL_TRIGGER = /^mapped_take_all/;
 const TAKE_ALL_LINE = /mapped take-all/i;
+const TAKE_ALL_KIND = 'take_all';
 const TAKE_ALL_NOTE = 'Take-all is treated on known trouble areas only. None is on file for this lawn.';
 // "Blocked" means the read found a limit or hold that forbids the product. When the limit read itself
 // failed the product is only UNREADABLE: its entry or card offers nothing (we cannot vouch for it),
@@ -137,7 +138,11 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
 async function addOnOffers({ candidates, rows, svc, knex }) {
-  const chosen = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
+  const picks = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
+  // A take-all row the pick passed over (October's Headway row follows the large patch row) is governed
+  // all the same: its limit is read so a forbidden one stays out of the search, and it has no offer.
+  const picked = new Set(picks.map(([, candidate]) => idOf(candidate.raw.product.id)));
+  const chosen = [...picks, ...takeAllAddOns(candidates, rows).filter((c) => !picked.has(idOf(c.raw.product.id))).map((c) => [TAKE_ALL_KIND, c])];
   // `blocked`: the picks a limit or a city hold that was READ forbids. `unreadable`: the picks whose
   // limit read failed (nothing is offered for them, and they are not forbidden). A pick that merely
   // has no finding is neither.
@@ -147,7 +152,7 @@ async function addOnOffers({ candidates, rows, svc, knex }) {
   if (!capped) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
   for (const [kind, candidate] of chosen) {
     const id = idOf(candidate.raw.product.id);
-    offers[kind] = offerFor(kind, candidate, { capped, rows });
+    if (kind !== TAKE_ALL_KIND) offers[kind] = offerFor(kind, candidate, { capped, rows });
     if (isBlocked(candidate, capped)) offers.blocked.push(id);
     else if (isUnreadable(candidate, capped)) offers.unreadable.push(id);
   }
@@ -167,6 +172,17 @@ function pickAddOns(candidates, rows) {
     caterpillars: withRole((row) => row.gates?.trigger === CATERPILLAR_TRIGGER)[0] || null,
     dry_spots: withRole((row) => row.gates?.trigger === DRY_SPOT_TRIGGER)[0] || null,
   };
+}
+
+// Every take-all fungicide row of the month, wherever it stands in the program order (owner 2026-10-08:
+// take-all is preventive on mapped areas only, never curative on a lawn with none on file). The staged
+// role says fungicide; the trigger or the protocol line says take-all. The sheet keeps these out of the
+// plain add-on list always, and releases them to the search only (see guideGovernance).
+function takeAllAddOns(candidates, rows) {
+  return (candidates || []).filter((candidate) => {
+    const row = stagedRowOf(rows, candidate.raw);
+    return row && row.role === FUNGICIDE_ROLE && isTakeAll(candidate, rows);
+  });
 }
 
 // The plan's own limit reader over some products as selected lines: the hard blocks by product id,
@@ -472,6 +488,63 @@ function treatmentGuideFreeze(lawnFast) {
   return { lawnTreatmentGuide: { v: 1, cards } };
 }
 
+// The technician's own finds, read back from the record for the lawn report's finding-to-product tie
+// (service-report/lawn-report-facts.js, GATE_LAWN_REPORT_FACTS): the cards whose check was answered
+// "found" and whose product was taken, with the product ids the card named. Only the kinds that name
+// something the technician saw (fungus, chinch bugs, caterpillars). The one deliberate reader of the record
+// besides the freeze above. The echo came from the client, so a find reaches a customer only after
+// verifyGuideFind below has checked it. Pure.
+const TECH_FIND_KINDS = Object.freeze(['fungus', 'chinch', 'caterpillars']);
+function guideTakenFindings(structuredNotes) {
+  const notes = parseJson(structuredNotes);
+  const block = notes && notes.lawnTreatmentGuide;
+  if (!block || typeof block !== 'object' || block.v !== 1 || !Array.isArray(block.cards)) return [];
+  const seen = new Set();
+  const finds = [];
+  for (const card of block.cards) {
+    if (!card || card.checked !== 'found' || card.taken !== true || !TECH_FIND_KINDS.includes(card.kind) || seen.has(card.kind)) continue;
+    seen.add(card.kind);
+    finds.push({ kind: card.kind, productIds: Array.isArray(card.productIds) ? card.productIds.map((id) => String(id).toLowerCase()) : [] });
+  }
+  return finds;
+}
+
+// What the program's staged rows say each find's product must be (the same definitions the cards use above):
+// the fungus card's fungicide (role), the caterpillar row (gates.trigger), the chinch rungs (gates.trigger).
+const FIND_ROW_TEST = Object.freeze({
+  fungus: (row) => row.role === FUNGICIDE_ROLE,
+  caterpillars: (row, gates) => gates.trigger === CATERPILLAR_TRIGGER,
+  chinch: (row, gates) => CHINCH_TRIGGERS.includes(gates.trigger),
+});
+
+/**
+ * Whether a technician's recorded find is real enough to be told to the customer. false on any definite doubt (a
+ * missing id, a product the program does not stage for the card), and the find stays on the technician record only.
+ * A failed READ throws (see below).
+ *   - every product id the card named is a uuid and a staged program row of the card's own kind (a fungicide
+ *     row for fungus, the caterpillar row, a chinch rung), so a modified echo cannot name any product it likes;
+ *   - a fungus card also needs the confirmed assessment to read fungus minor or worse, a caterpillar card insect
+ *     damage moderate or worse (the live guide's own thresholds, from `signals`); the standing chinch tap is
+ *     offered in every month by design, so chinch is checked against its rungs alone.
+ * `signals` is signalsFromAssessment(assessment, run) of the confirmed assessment, or null (fungus and
+ * caterpillars then fail). The applied-product side (that those products really went down on the visit, and are
+ * of the right kind) is checked by the caller against the visit's rows.
+ */
+async function verifyGuideFind({ kind, productIds, signals, knex }) {
+  const test = FIND_ROW_TEST[kind];
+  const ids = Array.isArray(productIds) ? productIds : [];
+  if (!test || !ids.length || !ids.every((id) => UUID_RE.test(id))) return false;
+  if (kind === 'fungus' && !(signals && atLeast(signals.fungus, 'minor'))) return false;
+  if (kind === 'caterpillars' && !(signals && atLeast(signals.insect, 'moderate'))) return false;
+  const { activeProtocolProducts } = require('./lawn-protocol-retired');
+  // A failed program read THROWS: it is not an answer. The caller (the facts freeze) treats it as a failed attempt
+  // and records that, instead of freezing a visit without a find it could not check.
+  const staged = await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
+    .whereIn('lpp.product_id', ids)
+    .select('lpp.product_id', 'lpp.role', 'lpp.gates');
+  return ids.every((id) => staged.some((row) => String(row.product_id).toLowerCase() === id && test(row, parseJson(row.gates) || {})));
+}
+
 module.exports = {
   KINDS,
   WEED_MIN_PERCENT,
@@ -480,6 +553,7 @@ module.exports = {
   signalsFromAssessment,
   addOnOffers,
   pickAddOns,
+  takeAllAddOns,
   weedOffer,
   blockedProductIds,
   unreadableProductIds,
@@ -487,4 +561,6 @@ module.exports = {
   resolveChinch,
   buildCards,
   treatmentGuideFreeze,
+  guideTakenFindings,
+  verifyGuideFind,
 };

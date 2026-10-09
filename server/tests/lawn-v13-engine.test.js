@@ -265,9 +265,10 @@ const BLINDSIDE = 'Blindside Herbicide';
 // the staged Stonewall 15-0-15 line).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
+const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 // December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
 const F10_22 = decemberMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -486,7 +487,8 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => decSwapped(swapped(s))).map((s) => ({
       productId: idOf(matrixName(s[0])), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
-    const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => ({
+    // 20261009100000 retires the Advion add-on rows and inserts the fire ant granule rows in their place.
+    const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => (spec.name === matrixMigration.ADVION ? { ...spec, name: granuleMigration.GRANULE } : spec)).map((spec) => ({
       productId: idOf(spec.name), defaultInPlan: spec.defaultInPlan, gates: spec.gates, applicationMode: spec.mode, ratePer1000: spec.rate, rateUnit: spec.unit,
     }));
     const products = [...staged, ...added];

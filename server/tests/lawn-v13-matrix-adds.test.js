@@ -6,6 +6,7 @@ const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_st
 const october = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
+const granule = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 const prohibited = require('../services/lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
 
@@ -37,7 +38,7 @@ describe('the three tracks carry the same adds', () => {
   });
 
   test('no new line reads as an inspection or a premium step, and none says "if"', () => {
-    const added = [matrix.HEAD, matrix.ADVION, N.VEL, N.GRA];
+    const added = [matrix.HEAD, granule.GRANULE, N.VEL, N.GRA];
     for (const visit of v13.st_augustine.visits) {
       for (const line of lines(visit.secondary).filter((l) => added.includes(nameOf(l)))) {
         const [parsed] = engine.parseProtocolLines(line, 'conditional', { exactName: true });
@@ -238,18 +239,23 @@ describe('6. July is the scout visit again: no 0-0-50 potash step (owner: Decemb
   });
 });
 
-describe('7. Advion fire ant bait: an optional add-on in April and October (both spreader visits)', () => {
-  test('a secondary line only, priced by the office, 1.5 lb per acre', () => {
+describe('7. Fire ant granule (Topchoice Granular Insecticide): an optional add-on in April and October (both spreader visits)', () => {
+  // The Advion bait was the add-on until 2026-10-09 (20261007180000 staged it, frozen); 20261009100000 replaced it.
+  test('a secondary line only, priced by the office, 2 lb per 1,000 sq ft as its own pass, one application a year', () => {
     for (const m of [4, 10]) {
-      const [line] = lineFor(m, matrix.ADVION);
+      const [line] = lineFor(m, granule.GRANULE);
       expect(line).toMatch(/optional add-on, office prices it/);
-      expect(line).toMatch(/1\.5 lb per acre \(0\.0344 lb per 1,000 sq ft\) with a hand spreader, on request only/);
-      expect(lines(visitFor(m).primary).map(nameOf)).not.toContain(matrix.ADVION);
+      expect(line).toMatch(/2 lb per 1,000 sq ft \(87 lb per acre\) with a spreader, as its own pass, never blended with the month's granular \(the label says not to apply it in combination with other materials\)/);
+      expect(line).toMatch(/one application per lawn per year, so April or October, not both/);
+      expect(line).toMatch(/on request only$/);
+      expect(lines(visitFor(m).primary).map(nameOf)).not.toContain(granule.GRANULE);
+      expect(lineFor(m, matrix.ADVION)).toEqual([]);
     }
-    for (const m of [1, 2, 3, 5, 6, 7, 8, 9, 11, 12]) expect(lineFor(m, matrix.ADVION)).toEqual([]);
-    const spec = matrix.INSERTS.filter((s) => s.name === matrix.ADVION);
-    expect(spec.map((s) => s.defaultInPlan)).toEqual([false, false]);
-    expect(matrix.CATALOG.find((p) => p.name === matrix.ADVION).epa_reg_number).toBeNull();
+    for (const m of [1, 2, 3, 5, 6, 7, 8, 9, 11, 12]) expect(lineFor(m, granule.GRANULE)).toEqual([]);
+    expect(JSON.stringify(v13)).not.toMatch(/Advion/);
+    const spec = granule.ROW;
+    expect(spec.defaultInPlan).toBe(false);
+    expect(granule.EPA).toBe('432-1217');
   });
 });
 

@@ -580,6 +580,7 @@ const V13_GATE_NOTES = [
   { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'Not allowed in North Port this month; skip this product.' },
   { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port holds this product from June to September until the city confirms. Do not apply it at this visit.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
+  { key: 'ownPass', text: () => 'Apply as its own spreader pass: do not blend with the month\'s granular or any other product.' },
   { key: 'delayWateringOrMowingHours', text: (hours) => `Delay watering (irrigation) or mowing for ${hours} hours after application (label).` },
   { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
   { key: 'noWaterIn', text: () => 'Do not water this in.' },

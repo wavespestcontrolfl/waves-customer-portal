@@ -64,7 +64,7 @@ const RAIN_OK_KEYS = new Set([
   'waves_assessment', 'waves_assessment_plus', 'new_customer_inspection',
   'wdo_inspection', 'termite_inspection', 'pest_inspection', 'rodent_inspection', 'lawn_inspection',
   // interior-only treatment
-  'bed_bug_treatment', 'german_roach', 'german_roach_initial',
+  'bed_bug_treatment', 'german_roach', 'german_roach_initial', 'vehicle_german_roach',
   // rodent checks and attic work (not trap setup, exclusion or station install)
   'rodent_bait_quarterly', 'rodent_monitoring',
   'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',

@@ -663,6 +663,45 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect('guidedProductIds' in (await context(tablesFor())).plannedProducts).toBe(false);
     });
 
+    test('lawnReportTies (the sheet records the standing chinch tap as a find) exists only while the report ties are live', async () => {
+      const TIE_GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2', 'GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+      try {
+        live();
+        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
+        for (const name of TIE_GATES.slice(0, 3)) process.env[name] = 'true';
+        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
+        process.env.GATE_LAWN_REPORT_LEAD = 'true';
+        expect((await context(tablesFor())).lawnReportTies).toBe(true);
+        delete process.env.GATE_LAWN_REPORT_FACTS;
+        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
+      } finally {
+        for (const name of TIE_GATES) delete process.env[name];
+      }
+    });
+
+    test('lawnReportFacts (the sheet names the spot rows whose area it recorded) exists only while GATE_LAWN_REPORT_FACTS is live', async () => {
+      try {
+        live();
+        expect('lawnReportFacts' in (await context(tablesFor()))).toBe(false);
+        process.env.GATE_LAWN_REPORT_FACTS = 'true';
+        expect((await context(tablesFor())).lawnReportFacts).toBe(true);
+      } finally {
+        delete process.env.GATE_LAWN_REPORT_FACTS;
+      }
+    });
+
+    test('the month\'s take-all fungicide rows are named, a pick or not; with the guide off or no take-all row the key says so', async () => {
+      live();
+      expect((await context(tablesFor())).plannedProducts.takeAllProductIds).toEqual([]);
+      const takeAllPlan = plan(addOns());
+      takeAllPlan.completionDefaults.addOns[2].raw = 'Test Artavia — mapped take-all areas, second spring application';
+      buildPlanForService.mockResolvedValue(takeAllPlan);
+      v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
+      expect((await context(tablesFor())).plannedProducts.takeAllProductIds).toEqual([P_ART]);
+      delete process.env.GATE_LAWN_TREATMENT_GUIDE;
+      expect('takeAllProductIds' in (await context(tablesFor())).plannedProducts).toBe(false);
+    });
+
     test('the staged row\'s gate notes ride an off-plan chinch product', async () => {
       live();
       v13GateNotes.mockReturnValue([{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }]);
@@ -786,7 +825,18 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         blockedProductIds: [],
         unreadableProductIds: [],
         unreadableNote: 'The limits could not be checked. Use Search products for what you applied; the office will review it.',
+        // No take-all row in this month's plan.
+        takeAllProductIds: [],
       });
+    });
+
+    test('the plan\'s take-all fungicide rows, read now, ride the answer', async () => {
+      live();
+      const takeAllPlan = plan(addOns());
+      takeAllPlan.completionDefaults.addOns[2].raw = 'Test Artavia — mapped take-all areas, second spring application';
+      buildPlanForService.mockResolvedValue(takeAllPlan);
+      v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
+      expect((await guide(tablesFor())).takeAllProductIds).toEqual([P_ART]);
     });
 
     test('the fresh chinch decision rides the answer: the product, then the fallback, then nothing', async () => {
