@@ -23,7 +23,8 @@ exists mainly to (a) get an App Store listing and (b) swap web-push → APNs.
 | `docs/mobile/apns-backend-pr-plan.md` | The backend follow-up (DB + APNs sender + subscribe route) |
 
 The generated Xcode project (`client/ios/`) is gitignored — regenerate it with
-the bootstrap script.
+the bootstrap script. The one tracked folder inside it is
+`client/ios/App/ci_scripts` (see Xcode Cloud below).
 
 ## Run the spike (macOS)
 
@@ -61,6 +62,30 @@ If it fails, enable Push Notifications for the App ID, refresh its signing
 profile in Xcode, rebuild, and export again. A portal web deployment cannot
 change an entitlement in an installed iOS binary. See Apple's
 [APS entitlement documentation](https://developer.apple.com/documentation/bundleresources/entitlements/aps-environment).
+
+## Xcode Cloud
+
+Xcode Cloud clones the repository, and the clone has no Xcode project. It runs
+`client/ios/App/ci_scripts/ci_post_clone.sh` first, which installs Node (the
+`.nvmrc` major, from nodejs.org) and CocoaPods and then runs
+`bootstrap-ios.sh` with `CI=true`. The bootstrap also writes what a cloud build
+needs and a command line cannot supply there: a shared `App` scheme, the
+release version and the signing team.
+
+Workflow settings in App Store Connect → Xcode Cloud:
+
+- **Start condition:** branch `main`. A branch without this script fails in
+  under a minute with "Workspace App.xcworkspace does not exist".
+- **Version:** `ci_post_clone.sh` holds the default (`DEFAULT_MARKETING_VERSION`).
+  Raise it in a PR when App Review approves that version, or set the workflow
+  environment variable `WAVES_IOS_MARKETING_VERSION` for one build.
+- **Build number:** Xcode Cloud counts from 1. Local uploads use a date number
+  (`2026100503`), so set Settings → Build Number → next build number above the
+  last upload of the same version, or App Store Connect refuses the build.
+- Run the push check in the section above on the cloud build's IPA
+  (Artifacts) before a first submission from Xcode Cloud.
+
+To run the same steps on a Mac: `bash client/ios/App/ci_scripts/ci_post_clone.sh`.
 
 ## Load modes (set in `capacitor.config.json`)
 
