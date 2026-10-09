@@ -236,12 +236,13 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   return rows.sort((a, b) => Number(b.wet) - Number(a.wet) || (b.peak ?? 0) - (a.peak ?? 0));
 }
 
-// Notices this pass first raised today (ET): what the day's budget has used.
+// Notices this pass rang today (ET), first rings and comebacks alike: what
+// the day's budget has used. Each ring stamps its ET day on the row
+// (`rang_on`); a comeback keeps the row's created_at, so that cannot count it.
 async function noticesRaisedToday(db, now) {
-  const dayStart = parseETDateTime(`${etDateString(now)}T00:00`);
   const [{ count }] = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [KEY_PREFIX])
-    .where('created_at', '>=', dayStart)
+    .whereRaw("metadata->>'rang_on' = ?", [etDateString(now)])
     .count('id as count');
   return Number(count) || 0;
 }
@@ -250,7 +251,7 @@ const noticeKey = (row) => `${KEY_PREFIX}${row.visit.id}:${row.date}:${row.start
 
 // The notice, by the shared composer: the customer's name in the headline, a
 // spoken day and time in the why (no ISO date), a link that opens the visit.
-async function sendNotice(row, { db, deps, reopen = null }) {
+async function sendNotice(row, { db, deps, reopen = null, now = new Date() }) {
   const { raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
   const { lookupCustomerName, fitAction } = require('../admin-alert-names');
   const { visit, date, start, peak, proposal } = row;
@@ -294,7 +295,9 @@ async function sendNotice(row, { db, deps, reopen = null }) {
         + `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `
         + (proposal ? `${proposal} that day reads below ${DRY_PCT}% and no other stop is in it. ` : `No hour that day is both below ${DRY_PCT}% and open. `)
         + 'Nothing was moved and the customer was not contacted. Move it with Quick Move.',
-      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false, retired: null },
+      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false, retired: null,
+        // Only a call that can ring stamps the day; a quiet rewrite keeps the row's own.
+        ...(reopen ? { rang_on: etDateString(now) } : {}) },
     },
   );
 }
@@ -327,7 +330,7 @@ async function ringWet(wet, standing, budget, { db, deps, now }) {
     const isStanding = standing.has(noticeKey(row));
     if (!isStanding && noticed >= budget) { deferred += 1; continue; }
     try {
-      const result = await sendNotice(row, { db, deps, reopen: isStanding ? null : `run:${now.toISOString()}` });
+      const result = await sendNotice(row, { db, deps, now, reopen: isStanding ? null : `run:${now.toISOString()}` });
       if (result && !result.suppressed && (!result.deduped || result.rung === true)) noticed += 1;
     } catch (err) {
       logger.warn(`[rain-pass] notice for visit ${row.visit.id} failed: ${err.message}`);

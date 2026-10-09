@@ -162,7 +162,10 @@ describe('auto-dispatch rain pass', () => {
       ? { notification: { id: 'old' }, deduped: true, refreshed: true, rung: false } : { notification: { id: 'new' } }));
     expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 13, wet: 13, noticed: 10, deferred: 2, closed: 0 });
     // The standing notice is rewritten with no version: only its content can change it.
-    expect(d.raiseAdminAlert.mock.calls.find(([, , opts]) => opts.dedupeKey.includes('visit-12:'))[2].dedupeVersion).toBeUndefined();
+    const standingOpts = d.raiseAdminAlert.mock.calls.find(([, , opts]) => opts.dedupeKey.includes('visit-12:'))[2];
+    expect(standingOpts.dedupeVersion).toBeUndefined();
+    // A quiet rewrite does not use the budget: it stamps no ring day.
+    expect(standingOpts.metadata).not.toHaveProperty('rang_on');
     expect(d.raiseAdminAlert).toHaveBeenCalledTimes(11);
   });
 
@@ -203,6 +206,8 @@ describe('auto-dispatch rain pass', () => {
     const [, , opts] = d.raiseAdminAlert.mock.calls[0];
     expect(opts.dedupeVersion).toBe(`run:${NOW.toISOString()}`);
     expect(opts.metadata.retired).toBeNull();
+    // A comeback keeps the row's created_at, so the ring's day is stamped for the day's budget.
+    expect(opts.metadata.rang_on).toBe(TODAY);
   });
 
   test('two rows of one customer at the same premise, point and window with no visit id are one stop, with no phantom hour', async () => {
