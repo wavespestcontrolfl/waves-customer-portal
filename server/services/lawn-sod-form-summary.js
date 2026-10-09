@@ -15,6 +15,7 @@
 
 const { sodHolds, validateSodLaidOn, MAX_SOD_AGE_MONTHS } = require('./lawn-sod-holds');
 const linkage = require('./estimate-property-linkage');
+const { inheritReferenceUnit } = require('./stamped-address');
 const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./service-report/visit-property-scope');
 const { isPreEmergent } = require('./service-report/lawn-watering-rule');
 const { etCalendarDayOf, validCalendarDate, etDateString, addETDays } = require('../utils/datetime-et');
@@ -63,8 +64,11 @@ function homeScope(knex, customerId, home) {
   const homeKey = linkage.normalizedStampedStreet(home.address_line1, home.address_line2, home.city, home.zip);
   const caches = { propertyById: new Map(), estimateById: new Map(), onLookupFailure: () => { caches.failed = true; } };
   let single;
+  // A stamp on this home's street that omits the unit takes the home's unit (phone bookings often omit line 2);
+  // a stamp that names another unit stays another premises.
+  const homeStamp = { service_address_line1: home.address_line1, service_address_line2: home.address_line2, service_address_city: home.city, service_address_zip: home.zip };
   return async function atThisHome(row) {
-    const scope = await resolveVisitPropertyScope(row, knex, caches);
+    const scope = await resolveVisitPropertyScope(row.service_address_line1 ? inheritReferenceUnit(row, homeStamp) : row, knex, caches);
     if (caches.failed) throw new Error('visit property scope lookup failed');
     if (scope.hasEvidence) return Boolean(scope.key && homeKey && sameResolvedProperty(scope.key, homeKey));
     if (single === undefined) single = await customerHasOnlyPrimaryPremises(knex, customerId, home, homeKey, { unresolvedFails: true });

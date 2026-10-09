@@ -181,6 +181,9 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
       expect((await named([at(10, { ...HERE, service_address_line1: '55 Other Rd' })])).lastPreEmergent).toBeNull();
       expect((await named([at(10, { ...HERE, service_address_line2: 'Unit 4' })])).lastPreEmergent).toBeNull();
       expect((await named([at(10, { ...HERE, service_address_zip: '34999', service_address_city: 'Elsewhere' })])).lastPreEmergent).toBeNull();
+      // A stamp on this street that omits the unit takes the home's unit; a unit written in line 1 still counts as stated.
+      expect((await named([at(10, { ...HERE, service_address_line2: null })])).lastPreEmergent.date).toBe(daysAgo(10));
+      expect((await named([at(10, { ...HERE, service_address_line1: '100 Sample St Unit 4', service_address_line2: null })])).lastPreEmergent).toBeNull();
       // The newer visit was at another unit: the older one at this home is the one named.
       expect((await named([at(5, { ...HERE, service_address_line2: 'Unit 4' }), at(40, HERE)])).lastPreEmergent.date).toBe(daysAgo(40));
     });
