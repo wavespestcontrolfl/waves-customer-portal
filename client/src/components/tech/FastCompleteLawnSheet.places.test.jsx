@@ -511,6 +511,22 @@ describe('Weed spots: the entry is one tap per place', () => {
     expect(sent(P_LEAD).areaPlace).toBe('front');
   });
 
+  test('the place chips sit inside the Weed spots card, under the area sizes, and inside every other spot row card', async () => {
+    await open(placeContext({ weedMix: { ...LEAD_SET, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF] } }));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    const where = screen.getByRole('group', { name: 'Weed spots place' });
+    expect(card.contains(where)).toBe(true);
+    expect(card.className).toContain('tech-product-editor');
+    // Under the area sizes: the size chips come before the place chips in the card.
+    const size = within(card).getByRole('button', { name: '500 sq ft' });
+    expect(size.compareDocumentPosition(where) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // A normal spot row keeps its place control inside its own card.
+    addFungicide();
+    const row = editorFor('Spot Fungicide');
+    expect(within(row).getByText('Where on the lawn')).toBeTruthy();
+  });
+
   test('the surfactant rides the weed place: no place of its own to pick', async () => {
     await open(CHOICES(ALL(LEAD_SET)));
     addWeedAt('Back');
@@ -1304,3 +1320,355 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
   });
 });
 
+
+// ── a target on a spot fungicide / insecticide row (owner 2026-10-09) ───────────────────────────────────────────
+// The server sends the closed lists (context.spotTargets) and checks what is stored; the sheet shows one optional choice on a
+// spot fungicide / insecticide row, none on a whole-lawn row, and a line (no tap) on a row a chinch find opened.
+describe('a target on a spot fungicide or insecticide row', () => {
+  const SPOT_TARGETS = {
+    v: 1,
+    fungicide: ['Large patch', 'Dollar spot', 'Gray leaf spot', 'Take-all root rot', 'Fairy ring', 'Pythium root rot'],
+    insecticide: ['Southern chinch bugs', 'Fall armyworms', 'Tropical sod webworms', 'White grubs', 'Tawny mole crickets', 'Fire ants'],
+    chinch: 'Southern chinch bugs',
+    takeAll: 'Take-all root rot',
+  };
+  const withTargets = (ctx) => ({ ...ctx, spotTargets: SPOT_TARGETS });
+  const BIF_ADDON = addOn(P_BIF, 'Atticus Talak 7.9 F');
+  const targetGroup = (name) => within(placeGroup(name)).queryByRole('group', { name: `Treating, ${name}` });
+  const labels = (group) => within(group).getAllByRole('button').map((b) => b.textContent);
+
+  test('a spot fungicide offers the fungicide names, optional: one tap sets it, a second tap clears it, Complete never waits for it', async () => {
+    await open(withTargets(placeContext({ addOns: [...ADD_ONS, BIF_ADDON] })));
+    addFungicide();
+    const group = targetGroup('Spot Fungicide');
+    expect(labels(group)).toEqual(['Large patch', 'Dollar spot', 'Gray leaf spot', 'Fairy ring', 'Pythium root rot']);
+    expect(pressed(group)).toEqual([]);
+    fireEvent.click(chipOf(group, 'Dollar spot'));
+    expect(pressed(group)).toEqual(['Dollar spot']);
+    fireEvent.click(chipOf(group, 'Dollar spot'));
+    expect(pressed(group)).toEqual([]);
+    fireEvent.click(chipOf(group, 'Large patch'));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG).targets).toEqual(['Large patch']);
+  });
+
+  test('a target picked on a spot row is not sent once the row is moved to a whole-lawn method, and is sent again when it is back on spot', async () => {
+    await open(withTargets(placeContext()));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.click(chipOf(targetGroup('Spot Fungicide'), 'Dollar spot'));
+    const method = within(row).getByRole('combobox', { name: /^Method for / });
+    const pick = (label) => fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === label).value } });
+    pick('Broadcast spray');
+    expect(targetGroup('Spot Fungicide')).toBeNull();
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ applicationMethod: 'broadcast_spray', targets: [] });
+    expect(sent(P_FUNG)).not.toHaveProperty('targetFind');
+  });
+
+  test('moved off spot and back: the pick it still shows is the one it sends', async () => {
+    await open(withTargets(placeContext()));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.click(chipOf(targetGroup('Spot Fungicide'), 'Dollar spot'));
+    const method = within(row).getByRole('combobox', { name: /^Method for / });
+    const pick = (label) => fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === label).value } });
+    pick('Broadcast spray');
+    pick('Spot treatment');
+    expect(pressed(targetGroup('Spot Fungicide'))).toEqual(['Dollar spot']);
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ targets: ['Dollar spot'] });
+  });
+
+  test('with nothing picked the row completes and sends no target', async () => {
+    await open(withTargets(placeContext()));
+    addFungicide();
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ targets: [] });
+    expect(sent(P_FUNG)).not.toHaveProperty('targetFind');
+  });
+
+  test('a spot insecticide added another way offers the insect names but never the chinch name (the chinch entry is that way)', async () => {
+    await open(withTargets(placeContext({ addOns: [...ADD_ONS, BIF_ADDON] })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Atticus Talak 7.9 F' }));
+    expect(labels(targetGroup('Atticus Talak 7.9 F'))).toEqual(['Fall armyworms', 'Tropical sod webworms', 'White grubs', 'Tawny mole crickets', 'Fire ants']);
+  });
+
+  test('a whole-lawn row never asks', async () => {
+    const broadcast = { productId: P_FUNG, name: 'Spot Fungicide', applicationMethod: 'broadcast_spray', amount: 6, amountUnit: 'fl_oz', treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1, rateUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'No rule', mowHoldDays: null };
+    await open(withTargets(placeContext({ planned: [broadcast] })));
+    expect(screen.getByRole('group', { name: 'Spot Fungicide' })).toBeTruthy();
+    expect(screen.queryByText('Treating (optional)')).toBeNull();
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ targets: [] });
+  });
+
+  test('without the lists in the context (the guide is off, or an older server) there is no control and the body is as before', async () => {
+    await open(placeContext());
+    addFungicide();
+    expect(screen.queryByText('Treating (optional)')).toBeNull();
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG).targets).toEqual([]);
+  });
+
+  test('a row the chinch entry opened shows the recorded target as a line (no tap) and names the find to the server', async () => {
+    const BIF_ITEM = { productId: P_BIF, name: 'Atticus Talak 7.9 F', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: null, rateUnit: null, gateNotes: [] };
+    const chinch = {
+      item: BIF_ITEM, note: null, rungIds: [P_ARENA, P_BIF], unreadableIds: [],
+      byPlace: { front: { item: BIF_ITEM, note: null, unreadableIds: [] } },
+    };
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [] };
+    await open(withTargets(placeContext({ treatmentGuide: true, chinch })));
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment: Front' }));
+    const row = screen.getByRole('group', { name: 'Atticus Talak 7.9 F' });
+    expect(within(row).getByText('Recorded for: Southern chinch bugs.')).toBeTruthy();
+    expect(within(row).queryByText('Treating (optional)')).toBeNull();
+    typeArea(row, '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_BIF)).toMatchObject({ targets: [], targetFind: 'chinch' });
+  });
+});
+
+// ── mix help (GATE_LAWN_MIX_HELP, owner 2026-10-09) ─────────────────────────────────────────────────────────────
+// The server does the arithmetic and sends it as words per product and tank size (plannedProducts.mixHelp); the sheet shows the chosen
+// tank's line on each spot row and on the Weed spots card, remembers the tank size on the device, and takes "Gallons sprayed" in place
+// of the area (a preview: /complete converts and records). With no mixHelp the sheet is exactly what it was.
+describe('mix help: the amount for a full tank, and gallons sprayed', () => {
+  const dose = (oz1, oz2, oz4, unit = 'fl oz', ml = 29.5735) => Object.fromEntries([[1, oz1], [2, oz2], [4, oz4]].map(([tank, amount]) => [tank, { text: `${amount.toFixed(2)} ${unit} (${(amount * ml).toFixed(1)} mL)`, coversSqft: tank * 500 }]));
+  const FUNG = { name: 'Spot Fungicide', carrierGalPer1000: 2, perTank: dose(0.5, 1, 2), per1000: '1.00 fl oz (29.6 mL)', concentration: null, note: null };
+  const LEAD = { name: 'Lead WG', carrierGalPer1000: 1, perTank: { 1: { text: '0.09 oz (2.41 g)', coversSqft: 1000 }, 2: { text: '0.17 oz (4.82 g)', coversSqft: 2000 }, 4: { text: '0.34 oz (9.64 g)', coversSqft: 4000 } }, per1000: '0.09 oz (2.41 g)', concentration: null, note: null, labelLines: [{ text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Lead WG label, Precautions, item 3' }] };
+  const CERT = { name: 'Cert Herbicide', carrierGalPer1000: 1, perTank: { 1: { text: '0.03 oz (0.79 g)', coversSqft: 1000 }, 2: { text: '0.06 oz (1.59 g)', coversSqft: 2000 }, 4: { text: '0.11 oz (3.18 g)', coversSqft: 4000 } }, per1000: '0.03 oz (0.79 g)', concentration: null, note: null };
+  const SURF = { name: 'Tank Surfactant', carrierGalPer1000: null, perTank: { 1: { text: '0.32 fl oz (9.5 mL)', coversSqft: null }, 2: { text: '0.64 fl oz (18.9 mL)', coversSqft: null }, 4: { text: '1.28 fl oz (37.9 mL)', coversSqft: null } }, per1000: null, concentration: '0.25% v/v', note: null };
+  const MIX_HELP = (rows, extra = {}) => ({ v: 1, tanks: [1, 2, 4], rows, weedOrder: null, ...extra });
+  const withHelp = (ctx, mixHelp) => ({ ...ctx, plannedProducts: { ...ctx.plannedProducts, mixHelp } });
+  const openMix = (ctx, props = {}) => openSheet({ request: makeRequest({ ctx }), props: { catalog: CAT, operatorId: 'tech-1', ...props } });
+  const WEED = () => placeContext({ weedMix: { ...LEAD_SET, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF] } });
+  const tankKey = 'waves.lawnMixTank.tech-1';
+
+  beforeEach(() => { window.localStorage.removeItem(tankKey); });
+  afterEach(() => { window.localStorage.removeItem(tankKey); });
+
+  test('a spot row shows the full-tank amount; the tank defaults to the largest, one tap changes it and the device remembers it', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const mix = screen.getByRole('group', { name: 'Mix for Spot Fungicide' });
+    expect(pressed(within(mix).getByRole('group', { name: 'Spot Fungicide tank size' }))).toEqual(['4 gal']);
+    expect(within(mix).getByText('4 gal tank: 2.00 fl oz (59.1 mL) Covers about 2,000 sq ft.')).toBeTruthy();
+    fireEvent.click(chipOf(mix, '2 gal'));
+    expect(within(mix).getByText('2 gal tank: 1.00 fl oz (29.6 mL) Covers about 1,000 sq ft.')).toBeTruthy();
+    expect(window.localStorage.getItem(tankKey)).toBe('2');
+    // The next sheet on this device starts on the last tank used.
+    cleanup();
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    expect(pressed(screen.getByRole('group', { name: 'Spot Fungicide tank size' }))).toEqual(['2 gal']);
+  });
+
+  test('the Weed spots card with no tank dose for any product shows the per-1,000 lines and the reason, and no tank chips', async () => {
+    const noTank = (entry) => ({ ...entry, carrierGalPer1000: null, perTank: null, note: 'The carrier volume is not on file for this product, so there is no tank amount.' });
+    await openMix(withHelp(WEED(), MIX_HELP({ [P_LEAD]: noTank(LEAD), [P_CERT]: noTank(CERT), [P_SURF]: SURF })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const mix = screen.getByRole('group', { name: 'Mix for Weed spots' });
+    expect(within(mix).getByText('Lead WG, Per 1,000 sq ft: 0.09 oz (2.41 g)')).toBeTruthy();
+    // The surfactant still has a tank amount, so the heading and chips stay.
+    expect(within(mix).getByRole('group', { name: 'Weed spots tank size' })).toBeTruthy();
+    cleanup();
+    await openMix(withHelp(WEED(), MIX_HELP({ [P_LEAD]: noTank(LEAD), [P_CERT]: noTank(CERT) })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const bare = screen.getByRole('group', { name: 'Mix for Weed spots' });
+    expect(within(bare).queryByText('Mix for a full tank')).toBeNull();
+    expect(within(bare).queryByRole('group', { name: 'Weed spots tank size' })).toBeNull();
+    expect(within(bare).getAllByText(/The carrier volume is not on file/)).toHaveLength(2);
+  });
+
+  test('a stored tank the server does not offer is ignored', async () => {
+    window.localStorage.setItem(tankKey, '3');
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    expect(pressed(screen.getByRole('group', { name: 'Spot Fungicide tank size' }))).toEqual(['4 gal']);
+  });
+
+  test('a row with no carrier on file shows the per-1,000 dose and says so; no gallons entry is offered', async () => {
+    const noCarrier = { ...FUNG, carrierGalPer1000: null, perTank: null, note: 'The carrier volume is not on file for this product, so there is no tank amount.' };
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: noCarrier })));
+    addFungicide();
+    const mix = screen.getByRole('group', { name: 'Mix for Spot Fungicide' });
+    expect(within(mix).getByText('Per 1,000 sq ft: 1.00 fl oz (29.6 mL)')).toBeTruthy();
+    expect(within(mix).getByText('The carrier volume is not on file for this product, so there is no tank amount.')).toBeTruthy();
+    // No tank dose exists, so no tank heading and no tank chips that would change nothing.
+    expect(within(mix).queryByText('Mix for a full tank')).toBeNull();
+    expect(within(mix).queryByRole('group', { name: 'Spot Fungicide tank size' })).toBeNull();
+    expect(screen.queryByText(/Gallons sprayed/)).toBeNull();
+  });
+
+  test('gallons sprayed give the spot area (a preview), the amount is figured from it, and the body carries the gallons and the area; typing an area takes the gallons back', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '2' } });
+    expect(within(row).getByText('About 1,000 sq ft at 2 gal per 1,000 sq ft.')).toBeTruthy();
+    expect(within(row).getByText('Spot area, 1,000 sq ft')).toBeTruthy();
+    expect(within(row).getByText(/1 fl oz per 1,000 sq ft × 1,000 sq ft/)).toBeTruthy();
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 2, areaPlace: 'back' });
+  });
+
+  test('gallons past the bound (more than 40) figure no area and the control says so; the body carries no gallons', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '41' } });
+    expect(within(row).getByText('That is more than 40 gallons. Check the number, or enter the area instead.')).toBeTruthy();
+    expect(within(row).queryByText(/About .* sq ft at/)).toBeNull();
+    expect(within(row).queryByText(/^Spot area,/)).toBeNull();
+  });
+
+  test('an area typed after the gallons clears the gallons (one number, one way)', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    const gallons = within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide');
+    fireEvent.change(gallons, { target: { value: '2' } });
+    typeArea(row, '100');
+    expect(gallons.value).toBe('');
+    expect(within(row).getByText('Spot area, 100 sq ft')).toBeTruthy();
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ areaValue: 100 });
+    expect(sent(P_FUNG)).not.toHaveProperty('sprayedGallons');
+  });
+
+  test('the Weed spots card lists each weed product for the tank, the surfactant, and the label lines; the mixing order only when the server lists every product', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows, { weedOrder: [P_LEAD, P_CERT, P_SURF] })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    const mix = within(card).getByRole('group', { name: 'Mix for Weed spots' });
+    expect(card.contains(mix)).toBe(true);
+    expect(within(mix).getByText('Lead WG, 4 gal tank: 0.34 oz (9.64 g) Covers about 4,000 sq ft.')).toBeTruthy();
+    expect(within(mix).getByText('Cert Herbicide, 4 gal tank: 0.11 oz (3.18 g) Covers about 4,000 sq ft.')).toBeTruthy();
+    expect(within(mix).getByText('Tank Surfactant, 4 gal tank: 1.28 fl oz (37.9 mL)')).toBeTruthy();
+    expect(within(mix).getByText('Mixing order: Lead WG, Cert Herbicide, Tank Surfactant.')).toBeTruthy();
+    expect(within(mix).getByText('Lead WG label, Precautions, item 3: Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.')).toBeTruthy();
+    fireEvent.click(chipOf(mix, '2 gal'));
+    expect(within(mix).getByText('Lead WG, 2 gal tank: 0.17 oz (4.82 g) Covers about 2,000 sq ft.')).toBeTruthy();
+    expect(within(mix).getByText('Tank Surfactant, 2 gal tank: 0.64 fl oz (18.9 mL)')).toBeTruthy();
+  });
+
+  test('no mixing order when the server does not list every product on the card', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows, { weedOrder: [P_LEAD, P_SURF] })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    expect(screen.queryByText(/Mixing order/)).toBeNull();
+  });
+
+  test('a surfactant left out in the heat shows the existing note, with no surfactant amount', async () => {
+    const left = { ...LEAD_SET, productIds: [P_LEAD, P_CERT], surfactant: { productId: P_SURF, included: false, note: 'Surfactant left out: it is 90°F or hotter.' }, tempF: 93 };
+    const ctx = placeContext({ weedMix: { ...left, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF] } });
+    await openMix(withHelp(ctx, MIX_HELP({ [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const mix = screen.getByRole('group', { name: 'Mix for Weed spots' });
+    expect(within(mix).getByText('Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
+    expect(within(mix).queryByText(/Tank Surfactant/)).toBeNull();
+  });
+
+  test('gallons on the Weed spots card give every sized weed row its area; the surfactant (no area) gets none', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows)));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    fireEvent.change(within(card).getByLabelText('Gallons sprayed (instead of the area), Weed spots'), { target: { value: '1' } });
+    expect(within(card).getByText('About 1,000 sq ft at 1 gal per 1,000 sq ft.')).toBeTruthy();
+    fireEvent.click(chipOf(screen.getByRole('group', { name: 'Weed spots place' }), 'Front'));
+    await analyzeAndComplete();
+    expect(sent(P_LEAD)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 1 });
+    expect(sent(P_CERT)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 1 });
+    expect(sent(P_SURF)).not.toHaveProperty('sprayedGallons');
+  });
+
+  test('a typed weed area clears the card\'s gallons', async () => {
+    const rows = { [P_LEAD]: LEAD, [P_CERT]: CERT, [P_SURF]: SURF };
+    await openMix(withHelp(WEED(), MIX_HELP(rows)));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    const gallons = within(card).getByLabelText('Gallons sprayed (instead of the area), Weed spots');
+    fireEvent.change(gallons, { target: { value: '1' } });
+    fireEvent.click(within(card).getByRole('button', { name: '500 sq ft' }));
+    expect(gallons.value).toBe('');
+  });
+
+  test('the server could not check the gallons (400 lawn_gallons_unavailable_now, nothing written): the form stays editable, and the tech enters the area and completes under a new key', async () => {
+    await open(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    const gallons = within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide');
+    fireEvent.change(gallons, { target: { value: '2' } });
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    completeErrors.push(refusal(400, 'lawn_gallons_unavailable_now', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.'));
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await screen.findByText(/enter the area instead/);
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_FUNG)).toMatchObject({ sprayedGallons: 2, areaValue: 1000 });
+    // Not the locked "Retry the same completion" state: the form is editable.
+    expect(screen.queryByText(/Tap Retry to send the same completion again/)).toBeNull();
+    expect(within(placeGroup('Spot Fungicide')).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide').disabled).toBe(false);
+    fireEvent.change(within(placeGroup('Spot Fungicide')).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '' } });
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    const [first, second] = completeCalls().map((call) => call.body);
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    expect(second.products.find((p) => p.productId === P_FUNG)).toMatchObject({ areaValue: 100, areaUnit: 'sqft' });
+    expect(second.products.find((p) => p.productId === P_FUNG)).not.toHaveProperty('sprayedGallons');
+  });
+
+  test('gate off while the sheet was open (400 lawn_gallons_unavailable): the form stays editable, the tech enters the area and completes under a new key without gallons', async () => {
+    await open(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '2' } });
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    completeErrors.push(refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed is not available right now. Enter the area instead.'));
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await screen.findByText(/Enter the area instead\./);
+    expect(screen.queryByText(/Tap Retry to send the same completion again/)).toBeNull();
+    const gallons = () => within(placeGroup('Spot Fungicide')).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide');
+    expect(gallons().disabled).toBe(false);
+    fireEvent.change(gallons(), { target: { value: '' } });
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    const [first, second] = completeCalls().map((call) => call.body);
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    expect(second.products.find((p) => p.productId === P_FUNG)).toMatchObject({ areaValue: 100 });
+    expect(second.products.find((p) => p.productId === P_FUNG)).not.toHaveProperty('sprayedGallons');
+  });
+
+  test('no mixHelp in the context (gate off, or an older server): none of it renders and the body carries no gallons', async () => {
+    await openMix(placeContext());
+    addFungicide();
+    expect(screen.queryByText('Mix for a full tank')).toBeNull();
+    expect(screen.queryByText(/Gallons sprayed/)).toBeNull();
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).not.toHaveProperty('sprayedGallons');
+  });
+});

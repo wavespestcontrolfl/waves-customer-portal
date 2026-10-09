@@ -17,6 +17,7 @@
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer. Auto clock-in's vehicle-agreement rule does NOT depend on this gate. Flip order: this gate, issue the vehicle agreement, technicians sign, then GATE_GEOFENCE_AUTO_CLOCK_IN.)
+ *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_GEOFENCE_AUTO_CLOCK_IN=true (owner 2026-10-06: in automatic geofence mode, a technician with no shift today who arrives at their own scheduled visit for today is clocked in automatically (source geofence_auto) and the job timer starts, so the first stop starts the paid day; never on an unscheduled, multi-stop, other-tech, other-day, stale, inactive-tech or already-clocked-in arrival. Read at call time via geofenceAutoClockInLive(), dark by default; off = today's behavior; rollback = unset)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
@@ -212,6 +213,8 @@
  *   GATE_LAWN_REPORT_FACTS=true (lawn report facts frozen at completion, owner 2026-10-08: three changes to the customer lawn report, each DECIDED ONCE at completion by the lawn write gate into service_records.structured_notes.lawnReportFacts { v: 1, reentry, productUse, ties, frozenAt } (first writer wins, before the first report build) and rendered only from the record. (1) Ready to re-enter is a CONDITION from the products applied, not a 30 minute clock: the visit's rule is the strictest of its products (dry < watered_in_and_dry; a product with no approved frozen facts, a label that is not plain 'until dry' (a stored hours figure, unreadable or no text), or no usable method marks the visit 'default' and keeps today's clock, so the condition is never weaker than the report's label floor); a lawn record carrying a real rule prints fixed sentences with no clock time and no countdown. (2) A spot product card says where it was used ('Spot treatment, about 250 sq ft' / 'Spot treatment'); whole-lawn cards unchanged. (3) A photo finding is tied to what was applied in fixed sentences: the Visit Summary freezes version 4 with the tie facts (v3 entries still render as they were frozen), the technician's chinch / caterpillar / fungus tap is a finding, and the tied product's 'What to expect' line reads curative. The tie part freezes only while GATE_LAWN_VISIT_SUMMARY_V2 AND GATE_LAWN_REPORT_COPY_V6 are also live (lawnReportTiesLive()); the re-entry condition and the spot text need neither. The gate controls ONLY the freeze; a render and the PDF key (':rf=') read what the record carries, whatever the gate says, so a record without the block renders exactly as before. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReportFactsLive(). Ships DARK; off = identical frozen notes and payload)
  *   GATE_LAWN_TREATMENT_GUIDE=true (lawn Fast Complete "Suggested from this lawn" cards, owner 2026-10-08, "build the guide": once the technician has confirmed the lawn assessment, the sheet shows one card per photo finding from a FIXED rule table in lawn-treatment-guide.js (no model call): weeds (10% coverage or more), fungus, chinch bugs and caterpillars (moderate or severe insect damage; the chinch card April through September) and dry spots, each with its check to do first and a one-tap product from the month's own add-ons; the technician taps every product, nothing is added by itself. A standing "Chinch bugs found" entry is in the optional list every month; Arena 50 WDG, then Atticus Talak 7.9 F at the Arena yearly cap, both resolved from the v13 program's staged rows. The context carries `treatmentGuide`, GET /:serviceId/lawn-fast/treatment-guide answers the cards, and the completion freezes which cards showed and what the technician did in structured_notes.lawnTreatmentGuide (never read by a customer or public path). Technician sheet only: no customer text, no report or public payload change. Strict opt-in: exactly 'true' in every environment, read at call time via lawnTreatmentGuideLive(), and live only while GATE_LAWN_SPOT_RULES and GATE_LAWN_V13 are also live (the weed card is the spot-rules Weed spots entry, and every product is read from the staged v13 rows). Ships DARK; off = the context, the routes and the sheet are byte-identical to before.)
  *   GATE_LAWN_TROUBLE_AREAS=true (lawn Fast Complete places and trouble areas, owner 2026-10-09, "start building these"; server/services/lawn-trouble-areas.js: every spot-treatment row on the sheet also asks WHERE on the lawn in one tap from a fixed closed list (Front, Back, Left side, Right side); the place rides the /complete product row as areaPlace and is stored with the completion's product record (service_products.treated_place and the application ledger's treated_place); a per-property store of trouble areas (lawn_trouble_areas: place, type, first and last seen, active or cleared) is written at completion from spot rows that carry a place and read by the context, which shows the technician a compact "Known trouble areas" line, offers a known area as the default place for the matching row and lets the technician clear one (POST /:serviceId/lawn-fast/trouble-areas/:areaId/clear); the v13 yearly count and amount caps and the Arena 56-day interval are judged per (property, place) for spot rows that carry a place, the weed mix and the chinch ladder carry a decision per place (weedMix.byPlace, chinch.byPlace, troubleAreas.blocked), and the /complete preflight refuses a spot row whose place the cap forbids (400 lawn_place_limit) or that has no place (400 lawn_place_required); a ledger row with no place counts against every place of that lawn; whole-lawn rows keep the per-lawn logic; no limit value is added or changed; a guided pick (fungicide, caterpillar, dry spot) is held back only when no place permits it, and the weeds and chinch cards add a place's own set with one tap on the place; known limit: one place per product per visit; technician and office surfaces only: no customer text, no report or public payload change. Strict opt-in: exactly 'true' in every environment, read at call time via lawnTroubleAreasLive(), and live only while GATE_LAWN_SPOT_RULES, GATE_LAWN_V13 and GATE_LAWN_TREATMENT_GUIDE are also live (the guide is live in production; without it the sheet has no take-all or chinch ids). Ships DARK; off = the context, the routes, the sheet, the limits and the completion are byte-identical to before.)
+ *   GATE_LAWN_SPOT_TARGET=true (lawn Fast Complete target on a spot fungicide or insecticide row, owner 2026-10-09; server/services/lawn-spot-target.js: the context carries spotTargets (the closed lists of the expectations engine's own target table), the sheet shows one optional "Treating (optional)" choice on a spot fungicide or insecticide row and a "Recorded for:" line, with no tap, on a row a chinch find opened, and /complete stores service_products.targets for those rows from the SERVER's verdict (the trouble-area type confirmed by the staged sets decides; a tag is kept only when it stands for that same type). A stored target changes live customer text with existing sentences: the product's "What to expect" row reads curative and the product card's purpose line names the recorded target. Strict opt-in: exactly 'true' in every environment, read at call time via lawnSpotTargetLive(), and live only while GATE_LAWN_TREATMENT_GUIDE is also live. Ships DARK; off = no spotTargets key, no control, the sheet sends targets: [] and /complete stores exactly what it stored before.)
+ *   GATE_LAWN_MIX_HELP=true (lawn Fast Complete mix help, owner 2026-10-09; server/services/lawn-mix-help.js: the context's plannedProducts.mixHelp gives each spot-spray product of the visit's program (and the Weed spots entry) the amount for a full tank of 1, 2 or 4 gallons at the STAGED row's own rate, rate unit and carrier volume (gallons per 1,000 sq ft), in units a technician can measure (oz by weight to 2 decimals and grams for dry products, fl oz and mL for liquids), the surfactant's amount from its staged concentration, and the mixing order the catalog's mixing_order_category already states; a row with no carrier on file shows only its per-1,000 sq ft dose and says the carrier is not on file; the Celsius WG label's own tank-stability lines are shown on the Weed spots entry, matched by EPA registration number; a spray spot row can take GALLONS SPRAYED instead of an area: /complete converts them with the product's staged carrier (never the sheet's) to the recorded spot area, which then flows to the per-place limits, the ledger and the customer card exactly as a typed area does, and marks the row on structured_notes.lawnSprayedGallons; the tank size is remembered on the technician's device. Technician sheet only: no customer text, no public payload. Strict opt-in: exactly 'true' in every environment, read at call time via lawnMixHelpLive(), and live only while GATE_LAWN_SPOT_RULES and GATE_LAWN_V13 are also live. Ships DARK; off = the context, the sheet and the completion are byte-identical to before.)
  *   GATE_LAWN_FAST_COMPLETE=true (Lawn Fast Complete, server half, PR-C1: for a lawn visit of any type (recurring program, per-application or one-time), GET /:serviceId/lawn-fast/context answers what the one-screen completion sheet opens with (eligibility verdict with a reason, the visit's planned products each with its post-application watering rule, whether a confirmed lawn assessment exists, the soft photo status), POST /:serviceId/lawn-fast/watering-preview answers the per-product rules and the one watering sentence the report would print for the chosen products (the report's own builder, so they cannot differ), and a /complete body carrying a `lawnFast` block must pass a preflight: gate on, an eligible visit and a CONFIRMED lawn assessment. The photo minimum is advisory only, never a refusal. The schedule payload carries `lawnFastCompleteEnabled` per service. Customer-silent: sends no text or email and changes no completion messaging. Strict opt-in: exactly 'true' in every environment, read at call time via lawnFastCompleteLive(). Ships DARK; off = both routes answer 404 {enabled:false}, a `lawnFast` block on /complete is refused 409 lawn_fast_disabled, and the flag is false.)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
@@ -344,6 +347,9 @@ const gates = {
   agentSessionGuard: process.env.GATE_AGENT_SESSION_GUARD === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
+  // Customer reschedule page names the next plan visit's new date beside Confirm (dark).
+  // Registered for logGateStatus only; routes/reschedule-public.js reads the env at call time.
+  rescheduleNextVisitDate: process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE === 'true',
   // Customer-facing pickers stop at a 16:00 start (dark). Registered for logGateStatus only;
   // scheduling/customer-windows.js reads the env at call time.
   customerLastStart16: gateEnvValue('GATE_CUSTOMER_LAST_START_16'),
@@ -2025,6 +2031,10 @@ const gates = {
   // logGateStatus only — the canonical CALL-TIME reader is
   // callLastNameLookupLive() below.
   callLastNameLookup: process.env.GATE_CALL_LAST_NAME_LOOKUP === 'true',
+  // Pin check after a visit (owner "build guardrail" 2026-10-09). Ships DARK: off
+  // unless exactly 'true'. This entry is for logGateStatus only — the canonical
+  // CALL-TIME reader is pinParkedCheckLive() below.
+  pinParkedCheck: process.env.GATE_PIN_PARKED_CHECK === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -4398,6 +4408,13 @@ const gates = {
   // read GATE_LAWN_TROUBLE_AREAS at call time via lawnTroubleAreasLive() (which also needs the spot
   // rules, the v13 program and the treatment guide).
   lawnTroubleAreas: process.env.GATE_LAWN_TROUBLE_AREAS === 'true',
+  // Lawn Fast Complete mix help (owner 2026-10-09): the amount for a full tank of a spot spray, and gallons sprayed
+  // in place of an area. Ships DARK. This entry is for logGateStatus only: lawn-mix-help.js reads
+  // GATE_LAWN_MIX_HELP at call time via lawnMixHelpLive() (which also needs the spot rules and the v13 program).
+  // Lawn Fast Complete spot target (owner 2026-10-09): a target on a spot fungicide / insecticide row. Ships DARK. This entry is for
+  // logGateStatus only: lawn-spot-target.js reads GATE_LAWN_SPOT_TARGET at call time via lawnSpotTargetLive() (which also needs the guide).
+  lawnSpotTarget: process.env.GATE_LAWN_SPOT_TARGET === 'true',
+  lawnMixHelp: process.env.GATE_LAWN_MIX_HELP === 'true',
   // GATE_LAWN_REPORT_FACTS (owner 2026-10-08): the lawn report's re-entry condition, spot-use text and
   // finding-to-product tie, frozen at completion. Ships DARK. This entry is for logGateStatus only:
   // the lawn write gate reads it at call time via lawnReportFactsLive().
@@ -5714,6 +5731,16 @@ function callLastNameLookupLive() {
   return process.env.GATE_CALL_LAST_NAME_LOOKUP === 'true';
 }
 
+// GATE_PIN_PARKED_CHECK read at CALL time — strict `=== 'true'`, dark by default
+// (owner "build guardrail" 2026-10-09). The canonical reader for
+// services/pin-parked-check.js and the pin_suggestion part of
+// routes/admin-customer-geocodes.js. Off: the daily job returns before any query,
+// the review endpoints add no suggestion and the dismiss route answers 404.
+// It never writes a pin and never contacts a customer. Kill: unset.
+function pinParkedCheckLive() {
+  return process.env.GATE_PIN_PARKED_CHECK === 'true';
+}
+
 // GATE_SIGNUP_SINGLE_EMAIL read at CALL time — strict `=== 'true'`, dark by
 // default in every environment (owner-approved 2026-09-29; the owner flips it
 // after previewing the template). The canonical reader for the one-signup-email
@@ -6091,6 +6118,20 @@ function lawnTroubleAreasLive() {
   return process.env.GATE_LAWN_TROUBLE_AREAS === 'true' && lawnSpotRulesLive() && lawnV13Live() && lawnTreatmentGuideLive();
 }
 
+// GATE_LAWN_SPOT_TARGET read at CALL time — strict `'true'` only, so an unset variable is the kill switch. Live only while the
+// treatment guide is too (fail closed): the confirmation of a row's type uses the guide's staged sets. The context key, the sheet's
+// control and the completion's stored targets all follow this one reader; off = the old behavior exactly.
+function lawnSpotTargetLive() {
+  return process.env.GATE_LAWN_SPOT_TARGET === 'true' && lawnTreatmentGuideLive();
+}
+
+// GATE_LAWN_MIX_HELP read at CALL time — strict `'true'` only, so an unset variable is the kill switch. Live only while
+// the spot rules AND the v13 program are too (fail closed): the mix help reads the staged v13 rows of the spot sheet's
+// products. The lawn Fast Complete context and the completion follow this one reader; off = the old behavior exactly.
+function lawnMixHelpLive() {
+  return process.env.GATE_LAWN_MIX_HELP === 'true' && lawnSpotRulesLive() && lawnV13Live();
+}
+
 // GATE_LAWN_REPORT_FACTS read at CALL time — strict `'true'` only, so an unset variable is the kill
 // switch. It controls ONLY the freeze at completion (the lawn write gate): a render and the PDF key
 // read what the record already carries and never this gate, so a flip cannot change a stored report.
@@ -6348,6 +6389,10 @@ module.exports.lawnSpotRulesLive = lawnSpotRulesLive;
 module.exports.lawnTreatmentGuideLive = lawnTreatmentGuideLive;
 // GATE_LAWN_TROUBLE_AREAS reader, on its own line so gate PRs never conflict.
 module.exports.lawnTroubleAreasLive = lawnTroubleAreasLive;
+// GATE_LAWN_SPOT_TARGET reader, on its own line so gate PRs never conflict.
+module.exports.lawnSpotTargetLive = lawnSpotTargetLive;
+// GATE_LAWN_MIX_HELP reader, on its own line so gate PRs never conflict.
+module.exports.lawnMixHelpLive = lawnMixHelpLive;
 // GATE_LAWN_REPORT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportFactsLive = lawnReportFactsLive;
 // GATE_LAWN_REPORT_FACTS tie part (needs the Visit Summary and v6 copy gates), on its own line.
@@ -6370,6 +6415,8 @@ module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
 module.exports.staffOnboardingDocsLive = staffOnboardingDocsLive;
 // GATE_CALL_LAST_NAME_LOOKUP reader, on its own line so gate PRs never conflict.
 module.exports.callLastNameLookupLive = callLastNameLookupLive;
+// GATE_PIN_PARKED_CHECK reader, on its own line so gate PRs never conflict.
+module.exports.pinParkedCheckLive = pinParkedCheckLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportClarityLive = lawnReportClarityLive;
 // GATE_TRACE_REUSE reader, on its own line so gate PRs never conflict.

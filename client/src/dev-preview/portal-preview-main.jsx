@@ -627,7 +627,6 @@ Object.assign(api, {
       fungus: { level: 'MODERATE', color: '#FF9800', advice: 'Moderate fungus risk — water only in early morning' },
       chinch: { level: 'MODERATE', color: '#FF9800', advice: 'Chinch bugs active — watch sunny areas near driveways' },
     },
-    irrigationRecommendation: 'Skip a cycle if afternoon rain arrives — about 0.75 inches this week is plenty.',
     updatedAt: new Date().toISOString(),
   }),
   getAlerts: async () => ({ alerts: [] }),

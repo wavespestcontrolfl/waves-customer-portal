@@ -25656,6 +25656,8 @@ const MONTH_NAMES = [
 
 /* Product descriptions — plain-language for techs and Virginia */
 const PRODUCT_DESCRIPTIONS = {
+  // Before the generic key: the plain product is the caterpillar product on lawn and tree & shrub lines.
+  "acelepryn insecticide": "chlorantraniliprole for leaf-feeding caterpillars (IRAC 28)",
   "acelepryn xtra": "prevents chinch bugs, webworms, and grubs for 2-3 months",
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
   "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
@@ -25732,12 +25734,13 @@ const PRODUCT_DESCRIPTIONS = {
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",
-  mainspring: "non-neonic option for whiteflies, caterpillars, leafminers, and resistance management (IRAC 28)",
-  "distance igr": "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
-  distance: "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
+  mainspring: "non-neonic option for whiteflies, leafminers, and resistance management (IRAC 28)",
+  "distance igr": "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
+  distance: "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
   talus: "insect growth regulator for immature whitefly and scale stages (IRAC 16)",
   "kphite 7lp": "phosphite support for root/oomycete pressure; FRAC P07",
   kphite: "phosphite support for root/oomycete pressure; FRAC P07",
+  reliant: "phosphite support for root/oomycete pressure; FRAC P07",
   conserve: "spinosyn option for caterpillar/thrips-type work where labeled",
   floramite: "miticide for confirmed mite pressure only",
   "liquid copper": "contact protectant for labeled leaf or bacterial disease; keep separate from oil",

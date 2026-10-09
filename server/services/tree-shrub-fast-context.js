@@ -25,6 +25,10 @@ const {
   deriveTreeShrubTreatments,
 } = require('./tree-shrub-closeout');
 const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
+const { loadLiveRecurringObligationRows, ownershipKeysForRow } = require('./waveguard-existing-services');
+const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
+// ADDON_LINE_IS_PLAN_SQL names this table unaliased.
+const ADDONS = 'scheduled_service_addons';
 const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
@@ -413,6 +417,48 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
 }
 
 /**
+ * True when this customer also has a live recurring mosquito service at THIS
+ * property: the T&S protocol asks for a scale / sooty mold / mite check at every
+ * visit of such an account. "Live" is the ownership lifecycle the pricing AI
+ * uses (loadLiveRecurringObligationRows: active customer, recurring, non-terminal,
+ * no callback or one-time source) and "mosquito" is its ownership family.
+ * Mosquito counts as a live row's own service or as a plan add-on line on one
+ * (service-library ADDON_LINE_IS_PLAN_SQL, the one plan add-on predicate), this visit's
+ * own add-on lines included. A row stamped with another property does not
+ * count; a row with no property link, or a visit with none, falls back to the
+ * customer level (a notice too many, never one too few). Any failure answers
+ * false and logs.
+ */
+async function loadJointMosquitoAccount(svc, knex, serviceId) {
+  try {
+    const here = (await loadLiveRecurringObligationRows(knex, svc.customer_id))
+      .filter((row) => !svc.property_id || !row.property_id || String(row.property_id) === String(svc.property_id));
+    const isMosquito = (row) => ownershipKeysForRow(row).includes('mosquito');
+    if (here.some((row) => String(row.id) !== String(svc.id) && isMosquito(row))) return true;
+    // This visit's own add-on lines count even when the lifecycle loader left the visit out (an
+    // overdue pending or confirmed visit is not a forward obligation, but this sheet still opens it).
+    // Only a recurring visit: on a one-time visit a NULL add-on cadence is one-off work, not a plan line.
+    const ownVisit = svc.is_recurring === true ? [svc.id] : [];
+    const visitIds = [...new Set([...here.map((row) => row.id), ...ownVisit].filter(Boolean).map(String))];
+    if (!visitIds.length) return false;
+    const addons = await knex(ADDONS)
+      .leftJoin('services as addon_service', 'addon_service.id', `${ADDONS}.service_id`)
+      .whereIn(`${ADDONS}.scheduled_service_id`, visitIds)
+      .whereRaw(ADDON_LINE_IS_PLAN_SQL)
+      .select(`${ADDONS}.service_name as addon_name`, `${ADDONS}.service_key_snapshot`, 'addon_service.service_key', 'addon_service.name as catalog_name');
+    return addons.some((line) => isMosquito({
+      service_key: line.service_key_snapshot || line.service_key,
+      service_name: line.catalog_name || line.addon_name,
+      service_type: line.addon_name,
+    }));
+  } catch (err) {
+    // No driver message: it can echo SQL and bound values.
+    logger.warn(`[ts-fast-context] mosquito account check unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+    return false;
+  }
+}
+
+/**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` only
  * for a missing service; an ineligible visit answers `eligible: false` with the
  * reason and the visit identity, and skips the heavier reads.
@@ -480,6 +526,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     ...(monthProductHolds.length && { monthProductHolds }),
     lastVisit: buildLastVisit(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
+    jointMosquitoAccount: await loadJointMosquitoAccount(svc, knex, serviceId),
     warnings,
     ...(warningsUnavailable && { warningsUnavailable: true }),
     // GATE_TS_WATCH_LIST: this visit's month on the seasonal watch list. Gate

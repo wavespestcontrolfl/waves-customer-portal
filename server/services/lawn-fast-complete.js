@@ -755,6 +755,8 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       ...weed,
       ...chinch,
       ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet)),
+      // GATE_LAWN_MIX_HELP: the amount for a full tank of each spot spray (lawn-mix-help.js; `{}` while the gate is off).
+      ...await require('./lawn-mix-help').contextBlock({ loaded, weed, chinch, month: visitMonthOf(svc), knex }),
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
       ...(featureGates.lawnTroubleAreasLive() ? { troubleSeed: troubleSeedOf({ loaded, sheet, weed, chinch }) } : {}),
     };
@@ -929,7 +931,8 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     // the key exists only while the gate is live, so gate off is byte-identical.
     // A visit whose program rows could not be read has no guide at all (the read failure is named), rather
     // than a guide that claims a clean "no chinch rows staged".
-    ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true } : {}),
+    // GATE_LAWN_SPOT_TARGET: the context also carries the closed lists of a spot fungicide / insecticide row's target (lawn-spot-target.js).
+    ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true, ...require('./lawn-spot-target').contextKey() } : {}),
     // GATE_LAWN_REPORT_FACTS context keys (the standing chinch find, the recorded spot areas), present only while live.
     ...reportFactsContextKeys(),
     // Why the planned list is empty when it is empty because a read failed
@@ -1239,7 +1242,8 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   }
   // GATE_LAWN_TROUBLE_AREAS: every spot row names a place, and the place the yearly limits forbid is refused
   // (lawn-trouble-areas.js preflightPlaces; null while the gate is off).
-  return require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products });
+  // GATE_LAWN_MIX_HELP: gallons sprayed become the recorded spot area first (lawn-mix-help.js), so the places are judged on it.
+  return require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products }));
 }
 
 // The visit type re-judged INSIDE the completion transaction, beside the main flow's
