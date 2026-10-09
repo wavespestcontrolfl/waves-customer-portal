@@ -45,22 +45,35 @@ describe('config: the label figures', () => {
 describe('Codex r5 #6204: the count limit and products with no limit on file', () => {
   const DOMINION = { id: 'cat-dominion', name: 'Dominion 2L 1 gal', active_ingredient: 'Imidacloprid 21.4%' };
   const GENERIC = { id: 'cat-generic', name: 'Generic imidacloprid 75 WSP', active_ingredient: 'Imidacloprid 75%' };
-  const zylamOn = (date, qty = 0.5) => row(ZYLAM, qty, 'fl_oz', { application_date: date });
+  const zylamOn = (recordId, qty = 0.5, extra = {}) => row(ZYLAM, qty, 'fl_oz', { id: `pah-${recordId}-${qty}`, service_record_id: recordId, ...extra });
   const zylamCap = (rows) => entryOf(computeNeonicLedger({ rows, bedSqft: BED, catalog: CATALOG }), 'dinotefuran')
     .capByProduct.find((p) => p.productId === 'cat-zylam');
 
-  test('Zylam carries the days it was applied this year against the label\'s three', () => {
+  test('Zylam carries the visits that applied it this year against the label\'s three', () => {
     expect(zylamCap([])).toMatchObject({ maxApplications: 3, applicationsUsed: 0 });
-    expect(zylamCap([zylamOn('2026-02-01'), zylamOn('2026-05-01'), zylamOn('2026-08-01')])).toMatchObject({ maxApplications: 3, applicationsUsed: 3 });
+    expect(zylamCap([zylamOn('rec-1'), zylamOn('rec-2'), zylamOn('rec-3')])).toMatchObject({ maxApplications: 3, applicationsUsed: 3 });
   });
 
-  test('two rows on one day are one application; an unsized row still counts', () => {
-    expect(zylamCap([zylamOn('2026-02-01'), zylamOn('2026-02-01'), zylamOn('2026-05-01', null)]).applicationsUsed).toBe(2);
+  test('two rows of one visit are one application; two visits on one day are two; an unsized row still counts (Codex r6)', () => {
+    expect(zylamCap([zylamOn('rec-1', 0.5), zylamOn('rec-1', 0.3), zylamOn('rec-2', null)]).applicationsUsed).toBe(2);
+    const sameDay = { application_date: '2026-02-01' };
+    expect(zylamCap([zylamOn('rec-1', 0.5, sameDay), zylamOn('rec-2', 0.5, sameDay), zylamOn('rec-3', 0.5)]).applicationsUsed).toBe(3);
+    // No service record (an import, a hand entry): each row is its own application.
+    expect(zylamCap([zylamOn(null, 0.5, { id: 'a' }), zylamOn(null, 0.5, { id: 'b' })]).applicationsUsed).toBe(2);
+  });
+
+  test('a two-active product is still a product of the capped active (Codex r6)', () => {
+    const temprid = { id: 'cat-temprid', name: 'Temprid FX', active_ingredient: 'Beta-cyfluthrin + Imidacloprid' };
+    const ledger = computeNeonicLedger({ rows: [], bedSqft: BED, catalog: [MERIT, temprid] });
+    expect(entryOf(ledger, 'imidacloprid').uncapped).toEqual([{ productId: 'cat-temprid', name: 'Temprid FX' }]);
+    expect(isTreeShrubLedgerRow({ product_name: 'Temprid FX', active_ingredient: 'Beta-cyfluthrin + Imidacloprid', service_line: 'pest' })).toBe(false);
+    const src = fs.readFileSync(path.join(__dirname, '../services/tree-shrub-neonic-ledger.js'), 'utf8');
+    expect(src).toMatch(/const like = `%\$\{cap\.activeIngredientPrefix\}%`;/);
   });
 
   test('Safari applications do not spend Zylam\'s count, and Safari has no count limit', () => {
     const dino = entryOf(computeNeonicLedger({
-      rows: [row(SAFARI, 1, 'oz', { application_date: '2026-02-01' }), zylamOn('2026-03-01')], bedSqft: BED, catalog: CATALOG,
+      rows: [row(SAFARI, 1, 'oz', { service_record_id: 'rec-9' }), zylamOn('rec-1')], bedSqft: BED, catalog: CATALOG,
     }), 'dinotefuran');
     expect(dino.capByProduct.find((p) => p.productId === 'cat-zylam').applicationsUsed).toBe(1);
     expect(dino.capByProduct.find((p) => p.productId === 'cat-safari')).toMatchObject({ maxApplications: null, applicationsUsed: null });
@@ -97,9 +110,9 @@ describe('Codex r5 #6204: the count limit and products with no limit on file', (
     expect(imi.uncapped).toEqual([{ productId: 'cat-ima', name: 'Arborjet Ima-Jet 10', injection: true }]);
   });
 
-  test('the ledger query reads the application date', async () => {
+  test('the ledger query reads the row and record ids the count needs', async () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/tree-shrub-neonic-ledger.js'), 'utf8');
-    expect(src).toMatch(/'pah\.quantity_applied', 'pah\.quantity_unit', 'pah\.application_date'/);
+    expect(src).toMatch(/'pah\.id', 'pah\.service_record_id', 'pah\.quantity_applied', 'pah\.quantity_unit'/);
   });
 });
 
@@ -255,7 +268,7 @@ describe('the ledger scope: which rows spend the bed allowance', () => {
     expect(sql).toContain('COALESCE(pah.active_ingredient, sp.active_ingredient, pc.active_ingredient) ILIKE ?');
     expect(sql).toContain('COALESCE(sp.product_name, pc.name) as product_name');
     expect(sql).toContain('COALESCE(pah.active_ingredient, sp.active_ingredient, pc.active_ingredient) as active_ingredient');
-    expect(bindings).toEqual(expect.arrayContaining(['cust-1', 'prop-1', '2026-01-01', '2026-12-31', 'dinotefuran%', 'imidacloprid%', 'visit-1']));
+    expect(bindings).toEqual(expect.arrayContaining(['cust-1', 'prop-1', '2026-01-01', '2026-12-31', '%dinotefuran%', '%imidacloprid%', 'visit-1']));
   });
 
   test('the year follows the visit date in ET', async () => {

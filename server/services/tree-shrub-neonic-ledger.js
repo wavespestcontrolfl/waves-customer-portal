@@ -39,7 +39,9 @@ const positive = (value) => {
 // { cap, entry }. `entry` is null for an ingredient with no strength in the config for this name.
 function capFor(name, activeIngredient) {
   const ai = String(activeIngredient || '').trim().toLowerCase();
-  const cap = ai ? NEONIC_CAPS.find((c) => ai.startsWith(c.activeIngredientPrefix)) : null;
+  // Anywhere in the ingredient text, as a word: a two-active product ("Beta-cyfluthrin + Imidacloprid")
+  // is still an imidacloprid product.
+  const cap = ai ? NEONIC_CAPS.find((c) => new RegExp(`(^|[^a-z])${c.activeIngredientPrefix}`).test(ai)) : null;
   if (!cap) return null;
   const label = String(name || '').trim();
   const injection = (cap.injectionPatterns || []).some((pattern) => pattern.test(label));
@@ -48,13 +50,14 @@ function capFor(name, activeIngredient) {
 
 const yearlyAmountFor = (entry, bedSqft) => round4((entry.perAcreYear * bedSqft) / SQFT_PER_ACRE);
 
-// A product with a label limit on the NUMBER of applications: remember the day of this one. Two
-// rows on one day are one application; a row with no date is its own.
+// A product with a label limit on the NUMBER of applications: remember this one. An application is
+// one visit (its service record): two rows of one visit are one application, two visits on one day
+// are two. A row with no record is its own application.
 function noteApplicationDay(applicationDays, entry, row) {
   if (!entry?.maxApplicationsPerYear) return;
-  const days = applicationDays.get(entry) || new Set();
-  days.add(row.application_date ? String(etCalendarDayOf(row.application_date)) : `row-${days.size}`);
-  applicationDays.set(entry, days);
+  const seen = applicationDays.get(entry) || new Set();
+  seen.add(row.service_record_id ? `record-${row.service_record_id}` : `row-${row.id ?? seen.size}`);
+  applicationDays.set(entry, seen);
 }
 
 function productCap(product, entry, area, usedShare, applicationDays) {
@@ -81,7 +84,7 @@ function productCap(product, entry, area, usedShare, applicationDays) {
  * products of this ingredient with no strength in the config: the sheet holds them, except a
  * trunk-injection product (`injection: true`), which is dosed per tree and only gets a line. A product with
  * a label limit on the NUMBER of applications carries maxApplications and applicationsUsed (the
- * days it was applied this year, sized or not); the others carry null.
+ * visits that applied it this year, sized or not); the others carry null.
  */
 function computeNeonicLedger({ rows = [], bedSqft = null, catalog = [] } = {}) {
   const area = positive(bedSqft);
@@ -154,13 +157,13 @@ async function loadNeonicLedgerRows(database, svc, serviceDate) {
     .where('pah.application_date', '<=', `${year}-12-31`)
     .where(function dinotefuranOrImidacloprid() {
       for (const cap of NEONIC_CAPS) {
-        const like = `${cap.activeIngredientPrefix}%`;
+        const like = `%${cap.activeIngredientPrefix}%`;
         this.orWhereRaw('COALESCE(pah.active_ingredient, sp.active_ingredient, pc.active_ingredient) ILIKE ?', [like]);
       }
     });
   scopeHistoryToTreatment(query, database, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }, 'pah');
   const rows = await query.select(
-    'pah.quantity_applied', 'pah.quantity_unit', 'pah.application_date',
+    'pah.id', 'pah.service_record_id', 'pah.quantity_applied', 'pah.quantity_unit',
     // The name and ingredient FROZEN when the application was recorded win over the catalog's
     // current ones: renaming a product or editing its ingredient must not re-class its history.
     database.raw('COALESCE(sp.product_name, pc.name) as product_name'),
