@@ -1056,7 +1056,9 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     const singleIdx = src.indexOf('await SmartRebooker.reschedule(');
     const seriesIdx = src.indexOf('await SmartRebooker.rescheduleSeries(');
     expect(src.slice(singleIdx, singleIdx + 1400)).toMatch(/moveGuard: officeApprovalRecheck/);
-    expect(src.slice(seriesIdx, singleIdx)).toMatch(/moveGuard: officeApprovalRecheck/);
+    // The series guard runs the approval re-read first, then the next-visit
+    // date pin (GATE_RESCHEDULE_NEXT_VISIT_DATE), both on the locked series.
+    expect(src.slice(seriesIdx, singleIdx)).toMatch(/moveGuard: async \(ctx\) => \{\s*await officeApprovalRecheck\(ctx\);/);
     const guardIdx = src.indexOf('const officeApprovalRecheck = async ({ trx }) => {');
     expect(guardIdx).toBeGreaterThan(-1);
     const guard = src.slice(guardIdx, guardIdx + 700);
