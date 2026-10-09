@@ -106,6 +106,39 @@ into `priceLawnCare`.
 - MODERATE_SHADE: 0.625 lb N, 2 N-apps, Pillar
 - HEAVY_SHADE: 0.50 lb N, 2 N-apps, Pillar
 
+**Cost-plus list price (`GATE_LAWN_COST_PLUS_LIST`, ships OFF; owner 2026-10-09):**
+residential recurring lawn care only. Off, everything above is unchanged. On:
+
+- `annualCost` = v13 whole-lawn product (`LAWN_PRICING_V2.costPlusList.materialPer1000SqftPerYear`
+  by cadence, one program for every grass) + labor with `spotMinutesPerVisit` more
+  minutes a visit + the usual drive, callback and admin costs.
+- List annual = `max(market table, ceil(annualCost / (1 - listMargin) / visits) * visits, minimumPerVisit * visits)`.
+  Defaults: `listMargin` 0.45, `minimumPerVisit` $55, `spotMinutesPerVisit` 10. The lawn size is not rounded.
+- The program minimum, the cadence-ladder lift and the Bermuda adder then apply as before.
+- The mode arms the cost floor: WaveGuard and manual discounts on the lawn line stop at
+  `minimumCollectedAnnualPrice` = `annualCost / 0.65` (a 35% margin).
+- Tier rows read `pricingSource` `COST_PLUS_LIST` or `MINIMUM_PER_VISIT` (else the usual
+  labels) and carry `costPlusListApplied`, `listMargin` and `costPlusListAnnual`.
+- Cost basis: `lawn-cost-plus-knobs.js` `resolveLawnCostPlusBasis(snapshot)` returns one validated object
+  (`version` 1) with every non-property number behind the cost, list price and floor: `costPlusList`,
+  collected-margin floor, labor minutes (base and per 1,000 sq ft), loaded labor rate, drive minutes per
+  route density, callback and equipment reserves, admin cost. In this mode `priceLawnCare` takes tuning
+  numbers ONLY from the basis. The caller options `targetLawnGrossMargin`, `lawnMaterialCostPerK`,
+  `lawnLaborMinutesBase`, `lawnLaborMinutesPerK`, `routeDriveMinutes`, `adminAnnual` and
+  `annualMaterialBudget` are IGNORED, whoever sends them (an earlier "explicit caller override still wins"
+  rule is withdrawn). Property facts stay live: lawn size, complexity minutes, maintenance and pest-pressure
+  callback adders, property route density. Off mode keeps its overrides bit for bit.
+- Bounds (one table, one validator for the pricer, the replay snapshot and the admin save): `listMargin`
+  0.05 to 0.75; `minimumPerVisit` 0 to 500, 2 decimals; `spotMinutesPerVisit` 0 to 120; material above 0
+  to 500 per 1,000 sq ft a year, 2 decimals; loaded labor rate above 0 to 500; minutes 0 to 240; reserves
+  and admin 0 to 1,000.
+- Resolution: `services.lawn.costPlusList ?? input.lawnCostPlusList ?? gate` (server-set only), stamped as
+  `pricingMetadata.lawnCostPlusList` plus the full basis (`lawnCostPlusListBasis`). A saved estimate replays as
+  stamped on that basis; an ON stamp with no basis uses the live one; a priced lawn with no stamp means OFF;
+  no priced lawn pins nothing. Posted values are stripped.
+  The one-time lawn anchor stays on the market table; commercial lawn is untouched.
+- An invalid basis or `costPlusList` fails the calculation closed (400 `LAWN_COST_PLUS_LIST_KNOBS_INVALID`).
+
 ---
 
 ## 5. Tree & Shrub

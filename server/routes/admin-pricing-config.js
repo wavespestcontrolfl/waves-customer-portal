@@ -5,6 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { costLineFromUsage } = require('../services/product-costing');
 const { BED_BUG, TERMITE } = require('../services/pricing-engine/constants');
+const { costPlusListKnobError } = require('../services/pricing-engine/lawn-cost-plus-knobs');
 
 // Reads and the calculators (margin-check / estimate / quick-quote) stay
 // tech-or-admin — the tech portal estimators price off them. WRITES are
@@ -247,6 +248,15 @@ function validatePricingConfigData(configKey, data, oldConfig) {
   const isRatio01 = (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) < 1;
   const isPositive = (v) => Number.isFinite(num(v)) && num(v) > 0;
   const isNonNegative = (v) => Number.isFinite(num(v)) && num(v) >= 0;
+
+  // lawn_pricing_v2.costPlusList (GATE_LAWN_COST_PLUS_LIST knobs) is checked on
+  // its own, ahead of the key-specific chain below, so a sibling key (such as
+  // bermudaSuppression) in the same save can never skip it. One validator with
+  // the pricer: a save that passes here prices.
+  if (configKey === 'lawn_pricing_v2' && data?.costPlusList !== undefined) {
+    const problem = costPlusListKnobError(data.costPlusList);
+    if (problem) return fail(`lawn_pricing_v2.${problem}`);
+  }
 
   // The global_* singles must be STRICTLY positive: syncConstantsFromDB
   // applies them through truthy `?.value` checks, so a stored 0 would return
