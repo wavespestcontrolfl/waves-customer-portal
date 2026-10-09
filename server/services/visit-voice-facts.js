@@ -739,11 +739,14 @@ const SWEEP_ACTION_RE = /\b(?:swe(?:ep|pt|eping)s?|brush(?:ed|es|ing)?|knock(?:e
 const SWEEP_WEB_RE = /web/;
 const SWEEP_EAVE_RE = /\b(?:eaves?|soffits?|fascia)\b/;
 const SWEEP_NEST_RE = /\b(?:nests?|hives?|wasps?|hornets?|bees?|daubers?)\b/;
+// With no web named, only a sweeping word makes an eave a sweep: "cleaned the
+// eaves" or "removed debris from the soffit" may be anything.
+const SWEEP_BRUSH_RE = /\b(?:swe(?:ep|pt|eping)s?|brush(?:ed|es|ing)?|knock(?:ed|s|ing)?\s+(?:down|off|out)|de-?web(?:bed|bing|s)?)\b/;
 // A denial just before the action, over the few filler words a denial runs on
 // ("didn't sweep", "not to knock down", "no webs to sweep", "wasn't able to
 // brush"); words past those (not home and I swept) are another clause's.
-const SWEEP_DENIAL_FILLER = String.raw`to|us|me|them|him|her|you|able|get|got|any|the|a|an|of|be|been|need|needed|necessary|want|wanted|have|has|had|asked|told|allowed|let|webs?|cobwebs?|spider\s*webs?|eaves?|soffits?`;
-const SWEEP_DENIAL_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|unable|asked\s+(?:us\s+)?not)\b(?:\s+(?:${SWEEP_DENIAL_FILLER})){0,4}\s+$`);
+const SWEEP_DENIAL_FILLER = String.raw`to|us|me|them|him|her|you|able|get|got|any|the|a|an|of|be|been|need|needed|necessary|want|wanted|have|has|had|asked|told|allowed|let|manage|managed|time|chance|around|really|even|webs?|cobwebs?|spider\s*webs?|eaves?|soffits?`;
+const SWEEP_DENIAL_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|unable|asked\s+(?:us\s+)?not)\b(?:\s+(?:${SWEEP_DENIAL_FILLER})){0,6}\s+$`);
 const sweepAssertion = (quote) => spanOf(SWEEP_ACTION_RE.exec(quote));
 
 function readSweep(sweep, grounding) {
@@ -752,7 +755,8 @@ function readSweep(sweep, grounding) {
     assertion: sweepAssertion, denialAfter: TRAILING_DENIAL.treatment, denialBefore: SWEEP_DENIAL_BEFORE_RE,
   });
   if (!read || read.denied || !sweepAssertion(read.quote)) return {};
-  const names = SWEEP_WEB_RE.test(read.quote) || (SWEEP_EAVE_RE.test(read.quote) && !SWEEP_NEST_RE.test(read.quote));
+  const names = SWEEP_WEB_RE.test(read.quote)
+    || (SWEEP_EAVE_RE.test(read.quote) && SWEEP_BRUSH_RE.test(read.quote) && !SWEEP_NEST_RE.test(read.quote));
   return names ? { sweep: { quote: read.quote } } : {};
 }
 

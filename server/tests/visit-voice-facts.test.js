@@ -791,6 +791,15 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(said(note, quote)).toBeNull();
   });
 
+  test('an eave with no web named needs a sweeping word; a long-winded denial still denies', () => {
+    expect(readSweep('Cleaned the eaves and sprayed the perimeter.', { done: true, quote: 'Cleaned the eaves' })).toBeNull();
+    expect(readSweep('Removed debris from the soffit.', { done: true, quote: 'Removed debris from the soffit' })).toBeNull();
+    expect(readSweep('Brushed the eaves and sprayed the perimeter.', { done: true, quote: 'Brushed the eaves' })).toEqual({ quote: 'brushed the eaves' });
+    expect(readSweep('Cleaned the webs off the eaves.', { done: true, quote: 'Cleaned the webs off the eaves' })).toEqual({ quote: 'cleaned the webs off the eaves' });
+    expect(readSweep('Did not manage to get around to sweep the eaves.', { done: true, quote: 'sweep the eaves' })).toBeNull();
+    expect(readSweep("Didn't have time to sweep the eaves.", { done: true, quote: 'sweep the eaves' })).toBeNull();
+  });
+
   test('webs only seen are not a sweep', () => {
     const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
     expect(said(note, 'Saw webs on the eaves')).toBeNull();
