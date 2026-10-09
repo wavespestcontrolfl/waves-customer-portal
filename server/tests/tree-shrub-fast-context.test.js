@@ -671,7 +671,8 @@ describe('the fast-context jointMosquitoAccount flag', () => {
   // Mosquito sold as a plan add-on line on another live recurring visit (Codex r1 #6200).
   describe('mosquito as an add-on line', () => {
     const ADDONS = 'scheduled_service_addons';
-    const withAddons = (addons) => fakeKnex({ scheduled_services: visit(), products_catalog: catalog, [ADDONS]: addons });
+    // A program visit is recurring; a one-time visit passes { is_recurring: false }.
+    const withAddons = (addons, extra = { is_recurring: true }) => fakeKnex({ scheduled_services: visit(extra), products_catalog: catalog, [ADDONS]: addons });
     const pest = () => row({ service_type: 'Pest Control' });
 
     test('a plan add-on line on a live row at this property is true, by key snapshot, catalog or line name', async () => {
@@ -705,6 +706,13 @@ describe('the fast-context jointMosquitoAccount flag', () => {
       const knex = withAddons([{ addon_name: 'Mosquito Barrier Treatment' }]);
       expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(true);
       expect(knex.calls.filter(([table]) => table === ADDONS)).toContainEqual([ADDONS, 'whereIn', 'scheduled_service_addons.scheduled_service_id', ['visit-1']]);
+    });
+
+    test('a one-time visit never counts its own add-on lines: a NULL cadence there is one-off work (Codex r6 #6200)', async () => {
+      loadLiveRecurringObligationRows.mockResolvedValue([]);
+      const knex = withAddons([{ addon_name: 'Mosquito Barrier Treatment' }], { is_recurring: false });
+      expect((await buildTreeShrubFastContext('visit-1', knex)).jointMosquitoAccount).toBe(false);
+      expect(knex.calls.some(([table]) => table === ADDONS)).toBe(false);
     });
 
     test('an add-on read failure is false and logged', async () => {

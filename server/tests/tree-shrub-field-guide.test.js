@@ -74,6 +74,8 @@ test('Zylam carries the soil-drench dose by plant height, kept out of the per-ga
   expect(zylam.mix).toEqual([0.0725, 0.16]);
   // Codex r5 #6200: the tank amount is named foliar-only, and the drench carries the label's timing.
   expect(zylam.mixLabel).toBe('Foliar spray only');
+  expect(zylam.limits).toContain('After a soil drench, do not follow with a foliar Zylam spray or another neonicotinoid (label resistance direction).');
+  expect(zylam.source).toMatch(/pp\. 2–6$/);
   expect(zylam.apply).toMatch(/never by the tank amount\. The label directs soil applications early in the plant's growing cycle/);
   expect(zylam.mixes).toBeUndefined();
 });

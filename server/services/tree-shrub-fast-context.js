@@ -435,7 +435,9 @@ async function loadJointMosquitoAccount(svc, knex, serviceId) {
     if (here.some((row) => String(row.id) !== String(svc.id) && isMosquito(row))) return true;
     // This visit's own add-on lines count even when the lifecycle loader left the visit out (an
     // overdue pending or confirmed visit is not a forward obligation, but this sheet still opens it).
-    const visitIds = [...new Set([...here.map((row) => row.id), svc.id].filter(Boolean).map(String))];
+    // Only a recurring visit: on a one-time visit a NULL add-on cadence is one-off work, not a plan line.
+    const ownVisit = svc.is_recurring === true ? [svc.id] : [];
+    const visitIds = [...new Set([...here.map((row) => row.id), ...ownVisit].filter(Boolean).map(String))];
     if (!visitIds.length) return false;
     const addons = await knex(ADDONS)
       .leftJoin('services as addon_service', 'addon_service.id', `${ADDONS}.service_id`)
