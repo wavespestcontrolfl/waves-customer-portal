@@ -2509,6 +2509,11 @@ export function composeTechNote({ tips = [], customerName = '', firstName, seed 
   const count = Math.min(Math.max(tips.length, 1), 3);
   const first = techNoteFirstName(firstName !== undefined ? firstName : customerName);
   const greeting = first ? TECH_NOTE_GREETINGS[seed % TECH_NOTE_GREETINGS.length](first) : 'Hey there,';
+  // The technician's own line may be something they did or saw at this visit
+  // (owner 2026-10-09: advice or an observation, both), which does not read
+  // under "One thing that will make a real difference:". A note made only of
+  // their own words gets the greeting and no opener.
+  if (tips.length > 0 && tips.every((tip) => tip?.source === 'technician')) return { greeting, opener: null };
   const openers = TECH_NOTE_OPENERS[count];
   return { greeting, opener: openers[Math.floor(seed / 7) % openers.length] };
 }
@@ -2551,7 +2556,7 @@ export function TechNoteCard({ data, mode = 'live' }) {
       <blockquote style={{ position: 'relative', margin: 0, padding: '4px 4px 0 22px' }}>
         <span aria-hidden="true" style={{ position: 'absolute', left: -2, top: -14, fontSize: 56, lineHeight: 1, color: 'var(--line-strong, rgba(4,57,94,0.35))', fontFamily: 'Georgia, serif' }}>“</span>
         <p style={{ margin: '0 0 10px', fontWeight: 600, color: 'var(--text, #04395E)' }}>{greeting}</p>
-        <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>
+        {opener && <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>}
         {tips.map((tip, i) => (
           <p key={`${tip.id || 'tip'}-${i}`} style={{ margin: '0 0 10px', lineHeight: 1.6 }}>
             {tip.copy}
