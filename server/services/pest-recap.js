@@ -339,14 +339,21 @@ async function sheetRecordFor(profile, svc, knex) {
     typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
   };
   if (!record.lane && !record.typedType) return record;
+  return (await serviceHasLinkedProject(svc.id, knex)) ? none : record;
+}
+
+// Is a project linked to this visit, directly (projects.scheduled_service_id) or only through its service record
+// (the legacy link)? The admin-projects create guard's own lookup. A read that fails counts as linked (fail closed).
+// Used by the sheet record above and by the combo stop check (combo-fast-complete.js), on the caller's connection.
+async function serviceHasLinkedProject(serviceId, knex = db) {
   const linked = await knex('projects')
     .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')
     .where((q) => q
-      .where('projects.scheduled_service_id', svc.id)
-      .orWhere('service_records.scheduled_service_id', svc.id))
+      .where('projects.scheduled_service_id', serviceId)
+      .orWhere('service_records.scheduled_service_id', serviceId))
     .first('projects.id')
     .catch(() => ({}));
-  return linked ? none : record;
+  return !!linked;
 }
 
 async function visitTraceOnReport(svc, profile, lane, knex) {
@@ -1743,6 +1750,7 @@ module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
   sheetRecordFor,
+  serviceHasLinkedProject,
   loadServiceWithCustomer,
   RECAP_COMPARED_IDENTITY_KEYS,
   buildRecapContext,

@@ -107,13 +107,13 @@ describe('prepare mode', () => {
     act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'one', products: [1, 2] })));
     await waitFor(() => expect(prepared.result.current.prepared).toBeNull());
     expect(onPrepared).toHaveBeenCalledTimes(1);
-    expect(onPrepared).toHaveBeenCalledWith('svc-a', null);
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null, expect.any(Number));
     // Revoked once: a later change does not tell the container again.
     act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'three' })));
     expect(onPrepared).toHaveBeenCalledTimes(1);
     // Preparing again hands over the new body.
     await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'three' }), 's'); });
-    expect(onPrepared).toHaveBeenLastCalledWith('svc-a', expect.objectContaining({ technicianNotes: 'three' }));
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-a', expect.objectContaining({ technicianNotes: 'three' }), expect.any(Number));
     expect(prepared.result.current.prepared.technicianNotes).toBe('three');
   });
 
@@ -125,7 +125,7 @@ describe('prepare mode', () => {
     onPrepared.mockClear();
     act(() => prepared.result.current.revokeIfChanged(() => { throw new Error('no draft'); }));
     await waitFor(() => expect(prepared.result.current.prepared).toBeNull());
-    expect(onPrepared).toHaveBeenCalledWith('svc-a', null);
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null, expect.any(Number));
   });
 
   test('outside prepare mode revokeIfChanged does nothing', async () => {
@@ -143,6 +143,7 @@ describe('prepare mode', () => {
     await waitFor(() => expect(view.result.current.recovering).toBe(false));
     let pending;
     act(() => { pending = view.result.current.submit(() => ({ n: 'A' }), 's'); });
+    await waitFor(() => expect(slow).toHaveBeenCalled());
     // Switch to part B before A's handoff settles; B prepares at once.
     const fast = vi.fn();
     view.rerender({ base: '/b', request, serviceId: 'svc-b', operatorId: 'op-a', onPrepared: fast });
@@ -156,5 +157,76 @@ describe('prepare mode', () => {
     act(() => view.result.current.revokeIfChanged(() => ({ n: 'B' })));
     expect(view.result.current.prepared.n).toBe('B');
     expect(fast).not.toHaveBeenCalled();
+  });
+
+  // A container that applies a call only when its seq is the greatest seen for the service, as the contract says.
+  function container({ delays = [] } = {}) {
+    const state = { body: undefined, lastSeq: 0, applied: [], calls: [] };
+    const fn = vi.fn(async (serviceId, body, seq) => {
+      const delay = delays.shift() ?? 0;
+      state.calls.push({ body, seq });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (delay === -1) throw new Error('container refused');
+      if (seq > state.lastSeq) { state.lastSeq = seq; state.body = body; state.applied.push(seq); }
+    });
+    return { state, fn };
+  }
+
+  test('a slow revocation then a fast body: calls run in order with rising seq, and the container ends with the body', async () => {
+    const { state, fn } = container({ delays: [0, 60, 0] });
+    const view = mount({ onPrepared: fn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 1 }), 's'); });
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 2 })));
+    // The revocation (60 ms) is still pending when the tech saves again.
+    await act(async () => { await view.result.current.submit(() => ({ n: 2 }), 's'); });
+    expect(state.calls.map((call) => call.body?.n ?? null)).toEqual([1, null, 2]);
+    const seqs = state.calls.map((call) => call.seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(3);
+    expect(state.body.n).toBe(2);
+    expect(view.result.current.prepared.n).toBe(2);
+  });
+
+  test('two quick edits make one revocation, after the handoff', async () => {
+    const { state, fn } = container({ delays: [0, 40] });
+    const view = mount({ onPrepared: fn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 1 }), 's'); });
+    act(() => { view.result.current.revokeIfChanged(() => ({ n: 2 })); view.result.current.revokeIfChanged(() => ({ n: 3 })); });
+    await waitFor(() => expect(state.applied).toHaveLength(2));
+    expect(state.calls.map((call) => call.body?.n ?? null)).toEqual([1, null]);
+  });
+
+  test('a revocation that rejects shows the error, stays not prepared, and the next prepare clears it', async () => {
+    const { state, fn } = container({ delays: [0, -1, 0] });
+    const view = mount({ onPrepared: fn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 1 }), 's'); });
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 2 })));
+    await waitFor(() => expect(view.result.current.error).toBe('Could not update this stop. Try again.'));
+    expect(view.result.current.prepared).toBeNull();
+    await act(async () => { await view.result.current.submit(() => ({ n: 2 }), 's'); });
+    expect(view.result.current.error).toBe('');
+    expect(view.result.current.prepared.n).toBe(2);
+    expect(state.body.n).toBe(2);
+  });
+
+  test('a scope switch mid-queue: the old part\'s queued call is skipped and its late settle touches nothing', async () => {
+    const { fn: slowFn, state: slowState } = container({ delays: [0, 60] });
+    const request = vi.fn(async () => ({}));
+    const view = renderHook((p) => useFastCompleteSubmit(p), { initialProps: { base: '/a', request, serviceId: 'svc-a', operatorId: 'op-a', onPrepared: slowFn } });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 'A' }), 's'); });
+    act(() => view.result.current.revokeIfChanged(() => ({ n: 'A2' })));
+    const { fn: fastFn, state: fastState } = container();
+    view.rerender({ base: '/b', request, serviceId: 'svc-b', operatorId: 'op-a', onPrepared: fastFn });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => ({ n: 'B' }), 's'); });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fastState.body.n).toBe('B');
+    expect(view.result.current.prepared.n).toBe('B');
+    expect(view.result.current.error).toBe('');
+    expect(slowState.calls.length).toBeLessThanOrEqual(2);
   });
 });

@@ -42,11 +42,21 @@
 // packet that carries the body, so a prepared body is never written as a
 // saved completion attempt, never held for a retry and never offered as one.
 // Submitting again after an edit builds a new body and replaces the last.
-// Contract with the container (PR 2): onPrepared(serviceId, body) means "this part is ready, here is its body";
-// onPrepared(serviceId, null) means "this part is NOT ready any more": an input behind the body changed after the
-// handoff (the sheet calls revokeIfChanged on every render with the builder it would submit with; a different
-// body, key aside, revokes). The container must drop that part's body and block "Complete stop" until the part is
-// prepared again; the footer goes back to "Save for this stop". A handoff that throws leaves the part unprepared.
+// Contract with the container (PR 2): onPrepared(serviceId, bodyOrNull, seq).
+//   - body: "this part is ready, here is its body".
+//   - null: "this part is NOT ready any more": an input behind the body changed after the handoff (the sheet calls
+//     revokeIfChanged on every render with the builder it would submit with; a different body, key aside, revokes).
+//     The container must drop that part's body and block "Complete stop" until the part is prepared again; the
+//     footer goes back to "Save for this stop".
+//   - seq: a number that only ever increases (one counter for every part and every mount in the page). APPLY A CALL
+//     ONLY IF its seq is greater than the last seq applied for that serviceId; ignore the rest. Then a late or
+//     out-of-order settle can never put an older body or an older null over a newer one, even if the container
+//     ignores the promise it returns.
+//   - Calls for one part are serialized by the hook: the next one starts only after the previous settled (a
+//     handoff waits behind a pending revocation), in the order the tech made the changes.
+//   - A returned promise that rejects (or a throw) means "not applied": the part stays not prepared, and shows
+//     "Could not update this stop. Try again." until a later call succeeds. A failed revocation is not swallowed.
+//   - A part that is switched away from (another service) is no longer called; a late settle touches nothing.
 // Without onPrepared the hook is exactly as above.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { shouldResetCompletionIdempotencyKey } from '../lib/completion-idempotency';
@@ -56,6 +66,10 @@ import {
   hasFastCompletionMarker,
   putFastCompletionAttempt,
 } from '../lib/completion-resume-store';
+
+// One counter for the whole page, so a seq only increases across parts and across remounts of the same part.
+let preparedSeq = 0;
+const UNPREPARE_FAILED = 'Could not update this stop. Try again.';
 
 const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch']);
 const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
@@ -148,6 +162,8 @@ export default function useFastCompleteSubmit({
   const [prepared, setPrepared] = useState(null);
   // The body handed over, key aside, as text: what a later render's body is compared with.
   const preparedSignatureRef = useRef('');
+  // Every onPrepared call of the current scope runs through this chain, one at a time.
+  const preparedQueueRef = useRef(Promise.resolve());
   // The visit's invoice fields (lib/completion-invoice-fields.js), the same
   // ones the full form posts. Read when a NEW body is built; a held, retried
   // or restored body keeps the fields it was prepared with.
@@ -201,6 +217,7 @@ export default function useFastCompleteSubmit({
     setStorageWarning('');
     setPrepared(null);
     preparedSignatureRef.current = '';
+    preparedQueueRef.current = Promise.resolve();
 
     if (!scope.serviceId || !scope.operatorId || typeof onPreparedRef.current === 'function') {
       // Existing callers opt into durable recovery by supplying both IDs.
@@ -438,6 +455,18 @@ export default function useFastCompleteSubmit({
 
   // Prepare mode (see the header): the body a send would post (key, built fields, invoice fields) goes to
   // onPrepared instead. The same one-at-a-time rule as a send, and nothing is stored or held.
+  // One onPrepared call, queued behind the scope's earlier ones (whether they settled or failed). It is skipped when
+  // its scope has gone, and numbered when it actually starts, so the numbers follow the order of the calls.
+  const callPrepared = useCallback((scope, bodyOrNull) => {
+    const run = async () => {
+      if (!sameScope(scopeRef.current, scope)) return;
+      await onPreparedRef.current(scope.serviceId, bodyOrNull, ++preparedSeq);
+    };
+    const next = preparedQueueRef.current.then(run, run);
+    preparedQueueRef.current = next.catch(() => {});
+    return next;
+  }, []);
+
   const prepare = useCallback(async (buildBody) => {
     if (inFlight.current || recovering) return;
     const scope = scopeRef.current;
@@ -446,7 +475,7 @@ export default function useFastCompleteSubmit({
     setSubmitting(true);
     setError('');
     try {
-      await onPreparedRef.current(scope.serviceId, body);
+      await callPrepared(scope, body);
       // Every write after the await is scope-checked: a part switched away from while its handoff was in flight
       // must not touch the next part's signature or state.
       if (sameScope(scopeRef.current, scope)) {
@@ -461,7 +490,7 @@ export default function useFastCompleteSubmit({
         inFlight.current = false;
       }
     }
-  }, [recovering]);
+  }, [recovering, callPrepared]);
 
   // Prepare mode: has anything behind the prepared body changed? Builds the body the sheet would submit now and
   // compares it with the one handed over (structurally, whatever field moved); a change, or a body that can no
@@ -471,10 +500,12 @@ export default function useFastCompleteSubmit({
     let now = null;
     try { now = bodySignature({ ...buildBody(), ...(invoiceFieldsRef.current || {}) }); } catch { now = null; }
     if (now === preparedSignatureRef.current) return;
+    const scope = scopeRef.current;
     preparedSignatureRef.current = '';
     setPrepared(null);
-    Promise.resolve(onPreparedRef.current(scopeRef.current.serviceId, null)).catch(() => {});
-  }, []);
+    // A refusal is shown, never swallowed: the container may still hold the old body.
+    callPrepared(scope, null).catch(() => { if (sameScope(scopeRef.current, scope)) setError(UNPREPARE_FAILED); });
+  }, [callPrepared]);
 
   const retry = useCallback(() => {
     if (!pendingBodyRef.current) return;

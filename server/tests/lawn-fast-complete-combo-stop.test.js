@@ -31,7 +31,7 @@ const svcRow = (extra = {}) => ({
 
 // scheduled_services answers .first() with the service and, once whereNotIn ran (visit-groups.openMembers),
 // its awaited list with `members`.
-function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT }, { id: OTHER }], packet = null, svc = svcRow() } = {}) {
+function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT }, { id: OTHER }], packet = null, svc = svcRow(), projectError = false } = {}) {
   const queried = [];
   const knex = jest.fn((table) => {
     queried.push(table);
@@ -46,7 +46,10 @@ function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT
       customers: { billing_mode: null },
       lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true },
     };
-    chain.first = async () => tables[table];
+    chain.first = async () => {
+      if (table === 'projects' && projectError) throw new Error('projects read failed');
+      return tables[table];
+    };
     chain.then = (resolve, reject) => Promise.resolve(list && table === 'scheduled_services' ? members : []).then(resolve, reject);
     chain.catch = () => Promise.resolve([]);
     return chain;
@@ -266,5 +269,58 @@ describe('the pair is validated before the grouped refusal lifts (header path an
     comboLive();
     memberVerdicts = { [VISIT]: LAWN_V, [OTHER]: OTHER_LAWN };
     expect(await buildLawnFastContext(VISIT, { knex: fakeKnex(), allowGrouped: { stop: true } })).toMatchObject({ eligible: false, reason: 'grouped_visit' });
+  });
+});
+
+describe('project linkage is rechecked for both members (header path and packet path)', () => {
+  const pestRecap = require('../services/pest-recap');
+  const paths = [
+    ['header path', () => fakeKnex(), { stop: true }],
+    ['packet path', () => fakeKnex({ visit: { id: STOP, status: 'closing' }, packet: PK }), { packetContext: { packetId: PACKET } }],
+  ];
+
+  test.each(paths)('%s: the valid pair with no project is allowed (reads both members)', async (_label, knexFor, ask) => {
+    comboLive();
+    const linked = jest.spyOn(pestRecap, 'serviceHasLinkedProject').mockResolvedValue(false);
+    expect(await groupedStopAllowed(knexFor(), svcRow(), ask)).toBe(true);
+    expect(linked.mock.calls.map(([id]) => id).sort()).toEqual([OTHER, VISIT].sort());
+  });
+
+  test.each(paths)('%s: a project linked to either member after the schedule loaded refuses', async (_label, knexFor, ask) => {
+    comboLive();
+    for (const member of [VISIT, OTHER]) {
+      jest.spyOn(pestRecap, 'serviceHasLinkedProject').mockImplementation(async (id) => id === member);
+      expect(await groupedStopAllowed(knexFor(), svcRow(), ask)).toBe(false);
+    }
+  });
+
+  test.each(paths)('%s: a lookup that fails refuses (the lookup answers linked on error)', async (_label, knexFor, ask) => {
+    comboLive();
+    const failing = fakeKnex({ visit: ask.stop ? { id: STOP, status: 'open' } : { id: STOP, status: 'closing' }, packet: ask.stop ? null : PK, projectError: true });
+    expect(await groupedStopAllowed(failing, svcRow(), ask)).toBe(false);
+  });
+});
+
+describe('serviceHasLinkedProject (the lookup behind the sheet record and the combo check)', () => {
+  const { serviceHasLinkedProject } = require('../services/pest-recap');
+  const recording = (answer) => {
+    const wheres = [];
+    const chain = {};
+    for (const m of ['leftJoin']) chain[m] = () => chain;
+    chain.where = (arg) => { if (typeof arg === 'function') { const inner = { where: (c) => { wheres.push(c); return inner; }, orWhere: (c) => { wheres.push(c); return inner; } }; arg(inner); } return chain; };
+    chain.first = () => (answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer));
+    const knex = jest.fn(() => chain);
+    knex.wheres = wheres;
+    return knex;
+  };
+
+  test('looks at the direct link and the legacy link through the service record', async () => {
+    const knex = recording(undefined);
+    expect(await serviceHasLinkedProject('svc-1', knex)).toBe(false);
+    expect(knex.wheres).toEqual(['projects.scheduled_service_id', 'service_records.scheduled_service_id']);
+  });
+  test('a found project is linked; a failed read counts as linked', async () => {
+    expect(await serviceHasLinkedProject('svc-1', recording({ id: 'p' }))).toBe(true);
+    expect(await serviceHasLinkedProject('svc-1', recording(new Error('boom')))).toBe(true);
   });
 });

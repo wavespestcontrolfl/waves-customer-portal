@@ -131,7 +131,7 @@ describe('prepare mode (a part of a grouped stop)', () => {
     // The customer-home tap changes the body: revoked, container told.
     fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await waitFor(() => expect(onPrepared).toHaveBeenCalledTimes(2));
-    expect(onPrepared).toHaveBeenLastCalledWith('svc-1', null);
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-1', null, expect.any(Number));
   });
 
   test('a new inline onPrepared on a parent re-render keeps the sheet prepared and tells the container nothing', async () => {

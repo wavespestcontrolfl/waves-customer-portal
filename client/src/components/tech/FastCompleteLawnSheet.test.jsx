@@ -3852,7 +3852,7 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(onPrepared).toHaveBeenCalledTimes(1);
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Changed words' } });
     await waitFor(() => expect(screen.queryByText('Saved for this stop')).toBeNull());
-    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null);
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null, expect.any(Number));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     fireEvent.click(completeButton());
     await screen.findByText('Saved for this stop');

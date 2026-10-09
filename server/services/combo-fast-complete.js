@@ -53,8 +53,14 @@ function pestReportFlowAdmits(profile, serviceType, isCallback) {
 async function pairAdmitted(knex, memberIds, allowStatuses) {
   if (memberIds.length !== COMBO_STOP_MEMBERS) return false;
   const { resolveLawnFastEligibility } = require('./lawn-fast-complete');
-  const verdicts = await Promise.all(memberIds.map((id) => resolveLawnFastEligibility(id, knex, { withVisitType: false, allowStatuses })));
-  if (verdicts.some((verdict) => !verdict.ok)) return false;
+  const { serviceHasLinkedProject } = require('./pest-recap');
+  // Two reads per member on the caller's connection: the eligibility/profile read, and the project link (the office
+  // may link a project after the schedule loaded; a failed read counts as linked).
+  const [verdicts, linked] = await Promise.all([
+    Promise.all(memberIds.map((id) => resolveLawnFastEligibility(id, knex, { withVisitType: false, allowStatuses }))),
+    Promise.all(memberIds.map((id) => serviceHasLinkedProject(id, knex))),
+  ]);
+  if (verdicts.some((verdict) => !verdict.ok) || linked.some(Boolean)) return false;
   const lawn = verdicts.filter((verdict) => verdict.profile?.category === 'lawn_care' && LAWN_REASONS_SET_ASIDE.includes(verdict.reason));
   const pest = verdicts.filter((verdict) => pestReportFlowAdmits(verdict.profile, verdict.svc?.service_type, verdict.svc?.is_callback));
   return lawn.length === 1 && pest.length === 1;

@@ -184,6 +184,7 @@ postgres('a pest + lawn Fast Complete packet on PostgreSQL', () => {
   afterEach(async () => {
     while (worlds.length) {
       const world = worlds.pop();
+      await mockPg('projects').where({ customer_id: world.customerId }).del();
       await mockPg('invoices').where({ customer_id: world.customerId }).del();
       await mockPg('product_inventory_movements').where({ product_id: world.productId }).del();
       await mockPg('lawn_assessments').where({ customer_id: world.customerId }).del();
@@ -267,5 +268,20 @@ postgres('a pest + lawn Fast Complete packet on PostgreSQL', () => {
     expect(saved.body).toMatchObject({ code: 'lawn_fast_not_eligible', reason: 'grouped_visit', serviceId: grouped.lawnId });
     expect(await mockPg('service_records').whereIn('scheduled_service_id', [grouped.pestId, grouped.lawnId])).toHaveLength(0);
     expect(await mockPg('visit_completion_packets').where({ visit_id: grouped.visitId })).toHaveLength(0);
+  });
+
+  test('a project linked to a member after the bodies were built refuses the packet and records nothing', async () => {
+    const grouped = await makeStop({ grouped: true });
+    worlds.push(grouped);
+    const bodies = await sheetBodies(grouped);
+    await mockPg('projects').insert({ customer_id: grouped.customerId, scheduled_service_id: grouped.pestId, project_type: 'wdo_inspection', status: 'draft', created_by_tech_id: grouped.techId });
+    const saved = await saveVisitCompletionPacket({
+      visitId: grouped.visitId, idempotencyKey: randomUUID(), actor: { techRole: 'technician', technicianId: grouped.techId },
+      items: [{ serviceId: grouped.pestId, body: bodies.pest }, { serviceId: grouped.lawnId, body: bodies.lawn }],
+    });
+    expect(saved.status).toBe(409);
+    expect(saved.body).toMatchObject({ code: 'lawn_fast_not_eligible', reason: 'grouped_visit' });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: grouped.visitId })).toHaveLength(0);
+    expect(await mockPg('service_records').whereIn('scheduled_service_id', [grouped.pestId, grouped.lawnId])).toHaveLength(0);
   });
 });
