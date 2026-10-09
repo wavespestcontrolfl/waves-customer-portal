@@ -116,6 +116,18 @@ describe('terminal writer hand-off', () => {
     expect((await terminalWriterWork({ now, deps: f.deps })).due.map((r) => r.id)).toEqual([uid('a')]);
   });
 
+  test('a cap of 0 hands out nothing', async () => {
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '0';
+    const f = fakes({ rows: [row('a')] });
+    expect((await terminalWriterWork({ deps: f.deps })).due).toEqual([]);
+  });
+
+  test('a due row carries the action the queue matched it on', async () => {
+    const f = fakes({ rows: [row('a')] });
+    f.deps.queue.peek = jest.fn(async ({ actionType }) => (actionType === 'refresh_existing_page' ? [row('a', { action_type: 'new_supporting_blog' })] : []));
+    expect((await terminalWriterWork({ deps: f.deps })).due.map((r) => r.action_type)).toEqual(['refresh_existing_page']);
+  });
+
   test('other queue rows cannot hide a writing row: each writing action is read on its own', async () => {
     const f = fakes({ rows: [row('a', { action_type: 'refresh_existing_page' })] });
     expect((await terminalWriterWork({ deps: f.deps })).due.map((r) => r.id)).toEqual([uid('a')]);

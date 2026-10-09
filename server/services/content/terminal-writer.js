@@ -54,7 +54,8 @@ function terminalWriterLive() {
 
 function capFromEnv(key, fallback) {
   const n = Number.parseInt(process.env[key], 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  // 0 is a real cap (publish nothing), as it is for the engine's own guard.
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 const branchFor = (opportunityId) => `${BRANCH_PREFIX}${opportunityId}`;
@@ -105,7 +106,9 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
   const byId = new Map();
   for (const actionType of WRITER_ACTIONS) {
     const rows = await queue.peek({ limit: PEEK_LIMIT, minScore: THRESHOLDS.minScoreToAct, actionType });
-    for (const r of rows) if (r.status === 'pending') byId.set(r.id, r);
+    // peek matches on the queue's EFFECTIVE action (a row can be retargeted
+    // by its metadata); carry that one, it is what the writer must do.
+    for (const r of rows) if (r.status === 'pending') byId.set(r.id, { ...r, action_type: actionType });
   }
   const pending = [...byId.values()].sort((x, y) => y.score - x.score);
 
