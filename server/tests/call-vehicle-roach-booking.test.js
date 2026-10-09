@@ -96,6 +96,12 @@ describe('resolveCallBookingCatalogService with the gate on', () => {
     expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: row })).toEqual({ price: 199, source: 'catalog' });
   });
 
+  test('a Waves Assessment pick for roaches in a car stays an assessment (pre-push audit, v3)', () => {
+    const ASSESSMENT_ROW = { service_key: 'lawn_inspection', name: 'Waves Assessment', category: 'inspection', billing_type: 'one_time', pricing_type: 'fixed', base_price: '0.00' };
+    const extracted = { ...CAR_CALL, specific_service_name: 'Waves Assessment', matched_service: 'Waves Assessment', requested_service: 'Assessment for German roaches in her car' };
+    expect(resolveCallBookingCatalogService({ extracted, services: [...CATALOG, ASSESSMENT_ROW] })).toBe(ASSESSMENT_ROW);
+  });
+
   test('a recurring plan pick is never replaced', () => {
     const extracted = { ...CAR_CALL, matched_service: 'Quarterly Pest Control Service', specific_service_name: 'Quarterly Pest Control Service' };
     expect(resolveCallBookingCatalogService({ extracted, services: CATALOG }).service_key).toBe('pest_general_quarterly');
@@ -143,6 +149,20 @@ describe('resolveCallBookingCatalogService with the gate on', () => {
   test('no vehicle row in the catalog keeps the old resolution', () => {
     const services = CATALOG.filter((s) => s !== VEHICLE_ROW);
     expect(resolveCallBookingCatalogService({ extracted: CAR_CALL, services }).service_key).toBe('cockroach_control');
+  });
+});
+
+describe('waiverCarriesToCandidate: a vehicle-service waiver (pre-push audit, v3)', () => {
+  const { waiverCarriesToCandidate } = require('../services/call-triage-flags');
+  const stored = { status: 'ambiguous', wholeStructureUnitWaived: { reason: 'vehicle_service', missingComponents: ['subpremise'], originalStatus: 'ambiguous' } };
+  test('carries when the candidate still names roaches in a vehicle', () => {
+    expect(waiverCarriesToCandidate(stored, {}, { scalarInputsMatch: true, requestFields: { requested_service: 'roaches in my car' } })).toBe(true);
+  });
+  test('does not carry when the candidate adds a home job, drops the vehicle, changes its scalars or passes no request fields', () => {
+    expect(waiverCarriesToCandidate(stored, {}, { scalarInputsMatch: true, requestFields: { requested_service: 'roaches in my car', call_summary: 'Roaches in the kitchen too.' } })).toBe(false);
+    expect(waiverCarriesToCandidate(stored, {}, { scalarInputsMatch: true, requestFields: { requested_service: 'roach treatment' } })).toBe(false);
+    expect(waiverCarriesToCandidate(stored, {}, { scalarInputsMatch: false, requestFields: { requested_service: 'roaches in my car' } })).toBe(false);
+    expect(waiverCarriesToCandidate(stored, {}, { scalarInputsMatch: true })).toBe(false);
   });
 });
 

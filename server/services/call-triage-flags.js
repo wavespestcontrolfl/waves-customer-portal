@@ -1111,7 +1111,14 @@ function applyVehicleServiceUnitWaiver(av, opts = {}) {
 //   - any other waiver (whole-structure) carries when the caller-supplied
 //     scalar inputs (service and property type) match: `scalarInputsMatch`.
 // `stored` is the persisted (unwaived, marker-stamped) verdict.
-function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true, outbound = false } = {}) {
+function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true, outbound = false, requestFields = null } = {}) {
+  // A vehicle-service waiver was authorized by the PRIOR extraction's request fields: it carries
+  // only when the candidate's own request fields (its flat view) still name roaches in a vehicle
+  // and no home job. A caller that passes no request fields gets the unwaived verdict.
+  if (stored?.wholeStructureUnitWaived?.reason === VEHICLE_SERVICE_UNIT_WAIVER_REASON) {
+    return scalarInputsMatch && !!requestFields
+      && require('./call-booking-catalog').hasVehicleRoachRequest(requestFields);
+  }
   if (stored?.wholeStructureUnitWaived?.reason !== BUSINESS_WHOLE_BUILDING_WAIVER_REASON) return scalarInputsMatch;
   const property = candidate?.property || {};
   return applyBusinessWholeBuildingUnitWaiver(stored, {

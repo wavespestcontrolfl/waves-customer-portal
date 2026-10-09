@@ -1454,6 +1454,7 @@ async function replayCall(call, context) {
       transcript: transcriptForExtraction,
       outbound: String(call.direction || '').toLowerCase().startsWith('outbound'),
       scalarInputsMatch: !(priorV2Valid && waiverInputs(priorV2) !== waiverInputs(currentExtraction)),
+      requestFields: currentFlat,
     }))
     ? storedAvUnwaived : storedAv;
   const currentRoute = currentExtraction

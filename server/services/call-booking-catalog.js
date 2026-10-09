@@ -493,7 +493,9 @@ function resolveCallBookingCatalogService({
   // but a revisit is the plan's free between-visits callback, not an extra
   // plan visit.
   const pickPlanLane = reServiceLaneForPlanRow(byModelPick);
-  if (vehicleRoachAllowed && vehicleRoachOverridesPick(byModelPick)) {
+  // A call whose one service pick is the Waves Assessment asked for an assessment, not a
+  // treatment: the vehicle job does not replace it (the same hold the keyword rules honor).
+  if (vehicleRoachAllowed && vehicleRoachOverridesPick(byModelPick) && !assessmentPickHolds(byModelPick, extracted, services)) {
     const vehicleRow = services.find((s) => s.service_key === VEHICLE_SERVICE_KEY);
     if (vehicleRow) return vehicleRow;
   }
