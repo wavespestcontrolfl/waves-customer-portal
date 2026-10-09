@@ -144,11 +144,17 @@ router.get('/:scheduledServiceId/estimate', adminAuthenticate, requireTechOrAdmi
     // the check above gets no estimate.
     const visit = await scopeToCurrentAssignment(
       db('scheduled_services as ss').where('ss.id', scheduledServiceId), req,
-    ).first('ss.id', 'ss.customer_id', 'ss.source_estimate_id');
+    ).first('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.service_id');
     if (!visit) {
       // Reassigned in between → the same 403 the check gives; else 404.
       if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
       return res.status(404).json({ error: 'Scheduled service not found' });
+    }
+    // The assessment's estimate, not a general estimate read: an ordinary job
+    // booked from an estimate would otherwise hand its totals to a technician,
+    // past the 360's technician projection. Admins too.
+    if (!(await require('../services/assessment-booking').isAssessmentBooking(visit))) {
+      return res.status(404).json({ error: 'Not found' });
     }
     const estimate = await require('../services/assessment-estimate-summary').assessmentEstimateSummary(visit);
     res.json({ estimate });

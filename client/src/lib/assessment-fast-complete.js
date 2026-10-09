@@ -65,18 +65,19 @@ export function estimateAmountLabel(estimate) {
   return parts.length ? parts.join(' + ') : null;
 }
 
+// `sentAt` is the last real handoff to the customer (a delivery, or their own
+// acceptance), so a suppressed send reads "Not sent yet", like a draft.
+const NOT_SENT = 'Not sent yet';
 const STATUS_WORDS = {
-  draft: 'Not sent yet',
   scheduled: 'Scheduled to send',
   sending: 'Sending',
   send_failed: 'Send failed',
-  accepted: 'Accepted',
 };
 
 export function estimateStatusLabel(estimate) {
-  if (estimate?.status === 'accepted') return STATUS_WORDS.accepted;
+  if (estimate?.status === 'accepted') return 'Accepted';
   if (estimate?.sentAt) return `Sent ${formatETDate(estimate.sentAt, { month: 'short', day: 'numeric' })}`;
-  return STATUS_WORDS[estimate?.status] || String(estimate?.status || '').replace(/_/g, ' ');
+  return STATUS_WORDS[estimate?.status] || NOT_SENT;
 }
 
 export function estimateLineOf(summary) {

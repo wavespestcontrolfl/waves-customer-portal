@@ -14,10 +14,21 @@
  *  - the estimate the estimate-sent sweep pairs with this visit
  *    (assessment-estimate-closeout.js estimateForAssessment: the sent estimate
  *    that speaks for the assessment, including its legacy pairing).
- * An estimate that is archived, declined or expired is not the live price.
+ * Which of them is the live price is not decided here either:
+ *  - isEstimateCustomerViewable (routes/estimate-public.js), the customer
+ *    page's own rule: not archived, not held off the customer surface, not
+ *    expired or send-failed, and not past expires_at (the daily sweep flips
+ *    the status later; the date decides now);
+ *  - an estimate that has not gone out (UNSENT_STATUSES) is live for staff
+ *    when it would be viewable once sent, judged by that same rule;
+ *  - a declined estimate renders for the customer but is not a price.
  * Exactly one live candidate is shown. None is "none" (or "retired" when only
  * dead ones exist); more than one has no canonical pick, so it is "ambiguous"
  * and the sheet shows nothing rather than guess.
+ *
+ * "Sent" is a real handoff (call-commitments HANDOFF_COLS / latestHandoffAt: a
+ * delivery that reached the customer, or their own acceptance), never the
+ * sent_at column, which a suppressed send stamps while nothing goes out.
  *
  * Read-only. The estimate token is never returned: the link is the staff
  * estimate page, not the customer's bearer link.
@@ -25,30 +36,43 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-const DEAD_STATUSES = ['declined', 'expired'];
-const SENT_STATUSES = ['sent', 'viewed', 'accepted'];
+// Not delivered: a draft, a scheduled send, and a send that failed.
+const UNSENT_STATUSES = ['draft', 'scheduled', 'send_failed'];
 const COLUMNS = [
-  'id', 'status', 'archived_at', 'sent_at', 'created_at', 'estimate_slug',
-  'monthly_total', 'annual_total', 'onetime_total', 'service_interest',
+  'archived_at', 'created_at', 'expires_at', 'viewed_at', 'estimate_slug', 'estimate_data',
+  'monthly_total', 'annual_total', 'onetime_total',
 ];
 
-const isLive = (row) => !row.archived_at && !DEAD_STATUSES.includes(String(row.status || ''));
+function isLive(row, now = new Date()) {
+  const status = String(row.status || '');
+  if (status === 'declined') return false;
+  const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+  return isEstimateCustomerViewable(UNSENT_STATUSES.includes(status) ? { ...row, status: 'sent' } : row, now);
+}
 const money = (value) => (value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
 const iso = (value) => (value ? new Date(value).toISOString() : null);
 
 function summaryOf(row) {
-  const status = String(row.status || '');
+  const { latestHandoffAt } = require('./call-commitments');
   return {
     id: row.id,
     slug: row.estimate_slug || null,
-    status,
-    // A date is shown only for an estimate that went out.
-    sentAt: SENT_STATUSES.includes(status) ? iso(row.sent_at) : null,
+    status: String(row.status || ''),
+    // The last real handoff; null when nothing reached the customer.
+    sentAt: iso(latestHandoffAt(row)),
     createdAt: iso(row.created_at),
     monthlyTotal: money(row.monthly_total),
     annualTotal: money(row.annual_total),
     onetimeTotal: money(row.onetime_total),
   };
+}
+
+// Why a dead estimate is dead, in one word for the sheet.
+function retiredStatusOf(row, now) {
+  if (row.archived_at) return 'archived';
+  const status = String(row.status || '');
+  if (status === 'declined' || status === 'expired') return status;
+  return row.expires_at && new Date(row.expires_at) < now ? 'expired' : 'withdrawn';
 }
 
 async function candidateIds(conn, visit, now) {
@@ -71,14 +95,16 @@ async function assessmentEstimateSummary(visit, { conn = db, now = new Date() } 
     const ids = await candidateIds(conn, visit, now);
     if (!ids.length) return { state: 'none' };
     // customer_id keeps a stray link from showing another customer's quote.
-    const rows = await conn('estimates').whereIn('id', ids).where({ customer_id: visit.customer_id }).select(COLUMNS);
-    const live = rows.filter(isLive);
+    const { HANDOFF_COLS } = require('./call-commitments');
+    const rows = await conn('estimates').whereIn('id', ids).where({ customer_id: visit.customer_id })
+      .select([...HANDOFF_COLS(conn), ...COLUMNS]);
+    const live = rows.filter((row) => isLive(row, now));
     if (live.length > 1) return { state: 'ambiguous' };
     if (live.length === 1) return { state: 'found', estimate: summaryOf(live[0]) };
     if (!rows.length) return { state: 'none' };
     // Only dead estimates: say the newest one's status, never its price.
     const newest = [...rows].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
-    return { state: 'retired', status: newest.archived_at ? 'archived' : String(newest.status || '') };
+    return { state: 'retired', status: retiredStatusOf(newest, now) };
   } catch (err) {
     logger.warn(`[assessment-estimate-summary] read failed for visit ${visit.id}: ${err.message}`);
     return { state: 'unavailable' };

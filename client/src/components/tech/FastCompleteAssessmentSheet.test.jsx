@@ -341,6 +341,11 @@ describe('the estimate line', () => {
     expect(await screen.findByText('Estimate: $708.00 / year + $150.00 one-time · Not sent yet')).toBeTruthy();
   });
 
+  test('a suppressed send (status sent, no delivery date) reads "Not sent yet", never a date', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, sentAt: null } } }));
+    expect(await screen.findByText('Estimate: $59.00 / month · Not sent yet')).toBeTruthy();
+  });
+
   test('"No estimate yet" with a link that starts one for this customer', async () => {
     await openSheet(makeRequest({ estimate: { state: 'none' } }));
     expect(await screen.findByText('No estimate yet')).toBeTruthy();
