@@ -4558,8 +4558,9 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     // GATE_COLLECTIVE_SERIES_ANCHOR it refuses a non-admin any date change on
     // a recurring visit (the move would shift the whole series), so such a
     // caller gets today's options only, and `sameDayOnly` tells the sheet to
-    // keep its custom date on today. The tech route (/api/tech) is unaffected:
-    // its commit takes the single-job path for a technician instead.
+    // keep its custom date on today. The tech route (/api/tech) is a separate
+    // contract this route does not change (its options and commit stay as they
+    // were).
     if (req.techRole !== 'admin' && process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' && svc.is_recurring) {
       return res.json({ ...options, days: [], sameDayOnly: true });
     }

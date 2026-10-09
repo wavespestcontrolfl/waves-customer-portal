@@ -500,7 +500,11 @@ export default function DispatchPageV2({
   // GATE_STATION_FAST_COMPLETE: with the map known ON, a termite or rodent bait
   // station visit also opens the sheet, which carries the station checks.
   const stationSheetOn = stationMapKnownOn(stationMap);
-  const fastCompleteOperatorId = fastCompleteOperatorOf(useOutletContext());
+  const outlet = useOutletContext();
+  const fastCompleteOperatorId = fastCompleteOperatorOf(outlet);
+  // The role AdminLayout verified; the stored copy only as a fallback (a failed
+  // cache write can leave it missing or stale), as fastCompleteOperatorOf reads.
+  const verifiedRole = (outlet?.user?.id ? outlet.user : getAdminUser())?.role || null;
   const [closingVisitId, setClosingVisitId] = useState(null);
   // A stop of one regular pest visit and one lawn visit, on the one-screen container (GATE_COMBO_FAST_COMPLETE).
   const [comboStop, setComboStop] = useState(null);
@@ -2509,7 +2513,7 @@ export default function DispatchPageV2({
           service={detailService}
           // A technician login (the tech portal's Edit / Book next hand-off
           // lands here too) sees no office-only controls the server refuses.
-          adminActions={getAdminUser()?.role === "admin"}
+          adminActions={verifiedRole === "admin"}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => {
             setDetailService(null);
