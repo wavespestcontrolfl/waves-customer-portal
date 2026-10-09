@@ -85,7 +85,11 @@ const isActiveRow = (row) => row.active !== false;
 function resolveProductIn(productHint, catalog) {
   const top = productHint ? matchCatalogProduct({ raw: productHint, catalogProductHints: [productHint] }, catalog) : null;
   if (!top) return { status: 'unresolved', product: null, ids: [] };
-  const same = catalog.filter((row) => lower(row.name) === lower(top.name));
+  // One product = every row that carries the protocol's name or the matched row's name, as its own name OR as an alias: a
+  // legacy row left inactive under the old name and the renamed active row that keeps the old name as an alias are the same
+  // product, so the active one is selectable and both rows' applications count.
+  const names = new Set([lower(productHint), lower(top.name)]);
+  const same = catalog.filter((row) => names.has(lower(row.name)) || (row.aliases || []).some((alias) => names.has(lower(alias))));
   const live = same.filter(isActiveRow);
   const product = live.find((row) => String(row.id) === String(top.id)) || live[0] || null;
   return { status: product ? 'active' : 'inactive', product, ids: same.map((row) => row.id) };

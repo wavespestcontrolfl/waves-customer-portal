@@ -91,6 +91,18 @@ describe('the governed rate, one place', () => {
       }
     });
 
+    // Codex round 25: the legacy row was left inactive under the protocol name; the renamed row is active and keeps the name as an alias.
+    test('an inactive legacy row and the renamed active row that aliases its name are one product: the active one is selected, both ids count', () => {
+      const legacy = row('p-old', 'Snapshot 2.5TG', { active: false });
+      const renamed = row('p-new', 'Snapshot Pro Granular', { aliases: ['Snapshot 2.5TG'] });
+      for (const catalog of [[legacy, renamed, row('p-other', 'Demand CS')], [renamed, legacy]]) {
+        const out = governed.resolveProductIn('Snapshot 2.5TG', catalog);
+        expect(out.status).toBe('active');
+        expect(out.product.id).toBe('p-new');
+        expect([...out.ids].sort()).toEqual(['p-new', 'p-old']);
+      }
+    });
+
     test('only inactive rows: nothing to select, history still counts them; no row at all: unresolved', () => {
       expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-old', 'Snapshot 2.5TG', { active: false })])).toEqual({ status: 'inactive', product: null, ids: ['p-old'] });
       expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-x', 'Demand CS')])).toEqual({ status: 'unresolved', product: null, ids: [] });

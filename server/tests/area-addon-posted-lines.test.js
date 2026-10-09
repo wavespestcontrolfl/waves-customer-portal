@@ -187,3 +187,27 @@ describe('Update Details: what the edit adds', () => {
     expect(src.indexOf(call)).toBeLessThan(src.indexOf('await trx(\'scheduled_services\').where({ id: req.params.id }).update(updates);'));
   });
 });
+
+// Codex round 25: the Intelligence Bar books one catalog service by name, with no estimate, sold area or limit recheck.
+describe('the Intelligence Bar never books an area add-on by name', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'intelligence-bar', 'tools.js'), 'utf8');
+  const catalog = [
+    { id: 's-1', name: 'Fire Ant Yard Treatment', short_name: null, service_key: 'area_addon_fire_ant_yard', base_price: null, price_range_min: 69, category: 'lawn_care', billing_type: 'one_time' },
+    { id: 's-2', name: 'One-Time Pest Control', short_name: null, service_key: 'one_time_pest', base_price: 150, price_range_min: 150, category: 'pest_control', billing_type: 'one_time' },
+  ];
+  const conn = () => ({ where: () => ({ select: async () => catalog }) });
+
+  test('the pricer refuses the add-on with or without a stated price, before any price is read', async () => {
+    const { _ibBookingPricing } = require('../services/intelligence-bar/tools');
+    for (const statedPrice of [undefined, 99]) {
+      const out = await _ibBookingPricing({ customer: { id: 'c-1' }, serviceType: 'Fire Ant Yard Treatment', statedPrice, conn });
+      expect(out).toEqual({ error: '"Fire Ant Yard Treatment" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.' });
+    }
+  });
+
+  test('every booking path of the bar asks that pricer', () => {
+    expect(src.split('await ibBookingPricing(').length - 1).toBeGreaterThanOrEqual(4);
+    const fn = src.slice(src.indexOf('async function ibBookingPricing('));
+    expect(fn.indexOf("startsWith('area_addon_')")).toBeLessThan(fn.indexOf('isAlwaysFreeServiceType(serviceType)'));
+  });
+});
