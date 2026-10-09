@@ -395,6 +395,7 @@ function withSelfServeNotice(elig, svc, now = new Date()) {
 function selectSvc(column, value, database = db) {
   return database('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where(column, value)
     .first(
       's.id',
@@ -413,6 +414,8 @@ function selectSvc(column, value, database = db) {
       's.visit_id',
       's.recurring_pattern',
       's.recurring_interval_days',
+      // A legacy plan row's cadence (move limits: catalogCadence).
+      'sv.frequency as catalog_frequency',
       's.recurring_parent_id',
       's.self_booking_id',
       // Office approval to move inside the notice window (owner 2026-10-06);

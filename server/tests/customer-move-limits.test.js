@@ -93,6 +93,22 @@ describe('late-move limit', () => {
     expect(allowanceDays({ recurring_pattern: pattern, recurring_interval_days: interval })).toBeNull();
   });
 
+  test.each([
+    ['custom', 'monthly', 7], [null, 'monthly', 7], [null, 'quarterly', 21], ['custom', 'bimonthly', 14],
+    ['custom', 'every_6_weeks', 10], [null, 'seasonal_feb_oct', null], [null, 'one_time', null], [null, null, null],
+  ])('legacy plan row (%s, no interval) reads the catalog cadence %s', (pattern, frequency, days) => {
+    expect(allowanceDays({
+      recurring_pattern: pattern, recurring_interval_days: null, is_recurring: true, catalog_frequency: frequency,
+    })).toBe(days);
+  });
+
+  test('the catalog cadence is not read for a one-time visit, a stored pattern or a stored interval', () => {
+    expect(allowanceDays({ recurring_pattern: null, is_recurring: false, recurring_parent_id: null, catalog_frequency: 'monthly' })).toBeNull();
+    expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: true, catalog_frequency: 'monthly' })).toBe(21);
+    expect(allowanceDays({ recurring_pattern: 'custom', recurring_interval_days: 60, is_recurring: true, catalog_frequency: 'monthly' })).toBe(14);
+    expect(allowanceDays({ recurring_pattern: null, is_recurring: null, recurring_parent_id: 'p-1', catalog_frequency: 'monthly' })).toBe(7);
+  });
+
   test('the due date is the date before the customer\'s first move, not the date the visit is on now', async () => {
     const limit = await loadMoveLimit(onOct30(), { database: dbFor({ rows: twoMoves, completed: { id: 'x' } }), now: NOW });
     expect(limit.dueDate).toBe('2026-10-15');
