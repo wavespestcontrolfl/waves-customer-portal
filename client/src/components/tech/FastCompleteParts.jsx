@@ -158,12 +158,16 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
 // Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
 // reads it so it never closes or unmounts a part mid-request. Outside a container the default context is a no-op.
 export const PartBusyContext = createContext(() => {});
+// Every call reports under its OWN key (this hook instance + its source), so two parts, or two sources of one part, can
+// never clear each other's entry however their work overlaps.
 export function usePartBusy(source, busy) {
   const report = useContext(PartBusyContext);
+  const instance = useId();
   useEffect(() => {
-    report(source, busy);
-    return () => report(source, false);
-  }, [report, source, busy]);
+    const key = `${instance}:${source}`;
+    report(key, busy);
+    return () => report(key, false);
+  }, [report, instance, source, busy]);
 }
 
 // A part's requests, with every write counted: while any non-GET request is in flight the part reports busy (so the
