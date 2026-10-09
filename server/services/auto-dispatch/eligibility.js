@@ -67,6 +67,20 @@ function resolveDateLockDenial(service, ctx, dateStr) {
   return null;
 }
 
+// A visit a person took out of auto-dispatch, whatever its date or pin: staff
+// locked or excluded it, or the customer confirmed it. The ONE rule for the
+// eligibility check and for the missing-pin notice, which is moot for such a
+// visit (Codex #6208 r21, r24 P2). Returns the denial, or null.
+function heldOutOfAutoDispatch(service) {
+  if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
+  if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
+  // Any visit the customer confirmed holds its day and time (owner
+  // 2026-10-09; before, only a due-date occurrence was held, and two
+  // confirmed visits moved silently in one week).
+  if (service.customer_confirmed === true) return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this visit');
+  return null;
+}
+
 function isEligibleForAutoDispatch(service, ctx = {}) {
   if (!service) return deny('NOT_FOUND', 'Service row missing');
 
@@ -85,15 +99,8 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
     return deny(STATUS_REASON[status] || 'INVALID_STATUS', `Status '${status}' is not auto-dispatchable`);
   }
 
-  if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
-  if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
-
-  // Any visit the customer confirmed holds its day and time (owner
-  // 2026-10-09; before, only a due-date occurrence was held, and two
-  // confirmed visits moved silently in one week).
-  if (service.customer_confirmed === true) {
-    return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this visit');
-  }
+  const held = heldOutOfAutoDispatch(service);
+  if (held) return held;
 
   const dateStr = toDateStr(service.scheduled_date) || '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return deny('INVALID_DATE', 'Missing/invalid scheduled_date');
@@ -144,6 +151,29 @@ async function isRecurringPlanActive(service, db) {
   } catch (_) { /* table optional — fail open */ }
 
   return { active: true, reason_code: null, reason_description: null };
+}
+
+// The same signal for MANY visits in one read: the `customer:series` keys
+// that carry an unresolved plan_lapsed alert (planKey of each). A scan over a
+// long horizon must not make one round trip per series (Codex #6208 r21 P2).
+// Fails open like the single check: an unreadable table lapses nothing.
+function planKey(service) {
+  return `${service.customer_id}:${service.recurring_parent_id || service.id}`;
+}
+
+async function lapsedPlanKeys(services, db) {
+  const parentIds = [...new Set(services.map((s) => s.recurring_parent_id || s.id).filter(Boolean))];
+  if (!parentIds.length) return new Set();
+  try {
+    const alerts = await db('recurring_plan_alerts')
+      .whereIn('recurring_parent_id', parentIds)
+      .where('alert_type', 'plan_lapsed')
+      .whereNull('resolved_at')
+      .select('recurring_parent_id', 'customer_id');
+    return new Set(alerts.map((a) => `${a.customer_id}:${a.recurring_parent_id}`));
+  } catch (_) {
+    return new Set();
+  }
 }
 
 /**
@@ -247,4 +277,4 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
   }
 }
 
-module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit, VALID_STATUSES };
+module.exports = { isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES };

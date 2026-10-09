@@ -871,9 +871,15 @@ function initScheduledJobs() {
       // prior tick must not double-run and bypass the per-run change cap.
       await runExclusive('auto-dispatch-recurring', async () => {
         if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) {
-          const { flagUnplacedVisits } = require('./auto-dispatch/audit');
+          const { flagUnplacedVisits, maintainMissingGeoNotices } = require('./auto-dispatch/audit');
           const { getAutoDispatchConfig } = require('./auto-dispatch/config');
-          await flagUnplacedVisits(getAutoDispatchConfig());
+          // No placement run tonight: close pin notices that no longer apply.
+          // Each upkeep runs even when the other fails; the first failure is
+          // thrown after both ran.
+          const failures = [];
+          await flagUnplacedVisits(getAutoDispatchConfig()).catch((err) => failures.push(err));
+          await maintainMissingGeoNotices().catch((err) => failures.push(err));
+          if (failures.length) throw failures[0];
           return;
         }
         const { runAutoDispatch } = require('./auto-dispatch');
