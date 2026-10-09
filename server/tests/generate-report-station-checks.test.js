@@ -189,10 +189,34 @@ describe('the deterministic fallback when both providers fail', () => {
     expect(body.report).toContain('Every station was checked and found OK');
   });
 
-  test('every station flagged claims no OK remainder', async () => {
-    const { body } = await fallback({ stationChecks: [1, 2, 3, 4].map((number) => ({ number, status: 'inaccessible' })) });
+  test('every station flagged claims no OK remainder and no check', async () => {
+    const { status, body } = await fallback({ stationChecks: [1, 2, 3, 4].map((number) => ({ number, status: 'inaccessible' })) });
+    expect(status).toBe(200);
+    expect(body.report).toContain('Attempted to check the rodent bait stations');
     expect(body.report).toContain('Could not reach stations 1, 2, 3, 4');
     expect(body.report).not.toMatch(/found OK/);
+    expect(body.report).not.toMatch(/(^|[^t] )Checked the/);
+  });
+
+  test('a one-station property where that station could not be reached: copy, never "checked"', async () => {
+    const saved = mockStationRows;
+    mockStationRows = [{ id: 's1', program: 'rodent' }];
+    try {
+      const { status, body } = await fallback({ stationChecks: [{ number: 1, status: 'inaccessible' }] });
+      expect(status).toBe(200);
+      expect(body.report).toContain('Attempted to check the rodent bait stations');
+      expect(body.report).toContain('Could not reach station 1');
+      expect(body.report).not.toMatch(/Checked the/);
+    } finally { mockStationRows = saved; }
+  });
+
+  test('some stations reached keep the checked action', async () => {
+    const mixed = await fallback({ stationChecks: [{ number: 1, status: 'inaccessible' }, { number: 2, status: 'inaccessible' }, { number: 3, status: 'inaccessible' }] });
+    expect(mixed.body.report).toContain('Checked the rodent bait stations');
+    expect(mixed.body.report).toContain('Every other station was checked and found OK');
+    const serviced = await fallback({ stationChecks: [1, 2, 3].map((number) => ({ number, status: number === 1 ? 'serviced' : 'inaccessible' })).concat([{ number: 4, status: 'inaccessible' }]) });
+    expect(serviced.body.report).toContain('Checked the rodent bait stations');
+    expect(serviced.body.report).toContain('Serviced station 1');
   });
 
   test('gate off: the fallback is exactly what it is without station checks', async () => {
