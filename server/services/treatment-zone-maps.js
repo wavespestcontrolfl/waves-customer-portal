@@ -150,39 +150,49 @@ function noReusableTraceError() {
 // The source rows are locked in the order that address correction takes them
 // (visit, then zone), so the two cannot deadlock.
 async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, source, targetDate }) {
+  await recheckReuseTarget(conn, scheduledServiceId, { locationKey, targetDate, sourceDate: source.scheduledDate });
+  await recheckReuseSource(conn, source);
+}
+
+// The target, its row locked by now: still at the place the lookup proved,
+// and still on the day the source was chosen as an EARLIER visit of (a target
+// rescheduled during the copy is another visit to judge; Codex P2 r10 on #6175).
+async function recheckReuseTarget(conn, scheduledServiceId, { locationKey, targetDate, sourceDate }) {
   const here = await readVisitLocationRow(conn, scheduledServiceId);
   if (!here || visitLocationKey(here) !== locationKey) throw propertyChangedError();
-  // The target's own day (its row is locked by now): the source was chosen as
-  // an EARLIER visit, so a target rescheduled during the copy is another
-  // visit to judge (Codex P2 r10 on #6175).
   const target = await conn('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
   const lockedDate = dateOnlyOrNull(target?.scheduled_date);
-  if (!lockedDate || lockedDate !== targetDate || !(source.scheduledDate < lockedDate)) throw visitChangedError();
+  if (!lockedDate || lockedDate !== targetDate || !(sourceDate < lockedDate)) throw visitChangedError();
+}
+
+// The source, locked visit first and then its trace row: every field it was
+// chosen and approved on (Codex P1 r9 on #6175). The office can move a
+// completed visit to another day or make it another service while the
+// picture is copied, and it would no longer be an earlier visit of a service
+// that shows a trace; its frozen record must still be the one the render
+// verdict read; its trace row must be the same row, unchanged.
+async function recheckReuseSource(conn, source) {
   const sourceVisit = await conn('scheduled_services').where({ id: source.serviceId }).forUpdate()
     .first('status', 'customer_id', 'scheduled_date', 'service_id', 'service_type');
   const zone = await conn('treatment_zone_maps').where({ id: source.zoneId }).forUpdate().first('id', 'scheduled_service_id', 'updated_at');
-  const sameInstant = (a, b) => Number.isFinite(new Date(a).getTime()) && new Date(a).getTime() === new Date(b).getTime();
-  // Every field the source was chosen and approved on (Codex P1 r9 on #6175):
-  // the office can move a completed visit to another day or make it another
-  // service while the picture is copied, and it would no longer be an earlier
-  // visit of a service that shows a trace. Its frozen record must also still
-  // be the one the render verdict read.
   const record = sourceVisit && zone
     ? await conn('service_records').where({ scheduled_service_id: source.serviceId }).orderBy('created_at', 'desc').first('id')
     : null;
+  if (!sourceVisit || !zone || !record) throw noReusableTraceError();
+  const sameInstant = (a, b) => Number.isFinite(new Date(a).getTime()) && new Date(a).getTime() === new Date(b).getTime();
   const sameText = (a, b) => String(a ?? '') === String(b ?? '');
-  if (!sourceVisit || !zone
-    || sourceVisit.status !== 'completed'
-    || dateOnlyOrNull(sourceVisit.scheduled_date) !== source.scheduledDate
-    || !sameText(sourceVisit.service_id, source.serviceCatalogId)
-    || !sameText(sourceVisit.service_type, source.serviceType)
-    || !record || !sameText(record.id, source.recordId)
-    || String(sourceVisit.customer_id ?? '') !== String(source.customerId ?? '')
-    || String(zone.id) !== String(source.zoneId)
-    || String(zone.scheduled_service_id) !== String(source.serviceId)
-    || !sameInstant(zone.updated_at, source.updatedAt)) {
-    throw noReusableTraceError();
-  }
+  const unchanged = [
+    sourceVisit.status === 'completed',
+    dateOnlyOrNull(sourceVisit.scheduled_date) === source.scheduledDate,
+    sameText(sourceVisit.service_id, source.serviceCatalogId),
+    sameText(sourceVisit.service_type, source.serviceType),
+    sameText(sourceVisit.customer_id, source.customerId),
+    sameText(record.id, source.recordId),
+    sameText(zone.id, source.zoneId),
+    sameText(zone.scheduled_service_id, source.serviceId),
+    sameInstant(zone.updated_at, source.updatedAt),
+  ];
+  if (!unchanged.every(Boolean)) throw noReusableTraceError();
 }
 
 // The save's locks and what is judged under them: the visit (inside the
