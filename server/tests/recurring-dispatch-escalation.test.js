@@ -28,6 +28,7 @@ let rungLast24h = [];
 // estimates with an open combined-booking bell that carries missing_time_tech
 let combinedBells = [];
 const combinedBellSql = [];
+const combinedBellDone = [];
 const budgetSql = [];
 const budgetBindings = [];
 const budgetWhere = [];
@@ -40,6 +41,7 @@ beforeEach(() => {
   rungLast24h = [];
   combinedBells = [];
   combinedBellSql.length = 0;
+  combinedBellDone.length = 0;
   budgetSql.length = 0;
   budgetBindings.length = 0;
   budgetWhere.length = 0;
@@ -74,7 +76,10 @@ beforeEach(() => {
     const where = cleanup.where.bind(cleanup);
     cleanup.where = (...args) => { if (firstWhere === null) [firstWhere] = args; return where(...args); };
     let combinedRead = false;
-    cleanup.whereRaw = (sql, bindings) => { if (/dedupeKey' = ANY|problemCodes/.test(sql)) { combinedRead = true; combinedBellSql.push({ sql, bindings }); } if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); budgetBindings.push(bindings); budgetWhere.push(firstWhere); } return whereRaw(sql, bindings); };
+    const nullCols = [];
+    const whereNull = cleanup.whereNull.bind(cleanup);
+    cleanup.whereNull = (column) => { nullCols.push(column); return whereNull(column); };
+    cleanup.whereRaw = (sql, bindings) => { if (/dedupeKey' = ANY|problemCodes/.test(sql)) { if (!combinedRead) combinedBellDone.push(...nullCols); combinedRead = true; combinedBellSql.push({ sql, bindings }); } if (/interval '24 hours'/.test(sql)) { budgetRead = true; budgetSql.push(sql); budgetBindings.push(bindings); budgetWhere.push(firstWhere); } return whereRaw(sql, bindings); };
     cleanup.select = jest.fn(async () => (combinedRead ? combinedBells.map((estimate_id) => ({ estimate_id })) : budgetRead ? rungLast24h.map((dedupe_key) => ({ dedupe_key })) : [
       ...existingNoticeKeys.map((dedupe_key) => ({ dedupe_key })),
       ...(excludedTitle === 'Recurring visit time alert resolved' ? [] : resolvedNoticeKeys.map((dedupe_key) => ({ dedupe_key }))),
@@ -214,6 +219,8 @@ describe('recurring visit with no arrival time and no due date', () => {
     // An open bell (it keeps its dedupeKey) that names the missing time.
     expect(combinedBellSql[0]).toMatchObject({ bindings: [['combined-booking-check:e1', 'combined-booking-check:e2']] });
     expect(combinedBellSql[1].sql).toContain("'missing_time_tech'");
+    // A bell staff marked Done no longer covers the visit (r22 P2).
+    expect(combinedBellDone).toEqual(['done_at']);
   });
 
   test('a combined booking with no open bell (check off, customer not scanned, not run yet) keeps its visit in this lane', async () => {

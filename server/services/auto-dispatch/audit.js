@@ -210,14 +210,16 @@ const MISSING_GEO_RESOLVED_TITLE = 'Address pin alert resolved';
 // missing_time_tech problem. Read from the bell itself, not predicted from
 // that check's candidate rules: each copied rule (gates, customer state,
 // pipeline stage) left visits with no alert from either lane (Codex #6208
-// r5, r12, r18, r20). A closed bell has no dedupeKey (retireStanding drops
-// it), so a keyed row is an open one. No bell yet: the visit stays here; one
-// extra notice beats none.
+// r5, r12, r18, r20). Open = keyed (a system close drops the dedupeKey) and
+// not marked Done. No open bell: the visit stays here; one extra notice
+// beats none.
 async function combinedBookingEstimateIds(estimateIds) {
   const ids = [...new Set(estimateIds.filter(Boolean).map(String))];
   if (!ids.length) return new Set();
   const rows = await db('notifications')
     .where({ recipient_type: 'admin', category: 'alert' })
+    // A bell staff marked Done keeps its key; it no longer covers (r22 P2).
+    .whereNull('done_at')
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [ids.map((id) => `combined-booking-check:${id}`)])
     .whereRaw("jsonb_exists(coalesce(metadata->'problemCodes', '[]'::jsonb), 'missing_time_tech')")
     .select(db.raw("metadata->>'estimateId' as estimate_id"));

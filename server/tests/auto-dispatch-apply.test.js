@@ -291,6 +291,20 @@ describe('reminder sync failure after a committed move', () => {
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  // A cancelled reminder, or one for a visit no longer open, cannot go out
+  // (Codex #6208 r22 P2).
+  test.each([
+    ['the reminder is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
+    ['the visit is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: false }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'cancelled' }],
+  ])('a stale reminder time raises nothing when %s', async (_label, reminder, visit) => {
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    movableQueue();
+    db.mockImplementation(tableReader({ appointment_reminders: reminder, scheduled_services: visit }));
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a quiet sync whose check cannot be read is escalated to staff (Codex #6208 r5 P2)', async () => {
     AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
     movableQueue();
