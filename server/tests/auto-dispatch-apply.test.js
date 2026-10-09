@@ -152,12 +152,13 @@ test('re-arms a still-pending creation confirmation after the silent reminder sy
 });
 
 describe('reminder sync failure after a committed move', () => {
+  let movableRows;
   function movableQueue() {
-    const queue = [
+    movableRows = [
       readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
       { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
     ];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => movableRows.shift());
   }
 
   test('keeps the move, and tells staff to check that visit\'s reminder', async () => {
@@ -182,6 +183,29 @@ describe('reminder sync failure after a committed move', () => {
     notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
     movableQueue();
     await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+  });
+
+  // handleReschedule catches its own errors and resolves null, as it does for
+  // a visit with no reminder row: the row itself tells the two apart.
+  test('a sync that resolved null with the reminder still on another time tells staff', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    movableQueue();
+    db.mockImplementation((table) => (table === 'appointment_reminders'
+      ? readRow({ appointment_time: '2026-08-04T13:00:00Z' }) : movableRows.shift()));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a sync that resolved null for a visit with no reminder row, or a row on the new time, raises nothing', async () => {
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    for (const row of [undefined, { appointment_time: '2026-08-11T12:00:00Z' }]) {
+      AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+      movableQueue();
+      db.mockImplementation((table) => (table === 'appointment_reminders' ? readRow(row) : movableRows.shift()));
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    }
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('a clean reminder sync raises no notice', async () => {

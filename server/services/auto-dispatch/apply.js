@@ -478,6 +478,23 @@ async function flagReminderSyncFailed(service, best) {
   }
 }
 
+// After a sync that returned nothing: whether a reminder row exists for the
+// visit and still names a time other than the slot the move landed on. No row
+// is not a failure (nothing can go out for the old slot).
+// An unreadable row is logged, not alerted: nothing is known either way.
+async function reminderOffNewSlot(AppointmentReminders, service, best) {
+  try {
+    const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time');
+    if (!row) return false;
+    const expected = AppointmentReminders.composeScheduledApptTime({ scheduled_date: best.date, window_start: best.start_time || '08:00' });
+    const actual = new Date(row.appointment_time).getTime();
+    return !expected || Number.isNaN(actual) || actual !== expected.getTime();
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder row could not be read after the move of ${service.id}: ${err.message}`);
+    return false;
+  }
+}
+
 /**
  * One placement attempt against a specific candidate `best` — the ENTIRE
  * original applyAutoDispatchMove body, parameterized on the candidate and
@@ -651,6 +668,11 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
       await db('appointment_reminders')
         .where({ id: reminderRecord.id })
         .update({ confirmation_sent: false, confirmation_sent_at: null });
+    }
+    // handleReschedule catches its own errors and returns null, as it does
+    // for a visit with no reminder row. Tell the two apart by the row itself.
+    if (!reminderRecord && await reminderOffNewSlot(AppointmentReminders, service, best)) {
+      await flagReminderSyncFailed(service, best);
     }
   } catch (remErr) {
     logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
