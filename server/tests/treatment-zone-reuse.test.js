@@ -105,15 +105,20 @@ function makeKnex({
         // The write's look at the target's own day (its row is locked by then).
         if (table === 'scheduled_services' && columns.length === 1 && columns[0] === 'scheduled_date') return Promise.resolve(targetRow);
         if (table === 'treatment_zone_maps' && c._lock) return Promise.resolve(sourceZone);
-        // The write's own look at the source's record asks for its id alone.
-        if (table === 'service_records') return Promise.resolve(columns.length === 1 && columns[0] === 'id' && lockedRecord !== undefined ? lockedRecord : record);
+        // The lookup reads the source's record first; the write reads it again
+        // inside the transaction (after the visit lock was taken).
+        if (table === 'service_records') return Promise.resolve(state.locks.length && lockedRecord !== undefined ? lockedRecord : record);
         return Promise.resolve(own);
       },
       insert: (record) => {
         state.inserted = record;
         return { onConflict: () => ({ merge: () => ({ returning: () => Promise.resolve([{ id: 'zone-new', ...record }]) }) }) };
       },
-      then: (res, rej) => Promise.resolve(candidates).then(res, rej),
+      then: (res, rej) => {
+        // A locked read of many rows (the source's add-on rows) is a lock too.
+        if (c._lock) state.locks.push(`${table} ${JSON.stringify(c._where)}${c._share ? ' share' : ''}`);
+        return Promise.resolve(candidates).then(res, rej);
+      },
     };
     return c;
   });
@@ -515,6 +520,39 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
       expect((await run(knex)).linear_ft).toBe(220);
     });
 
+    // Codex P1 r11 on #6175: a legacy record's render verdict reads the live
+    // add-on rows, so both source verdicts are asked again under the lock.
+    test('a source the render verdict suppresses by the time of the write is refused', async () => {
+      traceEligibility.resolveTraceRenderVerdict
+        .mockResolvedValueOnce({ suppressed: false, eligibility: null })
+        .mockResolvedValue({ suppressed: true });
+      const knex = makeKnex({ lock: locked() });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'no_reusable_trace' });
+      expect(knex.state.inserted).toBeNull();
+      expect(knex.state.locks).toEqual(expect.arrayContaining([expect.stringContaining('scheduled_service_addons')]));
+    });
+
+    test('a source the capture check blocks by the time of the write is refused', async () => {
+      let sourceAsks = 0;
+      traceEligibility.traceCaptureBlockPayload.mockImplementation(async (visit) => {
+        if (visit.id !== 'svc-0') return null;
+        sourceAsks += 1;
+        return sourceAsks > 1 ? { status: 400, payload: { code: 'trace_not_eligible' } } : null;
+      });
+      const knex = makeKnex({ lock: locked() });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'no_reusable_trace' });
+      expect(knex.state.inserted).toBeNull();
+    });
+
+    test('a verdict that fails under the lock is not a yes', async () => {
+      traceEligibility.resolveTraceRenderVerdict
+        .mockResolvedValueOnce({ suppressed: false, eligibility: null })
+        .mockRejectedValue(new Error('add-on read failed'));
+      const knex = makeKnex({ lock: locked() });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'no_reusable_trace' });
+      expect(knex.state.inserted).toBeNull();
+    });
+
     // Codex P2 r10 on #6175: the target's own day is part of what was judged.
     test.each([
       ['moved to the source\'s day', { scheduled_date: '2026-07-01' }],
@@ -530,7 +568,7 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
     // Codex P1 r5 on #6175: a visit with no pin of its own rests on the
     // customer's pin, so the customer row is held first (a geocode correction
     // takes it FOR UPDATE and waits), then the visit, then the source rows.
-    test('the customer row is held first, then the visit, then the source visit and its trace row', async () => {
+    test('the customer row is held first, then the visit, then the source visit, its trace row and its add-on rows', async () => {
       const knex = makeKnex({ lock: locked() });
       await run(knex);
       expect(knex.state.locks).toEqual([
@@ -538,6 +576,8 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
         'scheduled_services ["scheduled_services.id","svc-1"]',
         'scheduled_services [{"id":"svc-0"}]',
         'treatment_zone_maps [{"id":"zone-0"}]',
+        // The source's live add-on rows, which a legacy record's verdict reads.
+        'scheduled_service_addons [{"scheduled_service_id":"svc-0"}] share',
       ]);
     });
 
@@ -563,6 +603,17 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
 });
 
 // Codex security P2 r7 on #6175: one copy per visit at a time.
+// Codex P2 r11 on #6175: this visit's own eligibility is asked once.
+describe('findReusableTreatmentZone: the target is judged once', () => {
+  test('many candidates the source checks reject cost one target check, not one per row', async () => {
+    traceEligibility.resolveTraceRenderVerdict.mockResolvedValue({ suppressed: true });
+    const many = Array.from({ length: 25 }, (_, i) => ({ ...ZONE, id: `zone-${i}`, scheduled_service_id: `svc-old-${i}`, source_service_id: `svc-old-${i}` }));
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex({ candidates: many }) })).toBeNull();
+    const targetAsks = traceEligibility.traceCaptureBlockPayload.mock.calls.filter(([visit]) => visit.id === VISIT.id);
+    expect(targetAsks).toHaveLength(1);
+  });
+});
+
 describe('reuseLastTreatmentZone: one copy per visit at a time', () => {
   test('a second copy for the same visit while one runs is refused before anything is read or uploaded', async () => {
     let release;

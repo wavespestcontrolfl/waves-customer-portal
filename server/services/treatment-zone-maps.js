@@ -176,9 +176,10 @@ async function recheckReuseSource(conn, source) {
     .first('status', 'customer_id', 'scheduled_date', 'service_id', 'service_type');
   const zone = await conn('treatment_zone_maps').where({ id: source.zoneId }).forUpdate().first('id', 'scheduled_service_id', 'updated_at');
   const record = sourceVisit && zone
-    ? await conn('service_records').where({ scheduled_service_id: source.serviceId }).orderBy('created_at', 'desc').first('id')
+    ? await conn('service_records').where({ scheduled_service_id: source.serviceId }).orderBy('created_at', 'desc').first()
     : null;
   if (!sourceVisit || !zone || !record) throw noReusableTraceError();
+  await recheckSourceVerdicts(conn, source, sourceVisit, record);
   const sameInstant = (a, b) => Number.isFinite(new Date(a).getTime()) && new Date(a).getTime() === new Date(b).getTime();
   const sameText = (a, b) => String(a ?? '') === String(b ?? '');
   const unchanged = [
@@ -193,6 +194,25 @@ async function recheckReuseSource(conn, source) {
     sameInstant(zone.updated_at, source.updatedAt),
   ];
   if (!unchanged.every(Boolean)) throw noReusableTraceError();
+}
+
+// The source's two verdicts, asked again under the lock (Codex P1 r11 on
+// #6175). A legacy record with no frozen add-on lines takes its render
+// verdict from the LIVE scheduled_service_addons rows, which an office edit
+// can replace while the picture is copied without touching the visit, the
+// record or the trace row. Those rows are held, then both verdicts are read
+// again inside the transaction; a verdict that fails is not a yes.
+async function recheckSourceVerdicts(conn, source, sourceVisit, record) {
+  try {
+    await conn('scheduled_service_addons').where({ scheduled_service_id: source.serviceId }).forShare().select('id');
+    const { resolveTraceRenderVerdict, traceCaptureBlockPayload } = require('./service-report/trace-eligibility');
+    const verdict = await resolveTraceRenderVerdict(record, conn);
+    const blocked = await traceCaptureBlockPayload({ ...sourceVisit, id: source.serviceId }, conn, { captureMode: REUSE_CAPTURE_MODE });
+    if (verdict && !verdict.suppressed && !blocked) return;
+  } catch (err) {
+    logger.warn(`[treatment-zone] source verdict recheck failed service=${source.serviceId}: ${err.message}`);
+  }
+  throw noReusableTraceError();
 }
 
 // The save's locks and what is judged under them: the visit (inside the
@@ -649,6 +669,7 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
 
   const { traceCaptureBlockPayload } = require('./service-report/trace-eligibility');
   let here;
+  let targetBlocked;
   for (const row of rows) {
     if (!reuseRowMatches(row, visit, visitDate)) continue;
     const footprint = traceFootprint(row.path_points);
@@ -656,7 +677,12 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     if (here === undefined) here = await resolveVisitLocation(knex, visit.id);
     if (!here) return null;
     if (!footprintContains(footprint, here)) continue;
-    if (await traceCaptureBlockPayload(visit, knex, { captureMode: row.capture_mode })) continue;
+    // This visit's own eligibility is the same for every candidate (they are
+    // all perimeter traces): asked once, not once per row (Codex P2 r11 on #6175).
+    if (targetBlocked === undefined) {
+      targetBlocked = !!(await traceCaptureBlockPayload(visit, knex, { captureMode: REUSE_CAPTURE_MODE }));
+    }
+    if (targetBlocked) return null;
     // The SOURCE visit must itself be one whose trace may be captured and
     // shown: a legacy perimeter trace saved on an inspection, a trapping or
     // another service the report hides the map for is never copied onto a
