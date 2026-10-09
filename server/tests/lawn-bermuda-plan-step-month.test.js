@@ -103,3 +103,11 @@ test('a partial load for the appointment month never falls back to the assigned 
   expect(merged.get('rec')).toBe(STEP_ROW);
   expect(merged.has('fus')).toBe(false);
 });
+
+test('the window month arrives as the stored number: 6 is June, so a June visit in its own window loads nothing (codex #6229 r1 P2)', async () => {
+  const same = await stage('2026-06-02', 6);
+  expect(mockLoadRows).not.toHaveBeenCalled();
+  expect(same.rows(WINDOW_ROWS)).toBe(WINDOW_ROWS);
+  await stage('2026-06-02', 4);
+  expect(mockLoadRows).toHaveBeenCalledTimes(1);
+});

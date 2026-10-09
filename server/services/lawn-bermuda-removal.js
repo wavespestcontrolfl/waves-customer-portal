@@ -861,7 +861,9 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
       const unreadVisit = unavailable && !!stepMonth;
       // The staged step rows are the APPOINTMENT month's, as the tank sheet and the completion actions
       // read them (servingStepRows): when the assigned window is another month's, they are loaded here.
-      const stepRows = active && structuredProtocol.window?.month !== stepMonth
+      // The window's month is the stored number (4, 6); the step month is its abbreviation.
+      const windowMonth = MONTH_ABBR[Number(structuredProtocol.window?.month) - 1] || structuredProtocol.window?.month;
+      const stepRows = active && windowMonth !== stepMonth
         ? await loadStepRows(knex, trackKey, stepMonth, strict) : null;
       const excludedWarnings = [
         ...(visit && cultivar === 'excluded' ? [EXCLUDED_CULTIVAR_WARNING] : []),
