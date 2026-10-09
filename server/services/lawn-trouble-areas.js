@@ -248,21 +248,26 @@ async function recordStore(trx, { svc, record, products, inserted, catalog, conf
   if (!live() || !inserted.some((sp) => sp.treated_place)) return;
   const { savepointScope } = require('../utils/savepoint-read');
   try {
-    // The places are off for a visit whose property cannot be resolved (the same property the context and the preflight used).
-    const propertyId = await propertyOf(trx, svc);
-    if (!propertyId) return;
-    const scoped = { ...svc, property_id: propertyId };
     // The server's staged sets (take-all rows, chinch rungs) classify the special products whatever the sheet said. They are read once, and
-    // only when a placed row could need them; a read that fails stores nothing for such a row (areaRowsOf).
+    // only when a placed row could need them; a read that fails stores nothing for such a row (areaRowsOf). The read runs on its own
+    // connection (a pure read of the plan, never on the completion's transaction).
     const needs = placedSpotRows({ requestRows: products, inserted, catalog }).some(needsSets);
     const confirmed = needs && confirm ? await confirm().catch(() => null) : null;
-    let rows = areaRowsOf({ requestRows: products, inserted, catalog, confirmed, readFailed: needs && !confirmed });
-    // A take-all row from the guide CARD maps nothing new (the preflight holds it to a mapped place): never store one at an unmapped place.
-    if (rows.some((row) => row.type === 'take_all' && row.source === 'guide_card')) {
-      const mapped = new Set((await loadActive(trx, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
-      rows = rows.filter((row) => !(row.type === 'take_all' && row.source === 'guide_card' && !mapped.has(row.place)));
-    }
-    await savepointScope(trx, (k) => module.exports.recordFromCompletion(k, { svc: scoped, record, rows }));
+    // EVERY read and write this store makes on the completion's transaction sits in ONE savepoint: a statement that fails (a missing table,
+    // a lock) aborts only the savepoint, the store is skipped, and the completion's other writes still commit.
+    await savepointScope(trx, async (k) => {
+      // The places are off for a visit whose property cannot be resolved (the same property the context and the preflight used; resolved
+      // once per visit, so this is the cached answer).
+      const propertyId = await propertyOf(k, svc);
+      if (!propertyId) return;
+      let rows = areaRowsOf({ requestRows: products, inserted, catalog, confirmed, readFailed: needs && !confirmed });
+      // A take-all row from the guide CARD maps nothing new (the preflight holds it to a mapped place): never store one at an unmapped place.
+      if (rows.some((row) => row.type === 'take_all' && row.source === 'guide_card')) {
+        const mapped = new Set((await loadActive(k, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
+        rows = rows.filter((row) => !(row.type === 'take_all' && row.source === 'guide_card' && !mapped.has(row.place)));
+      }
+      await module.exports.recordFromCompletion(k, { svc: { ...svc, property_id: propertyId }, record, rows });
+    });
   } catch (err) {
     logger.warn(`[dispatch] trouble-area store write failed (non-blocking) for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
   }

@@ -253,6 +253,24 @@ postgres('closeout: the place of a spot treatment', () => {
     }
   });
 
+  test('the property resolver fails inside the completion transaction: the places are off for the visit and the completion still commits', async () => {
+    const f = await seedLawnVisit({ unlinked: true });
+    try {
+      await mockPg.raw('ALTER TABLE property_preferences RENAME TO property_preferences_away');
+      let out;
+      try {
+        out = await complete(f, { products: [spot(f, { areaPlace: 'back' })] });
+      } finally {
+        await mockPg.raw('ALTER TABLE property_preferences_away RENAME TO property_preferences');
+      }
+      expect(out.status).toBe(200);
+      const record = await recordOf(f);
+      expect(await mockPg('service_products').where({ service_record_id: record.id })).toMatchObject([{ treated_place: null }]);
+      expect(await ledgerOf(f, record.id)).toMatchObject({ treated_place: null, property_id: null });
+      expect(await areasOf(f)).toEqual([]);
+    } finally { await cleanup(f); }
+  });
+
   // A visit whose nullable property_id is unset: the places work on the property the property-area flow resolves (the one shared resolver),
   // and are off for the visit when it cannot be resolved.
   describe('a visit with no property link', () => {
@@ -371,6 +389,28 @@ postgres('closeout: the place of a spot treatment', () => {
         expect((await complete(f, { products: [spot(f, { productId: product.id, areaPlace: 'front' }), spot(f, { areaPlace: 'back' })] })).status).toBe(200);
         expect(await typesOf(f)).toEqual([['back', 'weeds']]);
         expect(lookup).toHaveBeenCalledTimes(1);
+      } finally { await cleanup(f); await mockPg('products_catalog').where({ id: product.id }).del().catch(() => {}); }
+    });
+
+    // A store read that fails INSIDE the completion's transaction must abort only its savepoint: the other completion writes still commit.
+    test('the take-all area lookup fails inside the transaction (the table is missing): the completion still commits its record, product rows and ledger', async () => {
+      const f = await seedLawnVisit();
+      const product = await fungicide();
+      try {
+        sets({ takeAll: new Set([product.id.toLowerCase()]) });
+        await mockPg.raw('ALTER TABLE lawn_trouble_areas RENAME TO lawn_trouble_areas_away');
+        let out;
+        try {
+          out = await complete(f, { products: [spot(f, { productId: product.id, areaPlace: 'front', troubleSource: 'guide_card' })] });
+        } finally {
+          await mockPg.raw('ALTER TABLE lawn_trouble_areas_away RENAME TO lawn_trouble_areas');
+        }
+        expect(out.status).toBe(200);
+        const record = await recordOf(f);
+        expect(record).toBeTruthy();
+        expect(await mockPg('service_products').where({ service_record_id: record.id, treated_place: 'front' })).toHaveLength(1);
+        expect(await ledgerOf(f, record.id)).toMatchObject({ treated_place: 'front' });
+        expect(await typesOf(f)).toEqual([]);
       } finally { await cleanup(f); await mockPg('products_catalog').where({ id: product.id }).del().catch(() => {}); }
     });
 

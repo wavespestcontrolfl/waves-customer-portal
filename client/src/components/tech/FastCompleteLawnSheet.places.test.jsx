@@ -1183,6 +1183,20 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
     expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'back', troubleType: 'take_all', troubleSource: 'guide_card' });
+    // The guide record names the card's product AND the mapped area it was applied at (one rule for every card: the place of its own row).
+    expect(completeCalls()[0].body.lawnFast.treatmentGuide.cards).toEqual([expect.objectContaining({ kind: 'fungus', taken: true, productIds: [P_FUNG], place: 'back' })]);
+  });
+
+  test('an ordinary fungus card records the place of the row it added', async () => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [{ ...takeAllCard(), allowedPlaces: undefined, note: null }], takeAllProductIds: [] };
+    await open(placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: areasBlock() }));
+    await analyze();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    fireEvent.click(chipOf(chips(), 'Front'));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls()[0].body.lawnFast.treatmentGuide.cards).toEqual([expect.objectContaining({ kind: 'fungus', taken: true, productIds: [P_FUNG], place: 'front' })]);
   });
 
   // The tech clears the take-all area on the sheet while its card is open: the card follows at once, with no re-read.

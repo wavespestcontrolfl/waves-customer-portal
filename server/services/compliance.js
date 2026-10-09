@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { savepointRead } = require('../utils/savepoint-read');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
@@ -256,10 +257,11 @@ const ComplianceService = {
     // Every other row keeps exactly the property it had.
     let placedLookup = null;
     const placedProperty = () => {
-      placedLookup = placedLookup || (async () => {
-        const row = sr.scheduled_service_id ? await k('scheduled_services').where({ id: sr.scheduled_service_id }).first() : null;
-        return row ? require('./lawn-trouble-areas').propertyOf(k, row) : null;
-      })();
+      // On the completion's transaction this read sits in a savepoint of its own: a failure leaves the row unplaced and aborts nothing.
+      placedLookup = placedLookup || savepointRead(k, async (kk) => {
+        const row = sr.scheduled_service_id ? await kk('scheduled_services').where({ id: sr.scheduled_service_id }).first() : null;
+        return row ? require('./lawn-trouble-areas').propertyOf(kk, row) : null;
+      }).catch(() => null);
       return placedLookup;
     };
 

@@ -19,7 +19,7 @@ jest.mock('../models/db', () => {
   chain.then = (resolve) => Promise.resolve([]).then(resolve);
   chain.catch = () => chain;
   const proxy = (...args) => (mockDbCurrent ? mockDbCurrent(...args) : chain);
-  proxy.transaction = () => Promise.resolve();
+  proxy.transaction = (fn) => Promise.resolve(typeof fn === 'function' ? fn(proxy) : undefined);
   proxy.raw = (sql) => ({ toString: () => sql });
   proxy.fn = { now: () => new Date() };
   proxy.schema = { hasTable: async () => true, hasColumn: async () => true };
@@ -68,6 +68,37 @@ const CONTEXT = '/:lawnFastServiceId/lawn-fast/context';
 const PREVIEW = '/:lawnFastServiceId/lawn-fast/watering-preview';
 const VISIT = '00000000-0000-4000-8000-000000000001';
 const params = { lawnFastServiceId: VISIT };
+
+// A visit table that judges the technician predicate (owner, dead status, completed, window) the way the SQL filter does, on a state the
+// test can change between the ownership check and the lock: `state.sequence` serves successive reads, the last one repeating.
+const dbWithVisit = (state, calls = []) => (table) => {
+  calls.push(table);
+  const filters = [];
+  const chain = {};
+  const add = (kind) => (...args) => { filters.push([kind, ...args]); return chain; };
+  for (const m of ['select', 'leftJoin', 'forUpdate']) chain[m] = () => chain;
+  chain.where = add('where');
+  chain.whereNot = add('whereNot');
+  chain.whereNotIn = add('whereNotIn');
+  chain.first = async () => {
+    if (table !== 'scheduled_services') return null;
+    state.reads = (state.reads || 0) + 1;
+    const row = state.sequence[Math.min(state.reads, state.sequence.length) - 1];
+    if (!row) return undefined;
+    const col = (name) => String(name).replace(/^scheduled_services\./, '');
+    const ok = filters.every(([kind, name, a1, a2]) => {
+      if (col(name) === 'id') return true;
+      if (kind === 'where' && a2 !== undefined) return a1 === '>=' ? String(row[col(name)]).slice(0, 10) >= String(a2) : true;
+      if (kind === 'where') return typeof name === 'object' ? true : row[col(name)] === a1;
+      if (kind === 'whereNot') return row[col(name)] !== a1;
+      if (kind === 'whereNotIn') return !a1.includes(row[col(name)]);
+      return true;
+    });
+    return ok ? row : null;
+  };
+  chain.then = (resolve) => Promise.resolve([]).then(resolve);
+  return chain;
+};
 
 const dbWithOwner = (technician_id, calls = []) => (table) => {
   calls.push(table);
@@ -258,7 +289,7 @@ describe('POST lawn-fast/trouble-areas/:areaId/clear', () => {
   const callClear = (actor) => invoke('post', CLEAR, { params: { ...params, areaId: AREA }, actor });
   beforeEach(() => {
     for (const name of GATES) process.env[name] = 'true';
-    mockDbCurrent = dbWithOwner('tech-1');
+    mockDbCurrent = dbWithVisit({ sequence: [{ id: 'visit-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'Lawn Care' }] });
     resolveLawnFastEligibility.mockReset().mockResolvedValue({ ok: true, reason: null, svc: { id: VISIT, property_id: 'prop-1' } });
     clearArea.mockReset().mockResolvedValue({ id: AREA, place: 'back', type: 'fungus' });
   });
@@ -286,6 +317,51 @@ describe('POST lawn-fast/trouble-areas/:areaId/clear', () => {
     const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
     expect(res.statusCode).toBe(403);
     expect(clearArea).not.toHaveBeenCalled();
+  });
+
+  // The clear runs under the visit's row lock (lockOwnedLiveVisit, as the other technician mutations on this route do): a change that lands
+  // after the first ownership check is caught under the lock, and nothing is read or written for the former technician.
+  describe('the visit is locked before anything is cleared', () => {
+    const today = require('../utils/datetime-et').etDateString(new Date());
+    const visit = (extra = {}) => ({ id: 'visit-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: today, service_type: 'Lawn Care', ...extra });
+
+    test('reassigned after the ownership check: 403 service_not_assigned, no eligibility read, nothing cleared', async () => {
+      mockDbCurrent = dbWithVisit({ sequence: [visit(), visit({ technician_id: 'tech-2' })] });
+      const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+      expect(res.statusCode).toBe(403);
+      expect(res.body.code).toBe('service_not_assigned');
+      expect(resolveLawnFastEligibility).not.toHaveBeenCalled();
+      expect(clearArea).not.toHaveBeenCalled();
+    });
+
+    test.each(['cancelled', 'no_show', 'skipped', 'completed'])('turned %s after the ownership check: 403, nothing cleared', async (status) => {
+      mockDbCurrent = dbWithVisit({ sequence: [visit(), visit({ status })] });
+      const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+      expect(res.statusCode).toBe(403);
+      expect(clearArea).not.toHaveBeenCalled();
+    });
+
+    test('still the technician\'s at the lock: eligibility and the clear run on the transaction handle, once', async () => {
+      mockDbCurrent = dbWithVisit({ sequence: [visit()] });
+      const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
+      expect(res.statusCode).toBe(200);
+      expect(resolveLawnFastEligibility).toHaveBeenCalledTimes(1);
+      expect(clearArea).toHaveBeenCalledTimes(1);
+    });
+
+    test('an admin is not scoped by assignment, but a visit that is gone is a 404 under the lock', async () => {
+      mockDbCurrent = dbWithVisit({ sequence: [visit({ technician_id: 'tech-9' })] });
+      expect((await callClear({ techRole: 'admin', technicianId: 'admin-1' })).statusCode).toBe(200);
+      clearArea.mockClear();
+      resolveLawnFastEligibility.mockClear();
+      // An administrator is never read before the lock, so the lock is the first read here: a visit deleted by then is a 404.
+      mockDbCurrent = dbWithVisit({ sequence: [null] });
+      const res = await callClear({ techRole: 'admin', technicianId: 'admin-1' });
+      expect(res.statusCode).toBe(404);
+      expect(res.body.code).toBe('not_found');
+      expect(resolveLawnFastEligibility).not.toHaveBeenCalled();
+      expect(clearArea).not.toHaveBeenCalled();
+    });
   });
 
   test.each([

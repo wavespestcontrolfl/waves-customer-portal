@@ -7892,7 +7892,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // recap validates against the same vocabulary (codex P1 r11).
           const { isValidRateUnit } = require('../services/inventory-units');
           // GATE_LAWN_TROUBLE_AREAS: a visit whose property cannot be resolved records no place (the gate acts as off for that visit).
-          const placesOn = !!(await require('../services/lawn-trouble-areas').propertyOf(trx, svc));
+          const placesOn = !!(await savepointRead(trx, (k) => require('../services/lawn-trouble-areas').propertyOf(k, svc)).catch(() => null));
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;

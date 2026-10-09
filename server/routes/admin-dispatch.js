@@ -4728,21 +4728,29 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
     if (!require('../config/feature-gates').lawnTroubleAreasLive()) return res.status(404).json({ enabled: false });
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
-    // The same eligibility the sheet's context applies: only a visit the lawn sheet can complete (a lawn visit with no re-service,
-    // assessment, project, companion or grouped-stop lane, and not closed) may clear a lawn's trouble area.
-    const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, db, { withVisitType: false });
-    if (!eligibility.ok) return res.status(recapStatusForReason(eligibility.reason)).json({ error: eligibility.reason, code: eligibility.reason });
-    if (eligibility.reason) return res.status(409).json({ error: 'This visit cannot be completed on the quick sheet.', code: 'lawn_fast_not_eligible', reason: eligibility.reason });
-    const visit = eligibility.svc;
-    const cleared = await require('../services/lawn-trouble-areas').clearArea(db, {
-      areaId: req.params.areaId,
-      // The same property the context listed the areas from (the visit's link, else the resolved one).
-      propertyId: await require('../services/lawn-trouble-areas').propertyOf(db, visit),
-      technicianId: req.technicianId || null,
+    // The eligibility, the property and the clear run inside ONE transaction that first locks the visit (lockOwnedLiveVisit, the helper the
+    // other technician mutations on this route use: FOR UPDATE, no NOWAIT), so a reassignment landing after the ownership check above can
+    // never let the former technician clear. The same eligibility the sheet's context applies: only a visit the lawn sheet can complete (a
+    // lawn visit with no re-service, assessment, project, companion or grouped-stop lane, and not closed) may clear a lawn's trouble area.
+    const outcome = await db.transaction(async (trx) => {
+      await lockOwnedLiveVisit(trx, req, serviceId, ['id']);
+      const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false });
+      if (!eligibility.ok) return { status: recapStatusForReason(eligibility.reason), body: { error: eligibility.reason, code: eligibility.reason } };
+      if (eligibility.reason) return { status: 409, body: { error: 'This visit cannot be completed on the quick sheet.', code: 'lawn_fast_not_eligible', reason: eligibility.reason } };
+      const cleared = await require('../services/lawn-trouble-areas').clearArea(trx, {
+        areaId: req.params.areaId,
+        // The same property the context listed the areas from (the visit's link, else the resolved one).
+        propertyId: await require('../services/lawn-trouble-areas').propertyOf(trx, eligibility.svc),
+        technicianId: req.technicianId || null,
+      });
+      if (!cleared) return { status: 404, body: { error: 'That trouble area is not on this lawn.', code: 'trouble_area_not_found' } };
+      return { status: 200, body: { enabled: true, cleared: { id: cleared.id, place: cleared.place, type: cleared.type } } };
     });
-    if (!cleared) return res.status(404).json({ error: 'That trouble area is not on this lawn.', code: 'trouble_area_not_found' });
-    res.json({ enabled: true, cleared: { id: cleared.id, place: cleared.place, type: cleared.type } });
-  } catch (err) { next(err); }
+    return res.status(outcome.status).json(outcome.body);
+  } catch (err) {
+    if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
 });
 
 // POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip
