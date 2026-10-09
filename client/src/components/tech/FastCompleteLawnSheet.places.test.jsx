@@ -732,9 +732,9 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
       back: { item: null, note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.', unreadableIds: [P_ARENA] },
     },
   });
-  const openWithArenaRow = async (fresh) => {
+  const openWithArenaRow = async (fresh, blockedProductIds = []) => {
     // Arena is a planned row; the sheet opened with the context's own chinch decision.
-    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: fresh };
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: fresh, blockedProductIds };
     await open(placeContext({
       treatmentGuide: true, chinch: FRESH_CHINCH([]), planned: [{ ...ARENA_ITEM, treatedSqft: null }], addOns: [],
     }));
@@ -753,10 +753,25 @@ describe('reconciliation: a product unreadable at one place stays on the sheet',
     expect(chipOf(where, 'Back').disabled).toBe(false);
   });
 
-  test('the same answer without the unreadable id drops the row (proving the test can fail): Complete is held on the row', async () => {
-    await openWithArenaRow(FRESH_CHINCH([]));
+  test('the same answer with Arena read as at its limit at every place drops the row (proving the test can fail): Complete is held on the row', async () => {
+    const capped = FRESH_CHINCH([]);
+    await openWithArenaRow({
+      ...capped, blockedIds: [P_ARENA], limitedIds: [P_ARENA],
+      byPlace: { front: { ...capped.byPlace.front, limitedIds: [P_ARENA] }, back: { item: BIF_ITEM, note: null, unreadableIds: [], limitedIds: [P_ARENA] } },
+    }, [P_ARENA]);
     // The first answer reconciles nothing (the taps were locked until it came); the same test holds Complete on the row.
     await waitFor(() => expect(footerNote() + completeButton().textContent).toMatch(/Remove Arena 50 WDG: it is not offered for this lawn right now\./));
+  });
+
+  // The limits are judged at each place: Arena at its limit at the front and open at the back is still a real application at the back.
+  test('Arena at its limit at one place and open at another: the search lists it and its row stays', async () => {
+    const mixed = FRESH_CHINCH([]);
+    await openWithArenaRow({
+      ...mixed, blockedIds: [P_ARENA], limitedIds: [P_ARENA],
+      byPlace: { front: { ...mixed.byPlace.front, limitedIds: [P_ARENA] }, back: { item: ARENA_ITEM, note: null, unreadableIds: [], limitedIds: [] } },
+    }, [P_ARENA]);
+    expect(screen.getByRole('group', { name: 'Arena 50 WDG' })).toBeTruthy();
+    expect(footerNote() + completeButton().textContent).not.toMatch(/Remove Arena 50 WDG/);
   });
 
   test('the weed mix: a member unreadable at a place the top level does not follow is searchable and kept', async () => {

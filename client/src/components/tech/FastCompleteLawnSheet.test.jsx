@@ -2134,7 +2134,8 @@ describe('weed spots and the spot area', () => {
     expect(within(addons()).getByText('On the sheet · Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
   });
 
-  test('no product of the weed group is listed in the search: offered or held back, it comes through the entry only', async () => {
+  // Owner 2026-10-09: every lawn product is in the search; only a limit that was read keeps one out.
+  test('the search lists the weed group too: the entry adds the mix, the search adds one product', async () => {
     await open(weedContext(MIX({
       productIds: [P_LEAD, P_CERT], note: 'Surfactant left out: it is 90°F or hotter.',
       surfactant: { productId: P_SURF, included: false, note: 'Surfactant left out: it is 90°F or hotter.' }, tempF: 93,
@@ -2142,8 +2143,28 @@ describe('weed spots and the spot area', () => {
     const search = await screen.findByLabelText('Search products');
     for (const name of ['Lead WG', 'Tank Surfactant', 'Blind Herbicide']) {
       fireEvent.change(search, { target: { value: name } });
-      expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
     }
+  });
+
+  test('a member at its own yearly limit while the lead stays open is not in the search', async () => {
+    await open(weedContext(MIX({ productIds: [P_LEAD], blockedIds: [P_CERT], surfactant: null, note: 'Cert yearly limit reached; left out.' })));
+    const search = await screen.findByLabelText('Search products');
+    fireEvent.change(search, { target: { value: 'Lead WG' } });
+    expect(await screen.findByRole('button', { name: /^Lead WG/ })).toBeTruthy();
+    fireEvent.change(search, { target: { value: 'Cert Herbicide' } });
+    expect(screen.queryByRole('button', { name: /^Cert Herbicide/ })).toBeNull();
+  });
+
+  test('lead at its yearly limit: the search leaves out the lead only; the replacement and the members with no limit of their own are listed', async () => {
+    await open(weedContext(MIX({ mode: 'replacement', productIds: [P_BLIND], blockedIds: [P_LEAD], surfactant: null, note: 'Lead yearly limit reached; Blind is used in its place.' })));
+    const search = await screen.findByLabelText('Search products');
+    for (const name of ['Blind Herbicide', 'Tank Surfactant']) {
+      fireEvent.change(search, { target: { value: name } });
+      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
+    }
+    fireEvent.change(search, { target: { value: 'Lead WG' } });
+    expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
   });
 
   test('when the limits could not be read the search lists the weed products again', async () => {
@@ -2393,7 +2414,7 @@ describe('suggested from this lawn', () => {
     { id: P_CERT, name: 'Cert Herbicide', category: 'herbicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
     { id: P_ART, name: 'Art Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
     { id: P_VEL, name: 'Vel Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
-    { id: P_ACE, name: 'Ace Insecticide', category: 'insecticide', formulation: 'SC', default_rate_per_1000: 0.07, default_unit: 'fl_oz' },
+    { id: P_ACE, name: 'Ace Insecticide', category: 'insecticide', service_lines: ['lawn'], formulation: 'SC', default_rate_per_1000: 0.07, default_unit: 'fl_oz' },
     { id: P_DISP, name: 'Disp Wetting Agent', category: 'adjuvant', formulation: 'SL', default_rate_per_1000: 1, default_unit: 'fl_oz' },
     { id: P_ARENA, name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.29, default_unit: 'oz' },
     { id: P_BIF, name: 'Atticus Talak 7.9 F', category: 'insecticide', formulation: 'SC', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
@@ -2926,14 +2947,14 @@ describe('suggested from this lawn', () => {
       expect(within(cardGroup('Weed spots')).getByRole('button', { name: 'Weed spots: on the sheet' }).disabled).toBe(true);
     });
 
-    test('the search follows the fresh decision: no product of its weed group is listed, offered or held back', async () => {
+    test('the search follows the fresh decision: it lists the weed group the fresh read does not forbid', async () => {
       answer([freshCard()], FRESH);
       await open();
       await analyze();
       await suggested();
       for (const name of ['Cert Herbicide', 'Lead WG']) {
         fireEvent.change(screen.getByLabelText('Search products'), { target: { value: name } });
-        expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+        expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
       }
     });
 
@@ -3076,7 +3097,7 @@ describe('suggested from this lawn', () => {
     });
   });
 
-  describe('a product a visible card owns is not offered anywhere else', () => {
+  describe('a product a visible card owns leaves the add-ons list; the search still lists it', () => {
     const searchFor = (name) => fireEvent.change(screen.getByLabelText('Search products'), { target: { value: name } });
     const GENERIC = (name) => within(addons()).queryByRole('button', { name: `Add ${name}` });
 
@@ -3084,25 +3105,25 @@ describe('suggested from this lawn', () => {
       ['fungus', () => CARDS.fungus(), 'Art Fungicide'],
       ['caterpillars', () => CARDS.caterpillars(), 'Ace Insecticide'],
       ['dry_spots', () => CARDS.dry_spots(), 'Disp Wetting Agent'],
-    ])('the %s card owns its product: not in the add-ons list, not in the search', async (_kind, makeCard, name) => {
+    ])('the %s card owns its product: not in the add-ons list, still in the search', async (_kind, makeCard, name) => {
       answer([makeCard()]);
       await open();
       await analyze();
       await suggested();
       expect(GENERIC(name)).toBeNull();
       searchFor(name.split(' ')[0]);
-      expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
       // The other add-ons are still there.
       expect(GENERIC('Vel Fungicide')).toBeTruthy();
     });
 
-    test('the chinch card owns Arena: out of the search while it shows', async () => {
+    test('the chinch card shows and the search still lists Arena', async () => {
       answer([CARDS.chinch()]);
       await open();
       await analyze();
       await suggested();
       searchFor('Arena');
-      expect(screen.queryByRole('button', { name: /^Arena 50 WDG/ })).toBeNull();
+      expect(await screen.findByRole('button', { name: /^Arena 50 WDG/ })).toBeTruthy();
     });
 
     test('"Nothing found" releases the product to the list and the search (the tech looked and decided)', async () => {
@@ -3115,11 +3136,10 @@ describe('suggested from this lawn', () => {
       searchFor('Art Fungicide');
       expect(await screen.findByRole('button', { name: /^Art Fungicide/ })).toBeTruthy();
       fireEvent.click(within(cardGroup('Insects: check for chinch bugs')).getByRole('button', { name: 'Nothing found' }));
-      // A chinch rung is governed for the visit: after "Nothing found" it comes through the standing
-      // entry (which returns), never the search.
+      // After "Nothing found" the standing chinch entry returns, and the search lists Arena as before.
       expect(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' })).toBeTruthy();
       searchFor('Arena');
-      expect(screen.queryByRole('button', { name: /^Arena 50 WDG/ })).toBeNull();
+      expect(await screen.findByRole('button', { name: /^Arena 50 WDG/ })).toBeTruthy();
     });
 
     test('a take-all card holds its product: no add button anywhere, and it stays out of the list and the search', async () => {
@@ -3256,7 +3276,7 @@ describe('suggested from this lawn', () => {
 
     const STATES = [
       ['guide off', async () => { await mxOpen(mxContext({ treatmentGuide: false })); await analyze(); },
-        { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'hidden', ...NO_CARDS }],
+        { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'hidden', ...NO_CARDS }],
       ['idle (before Confirm)', async () => { answer([]); await mxOpen(); },
         { art: 'locked', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'locked', vel: 'addable', weedEntry: 'locked', chinchEntry: 'locked', ...NO_CARDS }],
       ['pending (asked, not answered)', async () => { guideAnswer = NEVER; await mxOpen(); await analyze(); },
@@ -3264,18 +3284,18 @@ describe('suggested from this lawn', () => {
       ['answered, everything offered', async () => {
         guideAnswer = answerOf([CARDS.weeds(), CARDS.fungus(), CARDS.chinch(), CARDS.caterpillars(), CARDS.dry_spots()], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'hidden', chinchEntry: 'hidden', weedCard: 'addable', chinchCard: 'addable', fungusCard: 'addable', catCard: 'addable', dryCard: 'addable' }],
+      }, { art: 'hidden', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'hidden', chinchEntry: 'hidden', weedCard: 'addable', chinchCard: 'addable', fungusCard: 'addable', catCard: 'addable', dryCard: 'addable' }],
       ['answered, everything blocked', async () => {
         const note = 'The yearly weed-spray limit is reached for this lawn.';
-        guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
+        guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note, blockedIds: [P_LEAD, P_CERT, P_BLIND] }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
         await mxOpen(); await analyze(); await suggested();
       }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
       ['answered, no finding and nothing blocked', async () => {
         guideAnswer = answerOf([], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
+      }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
       ['guide request fails after a clean context (failed on the first read)', async () => { guideAnswer = refusal(500, 'boom', 'Internal error'); await mxOpen(); await analyze(); await waitFor(() => expect(guideCalls()).toHaveLength(1)); },
-        { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
+        { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
       // Unreadable is not blocked: nothing is offered (no card, no tap), but every product is released to
       // the search, a pick to the list, so a real application can still be recorded.
       ['answered, limits unreadable', async () => {
@@ -3290,7 +3310,7 @@ describe('suggested from this lawn', () => {
           unreadableProductIds: [P_BIF], unreadableNote: UNREADABLE,
         };
         await mxOpen(); await analyze(); await suggested();
-      }, { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'line', ...NO_CARDS }],
+      }, { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'hidden', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'line', ...NO_CARDS }],
       ['failed on the first read, context weed mix unavailable', async () => {
         guideAnswer = refusal(500, 'boom', 'Internal error');
         await mxOpen(mxContext({ plannedProducts: mxPlanned({ weedMix: { ...MX_WEED, mode: 'unavailable', productIds: [], note: UNREADABLE }, chinch: UNREAD_CHINCH }) }));
@@ -3310,18 +3330,29 @@ describe('suggested from this lawn', () => {
       expect(await probe()).toEqual(expected);
     });
 
-    test('a failed guide request keeps the context\'s rungs governed: Arena is not in the search, Talak is not a generic add-on, and the standing entry is the context\'s', async () => {
+    test('a failed guide request keeps the context\'s rungs governed: the search lists them, Talak is not a generic add-on, and the standing entry is the context\'s', async () => {
       guideAnswer = refusal(500, 'boom', 'Internal error');
       await mxOpen();
       await analyze();
       await waitFor(() => expect(guideCalls()).toHaveLength(1));
       await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
-      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('hidden');
-      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('hidden');
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('addable');
+      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('addable');
       expect(listState('Atticus Talak 7.9 F')).toBe('hidden');
       expect(lineOf('Chinch bugs found at the edge of damage').textContent).toContain('Arena 50 WDG, spot treatment');
       fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
       expect(present('Arena 50 WDG')).toBe(true);
+    });
+
+    test('a failed guide request keeps the context\'s read limits: Arena at its yearly limit stays out of the search, Talak is listed', async () => {
+      guideAnswer = refusal(500, 'boom', 'Internal error');
+      const chinch = { item: { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' }, note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: RUNGS, blockedIds: [P_ARENA] };
+      await mxOpen(mxContext({ plannedProducts: mxPlanned({ chinch }) }));
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('hidden');
+      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('addable');
     });
 
     test('weed members are judged one by one: the member read as capped stays out of the search, its sibling is released', async () => {
@@ -3405,7 +3436,7 @@ describe('suggested from this lawn', () => {
       for (const name of ['Art Fungicide', 'Lead WG', 'Vel Fungicide']) expect(present(name)).toBe(true);
       await retake();
       // Now the read succeeds and forbids them.
-      guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [] }, CLEAN_CHINCH, [P_ART, P_LEAD, P_CERT, P_BLIND]);
+      guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], blockedIds: [P_LEAD, P_CERT, P_BLIND] }, CLEAN_CHINCH, [P_ART, P_LEAD, P_CERT, P_BLIND]);
       await analyze();
       await screen.findByText('Removed: Art Fungicide, Lead WG. The limits changed.');
       expect(present('Art Fungicide')).toBe(false);

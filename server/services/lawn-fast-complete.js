@@ -638,8 +638,9 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex, places = null }
   // technician adds), and why.
   const offerOf = async (f) => {
     const { rungIds, blockedIds, unreadableIds } = f;
-    // chinchOnlyIds exists only with the places gate live (see lawn-treatment-guide chinchOnlyIdsOf).
-    const only = f.chinchOnlyIds ? { chinchOnlyIds: f.chinchOnlyIds } : {};
+    // chinchOnlyIds exists only with the places gate live (see lawn-treatment-guide chinchOnlyIdsOf). limitedIds: the rungs
+    // whose own limit was read as forbidding (the sheet's search leaves out only these); absent when the limit read failed.
+    const only = { ...(f.chinchOnlyIds ? { chinchOnlyIds: f.chinchOnlyIds } : {}), ...(Array.isArray(f.limitedIds) ? { limitedIds: f.limitedIds } : {}) };
     if (!f.productId) return { item: null, note: f.note, rungIds, blockedIds, unreadableIds, ...only };
     return { item: await itemFor(f), note: f.note, rungIds, blockedIds, unreadableIds, ...only };
   };
