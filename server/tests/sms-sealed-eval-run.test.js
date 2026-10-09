@@ -1195,7 +1195,8 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
   });
 
   test('the current identity (7_m, #5610): the compact key m requires everything 5_cflvp does + the MISSED VISIT scope line, and forbids nothing', () => {
-    for (const v of ['house_voice_v12_real_answers7_m', 'house_voice_v12_real_answers7_m+bclm', 'house_voice_v12_real_answers7_m+c']) {
+    // '8_m' (#6172 next-of-series) is a behavior-only bump: same key m, same fact contract.
+    for (const v of ['house_voice_v12_real_answers7_m', 'house_voice_v12_real_answers7_m+bclm', 'house_voice_v12_real_answers7_m+c', 'house_voice_v12_real_answers8_m', 'house_voice_v12_real_answers8_m+bclm']) {
       expect(contract(v).required).toEqual([SLA, RS, CF, LBL, VL, PO, MV]);
       expect(contract(v).forbidden).toEqual([]);
     }
