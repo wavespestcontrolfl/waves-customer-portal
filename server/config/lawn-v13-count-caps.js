@@ -33,7 +33,7 @@
 const LABEL = 'owner 2026-10-06';
 
 const V13_COUNT_CAPS = Object.freeze([
-  { name: 'Celsius WG', cap: 2, description: `Celsius WG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
+  { name: 'Celsius WG', cap: 2, yearWindow: 'rolling365', description: `Celsius WG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` }, // label: 0.17 oz per 1,000 sq ft "per year (365 days)"
   {
     name: 'Arena 50 WDG',
     cap: 2,
@@ -50,7 +50,7 @@ const V13_COUNT_CAPS = Object.freeze([
     minIntervalDays: 56,
     intervalDescription: `Arena 50 WDG: at least 56 days (8 weeks) between applications on a lawn under the v13 lawn program (${LABEL}; the company's own spacing, not a label interval).`,
   },
-  { name: 'Certainty Turf Herbicide', cap: 2, description: `Certainty Turf Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
+  { name: 'Certainty Turf Herbicide', cap: 2, yearWindow: 'rolling365', description: `Certainty Turf Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` }, // label says per year; counted over 365 days by Waves rule
   { name: 'Blindside Herbicide', cap: 2, description: `Blindside Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
 ]);
 

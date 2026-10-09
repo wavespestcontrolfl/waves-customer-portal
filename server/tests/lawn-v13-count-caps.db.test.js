@@ -1289,14 +1289,16 @@ describeDb('v13 count caps through PostgreSQL', () => {
     };
     const limitBlocks = (result) => result.propertyGate.blocks.filter((b) => b.code === 'lawn_v13_annual_limit');
     // The yearly COUNT block alone: Arena's staged dose (0.147) also makes a 3rd pass an amount block, which has its own tests.
-    const countBlocks = (result) => limitBlocks(result).filter((b) => /applications this year/.test(b.message));
+    // Celsius counts the last 365 days (yearWindow 'rolling365'); Arena the calendar year.
+    const yearWords = (name) => (name === CELSIUS ? 'in the last 365 days' : 'this year');
+    const countBlocks = (result) => limitBlocks(result).filter((b) => /applications (this year|in the last 365 days)/.test(b.message));
 
     test.each([CELSIUS, ARENA])('%s: a third application in the year at the same property is blocked; one at another property is not', async (name) => {
       const { visitA, visitB } = await twoProperties(name, ['2026-02-02', '2026-03-16']);
       const resultA = await plan(visitA, name);
       expect(countBlocks(resultA)).toHaveLength(1);
       expect(countBlocks(resultA)[0]).toMatchObject({ productName: name });
-      expect(countBlocks(resultA)[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+      expect(countBlocks(resultA)[0].message).toContain(`2/2 applications ${yearWords(name)} — LIMIT REACHED`);
       expect(resultA.status).toBe('blocked');
       const resultB = await plan(visitB, name);
       expect(limitBlocks(resultB)).toEqual([]);
@@ -1322,7 +1324,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
         const two = await twoProperties(name, ['2026-02-02', '2026-03-16']);
         const blocked = countBlocks(await plan(two.visitA, name));
         expect(blocked).toHaveLength(1);
-        expect(blocked[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+        expect(blocked[0].message).toContain(`2/2 applications ${yearWords(name)} — LIMIT REACHED`);
         expect(limitBlocks(await plan(two.visitB, name))).toEqual([]);
         delete process.env.GATE_LAWN_V13;
         const off = await buildPlanForService(two.visitA.id, { db: knex, selectedConditionalProductNames: [name] });

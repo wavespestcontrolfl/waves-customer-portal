@@ -95,7 +95,7 @@ async function applyV13ToRows(rows) {
   const result = rows.filter((limit) => !capIds.has(String(limit.product_id)));
   for (const [id, entry] of capIds) {
     const stored = rows.filter((limit) => String(limit.product_id) === id);
-    result.push(...withEntryCaps(entry, stored, id).map((limit) => ({ product_name: entry.name, ...limit })));
+    result.push(...withEntryCaps(entry, stored, id).map((limit) => ({ product_name: entry.name, year_window: entry.yearWindow || null, ...limit })));
   }
   return result;
 }
@@ -193,6 +193,8 @@ const isAmountRow = (limit) => limit.limit_type === 'annual_max_rate' && limit.m
 //   amount    current = oz per 1,000 sq ft already used this year on the busiest lawn, exceeded at the cap,
 //             warning from 75% of it.
 async function limitStatusFor(limit, matchingApps, { today, customerCounty, customerId, yearStart, lastBefore }) {
+  // A rolling-365 product (application-limits ROLLING_365, `year_window` on its v13 rows) counts its yearly amount over the last 365 days.
+  const window = applicationLimits.windowFor(today, limit.year_window);
   const product = { id: limit.product_id, name: limit.product_name };
   if (isIntervalRow(limit)) {
     const latest = matchingApps.map((app) => etCalendarDayOf(app.application_date)).sort().pop()
@@ -202,7 +204,7 @@ async function limitStatusFor(limit, matchingApps, { today, customerCounty, cust
     return { status: check.violated ? 'exceeded' : 'ok', current: check.current ?? null };
   }
   if (isAmountRow(limit)) {
-    const check = await applicationLimits.evaluateV13AmountCap(limit, product, { customerId, yearStart, proposedDate: `${today}T12:00:00Z` }, db);
+    const check = await applicationLimits.evaluateV13AmountCap(limit, product, { customerId, yearStart, window, proposedDate: `${today}T12:00:00Z` }, db);
     return { status: check.violated ? 'exceeded' : (check.approaching ? 'warning' : 'ok'), current: check.amountUsed };
   }
   return limitStatus(limit, matchingApps, { today, customerCounty });
@@ -537,21 +539,24 @@ const ComplianceService = {
     // application-limits uses so the two surfaces never disagree.
     const customerCounty = inferCountyFromZipInternal(customer.zip) || applicationLimits.getCounty(customer);
 
-    // Get all applications this year for the customer
+    // Get all applications since a day for the customer
     // treated_property_id: the property the application's visit was booked at, by the same
     // join application-limits scopes its history with (null = the row cannot be placed).
-    const apps = await db('property_application_history')
+    const appsSince = (since) => db('property_application_history')
       .where({ 'property_application_history.customer_id': customerId })
-      .where('property_application_history.application_date', '>=', yearStart)
+      .where('property_application_history.application_date', '>=', since)
       .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .leftJoin('service_records as sr_prop', 'property_application_history.service_record_id', 'sr_prop.id')
       .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
       .select('property_application_history.*', 'products_catalog.name as product_name', 'ss_prop.property_id as visit_property_id')
       .then(placeOnTheLedgerProperty);
+    const apps = await appsSince(yearStart);
 
     // Get all product limits, the v13 caps applied while the gate is on.
     const limits = await limitRowsWithV13Caps();
+    // The limits of a rolling-365 product count the last 365 days, not the calendar year (application-limits ROLLING_365).
+    const rollingApps = limits.some((limit) => limit.year_window) ? await appsSince(applicationLimits.windowFor(today, 'rolling365').start) : apps;
 
     // A product's minimum interval looks back past New Year (a December application holds a February one), so
     // the latest earlier application of the products with an interval row and none this year is read in one query.
@@ -559,7 +564,7 @@ const ComplianceService = {
 
     const results = [];
     for (const limit of limits) {
-      const { status, current } = await limitStatusFor(limit, matchingApplications(limit, apps), { today, customerCounty, customerId, yearStart, lastBefore });
+      const { status, current } = await limitStatusFor(limit, matchingApplications(limit, limit.year_window ? rollingApps : apps), { today, customerCounty, customerId, yearStart, lastBefore });
 
       results.push({
         limitId: limit.id,
@@ -684,7 +689,12 @@ const ComplianceService = {
     // annual_max_apps is a per-lawn cap: each customer's busiest lawn, never the company-wide total of
     // the product. One grouped query for every capped product; no application row reaches Node.
     const capped = limits.filter((limit) => limit.limit_type === 'annual_max_apps' && limit.product_id);
-    const busiest = await busiestLawnByProduct(capped.map((limit) => limit.product_id), yearStart);
+    // A rolling-365 product counts the last 365 days (application-limits ROLLING_365), the rest the calendar year.
+    const idsOf = (rolling) => capped.filter((limit) => !!limit.year_window === rolling).map((limit) => limit.product_id);
+    const busiest = new Map([
+      ...await busiestLawnByProduct(idsOf(false), yearStart),
+      ...await busiestLawnByProduct(idsOf(true), applicationLimits.windowFor(today, 'rolling365').start),
+    ]);
     const warningCount = capped.filter((limit) => (busiest.get(String(limit.product_id)) ?? 0) >= Number(limit.limit_value) - 1).length;
 
     // Tech license status
