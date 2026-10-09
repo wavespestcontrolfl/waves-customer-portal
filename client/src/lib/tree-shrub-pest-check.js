@@ -24,6 +24,7 @@ const LIVE_FINDS_ONLY = [
   { pattern: /\bdipel\b/i, label: 'DiPel PRO DF' },
   { pattern: /\bconserve\b/i, label: 'Conserve' },
   { pattern: /\bmainspring\b/i, label: 'Mainspring' },
+  { pattern: /\bacelepryn\b/i, label: 'Acelepryn' },
   { pattern: /\bfloramite\b/i, label: 'Floramite' },
   // Oil moved to live-find use only (owner 2026-10-09). This stays a note,
   // never a block.

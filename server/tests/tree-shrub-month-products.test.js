@@ -143,13 +143,14 @@ describe('resolveMonthProducts', () => {
     }
   });
 
-  test('KPHITE, copper and the routine fungicide line are off the base program; Azatin O is gone (owner 2026-10-09)', () => {
+  test('the phosphite line is Reliant, off the base program; copper and the routine fungicide line too; Azatin O is gone (owner 2026-10-09)', () => {
     const program = protocols.tree_shrub;
     for (const month of ['Mar', 'Jun', 'Oct']) {
       const visit = program.visits.find((v) => v.month === month);
-      expect(visit.primary).not.toMatch(/kphite/i);
-      expect(visit.secondary).toMatch(/^KPHITE 7LP only on beds with root-rot history or replacement plantings; verify container label and method; foliar and soil rates differ; FRAC P07$/m);
+      expect(visit.primary).not.toMatch(/kphite|reliant/i);
+      expect(visit.secondary).toMatch(/^Reliant \(phosphite\) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp\/gal, repeat at 14–21 days; soil drench with the rig only \(25 gal of mix per 100 sq ft\); FRAC P07$/m);
     }
+    expect(JSON.stringify(program)).not.toMatch(/kphite/i);
     expect(JSON.stringify(program)).not.toMatch(/azatin|azamax/i);
     expect(JSON.stringify(program.visits)).not.toMatch(/Labeled ornamental fungicide|Copper: exact container label/);
     expect(program.annual_rotation.fungicide_disease.join('\n')).toMatch(/Copper only for a diagnosed labeled bacterial or leaf disease, after the exact container label is verified; not a routine program line/);

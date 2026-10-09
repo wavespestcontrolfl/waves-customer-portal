@@ -143,3 +143,65 @@ describe('DiPel and manganese sulfate guide entries (owner 2026-10-05)', () => {
     }
   });
 });
+
+describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', () => {
+  const guide = require('../config/tree-shrub-field-guide.json');
+  const protocols = require('../config/protocols.json');
+  const visits = protocols.tree_shrub.visits;
+  const conditional = (month) => visits.find((v) => v.month === month).fieldGuide.conditional;
+
+  test('caterpillar jobs name Acelepryn; Mainspring is the whitefly product', () => {
+    for (const month of ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug']) {
+      const visit = visits.find((v) => v.month === month);
+      expect(visit.secondary).toMatch(/^Acelepryn 2–16 fl oz\/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; at least 7 days between sprays \(\$5\.66\)$/m);
+      expect(visit.primary).not.toMatch(/acelepryn/i);
+    }
+    for (const visit of visits) {
+      expect(`${visit.primary}\n${visit.secondary}`).not.toMatch(/mainspring[^\n]*caterpillar/i);
+      for (const row of visit.fieldGuide.conditional) {
+        expect(row.key === 'mainspring' && /caterpillar/i.test(row.where)).toBe(false);
+      }
+    }
+    for (const month of ['Mar', 'Apr', 'May', 'Jul', 'Aug']) {
+      expect(conditional(month)).toContainEqual({ key: 'acelepryn', where: 'Caterpillars, live finds' });
+    }
+  });
+
+  test('the Acelepryn entry carries the landscape label rate and limits', () => {
+    const acelepryn = guide.products.acelepryn;
+    expect(acelepryn.source).toMatch(/EPA 100-1489/);
+    expect(acelepryn.rates[0][0]).toBe('2–16 fl oz / 100 gal');
+    expect(acelepryn.mix).toEqual([0.02, 0.16]);
+    expect(acelepryn.targets).toMatch(/no whitefly use/);
+    expect(acelepryn.limits.join(' ')).toMatch(/At least 7 days between treatments\..*38\.3 fl oz per acre/);
+  });
+
+  test('Reliant takes the KPHITE entry: foliar by the gallon, drench by the rig', () => {
+    expect(guide.products.kphite).toBeUndefined();
+    const reliant = guide.products.reliant;
+    expect(reliant.source).toMatch(/EPA 83416-1/);
+    expect(reliant.rates.map((r) => r[0])).toEqual(['Foliar: 2–4 tsp / gal', 'Soil drench: 6¼–12¾ fl oz / 100 gal']);
+    expect(reliant.mix).toBeUndefined();
+    for (const month of ['Mar', 'Jun', 'Oct']) {
+      expect(conditional(month)).toContainEqual({ key: 'reliant', where: 'Root-rot history or replacement plantings' });
+    }
+  });
+
+  test('every card key has a guide entry', () => {
+    for (const visit of visits) {
+      for (const section of ['routine', 'conditional']) {
+        for (const row of visit.fieldGuide[section] || []) expect(guide.products[row.key]).toBeDefined();
+      }
+    }
+  });
+
+  test('every Distance line and the guide state one scale spray a year', () => {
+    const lines = visits.flatMap((v) => `${v.primary}\n${v.secondary}`.split('\n')).filter((line) => /^Distance IGR/.test(line));
+    expect(lines).toHaveLength(7);
+    for (const line of lines) expect(line).toMatch(/one scale spray per property per calendar year \(\$16\.52\)$/);
+    const limits = guide.products.distance.limits.join(' ');
+    expect(limits).toMatch(/Scales and mealybugs: one application per calendar year\./);
+    expect(limits).toMatch(/6 fl oz followed by 6 fl oz at least 21 days later/);
+    expect(limits).not.toMatch(/two per six months/);
+  });
+});

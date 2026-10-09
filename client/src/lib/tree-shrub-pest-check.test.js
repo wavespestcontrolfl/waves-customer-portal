@@ -101,7 +101,7 @@ describe('live-finds-only rule', () => {
     ]);
   });
   test('every product on the protocol list is recognised', () => {
-    for (const name of ['TriStar 8.5 SL', 'Distance IGR', 'DiPel PRO DF', 'Conserve SC', 'Mainspring GNL', 'Floramite SC']) {
+    for (const name of ['TriStar 8.5 SL', 'Distance IGR', 'DiPel PRO DF', 'Conserve SC', 'Mainspring GNL', 'Acelepryn Insecticide', 'Floramite SC']) {
       expect(liveFindsOnlyLabel(row(name))).not.toBe('');
     }
     expect(liveFindsOnlyLabel(row('Snapshot 2.5TG'))).toBe('');
