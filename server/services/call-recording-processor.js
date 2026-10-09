@@ -6302,7 +6302,9 @@ function hasPreSlabTermiteContext(text) {
 // Not the generic catalog row "Waves Pest Control Appointment Service": that
 // name keeps resolving as it always has (the replay showed stripping it
 // re-labels existing-customer scheduling calls).
-const OWN_BUSINESS_NAME_RE = /\bwaves\s+pest\s+control(?!\s+appointment)(?:\s*(?:&|and)\s*lawn\s*care)?\b/g;
+// Only the retired brand spelling "... & Lawn Care" is taken with the name;
+// "Waves Pest Control and lawn care was requested" keeps its lawn request.
+const OWN_BUSINESS_NAME_RE = /\bwaves\s+pest\s+control(?!\s+appointment)(?:\s*&\s*lawn\s*care\b)?/g;
 
 function canonicalWavesService(value) {
   const text = String(value || '').toLowerCase().replace(OWN_BUSINESS_NAME_RE, ' ').trim();

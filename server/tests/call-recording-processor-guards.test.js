@@ -152,6 +152,11 @@ describe('call recording appointment guardrails', () => {
       requested_service: null,
       call_summary: 'The caller contacted Waves Pest Control because they need pest control at a new home.',
     })).toMatchObject({ ok: true, service: 'General Pest Control' });
+    // "and lawn care" after the name is a request, not part of the brand.
+    expect(resolveSchedulableCallService({
+      requested_service: null,
+      call_summary: 'The caller called Waves Pest Control and lawn care was requested for the front yard.',
+    })).toMatchObject({ ok: true, service: 'Lawn Care' });
     expect(resolveSchedulableCallService({
       matched_service: 'Waves Pest Control Appointment Service',
       requested_service: 'Scheduled service visit',
