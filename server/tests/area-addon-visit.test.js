@@ -143,6 +143,7 @@ function fakeTrx({ catalog = [], existing = [] } = {}) {
       return {
         where: ({ scheduled_service_id: id, service_key_snapshot: key }) => ({
           select: async () => state.addons.filter((r) => r.scheduled_service_id === id).map((r) => ({ service_key_snapshot: r.service_key_snapshot })),
+          del: async () => { state.addons = state.addons.filter((r) => !(r.scheduled_service_id === id && r.service_key_snapshot === key)); },
           update: async (data) => {
             const hit = state.addons.filter((r) => r.scheduled_service_id === id && r.service_key_snapshot === key);
             hit.forEach((r) => Object.assign(r, data));
@@ -366,6 +367,21 @@ describe('adopting an existing appointment never squeezes the add-on visit into 
     expect([refreshed.estimated_price, refreshed.base_price]).toEqual([sold.addOnPrice, sold.addOnPrice]);
     expect(JSON.parse(refreshed.area_addon_scope).areaSqFt).not.toBe(1);
     expect(refreshed.estimated_duration_minutes).toBe(Math.ceil(sold.durationMinutes));
+  });
+
+  // Codex round 23: the estimate was revised to REMOVE an add-on the booked visit carries.
+  test('a carried add-on row the estimate no longer sells is removed; a row of another service is kept', async () => {
+    const { estimate } = oneTimeEstimate(THREE.slice(0, 2));
+    const profile = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const soldKeys = rows.areaAddOnProfileRows(profile).map((row) => row.catalogServiceKey);
+    const gone = KEYS.find((key) => !soldKeys.includes(key));
+    const existing = [
+      { scheduled_service_id: 'visit-1', service_key_snapshot: gone, estimated_price: 99 },
+      { scheduled_service_id: 'visit-1', service_key_snapshot: 'mosquito_one_time', estimated_price: 50 },
+    ];
+    const trx = fakeTrx({ catalog: catalogFor(KEYS), existing });
+    await rows.writeAdoptedAreaAddOns(trx, { scheduledServiceId: 'visit-1', estimate, ownServiceKey: soldKeys[0], adoptedRow: { estimated_duration_minutes: profile.durationMinutes } });
+    expect(trx.state.addons.map((r) => r.service_key_snapshot).sort()).toEqual(['mosquito_one_time', ...soldKeys.slice(1)].sort());
   });
 
   test('an estimate with no area add-on adopts as before, whatever the appointment length', async () => {

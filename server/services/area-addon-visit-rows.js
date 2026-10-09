@@ -199,6 +199,14 @@ async function stampExistingRowScopes(trx, scheduledServiceId, wanted) {
   return stamped;
 }
 
+async function dropUnsoldAddOnRows(trx, scheduledServiceId, wanted) {
+  const sold = new Set(wanted.map((row) => row.catalogServiceKey).filter(Boolean));
+  const carried = await trx('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId }).select('service_key_snapshot');
+  const stale = [...new Set(carried.map((row) => row.service_key_snapshot).filter((key) => isAreaAddOnCatalogKey(key) && !sold.has(key)))];
+  for (const key of stale) await trx('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId, service_key_snapshot: key }).del();
+  return stale.length;
+}
+
 async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
   if (!rows.length) return 0;
   const cols = await trx('scheduled_service_addons').columnInfo();
@@ -223,6 +231,9 @@ async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
 async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null, addMissingRows = true, refreshExisting = false }) {
   await stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey });
   const wanted = secondaryAreaAddOns(serviceProfile, ownServiceKey);
+  // Adoption also drops a carried area add-on row the LOCKED estimate no longer sells (it was removed by a revision after the
+  // staff booking): the visit total becomes the revised estimate's, so the stale row must not stay in dispatch or the invoice.
+  if (scheduledServiceId && refreshExisting) await dropUnsoldAddOnRows(trx, scheduledServiceId, wanted);
   if (!scheduledServiceId || wanted.length === 0) return 0;
   if (!addMissingRows) return stampExistingRowScopes(trx, scheduledServiceId, wanted);
   for (const row of wanted) {
@@ -285,7 +296,11 @@ function needsNewSlotError(needed, booked) {
 async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownServiceKey = null, adoptedRow = {} }) {
   // Lazy: estimate-slot-availability loads slot-reservation, which loads this module.
   const availability = require('./estimate-slot-availability');
-  if (areaAddOnProfileRows(availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' })).length === 0) return 0;
+  if (areaAddOnProfileRows(availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' })).length === 0) {
+    // The estimate sells no add-on (any more): a carried add-on row is stale. One row read, nothing else.
+    if (scheduledServiceId) await dropUnsoldAddOnRows(trx, scheduledServiceId, []);
+    return 0;
+  }
   // The SAME resolver a fresh booking sizes with: under scheduling capacity it
   // reads each service's catalog allowance on this transaction, so adoption
   // neither refuses a visit a new booking would fit nor passes a shorter one.
