@@ -683,6 +683,8 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       process.env.GATE_LAWN_SPOT_RULES = 'true';
       const ctx = await context(tablesFor());
       expect('treatmentGuide' in ctx).toBe(false);
+      expect('spotTargets' in ctx).toBe(false);
+      expect('mixHelp' in ctx.plannedProducts).toBe(false);
       expect('chinch' in ctx.plannedProducts).toBe(false);
       expect(v13VisitLimits).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.arrayContaining([expect.objectContaining({ product: expect.objectContaining({ id: P_ARENA }) })]), expect.anything(), expect.anything());
     });
@@ -707,6 +709,12 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       live();
       const ctx = await context(tablesFor());
       expect(ctx.treatmentGuide).toBe(true);
+      // GATE_LAWN_SPOT_TARGET is its own gate: the guide alone carries no spotTargets key.
+      expect('spotTargets' in ctx).toBe(false);
+      process.env.GATE_LAWN_SPOT_TARGET = 'true';
+      const withTargets = await context(tablesFor());
+      expect(withTargets.spotTargets).toMatchObject({ v: 1, chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' });
+      delete process.env.GATE_LAWN_SPOT_TARGET;
       expect(ctx.plannedProducts.chinch).toEqual({
         item: expect.objectContaining({
           productId: P_ARENA, name: 'Test Arena', applicationMethod: 'spot_treatment', amount: null, treatedSqft: null, ratePer1000: null, rateUnit: null, line: null, gateNotes: [],
