@@ -389,12 +389,17 @@ const samePrice = (posted, sold) => Number.isFinite(Number(posted)) && posted !=
  * `estimate` is the row the caller holds locked (null when the visit has none). `recurring`: the visit is, or becomes, part of a
  * repeating series.
  */
-function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false } = {}) {
+function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, wholeVisit = true } = {}) {
   const wanted = posted.filter((line) => line && isAreaAddOnCatalogKey(line.key));
   if (!wanted.length) return;
   const name = nameOfServiceKey(wanted[0].key);
   if (recurring) throw postedRefusal('AREA_ADDON_ONE_TIME_ONLY', `${name} is a one-time application. Book it as its own appointment, not in a repeating series.`);
+  // One estimate sells ONE application of an add-on: the same add-on twice on a visit (two lines, or the visit's own service and
+  // a line) would book and bill two while the limit recheck counts one.
+  const repeated = wanted.find((line, index) => wanted.findIndex((other) => other.key === line.key) !== index);
+  if (repeated) throw postedRefusal('AREA_ADDON_DUPLICATE', `${nameOfServiceKey(repeated.key)} is on this appointment more than once. An estimate sells one application: remove the extra line.`);
   const sold = soldAreaAddOnPrices(estimate);
+
   for (const line of wanted) {
     const lineName = nameOfServiceKey(line.key);
     if (!sold.has(line.key)) {
@@ -406,6 +411,25 @@ function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false }
       throw postedRefusal('AREA_ADDON_PRICE_CHANGED', `The price of ${lineName} on the estimate changed after this appointment was built: reopen the estimate and build the appointment again.`);
     }
   }
+  // `wholeVisit` (a booking: `posted` is everything the visit will carry): the add-on that carries the visit's drive and
+  // booking cost on the estimate must stay when any other sold add-on is booked. The others are priced as additional add-ons,
+  // so a visit of only those would be sold with no trip cost in its price.
+  if (wholeVisit) assertCostCarrierKept(estimate, wanted, sold);
+}
+
+// The catalog keys of the sold add-ons that carry the visit's one drive or its one booking-and-invoicing charge.
+function costCarrierServiceKeys(estimate) {
+  if (!estimate) return [];
+  const rows = require('./estimate-result-container').storedAreaAddOnRows(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
+  return [...new Set(rows.filter((row) => row && (row.carriesVisitDrive === true || row.carriesJobAdmin === true))
+    .map((row) => row.catalogServiceKey || (AREA_ADDONS.items[row.addOnKey] || {}).serviceKey).filter(Boolean))];
+}
+
+function assertCostCarrierKept(estimate, wanted, sold) {
+  const postedKeys = new Set(wanted.map((line) => line.key));
+  const missing = costCarrierServiceKeys(estimate).find((key) => sold.has(key) && !postedKeys.has(key));
+  if (!missing) return;
+  throw postedRefusal('AREA_ADDON_CARRIER_REQUIRED', `${nameOfServiceKey(missing)} carries the visit's drive and booking cost on the estimate, so the other add-on treatments are priced without it. Keep ${nameOfServiceKey(missing)} on this appointment, or build a new estimate for the add-on treatments you want to book.`);
 }
 
 /**
@@ -427,13 +451,14 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   const inSeries = visit.is_recurring === true || Boolean(visit.recurring_parent_id);
   // Becoming a series, or adding to one, with an area add-on on it.
   if ((updates.is_recurring === true && !inSeries) || (inSeries && added.length > 0)) {
-    assertPostedAreaAddOnsSold(null, finalKeys.map((key) => ({ key })), { recurring: true });
+    assertPostedAreaAddOnsSold(null, [...new Set(finalKeys)].map((key) => ({ key })), { recurring: true });
   }
   if (!added.length) return { keys: finalKeys, added };
   const estimate = visit.source_estimate_id
     ? await trx('estimates').where({ id: visit.source_estimate_id }).first('id', 'estimate_data', 'pricing_authority', 'show_one_time_option')
     : null;
-  assertPostedAreaAddOnsSold(estimate, added.map((key) => ({ key })));
+  // The same add-on twice on the visit after the edit (rows, or the visit's own service and a row).
+  assertPostedAreaAddOnsSold(estimate, finalKeys.filter((key) => added.includes(key)).map((key) => ({ key })), { wholeVisit: false });
   return { keys: finalKeys, added };
 }
 

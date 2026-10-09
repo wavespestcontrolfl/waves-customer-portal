@@ -104,7 +104,10 @@ async function placeKeys(database, { seeds = [], address = '' }) {
   const shape = addressPlace(address);
   const keys = new Set(seedIds.length ? [] : [shape.canon].filter(Boolean));
   if (seedIds.length) (await database('customer_properties').whereIn('id', seedIds).select('address_key')).forEach((row) => row.address_key && keys.add(row.address_key));
-  return { seedIds, keys: [...keys].sort(), text: shape.text };
+  // A named property IS the place: the estimate's editable address text can name another address by then, so it is no
+  // identity beside a property whose own address key is known (it would pull that other address's unplaced visits and legacy
+  // applications in). A named property with no address key on file keeps the text: it is the only address there is.
+  return { seedIds, keys: [...keys].sort(), text: seedIds.length && keys.size ? '' : shape.text };
 }
 
 // The place a history is read for: { ids, keys, text }. `ids` are the named properties and every customer_properties row, of any

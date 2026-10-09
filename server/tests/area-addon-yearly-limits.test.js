@@ -1079,6 +1079,20 @@ describe('the history is the place\'s, whoever the customer record is (Codex rou
     });
   });
 
+  // Codex round 28: the estimate names a property AND carries an address text edited to another address. The property is the
+  // place; an unplaced visit at the typed address is not at it.
+  describe('a named property with a known address key: the estimate\'s typed address is no second identity', () => {
+    const typedElsewhere = second({ customer_id: CUSTOMER, property_id: PROPERTY, address: '9 Other St, Bradenton, FL 34202' });
+    const unplacedAt = (address) => ({
+      scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.customer_id': CUSTOMER_B, 's.property_id': null, 's.source_estimate_id': OTHER_ESTIMATE })],
+      estimates: [{ id: OTHER_ESTIMATE, address }],
+    });
+    test('an unplaced visit at the typed address does not count; one at the property\'s own address does', async () => {
+      await expect(check(unplacedAt('9 Other St, Bradenton, FL 34202'), typedElsewhere)).resolves.toBeUndefined();
+      await expect(check(unplacedAt('1 Test Way, Bradenton, FL 34202'), typedElsewhere)).rejects.toMatchObject(refused);
+    });
+  });
+
   // Codex round 19: one customer with an older (or inactive) property row of the same address_key. The estimate names the
   // current row; an application or a booking recorded against the older row is still at the place.
   describe('the same customer\'s older property row at the same place counts', () => {

@@ -46,8 +46,23 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
   });
 
   test('fewer than sold is the office\'s choice (round 9): a sold add-on left out is allowed', () => {
-    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: BED, price: both.prices[BED] }])).not.toThrow();
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB, price: both.prices[WEB] }])).not.toThrow();
     expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: 'pest_control' }])).not.toThrow();
+  });
+
+  // Codex round 28: the first priced add-on carries the visit's one drive and booking cost; the others are priced without it.
+  test('the add-on that carries the visit cost must stay when another sold add-on is booked', () => {
+    const message = 'Web Sweep carries the visit\'s drive and booking cost on the estimate, so the other add-on treatments are priced without it. Keep Web Sweep on this appointment, or build a new estimate for the add-on treatments you want to book.';
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: BED, price: both.prices[BED] }])).toThrow(expect.objectContaining({ status: 409, code: 'AREA_ADDON_CARRIER_REQUIRED', message }));
+    // an edit that adds one add-on to a visit judges only what it adds
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: BED }], { wholeVisit: false })).not.toThrow();
+  });
+
+  // Codex round 28: one estimate sells one application of an add-on.
+  test('the same add-on twice (two lines, or the visit\'s own service and a line) is refused', () => {
+    const message = 'Bed Pre-Emergent Weed Control is on this appointment more than once. An estimate sells one application: remove the extra line.';
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB }, { key: BED, price: both.prices[BED] }, { key: BED, price: both.prices[BED] }])).toThrow(expect.objectContaining({ status: 409, code: 'AREA_ADDON_DUPLICATE', message }));
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB, price: both.prices[WEB] }, { key: WEB, price: both.prices[WEB] }])).toThrow(refused('AREA_ADDON_DUPLICATE'));
   });
 
   test('an add-on the revised estimate no longer sells is refused with the staff message, whether it is the visit\'s own service or a line', () => {
@@ -66,7 +81,7 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
     const message = 'The price of Bed Pre-Emergent Weed Control on the estimate changed after this appointment was built: reopen the estimate and build the appointment again.';
     expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: BED, price: both.prices[BED] + 10 }])).toThrow(expect.objectContaining({ code: 'AREA_ADDON_PRICE_CHANGED', message }));
     expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: BED, price: null }])).toThrow(refused('AREA_ADDON_PRICE_CHANGED'));
-    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: BED, price: String(both.prices[BED]) }])).not.toThrow();
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB }, { key: BED, price: String(both.prices[BED]) }])).not.toThrow();
   });
 
   test('no estimate at all: an area add-on is priced and limited from an estimate, so a hand-made line is refused', () => {
