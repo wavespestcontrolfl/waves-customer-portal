@@ -236,15 +236,16 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   return rows.sort((a, b) => Number(b.wet) - Number(a.wet) || (b.peak ?? 0) - (a.peak ?? 0));
 }
 
-// Notices this pass rang today (ET), first rings and comebacks alike: what
-// the day's budget has used. Each ring stamps its ET day on the row
-// (`rang_on`); a comeback keeps the row's created_at, so that cannot count it.
-async function noticesRaisedToday(db, now) {
-  const [{ count }] = await db('notifications').where({ recipient_type: 'admin' })
+// The keys of the notices this pass rang today (ET), first rings and
+// comebacks alike: each ring stamps its ET day on the row (`rang_on`; a
+// comeback keeps the row's created_at, so that cannot tell). A notice rings
+// at most once a day (ringWet), so the size of this set is the day's rings.
+async function keysRungToday(db, now) {
+  const rows = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [KEY_PREFIX])
     .whereRaw("metadata->>'rang_on' = ?", [etDateString(now)])
-    .count('id as count');
-  return Number(count) || 0;
+    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"));
+  return rows.map((row) => row.dedupe_key);
 }
 
 // One key per physical stop at a date and start: the durable visit_id for a
@@ -327,14 +328,18 @@ async function closeSettled(rows, standing, { episodes, db, now }) {
   return settled;
 }
 
-// One notice per wet stop. A standing notice is only rewritten; a new one
-// (or one that rings again) needs room in the day's budget.
-async function ringWet(wet, standing, budget, { db, deps, now }) {
+// One notice per wet stop. A standing notice is only rewritten. A new one,
+// or a closed one whose rain is back, rings when the day's budget has room
+// and it has not rung today already: a forecast that goes dry and wet again
+// inside one day rings once, and comes back on a later day if still wet.
+async function ringWet(wet, standing, rungToday, { db, deps, now }) {
   let noticed = 0;
   let deferred = 0;
+  const budget = Math.max(0, MAX_NOTICES_PER_DAY - rungToday.size);
   for (const row of wet) {
-    const isStanding = standing.has(noticeKey(row));
-    if (!isStanding && noticed >= budget) { deferred += 1; continue; }
+    const key = noticeKey(row);
+    const isStanding = standing.has(key);
+    if (!isStanding && (noticed >= budget || rungToday.has(key))) { deferred += 1; continue; }
     try {
       const result = await sendNotice(row, { db, deps, now, reopen: isStanding ? null : `run:${now.toISOString()}` });
       if (result && !result.suppressed && (!result.deduped || result.rung === true)) noticed += 1;
@@ -360,9 +365,9 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
     // Standing: every notice of this pass that it has not closed.
     const standing = new Set(await episodes.openAdminAlertKeys(db, KEY_PREFIX));
     const dried = await closeSettled(rows, standing, { episodes, db, now });
-    const budget = Math.max(0, MAX_NOTICES_PER_DAY - (wet.length ? await (deps.noticesRaisedToday || noticesRaisedToday)(db, now) : 0));
-    const { noticed, deferred } = await ringWet(wet, standing, budget, { db, deps, now });
-    if (deferred) logger.warn(`[rain-pass] day's notice budget hit (${MAX_NOTICES_PER_DAY}); ${deferred} wait for a later run`);
+    const rungToday = new Set(wet.length ? await (deps.keysRungToday || keysRungToday)(db, now) : []);
+    const { noticed, deferred } = await ringWet(wet, standing, rungToday, { db, deps, now });
+    if (deferred) logger.info(`[rain-pass] ${deferred} wet stop(s) not rung: the day's budget (${MAX_NOTICES_PER_DAY}) is used, or the notice already rang today`);
     logger.info(`[rain-pass] checked=${rows.length} wet=${wet.length} noticed=${noticed} deferred=${deferred} closed=${dried.length}`);
     return { ran: true, checked: rows.length, wet: wet.length, noticed, deferred, closed: dried.length };
   } catch (err) {

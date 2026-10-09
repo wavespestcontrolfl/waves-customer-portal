@@ -35,7 +35,7 @@ function deps(rows, extra = {}) {
     customerName: jest.fn(async () => 'Test Person'),
     raiseAdminAlert: jest.fn(async () => ({ notification: { id: 'n1' } })),
     episodes: { openAdminAlertKeys: jest.fn(async () => []), closeAdminAlertKeys: jest.fn(async () => 1) },
-    noticesRaisedToday: jest.fn(async () => 0),
+    keysRungToday: jest.fn(async () => []),
     ...extra,
   };
 }
@@ -144,8 +144,15 @@ describe('auto-dispatch rain pass', () => {
 
   test('the budget is for the whole day: a run after six notices today rings four more', async () => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
-    const d = deps(Array.from({ length: 7 }, (_, i) => stop({ id: `visit-${i}` })), { noticesRaisedToday: jest.fn(async () => 6) });
+    const d = deps(Array.from({ length: 7 }, (_, i) => stop({ id: `visit-${i}` })), { keysRungToday: jest.fn(async () => Array.from({ length: 6 }, (_, i) => `rain-pass:earlier-${i}:${D1}:09:00`)) });
     expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 7, noticed: 4, deferred: 3 });
+  });
+
+  test('a notice rings once a day: closed and wet again the same day, it waits for a later day', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const d = deps([stop()], { keysRungToday: jest.fn(async () => [`rain-pass:visit-1:${D1}:14:00`]) });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 1, noticed: 0, deferred: 1 });
+    expect(d.raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('a reorder of the day does not change which row stands for a stop', () => {
