@@ -15,7 +15,7 @@ const catalogNames = catalogNameIndex([
   'WDO Inspection Service', 'Bee / Wasp Nest Removal Service', 'Flea Control Service',
   'Termite Inspection Service', 'Termite Monitoring Service', 'Rodent Trapping Service',
   'Quarterly Rodent Bait Station Service', 'Waves Assessment', 'Semiannual Pest Control Service',
-  'Every 6 Weeks Lawn Care Service',
+  'Every 6 Weeks Lawn Care Service', 'Lawn + Tree & Shrub Service',
 ]);
 const name = (text) => leadServiceDisplay(text, { catalogNames });
 
@@ -79,8 +79,10 @@ describe('leadServiceDisplay', () => {
     ['WDO Inspection Service', 'WDO Inspection Service'],
     ['WDO inspection and report', 'WDO Inspection Service'],
     ['Wasp & Hornet Control', 'Bee / Wasp Nest Removal Service'],
-    ['Quarterly Pest Control + German Cockroach Treatment', 'Quarterly Pest Control Service + German Roach Cleanout Service'],
-    ['German Cockroach Treatment', 'German Roach Cleanout Service'],
+    ['Quarterly Pest Control + German Cockroach Treatment', 'Quarterly Pest Control Service + German Cockroach Treatment'],
+    ['German Cockroach Treatment', 'German Cockroach Treatment'],
+    ['Lawn + Tree & Shrub Service', 'Lawn + Tree & Shrub Service'],
+    ['Quarterly Pest Control Service + Lawn + Tree & Shrub Service', 'Quarterly Pest Control Service + Lawn + Tree & Shrub Service'],
     ['One-Time WDO inspection and termite treatment', 'WDO Inspection Service + Termite Liquid Treatment Service'],
     ['Termite inspection for a closing', 'Waves Assessment (Termite)'],
     ['Quarterly Pest Control Service + Bee / Wasp Nest Removal Service', 'Quarterly Pest Control Service + Bee / Wasp Nest Removal Service'],

@@ -43,7 +43,6 @@ const TOPICS = [
   { key: 'plugging', short: 'Lawn', fixed: 'Lawn Plugging Service', re: /\baeration\b|\bplugging\b|\bplugs\b/i },
   { key: 'lawn_pest', short: 'Lawn', recurring: 'Monthly Lawn Care Service', oneTime: 'Lawn Pest Knockdown Service', re: /\blawn\s+(?:pest|insect)\b|\bchinch\b|\bmole\s+crickets?\b/i },
   { key: 'lawn', short: 'Lawn', recurring: 'Monthly Lawn Care Service', oneTime: 'One-Time Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz]|\bweeds?\b|\bsod\b|\bfungus\b|\bfungal\b|\bfungicide\b/i },
-  { key: 'german_roach', short: 'Pest', fixed: 'German Roach Cleanout Service', re: /\bgerman\s+(?:cock)?roach(?:es)?\b/i },
   { key: 'cockroach', short: 'Pest', recurring: 'Quarterly Pest Control Service', oneTime: 'Cockroach Treatment Service', re: /\broach(?:es)?\b|\bcockroach(?:es)?\b|\bpalmetto\s+bugs?\b/i },
   { key: 'pest', short: 'Pest', recurring: 'Quarterly Pest Control Service', oneTime: 'One-Time Pest Control Service', re: /\bpests?\b|\bbugs?\b|\binsects?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bsilverfish\b|\bearwigs?\b|\bscorpions?\b|\bcentipedes?\b|\bmillipedes?\b/i },
 ];
@@ -62,6 +61,11 @@ const ONE_TIME_LABELS = {
   'rodent sanitation': 'Rodent Sanitation Service',
 };
 
+// Intake labels with no catalog row of their own; shown as written. The
+// quote wizard's German cockroach add-on is one treatment inside a recurring
+// pest plan, not the German Roach Cleanout program.
+const KEPT_LABELS = new Set(['german cockroach treatment']);
+
 const SHORT_ORDER = ['Pest', 'Lawn', 'Termite', 'Rodent', 'Mosquito', 'Tree & Shrub', 'Bed Bug', 'Bee / Wasp', 'Wildlife', 'WDO'];
 
 const RECURRING_RE = /\b(?:recurring|ongoing|quarterly|monthly|bi[-\s]?monthly|every\s+\d+\s+weeks?|every\s+(?:other\s+)?(?:month|quarter)|semi[-\s]?annual(?:ly)?|annual(?:ly)?|seasonal|year[-\s]round|bait\s+stations?|monitoring|per\s+(?:quarter|month|year)|times?\s+(?:a|per)\s+year)\b/i;
@@ -78,8 +82,7 @@ const COVERED_BY = {
   rodent: ['rodent_exclusion'],
   tree_shrub: ['palm'],
   lawn: ['lawn_pest', 'plugging'],
-  pest: ['lawn_pest', 'cockroach', 'german_roach'],
-  cockroach: ['german_roach'],
+  pest: ['lawn_pest', 'cockroach'],
 };
 const TERMITE_WORK_RE = /\btreat(?:ment|ments|ing)?\b|\bbait\b|\btermite\s+(?:control|protection)\b/i;
 const RODENT_NAMED_RE = /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/i;
@@ -123,6 +126,7 @@ function catalogNameIndex(names) {
 
 function classify(part, catalogNames) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
+  if (KEPT_LABELS.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
   const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
   if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: topicsFor(part)[0] || null };
   const frequency = statesRecurring(part) ? 'recurring' : ONE_TIME_RE.test(part) ? 'one_time' : null;
@@ -176,6 +180,19 @@ function recurringName(topic, text, catalogNames) {
   return catalogNames.get(wanted.toLowerCase()) || topic.recurring;
 }
 
+// Parts are joined by " + ", but a few catalog names contain one
+// ("Lawn + Tree & Shrub Service"); those stay whole.
+function splitParts(text, catalogNames) {
+  const pieces = text.split(/\s+\+\s+/).map(clean).filter(Boolean);
+  if (!catalogNames) return pieces;
+  const parts = [];
+  for (let i = 0; i < pieces.length; i += 1) {
+    const joined = i + 1 < pieces.length ? `${pieces[i]} + ${pieces[i + 1]}` : null;
+    if (joined && catalogNames.has(joined.toLowerCase())) { parts.push(joined); i += 1; } else parts.push(pieces[i]);
+  }
+  return parts;
+}
+
 // Where one part of the text goes: a name of its own, or into the
 // assessment's brackets.
 function placePart(part, plan, name, toAssessment) {
@@ -206,7 +223,7 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
 
-  const parts = text.split(/\s+\+\s+/).map(clean).filter(Boolean).map((part) => classify(part, catalogNames));
+  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames));
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.
