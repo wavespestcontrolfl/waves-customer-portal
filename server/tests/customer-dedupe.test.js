@@ -1614,10 +1614,14 @@ describe('executeMerge', () => {
       expect(recorded.moved_pref_new_sod).toBe(null);
     });
 
-    it('different homes but the moved row carries no record: nothing to clear, nothing journaled', async () => {
-      const { prefUpdates, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { hasRecord: false });
+    it('different homes but the moved row carries no record: nothing to clear, the empty record is still journaled for the undo guard', async () => {
+      const { prefUpdates, recorded, result } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { hasRecord: false });
       expect(touchesSod(prefUpdates)).toBe(false);
-      expect(recorded.moved_pref_new_sod).toBe(null);
+      expect(recorded.moved_pref_new_sod).toEqual({
+        row_id: 'pp-1',
+        before: { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null },
+      });
+      expect(result.repointed['property_preferences.new_sod_cleared']).toBeUndefined();
     });
   });
 

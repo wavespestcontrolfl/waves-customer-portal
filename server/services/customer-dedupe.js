@@ -3587,10 +3587,14 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
             try {
               await sp.transaction(async (sod) => {
                 const moved = await sod('property_preferences').where({ customer_id: winnerId }).forUpdate().first('id', ...NEW_SOD_COLUMNS);
-                if (moved && NEW_SOD_COLUMNS.some((c) => moved[c] != null)) {
-                  await sod('property_preferences').where({ id: moved.id }).update(clearedNewSodColumns());
+                if (moved) {
+                  // Journaled even when the record is empty: the undo guard reads this entry, so a record
+                  // staff enter on the moved row AFTER the merge is still refused rather than handed back.
                   movedPrefNewSod = { row_id: moved.id, before: newSodBeforeImage(moved) };
-                  repointed['property_preferences.new_sod_cleared'] = 1;
+                  if (NEW_SOD_COLUMNS.some((c) => moved[c] != null)) {
+                    await sod('property_preferences').where({ id: moved.id }).update(clearedNewSodColumns());
+                    repointed['property_preferences.new_sod_cleared'] = 1;
+                  }
                 }
               });
             } catch (sodErr) {
@@ -5754,9 +5758,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     if (newSodCleared && newSodCleared.row_id && newSodCleared.before) {
       let restoreQuery = trx('property_preferences').where({ id: newSodCleared.row_id, customer_id: loserId });
       for (const col of NEW_SOD_COLUMNS) restoreQuery = restoreQuery.whereNull(col);
-      const restored = await restoreQuery.update(newSodCleared.before);
-      // (a record entered since was refused before any write above; here the row simply did not come back)
-      if (!restored) skipped.push({ key: 'property_preferences.new_sod', reason: 'rows_changed_during_revert' });
+      // An all-null before-image (the moved row had no record) has nothing to put back.
+      if (NEW_SOD_COLUMNS.some((c) => newSodCleared.before[c] != null)) {
+        const restored = await restoreQuery.update(newSodCleared.before);
+        // (a record entered since was refused before any write above; here the row simply did not come back)
+        if (!restored) skipped.push({ key: 'property_preferences.new_sod', reason: 'rows_changed_during_revert' });
+      }
     }
 
     // Operator call links the merge rewrote to the winner go back to the

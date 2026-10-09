@@ -1154,6 +1154,35 @@ describe('revertMerge', () => {
       expect(state.journalUpdate).toBeNull();
     });
 
+    describe('the moved row had no record at the merge (all-null before-image)', () => {
+      const EMPTY = { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };
+      const journalEmpty = () => {
+        const journal = journalWithSod();
+        journal.repointed_ids.moved_pref_new_sod = { row_id: 'pp-1', before: EMPTY };
+        return journal;
+      };
+
+      it('REFUSES the undo when staff entered a record on that row after the merge', async () => {
+        const tables = tablesFor();
+        tables.property_preferences.firstRow = { id: 'pp-1', customer_id: WINNER, ...EMPTY, sod_laid_on: '2026-10-05', sod_covers: 'whole' };
+        const { trx, state } = buildRevertTrx({ journal: journalEmpty(), winner: baseWinner(), loser: baseLoser(), tables });
+        db.transaction.mockImplementation(async (fn) => fn(trx));
+        await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+          .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/sod record was entered .* after this merge/) });
+        expect(state.repointedBack).toEqual([]);
+        expect(state.journalUpdate).toBeNull();
+      });
+
+      it('undoes normally and writes no sod columns when nothing was entered', async () => {
+        const { trx, state } = buildRevertTrx({ journal: journalEmpty(), winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
+        db.transaction.mockImplementation(async (fn) => fn(trx));
+        const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+        expect(state.repointedBack.find((r) => r.table === 'property_preferences')).toMatchObject({ ids: ['pp-1'], payload: { customer_id: LOSER } });
+        expect(sodRestores(state)).toEqual([]);
+        expect(result.skipped.filter((x) => x.key === 'property_preferences.new_sod')).toEqual([]);
+      });
+    });
+
     it('a journal with no cleared record restores nothing', async () => {
       const journal = journalWithSod();
       journal.repointed_ids.moved_pref_new_sod = null;
