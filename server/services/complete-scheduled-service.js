@@ -6819,6 +6819,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
+            // GATE_LAWN_MIX_HELP: the rows whose spot area the server derived from gallons sprayed (the record says so).
+            ...require('./lawn-mix-help').sprayedGallonsFreeze(products),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -6914,8 +6916,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );
+          // Lawn Fast Complete: the target a spot fungicide / insecticide row is stored with (lawn-spot-target.js; the row's own tags for any other
+          // completion). Resolved BEFORE the report facts freeze, so the stored application and every frozen report fact use the same targets.
+          const spotTargets = await require('../services/lawn-spot-target').resolveForCompletion({
+            rows: products, lawnFast, catalog: completionCatalogRowsById, canonicalId: canonicalProductId, inferMethod: inferServiceReportApplicationMethod, serviceLine: reportServiceLine,
+            confirm: () => require('./lawn-fast-complete').troubleTypeIdsFor(svc),
+          });
           const reportProductFactsSnapshot = freezeReportProductFacts({
-            productIds: snapshotProductIds, submitted: products, catalogById: completionCatalogRowsById, plan: waveguardPlan,
+            productIds: snapshotProductIds, submitted: spotTargets.submitted(products), catalogById: completionCatalogRowsById, plan: waveguardPlan,
           });
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
             visit: snapshotVisitRow,
@@ -8029,7 +8037,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (serviceProductCols.application_area) serviceProductInsert.application_area = p.applicationArea || p.area || null;
             if (serviceProductCols.epa_reg_number) serviceProductInsert.epa_reg_number = product.epa_reg_number || product.epa_registration_number || null;
             if (serviceProductCols.zone_ids) serviceProductInsert.zone_ids = Array.isArray(p.zoneIds) ? p.zoneIds : [];
-            if (serviceProductCols.targets) serviceProductInsert.targets = Array.isArray(p.targets) ? p.targets : [];
+            if (serviceProductCols.targets) serviceProductInsert.targets = spotTargets.of(p);
             if (serviceProductCols.area_value) {
               serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
             }

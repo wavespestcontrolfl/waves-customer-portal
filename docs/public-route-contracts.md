@@ -833,6 +833,36 @@ offer window) — the customer gets the standard "pick your time again" 409
 instead of a silently mis-ordered commit. The staff save probe
 (`checkArrivalPlacement`) stays append-only too.
 
+Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
+dark, read at call time in `routes/reschedule-public.js`): `GET
+/api/public/reschedule/:token` may carry `nextVisit: { currentDate, byDate }`.
+`currentDate` is the next plan visit's date today (`YYYY-MM-DD`); `byDate` maps
+an offered date in `availability.days` to the cadence date a move to that date
+gives the next visit. Both come from `SmartRebooker.projectNextVisitDates`
+(the sibling selection and projector of `rescheduleSeries`); the client only
+looks the picked date up and never computes a shift. The key is OMITTED, never
+null, when: the gate is off; the visit is not a series visit or
+`GATE_COLLECTIVE_SERIES_ANCHOR` is off; no later visit can move; the
+customer's move would not write the date on the next visit (its stop is shared
+with another live service or its visit is frozen; under
+`GATE_CUSTOMER_RECURRING_DISPATCH` also a row that is not pending/confirmed, is
+customer-confirmed, is dispatch-locked or excluded, or has a sendable
+reminder); the projection fails. `byDate` has no entry for the visit's own
+date (a time-only move does not shift the plan). `POST .../find-slots` and
+the commit route's `SLOT_TAKEN` refresh carry the same key for the days they
+return, and the client replaces the dates it holds with that answer (no key =
+no date named); a date with no entry shows no line. Confirm pin: the commit body carries
+`disclosed_next_visit_date` and `disclosed_next_visit_current_date` (the new
+date and the current date the line named for the picked slot, or null when it
+named none). While the gate is on, the series mover hands its own verdict for
+the next visit (the date it is on and the date the move writes on it, null
+when the move keeps it in place) to `moveGuard` on its locked transaction,
+before its first write; when the page said something else (the next visit became
+customer-confirmed, dispatch-locked, reminded, shared or frozen after the page
+loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
+page reloads. A page loaded before the gate was set sends no field and gets
+the same reload when a date would be named.
+
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
 SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
