@@ -144,14 +144,20 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const draft = await estimate(c, { createdAt: minutesAgo(60) });
     const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     // The move lands right after the pair read, before the write.
-    const realRaw = mockPg.raw;
-    mockPg.raw = async (...args) => {
-      const out = await realRaw.apply(mockPg, args);
-      mockPg.raw = realRaw;
-      await mockPg('estimates').where({ id: sent }).update({ address: '500 Elsewhere Blvd, Testville, FL 34000' });
-      return out;
+    let moved = false;
+    const conn = {
+      raw: async (...args) => {
+        const out = await mockPg.raw(...args);
+        if (!moved) {
+          moved = true;
+          await mockPg('estimates').where({ id: sent }).update({ address: '500 Elsewhere Blvd, Testville, FL 34000' });
+        }
+        return out;
+      },
+      transaction: (fn) => mockPg.transaction(fn),
     };
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
+    expect((await retireDraftsReplacedBySentEstimate({ conn })).retired).toBe(0);
+    expect(moved).toBe(true);
     expect((await row(draft)).archived_at).toBeNull();
   });
 
@@ -166,13 +172,16 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const assessmentLinked = await estimate(c, { createdAt: minutesAgo(60), data: { scheduled_service_id: randomUUID() } });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     await mockPg('booking_intents').insert({ id: randomUUID(), phone: '+12025550123', pricing_estimate_id: handoff, suppressed: false });
-    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'pending', flags: JSON.stringify({ estimate_id: clarify }) });
+    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'pending', source_ref: `fixture:${clarify}`, flags: JSON.stringify({ estimate_id: clarify }) });
     // A merged bedroom ask keeps targeting its original draft through bedroom_estimate_id.
     const bedroom = await estimate(c, { createdAt: minutesAgo(60) });
-    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'pending', flags: JSON.stringify({ estimate_id: randomUUID(), bedroom_estimate_id: bedroom }) });
+    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'pending', source_ref: `fixture:${bedroom}`, flags: JSON.stringify({ estimate_id: randomUUID(), bedroom_estimate_id: bedroom }) });
     // A rejected (terminal) clarification is history, not a live dependent.
     const oldClarify = await estimate(c, { createdAt: minutesAgo(60) });
-    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'rejected', flags: JSON.stringify({ estimate_id: oldClarify }) });
+    // (the insert guard admits a clarification only as pending; rejection is a later update)
+    const rejectedId = randomUUID();
+    await mockPg('message_drafts').insert({ id: rejectedId, intent: 'estimate_clarify', status: 'pending', source_ref: `fixture:${rejectedId}`, flags: JSON.stringify({ estimate_id: oldClarify }) });
+    await mockPg('message_drafts').where({ id: rejectedId }).update({ status: 'rejected' });
     const bellId = randomUUID();
     await mockPg('notifications').insert({ id: bellId, recipient_type: 'admin', category: 'lead', title: 'Draft ready', metadata: JSON.stringify({ estimateId: staffDraft }) });
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
