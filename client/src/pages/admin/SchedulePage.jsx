@@ -7301,6 +7301,20 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
   );
 }
 
+// A chemical area add-on's label text: rate, area basis, yearly limit and the
+// one safety line. A spray-check Hold sends the reason in place of the rate.
+function JobCardGoverned({ governed, D }) {
+  if (!governed) return null;
+  return (
+    <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
+      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      <div>Area: {governed.area}</div>
+      <div>Limit: {governed.limit}</div>
+      {governed.safety && <div style={{ fontWeight: 500 }}>Safety: {governed.safety}</div>}
+    </div>
+  );
+}
+
 function JobCardProduct({ p, serviceId, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
@@ -7314,9 +7328,10 @@ function JobCardProduct({ p, serviceId, D }) {
     </>
   );
   return (
-    <JobCardCollapsible title={p.name} right={right} D={D}>
+    <JobCardCollapsible title={p.name} right={right} defaultOpen={Boolean(p.governed)} D={D}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
+        <JobCardGoverned governed={p.governed} D={D} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}

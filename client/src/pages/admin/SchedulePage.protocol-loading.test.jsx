@@ -253,6 +253,39 @@ describe("ProtocolPanel independent request failures", () => {
   });
 });
 
+describe("Job card chemical area add-on", () => {
+  const governed = {
+    rate: "16 fl oz in 1 gal of water per 1,000 sq ft.", area: "Hard-surface and bare-ground square feet treated.",
+    limit: "Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.",
+    safety: "Hard surfaces and bare ground only. Do not walk on it until dry.", rateNote: null,
+  };
+  const card = (extra = {}) => ({
+    enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Shell, Rock & Paver Weed Control" }, addons: [], planBlocks: [],
+    sprayCheck: { window: "not_today" }, tank: { calibrated: false, reason: "Fixture rig unavailable" },
+    products: [{ id: "gov1", name: "Roundup QuikPro SC", role: "base", conditional: false, line: "Spray weeds on hard surfaces and bare ground only.", verdict: "unknown", governed: { ...governed, ...extra } }],
+  });
+  const show = async (body) => {
+    fetch.mockImplementation((url) => reply(url.includes("/protocols/job-card/") ? body : fixture(url)));
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+  };
+
+  it("opens the product with its rate, area basis, yearly limit and safety line", async () => {
+    await show(card());
+    expect(await screen.findByText("Rate: 16 fl oz in 1 gal of water per 1,000 sq ft.")).toBeVisible();
+    expect(screen.getByText("Area: Hard-surface and bare-ground square feet treated.")).toBeVisible();
+    expect(screen.getByText("Limit: Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.")).toBeVisible();
+    expect(screen.getByText("Safety: Hard surfaces and bare ground only. Do not walk on it until dry.")).toBeVisible();
+  });
+
+  it("shows the hold reason in place of a withheld rate, and no Safety line when none is stated", async () => {
+    await show(card({ rate: null, rateNote: "Spray check: wind over 10 mph — rate withheld", safety: null }));
+    expect(await screen.findByText("Spray check: wind over 10 mph — rate withheld")).toBeVisible();
+    expect(screen.queryByText(/^Rate:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Safety:/)).not.toBeInTheDocument();
+    expect(screen.getByText(/^Limit:/)).toBeVisible();
+  });
+});
+
 describe("Job card Tank section rigs", () => {
   const rigs = [
     { equipmentSystemId: "sys-1", name: "110-Gallon Spray Tank #1", tankCapacityGal: 110 },

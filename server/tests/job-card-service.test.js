@@ -1857,29 +1857,108 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     ]);
   });
 
-  test('area add-on rows take no recurring program lines, as primary or add-on (the catalog key, not the name, decides)', async () => {
+  describe('area add-ons: the governed recipe, never the recurring program (Codex round 5 P1)', () => {
+    const { AREA_ADDONS } = require('../services/pricing-engine/constants');
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] },
       lawn: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] },
     };
-    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'c', name: 'Celsius WG' }];
-    const { AREA_ADDONS } = require('../services/pricing-engine/constants');
-    const buildPlan = jest.fn();
-    for (const cfg of Object.values(AREA_ADDONS.items)) {
-      const isPest = cfg.category === 'pest_control';
-      const facts = {
-        isLawn: !isPest, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, scheduledDate: '2026-09-04', addons: [],
-      };
-      const primary = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
-      expect([cfg.serviceKey, primary.lines]).toEqual([cfg.serviceKey, []]);
-      expect(primary.note).toBe(`No treatment protocol for this service (${cfg.category})`);
+    const PRODUCT_BY_KEY = {
+      area_addon_bed_pre_emergent: 'Snapshot 2.5TG',
+      area_addon_lawn_insect_spot: 'Arena 50 WDG',
+      area_addon_fire_ant_yard: 'Topchoice Granular Insecticide',
+      area_addon_lawn_insect_preventive: 'Acelepryn Insecticide',
+      area_addon_hardscape_weed: 'Roundup QuikPro SC',
+    };
+    const catalog = [
+      { id: 'd', name: 'Demand CS' }, { id: 'c', name: 'Celsius WG' },
+      ...Object.values(PRODUCT_BY_KEY).map((name, n) => ({ id: `gov${n}`, name, rate_unit: 'lb', label_verified_at: '2026-08-01' })),
+    ];
+    const chemical = Object.values(AREA_ADDONS.items).filter((cfg) => PRODUCT_BY_KEY[cfg.serviceKey]);
+    const cardsFor = (lines) => jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines, verdicts: [], packSizes: {} });
+
+    test('the five chemical keys are exactly the catalog items that are not the web sweep', () => {
+      expect(chemical.map((cfg) => cfg.serviceKey).sort()).toEqual(Object.keys(PRODUCT_BY_KEY).sort());
+      expect(Object.keys(AREA_ADDONS.items)).toHaveLength(6);
+    });
+
+    test.each(Object.keys(PRODUCT_BY_KEY))('%s as the booked visit: only its governed product, rate, area, limit and safety line', async (key) => {
+      const cfg = chemical.find((c) => c.serviceKey === key);
+      const buildPlan = jest.fn();
+      const facts = { isLawn: true, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: key, scheduledDate: '2026-09-04', addons: [] };
+      const out = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
+      expect(buildPlan).not.toHaveBeenCalled();
+      expect(out.lines.map((l) => l.product.name)).toEqual([PRODUCT_BY_KEY[key]]);
+      expect(out.lines.map((l) => l.product.id)).not.toContain('d');
+      expect(out.lines.map((l) => l.product.id)).not.toContain('c');
+      const [card] = await cardsFor(out.lines);
+      expect(card.name).toBe(PRODUCT_BY_KEY[key]);
+      expect(card.conditional).toBe(false);
+      expect(card.governed).toMatchObject({ rate: expect.stringMatching(/\d/), area: expect.stringMatching(/square feet/), limit: expect.any(String), rateNote: null });
+    });
+
+    test('the text a technician reads for each chemical add-on', async () => {
+      const text = {};
+      for (const cfg of chemical) {
+        const out = await jobCard.resolveVisitLines({ facts: { serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+        const [card] = await cardsFor(out.lines);
+        text[cfg.serviceKey] = [card.name, card.line, card.governed.rate, card.governed.area, card.governed.limit, card.governed.safety];
+      }
+      expect(text).toEqual({
+        area_addon_bed_pre_emergent: ['Snapshot 2.5TG', 'Granular pre-emergent on the beds, then water in.', '3.45 lb per 1,000 sq ft of bed (label range 2.3 to 4.6). Granular; water in.', 'Bed square feet treated.', 'Label limit 600 lb per acre (13.8 lb per 1,000 sq ft) in 12 months. At least 60 days between applications.', 'Beds must be weed-free first: it does not kill existing weeds.'],
+        area_addon_lawn_insect_spot: ['Arena 50 WDG', 'Spray the damaged area and the green edge into the thatch.', '0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal of water per 1,000 sq ft. St. Augustine only.', 'Treated square feet: the damaged area plus the green edge.', 'Repeat no sooner than 8 weeks. Season limit 12.8 oz per acre (0.29 oz per 1,000 sq ft): 2 applications.', 'Florida FIFRA 2(ee) sheet (expires 2028-12-31, on file in Staff documents): the applicator must carry it.'],
+        area_addon_fire_ant_yard: ['Topchoice Granular Insecticide', 'Broadcast the granules over the lawn.', '2 lb per 1,000 sq ft (87 lb per acre), broadcast.', 'Lawn square feet treated.', 'Once per 12 months.', 'Restricted-use product: certified applicator only.'],
+        area_addon_lawn_insect_preventive: ['Acelepryn Insecticide', 'Yearly preventive spray over the lawn.', '0.184 fl oz per 1,000 sq ft (8 fl oz per acre).', 'Lawn square feet treated.', 'Once a year (April).', null],
+        area_addon_hardscape_weed: ['Roundup QuikPro SC', 'Spray weeds on hard surfaces and bare ground only.', '16 fl oz in 1 gal of water per 1,000 sq ft.', 'Hard-surface and bare-ground square feet treated.', 'Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.', 'Carries indaziflam, up to 6 months of soil residual. Hard surfaces and bare ground only: keep off lawn, planted beds and the root zones of trees and shrubs. Do not walk on it until dry.'],
+      });
+    });
+
+    test.each(Object.keys(PRODUCT_BY_KEY))('%s as an add-on on a pest visit: the pest program keeps its own lines, the add-on adds only its recipe product', async (key) => {
+      const cfg = chemical.find((c) => c.serviceKey === key);
+      const out = await jobCard.resolveVisitLines({
+        facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: cfg.name, category: cfg.category, serviceKey: key }] },
+        protocols, catalog, dbh: () => ({}),
+      });
+      expect(out.lines.filter((l) => l.source === cfg.name).map((l) => l.product.name)).toEqual([PRODUCT_BY_KEY[key]]);
+      expect(out.lines.filter((l) => l.source !== cfg.name).map((l) => l.product.name)).toEqual(['Demand CS']);
+      expect(out.addons).toMatchObject([{ name: cfg.name, products: 1, visit: null, note: null }]);
+    });
+
+    test('the web sweep applies no product: no program lines, no recipe, as primary or add-on', async () => {
+      const cfg = AREA_ADDONS.items.web_sweep;
+      const buildPlan = jest.fn();
+      const primary = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
+      expect(primary.lines).toEqual([]);
+      expect(primary.note).toBe('No treatment protocol for this service (pest_control)');
       const hosted = await jobCard.resolveVisitLines({
         facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: cfg.name, category: cfg.category, serviceKey: cfg.serviceKey }] },
         protocols, catalog, dbh: () => ({}),
       });
-      expect(hosted.addons).toMatchObject([{ name: cfg.name, products: 0, visit: null, note: `No treatment protocol for this add-on (${cfg.category})` }]);
-    }
-    expect(buildPlan).not.toHaveBeenCalled();
+      expect(hosted.lines.map((l) => l.product.name)).toEqual(['Demand CS']);
+      expect(hosted.addons).toMatchObject([{ name: cfg.name, products: 0, visit: null, note: 'No treatment protocol for this add-on (pest_control)' }]);
+      expect(buildPlan).not.toHaveBeenCalled();
+    });
+
+    test('a spray-check Hold withholds the rate and keeps area, limit and safety', async () => {
+      const key = 'area_addon_hardscape_weed';
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+      const [card] = await jobCard._test.buildProductCards({
+        facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
+        verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
+      });
+      expect(card.governed).toMatchObject({ rate: null, rateNote: 'Spray check: wind over 10 mph — rate withheld', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('indaziflam') });
+    });
+
+    test('a recipe product missing from the catalog says so and adds no line', async () => {
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: [{ id: 'd', name: 'Demand CS' }], dbh: () => ({}) });
+      expect(out.lines).toEqual([]);
+      expect(out.note).toBe('Topchoice Granular Insecticide is not in the product catalog — follow the label');
+    });
+
+    test('a card for an ordinary product carries no governed field', async () => {
+      const [card] = await cardsFor([{ raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P' } }]);
+      expect(card.governed).toBeUndefined();
+    });
   });
 
   test('the misting-system NAME alone (no serviceKey) suppresses the barrier program, primary and add-on; barrier rows are unchanged (Codex round-2 P1)', async () => {

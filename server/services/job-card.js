@@ -49,6 +49,7 @@ const { isServingProtocol } = require('./lawn-program');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
+const { areaAddOnRecipe } = require('../config/area-addon-recipes');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -423,11 +424,6 @@ async function loadAddons(dbh, serviceId) {
   return rows.map((r) => ({ name: clean(r.service_name, 80), category: r.category || null, serviceKey: r.service_key || null })).filter((a) => a.name);
 }
 
-// Area add-on catalog keys by family (constants.js AREA_ADDONS): single-purpose
-// one-time jobs that take no recurring program lines (see ADDON_PROGRAMS).
-const AREA_ADDON_SERVICE_KEYS_BY_CATEGORY = Object.values(require('./pricing-engine/constants').AREA_ADDONS.items)
-  .reduce((acc, cfg) => { acc[cfg.category].push(cfg.serviceKey); return acc; }, { pest_control: [], lawn_care: [] });
-
 // Catalog category → the treatment programs it may resolve to (the
 // matcher's pick is honoured only inside `any`, else the category's
 // `fallback`), so "Initial German Roach Knockdown" under pest_control
@@ -451,12 +447,13 @@ const AREA_ADDON_SERVICE_KEYS_BY_CATEGORY = Object.values(require('./pricing-eng
 // Contrac Blox bait stations) and let the tank search dose any pesticide
 // on them. The bait-station services keep the program.
 const ADDON_PROGRAMS = Object.freeze({
-  // Area add-ons (migration 20261008200000) are listed under nonChemical: the
-  // category's recurring program lines (the lawn visit's products, the pest
-  // visit's steps) are NOT their work, so they get no program; the tech enters
-  // the product used at completion (a web sweep applies none).
-  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: AREA_ADDON_SERVICE_KEYS_BY_CATEGORY.pest_control },
-  lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing', ...AREA_ADDON_SERVICE_KEYS_BY_CATEGORY.lawn_care] },
+  // Area add-ons (migration 20261008200000): the category's recurring program
+  // lines (the lawn visit's products, the pest visit's steps) are NOT their
+  // work. The web sweep applies no product (nonChemical); the five chemical
+  // add-ons route to their own governed recipe by key, whatever their
+  // category (addonProgramKey; config/area-addon-recipes.js).
+  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: ['area_addon_web_sweep'] },
+  lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
   // mosquito_misting_system (the misting SYSTEM's design-visit identity) is
   // suppressed by the shared isMistingDesignConsultation predicate in
   // addonProgramKey below — key-first, name only for a keyless row — so it
@@ -479,6 +476,10 @@ const ADDON_PROGRAMS = Object.freeze({
   specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });
 function addonProgramKey(category, name, protocols, serviceKey = null) {
+  // A chemical area add-on has a governed recipe (areaAddOnLines), not a
+  // dosing program: no protocols.json lines, and the tank search stays closed
+  // to it (the amount follows the treated area the tech measures).
+  if (areaAddOnRecipe(serviceKey)) return null;
   const rule = ADDON_PROGRAMS[category];
   if (!rule) return null;
   // The misting SYSTEM's design-visit identity is a consultation, not a
@@ -1173,6 +1174,20 @@ function procedureLines(text) {
 }
 
 /**
+ * The governed recipe of a chemical area add-on as a product line: the
+ * catalog product with the label rate, area basis, yearly limit and safety
+ * line riding along as `governed` text (see config/area-addon-recipes.js).
+ * A product missing from the catalog yields no line and says so.
+ */
+function areaAddOnLines(serviceKey, catalog) {
+  const recipe = areaAddOnRecipe(serviceKey);
+  const product = resolveCatalogProductForName(recipe.product, catalog);
+  if (!product) return { lines: [], note: `${recipe.product} is not in the product catalog — follow the label` };
+  const { rate, area, limit, safety } = recipe;
+  return { lines: [{ raw: recipe.step, role: 'base', selected: true, product, governed: { rate, area, limit, safety } }], note: null };
+}
+
+/**
  * The primary line plus every add-on line attached to the visit. Add-ons
  * resolve through the protocol path with their own seasonal pick; a product
  * already on the card from the primary line is not repeated. A lawn add-on
@@ -1180,10 +1195,21 @@ function procedureLines(text) {
  * appointment's service type), so it is reported, never dosed.
  */
 async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
-  const primary = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+  // A chemical area add-on booked as the visit itself: its governed recipe,
+  // never the recurring program (resolveVisitProducts would find none).
+  const recipePrimary = areaAddOnRecipe(facts.serviceKey) ? areaAddOnLines(facts.serviceKey, catalog) : null;
+  const primary = recipePrimary
+    ? { visit: null, lines: recipePrimary.lines, blocks: [], note: recipePrimary.note }
+    : await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
   const lines = [...primary.lines];
   const addons = [];
   for (const { name, category, serviceKey = null } of facts.addons || []) {
+    if (areaAddOnRecipe(serviceKey)) {
+      const recipe = areaAddOnLines(serviceKey, catalog);
+      for (const line of recipe.lines) lines.push({ ...line, source: name });
+      addons.push({ name, products: recipe.lines.length, visit: null, note: recipe.note });
+      continue;
+    }
     const programKey = addonProgramKey(category, name, protocols, serviceKey);
     if (!programKey) { addons.push({ name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` }); continue; }
     if (programKey === 'lawn') { addons.push({ name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' }); continue; }
@@ -1375,6 +1401,17 @@ function mergeProductLines(lines) {
   return [...byProduct.values()];
 }
 
+/**
+ * The label text of an area add-on's recipe for the card. The rate is a
+ * dosing instruction, so a spray-check Hold withholds it exactly as it
+ * withholds a planned amount; area basis, limit and safety stay.
+ */
+function governedForCard(governed, verdict) {
+  if (!governed) return undefined;
+  const held = verdict.verdict === 'hold';
+  return { ...governed, rate: held ? null : governed.rate, rateNote: held ? `Spray check: ${verdict.reason} — rate withheld` : null };
+}
+
 async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
   const cards = [];
   for (const line of mergeProductLines(lines)) {
@@ -1411,6 +1448,8 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
+      // A chemical area add-on's label text (rate, area, limit, safety).
+      governed: governedForCard(line.governed, verdict),
       // The plan's requirement for the shortage line — never an actionable
       // dose (it survives every withhold so "On hand X vs Y" stays whole).
       demand: demandMix ? { amount: Number(demandMix.amount), unit: demandMix.amountUnit || p.rate_unit || null } : null,
