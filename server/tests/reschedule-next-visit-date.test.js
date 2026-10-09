@@ -103,6 +103,12 @@ describe('SmartRebooker.projectNextVisitDates', () => {
     expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(p) })).toBeNull();
   });
 
+  test('null when the series parent belongs to another customer', async () => {
+    const p = plan();
+    p.parent = { ...p.parent, customer_id: 'cust-2' };
+    expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(p) })).toBeNull();
+  });
+
   test('null when no later visit can move', async () => {
     const p = plan();
     p.siblings = [p.siblings[0]];

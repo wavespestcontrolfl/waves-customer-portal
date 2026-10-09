@@ -1249,6 +1249,8 @@ async function loadNextVisitSweep(conn, serviceId) {
   const parentId = service.recurring_parent_id || service.id;
   const parent = await conn('scheduled_services').where({ id: parentId }).first();
   if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) return null;
+  // A parent on another customer's account never drives this page's dates.
+  if (String(parent.customer_id) !== String(service.customer_id)) return null;
   const siblings = await conn('scheduled_services')
     .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
     .where('customer_id', service.customer_id)
