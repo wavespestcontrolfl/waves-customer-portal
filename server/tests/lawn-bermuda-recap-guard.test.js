@@ -20,7 +20,7 @@ describe('the ledger writers', () => {
     const source = read('pest-recap.js');
     expect(source.split('createComplianceRecords(').length - 1).toBe(1);
     const ledger = source.indexOf('createComplianceRecords(recordId, { trx })');
-    const guard = source.indexOf('refuseStepSprayOnRecap(trx, recordId)', ledger);
+    const guard = source.indexOf('refuseStepSprayOnRecap(trx, recordId);', ledger);
     expect(ledger).toBeGreaterThan(-1);
     expect(guard).toBeGreaterThan(ledger);
     expect(guard - ledger).toBeLessThan(700);
@@ -43,6 +43,24 @@ describe('refuseStepSprayOnRecap', () => {
   test('a live Recognition ledger row for the record is refused with a 400', async () => {
     await expect(refuseStepSprayOnRecap(fakeTrx({ limitRows: RATE_ROW, ledgerRow: { id: 'row' } }), 'record'))
       .rejects.toMatchObject({ code: 'lawn_bermuda_recap_not_allowed', statusCode: 400, isOperational: true });
+  });
+
+  test('before a replace: a Recognition row already on the record is refused with its own message (codex r53 P2)', async () => {
+    await expect(refuseStepSprayOnRecap(fakeTrx({ limitRows: RATE_ROW, ledgerRow: { id: 'row' } }), 'record', { existing: true }))
+      .rejects.toMatchObject({ code: 'lawn_bermuda_recap_not_allowed', statusCode: 400, message: expect.stringMatching(/full visit form/) });
+    await expect(refuseStepSprayOnRecap(fakeTrx({ limitRows: RATE_ROW, ledgerRow: null }), 'record', { existing: true })).resolves.toBeUndefined();
+  });
+
+  test('the recap runs that check before its replace block deletes or retracts anything', () => {
+    const source = read('pest-recap.js');
+    const block = source.indexOf('if (productRows.length || confirmedEmptyReplace) {');
+    const guard = source.indexOf('refuseStepSprayOnRecap(trx, recordId, { existing: true })', block);
+    const firstDelete = source.indexOf('.del()', block);
+    const firstRetract = source.indexOf('retracted_at: new Date()', block);
+    expect(block).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(block);
+    expect(guard).toBeLessThan(firstDelete);
+    expect(guard).toBeLessThan(firstRetract);
   });
 
   test('no Recognition row, no tagged label-rate row, or the gate off: nothing', async () => {

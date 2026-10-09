@@ -510,14 +510,17 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
 // record throws a 400 and the transaction rolls back. Gate off, or no tagged label-rate row to
 // name Recognition by: nothing.
 const RECAP_REFUSAL_MESSAGE = 'Recognition is recorded on the lawn visit that carries the bermuda removal step. Take it off this recap.';
-async function refuseStepSprayOnRecap(trx, recordId) {
+const RECAP_EXISTING_MESSAGE = 'This visit has Recognition on record. Change its products on the full visit form, not on the recap.';
+// `existing: true` is the check BEFORE a recap replaces the record's products: a Recognition row
+// already on the record (written by /complete) must not be retracted through the recap either.
+async function refuseStepSprayOnRecap(trx, recordId, { existing = false } = {}) {
   if (!bermudaRemovalLive() || !recordId) return;
   const ids = await stepProductIds(trx);
   if (!ids.recognition) return;
   const written = await trx('property_application_history')
     .where({ service_record_id: recordId, product_id: ids.recognition }).whereNull('retracted_at').first('id');
   if (!written) return;
-  throw Object.assign(new Error(RECAP_REFUSAL_MESSAGE), { code: 'lawn_bermuda_recap_not_allowed', isOperational: true, statusCode: 400 });
+  throw Object.assign(new Error(existing ? RECAP_EXISTING_MESSAGE : RECAP_REFUSAL_MESSAGE), { code: 'lawn_bermuda_recap_not_allowed', isOperational: true, statusCode: 400 });
 }
 
 // After a completion ledgered its sprays: the label-rate WARNING for Recognition (its yearly
