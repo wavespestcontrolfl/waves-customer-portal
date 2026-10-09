@@ -102,7 +102,7 @@ import {
   SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
   useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
-import { pestSheetTipIds } from '../../lib/tech-tips';
+import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
 // Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
 export { isSendableRateUnit };
@@ -1623,7 +1623,8 @@ function ReportFlowForm({
   const tipOffer = useMemo(() => {
     const readPests = draft?.facts?.pests;
     if (!tips || !draft || form.customTip.trim()) return null;
-    const id = pestSheetTipIds(tips, { pests: Array.isArray(readPests) ? readPests : [], note: form.note })[0];
+    const id = pestSheetTipIds(tips, { // The reader names pests in its own words ("ghost ants"): read as a note is.
+      pests: pestsInNote(Array.isArray(readPests) ? readPests.join('. ') : ''), note: form.note })[0];
     if (!id || (form.tipId && form.tipId !== id)) return null;
     const tip = [...(tips.groups || []).flatMap((group) => group.tips || []), ...(tips.more || [])].find((entry) => entry.id === id);
     return tip ? {

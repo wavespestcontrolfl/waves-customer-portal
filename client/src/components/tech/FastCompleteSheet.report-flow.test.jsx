@@ -64,7 +64,7 @@ function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
   trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
   promises = { available: false, promises: [] }, blog = { available: false, posts: [] }, photoChange = () => ({}),
-  context = {},
+  context = {}, tips = { available: false },
 } = {}) {
   const calls = [];
   const completes = [...complete];
@@ -72,7 +72,7 @@ function makeRequest({
     calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
     if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service, products: typeof products === 'function' ? products() : products, ...context };
     if (path.endsWith('/tech-rating-allowed')) return rating;
-    if (path.endsWith('/tech-tips')) return { available: false };
+    if (path.endsWith('/tech-tips')) return tips;
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
     if (path.split('?')[0].endsWith('/blog-posts')) return typeof blog === 'function' ? blog(path) : blog;
     if (/\/photos\/[^/]+$/.test(path)) return photoChange(path, options);
@@ -302,6 +302,27 @@ describe('generate and read', () => {
     }
     expect(screen.getByText('We placed bait along the counter edge and treated around the outside of the house.')).toBeTruthy();
     expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside and outside · for ghost ants');
+  });
+
+  test('after the note is read, one tip for what it heard is offered; a tap adds it and it is never picked for the tech (owner 2026-10-09)', async () => {
+    const tip = (id, label, extra = {}) => ({ id, label, keywords: [], copy: `${label} copy.`, ...extra });
+    const tips = {
+      available: true,
+      groups: [{ id: 'kitchen', label: 'Kitchen', tips: [tip('bulbs', 'Warm porch bulbs'), tip('bowls', 'Pet bowls up overnight', { pests: ['Ants'] })] }],
+      more: [],
+    };
+    // The note names no pest the client can read; the server's reader heard ants.
+    const request = makeRequest({ tips, facts: { ...FACTS, pests: ['ghost ants'] } });
+    await openSheet(request);
+    await generate({ note: 'Treated the kitchen and around the outside of the house.' });
+    await screen.findByText('Suggested from your note');
+    const offer = screen.getByRole('button', { name: /Pet bowls up overnight/ });
+    expect(offer.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(offer);
+    expect(screen.getByText('1 picked')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await waitFor(() => expect(request.bodies('/complete')).toHaveLength(1));
+    expect(request.bodies('/complete')[0].techTips).toEqual({ ids: ['bowls'], custom: null });
   });
 
   test('photo captions ride the report request, as the full form sends them', async () => {
