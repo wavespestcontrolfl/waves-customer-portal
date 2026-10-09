@@ -5171,6 +5171,18 @@ async function loadProjectCompletionContextByServiceId(services) {
         && require('../config/feature-gates').typedVoiceFillLive()
         && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
         && !(completionProfile?.companions || []).length,
+      // GATE_STATION_FAST_COMPLETE (with the two gates above): a termite or
+      // rodent bait station visit may open the Fast Complete sheet even while
+      // the station map is on, the sheet carrying the station checks. Only the
+      // two bait station forms (a trap check keeps the full form) and never a
+      // combined visit. The client also needs the map known on
+      // (pest-fast-complete.js isTypedReportEligible).
+      stationFastCompleteEnabled: require('../config/feature-gates').stationFastCompleteLive()
+        && require('../config/feature-gates').fastCompleteReportLive()
+        && require('../config/feature-gates').typedVoiceFillLive()
+        && Object.hasOwn(require('../services/visit-station-facts').STATION_SHEET_PROGRAMS, completionProfile?.findingsType || '')
+        && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
+        && !(completionProfile?.companions || []).length,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6358,6 +6370,8 @@ router.get('/', async (req, res, next) => {
         laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
         typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
         typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
+        // GATE_STATION_FAST_COMPLETE — see loadProjectCompletionContextByServiceId.
+        stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6987,6 +7001,7 @@ router.get('/week', async (req, res, next) => {
           laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
           typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
           typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
+          stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,

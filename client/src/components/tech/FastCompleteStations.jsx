@@ -1,0 +1,203 @@
+// client/src/components/tech/FastCompleteStations.jsx
+//
+// Bait station checks on the one-screen Fast Complete sheet
+// (GATE_STATION_FAST_COMPLETE, owner 2026-10-08). With the station map on, the
+// full form records a check for every station: each defaults to OK and the
+// tech taps only the exceptions. The sheet does the same without the map:
+//  - it loads the property's station registry (GET /admin/dispatch/:id/property-map)
+//    and shows "N stations, all OK";
+//  - the tech's note names exceptions by station number ("station 4 had
+//    activity, I replaced the bait in 7"); the server reads them from the note
+//    (typed-facts, services/visit-station-facts.js), verified in code, and each
+//    shows here as a chip with the words it came from;
+//  - a tap on a chip cycles ok, activity, serviced, no access (the rodent
+//    program reads "Consumption"); "Flag a station" marks one the note did
+//    not name. A fact the tech says out loud comes from talk-to-text, never a
+//    new mandatory tap (owner ruling the same day).
+// The completion posts `termiteStations` as the full form does (an entry per
+// pinned station, `touched` on exceptions) and the typed station counts from
+// the one shared rule (lib/station-checks.js stationAutoCounts).
+// Adding, moving or retiring a station stays on the full form, and so does a
+// visit this section cannot judge: a registry that failed to load, no station
+// on record, or a station with no pin (hold: "Use the Full form").
+// Scope: termite_bait_station and rodent_bait_station only; a rodent trap
+// check (rodent_trapping) keeps the full form, its setup and serviced rules
+// differ.
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { Button } from '../ui';
+import { Chip } from './FastCompleteParts';
+import {
+  EMPTY_STATION_MARKS, flagStationMark, mergeHeardStationExceptions, rodentConsumptionHold, stationAutoCounts, stationCheckEntry,
+  stationSheetProgram, stationStatusLabel, tapStationMark,
+} from '../../lib/station-checks';
+
+const NOT_LOADED = Object.freeze({ state: 'loading', stations: [] });
+
+// The registry as the sheet needs it: the program's active stations, each with
+// its number and whether it has a pin on the map (a drift-hidden pin has none:
+// the full form leaves it out of the counts and the checks, and so does this).
+function registryOf(res, program) {
+  // An unavailable map, or a station query that failed, is not "no stations":
+  // the full form fails closed on both, and so does the sheet.
+  if (!res?.available || res.stationsLoaded === false) return { state: 'failed', stations: [] };
+  const stations = (Array.isArray(res.stations) ? res.stations : [])
+    .filter((station) => (station.program || 'termite') === program)
+    .map((station) => ({
+      id: String(station.id),
+      number: station.number,
+      pinned: !!(station.geometryImage && station.geometryImage.type === 'circle'),
+    }))
+    .sort((a, b) => Number(a.number) - Number(b.number));
+  return { state: 'ready', stations };
+}
+
+// The sheet's station state for one visit. `enabled` is the schedule's routing
+// (service.stationsFlow); off, the hook is inert and every part answers as
+// absent. Reads go through refs so a note's read that lands after the tech
+// tapped judges the marks and the registry as they are now.
+export function useStationChecks({ service, request, enabled = false }) {
+  const program = enabled ? stationSheetProgram(service?.typedType) : null;
+  const active = enabled && program != null;
+  const [registry, setRegistry] = useState(NOT_LOADED);
+  const [marks, setMarks] = useState(EMPTY_STATION_MARKS);
+  const registryRef = useRef(registry);
+  registryRef.current = registry;
+  const marksRef = useRef(marks);
+  marksRef.current = marks;
+  const [attempt, setAttempt] = useState(0);
+  const serviceId = service?.id;
+
+  useEffect(() => {
+    if (!active || !serviceId) return undefined;
+    let cancelled = false;
+    setRegistry(NOT_LOADED);
+    // The sheet's own base path, as its other reads build theirs.
+    const base = `/admin/dispatch/${serviceId}`;
+    request(`${base}/property-map`)
+      .then((res) => { if (!cancelled) setRegistry(registryOf(res, program)); })
+      .catch(() => { if (!cancelled) setRegistry({ state: 'failed', stations: [] }); });
+    return () => { cancelled = true; };
+  }, [active, serviceId, program, request, attempt]);
+
+  const pinnedOf = (reg) => reg.stations.filter((station) => station.pinned);
+  const commit = useCallback((next) => {
+    marksRef.current = next;
+    setMarks(next);
+  }, []);
+  // The marks a note's read would leave, without landing them.
+  const heardMarks = useCallback((exceptions) => mergeHeardStationExceptions(
+    marksRef.current, exceptions, pinnedOf(registryRef.current).map((station) => station.id),
+  ), []);
+  const countsFor = useCallback((nextMarks) => (
+    registryRef.current.state === 'ready'
+      ? stationAutoCounts({ program, activeKeys: pinnedOf(registryRef.current).map((station) => station.id), statuses: nextMarks.statuses })
+      : null
+  ), [program]);
+
+  const pinned = pinnedOf(registry);
+  const unpinned = registry.stations.filter((station) => !station.pinned);
+  let hold = '';
+  if (active) {
+    if (registry.state === 'loading') hold = 'Loading the stations…';
+    else if (registry.state === 'failed') hold = 'Couldn’t load this property’s stations. Use the Full form.';
+    else if (!registry.stations.length) hold = 'No stations are on record for this property. Use the Full form.';
+    else if (unpinned.length) {
+      hold = `${unpinned.length === 1 ? `Station ${unpinned[0].number} has` : `${unpinned.length} stations have`} no pin on the map. Use the Full form.`;
+    }
+  }
+
+  return {
+    active,
+    program,
+    state: registry.state,
+    stations: registry.stations,
+    pinned,
+    marks,
+    // The stations the sheet shows, for the note's read: the server loads the
+    // registry itself and names only these.
+    roster: active && registry.state === 'ready' && !hold ? pinned.map((station) => ({ id: station.id, number: station.number })) : null,
+    counts: active ? countsFor(marks) : null,
+    countsFor: active ? countsFor : () => null,
+    // `termiteStations` as the full form sends it: an entry per pinned station.
+    entries: () => (active && registryRef.current.state === 'ready' && !hold
+      ? pinnedOf(registryRef.current).map((station) => stationCheckEntry(station.id, marksRef.current.statuses))
+      : []),
+    hold,
+    // The rodent program: a consumption mark beside "None" contradicts itself.
+    conflictFor: (values) => (active ? rodentConsumptionHold({ program, statuses: marks.statuses, values }) : null),
+    heardMarks,
+    applyHeard: (exceptions) => {
+      const next = heardMarks(exceptions);
+      if (next !== marksRef.current) commit(next);
+      return next;
+    },
+    tap: (id) => commit(tapStationMark(marksRef.current, id)),
+    flag: (id) => commit(flagStationMark(marksRef.current, id)),
+    retry: () => setAttempt((n) => n + 1),
+  };
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// "N stations, all OK", a chip for each exception (tap to change it), and
+// "Flag a station" for one the note did not name.
+export function FastCompleteStations({ checks, locked = false }) {
+  const titleId = useId();
+  const [picking, setPicking] = useState(false);
+  if (!checks?.active) return null;
+  const { program, state, pinned, marks } = checks;
+  const flagged = pinned.filter((station) => marks.statuses[station.id]);
+  const unflagged = pinned.filter((station) => !marks.statuses[station.id]);
+  const label = (station) => `Station ${station.number}: ${stationStatusLabel(marks.statuses[station.id], program)}`;
+  let summary = null;
+  if (state === 'loading') summary = 'Loading the stations…';
+  else if (checks.hold) summary = checks.hold;
+  else if (!flagged.length) summary = `${plural(pinned.length, 'station')}, all OK`;
+  else summary = `${plural(pinned.length, 'station')}, ${flagged.length} flagged, the rest OK`;
+  return (
+    <section className="tech-visit-card" aria-labelledby={titleId}>
+      <h3 id={titleId} className="tech-visit-section-title">Bait stations</h3>
+      <p className={checks.hold && state !== 'loading' ? 'tech-visit-muted tech-visit-status--warn' : 'tech-lane-value'} role="status">{summary}</p>
+      {state === 'failed' && (
+        <Button type="button" variant="ghost" className="tech-visit-action" disabled={locked} onClick={checks.retry}>Load the stations again</Button>
+      )}
+      {state === 'ready' && !checks.hold && (
+        <>
+          {flagged.length > 0 && (
+            <div className="tech-visit-tile-grid" role="group" aria-label="Flagged stations">
+              {flagged.map((station) => (
+                <Chip key={station.id} label={label(station)} pressed disabled={locked} onClick={() => checks.tap(station.id)} />
+              ))}
+            </div>
+          )}
+          {flagged.map((station) => (marks.quotes[station.id]
+            ? <p key={station.id} className="tech-visit-muted">{`Station ${station.number}: “${marks.quotes[station.id]}”`}</p>
+            : null))}
+          {flagged.length > 0 && (
+            <p className="tech-visit-muted">
+              {`Tap a chip to change it: ${stationStatusLabel('activity', program)}, Serviced, No access, then back to OK.`}
+            </p>
+          )}
+          {unflagged.length > 0 && (
+            <Button type="button" variant="ghost" className="tech-visit-action" aria-expanded={picking} disabled={locked} onClick={() => setPicking(!picking)}>
+              Flag a station
+            </Button>
+          )}
+          {picking && (
+            <div className="tech-visit-tile-grid" role="group" aria-label="Flag a station">
+              {unflagged.map((station) => (
+                <Chip
+                  key={station.id}
+                  label={`Station ${station.number}`}
+                  pressed={false}
+                  disabled={locked}
+                  onClick={() => { checks.flag(station.id); setPicking(false); }}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
