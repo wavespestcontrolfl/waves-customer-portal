@@ -48,11 +48,13 @@ const AWAITING_OUTCOME = 'deferred_terminal_draft';
 // directives) before the terminal can write again; the next run composes it.
 const GATE_RETRY_OUTCOME = 'deferred_gate_retry';
 const TERMINAL_AGENT_ID = 'terminal-writer';
-// Runs that end before the draft step and decide nothing about a draft. They
-// do not count as a row's "latest run" here: a publish-cap deferral between
-// two looks must not stop the row waiting on its brief (and orphan a draft
-// that is already pushed).
-const PRE_DRAFT_OUTCOMES = Object.freeze(['deferred_publish_cap']);
+// A publish-cap deferral that ended BEFORE the draft step (no agent on the
+// run) decides nothing about a draft. It does not count as a row's "latest
+// run" here: such a deferral between two looks must not stop the row waiting
+// on its brief (and orphan a draft that is already pushed). The late cap
+// backstop is different: that run took the draft (it carries the terminal
+// writer as its agent), so it does count and the row gets a new brief.
+const PRE_DRAFT_CAP_OUTCOME = 'deferred_publish_cap';
 const MISSING = 'terminal_draft_missing';
 const INVALID = 'terminal_draft_invalid';
 // The branch could not be read at all (GitHub failed); the row keeps waiting.
@@ -107,7 +109,7 @@ function draftProblem(parsed, opportunityId, expectedBriefId) {
  */
 async function waitingBriefId(opportunityId, { conn = db } = {}) {
   const latest = await conn('autonomous_runs').where('opportunity_id', opportunityId)
-    .whereNotIn('outcome', PRE_DRAFT_OUTCOMES)
+    .whereRaw('NOT (outcome = ? AND agent_id IS NULL)', [PRE_DRAFT_CAP_OUTCOME])
     .orderBy('created_at', 'desc').first('outcome', 'brief_id');
   return latest?.outcome === AWAITING_OUTCOME ? latest.brief_id || null : null;
 }
@@ -200,11 +202,11 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
         LEFT JOIN content_briefs b ON b.id = r.brief_id
        WHERE q.status = 'pending'
          AND r.created_at >= now() - (?::int * interval '1 day')
-         AND r.outcome <> ALL(?::text[])
+         AND NOT (r.outcome = ? AND r.agent_id IS NULL)
        ORDER BY r.opportunity_id, r.created_at DESC
     ) latest
     WHERE outcome = ? OR (outcome = ? AND agent_id = ?)
-    ORDER BY score DESC`, [AWAITING_WINDOW_DAYS, [...PRE_DRAFT_OUTCOMES], AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
+    ORDER BY score DESC`, [AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
   const due = [];
   const written = [];
   const rebrief = [];
@@ -219,6 +221,24 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     else due.push({ ...item, problem: fetched.code === INVALID ? fetched.reason : null });
   }
   return { due, written, rebrief };
+}
+
+/**
+ * The gate is off (the kill switch): the agent drafts again and no terminal
+ * work is asked for, so every open terminal item is closed. No GitHub read.
+ */
+async function closeTerminalItems({ now = new Date(), deps = {} } = {}) {
+  const episodes = deps.episodes || require('../admin-alert-episodes');
+  const conn = deps.db || db;
+  const open = await episodes.openAdminAlertKeys(conn, ALERT_KEY_PREFIX);
+  return episodes.closeAdminAlertKeys(conn, open, 'terminal_writer_off', { now, resolution: 'Cleared: the portal writes these drafts itself again' });
+}
+
+/** True while today's terminal item stands: the owner has been told a post waits. */
+async function terminalItemOpenToday({ now = new Date(), deps = {} } = {}) {
+  const episodes = deps.episodes || require('../admin-alert-episodes');
+  const open = await episodes.openAdminAlertKeys(deps.db || db, ALERT_KEY_PREFIX);
+  return open.includes(`${ALERT_KEY_PREFIX}${etDateString(now)}`);
 }
 
 const describe = (r) => `${String(r.action_type || 'post').replace(/_/g, ' ')}: ${r.query || r.page_url || [r.service, r.city].filter(Boolean).join(' in ') || 'untitled'}`;
@@ -271,7 +291,7 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
 }
 
 module.exports = {
-  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue,
+  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, terminalItemOpenToday,
   branchFor, draftPathFor, draftProblem,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
 };

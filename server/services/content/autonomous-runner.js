@@ -1649,6 +1649,14 @@ class AutonomousRunner {
       // (the 06-12 zero-alert shape, Codex r2) — re-trigger the alert rather
       // than stay silent; the sms_log day-dedupe inside _sendBlogDroughtSms
       // keeps it to one text per ET day no matter how many passes run.
+      // Terminal writer: a blog deferred this morning is not claimable yet at
+      // 1pm, which looks like a drought here. While today's terminal item
+      // stands, the owner has already been told a post waits for its draft.
+      const terminalWriter = require('./terminal-writer');
+      if (terminalWriter.terminalWriterLive() && await terminalWriter.terminalItemOpenToday().catch(() => false)) {
+        logger.info('[autonomous-runner] catch-up skipped: posts wait for a terminal draft (item open)');
+        return { outcome: 'skipped_no_claimable', skipped: true, reason: 'waiting_for_terminal_draft', count: 0, runs: [] };
+      }
       await this._sendBlogDroughtSms([]).catch((err) => {
         logger.warn(`[autonomous-runner] catch-up drought SMS failed: ${err.message}`);
       });
@@ -1993,6 +2001,11 @@ class AutonomousRunner {
       terminalItemRaised = await terminalWriter.raiseTerminalDue().then((r) => r.due > 0).catch((err) => {
         logger.warn(`[autonomous-runner] terminal writer item failed: ${err.message}`);
         return false;
+      });
+    } else {
+      // Gate off (the kill switch): no terminal work is asked for any more.
+      await terminalWriter.closeTerminalItems().catch((err) => {
+        logger.warn(`[autonomous-runner] closing terminal writer items failed: ${err.message}`);
       });
     }
     await this._sendDailyDigestSms(runs).catch((err) => {
