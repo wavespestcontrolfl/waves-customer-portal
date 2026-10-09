@@ -245,7 +245,7 @@ describe('an address change rechecks every visit it moves, at the destination pr
       await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new');
       expect(keysByVisit).toHaveBeenCalledWith({ tag: 'trx' }, [A, B]);
       expect(moved).toHaveBeenCalledTimes(1);
-      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, { visitId: B, visit: rows[1], propertyId: 'new', serviceKeys: ['area_addon_fire_ant_yard'], staff: true, alsoMoving: {} });
+      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, { visitId: B, visit: rows[1], propertyId: 'new', scheduledDate: undefined, serviceKeys: ['area_addon_fire_ant_yard'], staff: true, alsoMoving: {} });
     } finally { keysByVisit.mockRestore(); moved.mockRestore(); }
   });
 
@@ -279,6 +279,10 @@ describe('an address change rechecks every visit it moves, at the destination pr
       // the save replaces it with another add-on: that one is asked
       await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new', { id: A, ownKey: undefined, rowKeys: ['area_addon_hardscape_weed', 'mosquito_one_time'] });
       expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, expect.objectContaining({ visitId: A, serviceKeys: ['area_addon_hardscape_weed'] }));
+      // Codex round 42: a combined address and date edit is judged on the day the save sets
+      moved.mockClear();
+      await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new', { id: A, ownKey: undefined, rowKeys: undefined, scheduledDate: '2026-12-01' });
+      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, expect.objectContaining({ visitId: A, scheduledDate: '2026-12-01' }));
       // a save that does not post the rows keeps the stored ones
       moved.mockClear();
       await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new', { id: A, ownKey: undefined, rowKeys: undefined });

@@ -559,3 +559,25 @@ describe('the job card never prints the form\'s numbers', () => {
     expect(src).toContain('ratePer1000: _ratePer1000, rateUnit: _rateUnit, ...facts');
   });
 });
+
+// Codex round 42: the completion resolves the tags again on the locked visit and compares.
+describe('sameAddOnTags', () => {
+  const tags = (entries, unreadable = false) => { const map = new Map(entries); if (unreadable) map.unreadable = true; return map; };
+  test('the same rows tagged to the same add-ons are the same; a dropped, added or moved tag, or a changed readability, is not', () => {
+    const a = tags([['p-1|area_addon_fire_ant_yard', 'area_addon_fire_ant_yard']]);
+    expect(governed.sameAddOnTags(a, tags([['p-1|area_addon_fire_ant_yard', 'area_addon_fire_ant_yard']]))).toBe(true);
+    expect(governed.sameAddOnTags(tags([]), tags([]))).toBe(true);
+    expect(governed.sameAddOnTags(a, tags([]))).toBe(false);
+    expect(governed.sameAddOnTags(tags([]), a)).toBe(false);
+    expect(governed.sameAddOnTags(a, tags([['p-1|area_addon_fire_ant_yard', 'area_addon_bed_pre_emergent']]))).toBe(false);
+    expect(governed.sameAddOnTags(tags([]), tags([], true))).toBe(false);
+  });
+  test('the completion asks it on the locked visit row, before the record is written (source)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const lock = src.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const ask = src.indexOf('areaAddOnGovernedRate.sameAddOnTags(addOnTags, await areaAddOnGovernedRate.resolveApplicationAddOnTags(trx, lockedSvcRow, products))');
+    expect(lock).toBeGreaterThan(0);
+    expect(ask).toBeGreaterThan(lock);
+    expect(ask).toBeLessThan(src.indexOf('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);'));
+  });
+});

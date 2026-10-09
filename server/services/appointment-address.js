@@ -80,7 +80,9 @@ async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId, e
     const carried = isEdited && Array.isArray(edited.rowKeys) ? edited.rowKeys : (rowKeys.get(String(row.id)) || []);
     const serviceKeys = [ownKey, ...carried].filter((key) => String(key || '').startsWith('area_addon_'));
     if (!serviceKeys.length) continue;
-    const judged = await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: row.id, visit: row, propertyId, serviceKeys, staff: true, alsoMoving });
+    // The edited visit lands on the day the same save sets (a combined address and date edit is judged on its final day).
+    const scheduledDate = isEdited && edited.scheduledDate ? edited.scheduledDate : undefined;
+    const judged = await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: row.id, visit: row, propertyId, scheduledDate, serviceKeys, staff: true, alsoMoving });
     for (const key of (judged && judged.keys) || []) alsoMoving[key] = [...(alsoMoving[key] || []), judged.day];
   }
 }
