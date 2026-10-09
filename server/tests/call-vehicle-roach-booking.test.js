@@ -74,6 +74,12 @@ describe('hasVehicleRoachRequest', () => {
     [{ pain_points: 'roaches inside her SUV', call_summary: 'Roaches are throughout her apartment as well.' }, false],
     // "At her home address" is where the car is parked, not an infestation.
     [{ requested_service: 'roaches in my car', call_summary: 'Appointment at her home address on Thursday.' }, true],
+    [{ requested_service: 'roaches in my car', call_summary: 'The technician treats the car at her home on Thursday.' }, true],
+    // The roaches themselves must be in the vehicle (pre-push audit, v3): one clause names both.
+    [{ call_summary: 'Caller needs German roach treatment for her house and will wait in her car.' }, false],
+    [{ call_summary: 'Caller has German roaches, and she will be in her car until noon.' }, false],
+    [{ call_summary: 'German roaches at the property. Caller is calling from inside her truck.' }, false],
+    [{ requested_service: 'roaches in my car', call_summary: 'She wants roach treatment for her apartment too.' }, false],
   ])('%j -> %s', (extracted, expected) => {
     expect(hasVehicleRoachRequest(extracted)).toBe(expected);
   });

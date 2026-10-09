@@ -106,14 +106,23 @@ const NEGATED_VEHICLE_PHRASE_RE = new RegExp(`\\b(?:not|no|never|isn['’]?t|are
 // address" names where the car is parked, not an infestation, so a bare
 // home/house/apartment/condo word does not veto.
 const HOME_INFESTATION_RE = /\b(?:kitchen|bathrooms?|bedrooms?|cabinets?|pantry|garage|laundry|living\s+room|attic|(?:in|inside|throughout|around)\s+(?:(?:my|her|his|their|our|the|a|an|your)\s+)?(?:house|home|apartment|condo|unit))\b/i;
+// Treatment asked FOR the home ("roach treatment for her house") is a home job too.
+const HOME_TREATMENT_TARGET_RE = /\bfor\s+(?:(?:my|her|his|their|our|the|a|an|your)\s+)?(?:whole\s+|entire\s+)?(?:house|home|apartment|condo)\b(?!\s+address)/i;
+// Clause breaks: sentence punctuation, a comma, or a joining word.
+const VEHICLE_CLAUSE_SPLIT_RE = /[.;!?\n]+|,\s+|\s+(?:and|but|while|so|then|who|she|he|they)\s+/i;
 
 function hasVehicleRoachRequest(extracted = {}) {
   const fields = [extracted.requested_service, extracted.pain_points, extracted.call_summary]
     .filter((v) => typeof v === 'string' && v.trim());
-  const vehicleField = fields.some((text) => hasAffirmativeRoachMention(text)
-    && VEHICLE_PHRASE_RE.test(text.replace(NEGATED_VEHICLE_PHRASE_RE, ' ')));
+  // The roaches themselves must be in the vehicle: ONE clause names both. "Roach treatment
+  // for her house and she will wait in her car" names them in two clauses, so it is no
+  // vehicle job. A call that splits them ("She has roaches. They are in her car.") is not
+  // matched either: it keeps today's resolution and the office books it.
+  const vehicleField = fields.some((text) => text.split(VEHICLE_CLAUSE_SPLIT_RE).some((clause) => clause
+    && hasAffirmativeRoachMention(clause)
+    && VEHICLE_PHRASE_RE.test(clause.replace(NEGATED_VEHICLE_PHRASE_RE, ' '))));
   if (!vehicleField) return false;
-  return !fields.some((text) => HOME_INFESTATION_RE.test(text));
+  return !fields.some((text) => HOME_INFESTATION_RE.test(text) || HOME_TREATMENT_TARGET_RE.test(text));
 }
 
 // A model pick the vehicle request may replace: nothing, a generic row, or a
