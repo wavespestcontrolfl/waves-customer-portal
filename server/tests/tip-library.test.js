@@ -631,6 +631,21 @@ describe('open search and pest tags (owner 2026-10-09)', () => {
     for (const pest of TIP_PESTS) expect(tagged.some((tip) => tip.pests.includes(pest))).toBe(true);
   });
 
+  test('a general tip that names the treatment says so, and is never pest-tagged', () => {
+    const NAMES_WORK = /\b(treated|the treatment|I treat|where I worked|what I put down)\b/i;
+    for (const tip of TIPS.filter((t) => !t.services)) {
+      expect([tip.id, tip.namesWork === true]).toEqual([tip.id, NAMES_WORK.test(tip.copy)]);
+      if (tip.namesWork) expect(tip.pests).toBeUndefined();
+    }
+    expect(TIPS.filter((t) => t.namesWork).map((t) => t.id).sort()).toEqual(['ant_wipe_trail', 'ext_shrub_clearance', 'lawn_mow_after_weed_treatment', 'lawn_treated_weeds_leave', 'seal_screen_tears']);
+  });
+
+  test('the inspection tips lead both rodent inspection identities', () => {
+    for (const serviceKey of ['rodent_inspection', 'rodent_general_one_time']) {
+      expect(tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-09' }).groups[0].tips.map((tip) => tip.id)).toEqual(['ri_listen', 'ri_no_store_poison']);
+    }
+  });
+
   test('a pest-tagged tip claims no work, so it is true on a visit that did none of it', () => {
     for (const tip of TIPS.filter((t) => t.pests)) {
       expect(tip.copy).not.toMatch(/\b(bait|traps|stations?|treated|the treatment|I treat|where I worked|what I put down)\b/i);

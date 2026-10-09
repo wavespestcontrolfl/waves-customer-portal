@@ -38,7 +38,9 @@
  * claims no work is tagged: no bait, traps or stations, and no word of what
  * the technician treated or where ("the treatment", "where I worked"). A
  * lifted tip is then true whatever this visit did. A tip that does name the
- * work stays in its own list and opens by search.
+ * work stays in its own list and opens by search. A general tip (no
+ * `services`) whose copy names the treatment carries `namesWork: true`, and
+ * the sheet never lifts it by a word of the note either.
  *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
@@ -268,7 +270,7 @@ const TIPS = Object.freeze([
   // ── Around the house ──────────────────────────────────────────────────
   {
     id: 'ext_shrub_clearance', group: 'exterior', label: "A hand's width off the wall",
-    keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
+    namesWork: true, keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
     copy: "Branches touching the house are a bridge over the treated band along the foundation — ants and roaches walk the branch, not the ground, and the treatment never touches them. Trim to a hand's width of daylight between plant and wall and the bridge is closed.",
   },
   {
@@ -369,7 +371,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'seal_screen_tears', group: 'sealing', label: 'Patch lanai screen tears',
-    keywords: ['screen', 'lanai', 'tear', 'wasps', 'mosquito'], lines: ['mosquito', 'pest'], season: 'all',
+    namesWork: true, keywords: ['screen', 'lanai', 'tear', 'wasps', 'mosquito'], lines: ['mosquito', 'pest'], season: 'all',
     copy: "One tear in the lanai screen is a permanent open door for mosquitos and wasps, no matter what I treat outside it. A patch kit from the hardware store handles it in a few minutes.",
   },
   {
@@ -505,7 +507,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'lawn_mow_after_weed_treatment', group: 'lawn', label: 'Ask before mowing after a weed treatment',
-    keywords: ['mow', 'herbicide', 'sedge', 'wait', 'weeds', 'treatment'], lines: ['lawn'], season: 'all',
+    namesWork: true, keywords: ['mow', 'herbicide', 'sedge', 'wait', 'weeds', 'treatment'], lines: ['lawn'], season: 'all',
     findings: ['sedges', 'broadleaf_weeds', 'crabgrass'],
     copy: "Mowing too soon after a weed treatment cuts the weeds before the treatment has worked into them. How long to wait depends on the product I used, so ask me before the next mow. If a crew mows for you, ask them to check with me first.",
   },
@@ -535,7 +537,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'lawn_treated_weeds_leave', group: 'lawn', label: 'Leave treated weeds in place',
-    keywords: ['weeds', 'yellow', 'brown', 'pull', 'wait', 'treated'], lines: ['lawn'], season: 'all',
+    namesWork: true, keywords: ['weeds', 'yellow', 'brown', 'pull', 'wait', 'treated'], lines: ['lawn'], season: 'all',
     findings: ['sedges', 'broadleaf_weeds', 'crabgrass', 'dollarweed'],
     copy: "Weeds that have been treated can turn yellow or brown while the treatment works through them. Pulling them early can interrupt that, so leave them in place until my next visit. If a weed looks unchanged, point it out to me.",
   },
@@ -1138,13 +1140,13 @@ const TIPS = Object.freeze([
   {
     id: 'ri_listen', group: 'rodent', label: "Note when and where you hear them",
     keywords: ["noise", "scratching", "night", "attic", "ceiling"], lines: ["rodent"], season: 'all',
-    services: ["rodent_inspection"],
+    services: ["rodent_inspection", "rodent_general_one_time"],
     copy: "For the next few nights, note the time and the room when you hear scratching or running overhead. Something like \"2 a.m., over the kitchen\" shows me the route they use, and the plan I write is built around it.",
   },
   {
     id: 'ri_no_store_poison', group: 'rodent', label: "Hold off on store-bought bait",
     keywords: ["store bait", "smell", "wall", "attic", "d-con"], lines: ["rodent"], season: 'all',
-    services: ["rodent_inspection"],
+    services: ["rodent_inspection", "rodent_general_one_time"],
     copy: "Store-bought bait lets a rat die wherever it happens to be, often inside a wall or the attic, and the smell lasts for weeks. Hold off until we agree on a plan, so we know where every animal ends up.",
   },
   {
@@ -1156,7 +1158,7 @@ const TIPS = Object.freeze([
   // ── Third batch (owner-approved 2026-10-09, "batch 2 ok") ─────────────────
   {
     id: 'ant_wipe_trail', group: 'kitchen', label: "Clean up what the ants were after",
-    keywords: ["trail", "crumbs", "spill", "counter", "wipe"], lines: ["pest"], season: 'all',
+    namesWork: true, keywords: ["trail", "crumbs", "spill", "counter", "wipe"], lines: ["pest"], season: 'all',
     copy: "Ants follow a scent trail that the first scouts lay down. Clean up the spill or the crumbs they were walking to, and keep that spot clean for a week. Leave the sill, the door frame, and the baseboard where I worked as they are for now, since wiping there can undo the treatment.",
   },
   {
