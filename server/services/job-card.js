@@ -1388,15 +1388,18 @@ function mergeProductLines(lines) {
   // One card per catalog product: two protocol lines can resolve to the same
   // row (a base line plus a conditional). The selected line wins the card;
   // the other line's text rides along.
+  // The governed text of a chemical area add-on (rate, area, limit, safety)
+  // survives the merge: when the visit's own lines already select the same
+  // product, the one card keeps the add-on's instructions.
   const byProduct = new Map();
   for (const line of lines) {
     const existing = byProduct.get(line.product.id);
     if (!existing) { byProduct.set(line.product.id, { ...line, extraLines: [] }); continue; }
-    if (line.selected && !existing.selected) {
-      byProduct.set(line.product.id, { ...line, extraLines: [existing.raw, ...existing.extraLines] });
-    } else {
-      existing.extraLines.push(line.raw);
-    }
+    const governed = existing.governed || line.governed;
+    const kept = line.selected && !existing.selected
+      ? { ...line, extraLines: [existing.raw, ...existing.extraLines] }
+      : { ...existing, extraLines: [...existing.extraLines, line.raw] };
+    byProduct.set(line.product.id, governed ? { ...kept, governed } : kept);
   }
   return [...byProduct.values()];
 }
@@ -1955,6 +1958,7 @@ module.exports = {
   buildMixAmount,
   tankFromCalibrations,
   resolveVisitProducts,
+  mergeProductLines,
   resolveVisitLines,
   _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

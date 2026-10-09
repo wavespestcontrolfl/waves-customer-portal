@@ -25,13 +25,17 @@ const logger = require('./logger');
 
 const AREA_ADDON_ENGINE_KEY = 'area_addon';
 
-// The profile service the appointment itself is stamped with: the pest control
-// row when there is one, else the first. ONE rule for the catalog stamp
-// (slot-reservation catalogLinkForProfile) and for "everything else is an
-// add-on row" below.
+// The profile service the appointment itself is stamped with. ONE rule for the
+// catalog stamp (slot-reservation catalogLinkForProfile) and for "everything
+// else is an add-on row" below. A service that is NOT an area add-on always
+// outranks an add-on (a lawn treatment sold with a web sweep keeps its own
+// completion profile, protocol and closeout requirements; the sweep becomes
+// its add-on row). Within each group: the pest control row, else the first.
 function primaryProfileService(serviceProfile = {}) {
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
-  return services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  const pestFirst = (rows) => rows.find((svc) => svc?.service === 'pest_control') || rows[0] || null;
+  const hosts = services.filter((svc) => svc && svc.engineKey !== AREA_ADDON_ENGINE_KEY);
+  return pestFirst(hosts) || pestFirst(services);
 }
 
 function areaAddOnProfileRows(serviceProfile = {}) {

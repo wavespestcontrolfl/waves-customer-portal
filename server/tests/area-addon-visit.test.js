@@ -226,6 +226,38 @@ describe('B. every add-on other than the visit\'s own becomes a structured row',
     expect(rows.primaryProfileService({ services: [] })).toBeNull();
   });
 
+  test('a service that is not an area add-on outranks an add-on, even a pest-family web sweep', () => {
+    const lawn = { service: 'lawn_care', label: 'One-Time Lawn Care', engineKey: 'one_time_lawn' };
+    const sweep = addOnRow('area_addon_web_sweep');
+    const fireAnt = addOnRow('area_addon_fire_ant_yard');
+    expect(sweep.service).toBe('pest_control');
+    // The lawn treatment keeps the appointment (its own completion profile and closeout rules).
+    expect(rows.primaryProfileService({ services: [sweep, lawn] })).toBe(lawn);
+    expect(rows.primaryProfileService({ services: [fireAnt, sweep, lawn] })).toBe(lawn);
+    // The sweep is then an add-on row, not dropped.
+    expect(rows.secondaryAreaAddOns({ services: [sweep, lawn] }, null)).toEqual([sweep]);
+    // Add-ons only: pest control first, else the first, as before.
+    expect(rows.primaryProfileService({ services: [fireAnt, sweep] })).toBe(sweep);
+    expect(rows.primaryProfileService({ services: [fireAnt, addOnRow('area_addon_bed_pre_emergent')] })).toBe(fireAnt);
+  });
+
+  test('a job card product shared by the visit and a chemical add-on keeps the add-on\'s governed text', () => {
+    const { mergeProductLines } = require('../services/job-card');
+    const product = { id: 'prod-1', name: 'Topchoice Granular Insecticide' };
+    const own = { raw: 'Program line', role: 'base', selected: true, product };
+    const governed = { rate: '2 lb per 1,000 sq ft', area: 'Lawn', limit: 'Once per 12 months', safety: 'Restricted-use product' };
+    const addOn = { raw: 'Broadcast the granules over the lawn.', role: 'base', selected: true, product, governed, source: 'Fire Ant Yard Treatment' };
+    for (const order of [[own, addOn], [addOn, own], [{ ...own, selected: false }, addOn], [addOn, { ...own, selected: false }]]) {
+      const merged = mergeProductLines(order);
+      expect(merged).toHaveLength(1);
+      expect(merged[0].governed).toEqual(governed);
+      expect(merged[0].extraLines).toHaveLength(1);
+    }
+    // Ordinary lines gain no governed field.
+    const plain = mergeProductLines([own, { ...own, raw: 'Conditional line' }]);
+    expect(plain[0]).not.toHaveProperty('governed');
+  });
+
   test('a priced two-add-on estimate becomes one stamped service plus one row that sum to the one-time total', async () => {
     const { estimate, total } = oneTimeEstimate([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, { key: 'web_sweep' }]);
     const profile = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
