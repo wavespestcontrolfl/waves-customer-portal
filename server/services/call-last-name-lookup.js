@@ -104,8 +104,14 @@ async function loadEligible({ callLogId, customerId }) {
   const extraction = call.v2_extraction_status === 'valid' ? parseJson(call.ai_extraction_enriched) : null;
   if (!extraction) return { skip: 'no_valid_extraction' };
   if (!blank(extraction.caller?.last_name)) return { skip: 'caller_gave_last_name' };
+  // Every source matches on the customer's first name, so the CALLER must be
+  // that person: a call where nobody gave a first name, or a household member
+  // gave their own, must not look a surname up (or pay for a Twilio lookup).
+  const callerFirst = normalizeNamePart(extraction.caller?.first_name);
+  if (!callerFirst || !sameFirstName(callerFirst, normalizeNamePart(customer.first_name))) return { skip: 'caller_first_name_differs' };
   return {
     customer,
+    callCreatedAt: call.created_at,
     relationship: String(extraction.caller?.relationship_to_property || '').toLowerCase(),
   };
 }
@@ -132,7 +138,11 @@ function cleanSurname(value) {
 
 // Another live customer or lead on the same email or phone with the same
 // first name and a last name; exactly one distinct surname or nothing.
-async function surnameFromRecords({ customer }) {
+// Only rows last written BEFORE this call: the call's own pipeline can fill a
+// matching lead (or a sibling profile) from the legacy extraction, and reading
+// that back would present the call's own unverified surname as a record.
+async function surnameFromRecords({ customer, callCreatedAt }) {
+  if (!callCreatedAt) return { skip: 'no_call_time' };
   const email = String(customer.email || '').trim().toLowerCase();
   const phoneKey = phoneIdentityKey(customer.phone || '');
   const nanpKey = /^\d{10}$/.test(phoneKey || '') ? phoneKey : null;
@@ -143,9 +153,9 @@ async function surnameFromRecords({ customer }) {
   };
   const baseColumns = ['first_name', 'last_name'];
   const customers = await db('customers').whereNot({ id: customer.id }).whereNull('deleted_at')
-    .whereRaw("TRIM(COALESCE(last_name, '')) <> ''").where(sameContact).select(baseColumns);
+    .whereRaw("TRIM(COALESCE(last_name, '')) <> ''").where('updated_at', '<', callCreatedAt).where(sameContact).select(baseColumns);
   const leads = await db('leads').whereNull('deleted_at')
-    .whereRaw("TRIM(COALESCE(last_name, '')) <> ''").where(sameContact).select(baseColumns);
+    .whereRaw("TRIM(COALESCE(last_name, '')) <> ''").where('updated_at', '<', callCreatedAt).where(sameContact).select(baseColumns);
   const wanted = normalizeNamePart(customer.first_name);
   const found = new Map();
   for (const row of [...(customers || []), ...(leads || [])]) {

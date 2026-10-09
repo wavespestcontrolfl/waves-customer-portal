@@ -241,3 +241,21 @@ describe('surnameFromEmail: separated forms only', () => {
     expect(surnameFromEmail('pat.sample@example.com', '')).toBeNull();
   });
 });
+
+describe('Codex r1: entity notes in parentheses and company mailbox endings', () => {
+  test('a parenthesized entity marker makes the owner an entity; a life-estate note does not', () => {
+    expect(surnameForFirstName('SAMPLE PAT (REVOCABLE TRUST)', 'Pat', 'Sarasota')).toBeNull();
+    expect(surnameForFirstName('SAMPLE, PAT (TRUST)', 'Pat', 'Manatee')).toBeNull();
+    expect(surnameForFirstName('SAMPLE PAT (LLC', 'Pat', 'Sarasota')).toBeNull();
+    expect(surnameForFirstName('SAMPLE PAT (E LIFE EST)', 'Pat', 'Sarasota')).toBe('Sample');
+    expect(surnameForFirstName('SAMPLE, PAT (LIFE ESTATE)', 'Pat', 'Manatee')).toBe('Sample');
+  });
+
+  test('a last part ending in a business word is a mailbox; real surnames with such endings stay', () => {
+    expect(surnameFromEmail('pat.samplerealty@example.com', 'Pat')).toBeNull();
+    expect(surnameFromEmail('pat.examplehomes@example.com', 'Pat')).toBeNull();
+    expect(surnameFromEmail('pat_sample-examplegroup@example.com', 'Pat')).toBeNull();
+    expect(surnameFromEmail('pat.rosales@example.com', 'Pat')).toBe('Rosales');
+    expect(surnameFromEmail('pat.ismail@example.com', 'Pat')).toBe('Ismail');
+  });
+});

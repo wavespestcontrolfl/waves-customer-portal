@@ -20,6 +20,11 @@ const BUSINESS_WORDS = new Set([
   'investments', 'construction', 'roofing', 'plumbing', 'electric', 'hvac', 'pool', 'pools', 'landscaping',
   'associates', 'agency', 'estate', 'listings', 'broker', 'orders', 'assistant', 'noreply',
 ]);
+// A longer last part that ENDS in one of these is a company mailbox ("pat.samplerealty"). Only
+// words no surname ends in: "sales" and "mail" stay exact-only (Rosales, Ismail).
+const BUSINESS_SUFFIXES = ['realty', 'realtor', 'realtors', 'realestate', 'homes', 'properties', 'property', 'group', 'team',
+  'office', 'pest', 'lawn', 'rentals', 'rental', 'leasing', 'investments', 'construction', 'roofing', 'plumbing',
+  'landscaping', 'associates', 'agency', 'listings', 'marketing', 'management', 'services', 'service'];
 const SEPARATORS = ['.', '_', '-'];
 const GIVEN_RE = /^[a-z]+$/;
 const SURNAME_RE = /^[a-z](?:[a-z'-]*[a-z])?$/;
@@ -36,8 +41,10 @@ function surnameFromEmail(email, callerFirstName) {
   const [given, surname] = parts;
   if (!GIVEN_RE.test(given) || !sameFirstName(normalizeNamePart(given), callerFirst)) return null;
   if (surname.length < 2 || !SURNAME_RE.test(surname)) return null;
-  if (surname.split('-').some((piece) => BUSINESS_WORDS.has(piece))) return null;
+  const pieces = surname.split('-');
+  if (pieces.some((piece) => BUSINESS_WORDS.has(piece))) return null;
+  if (pieces.some((piece) => BUSINESS_SUFFIXES.some((word) => piece.length > word.length && piece.endsWith(word)))) return null;
   return titleCaseSurname(surname);
 }
 
-module.exports = { surnameFromEmail, BUSINESS_WORDS };
+module.exports = { surnameFromEmail, BUSINESS_WORDS, BUSINESS_SUFFIXES };

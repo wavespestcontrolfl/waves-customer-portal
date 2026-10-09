@@ -238,7 +238,7 @@ describe('the notification', () => {
   });
 
   test('the headline stays inside 60 characters for a long first name', async () => {
-    setupDb({ customer: { ...CUSTOMER, first_name: 'Pat'.repeat(12) } });
+    setupDb({ call: withExtraction({ first_name: 'Pat'.repeat(12) }), customer: { ...CUSTOMER, first_name: 'Pat'.repeat(12) } });
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: [`EXAMPLE, ${'PAT'.repeat(12)}`] });
     await run();
     const { spec } = posted();
@@ -344,6 +344,14 @@ describe('county owner record', () => {
 });
 
 describe('our own records', () => {
+  test('only rows last written before the call count: the call\'s own lead write is never read back', async () => {
+    const { records } = setupDb({ call: tenant(), customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
+    await run();
+    const fences = records.filter(([verb, column, op]) => verb === 'where' && column === 'updated_at' && op === '<');
+    expect(fences).toHaveLength(2); // the other-customers read and the leads read
+    for (const fence of fences) expect(fence[3]).toBe(CALL.created_at);
+  });
+
   test('another customer with the same contact, same first name and a last name', async () => {
     const { records } = setupDb({
       call: tenant(),
@@ -359,7 +367,7 @@ describe('our own records', () => {
 
   test('a lead record counts too, and a nickname first name matches', async () => {
     setupDb({
-      call: tenant(),
+      call: withExtraction({ relationship_to_property: 'tenant', first_name: 'Bill' }),
       customer: { ...CUSTOMER, first_name: 'Bill' },
       leads: [{ first_name: 'William', last_name: 'Sampleton' }],
     });
@@ -481,6 +489,26 @@ describe('Twilio caller name', () => {
 });
 
 describe('eligibility', () => {
+  test.each([
+    ['nobody gave a first name on the call', { first_name: null }],
+    ['a household member gave their own first name', { first_name: 'Robin' }],
+  ])('%s: no lookup, no Twilio request, no notification', async (_label, caller) => {
+    const { records } = setupDb({ call: withExtraction(caller) });
+    global.fetch = jest.fn();
+    expect(await run()).toEqual({ skipped: 'caller_first_name_differs' });
+    expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expectNoWrites(records);
+  });
+
+  test('the caller\'s nickname for the customer\'s first name is the same person', async () => {
+    setupDb({ call: withExtraction({ first_name: 'Bill' }), customer: { ...CUSTOMER, first_name: 'William' } });
+    lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: ['EXAMPLE, WILLIAM'] });
+    await run();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
   test('a last name already on the customer: nothing runs', async () => {
     const { records } = setupDb({ customer: { ...CUSTOMER, last_name: 'Existing' } });
     expect(await run()).toEqual({ skipped: 'has_last_name' });

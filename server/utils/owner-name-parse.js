@@ -58,7 +58,13 @@ function titleCaseSurname(text) {
 // Upper case, notes and legal tails removed, or null when the string is not
 // a plain personal-name shape (digits, slashes, an address line, an entity).
 function cleanOwnerString(raw) {
-  const text = String(raw || '').toUpperCase().replace(/\./g, '')
+  const upper = String(raw || '').toUpperCase().replace(/\./g, '');
+  // A note in parentheses is dropped ("(E LIFE EST)"), but one that names an
+  // entity ("(REVOCABLE TRUST)") makes the whole owner an entity: judged
+  // BEFORE the note is removed, life-estate wording aside.
+  const notes = (upper.match(/\([^)]*\)?/g) || []).join(' ').replace(/\bLIFE\s+EST(?:ATE)?\b/g, ' ');
+  if (notes.split(/[^A-Z']+/).some((w) => ENTITY_WORDS.has(w))) return null;
+  const text = upper
     .replace(/\([^)]*\)?/g, ' ')
     .replace(/\bLIFE\s+EST(?:ATE)?\b/g, ' ')
     .replace(/\bET\s*(?:AL|UX|VIR)\b/g, ' ')
