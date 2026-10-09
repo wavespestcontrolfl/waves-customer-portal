@@ -46,6 +46,10 @@ describe('pestSheetTipIds', () => {
     const library = { season: 'dry', groups: [{ tips: [tip('sweets', { pests: ['Wasps'], season: 'wet' }), tip('nest', { pests: ['Wasps'], season: 'all' })] }] };
     expect(pestSheetTipIds(library, { pests: ['Wasps'] })).toEqual(['nest']);
   });
+  it('holds the keyword lift to the same rules: nothing ruled out, nothing out of season', () => {
+    const library = { season: 'dry', groups: [{ tips: [tip('bowls', { keywords: ['ants'] }), tip('auto', { keywords: ['humidity'], season: 'wet' }), tip('fan', { keywords: ['humidity'] })] }] };
+    expect(pestSheetTipIds(library, { note: 'No ants seen. Humidity is high inside.' })).toEqual(['fan']);
+  });
   it('answers nothing before the library loads', () => {
     expect(pestSheetTipIds(null, { pests: ['Ants'] })).toEqual([]);
   });

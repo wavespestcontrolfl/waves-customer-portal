@@ -86,8 +86,10 @@ const NOTE_PESTS = [
 // "No roaches seen" names no pest: a negated phrase is dropped before the read.
 const NEGATED_PEST_RE = /\b(?:no|not|zero|without)\s+(?:(?:seeing|finding|see|find)\s+)?(?:(?:signs?|evidence)\s+of\s+|live\s+|new\s+|more\s+|any\s+)?[a-z]+\b/g;
 
+const withoutNegated = (note) => String(note || "").toLowerCase().replace(NEGATED_PEST_RE, " ");
+
 export function pestsInNote(note) {
-  const text = String(note || "").toLowerCase().replace(NEGATED_PEST_RE, " ");
+  const text = withoutNegated(note);
   return NOTE_PESTS.filter(([, re]) => re.test(text)).map(([pest]) => pest);
 }
 
@@ -111,7 +113,9 @@ export function pestSheetTipIds(library, { pests = [], note = "" } = {}) {
     .sort((a, b) => b.hits - a.hits)
     .map((entry) => entry.tip);
   const byId = new Map(every.map((tip) => [tip.id, tip]));
-  const forNote = tipsCalledForByNote(listed, note).map((id) => byId.get(id));
+  // The same two rules for the keyword lift: nothing the note rules out, and
+  // nothing for the other season.
+  const forNote = tipsCalledForByNote(listed.filter(inSeason), withoutNegated(note)).map((id) => byId.get(id));
   const lifted = [...new Set([...forPests, ...forNote])];
   return unsentTipsFirst(lifted, library?.lastSent).slice(0, PEST_TIP_LIFT_MAX).map((tip) => tip.id);
 }
