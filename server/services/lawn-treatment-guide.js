@@ -502,8 +502,9 @@ const FIND_ROW_TEST = Object.freeze({
 });
 
 /**
- * Whether a technician's recorded find is real enough to be told to the customer. Fail closed: false on any
- * doubt (a missing id, a failed read), and the find stays on the technician record only.
+ * Whether a technician's recorded find is real enough to be told to the customer. false on any definite doubt (a
+ * missing id, a product the program does not stage for the card), and the find stays on the technician record only.
+ * A failed READ throws (see below).
  *   - every product id the card named is a uuid and a staged program row of the card's own kind (a fungicide
  *     row for fungus, the caterpillar row, a chinch rung), so a modified echo cannot name any product it likes;
  *   - a fungus card also needs the confirmed assessment to read fungus minor or worse, a caterpillar card insect
@@ -514,21 +515,18 @@ const FIND_ROW_TEST = Object.freeze({
  * of the right kind) is checked by the caller against the visit's rows.
  */
 async function verifyGuideFind({ kind, productIds, signals, knex }) {
-  try {
-    const test = FIND_ROW_TEST[kind];
-    const ids = Array.isArray(productIds) ? productIds : [];
-    if (!test || !ids.length || !ids.every((id) => UUID_RE.test(id))) return false;
-    if (kind === 'fungus' && !(signals && atLeast(signals.fungus, 'minor'))) return false;
-    if (kind === 'caterpillars' && !(signals && atLeast(signals.insect, 'moderate'))) return false;
-    const { activeProtocolProducts } = require('./lawn-protocol-retired');
-    const staged = await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
-      .whereIn('lpp.product_id', ids)
-      .select('lpp.product_id', 'lpp.role', 'lpp.gates');
-    return ids.every((id) => staged.some((row) => String(row.product_id).toLowerCase() === id && test(row, parseJson(row.gates) || {})));
-  } catch (err) {
-    logger.warn(`[lawn-guide] find not verified: ${err?.code || err?.name || 'Error'}`);
-    return false;
-  }
+  const test = FIND_ROW_TEST[kind];
+  const ids = Array.isArray(productIds) ? productIds : [];
+  if (!test || !ids.length || !ids.every((id) => UUID_RE.test(id))) return false;
+  if (kind === 'fungus' && !(signals && atLeast(signals.fungus, 'minor'))) return false;
+  if (kind === 'caterpillars' && !(signals && atLeast(signals.insect, 'moderate'))) return false;
+  const { activeProtocolProducts } = require('./lawn-protocol-retired');
+  // A failed program read THROWS: it is not an answer. The caller (the facts freeze) treats it as a failed attempt
+  // and records that, instead of freezing a visit without a find it could not check.
+  const staged = await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
+    .whereIn('lpp.product_id', ids)
+    .select('lpp.product_id', 'lpp.role', 'lpp.gates');
+  return ids.every((id) => staged.some((row) => String(row.product_id).toLowerCase() === id && test(row, parseJson(row.gates) || {})));
 }
 
 module.exports = {

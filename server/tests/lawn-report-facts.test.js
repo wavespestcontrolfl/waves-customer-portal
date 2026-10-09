@@ -645,8 +645,10 @@ describe('verifiedTechFindings: the echo is checked before a find can reach the 
     expect(await verify([{ kind: 'weeds', productIds: [P_ARENA] }])).toEqual([]);
   });
 
-  test('fail closed: a failed program read verifies nothing and never throws', async () => {
-    expect(await verify([{ kind: 'chinch', productIds: [P_ARENA] }], { knex: stagedKnex(STAGED, { fail: true }) })).toEqual([]);
+  test('a failed program READ is not an answer: it throws, so the freeze records a failed attempt instead of leaving the find out', async () => {
+    await expect(verify([{ kind: 'chinch', productIds: [P_ARENA] }], { knex: stagedKnex(STAGED, { fail: true }) })).rejects.toThrow('down');
+    // A definite "no" never reads the program at all, so it cannot fail.
+    expect(await verify([{ kind: 'chinch', productIds: [] }], { knex: stagedKnex(STAGED, { fail: true }) })).toEqual([]);
     expect(await verify(undefined)).toEqual([]);
   });
 

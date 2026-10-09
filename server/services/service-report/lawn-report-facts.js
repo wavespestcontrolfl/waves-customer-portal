@@ -564,21 +564,38 @@ async function loadAssessmentAndRun(record, knex) {
  * Returns the frozen block (for the caller's in-memory notes) or null.
  */
 async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now = new Date() }) {
+  if (!record || !record.id || !knex) return null;
+  // Cheap exit: a block already on the row (a resumed completion, a second run, a recorded failure) is never rebuilt.
+  if (readFrozenReportFacts(record.structured_notes)) return null;
   try {
-    if (!record || !record.id || !knex) return null;
-    // Cheap exit: a block already on the row (a resumed completion, a second run) is never rebuilt.
-    if (readFrozenReportFacts(record.structured_notes)) return null;
+    const notes = parseJsonObject(record.structured_notes);
+    // Ties are decided BEFORE the copy: if the v6 copy or the Visit Summary already froze without a block (an earlier
+    // attempt that could not record anything), a tie frozen now would disagree with them, so none is frozen.
+    const tiesAllowed = withTies && !notes.lawnCopyV6 && !notes.lawnVisitSummary;
     const rows = await loadRows(record, knex);
-    if (!rows || !rows.length) return null;
-    const { assessment, run } = withTies ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
-    const taps = withTies ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
+    if (!rows) throw new Error('the visit\'s product facts could not be read');
+    if (!rows.length) return null;
+    const { assessment, run } = tiesAllowed ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
+    const taps = tiesAllowed ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
+    // A read that fails here THROWS (verifiedTechFindings): a find that could not be checked is not a find we may leave out.
     const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
-    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
+    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
     return await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
   } catch (err) {
-    logger.warn(`[lawn-report-facts] gather failed for service_record ${record && record.id}: ${err.message}`);
-    return null;
+    logger.warn(`[lawn-report-facts] gather failed for service_record ${record.id}: ${err.message}`);
+    return await recordFailedFreeze({ record, knex, now });
   }
+}
+
+/**
+ * One attempt decides. When the attempt fails (any read, or the write), a MARKED block is recorded instead: no
+ * re-entry rule (so the report keeps today's default clock, never anything weaker), no spot text (the zone text, as
+ * today), no ties. It is a frozen block like any other, so the v6 copy, the Visit Summary, the PDF key and every later
+ * attempt (the write gate's own call, a resumed completion) agree with it, and nothing can freeze different facts after
+ * copy has frozen. Never throws; null only if even the marker could not be written.
+ */
+async function recordFailedFreeze({ record, knex, now = new Date() }) {
+  return freezeReportFacts({ knex, serviceRecordId: record.id, facts: { v: FREEZE_VERSION, frozenAt: now.toISOString(), failed: true, productUse: {} } });
 }
 
 module.exports = {

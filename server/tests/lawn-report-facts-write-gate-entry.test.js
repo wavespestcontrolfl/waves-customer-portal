@@ -51,10 +51,14 @@ const productRow = (n, id) => ({
 });
 
 // A store that honors column lists and records the service_records freeze.
-function store(tables) {
+function store(tables, down = new Set()) {
   const state = { notes: {} };
   const knex = (table) => {
     const base = String(table).split(' as ')[0];
+    if (down.has(base)) {
+      const dead = { where: () => dead, whereIn: () => dead, whereRaw: () => dead, orderBy: () => dead, select: () => dead, first: () => Promise.reject(new Error('down')), catch: (fn) => Promise.resolve(fn(new Error('down'))), then: (r, j) => Promise.reject(new Error('down')).then(r, j) };
+      return dead;
+    }
     let rows = [...(tables[base] || [])];
     const project = (row, cols) => (!row || !cols.length ? row : Object.fromEntries(cols.map((c) => [c.split(' as ').pop().split('.').pop(), row[c.split(' as ')[0].split('.').pop()]])));
     const q = {};
@@ -144,5 +148,61 @@ describe('a technician fungus or caterpillar find, through the real write gate',
     const { block } = await complete({ cards: [card('fungus', P_FUNG)], productRows: [productRow(3, 1)], severities: { fungal_activity: { level: 'moderate' } } });
     expect(block).not.toHaveProperty('ties');
     expect(facts.frozenTies(JSON.stringify({ lawnReportFacts: block }), 'as-1')).toEqual([]);
+  });
+});
+
+describe('a failed early freeze followed by a succeeding later call (the real entry points, in the completion order)', () => {
+  const { freezeReportFactsOnly } = require('../services/service-report/lawn-report-write-gate');
+  const tablesFor = () => ({
+    service_products: [productRow(3, 1)],
+    products_catalog: CATALOG,
+    lawn_assessments: [ASSESSMENT],
+    lawn_assessment_runs: [runWith({ fungal_activity: { level: 'moderate' } })],
+    lawn_protocol_products: STAGED,
+  });
+  const notesWith = (state, extra = {}) => JSON.stringify({ ...extra, ...state.notes });
+
+  test('the early attempt fails on a read: a marker is recorded; the later synthesis call finds it and freezes nothing different', async () => {
+    live();
+    const guide = { lawnTreatmentGuide: { v: 1, cards: [card('fungus', P_FUNG)] } };
+    const down = new Set(['lawn_assessment_runs']);
+    const { knex, state } = store(tablesFor(), down);
+    loadServiceRecordForPdf.mockImplementation(async () => ({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: notesWith(state, guide) }));
+
+    const early = await freezeReportFactsOnly({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    expect(early).toMatchObject({ v: 1, failed: true });
+    expect(state.notes.lawnReportFacts).toMatchObject({ failed: true });
+
+    // The read recovers before the write gate runs; its own facts attempt must not now freeze a tie.
+    down.clear();
+    const out = await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    expect(state.notes.lawnReportFacts).toMatchObject({ failed: true });
+    expect(state.notes.lawnReportFacts).not.toHaveProperty('ties');
+    expect(state.notes.lawnReportFacts).not.toHaveProperty('reentry');
+    expect(out.reportFactsFreeze).toBeUndefined();
+    expect(facts.frozenTies(JSON.stringify(state.notes), 'as-1')).toEqual([]);
+  });
+
+  test('a failed verification read fails the whole attempt the same way', async () => {
+    live();
+    const guide = { lawnTreatmentGuide: { v: 1, cards: [card('fungus', P_FUNG)] } };
+    const { knex, state } = store(tablesFor(), new Set(['lawn_protocol_products']));
+    loadServiceRecordForPdf.mockImplementation(async () => ({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: notesWith(state, guide) }));
+    await freezeReportFactsOnly({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    expect(state.notes.lawnReportFacts).toMatchObject({ failed: true });
+    expect(state.notes.lawnReportFacts).not.toHaveProperty('ties');
+  });
+
+  test('a healthy early attempt freezes the facts once; the later call is a no-op', async () => {
+    live();
+    const guide = { lawnTreatmentGuide: { v: 1, cards: [card('fungus', P_FUNG)] } };
+    const { knex, state } = store(tablesFor());
+    loadServiceRecordForPdf.mockImplementation(async () => ({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: notesWith(state, guide) }));
+    const early = await freezeReportFactsOnly({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    expect(early.ties.items).toEqual([{ source: 'technician', kind: 'fungus', product: 'fungicide' }]);
+    const before = JSON.stringify(state.notes.lawnReportFacts);
+    const out = await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    expect(JSON.stringify(state.notes.lawnReportFacts)).toBe(before);
+    expect(out.reportFactsFreeze).toBeUndefined();
   });
 });

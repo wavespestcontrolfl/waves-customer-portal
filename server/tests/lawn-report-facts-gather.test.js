@@ -153,10 +153,74 @@ describe('gatherAndFreezeReportFacts', () => {
     expect(state.writes).toBe(0);
   });
 
-  test.each(['service_products', 'products_catalog', 'lawn_assessments', 'lawn_assessment_runs'])('a failed %s read freezes nothing', async (failTable) => {
-    const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failTable });
-    expect(await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true })).toBeNull();
-    expect(state.writes).toBe(0);
+  describe('one attempt decides: a failed attempt records a MARKED block, so nothing can freeze different facts later', () => {
+    const FAILED = { v: 1, failed: true, productUse: {} };
+
+    test.each(['service_products', 'products_catalog', 'lawn_assessments', 'lawn_assessment_runs', 'lawn_protocol_products'])('a failed %s read records the marker (no rule, no spot text, no ties)', async (failTable) => {
+      const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
+      const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray'), productRow(4, 2, 'spot_treatment', { area_value: 100, area_unit: 'sqft' })]), { failTable });
+      const out = await facts.gatherAndFreezeReportFacts({ record: record(notes), knex, withTies: true });
+      expect(out).toMatchObject(FAILED);
+      expect(state.notes.lawnReportFacts).toMatchObject(FAILED);
+      expect(state.notes.lawnReportFacts).not.toHaveProperty('reentry');
+      expect(state.notes.lawnReportFacts).not.toHaveProperty('ties');
+      expect(state.writes).toBe(1);
+    });
+
+    test('what a render reads from the marker is today\'s default: no rule (the clock), no spot text, no ties, no PDF-key change', async () => {
+      const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failTable: 'products_catalog' });
+      await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true });
+      const stored = JSON.stringify(state.notes);
+      expect(facts.readFrozenReportFacts(stored)).not.toBeNull();
+      expect(facts.frozenReentryRule(stored)).toBeNull();
+      expect(facts.frozenReentryForRecord({ structured_notes: stored })).toBeNull();
+      expect(facts.frozenProductUseTexts(stored)).toEqual({});
+      expect(facts.frozenTies(stored, 'as-1')).toEqual([]);
+      expect(facts.frozenTiedFamilies(stored, 'as-1')).toEqual([]);
+      expect(facts.hasFrozenTieBlock(stored, 'as-1')).toBe(false);
+      expect(facts.frozenReportFactsStamp(stored)).toBe('');
+    });
+
+    test('a failing early attempt followed by a succeeding later call: the later call changes nothing (the marker stands)', async () => {
+      const failing = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failTable: 'lawn_assessment_runs' });
+      await facts.gatherAndFreezeReportFacts({ record: record(), knex: failing.knex, withTies: true });
+      expect(failing.state.notes.lawnReportFacts).toMatchObject({ failed: true });
+      // The read recovers; the record the later call loads carries the marker.
+      const healthy = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]));
+      healthy.state.notes = JSON.parse(JSON.stringify(failing.state.notes));
+      const later = await facts.gatherAndFreezeReportFacts({ record: record(healthy.state.notes), knex: healthy.knex, withTies: true });
+      expect(later).toBeNull();
+      expect(healthy.state.writes).toBe(0);
+      expect(healthy.state.notes.lawnReportFacts).toMatchObject({ failed: true });
+      expect(healthy.state.notes.lawnReportFacts).not.toHaveProperty('ties');
+    });
+
+    test('a find whose verification READ failed fails the attempt (the visit is not frozen without a find it could not check)', async () => {
+      const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
+      const { knex, state } = fakeKnex(tables([productRow(4, 1, 'spot_treatment')]), { failTable: 'lawn_protocol_products' });
+      await facts.gatherAndFreezeReportFacts({ record: record(notes), knex, withTies: true });
+      expect(state.notes.lawnReportFacts).toMatchObject({ failed: true });
+      expect(state.notes.lawnReportFacts).not.toHaveProperty('ties');
+    });
+
+    test('ties are not frozen after the copy or the summary already froze without a block (they would disagree with it)', async () => {
+      for (const frozenKey of ['lawnCopyV6', 'lawnVisitSummary']) {
+        const notes = { [frozenKey]: { 'as-1': { v: 1 } }, lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
+        const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray'), productRow(4, 2, 'spot_treatment')]));
+        const out = await facts.gatherAndFreezeReportFacts({ record: record(notes), knex, withTies: true });
+        expect(out).toMatchObject({ v: 1, reentry: { rule: 'dry' } });
+        expect(state.notes.lawnReportFacts).not.toHaveProperty('ties');
+        expect(state.notes.lawnReportFacts).not.toHaveProperty('failed');
+      }
+    });
+
+    test('a failed write of the marker too: nothing is recorded, and nothing throws', async () => {
+      const { knex } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failTable: 'products_catalog' });
+      const realRaw = knex.raw;
+      knex.raw = () => { throw new Error('write failed'); };
+      expect(await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true })).toBeNull();
+      knex.raw = realRaw;
+    });
   });
 
   test('a visit with no assessment still freezes its re-entry rule, with no photo ties', async () => {
