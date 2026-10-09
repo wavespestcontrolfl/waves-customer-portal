@@ -26,8 +26,6 @@
 // incomplete and no-show outcomes, which the sheet does not record.
 import { canRecordConsultationOutcome } from './consultationVisit';
 import { completesOnOwnRecord } from './pest-fast-complete';
-import { CADENCE_OPTIONS } from '../components/ConsultationOutcomeSheet';
-import { fmtMoney } from './money';
 import { formatETDate } from './timezone';
 
 export function isAssessmentFastCompleteEligible(service) {
@@ -46,49 +44,37 @@ export function isAssessmentFastCompleteEligible(service) {
 }
 
 // The estimate line on the sheet (owner 2026-10-09: the estimate sets the price,
-// the sheet only shows it). `summary` is the answer of
+// the sheet only points to it). `summary` is the answer of
 // GET /admin/consultations/:id/estimate (services/assessment-estimate-summary.js).
 // Returns null where the sheet shows nothing: still loading, unreadable, or
-// more than one live estimate (no canonical pick, so no guess). Never builds a
-// number: the figures are the estimate's own stored totals.
-const cadenceLabel = (value) => CADENCE_OPTIONS.find((option) => option.value === value)?.label || '';
-
-// "$59.00 / month", "$708.00 / year", plus a one-time part; null with no total.
-export function estimateAmountLabel(estimate) {
-  const parts = [];
-  const monthly = Number(estimate?.monthlyTotal);
-  const annual = Number(estimate?.annualTotal);
-  const onetime = Number(estimate?.onetimeTotal);
-  if (monthly > 0) parts.push(`${fmtMoney(monthly)} ${cadenceLabel('month')}`);
-  else if (annual > 0) parts.push(`${fmtMoney(annual)} ${cadenceLabel('year')}`);
-  if (onetime > 0) parts.push(`${fmtMoney(onetime)} one-time`);
-  return parts.length ? parts.join(' + ') : null;
-}
-
+// more than one live estimate (no canonical pick, so no guess).
+//
+// NO AMOUNT, on purpose. An estimate's stored monthly / annual / one-time totals
+// are accounting figures: a $100-per-application plan is stored as $50, $75 or
+// $100 "monthly" by visit count, and a one-time total can be an alternative
+// (show_one_time_option), not an added charge. The price a person is quoted is
+// stated by the estimate page from its own lines. So the line says whether the
+// estimate went out and links to it; the price is read there.
+//
 // `sentAt` is the last real handoff to the customer (a delivery, or their own
-// acceptance), so a suppressed send reads "Not sent yet", like a draft.
-const NOT_SENT = 'Not sent yet';
-const STATUS_WORDS = {
-  scheduled: 'Scheduled to send',
-  sending: 'Sending',
-  send_failed: 'Send failed',
+// acceptance), so a suppressed send reads "not sent yet", like a draft.
+const UNSENT_WORDS = {
+  draft: 'Estimate draft, not sent yet',
+  scheduled: 'Estimate scheduled to send',
+  sending: 'Estimate sending',
+  send_failed: 'Estimate send failed',
 };
 
 export function estimateStatusLabel(estimate) {
-  if (estimate?.status === 'accepted') return 'Accepted';
-  if (estimate?.sentAt) return `Sent ${formatETDate(estimate.sentAt, { month: 'short', day: 'numeric' })}`;
-  return STATUS_WORDS[estimate?.status] || NOT_SENT;
+  if (estimate?.status === 'accepted') return 'Estimate accepted';
+  if (estimate?.sentAt) return `Estimate sent ${formatETDate(estimate.sentAt, { month: 'short', day: 'numeric' })}`;
+  return UNSENT_WORDS[estimate?.status] || 'Estimate not sent yet';
 }
 
 export function estimateLineOf(summary) {
   if (!summary) return null;
   if (summary.state === 'found' && summary.estimate) {
-    const { estimate } = summary;
-    return {
-      kind: 'found',
-      estimateId: estimate.id,
-      text: `Estimate: ${[estimateAmountLabel(estimate) || 'no total yet', estimateStatusLabel(estimate)].filter(Boolean).join(' · ')}`,
-    };
+    return { kind: 'found', estimateId: summary.estimate.id, text: estimateStatusLabel(summary.estimate) };
   }
   if (summary.state === 'none') return { kind: 'none', text: 'No estimate yet' };
   if (summary.state === 'retired') {

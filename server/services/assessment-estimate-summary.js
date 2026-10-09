@@ -2,8 +2,8 @@
  * The estimate that belongs to one Waves Assessment visit, as a read-only
  * summary for the Fast Complete sheet (GATE_ASSESSMENT_FAST_COMPLETE, owner
  * 2026-10-09: "estimate should be setting the price and we should pull from
- * this"). The sheet shows the estimate's own figure and links to it; it never
- * stores or types a price, so there is no second copy to drift.
+ * this"). The sheet points to the estimate and links to it; it never stores,
+ * types or restates a price, so there is no second copy to drift.
  *
  * Which estimate: only relations the code already keeps, no matching rule of
  * its own.
@@ -30,6 +30,14 @@
  * delivery that reached the customer, or their own acceptance), never the
  * sent_at column, which a suppressed send stamps while nothing goes out.
  *
+ * NO AMOUNT is returned. The stored monthly / annual / one-time totals are
+ * accounting figures (a per-application plan is stored annualized; a one-time
+ * total can be an alternative under show_one_time_option), and no single
+ * function states an estimate's price to a person: the admin list prints the
+ * monthly figure, the residential email says "priced per application", the
+ * customer page builds it from its own lines. A wrong price here is worse than
+ * none, so the sheet says whether the estimate went out and links to it.
+ *
  * Read-only. The estimate token is never returned: the link is the staff
  * estimate page, not the customer's bearer link.
  */
@@ -40,7 +48,6 @@ const logger = require('./logger');
 const UNSENT_STATUSES = ['draft', 'scheduled', 'send_failed'];
 const COLUMNS = [
   'archived_at', 'created_at', 'expires_at', 'viewed_at', 'estimate_slug', 'estimate_data',
-  'monthly_total', 'annual_total', 'onetime_total',
 ];
 
 function isLive(row, now = new Date()) {
@@ -49,7 +56,6 @@ function isLive(row, now = new Date()) {
   const { isEstimateCustomerViewable } = require('../routes/estimate-public');
   return isEstimateCustomerViewable(UNSENT_STATUSES.includes(status) ? { ...row, status: 'sent' } : row, now);
 }
-const money = (value) => (value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
 const iso = (value) => (value ? new Date(value).toISOString() : null);
 
 function summaryOf(row) {
@@ -61,9 +67,6 @@ function summaryOf(row) {
     // The last real handoff; null when nothing reached the customer.
     sentAt: iso(latestHandoffAt(row)),
     createdAt: iso(row.created_at),
-    monthlyTotal: money(row.monthly_total),
-    annualTotal: money(row.annual_total),
-    onetimeTotal: money(row.onetime_total),
   };
 }
 

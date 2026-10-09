@@ -323,7 +323,7 @@ describe('the estimate line', () => {
   test('shows the estimate\'s own total, status and a staff link; nothing to type', async () => {
     const request = makeRequest({ estimate: SENT_ESTIMATE });
     await openSheet(request);
-    expect(await screen.findByText('Estimate: $59.00 / month · Sent Oct 3')).toBeTruthy();
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
     const link = screen.getByRole('link', { name: 'Open estimate' });
     expect(link.getAttribute('href')).toBe('/admin/estimates?estimateId=est-1');
     expect(link.getAttribute('target')).toBe('_blank');
@@ -336,14 +336,28 @@ describe('the estimate line', () => {
     expect(request.calls.filter((call) => call.path.endsWith('/estimate'))).toEqual([{ path: '/admin/consultations/svc-a/estimate', method: 'GET', body: null }]);
   });
 
-  test('a draft says it is not sent; an annual and one-time total read as the estimate states them', async () => {
-    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, status: 'draft', sentAt: null, monthlyTotal: 0, annualTotal: 708, onetimeTotal: 150 } } }));
-    expect(await screen.findByText('Estimate: $708.00 / year + $150.00 one-time · Not sent yet')).toBeTruthy();
+  test('a draft says it is not sent', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, status: 'draft', sentAt: null } } }));
+    expect(await screen.findByText('Estimate draft, not sent yet')).toBeTruthy();
+  });
+
+  // The stored totals are accounting figures, not the quoted price. Even if a
+  // response carried them, the sheet prints no amount and no cadence.
+  test.each([
+    ['a per-application plan stored as $50 monthly', { monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0 }],
+    ['a recurring-or-one-time estimate', { monthlyTotal: 59, annualTotal: 708, onetimeTotal: 249, showOneTimeOption: true }],
+  ])('%s: no amount, no "/ month", no added one-time', async (_label, totals) => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, ...totals } } }));
+    const line = await screen.findByText('Estimate sent Oct 3');
+    const card = line.closest('section');
+    expect(card.textContent).toBe('Estimate sent Oct 3Open estimate');
+    // The card is the whole estimate line; no dollar figure anywhere on the sheet.
+    expect(document.body.textContent).not.toMatch(/\$|\d+\.\d\d|one-time/i);
   });
 
   test('a suppressed send (status sent, no delivery date) reads "Not sent yet", never a date', async () => {
     await openSheet(makeRequest({ estimate: { state: 'found', estimate: { ...SENT_ESTIMATE.estimate, sentAt: null } } }));
-    expect(await screen.findByText('Estimate: $59.00 / month · Not sent yet')).toBeTruthy();
+    expect(await screen.findByText('Estimate not sent yet')).toBeTruthy();
   });
 
   test('"No estimate yet" with a link that starts one for this customer', async () => {
@@ -386,7 +400,7 @@ describe('the estimate line', () => {
     const row = { outcome: 'warm', interests: [], quoted_amount: '129.5', quoted_cadence: 'quarter', quote_notes: 'Side yard' };
     const request = makeRequest({ row, estimate: SENT_ESTIMATE });
     render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
-    await screen.findByText('Estimate: $59.00 / month · Sent Oct 3');
+    await screen.findByText('Estimate sent Oct 3');
     fireEvent.change(note(), { target: { value: 'Second look.' } });
     fireEvent.click(completeButton());
     await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
@@ -398,7 +412,7 @@ describe('the estimate line', () => {
   test.each([['technician'], [null]])('role %s: the estimate line shows, with no Open estimate link', async (role) => {
     mockRole = role;
     await openSheet(makeRequest({ estimate: SENT_ESTIMATE }));
-    expect(await screen.findByText('Estimate: $59.00 / month · Sent Oct 3')).toBeTruthy();
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
     expect(screen.queryByRole('link')).toBeNull();
   });
 
@@ -409,10 +423,67 @@ describe('the estimate line', () => {
     expect(screen.queryByRole('link')).toBeNull();
   });
 
+  test('coming back to the tab re-reads the estimate, one request at a time, and keeps what the tech typed', async () => {
+    let current = { state: 'none' };
+    let release = null;
+    const base = makeRequest();
+    const request = vi.fn(async (path, options) => {
+      if (path === '/admin/consultations/svc-a/estimate') {
+        base.calls.push({ path, method: 'GET', body: null });
+        if (release === 'hold') await new Promise((resolve) => { release = resolve; });
+        return { estimate: current };
+      }
+      return base(path, options);
+    });
+    request.calls = base.calls;
+    const reads = () => request.calls.filter((call) => call.path.endsWith('/estimate')).length;
+    await openSheet(request);
+    expect(await screen.findByText('No estimate yet')).toBeTruthy();
+    fireEvent.change(note(), { target: { value: 'Walked the yard.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cold' }));
+    fireEvent.change(screen.getByLabelText('Call back on'), { target: { value: '2026-10-20' } });
+    // The admin made and sent the estimate in the other tab, then came back.
+    screen.getByRole('link', { name: 'Create estimate' }).focus();
+    current = SENT_ESTIMATE;
+    release = 'hold';
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(reads()).toBe(2));
+    // A second return while the first read is in flight starts no second request.
+    fireEvent(window, new Event('focus'));
+    fireEvent(document, new Event('visibilitychange'));
+    expect(reads()).toBe(2);
+    release();
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open estimate' })).toBeTruthy();
+    expect(note().value).toBe('Walked the yard.');
+    expect(screen.getByRole('button', { name: 'Cold' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByLabelText('Call back on').value).toBe('2026-10-20');
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(posts(request, '/complete')).toHaveLength(1));
+    expect(posts(request, '/complete')[0].body.consultationOutcome).toMatchObject({ outcome: 'cold', followUpAt: '2026-10-20T09:00' });
+  });
+
+  test('a failed re-read keeps the estimate line already shown', async () => {
+    let fail = false;
+    const base = makeRequest({ estimate: SENT_ESTIMATE });
+    const request = vi.fn(async (path, options) => {
+      if (fail && path === '/admin/consultations/svc-a/estimate') throw new Error('offline');
+      return base(path, options);
+    });
+    request.calls = base.calls;
+    await openSheet(request);
+    await screen.findByText('Estimate sent Oct 3');
+    screen.getByRole('link', { name: 'Open estimate' }).focus();
+    fail = true;
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/estimate')).length).toBe(2));
+    expect(screen.getByText('Estimate sent Oct 3')).toBeTruthy();
+  });
+
   test('a won consultation still shows the estimate line', async () => {
     const request = makeRequest({ row: { outcome: 'won', won_at: '2026-10-08T15:00:00.000Z', interests: [] }, estimate: SENT_ESTIMATE });
     render(<FastCompleteAssessmentSheet service={SERVICE} request={request} onClose={() => {}} />);
-    expect(await screen.findByText('Estimate: $59.00 / month · Sent Oct 3')).toBeTruthy();
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
   });
 });
 

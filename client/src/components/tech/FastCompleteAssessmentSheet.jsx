@@ -15,11 +15,14 @@
 //     imported from there, never copied;
 //   - an optional "Call back on" date, the office sheet's own follow-up rule
 //     (followUpApplies, followUpPayload, its blank-date default);
-//   - the customer's estimate, READ-ONLY: its stored total and status and a
-//     link that opens it for staff, or "No estimate yet" and a link to start
-//     one (owner 2026-10-09: the estimate sets the price). There is no price
-//     field and the sheet never writes the estimate's figure into the outcome
-//     row; the quote fields the row already holds ride through untouched;
+//   - the customer's estimate, READ-ONLY: whether one exists and whether it
+//     went out, and a link that opens it for staff, or "No estimate yet" and a
+//     link to start one (owner 2026-10-09: the estimate sets the price). The
+//     sheet prints NO amount: the stored totals are annualized accounting
+//     figures, not the price a per-application or one-time-option estimate
+//     states, and no one function states that price to a person. There is no
+//     price field and nothing of the estimate is written into the outcome row;
+//     the quote fields the row already holds ride through untouched;
 //   - the $75 inspection credit toggle, only where the full form shows it.
 //
 // Required before Complete: a note and an outcome pick. Nothing else blocks.
@@ -50,6 +53,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
   FOLLOW_UP_DEFAULT_HINT, INTEREST_OPTIONS, LOST_REASON_OPTIONS, OUTCOME_OPTIONS,
@@ -98,20 +102,32 @@ export function assessmentCompletionBody({ note, offerCredit, expectedVisit, con
   };
 }
 
-// The estimate that belongs to this assessment, read once for display. A read
-// that fails or answers nothing shows nothing: the estimate line is a
-// convenience and never blocks the sheet.
+// The estimate that belongs to this assessment, read for display. A read that
+// fails or answers nothing shows nothing: the estimate line is a convenience
+// and never blocks the sheet. Both links open a new tab, so the read runs again
+// when this tab is shown or focused again (useVisiblePageRefresh: one request
+// in flight, none while offline or hidden). It holds only the summary; nothing
+// the tech typed is touched. A response that is not the newest request's, or
+// that lands after unmount, is dropped; a failed refresh keeps the last answer.
 export function useAssessmentEstimate(serviceId, request) {
   const [summary, setSummary] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    setSummary(null);
-    Promise.resolve()
-      .then(() => request(`/admin/consultations/${encodeURIComponent(serviceId)}/estimate`))
-      .then((data) => { if (!cancelled) setSummary(data?.estimate || null); })
-      .catch(() => { if (!cancelled) setSummary(null); });
-    return () => { cancelled = true; };
+  const latest = useRef(0);
+  const load = useCallback(async ({ keepOnError = false } = {}) => {
+    const mine = ++latest.current;
+    try {
+      const data = await request(`/admin/consultations/${encodeURIComponent(serviceId)}/estimate`);
+      if (mine === latest.current) setSummary(data?.estimate || null);
+    } catch {
+      if (mine === latest.current && !keepOnError) setSummary(null);
+    }
   }, [serviceId, request]);
+  useEffect(() => {
+    setSummary(null);
+    load();
+    // Unmount, or another visit: no later answer of this one may land.
+    return () => { latest.current += 1; };
+  }, [load]);
+  useVisiblePageRefresh(() => load({ keepOnError: true }), { intervalMs: 0 });
   return summary;
 }
 

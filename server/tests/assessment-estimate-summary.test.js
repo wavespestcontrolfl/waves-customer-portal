@@ -71,12 +71,25 @@ describe('assessmentEstimateSummary', () => {
     expect(out.state).toBe('found');
     expect(out.estimate).toEqual({
       id: 'est-1', slug: 'EST-2026-0001', status: 'sent', sentAt: at(-5),
-      createdAt: at(-7), monthlyTotal: 59, annualTotal: 708, onetimeTotal: 0,
+      createdAt: at(-7),
     });
     expect(JSON.stringify(out)).not.toMatch(/secret-token|token/);
     // The link is read for THIS visit and customer.
     expect(conn.reads[0].raw.bind).toEqual(['visit-1']);
     expect(conn.reads[0].filters).toContainEqual({ customer_id: 'cust-1' });
+  });
+
+  // The stored totals are accounting figures, not the quoted price: a
+  // $100-per-application plan is stored annualized, and a one-time total can be
+  // an alternative. The summary states no amount at all.
+  test.each([
+    ['a per-application plan (six $100 applications, stored as $50 monthly)', { monthly_total: '50.00', annual_total: '600.00', onetime_total: '0.00', estimate_data: { engineResult: { lineItems: [{ service: 'lawn_care', monthly: 50, annual: 600, perApp: 100, frequency: 6 }] } } }],
+    ['a recurring-or-one-time estimate (show_one_time_option)', { monthly_total: '59.00', annual_total: '708.00', onetime_total: '249.00', show_one_time_option: true }],
+  ])('%s: no amount of any kind leaves the server', async (_label, over) => {
+    const out = await assessmentEstimateSummary(VISIT, { conn: makeConn({ linked: ['est-1'], rows: [row(over)] }) });
+    expect(out.state).toBe('found');
+    expect(Object.keys(out.estimate).sort()).toEqual(['createdAt', 'id', 'sentAt', 'slug', 'status']);
+    expect(JSON.stringify(out)).not.toMatch(/50|59|100|249|600|708|total|monthly|perApp/i);
   });
 
   test('a draft shows no sent date', async () => {
