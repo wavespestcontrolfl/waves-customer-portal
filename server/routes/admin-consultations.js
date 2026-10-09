@@ -52,6 +52,19 @@ async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
   return visit;
 }
 
+// The same canonical current-assignment predicate as loadOwnedVisitOr403, as
+// SQL on the visit alias (own row, not a dead status, inside the window), so a
+// read is coupled to the CURRENT assignment in its own query. An admin reads
+// any visit. One definition for every guarded read in this router.
+function scopeToCurrentAssignment(query, req, alias) {
+  if (req.techRole !== 'admin') {
+    query.where(`${alias}.technician_id`, req.technicianId)
+      .whereNotIn(`${alias}.status`, TECH_DEAD_ASSIGNMENT_STATUSES)
+      .where(`${alias}.scheduled_date`, '>=', techAccessCutoff());
+  }
+  return query;
+}
+
 // POST /api/admin/consultations/:scheduledServiceId/outcome
 router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
@@ -98,13 +111,7 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
     const q = db('consultation_outcomes as co')
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
       .where('co.scheduled_service_id', scheduledServiceId);
-    // The same canonical current-assignment predicate as loadOwnedVisitOr403,
-    // inlined on the `ss` alias (own row, not a dead status, inside the window).
-    if (req.techRole !== 'admin') {
-      q.where('ss.technician_id', req.technicianId)
-        .whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
-        .where('ss.scheduled_date', '>=', techAccessCutoff());
-    }
+    scopeToCurrentAssignment(q, req, 'ss');
     const row = await q.first('co.*');
     if (!row) {
       // Reassigned in between → the same 403 the check gives; else 404.
@@ -130,8 +137,17 @@ router.get('/:scheduledServiceId/estimate', adminAuthenticate, requireTechOrAdmi
     }
     const { scheduledServiceId } = req.params;
     if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
-    const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'customer_id', 'source_estimate_id');
-    if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+    // The visit row the summary is built from is read under the current
+    // assignment (the outcome read's own guard): a technician reassigned after
+    // the check above gets no estimate.
+    const visit = await scopeToCurrentAssignment(
+      db('scheduled_services as ss').where('ss.id', scheduledServiceId), req, 'ss',
+    ).first('ss.id', 'ss.customer_id', 'ss.source_estimate_id');
+    if (!visit) {
+      // Reassigned in between → the same 403 the check gives; else 404.
+      if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     const estimate = await require('../services/assessment-estimate-summary').assessmentEstimateSummary(visit);
     res.json({ estimate });
   } catch (err) {

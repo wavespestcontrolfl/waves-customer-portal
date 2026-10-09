@@ -72,6 +72,12 @@ jest.mock('../models/db', () => {
           if (mockVisitRowAfterFirstRead) { mockVisitRow = mockVisitRowAfterFirstRead; mockVisitRowAfterFirstRead = null; }
           return Promise.resolve(row);
         }
+        // The estimate route's guarded visit read: coupled to the current
+        // technician in its own query.
+        if (table === 'scheduled_services as ss') {
+          if (techFilter !== undefined && mockVisitRow?.technician_id !== techFilter) return Promise.resolve(null);
+          return Promise.resolve(mockVisitRow ? { ...mockVisitRow, customer_id: 'cust-1', source_estimate_id: null } : null);
+        }
         if (table === 'consultation_outcomes' || table === 'consultation_outcomes as co') {
           if (techFilter !== undefined && mockVisitRow?.technician_id !== techFilter) return Promise.resolve(null);
           return Promise.resolve(mockOutcomeRow);
@@ -298,6 +304,26 @@ describe('GET /:scheduledServiceId/estimate (Fast Complete estimate line)', () =
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ estimate: { state: 'found', estimate: { id: 'est-1' } } });
     expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID }));
+  });
+
+  test('a technician reassigned right after the ownership check gets 403 and no estimate fields', async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockCurrentRole = 'technician';
+    mockEstimateSummary.mockResolvedValue({ state: 'found', estimate: { id: 'est-1', monthlyTotal: 59 } });
+    mockVisitRowAfterFirstRead = { id: ID, technician_id: 'someone-else', status: 'confirmed', scheduled_date: TODAY_ET };
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(403);
+    expect(res.body).not.toHaveProperty('estimate');
+    expect(mockEstimateSummary).not.toHaveBeenCalled();
+  });
+
+  test("an admin reads any technician's visit estimate, from the guarded visit row", async () => {
+    process.env.GATE_ASSESSMENT_FAST_COMPLETE = 'true';
+    mockVisitRow = { id: ID, technician_id: 'someone-else', status: 'confirmed', scheduled_date: TODAY_ET };
+    mockEstimateSummary.mockResolvedValue({ state: 'none' });
+    const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
+    expect(res.status).toBe(200);
+    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID, customer_id: 'cust-1' }));
   });
 
   test("a technician cannot read another technician's visit estimate (403, summary never read)", async () => {
