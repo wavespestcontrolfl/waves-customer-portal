@@ -454,6 +454,10 @@ const CLASSES = [
   { // call-booking-rain-flag.js — one notice per phone-booked visit
     key: 'call_booking_rain', categories: ['schedule'], prefix: 'call-booking-rain:', rule: callBookingRainSettled,
   },
+  { // auto-dispatch/rain-pass.js — one notice per visit at a date and start;
+    // the same metadata, so the same rule: closed, moved, or the date passed.
+    key: 'rain_pass', categories: ['schedule'], prefix: 'rain-pass:', rule: callBookingRainSettled,
+  },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
   },

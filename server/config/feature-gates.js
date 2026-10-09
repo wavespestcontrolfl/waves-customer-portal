@@ -3454,6 +3454,17 @@ const gates = {
   // Kill switch: unset.
   callBookingRainFlag: gateEnvValue('GATE_CALL_BOOKING_RAIN_FLAG'),
 
+  // Auto-dispatch rain pass (owner 2026-10-08): the 04:10 run never moves a
+  // visit inside 72 hours and the hourly rain forecast is good for 3 dates,
+  // so the run cannot see rain. This pass reads the booked visits on those 3
+  // dates twice a day; an outdoor visit whose hourly chance reaches 70% from
+  // its start through 2 h after its end gets one admin notification on the
+  // 'schedule' channel, naming a dry open hour on the same date when there
+  // is one. Nothing is moved and no customer is texted. OFF in every
+  // environment; auto-dispatch/rain-pass.js reads it through gateEnvValue()
+  // at call time. Kill switch: unset.
+  autoDispatchRainPass: gateEnvValue('GATE_AUTO_DISPATCH_RAIN_PASS'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a

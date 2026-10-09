@@ -893,6 +893,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:30AM + 2:30PM — Auto-dispatch rain pass. The 4:10 run above
+  // cannot see rain (it never moves a visit inside 72 hours; the hourly
+  // forecast is good for 3 dates), so this reads the booked outdoor visits
+  // on those dates and tells the office which sit in rain and which hour
+  // that day is dry and open. Notify-only: never moves a visit, never texts
+  // a customer. Dark behind GATE_AUTO_DISPATCH_RAIN_PASS, read inside the
+  // pass. runExclusive because overlapping deploy instances would read the
+  // forecast twice.
+  // =========================================================================
+  cron.schedule('30 4,14 * * *', async () => {
+    try {
+      await runExclusive('auto-dispatch-rain-pass', async () => {
+        const { runRainPass } = require('./auto-dispatch/rain-pass');
+        await runRainPass();
+      });
+    } catch (err) {
+      logger.error(`Auto-dispatch rain pass failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :27 — Consultation-outcome reconciliation sweep. THE COMPLETENESS
   // GUARANTEE behind the direct hooks at admin-leads.js/admin-schedule.js
   // (see the RECONCILIATION MODEL note atop consultation-outcomes.js): those

@@ -1,0 +1,136 @@
+/**
+ * Auto-dispatch rain pass (owner 2026-10-08, GATE_AUTO_DISPATCH_RAIN_PASS,
+ * dark). A booked outdoor visit whose hourly chance of rain reaches 70% gets
+ * one admin notice naming a dry, open hour on the same date. Nothing for
+ * rain-OK work, a chance under 70%, a visit about to start, a date past the
+ * 3 days, or the gate off. The pass never moves a visit.
+ */
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const { runRainPass, planRainPass, _test } = require('../services/auto-dispatch/rain-pass');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+
+const TODAY = etDateString();
+const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${TODAY}T12:00`), n));
+const D1 = dayOffset(1);
+const NOW = parseETDateTime(`${TODAY}T04:30`);
+// Every date: 13:00-17:00 read 80%; every other hour 10%.
+const hourlyFor = (wetHours = [13, 14, 15, 16, 17]) => [0, 1, 2, 3].flatMap((d) => Array.from({ length: 24 }, (_, h) => ({
+  startTime: `${dayOffset(d)}T${String(h).padStart(2, '0')}:00:00-04:00`, rainChance: wetHours.includes(h) ? 80 : 10,
+})));
+const stop = (extra = {}) => ({
+  id: 'visit-1', customer_id: 'cust-1', service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_general_quarterly',
+  technician_id: 'tech-1', status: 'confirmed', scheduled_date: D1, window_start: '14:00:00', window_end: '15:00:00',
+  memberIds: ['visit-1'], ...extra,
+});
+
+function deps(stops, extra = {}) {
+  return {
+    loadStops: jest.fn(async () => stops),
+    storedVisitServices: jest.fn(async () => null),
+    withCatalogKeys: jest.fn(async (items) => items.map((item) => ({ name: item.name, serviceKey: item.serviceKey, findingsType: null }))),
+    visitPoint: jest.fn(async () => ({ lat: 27.4, lng: -82.4 })),
+    hourlyRain: jest.fn(async () => hourlyFor()),
+    rainOut: { loadOccupancy: jest.fn(async () => ({ rows: [] })), conflictsForTarget: jest.fn(() => []) },
+    dayHours: { DAY_START_HOUR: 8, DAY_END_HOUR: 17 },
+    customerName: jest.fn(async () => 'Test Person'),
+    raiseAdminAlert: jest.fn(async () => ({ notification: { id: 'n1' } })),
+    ...extra,
+  };
+}
+
+describe('auto-dispatch rain pass', () => {
+  afterEach(() => { delete process.env.GATE_AUTO_DISPATCH_RAIN_PASS; });
+
+  test('gate off: nothing is read and nothing is sent', async () => {
+    const d = deps([stop()]);
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: false, reason: 'gate_off' });
+    expect(d.loadStops).not.toHaveBeenCalled();
+    expect(d.raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('an outdoor visit in rain gets one notice that names the nearest dry open hour and passes the admin-alert rule', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const d = deps([stop()]);
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 1, wet: 1, noticed: 1 });
+    expect(d.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = d.raiseAdminAlert.mock.calls[0];
+    expect(category).toBe('schedule');
+    const composed = require('../services/admin-alert-compose').composeAdminAlert(spec);
+    expect(composed.headline).toBe("Schedule — move Test Person's visit out of rain");
+    // 10:00 is the last start whose work hour and two drying hours end before the 13:00 rain.
+    expect(composed.why).toMatch(/2:00 PM has 80% rain; 10:00 AM is dry and open\.$/);
+    expect(spec.link).toBe(`/admin/dispatch?tab=schedule&date=${D1}&appointment=visit-1`);
+    expect(opts.dedupeKey).toBe(`rain-pass:visit-1:${D1}:14:00`);
+    // The relevance sweep reads these to close the notice when the visit moves.
+    expect(opts.metadata).toMatchObject({ scheduledServiceId: 'visit-1', scheduled_date: D1, window_start: '14:00', proposed_start: '10:00' });
+  });
+
+  test('the proposed hour skips one another stop of the technician holds', async () => {
+    const d = deps([stop()]);
+    d.rainOut.conflictsForTarget = jest.fn((_snapshot, _id, _date, window) => (window.start === '10:00' ? [{ id: 'other' }] : []));
+    const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+    expect(row).toMatchObject({ wet: true, peak: 80, proposal: '09:00' });
+    expect(d.rainOut.conflictsForTarget.mock.calls[0][4]).toEqual({ excludeServiceIds: ['visit-1'], technicianId: 'tech-1' });
+  });
+
+  test('rain all day: the notice says there is no dry open hour', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const d = deps([stop()], { hourlyRain: jest.fn(async () => hourlyFor(Array.from({ length: 24 }, (_, h) => h))) });
+    await runRainPass({ now: NOW, db: {}, deps: d });
+    const [, spec, opts] = d.raiseAdminAlert.mock.calls[0];
+    expect(require('../services/admin-alert-compose').composeAdminAlert(spec).why).toMatch(/has 80% rain; no dry open hour that day\.$/);
+    expect(opts.metadata.proposed_start).toBeNull();
+  });
+
+  test.each([
+    ['rain-OK work', stop({ service_type: 'WDO Inspection', service_key_snapshot: 'wdo_inspection' }), {}, 'not_outdoor'],
+    ['a chance under 70%', stop(), { hourlyRain: jest.fn(async () => hourlyFor().map((h) => ({ ...h, rainChance: Math.min(h.rainChance, 65) }))) }, 'not_wet'],
+    ['a dry morning visit', stop({ window_start: '09:00:00', window_end: '10:00:00' }), {}, 'not_wet'],
+    ['a date past the 3 days', stop({ scheduled_date: dayOffset(3) }), {}, 'past_horizon'],
+    ['no forecast', stop(), { hourlyRain: jest.fn(async () => null) }, 'no_forecast'],
+    ['no point for the visit', stop(), { visitPoint: jest.fn(async () => null) }, 'no_point'],
+  ])('no notice for %s', async (_label, visit, extra, reason) => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const d = deps([visit], extra);
+    const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+    expect(row).toMatchObject({ wet: false, reason });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, noticed: 0 });
+    expect(d.raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a visit that starts within two hours today is left to storm watch', async () => {
+    const d = deps([stop({ scheduled_date: TODAY })]);
+    const [row] = await planRainPass({ now: parseETDateTime(`${TODAY}T12:30`), db: {}, deps: d });
+    expect(row).toMatchObject({ wet: false, reason: 'too_soon' });
+  });
+
+  test('a shared stop is judged across every service on it: a dry own hour with a wet sibling hour is wet', async () => {
+    const d = deps([stop({ window_start: '11:00:00', window_end: '12:00:00', memberIds: ['visit-1', 'visit-2'] })], {
+      storedVisitServices: jest.fn(async () => ({
+        own: [{ name: 'Quarterly Pest Control Service', key: 'pest_general_quarterly' }],
+        siblings: [{ name: 'Lawn Care', key: 'lawn_care_monthly' }],
+        span: { startOffset: 0, endOffset: 120 },
+      })),
+    });
+    const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+    // 11:00-13:00 of work, then drying through 15:00: the 13:00 rain is inside it.
+    expect(row).toMatchObject({ wet: true, peak: 80, proposal: '09:00' });
+  });
+
+  test('an hour with no reading is never taken for a dry hour', () => {
+    const hourly = hourlyFor().filter((h) => !h.startTime.startsWith(`${D1}T11`));
+    expect(_test.spanRain(hourly, D1, 9 * 60, 10 * 60)).toEqual({ peak: 10, complete: false });
+    expect(_test.spanRain(hourly, D1, 8 * 60, 9 * 60)).toEqual({ peak: 10, complete: true });
+  });
+
+  test('a failed notice does not stop the next one, and a repeat of a standing notice is not counted', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const raiseAdminAlert = jest.fn()
+      .mockRejectedValueOnce(new Error('db down'))
+      .mockResolvedValueOnce({ notification: { id: 'n1' }, deduped: true });
+    const d = deps([stop(), stop({ id: 'visit-2', memberIds: ['visit-2'] })], { raiseAdminAlert });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 2, wet: 2, noticed: 0 });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+  });
+});
