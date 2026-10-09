@@ -30,6 +30,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
+import { buildLinePriceOverridesPayload, overridableLines } from "../../lib/linePriceOverrides";
 import "../../styles/estimate-workflow.css";
 import { addressAskNotice, filterAddressAsks } from "../../lib/addressAsks";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
@@ -1282,6 +1283,85 @@ function mosquitoTierSelectionFlags(R, tier, index) {
   return { selected, recommended, dimmed: !selected };
 }
 
+// Per-line price override card (owner ask 2026-10-09). Lists every priced
+// one-time / specialty line of the generated estimate with an amount + reason
+// input; Apply regenerates through the engine, which replaces the line price
+// with the typed amount (see lib/linePriceOverrides.js + estimate-engine
+// applyLinePriceOverrides). Entries live on the form so a saved estimate's
+// inputs reopen with them and the persisted engineRequest replays them.
+function LinePriceOverridesCard({ estimate, generating, onApply }) {
+  const { form, set } = useContext(FormCtx);
+  const lines = overridableLines(estimate);
+  if (lines.length === 0) return null;
+  const entries = form.linePriceOverrides || {};
+  const update = (line, patch) => {
+    const current = entries[line.service] || { price: "", reason: "" };
+    set("linePriceOverrides", {
+      ...entries,
+      [line.service]: { ...current, ...patch, name: line.name },
+    });
+  };
+  const hasPending = lines.some((line) => {
+    const entry = entries[line.service];
+    const typed = String(entry?.price ?? "").trim();
+    return typed !== "" && Number(typed) !== line.price;
+  });
+  return (
+    <div className="mb-6 p-3 bg-zinc-50 border-hairline border-zinc-300 rounded-sm">
+      <div className="text-14 font-medium text-zinc-900 mb-1">Price Overrides</div>
+      <div className="text-14 text-ink-secondary mb-3">
+        Replace the engine price of a one-time or specialty line for this estimate only. The typed amount is the line price the customer sees; a manual estimate discount still applies on top.
+      </div>
+      {lines.map((line) => {
+        const entry = entries[line.service] || {};
+        const priceId = `estimate-line-override-${line.service}`;
+        const reasonId = `estimate-line-override-reason-${line.service}`;
+        return (
+          <div key={line.service} className="grid grid-cols-1 sm:grid-cols-[1fr_140px_1fr] gap-3 items-end mb-2">
+            <div className="text-14 text-zinc-900">
+              <div className="font-medium">{line.name}</div>
+              <div className="text-ink-secondary u-nums">
+                Engine price {fmtInt(line.enginePrice)}
+                {line.priceOverridden ? ` · currently ${fmtInt(line.price)}` : ""}
+              </div>
+            </div>
+            <Field label="Override ($)" id={priceId} className="mb-0">
+              <Input
+                id={priceId}
+                type="number"
+                min="0.01"
+                step="0.01"
+                placeholder="Engine price"
+                value={entry.price ?? ""}
+                onChange={(e) => update(line, { price: e.target.value })}
+              />
+            </Field>
+            <Field label="Reason (internal)" id={reasonId} className="mb-0">
+              <Input
+                id={reasonId}
+                type="text"
+                maxLength={300}
+                placeholder="e.g. carpenter ant infestation"
+                value={entry.reason ?? ""}
+                onChange={(e) => update(line, { reason: e.target.value })}
+              />
+            </Field>
+          </div>
+        );
+      })}
+      <Button
+        variant="secondary"
+        size="sm"
+        className="mt-2"
+        disabled={generating}
+        onClick={onApply}
+      >
+        {hasPending ? "Apply overrides & regenerate" : "Regenerate"}
+      </Button>
+    </div>
+  );
+}
+
 function RoachOverrideAppliedNote({ estimate, variant }) {
   const item = (estimate?.oneTime?.items || []).find(
     (it) =>
@@ -1476,6 +1556,8 @@ export default function EstimateToolViewV2({
     roachModifier: "NONE",
     roachFeeOverride: "",
     standaloneRoachFeeOverride: "",
+    // { [service]: { price, reason, name } } — see lib/linePriceOverrides.
+    linePriceOverrides: {},
     lawnFreq: "9",
     bermudaSuppression: false,
     measuredTurfSf: "",
@@ -4019,6 +4101,15 @@ export default function EstimateToolViewV2({
         );
         return null;
       }
+      // Per-line price overrides (any priced one-time / specialty line).
+      const linePriceOverridesBuilt = buildLinePriceOverridesPayload(
+        overrides.linePriceOverrides ?? form.linePriceOverrides,
+      );
+      if (linePriceOverridesBuilt.error) {
+        alert(linePriceOverridesBuilt.error);
+        return null;
+      }
+      const linePriceOverrides = linePriceOverridesBuilt.payload;
 
       const options = {
         grassType: form.grassType || "st_augustine",
@@ -4058,6 +4149,7 @@ export default function EstimateToolViewV2({
         ...(standaloneRoachFeeOverrideRelevant && standaloneRoachFeeOverride
           ? { standaloneRoachPriceOverride: standaloneRoachFeeOverride }
           : {}),
+        ...(linePriceOverrides ? { linePriceOverrides } : {}),
         mosquitoProgram: form.mosquitoProgram || "monthly12",
         mosquitoStationCount: parseInt(form.mosquitoStationCount, 10) || 0,
         mosquitoDunkCount: parseInt(form.mosquitoDunkCount, 10) || 0,
@@ -4720,6 +4812,7 @@ export default function EstimateToolViewV2({
       // quote (codex P2 #3223) — services stay selected, custom fees do not.
       roachFeeOverride: "",
       standaloneRoachFeeOverride: "",
+      linePriceOverrides: {},
       fleaOfferKey: "flea_elimination_two_visit",
       fleaComplexity: "light",
       fleaExteriorSourceSuspected: false,
@@ -8830,13 +8923,13 @@ export default function EstimateToolViewV2({
                                   price={fmtInt(item.price)}
                                 />{" "}
                               </TierGridV2>{" "}
-                              {item.service === "pest_initial_roach" &&
-                                item.priceOverridden && (
-                                  <div className="text-14 text-ink-secondary mt-1">
-                                    Fee manually overridden — engine bracket
-                                    price is {fmtInt(item.bracketPrice)}.
-                                  </div>
-                                )}
+                              {item.priceOverridden && (
+                                <div className="text-14 text-ink-secondary mt-1">
+                                  {item.service === "pest_initial_roach"
+                                    ? `Fee manually overridden — engine bracket price is ${fmtInt(item.bracketPrice)}.`
+                                    : `Price manually overridden — engine price is ${fmtInt(item.enginePrice)}.${item.priceOverrideReason ? ` Reason: ${item.priceOverrideReason}` : ""}`}
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -8866,11 +8959,22 @@ export default function EstimateToolViewV2({
                                   {serviceDetailText(s)}
                                 </div>
                               )}{" "}
+                              {s.priceOverridden && (
+                                <div className="text-14 text-ink-secondary mt-1">
+                                  Price manually overridden — engine price is {fmtInt(s.enginePrice)}.
+                                  {s.priceOverrideReason ? ` Reason: ${s.priceOverrideReason}` : ""}
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>{" "}
                       </>
                     )}
+                    <LinePriceOverridesCard
+                      estimate={E}
+                      generating={generating}
+                      onApply={() => doGenerate()}
+                    />
                     {(() => {
                       // Report-only low-margin signals (owner ruling
                       // 2026-07-17: margins are surfaced, never enforced) —

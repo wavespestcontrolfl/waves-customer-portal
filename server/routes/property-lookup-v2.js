@@ -6087,6 +6087,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // after WaveGuard, capped at base — exact mirror of v2 calcTotals.
     manualDiscount: o.manualDiscount || null,
     serviceSpecificDiscounts: Array.isArray(o.serviceSpecificDiscounts) ? o.serviceSpecificDiscounts : [],
+    // Per-line operator price overrides ({ [service]: { price, reason } }).
+    // Forwarded raw so the engine's own validation runs (same rule as the
+    // roach fee override) and so a persisted engineRequest replays them.
+    ...(o.linePriceOverrides && typeof o.linePriceOverrides === 'object'
+      ? { linePriceOverrides: o.linePriceOverrides }
+      : {}),
     services,
   };
 }

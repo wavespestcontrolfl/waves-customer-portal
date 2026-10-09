@@ -307,6 +307,23 @@ Urgency and WaveGuard tier discounts do not apply; active recurring customers
 receive the 15% one-time perk. Live database pricing can override these
 defaults.
 
+**Operator price override (per line):** `input.linePriceOverrides` —
+`{ [service]: { price, reason } }` (a bare number is accepted as `price`) —
+replaces the engine price of any priced one-time or specialty line
+(`one_time_pest`, `stinging_insect`, `wdo_inspection`, `flea_package`, …) with
+the typed amount. Owner ask 2026-10-09 (a $240 engine quote on a carpenter-ant
+job worth $400). Applied in `estimate-engine.js` right after the pricers run
+(`applyLinePriceOverrides`): the typed amount is the line's final price — the
+automatic one-time perk is not re-applied on top of it; an estimate-level
+manual discount still is. The line keeps the engine number as `enginePrice` /
+`engineTotal` and carries `priceOverridden: true` + `priceOverrideReason`
+(mapped through to the stored one-time / specialty item). Recurring (annual)
+lines, quote-required lines and `pest_initial_roach` (which has its own
+`priceOverride` input) are never overridden; an invalid amount surfaces as a
+line warning and the engine price stands. The admin builder sends it as
+`options.linePriceOverrides`, so a persisted `engineRequest` replays the
+override on every server reprice.
+
 > **Public quote mapping:** `public-quote.js` maps supported website selections
 > to recurring services and to one-time pest, lawn, mosquito, and specialty
 > engine inputs. Cases marked quote-required or requiring unsupported/custom
