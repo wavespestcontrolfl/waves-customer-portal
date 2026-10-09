@@ -12053,6 +12053,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // customer cannot both read an empty history, and history may have changed since the quote. The customer it resolves to
       // under that lock is the phone match the account step below makes. Left out: only the hold this accept graduates and the
       // appointment it adopts, never the estimate's other bookings.
+      // The add-on GATE first, read again here: the update above proved the estimate row is the one this request read, but the
+      // gate can turn off between the unlocked check at the top of the route and this point, and the limit recheck reads nothing
+      // with the gate off. A gated add-on rolls the accept back with the same 409 the unlocked check answers.
+      assertAreaAddOnGateOpenAtCommit(estimate);
       await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
         estimate,
         customerId: acceptPreLockedCommsId,
@@ -19932,6 +19936,13 @@ function assertAreaAddOnsAcceptedOneTime(estimate, treatAsOneTime) {
   if (treatAsOneTime || !mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) return;
   logger.warn(`[estimate-accept] estimate ${estimate.id} carries area add-ons and was accepted in recurring mode - ${mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE}; office books the add-on by hand`);
   throw Object.assign(new Error(mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE), { status: 409, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE });
+}
+
+// Throws the gated add-on 409 ({ error, code: AREA_ADDONS_GATED }) inside the accept transaction when the estimate carries an
+// area add-on and the gate is off now; nothing otherwise (no add-on, or gate on).
+function assertAreaAddOnGateOpenAtCommit(estimate) {
+  const refusal = require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
+  if (refusal) throw Object.assign(new Error(refusal.error), { status: 409, code: refusal.code });
 }
 
 // Throws the 400 AREA_ADDON_APPOINTMENT_REQUIRED for an accept of an estimate that carries an area add-on and

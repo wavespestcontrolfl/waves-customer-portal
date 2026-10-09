@@ -4280,6 +4280,17 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
       }
     });
 
+    // Codex round 26 (P0): the gate can turn off between the unlocked check and the commit; the limit recheck reads nothing then.
+    test('the add-on gate is read again inside the accept transaction, before the limit recheck (source order), and a gated add-on throws the coded 409', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+      const commit = src.indexOf('assertAreaAddOnGateOpenAtCommit(estimate);');
+      expect(commit).toBeGreaterThan(src.indexOf('.update(withServedDisclosurePreserved(trx, acceptedUpdates));'));
+      expect(src.indexOf("await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {", commit) - commit).toBeLessThan(120);
+      const fn = src.slice(src.indexOf('function assertAreaAddOnGateOpenAtCommit('), src.indexOf('function assertAreaAddOnsHaveAppointment('));
+      expect(fn).toContain('gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })');
+      expect(fn).toContain('{ status: 409, code: refusal.code }');
+    });
+
     // Codex round 19 on #6135: with no appointment the accept would hand back the generic /book link, which writes no add-on row.
     // Round 20: a visit merely linked to the estimate does not count either (only a slot or an adopted visit gets the add-on rows).
     test('area add-on accepted in one-time mode with no appointment -> coded 400 before any write', async () => {
