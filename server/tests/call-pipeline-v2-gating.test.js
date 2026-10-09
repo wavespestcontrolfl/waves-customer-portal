@@ -976,6 +976,12 @@ describe('emailRewrittenFromSpoken', () => {
     const spelled = `${transcript}\nAgent: Can you spell that?\nCaller: H, A, R, T, W, E, L, L at outlook.com.`;
     expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, spelled)).toBe(false);
   });
+  test('a phonetic spelling counts as said (codex #6247 r1 P2)', () => {
+    const phonetic = `${transcript}\nAgent: Can you spell that?\nCaller: H as in hotel, A, R, T, W, E, L like in lima, L for lima at outlook.com.`;
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, phonetic)).toBe(false);
+    const everyLetter = 'Caller: hartwall at outlook.com\nCaller: H as in hotel, A as in apple, R as in river, T as in tango, W as in water, E as in echo, L as in lima, L as in lima at outlook.com';
+    expect(emailRewrittenFromSpoken({ last_name: 'Hartwell', email: 'hartwell@outlook.com' }, everyLetter)).toBe(false);
+  });
   test('email said in several words is joined before the comparison', () => {
     expect(emailRewrittenFromSpoken({ first_name: 'Dana', last_name: 'Hartwell', email: 'dana.hartwell@outlook.com' }, 'Caller: dana dot hartwell at outlook dot com')).toBe(false);
   });

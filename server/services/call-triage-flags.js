@@ -216,7 +216,9 @@ function editDistance(a, b) {
 // word before the domain. A local part that only adds letters around the said word
 // ("j" + "smith") is not a rewrite either. Without a transcript the answer is false.
 // Measured on 60 days of stored calls (151 with an email, 2026-10-09): it fires on 2.
-const EMAIL_SAID_CONTEXT_CHARS = 120;
+// Wide enough for a surname spelled with a marker word on every letter.
+const EMAIL_SAID_CONTEXT_CHARS = 400;
+const PHONETIC_MARKER_RE = /\b([a-z0-9])[\s,]+(?:as in|like in|as|like|for)\s+[a-z]+\b[\s,.]*/g;
 function emailRewrittenFromSpoken(caller = {}, transcript = '') {
   const email = String(caller.email || '').toLowerCase();
   const at = email.indexOf('@');
@@ -235,9 +237,12 @@ function emailRewrittenFromSpoken(caller = {}, transcript = '') {
   const saidDomain = new RegExp(`(?:@|\\bat\\s+)${domainLabel}\\b`, 'g');
   let sawNearWord = false;
   for (let m = saidDomain.exec(text); m; m = saidDomain.exec(text)) {
-    const before = text.slice(Math.max(0, m.index - EMAIL_SAID_CONTEXT_CHARS), m.index);
+    const rawBefore = text.slice(Math.max(0, m.index - EMAIL_SAID_CONTEXT_CHARS), m.index);
+    // "H as in hotel", "b like in boy", "v for victor": keep the letter, drop the marker
+    // word, so a phonetic spelling counts as said (codex #6247 r1 P2).
+    const before = rawBefore.replace(PHONETIC_MARKER_RE, '$1 ');
     if (before.replace(/[^a-z0-9]/g, '').endsWith(local)) return false;
-    const word = (before.trim().split(/\s+/).pop() || '').replace(/[^a-z0-9]/g, '');
+    const word = (rawBefore.trim().split(/\s+/).pop() || '').replace(/[^a-z0-9]/g, '');
     if (word.length < 4 || local.includes(word) || word.includes(local)) continue;
     const distance = editDistance(word, local);
     if (distance >= 1 && distance <= 2 && nameTokens.some((t) => !word.includes(t))) sawNearWord = true;
