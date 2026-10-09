@@ -833,6 +833,23 @@ offer window) — the customer gets the standard "pick your time again" 409
 instead of a silently mis-ordered commit. The staff save probe
 (`checkArrivalPlacement`) stays append-only too.
 
+Reschedule move limits (owner 2026-10-09; `GATE_RESCHEDULE_MOVE_LIMITS`, dark,
+read at call time in `services/scheduling/customer-move-limits.js`; rules in
+`docs/gates-and-env.md`). While set: `GET /api/public/reschedule/:token` may
+answer `state: 'not_reschedulable'`, `reason: 'move_limit'` (a never-serviced
+customer's visit after 2 online moves), and for a movable visit carries
+`moveLimit: { lastDate, noTimeSoon }`. `lastDate` (`YYYY-MM-DD` or null) is the
+last date offered for this visit; when it is set, `availability` holds no day
+after it, and `find-slots` drops the same days. It is null when the visit has
+no plan allowance or when fewer than 3 times would remain inside the limit
+(the limit is then not applied). `noTimeSoon` is true when no time is open in
+the next 7 days. The key is OMITTED when the gate is off, the visit is a missed
+visit, or the move history cannot be read. `POST /api/public/reschedule/:token`
+answers `409 { code: 'MOVE_LIMIT' }` for a date past an applied limit or a
+blocked first visit, after its idempotent replay; the client reloads.
+`find-slots` answers its existing `409` with `reason: 'move_limit'` for a
+blocked first visit.
+
 Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
 dark, read at call time in `routes/reschedule-public.js`): `GET
 /api/public/reschedule/:token` may carry `nextVisit: { currentDate, byDate }`.

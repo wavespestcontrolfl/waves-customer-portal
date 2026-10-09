@@ -755,6 +755,36 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByTestId('next-visit-note')).not.toBeInTheDocument();
   });
 
+  it('move limits: names the last online date and hands off to the office (GATE_RESCHEDULE_MOVE_LIMITS)', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { lastDate: '2026-07-31', noTimeSoon: false } })) });
+    renderPage();
+    const note = await screen.findByTestId('move-limit-note');
+    expect(note).toHaveTextContent('Online, this visit can move as late as Fri, Jul 31.');
+    expect(note).not.toHaveTextContent('next 7 days');
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on/ })).toBeInTheDocument();
+  });
+
+  it('move limits: says when nothing is open in the next 7 days; no note when the server sends neither', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { lastDate: null, noTimeSoon: true } })) });
+    const { unmount } = renderPage();
+    expect(await screen.findByTestId('move-limit-note')).toHaveTextContent('Nothing is open in the next 7 days.');
+    unmount();
+
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { lastDate: null, noTimeSoon: false } })) });
+    renderPage();
+    await screen.findByRole('button', { name: /Choose 1:00 PM on/ });
+    expect(screen.queryByTestId('move-limit-note')).not.toBeInTheDocument();
+  });
+
+  it('move limits: a first visit past its online moves shows the text-us card, not an error', async () => {
+    stubFetch({ get: jsonResponse({ ...reschedulablePayload(), state: 'not_reschedulable', reason: 'move_limit', availability: null }) });
+    renderPage();
+    expect(await screen.findByText(/let's find a time that works/)).toBeInTheDocument();
+    expect(screen.getByTestId('move-limit-card')).toHaveTextContent('our team will set the next time with you');
+    expect(screen.getByRole('link', { name: 'Text Waves' })).toBeInTheDocument();
+    expect(screen.queryByText(/we can't move this one online/)).not.toBeInTheDocument();
+  });
+
   it('the commit POST discloses the collective scope the page rendered under (codex P1)', async () => {
     const fetchMock = stubFetch({
       get: jsonResponse(reschedulablePayload({ isRecurring: true, collectiveAnchor: true })),

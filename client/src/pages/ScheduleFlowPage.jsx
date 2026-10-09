@@ -689,8 +689,21 @@ const INELIGIBLE_COPY = {
   self_serve_notice: 'This visit is coming up too soon to move online.',
 };
 
+// First visit, third online move (owner 2026-10-09, GATE_RESCHEDULE_MOVE_LIMITS):
+// the office sets the time. Its own title and body: nothing went wrong.
+const MOVE_LIMIT_COPY = 'This visit has been moved a couple of times online, so our team will set the next time with you. Text or call and we\'ll get it sorted.';
+
 function IneligibleCard({ data }) {
   const reasonCopy = INELIGIBLE_COPY[data?.reason] || INELIGIBLE_COPY.not_available;
+  if (data?.reason === 'move_limit') {
+    return (
+      <Card>
+        <CardTitle>{data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}let&apos;s find a time that works</CardTitle>
+        <div data-testid="move-limit-card" style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{MOVE_LIMIT_COPY}</div>
+        <ContactRow />
+      </Card>
+    );
+  }
   return (
     <Card>
       <CardTitle>{data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}we can&apos;t move this one online</CardTitle>
@@ -708,6 +721,27 @@ function IneligibleCard({ data }) {
 // badge + move heading lead, the was/now card follows, and the hero below
 // reframes as the optional "different time?" ask — the moved-to slot is
 // already confirmed.
+// Customer move limits (payload.moveLimit, server gate
+// GATE_RESCHEDULE_MOVE_LIMITS). lastDate: the picker stops at this date for
+// this visit. noTimeSoon: nothing is open in the next 7 days. Each line
+// hands off to the office; the picker below stays usable.
+function MoveLimitNote({ moveLimit }) {
+  if (!moveLimit?.lastDate && !moveLimit?.noTimeSoon) return null;
+  return (
+    <div data-glass="soft" data-testid="move-limit-note" style={{ ...SOFT_NOTE, marginTop: 14 }}>
+      {moveLimit.noTimeSoon ? (
+        <div>Nothing is open in the next 7 days. If you need a sooner visit, text or call the office and we&apos;ll find a time.</div>
+      ) : null}
+      {moveLimit.lastDate ? (
+        <div style={moveLimit.noTimeSoon ? { marginTop: 8 } : undefined}>
+          Online, this visit can move as late as {shortDateLabel(moveLimit.lastDate)}. Need something later? Text or call us and we&apos;ll find a time.
+        </div>
+      ) : null}
+      <ContactRow />
+    </div>
+  );
+}
+
 function RescheduleHero({ data, selectedSlot }) {
   const current = data?.current || {};
   const move = data.weatherMove;
@@ -766,6 +800,7 @@ function RescheduleHero({ data, selectedSlot }) {
             {recurringNoteCopy(data, selectedSlot)}
           </div>
         ) : null}
+        <MoveLimitNote moveLimit={data.moveLimit} />
       </div>
     </>
   );
@@ -1420,7 +1455,8 @@ const FLOWS = {
     // notice window between page load and Confirm — reload so the page
     // renders the truthful (now not-reschedulable) state instead of leaving
     // a stale picker up under the error banner.
-    stateChangedCodes: ['SCOPE_CHANGED', 'SELF_SERVE_NOTICE'],
+    // MOVE_LIMIT: a move limit applied since the page loaded (reload shows it).
+    stateChangedCodes: ['SCOPE_CHANGED', 'SELF_SERVE_NOTICE', 'MOVE_LIMIT'],
     stateChangedMessage: 'The scheduling details for your plan just updated — here is the latest.',
     // Inside the picked row so the heads-up sits directly under the Confirm
     // it applies to — never below the fold.

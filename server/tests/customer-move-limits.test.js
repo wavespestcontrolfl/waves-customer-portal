@@ -184,3 +184,56 @@ describe('no time in the next 7 days', () => {
     expect(noTimeSoon({ days: [{ date: '2026-10-12', slots: [{}] }] }, now)).toBe(false);
   });
 });
+
+describe('reschedule-public wiring', () => {
+  jest.resetModules();
+  jest.doMock('../models/db', () => jest.fn());
+  jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+  const router = require('../routes/reschedule-public');
+  const { applyMoveLimit } = router._test;
+  const src = require('fs').readFileSync(require.resolve('../routes/reschedule-public'), 'utf8');
+
+  const day = (date, n) => ({ date, nearby: false, slots: Array.from({ length: n }, () => ({ date })) });
+  const full = { days: [day('2026-11-04', 3), day('2026-11-09', 2)], slots: [{ date: '2026-11-04' }, { date: '2026-11-09' }], nearby: false };
+  const limit = { dueDate: '2026-10-15', lastDate: '2026-11-05', firstVisitBlocked: false };
+
+  test('no limit: the list is returned as built and the payload key is absent', () => {
+    expect(applyMoveLimit(null, full, full)).toEqual({ availability: full, moveLimit: null });
+  });
+
+  test('limit applies: later days are dropped and the page is told the last date', () => {
+    const out = applyMoveLimit(limit, full, full);
+    expect(out.availability.days.map((d) => d.date)).toEqual(['2026-11-04']);
+    expect(out.moveLimit.lastDate).toBe('2026-11-05');
+  });
+
+  test('fewer than 3 times inside the limit: nothing is dropped and no last date is named', () => {
+    const thin = { ...full, days: [day('2026-11-04', 2), day('2026-11-09', 2)] };
+    const out = applyMoveLimit(limit, thin, thin);
+    expect(out.availability).toBe(thin);
+    expect(out.moveLimit.lastDate).toBeNull();
+  });
+
+  test('GET hands a first visit past its moves to the office before any availability build', () => {
+    const get = src.slice(src.indexOf("router.get('/:token'"), src.indexOf("router.post('/:token/find-slots'"));
+    const blocked = get.indexOf("reason: 'move_limit'");
+    expect(blocked).toBeGreaterThan(-1);
+    expect(blocked).toBeLessThan(get.indexOf('buildAvailabilityForService(svc'));
+  });
+
+  test('Confirm checks the limits after the idempotent replay and refuses MOVE_LIMIT', () => {
+    const commit = src.slice(src.indexOf("router.post('/:token', commitLimiter"));
+    const replay = commit.indexOf('replayed: true');
+    const check = commit.indexOf("code: 'MOVE_LIMIT'");
+    expect(replay).toBeGreaterThan(-1);
+    expect(check).toBeGreaterThan(replay);
+    expect(commit.slice(check - 400, check)).toMatch(/date > limit\.lastDate && await lateLimitActive\(svc, limit, range, config\)/);
+    expect(commit.slice(check - 400, check)).toMatch(/limit\?\.firstVisitBlocked/);
+  });
+
+  test('the search drops the same days GET drops', () => {
+    const search = src.slice(src.indexOf("router.post('/:token/find-slots'"), src.indexOf("router.post('/:token', commitLimiter"));
+    expect(search).toMatch(/await lateLimitActive\(svc, limit, range, config\)\) \{\s*availability = moveLimits\.withinLimit\(availability, limit\.lastDate\);/);
+    expect(search).toMatch(/reason: 'move_limit'/);
+  });
+});
