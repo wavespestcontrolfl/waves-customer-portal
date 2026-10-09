@@ -130,10 +130,13 @@ describe('gate on', () => {
       ['both dark', {}],
     ])('%s: no tie is read, the summary stays v3 where it is written, and the re-entry freeze still runs', async (_label, env) => {
       Object.assign(process.env, env);
+      // The real freeze stores no tie block while the tie part is not live.
+      reportFacts.gatherAndFreezeReportFacts.mockImplementation(async ({ withTies }) => (withTies ? BLOCK : (({ ties, ...rest }) => rest)(BLOCK)));
       const { knex, state } = fakeKnex();
       const out = await run(knex);
       expect(reportFacts.gatherAndFreezeReportFacts.mock.calls[0][0].withTies).toBe(false);
-      expect(out.reportFactsFreeze).toEqual(BLOCK);
+      expect(out.reportFactsFreeze).toMatchObject({ v: 1, reentry: BLOCK.reentry });
+      expect(out.reportFactsFreeze).not.toHaveProperty('ties');
       if (state.notes.lawnVisitSummary) {
         expect(gatherVisitSummaryFacts.mock.calls[0][0].ties).toEqual([]);
         expect(state.notes.lawnVisitSummary['77'].v).toBe(3);
@@ -188,6 +191,107 @@ describe('gate on', () => {
     const { knex } = fakeKnex();
     await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'pest' }, knex });
     expect(reportFacts.gatherAndFreezeReportFacts).not.toHaveBeenCalled();
+  });
+});
+
+describe('a completion that resumes after the gates changed honors the ties its record already froze', () => {
+  const { loadServiceRecordForPdf } = require('../services/service-report/pdf-queue');
+  const frozenRecord = (block) => ({ id: 's1', service_line: 'lawn', structured_notes: JSON.stringify({ lawnReportFacts: block }), technician_notes: 'x' });
+
+  test('the facts gate turned off after the freeze: the summary is still v4 with the frozen ties (the live gate only guards NEW facts)', async () => {
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    loadServiceRecordForPdf.mockResolvedValueOnce(frozenRecord(BLOCK));
+    const { knex, state } = fakeKnex();
+    await run(knex);
+    expect(reportFacts.gatherAndFreezeReportFacts).not.toHaveBeenCalled();
+    expect(gatherVisitSummaryFacts.mock.calls[0][0].ties).toEqual([TIE]);
+    expect(state.notes.lawnVisitSummary['77'].v).toBe(4);
+  });
+
+  test('the v6 or lead gate turned off after the freeze: same', async () => {
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    process.env.GATE_LAWN_REPORT_FACTS = 'true';
+    loadServiceRecordForPdf.mockResolvedValueOnce(frozenRecord(BLOCK));
+    const { knex, state } = fakeKnex();
+    await run(knex);
+    expect(state.notes.lawnVisitSummary['77'].v).toBe(4);
+  });
+
+  test('a record frozen without a tie block (the tie part was never live) still gets the v3 entry', async () => {
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    const { ties: _ties, ...noTies } = BLOCK;
+    loadServiceRecordForPdf.mockResolvedValueOnce(frozenRecord(noTies));
+    const { knex, state } = fakeKnex();
+    await run(knex);
+    expect(state.notes.lawnVisitSummary['77'].v).toBe(3);
+    expect(gatherVisitSummaryFacts.mock.calls[0][0].ties).toEqual([]);
+  });
+
+  test('ties frozen for another assessment do not select v4', async () => {
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    loadServiceRecordForPdf.mockResolvedValueOnce(frozenRecord({ ...BLOCK, ties: { assessmentId: '99', items: [TIE] } }));
+    const { knex, state } = fakeKnex();
+    await run(knex);
+    expect(state.notes.lawnVisitSummary['77'].v).toBe(3);
+  });
+});
+
+describe('the facts are frozen BEFORE anything can render or queue a render for the record', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+  const at = (needle) => source.indexOf(needle);
+
+  test('freezeReportFactsOnly: the facts block and nothing else (no token, no build, no synthesis side effect)', async () => {
+    process.env.GATE_LAWN_REPORT_FACTS = 'true';
+    const gate = require('../services/service-report/lawn-report-write-gate');
+    const { ensureReportToken } = require('../services/service-report/pdf-queue');
+    const { knex, state } = fakeKnex();
+    const block = await gate.freezeReportFactsOnly({ service: { id: 's1', service_line: 'lawn' }, knex });
+    expect(block).toEqual(BLOCK);
+    expect(reportFacts.gatherAndFreezeReportFacts).toHaveBeenCalledTimes(1);
+    expect(ensureReportToken).not.toHaveBeenCalled();
+    expect(buildReportV1Data).not.toHaveBeenCalled();
+    expect(state.notes).toEqual({});
+  });
+
+  test('freezeReportFactsOnly does nothing off the lawn line or with the gate off', async () => {
+    const gate = require('../services/service-report/lawn-report-write-gate');
+    const { knex } = fakeKnex();
+    expect(await gate.freezeReportFactsOnly({ service: { id: 's1', service_line: 'lawn' }, knex })).toBeNull();
+    process.env.GATE_LAWN_REPORT_FACTS = 'true';
+    expect(await gate.freezeReportFactsOnly({ service: { id: 's1', service_line: 'pest' }, knex })).toBeNull();
+    expect(reportFacts.gatherAndFreezeReportFacts).not.toHaveBeenCalled();
+  });
+
+  test('the completion path freezes them before the report token is minted and before the PDF render is queued', () => {
+    const freeze = at('.freezeReportFactsOnly({ service: record');
+    const mint = at('reportToken = await ensureReportToken(record.id)');
+    const enqueue = at('await enqueuePdfRenderJob({');
+    const synthesis = at('finalizeLawnReportSynthesis({ service: record');
+    expect(freeze).toBeGreaterThan(0);
+    expect(mint).toBeGreaterThan(freeze);
+    expect(enqueue).toBeGreaterThan(freeze);
+    // The later synthesis call stays (it is a no-op for the facts once they are frozen).
+    expect(synthesis).toBeGreaterThan(enqueue);
+  });
+
+  test('nothing else in the completion file mints a token or queues a render ahead of the freeze', () => {
+    const freeze = at('.freezeReportFactsOnly({ service: record');
+    const before = source.slice(0, freeze);
+    expect(before).not.toMatch(/await enqueuePdfRenderJob\(/);
+    expect(before).not.toMatch(/await ensureReportToken\(/);
+    expect(before).not.toMatch(/buildReportV1Data\(/);
+  });
+
+  test('the freeze runs under the same conditions as the synthesis gate (auto-send, report v1, not a backfill)', () => {
+    const freeze = at('earlyReportFactsFreeze = await');
+    const guard = source.slice(source.lastIndexOf('if (', freeze), freeze);
+    expect(guard).toContain("serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion");
+  });
+
+  test('its freeze is folded into the in-memory notes beside the gate\'s, so a later whole-object write keeps the key', () => {
+    expect(source).toContain('if (earlyReportFactsFreeze) recordStructuredNotes.lawnReportFacts = earlyReportFactsFreeze;');
   });
 });
 

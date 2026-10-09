@@ -11064,6 +11064,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // "text withheld" bell (GitHub Codex r1 P1).
     let reportTokenMintError = null;
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
+    // GATE_LAWN_REPORT_FACTS: the re-entry condition, spot text and ties are frozen BEFORE the report token is minted and
+    // before the PDF render is queued below, so no render can build (and cache) a lawn report without them. The lawn
+    // write gate's own call, much later, finds the block and does nothing. Same conditions as that gate; the freeze alone.
+    let earlyReportFactsFreeze = null;
+    if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
+      earlyReportFactsFreeze = await require('../services/service-report/lawn-report-write-gate').freezeReportFactsOnly({ service: record, knex: db });
+    }
     // delivery_mode 'disabled' (typed kill switch) suppresses the customer
     // report entirely — don't mint a public token at all (Codex P2). The
     // record still exists; flipping the mode back later can mint on demand.
@@ -13824,7 +13831,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.techParagraphFreeze) recordStructuredNotes.lawnTechParagraph = { ...(recordStructuredNotes.lawnTechParagraph || {}), ...gate.techParagraphFreeze };
         // And the Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY), keyed by assessment.
         if (gate.visitSummaryFreeze) recordStructuredNotes.lawnVisitSummary = { ...(recordStructuredNotes.lawnVisitSummary || {}), ...gate.visitSummaryFreeze };
-        // And the report facts (GATE_LAWN_REPORT_FACTS): re-entry condition, spot-product text, finding ties.
+        // And the report facts (GATE_LAWN_REPORT_FACTS): re-entry condition, spot-product text, finding ties. Frozen early
+        // (before the token and the PDF render); the gate hands back its own freeze only when it made one.
+        if (earlyReportFactsFreeze) recordStructuredNotes.lawnReportFacts = earlyReportFactsFreeze;
         if (gate.reportFactsFreeze) recordStructuredNotes.lawnReportFacts = gate.reportFactsFreeze;
         // A token the earlier mint could not create but the gate's own mint did.
         const recovered = adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl });

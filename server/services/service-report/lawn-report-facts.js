@@ -463,6 +463,16 @@ function frozenTies(structuredNotes, assessmentId) {
   return facts.ties.items;
 }
 
+/**
+ * Whether the record already carries a frozen tie block for this assessment (with or without items). A retried
+ * completion uses it to write the same version of the Visit Summary the first run's v6 copy was built for, whatever
+ * the gates say now: the live gate only decides whether NEW facts may be frozen.
+ */
+function hasFrozenTieBlock(structuredNotes, assessmentId) {
+  const facts = readFrozenReportFacts(structuredNotes);
+  return !!(facts && facts.ties && assessmentId != null && facts.ties.assessmentId === String(assessmentId));
+}
+
 /** The expectation families a frozen tie of THIS assessment makes curative (none for another assessment, after a retake). */
 function frozenTiedFamilies(structuredNotes, assessmentId) {
   const items = frozenTies(structuredNotes, assessmentId);
@@ -592,6 +602,7 @@ module.exports = {
   frozenReentryForRecord,
   frozenProductUseTexts,
   frozenTies,
+  hasFrozenTieBlock,
   frozenTiedFamilies,
   frozenReportFactsStamp,
   reentryCondition,

@@ -71,14 +71,15 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, programVisi
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
     if (assessmentId == null || instructionOut.productsLoadFailed) return null;
     // GATE_LAWN_REPORT_FACTS: a new entry is v4 and carries the finding-to-product ties frozen at completion
-    // (lawn-report-facts.js) while the tie part is live (needs this gate and the v6 copy gate too, feature-gates.js
-    // lawnReportTiesLive); otherwise the v3 entry exactly as before.
-    const tiesLive = featureGates.lawnReportTiesLive();
-    const ties = tiesLive ? reportFacts.frozenTies(record.structured_notes, assessmentId) : [];
+    // (lawn-report-facts.js) whenever THIS RECORD holds a frozen tie block, so a completion that resumes after the
+    // gates changed still writes the version its v6 copy was built for. The live gate (lawnReportTiesLive) decides
+    // only whether NEW facts may be frozen (above); otherwise the entry is the v3 one exactly as before.
+    const tiesFrozen = reportFacts.hasFrozenTieBlock(record.structured_notes, assessmentId);
+    const ties = tiesFrozen ? reportFacts.frozenTies(record.structured_notes, assessmentId) : [];
     const outcome = await summary.createAndFreezeVisitSummary({
       serviceRecordId: service.id,
       assessmentId,
-      version: tiesLive ? summary.FREEZE_VERSION_TIES : summary.FREEZE_VERSION,
+      version: tiesFrozen ? summary.FREEZE_VERSION_TIES : summary.FREEZE_VERSION,
       getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
       gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, programVisit: programVisitOut && programVisitOut.programVisit === true, nextVisitBooked: programVisitOut && programVisitOut.nextVisitBooked === true, ties, knex }),
       knex,
@@ -113,6 +114,26 @@ function withVisitSummary(result, visitSummaryFreeze) {
 // with it the v6 copy's first freeze) and the Visit Summary read what was just decided.
 function withReportFacts(record, freeze) {
   return freeze ? { ...record, structured_notes: { ...parseJsonObject(record.structured_notes), [reportFacts.FREEZE_KEY]: freeze } } : record;
+}
+
+const isLawnService = (service) => (service.service_line || (/(lawn)/i.test(String(service.service_type || '')) ? 'lawn' : null)) === 'lawn';
+
+/**
+ * ONLY the report-facts freeze (GATE_LAWN_REPORT_FACTS), for the completion path to call BEFORE it mints the report
+ * token or queues the PDF render: a render that ran before the block existed would build, and cache, a report without
+ * it. First writer wins, so the synthesis step's own call later is a no-op. Touches nothing else (no token, no build,
+ * no SMS or email). Never throws; returns the frozen block or null.
+ */
+async function freezeReportFactsOnly({ service, knex } = {}) {
+  try {
+    if (!service || !service.id || !knex || !isLawnService(service) || !featureGates.lawnReportFactsLive()) return null;
+    const { loadServiceRecordForPdf } = require('./pdf-queue');
+    const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
+    return await reportFacts.gatherAndFreezeReportFacts({ record: joined || service, knex, withTies: featureGates.lawnReportTiesLive() });
+  } catch (err) {
+    logger.warn(`[lawn-report-facts] early freeze failed for service_record ${service && service.id}: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -296,4 +317,4 @@ function frozenSmsSummary(record) {
   return typeof s === 'string' && s.trim() ? s.trim() : null;
 }
 
-module.exports = { finalizeLawnReportSynthesis, frozenSmsSummary };
+module.exports = { finalizeLawnReportSynthesis, freezeReportFactsOnly, frozenSmsSummary };
