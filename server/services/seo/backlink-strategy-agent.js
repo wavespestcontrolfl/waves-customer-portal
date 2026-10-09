@@ -304,9 +304,12 @@ const BacklinkStrategyAgent = {
         }
 
         // An error event, or the session's spend cap (budget_exhausted).
-        failure = streamFailureOf(event, data);
-        if (failure) {
-          logger.error(`[backlink-strategy] Agent ${failure}: ${JSON.stringify(data)}`);
+        // A local, so an event that is neither never clears a failure an
+        // earlier event set (max_tool_calls / max_events).
+        const streamFailure = streamFailureOf(event, data);
+        if (streamFailure) {
+          logger.error(`[backlink-strategy] Agent ${streamFailure}: ${JSON.stringify(data)}`);
+          failure = streamFailure;
           break;
         }
       }

@@ -208,9 +208,12 @@ const ContentAgent = {
         }
 
         // ── Error, or the session's spend cap (budget_exhausted) ──
-        failure = streamFailureOf(event, data);
-        if (failure) {
-          logger.error(`[content-agent] Agent ${failure}: ${JSON.stringify(data)}`);
+        // A local, so an event that is neither never clears a failure an
+        // earlier event set (max_tool_calls / max_events).
+        const streamFailure = streamFailureOf(event, data);
+        if (streamFailure) {
+          logger.error(`[content-agent] Agent ${streamFailure}: ${JSON.stringify(data)}`);
+          failure = streamFailure;
           break;
         }
       }
