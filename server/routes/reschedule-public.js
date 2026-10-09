@@ -207,6 +207,14 @@ async function visitChangedSince(svc, database = db) {
     || current.status !== svc.status;
 }
 
+// True, with the move-limit gate set, when the locked visit's plan cadence is
+// not the one this request loaded: the late-move allowance comes from it.
+function cadenceChangedSince(svc, locked) {
+  if (!moveLimits.moveLimitsEnabled() || !locked) return false;
+  return (locked.recurring_pattern || null) !== (svc.recurring_pattern || null)
+    || (Number(locked.recurring_interval_days) || null) !== (Number(svc.recurring_interval_days) || null);
+}
+
 // Confirm: true when a move limit refuses this move to `date` (a blocked
 // first visit, or a date past a late-move limit that applies).
 async function moveLimitRefuses(svc, elig, range, config, date) {
@@ -1041,10 +1049,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const officeApprovalRecheck = async ({ trx }) => {
       if (elig.missed) return;
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
-        .first('scheduled_date', 'window_start', 'office_move_approved_for');
+        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days');
       if (visitInsideMoveNoticeWindow(locked)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
+        });
+      }
+      // The move limit was judged with the plan cadence this request loaded.
+      // Staff can change the cadence with no move; the locked row decides.
+      if (cadenceChangedSince(svc, locked)) {
+        throw Object.assign(new Error('The scheduling details for your plan just updated — please review the latest options.'), {
+          statusCode: 409, isOperational: true, code: 'SCOPE_CHANGED',
         });
       }
     };
@@ -1280,6 +1295,7 @@ router._test = {
   applyMoveLimit,
   moveLimitRefuses,
   visitChangedSince,
+  cadenceChangedSince,
   pageEligibilityWithLimit,
   MOVE_LIMIT_MESSAGE,
   eligibility,

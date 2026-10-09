@@ -857,7 +857,9 @@ blocked first visit, and the client reloads there too. The commit route's
 `SLOT_TAKEN` refresh reads the visit again first: when its date, start or
 status changed since the request loaded it (another tab moved, rebooked or
 closed it), the answer is `409 SCOPE_CHANGED` and the page reloads (only
-while this gate is set).
+while this gate is set). Confirm also answers `409 SCOPE_CHANGED` when the
+locked visit's plan cadence (`recurring_pattern`, `recurring_interval_days`) is
+not the one the request loaded: the allowance comes from it.
 
 Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
 dark, read at call time in `routes/reschedule-public.js`): `GET

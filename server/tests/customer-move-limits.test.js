@@ -310,6 +310,27 @@ describe('reschedule-public wiring', () => {
     expect(out.payload.moveLimit.laterByOffice).toBe(false);
   });
 
+  test('cadenceChangedSince: a changed pattern or interval on the locked row is a change, only with the gate set', () => {
+    const { cadenceChangedSince } = router._test;
+    const svc = { recurring_pattern: 'quarterly', recurring_interval_days: null };
+    const prev = process.env.GATE_RESCHEDULE_MOVE_LIMITS;
+    try {
+      process.env.GATE_RESCHEDULE_MOVE_LIMITS = 'true';
+      expect(cadenceChangedSince(svc, { recurring_pattern: 'quarterly', recurring_interval_days: null })).toBe(false);
+      expect(cadenceChangedSince(svc, { recurring_pattern: 'monthly', recurring_interval_days: null })).toBe(true);
+      expect(cadenceChangedSince({ recurring_pattern: 'custom', recurring_interval_days: 42 },
+        { recurring_pattern: 'custom', recurring_interval_days: '42' })).toBe(false);
+      expect(cadenceChangedSince({ recurring_pattern: 'custom', recurring_interval_days: 42 },
+        { recurring_pattern: 'custom', recurring_interval_days: 30 })).toBe(true);
+      delete process.env.GATE_RESCHEDULE_MOVE_LIMITS;
+      expect(cadenceChangedSince(svc, { recurring_pattern: 'monthly' })).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_RESCHEDULE_MOVE_LIMITS; else process.env.GATE_RESCHEDULE_MOVE_LIMITS = prev;
+    }
+    // Both movers run the guard that holds the pin.
+    expect(src).toMatch(/'recurring_pattern', 'recurring_interval_days'\);\n[\s\S]{0,700}if \(cadenceChangedSince\(svc, locked\)\)/);
+  });
+
   test('visitChangedSince: another date, start or status, or an unreadable visit, is a change', async () => {
     const { visitChangedSince } = router._test;
     const svc = { id: 'svc-1', scheduled_date: '2026-10-15', window_start: '09:00:00', status: 'confirmed' };
