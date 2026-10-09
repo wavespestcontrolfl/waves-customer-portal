@@ -135,7 +135,8 @@ sold tiers are 6 and 9 visits a year.
 
 Technician-facing text only; no gate, migration, catalog or price change.
 
-- **Caterpillars: Acelepryn.** Six cards (Mar to Aug) carry a conditional
+- **Caterpillars: Acelepryn Insecticide** (the plain product, not Acelepryn
+  Xtra). Six cards (Mar to Aug) carry a conditional
   Acelepryn line for leaf-feeding caterpillars, live finds only (EPA 100-1489,
   section 7.2.1: 2 to 16 fl oz per 100 gal, 7 days between sprays, 38.3 fl oz
   per acre per year). The label has no whitefly use, so Mainspring stays the
@@ -143,9 +144,10 @@ Technician-facing text only; no gate, migration, catalog or price change.
   Conserve lines are unchanged.
 - **Phosphite: Reliant in place of KPHITE 7LP.** Same three cards (Mar, Jun,
   Oct), still a conditional line for root-rot history or replacement plantings.
-  Label EPA 83416-1: foliar 2 to 4 tsp per gallon at 14 to 21 days; soil drench
-  6¼ to 12¾ fl oz per 100 gal at 25 gal of mix per 100 sq ft, so the drench is
-  a rig job. Reliant has no catalog row yet, so a visit cannot record it until
+  Label EPA 83416-1, residential ornamental table: foliar 2 to 4 tsp per gallon
+  at 14 to 21 days. The residential soil drench is a 0.5 to 1% mix at 25 gal per
+  100 sq ft (16 to 32 fl oz of product per 100 sq ft), so the program has no
+  drench: the guide names it as a limit only. Reliant has no catalog row yet, so a visit cannot record it until
   the product is bought and added.
 - **Distance IGR: one scale spray a year.** The current label (accepted
   2023-11-08) allows one scale or mealybug application per calendar year, and

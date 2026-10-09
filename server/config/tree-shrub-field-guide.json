@@ -138,12 +138,12 @@
     "mainspring": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Whiteflies, caterpillars, soft scales, leafminers, thrips, lace bugs, leaf-feeding beetles, and aphids on landscape ornamentals.",
+      "targets": "Whiteflies, soft scales, leafminers, thrips, lace bugs, leaf-feeding beetles, and aphids on landscape ornamentals. The label also lists caterpillars; the program does not use Mainspring for them.",
       "apply": "Spray for even, thorough foliage coverage when infestations are first detected. Do not make foliar applications during rain.",
       "rates": [
         [
           "2–8 fl oz / 100 gal",
-          "Whiteflies, caterpillars, soft scales, and the other listed foliar pests except aphids."
+          "Whiteflies, soft scales, and the other listed foliar pests except aphids."
         ],
         [
           "4–8 fl oz / 100 gal",
@@ -155,7 +155,7 @@
         "At least 7 days between treatments. Outdoor maximum: 32 fl oz/acre/year, accounting for other cyantraniliprole products.",
         "Keep people and pets out until sprays dry."
       ],
-      "program": "Caterpillar jobs use Acelepryn or DiPel (owner 2026-10-09); Mainspring is the whitefly product. The table retains the draft 4–8 fl oz/100 gal choice. Whether to use the full 2–8 range for whiteflies and caterpillars still needs your call.",
+      "program": "Caterpillar jobs use Acelepryn Insecticide or DiPel, never Mainspring (owner 2026-10-09). The table retains the draft 4–8 fl oz/100 gal choice. Whether to use the full 2–8 range for whiteflies still needs your call.",
       "source": "Syngenta · EPA 100-1543 · 09-23 · pp. 19–20",
       "url": "https://assets.syngenta-us.com/pdf/labels/SCP%201543A-L1A_0923.pdf",
       "name": "Mainspring GNL",
@@ -187,10 +187,10 @@
         "Yearly limit: 38.3 fl oz per acre, which is 0.88 fl oz per 1,000 sq ft, all chlorantraniliprole products together. Lawn Acelepryn on the same area counts.",
         "Keep people and pets out until sprays dry."
       ],
-      "program": "Acelepryn is the caterpillar product (owner 2026-10-09). It is IRAC group 28, the same group as Mainspring, so it is not a rotation partner for Mainspring.",
+      "program": "Acelepryn Insecticide (chlorantraniliprole alone) is the caterpillar product (owner 2026-10-09). Do not use Acelepryn Xtra here: it adds a neonicotinoid. It is IRAC group 28, the same group as Mainspring, so it is not a rotation partner for Mainspring.",
       "source": "Syngenta · EPA 100-1489 · label accepted 01-11-24 · section 7.2.1",
       "url": "https://www3.epa.gov/pesticides/chem_search/ppls/000100-01489-20240111.pdf",
-      "name": "Acelepryn",
+      "name": "Acelepryn Insecticide",
       "equipment": [
         "bg",
         "flowzone",
@@ -233,7 +233,7 @@
         "Does not provide rapid adult-insect control.",
         "Scales and mealybugs: one application per calendar year. A property gets one scale spray a year.",
         "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz at least 21 days later.",
-        "Yearly limit: 0.176 lb of active ingredient per acre, all pyriproxyfen products together. That is one spray at 12 fl oz per 100 gal at label volume (100 gal per 20,000 sq ft), about 0.6 fl oz of Distance per 1,000 sq ft.",
+        "Yearly limit as the label prints it: 12 fl oz (0.176 lb active ingredient per acre) per acre per calendar year, all pyriproxyfen products together. One scale spray a year, at no more than 100 gal of mix per 20,000 sq ft, is the program limit.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
       "source": "Valent · EPA 59639-96 · label accepted 11-08-23 · Table 1",
@@ -395,27 +395,24 @@
       "summary": "Dose by plant size"
     },
     "reliant": {
-      "kind": "Diseases · foliar spray or soil drench",
+      "kind": "Diseases · foliar spray",
       "targetTitle": "Disease targets",
       "targets": "Phytophthora and Pythium root and crown rots on landscape ornamentals. Use only on beds with root-rot history or replacement plantings.",
-      "apply": "Foliar spray is the normal method: phosphite moves down to the roots. Cover the foliage evenly. The soil drench takes 25 gallons of mix per 100 sq ft, then irrigation, so it is a rig job only.",
+      "apply": "Foliar spray is the program method: phosphite moves down to the roots. Wet all foliage to the point of runoff.",
       "rates": [
         [
           "Foliar: 2–4 tsp / gal",
-          "1–2 qt per 100 gal. Repeat as needed at 14–21 days."
-        ],
-        [
-          "Soil drench: 6¼–12¾ fl oz / 100 gal",
-          "Apply 25 gal of mix per 100 sq ft. Water in. Repeat as needed at monthly intervals."
+          "Root rot (Phytophthora, Pythium). Repeat as needed at 14–21 days."
         ]
       ],
       "limits": [
         "Do not treat dormant plants or plants under heat or moisture stress.",
         "Do not exceed the rates or the intervals on the label; higher rates can injure plants.",
-        "Do not mix with copper or foliar fertilizer without a jar test and a small plant test first."
+        "Do not mix with copper or foliar fertilizer without a jar test and a small plant test first.",
+        "No soil drench on the program. The label's residential drench is a 0.5–1% mix (⅔–1⅓ fl oz per gal) at 25 gal per 100 sq ft: 16–32 fl oz of Reliant per 100 sq ft. Call the office before any drench."
       ],
       "program": "Reliant takes the place of KPHITE 7LP (owner 2026-10-09). The two labels use the same foliar rate.",
-      "source": "Quest Products · EPA 83416-1 · label accepted 10-25-24 · Ornamental Applications",
+      "source": "Quest Products · EPA 83416-1 · label accepted 10-25-24 · residential Ornamental Applications, pp. 63–64",
       "url": "https://www3.epa.gov/pesticides/chem_search/ppls/083416-00001-20241025.pdf",
       "name": "Reliant Systemic Fungicide",
       "equipment": [
@@ -423,7 +420,11 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Choose application method"
+      "summary": "",
+      "mix": [
+        0.33,
+        0.67
+      ]
     },
     "conserve": {
       "kind": "Insects · foliar spray",

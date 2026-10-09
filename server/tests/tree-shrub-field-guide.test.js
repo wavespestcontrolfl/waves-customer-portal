@@ -153,7 +153,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
   test('caterpillar jobs name Acelepryn; Mainspring is the whitefly product', () => {
     for (const month of ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug']) {
       const visit = visits.find((v) => v.month === month);
-      expect(visit.secondary).toMatch(/^Acelepryn 2–16 fl oz\/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; at least 7 days between sprays \(\$5\.66\)$/m);
+      expect(visit.secondary).toMatch(/^Acelepryn Insecticide: 2–16 fl oz\/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; at least 7 days between sprays \(\$5\.66\)$/m);
       expect(visit.primary).not.toMatch(/acelepryn/i);
     }
     for (const visit of visits) {
@@ -177,6 +177,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(acelepryn.rates[0][0]).toBe('2–16 fl oz / 100 gal');
     expect(acelepryn.mix).toEqual([0.02, 0.16]);
     expect(acelepryn.targets).toMatch(/no whitefly use/);
+    expect(acelepryn.name).toBe('Acelepryn Insecticide');
     expect(acelepryn.limits.join(' ')).toMatch(/At least 7 days between treatments\..*38\.3 fl oz per acre/);
   });
 
@@ -184,11 +185,33 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(guide.products.kphite).toBeUndefined();
     const reliant = guide.products.reliant;
     expect(reliant.source).toMatch(/EPA 83416-1/);
-    expect(reliant.rates.map((r) => r[0])).toEqual(['Foliar: 2–4 tsp / gal', 'Soil drench: 6¼–12¾ fl oz / 100 gal']);
-    expect(reliant.mix).toBeUndefined();
+    // Codex r1 #6218: the residential table, not the nursery one. Foliar only; the residential
+    // drench (0.5–1% at 25 gal per 100 sq ft) is named as a limit, never offered as a rate.
+    expect(reliant.source).toMatch(/residential Ornamental Applications/);
+    expect(reliant.rates.map((r) => r[0])).toEqual(['Foliar: 2–4 tsp / gal']);
+    expect(reliant.mix).toEqual([0.33, 0.67]);
+    expect(JSON.stringify(reliant)).not.toMatch(/6¼|12¾/);
+    expect(reliant.limits.join(' ')).toMatch(/No soil drench on the program\..*0\.5–1% mix/);
     for (const month of ['Mar', 'Jun', 'Oct']) {
       expect(conditional(month)).toContainEqual({ key: 'reliant', where: 'Root-rot history or replacement plantings' });
     }
+  });
+
+  test('the Acelepryn line resolves to the plain catalog product, not Acelepryn Xtra (Codex r1 #6218)', () => {
+    const { matchCatalogProduct } = require('../services/waveguard-plan-engine');
+    const catalog = [
+      { id: 'xtra', name: 'Acelepryn Xtra', best_price: 150 },
+      { id: 'plain', name: 'Acelepryn Insecticide', best_price: 905 },
+    ];
+    const line = visits.find((v) => v.month === 'Apr').secondary.split('\n').find((l) => /^Acelepryn/.test(l));
+    expect(matchCatalogProduct({ raw: line }, catalog)?.id).toBe('plain');
+  });
+
+  test('the Mainspring guide entry no longer offers caterpillars', () => {
+    const mainspring = guide.products.mainspring;
+    expect(mainspring.rates.map((r) => r[1]).join(' ')).not.toMatch(/caterpillar/i);
+    expect(mainspring.targets).toMatch(/the program does not use Mainspring for them/);
+    expect(mainspring.program).toMatch(/never Mainspring/);
   });
 
   test('every card key has a guide entry', () => {
@@ -207,5 +230,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(limits).toMatch(/Scales and mealybugs: one application per calendar year\./);
     expect(limits).toMatch(/6 fl oz followed by 6 fl oz at least 21 days later/);
     expect(limits).not.toMatch(/two per six months/);
+    // Codex r1 #6218: no per-1,000 sq ft figure until the label's two yearly numbers are reconciled.
+    expect(limits).not.toMatch(/per 1,000 sq ft/);
   });
 });

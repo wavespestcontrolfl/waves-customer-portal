@@ -25399,6 +25399,8 @@ const MONTH_NAMES = [
 
 /* Product descriptions — plain-language for techs and Virginia */
 const PRODUCT_DESCRIPTIONS = {
+  // Before the generic key: the plain product is the caterpillar product on lawn and tree & shrub lines.
+  "acelepryn insecticide": "chlorantraniliprole for leaf-feeding caterpillars (IRAC 28)",
   "acelepryn xtra": "prevents chinch bugs, webworms, and grubs for 2-3 months",
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
   "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",

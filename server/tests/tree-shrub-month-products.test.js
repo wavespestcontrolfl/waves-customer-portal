@@ -148,7 +148,7 @@ describe('resolveMonthProducts', () => {
     for (const month of ['Mar', 'Jun', 'Oct']) {
       const visit = program.visits.find((v) => v.month === month);
       expect(visit.primary).not.toMatch(/kphite|reliant/i);
-      expect(visit.secondary).toMatch(/^Reliant \(phosphite\) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp\/gal, repeat at 14–21 days; soil drench with the rig only \(25 gal of mix per 100 sq ft\); FRAC P07$/m);
+      expect(visit.secondary).toMatch(/^Reliant \(phosphite\) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp\/gal, repeat at 14–21 days; no soil drench on the program; FRAC P07$/m);
     }
     expect(JSON.stringify(program)).not.toMatch(/kphite/i);
     expect(JSON.stringify(program)).not.toMatch(/azatin|azamax/i);
