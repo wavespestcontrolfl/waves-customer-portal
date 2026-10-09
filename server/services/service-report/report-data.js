@@ -2229,8 +2229,8 @@ function stripLiveOnlyScheduleFields(data) {
   if (data.reportV2?.banner && typeof data.reportV2.banner === 'object') {
     delete data.reportV2.banner.forecastLine;
     delete data.reportV2.banner.observedRain;
-    // GATE_LAWN_REPORT_CLARITY: the sprinkler-setup invitation is a link to the
-    // portal, so it is live-only too.
+    // The sprinkler-setup invitation is a link to the portal, so it is
+    // live-only too.
     delete data.reportV2.banner.setupLine;
   }
   // The lawn v6 copy's by-next-visit sentences are schedule content too: a
@@ -3868,10 +3868,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
 // (scheduleUnconfirmed: the entries describe the former home).
 //
 // forCompletion (the completion build that gets frozen, and the Fast Complete
-// preview of it): with GATE_LAWN_REPORT_CLARITY on, a water-in with no sprinkler
-// head type on file states the amount and no minutes. A later render that has to
-// regenerate (nothing frozen) passes nothing and never reads the gate, so a gate
-// flip cannot change what an unfrozen render prints or what its PDF key covers.
+// preview of it): a water-in with no sprinkler head type on file states the
+// amount and no minutes (owner 2026-10-09, permanent: minutes only when the
+// customer's portal setup gives them). A later render that has to regenerate
+// (nothing frozen) passes nothing, so what an unfrozen render prints and what
+// its PDF key covers are unchanged.
 async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion = false }) {
   const waterContext = lawnAssessment?.waterContext || {};
   let runtime = null;
@@ -3899,7 +3900,7 @@ async function buildReportWateringInstruction({ products, service, completionTim
     })),
     completedAt: completionTime,
     runtime,
-    plainWhenNoSetup: forCompletion && lawnReportClarityLive(),
+    plainWhenNoSetup: forCompletion,
   });
 }
 
@@ -3942,15 +3943,13 @@ function bannerForecastExtras(instruction) {
   return forecastLine ? { forecastLine } : {};
 }
 
-// GATE_LAWN_REPORT_CLARITY: the invitation under an amount-only water-in (the
-// instruction was frozen without minutes because no sprinkler setup was on file).
-// Live view only, like the forecast sentence: stripLiveOnlyScheduleFields drops it
-// and it is never part of `lines`. Read at call time; only a frozen amountOnly
-// instruction can carry it, and the gate-off render has no key.
+// The invitation under an amount-only water-in (the instruction was frozen
+// without minutes because no sprinkler setup was on file). Live view only, like
+// the forecast sentence: stripLiveOnlyScheduleFields drops it and it is never
+// part of `lines`. Only a frozen amountOnly instruction can carry it.
 function bannerSetupExtras(instruction) {
   const waterIn = ['water_in', 'hold_then_water_in'].includes(instruction.state);
-  return instruction.amountOnly === true && waterIn && lawnReportClarityLive()
-    ? { setupLine: SETUP_INVITE_LINE } : {};
+  return instruction.amountOnly === true && waterIn ? { setupLine: SETUP_INVITE_LINE } : {};
 }
 
 // The banner payload: one server-built object the client, PDF and (later)
@@ -5752,6 +5751,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         customerConcern: structuredCustomerConcern(structured),
         // GATE_LAWN_REPORT_FACTS: the frozen re-entry condition, from the record only (null = the label text as before).
         reentryText: reportFacts.frozenReentryText(service),
+        // GATE_LAWN_WATER_RAIN: the rain card's permission, frozen at completion (null = today's card).
+        rainAdvice: reportFacts.frozenRainAdvice('lawn', service.structured_notes),
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,

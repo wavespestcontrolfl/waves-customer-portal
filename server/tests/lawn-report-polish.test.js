@@ -428,6 +428,61 @@ describe('the longer-cycles line: the render-time conditions', () => {
   });
 });
 
+describe('the rain card on the real report builder (frozen week weather + the frozen permission)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    require('../services/llm/call').dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+  });
+  const week = (values) => ({
+    assessmentId: 'la-cur', serviceDate: '2026-10-08', rainInches: values.reduce((a, b) => a + b, 0), et0Inches: null,
+    dailyRain: values.map((inches, i) => ({ date: `2026-10-0${2 + i}`, inches })), rainConfidence: null, rainSource: 'open_meteo',
+  });
+  const record = ({ values, waterAdvice }) => ({
+    ...lawnService(),
+    structured_notes: JSON.stringify({
+      lawnWeekWeather: { 'la-cur': week(values) },
+      lawnReportFacts: { v: 1, frozenAt: '2026-10-08T18:41:00Z', productUse: {}, ...(waterAdvice ? { waterAdvice } : {}) },
+    }),
+  });
+  const withPrefs = (prefs) => ({ ...fixtures(), property_preferences: prefs ? [{ customer_id: CUSTOMER, ...prefs }] : [] });
+  const build = async (service, prefs) => (await buildReportV1Data(service, 'tok-rain', makeKnex(withPrefs(prefs)), {}));
+  const SCHED = { irrigation_inches_per_week: 0.75, irrigation_system: true };
+  const V2 = { v: 2, longerCycles: false, rainCard: true, rainSensorLine: true };
+
+  test('a record frozen with the permission: 6 inches is "rain covered", with the sensor line; the Rain row stays the measured 6', async () => {
+    const data = await build(record({ values: [0, 3, 3, 0, 0, 0, 0], waterAdvice: V2 }), SCHED);
+    expect(data.reportV2.water).toMatchObject({ status: 'rain_covered', rainInches: 6, rainCard: true, rainSensorLine: true });
+    expect(data.reportV2.water.explanation).toMatch(/^Rain alone covered your lawn this week\./);
+  });
+
+  test('no schedule on file: still rain covered (the customer who heard nothing)', async () => {
+    const data = await build(record({ values: [0, 3, 3, 0, 0, 0, 0], waterAdvice: V2 }), null);
+    expect(data.reportV2.water).toMatchObject({ status: 'rain_covered', scheduleOnFile: false });
+  });
+
+  test('every other record is today\'s card: no block, a version 1 block, or a frozen "no" (new sod, a move)', async () => {
+    const plain = await build(record({ values: [0, 3, 3, 0, 0, 0, 0] }), SCHED);
+    expect(plain.reportV2.water.status).toBe('high');
+    ['rainCard', 'rainSensorLine'].forEach((key) => expect(plain.reportV2.water).not.toHaveProperty(key));
+    const v1 = await build(record({ values: [0, 3, 3, 0, 0, 0, 0], waterAdvice: { v: 1, longerCycles: false } }), SCHED);
+    expect(v1.reportV2).toEqual(plain.reportV2);
+    const no = await build(record({ values: [0, 3, 3, 0, 0, 0, 0], waterAdvice: { v: 2, longerCycles: false, rainCard: false, rainSensorLine: false } }), SCHED);
+    expect(no.reportV2).toEqual(plain.reportV2);
+  });
+
+  test('the PDF cache key follows the frozen permission', async () => {
+    const sig = async (waterAdvice) => (await resolveCanonicalLawnRender(
+      { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-10-08', structured_notes: record({ values: [0, 3, 3, 0, 0, 0, 0], waterAdvice }).structured_notes },
+      makeKnex(fixtures()),
+    )).signature;
+    expect(await sig(V2)).not.toBe(await sig(undefined));
+    expect(await sig({ v: 1, longerCycles: false })).toBe(await sig(undefined));
+  });
+});
+
 describe('the longer-cycles line on the real report builder (in-memory reader)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

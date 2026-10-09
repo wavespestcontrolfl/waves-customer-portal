@@ -1123,7 +1123,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     resolvedLines = settled.items;
     // Step blocks are product-scoped and ride the response beside the limit blocks: they
     // never hold the base products' quantities or the mixing order.
-    const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
+    const blocks = v13SelectionBlocks(resolvedLines, (line) => bermudaRemoval.rowFor(v13Rows, line.product.id, line.bermudaStep === true), gateContext);
     // The plan's own application-limit decision for a sheet opened from a visit: a capped
     // product gets no amount and its limit message (a block beside the apply-alone ones, not
     // holding the rest of the mix), a warning-level limit a sheet warning.
@@ -1132,7 +1132,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
       // no quantity at all; a capped line none either).
-      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext) : null;
+      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext, line) : null;
       const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),

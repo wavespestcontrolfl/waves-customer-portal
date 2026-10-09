@@ -12,7 +12,7 @@ const COMPLETED = '2026-09-30T18:40:00Z';
 const HOLD = (hours = 24, source = 'label') => ({ mode: 'hold', hold_hours: hours, source });
 const WATER_IN = (over = {}) => ({ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'default', ...over });
 const NONE = (source = 'label') => ({ mode: 'none', source });
-// A water-in window long enough to sit after a 24 h hold (rule C: the deadline is always completion + the window).
+// A water-in window long enough to sit after a 24 h hold without re-anchoring (rule C: the deadline is completion + the window while the hold ends before it).
 const LATE = (over = {}) => WATER_IN({ water_in_by_hours: 72, ...over });
 
 const build = (rules, extra = {}) => buildWateringInstruction({ rules, completedAt: COMPLETED, ...extra });
@@ -64,7 +64,7 @@ describe('mixed-visit matrix', () => {
     expectCleanCopy(r);
   });
 
-  test('hold + water-in (rule C): the deadline is completion + the rule window, never re-anchored to the hold end', () => {
+  test('hold + water-in (rule C): a hold that ends before the deadline keeps the completion-anchored deadline', () => {
     const r = build([HOLD(6), WATER_IN()], { runtime: { headTypes: ['spray'] } });
     expect(r.state).toBe('hold_then_water_in');
     expect(r.holdUntil).toBe('2026-10-01T01:00:00.000Z'); // 8:40 PM rounded up: 9 PM ET
@@ -80,15 +80,36 @@ describe('mixed-visit matrix', () => {
     expectCleanCopy(r);
   });
 
-  test('hold + water-in (rule C): a hold that reaches the deadline cannot be satisfied with it -> no claim', () => {
-    for (const rules of [[HOLD(48), WATER_IN()], [HOLD(24), WATER_IN()], [HOLD(24), WATER_IN({ water_in_by_hours: 1 })], [HOLD(72), LATE()]]) {
+  test('hold + water-in (rule C): a timed hold that reaches the deadline is followed by the water-in: hold end + the window (owner 2026-10-09)', () => {
+    // 24 h hold ends Thu 3 PM (2:40 PM rounded up); the 24 h window then runs from there: Fri 3 PM.
+    const r = build([HOLD(24), WATER_IN()], { runtime: { headTypes: ['rotor'] } });
+    expect(r.state).toBe('hold_then_water_in');
+    expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
+    expect(r.waterInBy).toBe('2026-10-02T19:00:00.000Z');
+    expect(r.lines).toEqual([
+      'Skip your turf watering until Thu 3 PM.',
+      'After that, water in today’s treatment by Fri 3 PM: run each zone about 40 minutes.',
+      'Run it even if it is not your usual day.',
+    ]);
+    expect(r.expiresAt).toBe(r.waterInBy);
+    expectCleanCopy(r);
+
+    expect(build([HOLD(48), WATER_IN()])).toMatchObject({ state: 'hold_then_water_in', holdUntil: '2026-10-02T19:00:00.000Z', waterInBy: '2026-10-03T19:00:00.000Z', waterInByLabel: 'Sat 3 PM' });
+    // A short window keeps its minute precision from the hold end.
+    expect(build([HOLD(24), WATER_IN({ water_in_by_hours: 1 })])).toMatchObject({ waterInBy: '2026-10-01T20:00:00.000Z', waterInByLabel: 'Thu 4 PM' });
+    // Six or more days out names the date.
+    expect(build([HOLD(72), LATE()])).toMatchObject({ holdUntil: '2026-10-03T19:00:00.000Z', waterInBy: '2026-10-06T19:00:00.000Z', waterInByLabel: 'Tue, Oct 6 at 3 PM' });
+    // Just inside the window: no re-anchoring, the completion-anchored deadline.
+    expect(build([HOLD(22), WATER_IN()])).toMatchObject({ state: 'hold_then_water_in', waterInBy: '2026-10-01T18:00:00.000Z' });
+  });
+
+  test('rule C: a 24 h hold beside a same-day water-in (Dylox) is still no claim: the run cannot fit the completion day', () => {
+    for (const rules of [[HOLD(24), WATER_IN({ water_in_same_day: true })], [HOLD(12), WATER_IN({ water_in_same_day: true })]]) {
       const r = build(rules);
       expect(r.state).toBeNull();
       expect(r.lines).toEqual([]);
       expect(r.waterInBy).toBeNull();
     }
-    // Just inside the window is still a claim.
-    expect(build([HOLD(22), WATER_IN()]).state).toBe('hold_then_water_in');
   });
 
   test('a 24 h hold with a 72 h window keeps the completion-anchored deadline', () => {
@@ -385,8 +406,8 @@ describe('water-in deadlines never round to or before completion', () => {
     expect(r.waterInByLabel).toBe('4:10 PM today');
     expect(r.lines[1]).toBe('After that, water in today’s treatment by 4:10 PM today: run each zone about 40 minutes.');
     expectCleanCopy(r);
-    // A window that ends before the hold does is no claim.
-    expect(build([HOLD(1), WATER_IN({ water_in_by_hours: 0.25 })]).state).toBeNull();
+    // A window that ends before the hold does follows the hold end, minute precision kept: 4 PM + 15 minutes.
+    expect(build([HOLD(1), WATER_IN({ water_in_by_hours: 0.25 })])).toMatchObject({ state: 'hold_then_water_in', waterInBy: '2026-09-30T20:15:00.000Z', waterInByLabel: '4:15 PM today' });
   });
 
   test('deadlineAfter helper', () => {
@@ -499,18 +520,25 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
     expect(r.lines[0]).toBe('Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.');
     expect(r.waterInBy).toBe('2026-10-03T18:00:00.000Z');
-    expect(build([DRY, HOLD(24), WATER_IN()]).state).toBeNull(); // 24 h hold vs 24 h window
+    // 24 h hold vs 24 h window: the water-in follows the printed hold end, and the drying condition keeps the note live.
+    const both = build([DRY, HOLD(24), WATER_IN()]);
+    expect(both.state).toBe('hold_then_water_in');
+    expect(both.lines[0]).toBe('Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.');
+    expect(both.waterInBy).toBe('2026-10-02T19:00:00.000Z');
+    expect(both.expiresAt).toBeNull();
+    expectCleanCopy(both);
   });
 
-  test('rule C with a dry hold: its configured hours (else the 6 h floor) are the hidden hold end for the conflict check', () => {
+  test('rule C with a dry hold: its configured hours are a printed hold end the water-in can follow; the 6 h floor is hidden and never anchors a deadline', () => {
     const dry = (hours) => ({ mode: 'hold', hold_hours: hours, hold_until: 'dry', source: 'label' });
-    expect(build([dry(24), WATER_IN()]).state).toBeNull(); // 24 h >= the 24 h deadline
+    expect(build([dry(24), WATER_IN()])).toMatchObject({ state: 'hold_then_water_in', waterInBy: '2026-10-02T19:00:00.000Z' }); // 24 h >= the 24 h deadline: hold end + 24 h
     expect(build([dry(12), WATER_IN()]).waterInBy).toBe('2026-10-01T18:00:00.000Z');
-    expect(build([dry(12), dry(30), WATER_IN()]).state).toBeNull(); // the largest configured floor counts
+    expect(build([dry(12), dry(30), WATER_IN()])).toMatchObject({ holdUntil: '2026-10-02T01:00:00.000Z', waterInBy: '2026-10-03T01:00:00.000Z' }); // the largest configured hours count
     const r = build([dry(30), LATE()]);
     expect(r.waterInBy).toBe('2026-10-03T18:00:00.000Z'); // still completion + 72 h
     expect(build([{ mode: 'hold', hold_hours: null, hold_until: 'dry', source: 'label' }, WATER_IN()]).waterInBy).toBe('2026-10-01T18:00:00.000Z');
-    // A water-in window shorter than the 6 h floor cannot follow an until-dry hold.
+    // A water-in window shorter than the 6 h floor cannot follow an until-dry hold with no hours: the floor is
+    // never printed, so it never anchors a deadline either.
     expect(build([DRY, WATER_IN({ water_in_by_hours: 5 })]).state).toBeNull();
   });
 
@@ -656,8 +684,8 @@ describe('mow hold', () => {
     expect(unknown.state).toBeNull();
     expect(unknown.lines).toEqual([]);
     expect(unknown.mowHold).toMatchObject({ days: 2, untilLabel: 'Fri 3 PM' });
-    // A hold-vs-water-in conflict (no claim) too.
-    const conflict = buildWateringInstruction({ rules: [entry(HOLD(48), 4), entry(WATER_IN({ water_in_by_hours: 24 }), null)], completedAt: COMPLETED });
+    // A hold-vs-same-day-water-in conflict (no claim) too.
+    const conflict = buildWateringInstruction({ rules: [entry(HOLD(48), 4), entry(WATER_IN({ water_in_by_hours: 24, water_in_same_day: true }), null)], completedAt: COMPLETED });
     expect(conflict.state).toBeNull();
     expect(conflict.mowHold).toMatchObject({ days: 4 });
   });
@@ -702,8 +730,8 @@ describe('mow hold', () => {
   });
 });
 
-// GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): the completion build passes
-// plainWhenNoSetup; only the "generic" basis (no head type on file) changes.
+// The completion build passes plainWhenNoSetup (owner 2026-10-08, permanent
+// since 2026-10-09); only the "generic" basis (no head type on file) changes.
 describe('amount only when no sprinkler setup is on file (plainWhenNoSetup)', () => {
   const plain = (rules, runtime = null) => build(rules, { runtime, plainWhenNoSetup: true });
   const GENERIC_RUNTIMES = [null, undefined, {}, { runMinutes: 20 }, { runMinutes: null, headTypes: [], systemOn: null }, { unconfirmed: true, headTypes: ['rotor'], runMinutes: 30 }];
@@ -784,7 +812,7 @@ describe('amount only when no sprinkler setup is on file (plainWhenNoSetup)', ()
   });
 
   test('a water-in with no honest deadline is still no claim', () => {
-    expect(plain([HOLD(30), WATER_IN()]).state).toBeNull();
+    expect(plain([HOLD(30), WATER_IN({ water_in_same_day: true })]).state).toBeNull();
   });
 
   test('minutesFor reports the basis either way', () => {

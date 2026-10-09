@@ -549,6 +549,23 @@ describe('plan engine reads the matched v13 protocol row', () => {
     expect(withGate('true', () => engine.v13ProtocolRows(structured).get('stw').ratePer1000)).toBe(0.5);
   });
 
+  test('an ordinary row and a bermuda step row for one catalog product stay two rows: each line reads its own (codex #6229 r2 P2)', () => {
+    const ordinary = { productId: 'nis', ratePer1000: null, gates: { weedMix: true } };
+    const step = { productId: 'nis', ratePer1000: null, gates: { bermudaRemoval: true, morningUnderF: 85 } };
+    // Either order in the list: the step row never overwrites the ordinary one.
+    for (const products of [[ordinary, step], [step, ordinary]]) {
+      const rows = withGate('true', () => engine.v13ProtocolRows({ version: LAWN_V13_VERSION, products }));
+      const ordinaryLine = withGate('true', () => engine.v13LineState({ id: 'nis' }, rows, new Set(), {}, { bermudaStep: false }));
+      const stepLine = withGate('true', () => engine.v13LineState({ id: 'nis' }, rows, new Set(), {}, { bermudaStep: true }));
+      expect(ordinaryLine.row).toBe(ordinary);
+      expect(stepLine.row).toBe(step);
+    }
+    // A step line with no step row is unavailable, never read on the ordinary row.
+    const onlyOrdinary = withGate('true', () => engine.v13ProtocolRows({ version: LAWN_V13_VERSION, products: [ordinary] }));
+    expect(engine.v13LineState({ id: 'nis' }, onlyOrdinary, new Set(), {}, { bermudaStep: true }).state).toBe('unavailable');
+    expect(engine.v13LineState({ id: 'nis' }, onlyOrdinary, new Set(), {}, {}).row).toBe(ordinary);
+  });
+
   test('every rate the migration states for a whole-lawn product reaches the engine as a positive protocol rate', () => {
     const stated = migration.PRODUCTS.filter(([, s]) => s[6] && s[3] != null).map(([, s]) => s[0]);
     expect(stated).toEqual(expect.arrayContaining([migration.NAMES.STW, migration.NAMES.NT, migration.NAMES.DIM, migration.NAMES.TET, migration.NAMES.STW15]));
