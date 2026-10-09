@@ -19,6 +19,9 @@
  *   mixed     rotor + spray + drip heads, 45 min, Mondays, no weekly inches: the third state ("45 min, Mondays")
  *   single    one rotor head type (plus drip), 45 min, Mondays: a derived figure with its basis line
  *   fourday   spray heads only, 15 min on four days, one spray product, no banner: a derived figure and the longer-cycles line
+ *   rainwet   6 inches of rain on two days + a 0.75 inch schedule (GATE_LAWN_WATER_RAIN): "rain covered" with the sensor line
+ *   raindry   a 0.2 inch week + a 0.5 inch schedule: the new deficit sentence
+ *   rainnone  6 inches of rain, nothing on file: "rain covered", the schedule call to action stays
  *   nothing   no irrigation entries at all: today's card ("Not on file"), the button moved to the Irrigation section
  *   (both visits carry a granule watered in, a spray and a surfactant, so the product cards show the label lines)
  *
@@ -52,7 +55,7 @@ const { lawnLayoutPayload } = require('../server/services/service-report/lawn-re
 const { buildReentryContextFromRecord } = require('../server/services/service-report/reentry');
 const facts = require('../server/services/service-report/lawn-report-facts');
 const { buildLawnWaterContext } = require('../server/services/service-report/report-data');
-const { mapWater } = require('../server/services/service-report/lawn-report-v2');
+const { mapWater, buildLawnReportV2 } = require('../server/services/service-report/lawn-report-v2');
 const { lawnPolishPayload } = require('../server/services/service-report/lawn-report-polish');
 const { waterAdviceBlock, attachLongerCycles } = require('../server/services/service-report/lawn-longer-cycles');
 
@@ -263,9 +266,25 @@ const POLISH_SPECS = {
   single: { catalog: CATALOG, prefs: entries({ irrigation_system_type: ['rotor', 'drip'] }) },
   fourday: { catalog: SPRAY_ONLY, prefs: entries({ irrigation_run_minutes: 15, watering_days: ['Mon', 'Tue', 'Thu', 'Fri'], irrigation_system_type: ['spray'] }) },
   nothing: { catalog: CATALOG, prefs: null },
+  // GATE_LAWN_WATER_RAIN: "base" = no frozen permission (today's card), "polish" = the permission frozen at completion.
+  rainwet: { catalog: SPRAY_ONLY, prefs: { irrigation_inches_per_week: 0.75, irrigation_system: true }, rain: [0, 0, 3, 3, 0, 0, 0] },
+  raindry: { catalog: SPRAY_ONLY, prefs: { irrigation_inches_per_week: 0.5, irrigation_system: true }, rain: [0, 0, 0, 0.2, 0, 0, 0] },
+  rainnone: { catalog: SPRAY_ONLY, prefs: null, rain: [0, 0, 3, 3, 0, 0, 0] },
 };
 
-function polishVisit(base, { catalog, prefs, polish }) {
+// The water section of a rain scenario, from the real builders: the context with the week's daily rain, then the report
+// builder with (on) or without (off) the permission the completion froze.
+function rainWater(spec, on) {
+  const daily = spec.rain.map((inches, i) => ({ date: `2026-10-${String(3 + i).padStart(2, '0')}`, inches }));
+  const waterContext = buildLawnWaterContext({
+    turfProfile: { grass_type: 'st_augustine' }, propertyPrefs: spec.prefs, serviceDate: VISIT_DAY,
+    completionRainfall7dInches: spec.rain.reduce((a, b) => a + b, 0), completionDailyRain: daily,
+  });
+  const report = buildLawnReportV2({ lawnAssessment: { scores: {}, waterContext }, applications: [], rainAdvice: on ? { rainCard: true, sensorLine: true } : null });
+  return { water: report.water, rain7d: daily.map((day) => ({ d: new Date(`${day.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }), in: day.inches })) };
+}
+
+function polishVisit(base, { catalog, prefs, polish, rain = null }) {
   const data = clone(base);
   setVisitDate(data);
   setPlan(data);
@@ -281,7 +300,13 @@ function polishVisit(base, { catalog, prefs, polish }) {
     };
   });
   data.reportV2.mowing = null;
-  data.reportV2.water = realWater(prefs, polish);
+  if (rain) {
+    const scenario = rainWater({ prefs, rain }, polish);
+    data.reportV2.water = scenario.water;
+    data.reportV2.rain7d = scenario.rain7d;
+  } else {
+    data.reportV2.water = realWater(prefs, polish);
+  }
   attachBanner(data, catalog.map((item) => ({ name: item.name, rule: item.rule })), {
     runtime: prefs ? { runMinutes: prefs.irrigation_run_minutes, wateringDays: prefs.watering_days, headTypes: prefs.irrigation_system_type, explicitInchesPerWeek: null } : null,
   });
@@ -290,8 +315,8 @@ function polishVisit(base, { catalog, prefs, polish }) {
   // each card, and the longer-cycles line (render-time conditions included).
   const prefsRow = prefs ? { ...prefs, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null } : null;
   const block = facts.buildReportFacts({
-    rows: catalog.map(factRow), run: null, assessment: null, techFindings: [], withTies: false, withLabelLines: polish,
-    waterAdvice: polish ? waterAdviceBlock(prefsRow, VISIT_DAY) : null, now: NOW,
+    rows: catalog.map(factRow), run: null, assessment: null, techFindings: [], withTies: false, withLabelLines: polish && !rain,
+    waterAdvice: polish && !rain ? waterAdviceBlock(prefsRow, VISIT_DAY) : null, now: NOW,
   });
   const notes = { [facts.FREEZE_KEY]: block };
   const drops = facts.frozenLabelDropsFor('lawn', JSON.stringify(notes));
@@ -310,11 +335,11 @@ function writePolish(name, base) {
   for (const polish of [false, true]) {
     const data = polishVisit(base, { ...POLISH_SPECS[name], polish });
     process.env.GATE_LAWN_REPORT_LAYOUT = 'true';
-    if (polish) process.env.GATE_LAWN_REPORT_POLISH = 'true';
+    if (polish && !POLISH_SPECS[name].rain) process.env.GATE_LAWN_REPORT_POLISH = 'true';
     const out = {
       ...clone(data),
       ...lawnLayoutPayload({ serviceLine: 'lawn', reportV2: data.reportV2, lawnAssessment: data.lawnAssessment, mowingHeight: null }),
-      ...lawnPolishPayload({ serviceLine: 'lawn', reportV2: data.reportV2 }),
+      ...(POLISH_SPECS[name].rain ? {} : lawnPolishPayload({ serviceLine: 'lawn', reportV2: data.reportV2 })),
     };
     delete process.env.GATE_LAWN_REPORT_LAYOUT;
     delete process.env.GATE_LAWN_REPORT_POLISH;

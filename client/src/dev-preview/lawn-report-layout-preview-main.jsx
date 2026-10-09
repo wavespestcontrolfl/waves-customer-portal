@@ -17,7 +17,7 @@ import WavesShell from '../components/brand/WavesShell';
 const FIXTURES = import.meta.glob('../pages/__fixtures__/lawn-layout/*.json', { eager: true, import: 'default' });
 const LAYOUT_SCENARIOS = ['spot', 'granular', 'clean'];
 // GATE_LAWN_REPORT_POLISH scenarios: a mixed-head system, a single-head system, 15 minutes on four days, and nothing on file; gate off ("base") and on.
-const POLISH_SCENARIOS = ['mixed', 'single', 'fourday', 'nothing'];
+const POLISH_SCENARIOS = ['mixed', 'single', 'fourday', 'nothing', 'rainwet', 'raindry', 'rainnone'];
 const SCENARIOS = [...LAYOUT_SCENARIOS, ...POLISH_SCENARIOS];
 
 const params = new URLSearchParams(window.location.search);
