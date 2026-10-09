@@ -123,7 +123,7 @@ import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
   RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
-  methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -1311,9 +1311,11 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   // Keyed on whether this is prepare mode, never on the callback's identity: a container that passes an inline
   // onPrepared must not recreate the request (the context would reload and the form would remount).
   const preparing = typeof onPrepared === 'function';
-  const stopRequest = useMemo(() => (preparing
+  const headerRequest = useMemo(() => (preparing
     ? (path, options = {}) => request(path, { ...options, ...(path.includes('/lawn-fast/') ? { headers: { ...options.headers, 'X-Combo-Stop': '1' } } : {}) })
     : request), [request, preparing]);
+  // Every write (a sod rooted date, a cleared trouble area, a photo, Analyze, Confirm) counts as work in flight.
+  const stopRequest = useWriteTracking(headerRequest, preparing);
   const ctx = useLawnFastContext({ base, request: stopRequest, service });
   // The visit's own property areas (read by PropertyServiceAreas, in the form) and
   // their hold: see usePropertyAreaLifecycle. A refused completion starts a refresh.

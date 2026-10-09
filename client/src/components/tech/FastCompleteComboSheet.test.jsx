@@ -86,7 +86,7 @@ const click = (name) => fireEvent.click(screen.getByRole('button', { name }));
 const completeStop = () => screen.getByRole('button', { name: /Complete stop|Resume closeout/ });
 // Readiness is immediate; the draft store is written behind it. A reload only finds what was written.
 const bothPersisted = (operator = 'op-1') => waitFor(async () => {
-  const stored = await store.getVisitCompletionDraft('visit', operator);
+  const stored = await store.getVisitCompletionDraft('combo:visit', operator);
   expect(Object.keys(stored?.forms || {}).sort()).toEqual(['svc-lawn', 'svc-pest']);
 });
 async function prepareBoth() {
@@ -153,13 +153,13 @@ describe('the container', () => {
     // An older call arriving late changes nothing.
     click('pest late old');
     await waitFor(() => expect(partCalls.pest.at(-1).seq).toBe(1));
-    const stored = await store.getVisitCompletionDraft('visit', 'op-1');
+    const stored = await store.getVisitCompletionDraft('combo:visit', 'op-1');
     expect(stored.forms['svc-pest'].body).toMatchObject({ n: 1 });
     // A newer null drops it.
     click('pest unsave');
     await waitFor(() => expect(completeStop()).toBeDisabled());
     expect(await screen.findByText(/Pest part: changed, save it again/)).toBeInTheDocument();
-    await waitFor(async () => expect((await store.getVisitCompletionDraft('visit', 'op-1')).forms['svc-pest']).toBeUndefined());
+    await waitFor(async () => expect((await store.getVisitCompletionDraft('combo:visit', 'op-1')).forms['svc-pest']).toBeUndefined());
     // Saving again brings it back.
     click('pest save');
     await waitFor(() => expect(completeStop()).toBeEnabled());
@@ -191,7 +191,7 @@ describe('the container', () => {
     ] });
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     // Recorded: the saved draft is gone.
-    await waitFor(async () => expect(await store.getVisitCompletionDraft('visit', 'op-1')).toBeFalsy());
+    await waitFor(async () => expect(await store.getVisitCompletionDraft('combo:visit', 'op-1')).toBeFalsy());
   });
 
   it('a lost response sends the same key and bodies again', async () => {
@@ -247,7 +247,7 @@ describe('the container', () => {
     await screen.findByText(/A promise changed\. Open that service again/);
     expect(post).toHaveBeenCalledTimes(1);
     expect(completeStop()).toBeDisabled();
-    expect((await store.getVisitCompletionDraft('visit', 'op-1')).forms['svc-pest']).toBeUndefined();
+    expect((await store.getVisitCompletionDraft('combo:visit', 'op-1')).forms['svc-pest']).toBeUndefined();
   });
 
   it('a reload restores the saved bodies: the parts show as saved, Complete stop is on, and Edit this part drops one', async () => {
@@ -280,7 +280,7 @@ describe('the container', () => {
     fireEvent.click(buttons[buttons.length - 1]);
     await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
     // The long form starts clean: the short screen's saved bodies are gone.
-    expect(await store.getVisitCompletionDraft('visit', 'op-1')).toBeFalsy();
+    expect(await store.getVisitCompletionDraft('combo:visit', 'op-1')).toBeFalsy();
   });
 
   it('a part that says it needs the long form shows the reason and Full form', async () => {
@@ -361,9 +361,10 @@ describe('drafts belong to the verified operator', () => {
       // The first operator's own draft is still theirs.
       mount('op-a');
       await screen.findAllByText('Saved earlier on this device. Edit it to change anything.');
-      expect(await store.getVisitCompletionDraft('visit', 'op-a')).toBeTruthy();
-      expect(await store.getVisitCompletionDraft('visit', 'op-b')).toBeFalsy();
-      expect(await store.getVisitCompletionDraft('visit', '')).toBeFalsy();
+      expect(await store.getVisitCompletionDraft('combo:visit', 'op-a')).toBeTruthy();
+      expect(await store.getVisitCompletionDraft('visit', 'op-a')).toBeFalsy();
+      expect(await store.getVisitCompletionDraft('combo:visit', 'op-b')).toBeFalsy();
+      expect(await store.getVisitCompletionDraft('combo:visit', '')).toBeFalsy();
       cleanup();
     }
   });
@@ -431,6 +432,101 @@ describe('navigation waits for work in flight', () => {
     expect(onClose).not.toHaveBeenCalled();
     click('pest busy off');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled());
+  });
+});
+
+describe('hydration happens before anything editable renders', () => {
+  it('a fresh stop keeps the first thing typed right after it loads', async () => {
+    mount();
+    const box = await screen.findByLabelText('Tell me about the visit');
+    fireEvent.change(box, { target: { value: 'Typed at once' } });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(screen.getByLabelText('Tell me about the visit')).toHaveValue('Typed at once');
+    expect(screen.getByTestId('pest-part')).toHaveTextContent('Typed at once');
+  });
+
+  it('a saved note is in the box and in both parts on their very first render', async () => {
+    await store.putVisitCompletionDraft('combo:visit', { visitId: 'visit', key: 'key_visit', note: 'Saved note', forms: {} }, 'op-1');
+    mount();
+    // findBy returns on the first render that has the box: it must already hold the saved note.
+    const box = await screen.findByLabelText('Tell me about the visit');
+    expect(box.value).toBe('Saved note');
+    expect(screen.getByTestId('pest-part')).toHaveTextContent('Saved note');
+  });
+});
+
+describe('one serialized writer persists the current map', () => {
+  const realPut = store.putVisitCompletionDraft;
+  const stored = async () => Object.keys((await store.getVisitCompletionDraft('combo:visit', 'op-1'))?.forms || {}).sort();
+
+  it('A fails while B succeeds: only B comes back after a reload', async () => {
+    let calls = 0;
+    const spy = vi.spyOn(store, 'putVisitCompletionDraft').mockImplementation((...args) => {
+      calls += 1;
+      return calls === 1 ? new Promise((resolve) => setTimeout(() => resolve(false), 30)) : realPut(...args);
+    });
+    const first = mount();
+    await screen.findByTestId('pest-part');
+    // Two overlapping saves: the first write fails while the second is queued.
+    click('pest save');
+    click('lawn save');
+    await screen.findByText(/rejected: Could not save this on this device/);
+    await waitFor(async () => expect(await stored()).toEqual(['svc-lawn']));
+    expect(screen.getByText(/Pest part: not saved yet/)).toBeInTheDocument();
+    expect(completeStop()).toBeDisabled();
+    first.unmount();
+    spy.mockRestore();
+    mount();
+    await screen.findByTestId('pest-part');
+    expect(screen.getAllByText('Saved earlier on this device. Edit it to change anything.')).toHaveLength(1);
+    expect(screen.queryByTestId('lawn-part')).not.toBeInTheDocument();
+  });
+
+  it('A then B both succeed: both are saved and ready', async () => {
+    mount();
+    await prepareBoth();
+    await bothPersisted();
+    expect(await stored()).toEqual(['svc-lawn', 'svc-pest']);
+  });
+
+  it('a failed compensating write leaves both not ready with the error shown', async () => {
+    vi.spyOn(store, 'putVisitCompletionDraft').mockResolvedValue(false);
+    mount();
+    await screen.findByTestId('pest-part');
+    click('pest save');
+    click('lawn save');
+    await waitFor(() => expect(screen.getAllByText(/rejected: Could not save this on this device/)).toHaveLength(2));
+    expect(screen.getByText(/Pest part: not saved yet · Lawn part: not saved yet/)).toBeInTheDocument();
+    expect(await screen.findAllByText(/Could not save this on this device/)).not.toHaveLength(0);
+    expect(completeStop()).toBeDisabled();
+  });
+});
+
+describe('Full form waits for the saved forms to be deleted', () => {
+  it('a delete that resolves false keeps the tech here with an error and a retry; the long form never reads the combo draft', async () => {
+    mount();
+    await prepareBoth();
+    await bothPersisted();
+    expect(await store.getVisitCompletionDraft('visit', 'op-1')).toBeFalsy();
+    const real = store.deleteVisitCompletionDraft;
+    const spy = vi.spyOn(store, 'deleteVisitCompletionDraft').mockResolvedValueOnce(false);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Full form' })[0]);
+    await screen.findByText(/Could not discard the saved forms/);
+    expect(onFullForm).not.toHaveBeenCalled();
+    expect(await store.getVisitCompletionDraft('combo:visit', 'op-1')).toBeTruthy();
+    spy.mockImplementation(real);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Full form' })[0]);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+    expect(await store.getVisitCompletionDraft('combo:visit', 'op-1')).toBeFalsy();
+  });
+
+  it('a delete that rejects is handled the same way', async () => {
+    mount();
+    await screen.findByTestId('pest-part');
+    vi.spyOn(store, 'deleteVisitCompletionDraft').mockRejectedValueOnce(new Error('idb gone'));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Full form' })[0]);
+    await screen.findByText(/Could not discard the saved forms/);
+    expect(onFullForm).not.toHaveBeenCalled();
   });
 });
 

@@ -102,7 +102,7 @@ import {
 import {
   AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
   SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
-  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
@@ -526,13 +526,15 @@ function prepareFor(service, onPrepared) {
   return plain ? onPrepared : () => { throw new Error(PREPARE_REFUSAL); };
 }
 
-export default function FastCompleteSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
+export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
   const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
   useLockBodyScroll(!embedded);
   const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
+  // As a part of a stop, every write the sheet sends is counted as work in flight (see useWriteTracking).
+  const request = useWriteTracking(plainRequest, embedded === true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const reportFlow = service?.reportFlow === true;

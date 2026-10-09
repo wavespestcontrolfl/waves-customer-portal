@@ -166,6 +166,19 @@ export function usePartBusy(source, busy) {
   }, [report, source, busy]);
 }
 
+// A part's requests, with every write counted: while any non-GET request is in flight the part reports busy (so the
+// container cannot close or unmount it mid-write). One place covers every present and future write of the sheet,
+// whichever control sends it. Outside a container (`enabled` false) the request is returned as it is.
+export function useWriteTracking(request, enabled) {
+  const [writes, setWrites] = useState(0);
+  usePartBusy('writes', writes > 0);
+  return useMemo(() => (enabled ? async (path, options) => {
+    if (String(options?.method || 'GET').toUpperCase() === 'GET') return request(path, options);
+    setWrites((n) => n + 1);
+    try { return await request(path, options); } finally { setWrites((n) => n - 1); }
+  } : request), [request, enabled]);
+}
+
 // A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no
 // dialog of its own. The container owns the one frame, the one scroll and the header; the part's header is hidden, its
 // body flows with the page and its footer (its own action button) stays at the end of the part (tech-workflow.css).

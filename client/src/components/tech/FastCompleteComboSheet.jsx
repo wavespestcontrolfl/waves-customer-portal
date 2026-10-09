@@ -169,15 +169,20 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
 
   const close = useCallback(() => { if (!blocked) onClose?.(); }, [blocked, onClose]);
   closeRef.current = close;
+  // The long form starts blank: the saved forms are deleted first, and the switch waits for the delete to land (it
+  // resolves false on a failure, it does not reject). On a failure the tech stays here with the error and tries again.
+  const [leaveError, setLeaveError] = useState('');
   const fullForm = async () => {
     if (blocked) return;
-    await deleteVisitCompletionDraft(visitId, scope).catch(noop);
+    const removed = await deleteVisitCompletionDraft(readiness.draftId, scope).catch(() => false);
+    if (!removed) { setLeaveError('Could not discard the saved forms on this device, so the long form was not opened. Tap Full form to try again.'); return; }
+    setLeaveError('');
     onFullForm?.();
   };
   const partFullForm = useCallback(() => send.setRefusal('The server says this stop needs the long form.'), [send.setRefusal]);
   const shared = { readiness, send, note: readiness.note, request, operatorId, catalog, onFullForm: partFullForm, changed, markChanged };
   const lines = PARTS.filter(({ kind }) => !readiness.ready(ids[kind])).map(({ kind, label }) => `${label} part: ${partStatus(readiness, ids[kind], label, changed[kind]).line}`);
-  const error = send.error || readiness.persistError;
+  const error = leaveError || send.error || readiness.persistError;
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>

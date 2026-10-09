@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { putVisitCompletionDraft } from '../lib/completion-resume-store';
 import {
-  clearTerminalDrafts, loadVisitCloseout, packetAfterSend, packetDisplayState, postVisitPacket, resolveSendFailure,
+  clearTerminalDrafts, comboDraftId, loadVisitCloseout, packetAfterSend, packetDisplayState, postVisitPacket, resolveSendFailure,
 } from '../lib/visit-closeout-packet';
 
 const PERSIST_ERROR = 'Could not save this on this device. Free some storage and try again.';
@@ -24,7 +24,7 @@ export function useStopLoad(visitId, scope) {
   const [state, setState] = useState({ status: 'loading', detail: null, rows: [], draft: null, error: '' });
   useEffect(() => {
     let live = true;
-    loadVisitCloseout(visitId, scope).then(({ detail, rows, draft }) => {
+    loadVisitCloseout(visitId, scope, comboDraftId(visitId)).then(({ detail, rows, draft }) => {
       if (live) setState({ status: 'ready', detail, rows, draft, error: '' });
     }).catch((err) => { if (live) setState((s) => ({ ...s, status: 'error', error: err.message || 'Could not load the stop.' })); });
     return () => { live = false; };
@@ -35,68 +35,89 @@ export function useStopLoad(visitId, scope) {
 }
 
 export function useStopReadiness({ visitId, scope, status, draft }) {
+  const draftId = comboDraftId(visitId);
   const entries = useRef({});
   const noteRef = useRef('');
   const keyRef = useRef('');
+  const restoredRef = useRef([]);
+  const seeded = useRef(false);
   const lastSeq = useRef({});
-  const chain = useRef(Promise.resolve());
+  const writer = useRef({ running: false, dirty: false, waiters: [], compensating: false });
   const [, setVersion] = useState(0);
-  const [note, setNoteState] = useState('');
-  const [restored, setRestored] = useState([]);
   const [persistError, setPersistError] = useState('');
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
-  // Seed from the saved draft once the stop has loaded: the note comes back with the bodies.
-  useEffect(() => {
-    if (status !== 'ready') return;
+  // Seeded synchronously, in the render that sees the load settle: no part is ever drawn with an empty note and then
+  // overwritten. The note comes back with the bodies; each body keeps the note it was saved under.
+  if (status === 'ready' && !seeded.current) {
+    seeded.current = true;
     const saved = draft.forms || {};
     noteRef.current = draft.note || '';
     keyRef.current = draft.key;
-    setNoteState(noteRef.current);
     entries.current = Object.fromEntries(Object.entries(saved).filter(([, form]) => form?.body)
       .map(([id, form]) => [id, { body: form.body, seq: 0, noteAtSave: form.noteAtSave ?? noteRef.current }]));
-    setRestored(Object.keys(entries.current));
-    bump();
-  }, [status]); // seeded once, when the load settles
+    restoredRef.current = Object.keys(entries.current);
+  }
 
-  // Write-through: the snapshot is taken now, written in order.
-  const persist = useCallback(() => {
-    const forms = Object.fromEntries(Object.entries(entries.current).map(([id, e]) => [id, { body: e.body, noteAtSave: e.noteAtSave }]));
-    const snapshot = { visitId, key: keyRef.current, note: noteRef.current, forms };
-    const run = async () => { if (!await putVisitCompletionDraft(visitId, snapshot, scope)) throw new Error(PERSIST_ERROR); };
-    const next = chain.current.then(run, run);
-    chain.current = next.catch(() => {});
-    return next;
-  }, [visitId, scope]);
+  // ONE serialized writer that always writes the map as it is when its turn runs ("persist latest"), never a snapshot
+  // taken at call time. A call resolves when a write that includes its entry has landed. When a write fails, the
+  // calls it carried are rolled back (their entries leave the map, synchronously, before the next snapshot is taken)
+  // and one more write follows with the corrected map; if that one fails too, the writer stops and the error is shown.
+  const drain = useCallback(async () => {
+    const w = writer.current;
+    while (w.dirty) {
+      w.dirty = false;
+      const batch = w.waiters.splice(0);
+      const forms = Object.fromEntries(Object.entries(entries.current).map(([id, e]) => [id, { body: e.body, noteAtSave: e.noteAtSave }]));
+      let ok = false;
+      try { ok = await putVisitCompletionDraft(draftId, { visitId, key: keyRef.current, note: noteRef.current, forms }, scope); } catch { ok = false; }
+      if (ok) {
+        w.compensating = false;
+        setPersistError('');
+        batch.forEach((waiter) => waiter.resolve());
+      } else {
+        batch.forEach((waiter) => { waiter.rollback?.(); waiter.reject(new Error(PERSIST_ERROR)); });
+        bump();
+        if (w.compensating) { w.compensating = false; setPersistError(PERSIST_ERROR); } else { w.compensating = true; w.dirty = true; }
+      }
+    }
+    w.running = false;
+  }, [visitId, scope, draftId, bump]);
+
+  const persist = useCallback((rollback) => new Promise((resolve, reject) => {
+    const w = writer.current;
+    w.waiters.push({ resolve, reject, rollback });
+    w.dirty = true;
+    if (!w.running) { w.running = true; void drain(); }
+  }), [drain]);
 
   // A part's onPrepared (the contract in useFastCompleteSubmit): applied only if its seq is the greatest seen for the
-  // service; a failed save puts the entry back as it was and rejects (the part stays not ready).
+  // service; a failed write puts the entry back as it was and rejects (the part stays not ready).
   const apply = useCallback((id, body, seq) => {
     if (!(seq > (lastSeq.current[id] ?? 0))) return Promise.resolve();
     lastSeq.current[id] = seq;
     const before = entries.current[id];
     if (body) entries.current[id] = { body, seq, noteAtSave: noteRef.current }; else delete entries.current[id];
     bump();
-    return persist().catch((err) => {
+    return persist(() => {
+      if (entries.current[id]?.seq !== seq && body) return;
       if (before) entries.current[id] = before; else delete entries.current[id];
-      bump();
-      throw err;
     });
   }, [persist, bump]);
 
   // "Edit this part": the entry is gone at once, the write follows; a failed write is shown, the part stays not ready.
   const drop = useCallback((id) => {
     delete entries.current[id];
-    setRestored((ids) => ids.filter((x) => x !== id));
+    restoredRef.current = restoredRef.current.filter((x) => x !== id);
     bump();
-    return persist().then(() => setPersistError(''), (err) => setPersistError(err.message));
+    return persist().catch((err) => setPersistError(err.message));
   }, [persist, bump]);
 
   const setNote = useCallback((text) => {
     noteRef.current = text;
-    setNoteState(text);
-    persist().then(() => setPersistError(''), (err) => setPersistError(err.message));
-  }, [persist]);
+    bump();
+    persist().catch((err) => setPersistError(err.message));
+  }, [persist, bump]);
 
   // A confirmed or reopened draft from a send: bodies follow it (a reopened form has none: it is not ready).
   const replaceFrom = useCallback((next) => {
@@ -105,17 +126,17 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
       if (form?.body) entries.current[id] = { ...entries.current[id], body: form.body }; else delete entries.current[id];
     }
     bump();
-    void persist().catch((err) => setPersistError(err.message));
+    persist().catch((err) => setPersistError(err.message));
   }, [persist, bump]);
 
-  const ready = (id) => entries.current[id]?.noteAtSave === noteRef.current && !!entries.current[id];
+  const ready = (id) => !!entries.current[id] && entries.current[id].noteAtSave === noteRef.current;
   const stale = (id) => !!entries.current[id] && !ready(id);
   // The draft the packet request sends: ready parts only, from the map (never from the loaded draft).
   const draftFor = (ids) => ({
     visitId, key: keyRef.current, note: noteRef.current,
     forms: Object.fromEntries(ids.filter(ready).map((id) => [id, { body: entries.current[id].body }])),
   });
-  return { note, setNote, ready, stale, restored, apply, drop, replaceFrom, draftFor, persistError };
+  return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, draftFor, persistError, draftId };
 }
 
 export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
@@ -130,7 +151,7 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
   const display = packetDisplayState({ result, detail: load.detail, busy });
 
   const send = async (candidate) => {
-    const response = await postVisitPacket({ visitId, packet, draft: candidate, services: load.rows, scope });
+    const response = await postVisitPacket({ visitId, packet, draft: candidate, services: load.rows, scope, draftId: readiness.draftId });
     setResult(response);
     load.setDetail((cur) => ({ ...cur, packet: packetAfterSend(response) }));
     if (['done', 'office_required'].includes(response.state)) await clearTerminalDrafts(visitId, load.detail.members, scope);
@@ -139,7 +160,7 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
 
   // Applies what resolveSendFailure decided, exactly as the long form does. Returns the draft to send again, or null.
   const failed = async (err, candidate) => {
-    const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope });
+    const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope, draftId: readiness.draftId });
     if (outcome.kind === 'resend') { readiness.replaceFrom(outcome.draft); return outcome.draft; }
     if (outcome.kind === 'reopened') {
       readiness.replaceFrom(outcome.draft);

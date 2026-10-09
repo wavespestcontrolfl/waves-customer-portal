@@ -50,20 +50,27 @@ function removeCompletionMetadata(serviceId, scope) {
   } catch { /* IndexedDB cleanup still removes the photo-bearing copy. */ }
 }
 
+// The one-screen container saves its forms under its own key, so it never reads or overwrites the long form's draft of
+// the same stop (and the long form never restores the container's).
+export const comboDraftId = (visitId) => `combo:${visitId}`;
+
+// (The delete calls resolve false on a failed delete instead of rejecting; a finished stop's leftover draft is cleared
+// again by the next load, so a failure here is left for that.)
 export async function clearTerminalDrafts(visitId, members, scope) {
   const serviceIds = [...new Set((members || []).map((member) => member?.id).filter(Boolean))];
   await Promise.all([
     deleteVisitCompletionDraft(visitId, scope),
+    deleteVisitCompletionDraft(comboDraftId(visitId), scope),
     ...serviceIds.map((serviceId) => deleteCompletionDraft(serviceId, scope)),
   ]);
   serviceIds.forEach((serviceId) => removeCompletionMetadata(serviceId, scope));
 }
 
 // A stop and its saved draft: { detail, rows, draft, terminal }. A packet already finished clears the old draft.
-export async function loadVisitCloseout(visitId, scope) {
+export async function loadVisitCloseout(visitId, scope, draftId = visitId) {
   const [detail, stored] = await Promise.all([
     adminFetch(`/admin/visit-closeouts/${visitId}`),
-    getVisitCompletionDraft(visitId, scope),
+    getVisitCompletionDraft(draftId, scope),
   ]);
   // A lost final response can leave a draft after the server finished.
   const terminal = ['done', 'failed'].includes(detail.packet?.status);
@@ -74,8 +81,8 @@ export async function loadVisitCloseout(visitId, scope) {
 }
 
 // Saves the draft (first send only) and records the stop: the same request, the same key, every time.
-export async function postVisitPacket({ visitId, packet, draft, services, scope }) {
-  if (!packet && !await putVisitCompletionDraft(visitId, draft, scope)) throw new Error('Could not preserve these forms for retry. Please try again.');
+export async function postVisitPacket({ visitId, packet, draft, services, scope, draftId = visitId }) {
+  if (!packet && !await putVisitCompletionDraft(draftId, draft, scope)) throw new Error('Could not preserve these forms for retry. Please try again.');
   return adminFetch(`/admin/visit-closeouts/${visitId}${packet ? '/resume' : ''}`, {
     method: 'POST',
     headers: { 'Idempotency-Key': draft.key },
@@ -99,7 +106,7 @@ const confirms = () => [
  *   null                  not a prompt (or already confirmed): the caller shows the error.
  * `ask` (window.confirm) is injectable for tests.
  */
-export async function packetConfirm({ err, candidate, packet, visitId, scope, ask = (text) => window.confirm(text) }) {
+export async function packetConfirm({ err, candidate, packet, visitId, scope, draftId = visitId, ask = (text) => window.confirm(text) }) {
   const form = candidate.forms[err.details?.serviceId];
   if (packet || !form) return null;
   const withFlag = (flag) => ({ ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: {
@@ -112,7 +119,8 @@ export async function packetConfirm({ err, candidate, packet, visitId, scope, as
     // A promise changed after the report was written: declining puts that form back to be marked again.
     if (flag !== 'promiseMarksConfirmed') return { declined: true };
     const reopened = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: { ...form, body: null } } };
-    await putVisitCompletionDraft(visitId, reopened, scope);
+    // (Resolves false on a failed write: the caller's own state is authoritative and writes the draft again.)
+    await putVisitCompletionDraft(draftId, reopened, scope);
     return { reopened, message: 'A promise changed. Open that service again to mark it, then complete the visit.' };
   }
   return null;
@@ -124,7 +132,7 @@ export async function packetConfirm({ err, candidate, packet, visitId, scope, as
  * day and refreshes the draft. Returns { detail, finished, refreshed } (refreshed = { rows, draft } or null). Throws
  * when the server cannot be read: the caller keeps the same key and body for a later retry.
  */
-export async function rediscoverCloseout({ visitId, candidate, err, scope }) {
+export async function rediscoverCloseout({ visitId, candidate, err, scope, draftId = visitId }) {
   const detail = await adminFetch(`/admin/visit-closeouts/${visitId}`);
   const finished = ['done', 'failed'].includes(detail.packet?.status);
   if (finished) await clearTerminalDrafts(visitId, detail.members, scope);
@@ -133,7 +141,8 @@ export async function rediscoverCloseout({ visitId, candidate, err, scope }) {
     const day = await adminFetch(`/admin/schedule?date=${encodeURIComponent(detail.serviceDate)}`);
     const rows = rowsForDetail(detail, day, visitId);
     const draft = draftForServices(candidate, visitId, rows);
-    await putVisitCompletionDraft(visitId, draft, scope);
+    // A write that fails (it resolves false) is as good as a failed read: the caller keeps the same key and bodies.
+    if (!await putVisitCompletionDraft(draftId, draft, scope)) throw new Error('Could not save the refreshed forms on this device.');
     refreshed = { rows, draft };
   }
   return { detail, finished, refreshed };
@@ -180,13 +189,13 @@ export const packetAfterSend = (response) => ({
  *                                           was re-read (the earlier answer is then void: clear it); `reload` when the
  *                                           member list changed and could not be re-read.
  */
-export async function resolveSendFailure({ err, candidate, packet, visitId, scope }) {
-  const confirm = await packetConfirm({ err, candidate, packet, visitId, scope });
+export async function resolveSendFailure({ err, candidate, packet, visitId, scope, draftId = visitId }) {
+  const confirm = await packetConfirm({ err, candidate, packet, visitId, scope, draftId });
   if (confirm?.resend) return { kind: 'resend', draft: confirm.resend };
   if (confirm?.reopened) return { kind: 'reopened', draft: confirm.reopened, message: confirm.message };
   if (confirm) return { kind: 'declined' };
   let found = null;
-  try { found = await rediscoverCloseout({ visitId, candidate, err, scope }); } catch { /* the same key and bodies stay saved for a later retry */ }
+  try { found = await rediscoverCloseout({ visitId, candidate, err, scope, draftId }); } catch { /* the same key and bodies stay saved for a later retry */ }
   let error = packetErrorMessage(err);
   if (found?.finished) error = '';
   if (found?.refreshed) error = 'The service list changed. Review the refreshed services before trying again.';
