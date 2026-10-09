@@ -115,15 +115,17 @@ describeDb('rolling 365-day yearly caps through PostgreSQL', () => {
       for (const name of [CELSIUS, CERTAINTY]) {
         const { f } = await lawn(name, ['2025-12-05', '2025-12-20']);
         const result = await check(f, name, '2026-01-12');
-        expect(types(result)).toEqual(['annual_max_apps']);
+        // Certainty also has a 28-day gap (label; v13 final pass): 20 December to 12 January is 23 days.
+        expect(types(result)).toEqual(name === CERTAINTY ? ['annual_max_apps', 'min_interval_days'] : ['annual_max_apps']);
         expect(result.blocks[0]).toMatchObject({ current: 2, max: 2 });
         expect(result.blocks[0].message).toBe(`${name}: 2/2 applications in the last 365 days — LIMIT REACHED.`);
       }
       const { f } = await lawn(BLINDSIDE, ['2025-12-05', '2025-12-20']);
       expect(types(await check(f, BLINDSIDE, '2026-01-12'))).toEqual([]);
-      // ...and the calendar-year product still stops at two in the same calendar year, with its old wording.
-      const same = await lawn(BLINDSIDE, ['2026-01-05', '2026-01-20']);
-      expect((await check(same.f, BLINDSIDE, '2026-02-12')).blocks[0].message).toBe(`${BLINDSIDE}: 2/2 applications this year — LIMIT REACHED.`);
+      // ...and the calendar-year product still stops inside the same calendar year, with its old wording (Blindside: one a year).
+      const same = await lawn(BLINDSIDE, ['2026-01-05']);
+      const sameYear = (await check(same.f, BLINDSIDE, '2026-02-12')).blocks.find((block) => block.type === 'annual_max_apps');
+      expect(sameYear.message).toBe(`${BLINDSIDE}: 1/1 applications this year — LIMIT REACHED.`);
     });
 
     test('the window is exactly 365 days: 364 days after the first application it still counts, 365 days after it is free', async () => {
@@ -243,8 +245,9 @@ describeDb('rolling 365-day yearly caps through PostgreSQL', () => {
       const { f } = await lawn(CELSIUS, ['2025-12-28', '2026-12-20']);
       const visit = await record(f, CELSIUS, '2026-06-01');
       expect(countViolation(await audit(f, visit, CELSIUS, '2026-06-01'))).toMatchObject({ current: 2, max: 2 });
-      // The calendar year of 2026 holds only one of them: the old reading would not flag it.
-      const blind = await lawn(BLINDSIDE, ['2025-12-28', '2026-12-20']);
+      // A calendar-year product reads the calendar year of the day: neither of these is in 2026, so nothing is flagged
+      // (Blindside allows one a year).
+      const blind = await lawn(BLINDSIDE, ['2025-12-28', '2027-01-05']);
       const blindVisit = await record(blind.f, BLINDSIDE, '2026-06-01');
       expect(await audit(blind.f, blindVisit, BLINDSIDE, '2026-06-01')).toEqual([]);
     });

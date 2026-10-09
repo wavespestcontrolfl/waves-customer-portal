@@ -17,7 +17,7 @@
       "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
       "Mole cricket nymphs, July and August: Talak 7.9 F on the spots, 1.0 fl oz per 1,000 sq ft by backpack, and the technician waters it in right after application with the hose (up to 0.5 inch) before leaving; the customer's 24-hour hold then applies. Bigger mole crickets in the fall go to Dylox 6.2 G.",
-      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place from November through March (April through October: no weed spray once the Celsius cap is reached). In February the weed spot is Celsius alone: no Certainty and no surfactant. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
+      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place from November through March (April through October: no weed spray once the Celsius cap is reached). In February the weed spot is Celsius alone: no Certainty and no surfactant. Blindside goes on at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: the warm-season rate is 0.149 to 0.23 oz a pass, and no more than 0.23 oz per 1,000 sq ft (10 oz per acre) a year). Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Dry spots: Dispatch Sprayable.",
       "Other spot diseases (secondary lines): Pythium root rot with Artavia in June, July and August (September's Artavia is the take-all pass only, so a take-all application stays unambiguous); fairy ring with Velista and a wetting agent; dollar spot on bermuda and zoysia with Velista or Gravex, never Artavia (its label says it does not control dollar spot); rust on zoysia with Velista or Gravex; leaf spot or melting out on bermuda with Velista.",
       "Fire ant granule (Topchoice Granular Insecticide) is an optional add-on in April or October, both spreader visits, one application per lawn per year. The office prices it. It is not part of the base visit.",
@@ -28,7 +28,7 @@
       "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
     ],
     "safety_rules": [
-      "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap, November through March only (April through October: no weed spray once the Celsius cap is reached). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
+      "Celsius WG: stay under the annual cap (Celsius and Certainty: up to 2 applications per lawn per year each; Blindside: 1 application per lawn per year); use Blindside after the Celsius cap, November through March only (April through October: no weed spray once the Celsius cap is reached), at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: warm-season rate 0.149 to 0.23 oz a pass, no more than 0.23 oz per 1,000 sq ft a year). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours. On mole cricket nymph spots the technician first waters it in right after application with the hose (up to 0.5 inch).",
       "Dylox 6.2 G: spreader visits only, water in.",
@@ -45,7 +45,7 @@
         "visit": 1,
         "month": "Jan",
         "primary": "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -71,7 +71,7 @@
         "visit": 3,
         "month": "Mar",
         "primary": "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nVelista — rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix\nVelista — rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -198,7 +198,7 @@
         "visit": 11,
         "month": "Nov",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
+        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -211,7 +211,7 @@
         "visit": 12,
         "month": "Dec",
         "primary": "LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -240,7 +240,7 @@
       "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
       "Mole cricket nymphs, July and August: Talak 7.9 F on the spots, 1.0 fl oz per 1,000 sq ft by backpack, and the technician waters it in right after application with the hose (up to 0.5 inch) before leaving; the customer's 24-hour hold then applies. Bigger mole crickets in the fall go to Dylox 6.2 G.",
-      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place from November through March (April through October: no weed spray once the Celsius cap is reached). In February the weed spot is Celsius alone: no Certainty and no surfactant. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
+      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place from November through March (April through October: no weed spray once the Celsius cap is reached). In February the weed spot is Celsius alone: no Certainty and no surfactant. Blindside goes on at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: the warm-season rate is 0.149 to 0.23 oz a pass, and no more than 0.23 oz per 1,000 sq ft (10 oz per acre) a year). Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Dry spots: Dispatch Sprayable.",
       "Other spot diseases (secondary lines): Pythium root rot with Artavia in June, July and August (September's Artavia is the take-all pass only, so a take-all application stays unambiguous); fairy ring with Velista and a wetting agent; dollar spot on bermuda and zoysia with Velista or Gravex, never Artavia (its label says it does not control dollar spot); rust on zoysia with Velista or Gravex; leaf spot or melting out on bermuda with Velista.",
       "Fire ant granule (Topchoice Granular Insecticide) is an optional add-on in April or October, both spreader visits, one application per lawn per year. The office prices it. It is not part of the base visit.",
@@ -251,7 +251,7 @@
       "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
     ],
     "safety_rules": [
-      "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap, November through March only (April through October: no weed spray once the Celsius cap is reached). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
+      "Celsius WG: stay under the annual cap (Celsius and Certainty: up to 2 applications per lawn per year each; Blindside: 1 application per lawn per year); use Blindside after the Celsius cap, November through March only (April through October: no weed spray once the Celsius cap is reached), at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: warm-season rate 0.149 to 0.23 oz a pass, no more than 0.23 oz per 1,000 sq ft a year). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours. On mole cricket nymph spots the technician first waters it in right after application with the hose (up to 0.5 inch).",
       "Dylox 6.2 G: spreader visits only, water in.",
@@ -268,7 +268,7 @@
         "visit": 1,
         "month": "Jan",
         "primary": "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -294,7 +294,7 @@
         "visit": 3,
         "month": "Mar",
         "primary": "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nVelista — rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix\nVelista — rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -403,7 +403,7 @@
         "visit": 11,
         "month": "Nov",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
+        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -416,7 +416,7 @@
         "visit": 12,
         "month": "Dec",
         "primary": "LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -445,7 +445,7 @@
       "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
       "Mole cricket nymphs, July and August: Talak 7.9 F on the spots, 1.0 fl oz per 1,000 sq ft by backpack, and the technician waters it in right after application with the hose (up to 0.5 inch) before leaving; the customer's 24-hour hold then applies. Bigger mole crickets in the fall go to Dylox 6.2 G.",
-      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place from November through March (April through October: no weed spray once the Celsius cap is reached). In February the weed spot is Celsius alone: no Certainty and no surfactant. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
+      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place from November through March (April through October: no weed spray once the Celsius cap is reached). In February the weed spot is Celsius alone: no Certainty and no surfactant. Blindside goes on at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: the warm-season rate is 0.149 to 0.23 oz a pass, and no more than 0.23 oz per 1,000 sq ft (10 oz per acre) a year). Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Dry spots: Dispatch Sprayable.",
       "Other spot diseases (secondary lines): Pythium root rot with Artavia in June, July and August (September's Artavia is the take-all pass only, so a take-all application stays unambiguous); fairy ring with Velista and a wetting agent; dollar spot on bermuda and zoysia with Velista or Gravex, never Artavia (its label says it does not control dollar spot); rust on zoysia with Velista or Gravex; leaf spot or melting out on bermuda with Velista.",
       "Fire ant granule (Topchoice Granular Insecticide) is an optional add-on in April or October, both spreader visits, one application per lawn per year. The office prices it. It is not part of the base visit.",
@@ -456,7 +456,7 @@
       "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
     ],
     "safety_rules": [
-      "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap, November through March only (April through October: no weed spray once the Celsius cap is reached). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
+      "Celsius WG: stay under the annual cap (Celsius and Certainty: up to 2 applications per lawn per year each; Blindside: 1 application per lawn per year); use Blindside after the Celsius cap, November through March only (April through October: no weed spray once the Celsius cap is reached), at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: warm-season rate 0.149 to 0.23 oz a pass, no more than 0.23 oz per 1,000 sq ft a year). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours. On mole cricket nymph spots the technician first waters it in right after application with the hose (up to 0.5 inch).",
       "Dylox 6.2 G: spreader visits only, water in.",
@@ -473,7 +473,7 @@
         "visit": 1,
         "month": "Jan",
         "primary": "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -499,7 +499,7 @@
         "visit": 3,
         "month": "Mar",
         "primary": "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nVelista — rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix\nVelista — rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -626,7 +626,7 @@
         "visit": 11,
         "month": "Nov",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days",
+        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -639,7 +639,7 @@
         "visit": 12,
         "month": "Dec",
         "primary": "LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, 0.149 oz per 1,000 sq ft, one application per lawn per year, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,

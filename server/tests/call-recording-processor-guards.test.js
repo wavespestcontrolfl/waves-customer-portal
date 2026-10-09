@@ -124,6 +124,52 @@ describe('call recording appointment guardrails', () => {
     )).toBe(true);
   });
 
+  test('the business name is not a pest control request (call 1185737f, 2026-06-19)', () => {
+    // A callback that only confirms a visit: no service named anywhere.
+    expect(resolveSchedulableCallService({
+      requested_service: null,
+      matched_service: null,
+      appointment_confirmed: true,
+      call_summary: 'The caller confirmed their 4:30 PM appointment with Waves Pest Control.',
+    }).service).not.toBe('General Pest Control');
+    expect(resolveSchedulableCallService({
+      requested_service: null,
+      matched_service: null,
+      appointment_confirmed: true,
+      call_summary: 'The caller confirmed a Waves Pest Control appointment for 4:30 PM.',
+    }).service).not.toBe('General Pest Control');
+    // Wildlife and non-service calls no longer resolve a service from the name.
+    for (const summary of [
+      'A roofing contractor called Waves Pest Control seeking assistance with bats in an attic.',
+      'The caller asked if Waves Pest Control is hiring.',
+      'The caller asked for Waves Pest Control & Lawn Care and the call disconnected.',
+    ]) {
+      expect(resolveSchedulableCallService({ requested_service: null, matched_service: null, call_summary: summary }))
+        .toMatchObject({ ok: false, noMatch: true });
+    }
+  });
+
+  test('a real pest request beside the business name still resolves, and the generic row name is unchanged', () => {
+    expect(resolveSchedulableCallService({
+      requested_service: 'Pest control for ants',
+      call_summary: 'The caller contacted Waves Pest Control about ants in the kitchen.',
+    })).toMatchObject({ ok: true, service: 'General Pest Control' });
+    expect(resolveSchedulableCallService({
+      requested_service: null,
+      call_summary: 'The caller contacted Waves Pest Control because they need pest control at a new home.',
+    })).toMatchObject({ ok: true, service: 'General Pest Control' });
+    // "and lawn care" after the name is a request, not part of the brand.
+    expect(resolveSchedulableCallService({
+      requested_service: null,
+      call_summary: 'The caller called Waves Pest Control and lawn care was requested for the front yard.',
+    })).toMatchObject({ ok: true, service: 'Lawn Care' });
+    expect(resolveSchedulableCallService({
+      matched_service: 'Waves Pest Control Appointment Service',
+      requested_service: 'Scheduled service visit',
+      appointment_confirmed: true,
+    })).toMatchObject({ ok: true, service: 'General Pest Control' });
+  });
+
   test('rejects unrelated SEO or construction calls even if a service phrase was extracted', () => {
     const result = resolveSchedulableCallService({
       matched_service: 'General Pest Control',
