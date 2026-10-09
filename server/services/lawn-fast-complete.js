@@ -345,6 +345,8 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
       completionTime: now,
       lawnAssessment: { waterContext: { scheduleUnconfirmed: context.scheduleUnconfirmed } },
       knex,
+      // The report freezes this wording at completion, so the preview shows it.
+      forCompletion: true,
     });
   } catch (err) {
     // The report builds no instruction when its irrigation inputs cannot be read.

@@ -701,3 +701,102 @@ describe('mow hold', () => {
     }
   });
 });
+
+// GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): the completion build passes
+// plainWhenNoSetup; only the "generic" basis (no head type on file) changes.
+describe('amount only when no sprinkler setup is on file (plainWhenNoSetup)', () => {
+  const plain = (rules, runtime = null) => build(rules, { runtime, plainWhenNoSetup: true });
+  const GENERIC_RUNTIMES = [null, undefined, {}, { runMinutes: 20 }, { runMinutes: null, headTypes: [], systemOn: null }, { unconfirmed: true, headTypes: ['rotor'], runMinutes: 30 }];
+
+  test('off (the default): the instruction is exactly what it was', () => {
+    for (const runtime of GENERIC_RUNTIMES) {
+      expect(build([WATER_IN()], { runtime, plainWhenNoSetup: false })).toEqual(build([WATER_IN()], { runtime }));
+    }
+    const r = build([WATER_IN()]);
+    expect(r.lines[1]).toBe('Run spray heads about 15 minutes a zone and rotors about 40 minutes.');
+    expect(r).not.toHaveProperty('amountOnly');
+  });
+
+  test('water-in with nothing on file: the amount, no minutes, no figures at all', () => {
+    for (const runtime of GENERIC_RUNTIMES) {
+      const r = plain([WATER_IN({ water_in_inches: 0.5 })], runtime);
+      expect(r.state).toBe('water_in');
+      expect(r.lines).toEqual([
+        'Water in today’s treatment with about ½ inch by Thu 2 PM.',
+        'Run it even if it is not your usual day.',
+      ]);
+      expect(r.minutes).toEqual({ spray: null, rotor: null, unknown: false, measured: null });
+      expect(r.amountOnly).toBe(true);
+      expect(r.waterInInches).toBe(0.5);
+      expect(r.lines.join(' ')).not.toMatch(/minute|spray|rotor/i);
+      expectCleanCopy(r);
+    }
+  });
+
+  test('the amount reads in the same style as the forecast sentence', () => {
+    expect(plain([WATER_IN({ water_in_inches: 0.25 })]).lines[0]).toBe('Water in today’s treatment with about ¼ inch by Thu 2 PM.');
+    expect(plain([WATER_IN({ water_in_inches: 0.27 })]).lines[0]).toBe('Water in today’s treatment with about 0.27 inch by Thu 2 PM.');
+    expect(plain([WATER_IN({ water_in_inches: 1.5 })]).lines[0]).toBe('Water in today’s treatment with about 1.5 inches by Thu 2 PM.');
+  });
+
+  test('the plan-credit swap still lands on the last line', () => {
+    const r = plain([WATER_IN({ water_in_inches: 0.25 })]);
+    expect(composeBannerLines(r, WITH_PLAN)).toEqual([
+      'Water in today’s treatment with about ¼ inch by Thu 2 PM.',
+      'Run it even if it is not your usual day. That counts toward this week’s watering.',
+    ]);
+  });
+
+  test('hold then water-in keeps its hold line and only the water-in clause changes', () => {
+    const r = plain([HOLD(6), WATER_IN()]);
+    expect(r.state).toBe('hold_then_water_in');
+    expect(r.lines).toEqual([
+      'Skip your turf watering until 9 PM tonight.',
+      'After that, water in today’s treatment with about ¼ inch by Thu 2 PM.',
+      'Run it even if it is not your usual day.',
+    ]);
+    expect(r.amountOnly).toBe(true);
+    expect(r.holdUntil).toBe(build([HOLD(6), WATER_IN()]).holdUntil);
+    expectCleanCopy(r);
+  });
+
+  test('a hold alone, and a none, are untouched', () => {
+    expect(plain([HOLD(24)])).toEqual(build([HOLD(24)]));
+    expect(plain([NONE()])).toEqual(build([NONE()]));
+    expect(plain([HOLD(24)])).not.toHaveProperty('amountOnly');
+  });
+
+  test('every basis other than generic is unchanged by the flag', () => {
+    const cases = [
+      { headTypes: ['rotor'] },
+      { headTypes: ['spray'] },
+      { headTypes: ['spray', 'rotor'] },
+      { headTypes: ['drip'] },
+      { headTypes: ['mystery'] },
+      { explicitInchesPerWeek: 0.9, runMinutes: 30, wateringDays: ['Mon', 'Thu'], headTypes: ['rotor'] },
+    ];
+    for (const runtime of cases) {
+      const on = plain([WATER_IN()], runtime);
+      expect(on).toEqual(build([WATER_IN()], { runtime }));
+      expect(on).not.toHaveProperty('amountOnly');
+      expect(plain([HOLD(6), WATER_IN()], runtime)).toEqual(build([HOLD(6), WATER_IN()], { runtime }));
+    }
+  });
+
+  test('a water-in with no honest deadline is still no claim', () => {
+    expect(plain([HOLD(30), WATER_IN()]).state).toBeNull();
+  });
+
+  test('minutesFor reports the basis either way', () => {
+    expect(_private.minutesFor(null, 0.25)).toMatchObject({ basis: 'generic', clause: expect.stringContaining('minutes') });
+    expect(_private.minutesFor(null, 0.25, true)).toMatchObject({ basis: 'generic', clause: null, amountOnly: true, amount: '¼ inch' });
+    expect(_private.minutesFor({ headTypes: ['rotor'] }, 0.25, true)).toMatchObject({ basis: 'head_type' });
+  });
+
+  test('the invitation sentence is clean customer copy', () => {
+    const { SETUP_INVITE_LINE } = require('../services/service-report/lawn-watering-instruction');
+    expect(SETUP_INVITE_LINE).toBe('Add your sprinkler setup and we’ll give you minutes for each zone.');
+    expect(findBannedCustomerCopy(SETUP_INVITE_LINE)).toEqual([]);
+    expect(reentrySafetyClaimFinding(SETUP_INVITE_LINE)).toBeFalsy();
+  });
+});
