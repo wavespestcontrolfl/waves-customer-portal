@@ -58,15 +58,21 @@ function storedEstimateContainer(estimateData, { pricingAuthority = null } = {})
 // prices something; an estimate whose only container is `engineResult` is read from it. Callers apply their
 // own predicate (sold, priced, carried) to the rows.
 const isAreaAddOnRow = (row) => isRecord(row) && row.service === 'area_addon';
-function storedAreaAddOnRows(estimateData, options = {}) {
-  const container = storedEstimateContainer(estimateData, options) || parseStoredData(estimateData);
-  if (!container) return [];
+function areaAddOnRowsIn(container) {
   const nested = container.results && container.results.oneTime;
   return [
     container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
     nested && nested.items, nested && nested.specItems,
     container.specItems, container.quoteRequiredItems, container.lineItems,
   ].filter(Array.isArray).flat().filter(isAreaAddOnRow);
+}
+function storedAreaAddOnRows(estimateData, options = {}) {
+  const data = parseStoredData(estimateData);
+  if (!data) return [];
+  const containers = [data.result, data.engineResult].filter(isRecord);
+  // No row in either container: nothing to pick between (and the audit's detector is never loaded).
+  if (containers.length && !containers.some((container) => areaAddOnRowsIn(container).length)) return [];
+  return areaAddOnRowsIn(storedEstimateContainer(data, options) || data);
 }
 
 // The commercial engine ids and their residential label-mapped twins are the SAME charge in two
