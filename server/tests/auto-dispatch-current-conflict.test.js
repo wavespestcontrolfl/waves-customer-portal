@@ -140,12 +140,15 @@ test('the unit\'s whole occupied span is tested: a sibling that runs to 12:00 ov
   expect(await currentConflict(SERVICE, CTX, new Set(['s1']))).toBeNull();
 });
 
-test('a co-located row of the same customer extends the stop: a later stop that overlaps only that work is a conflict (Codex r6 P1)', async () => {
+test('a co-located row of the same customer does not widen this visit\'s span: a stop that overlaps only that row is that row\'s conflict', async () => {
   const HOME = { customer_address_line1: '100 Example Street', customer_city: 'Example City', customer_zip: '00000' };
   const db = placesDb([{ id: 's1', property_id: null, ...HOME }, { id: 'co', property_id: null, ...HOME }]);
   rebooker.probeMoveConflicts.mockResolvedValue({ rows: [
     row({ id: 'co', customer_id: 'c1', window_start: '10:30', window_end: '11:30' }),
     row({ id: 'o1', window_start: '11:00', window_end: '12:00' }),
   ] });
-  expect(await currentConflict(SERVICE, { ...CTX, db })).toMatchObject({ kind: 'overlap', with: ['o1'] });
+  expect(await currentConflict(SERVICE, { ...CTX, db })).toBeNull();
+  // Evaluated itself, the co-located row is in conflict with the 11:00 stop.
+  expect(await currentConflict({ ...SERVICE, id: 'co', window_start: '10:30', window_end: '11:30' }, { ...CTX, db }, new Set(['co'])))
+    .toMatchObject({ kind: 'overlap', with: ['o1'] });
 });
