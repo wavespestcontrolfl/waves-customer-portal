@@ -272,17 +272,23 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
 // Hold what the conflict is made of until this move commits: the rebooker
 // locks only the DESTINATION date, so without this the other stop could be
 // moved or cancelled, or the closed day reopened, right after the re-read
-// below (Codex #6207 r3 P2). FOR SHARE on the other stops' rows blocks their
-// update or delete; on the blackout row, its removal. Booked interviews
-// (synthetic `interview:` ids) and a weekly day off have no row to hold.
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// below (Codex #6207 r3 P2). A closed day takes the shared closure-state
+// fence (blackout-dates.js lockClosureState, the counterpart of the admin
+// endpoints' exclusive lock; it covers one-off dates and weekly days off).
+// An overlap takes FOR SHARE on the other stops' rows, and on the
+// job_applications row behind a booked interview (`interview:<id>`), which
+// blocks their update or delete (r4).
+const INTERVIEW_ID = /^interview:(.+)$/;
 async function fenceSourceConflict(trx, sourceConflict) {
   if (sourceConflict.kind === 'closed_day') {
-    await trx('schedule_blackout_dates').where({ date: sourceConflict.date }).forShare().select('id');
+    await require('../scheduling/blackout-dates').lockClosureState(trx);
     return;
   }
-  const ids = (sourceConflict.with || []).filter((id) => UUID.test(String(id)));
-  if (ids.length) await trx('scheduled_services').whereIn('id', ids).forShare().select('id');
+  const ids = (sourceConflict.with || []).map(String);
+  const interviews = ids.map((id) => (INTERVIEW_ID.exec(id) || [])[1]).filter(Boolean);
+  const stops = ids.filter((id) => !INTERVIEW_ID.test(id));
+  if (stops.length) await trx('scheduled_services').whereIn('id', stops).forShare().select('id');
+  if (interviews.length) await trx('job_applications').whereIn('id', interviews).forShare().select('id');
 }
 
 // Read ONCE per move, before the first row is written: the unit mover runs

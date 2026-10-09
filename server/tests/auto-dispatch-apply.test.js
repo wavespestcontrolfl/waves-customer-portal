@@ -428,6 +428,8 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
         const q = { whereIn: (c, ids) => { locked.push([table, ids]); return q; }, where: (w) => { locked.push([table, w]); return q; }, forShare: () => q, select: async () => [] };
         return q;
       });
+      const blackoutDates = require('../services/scheduling/blackout-dates');
+      jest.spyOn(blackoutDates, 'lockClosureState').mockResolvedValue();
       const UUID1 = '11111111-1111-4111-8111-111111111111';
       read.mockResolvedValueOnce(null);
       await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1, 'interview:a1'] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
@@ -435,7 +437,8 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       read.mockResolvedValueOnce(null);
       await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'closed_day', date: '2026-11-26' } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
         .rejects.toMatchObject({ statusCode: 409 });
-      expect(locked).toEqual([['scheduled_services', [UUID1]], ['schedule_blackout_dates', { date: '2026-11-26' }]]);
+      expect(locked).toEqual([['scheduled_services', [UUID1]], ['job_applications', ['a1']]]);
+      expect(blackoutDates.lockClosureState).toHaveBeenCalledWith(lockTrx);
       // A grouped move runs the guard for each member in turn. The conflict
       // is read once, before the first member moves: afterwards the rest of
       // the unit no longer overlaps, and must still be allowed to follow.
@@ -745,7 +748,8 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
       await expect(guardOf(SmartRebooker.reschedule.mock.calls[0])({ trx, technicianId: 't1', service: SERVICE })).rejects.toThrow('stop here');
       expect(read).not.toHaveBeenCalled();
       // Fallback: authorized by the rescore's conflict, which is now gone.
-      await expect(guardOf(SmartRebooker.reschedule.mock.calls[1])({ trx, technicianId: 't1', service: SERVICE }))
+      const fence = { whereIn: () => fence, forShare: () => fence, select: async () => [] };
+      await expect(guardOf(SmartRebooker.reschedule.mock.calls[1])({ trx: jest.fn(() => fence), technicianId: 't1', service: SERVICE }))
         .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
     } finally {
       read.mockRestore();
