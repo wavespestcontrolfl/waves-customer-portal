@@ -30,7 +30,7 @@
 
 const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
-const { intervalDaysForPattern } = require('../recurring-appointment-seeder');
+const { intervalDaysForPattern, normalizeRecurringPattern } = require('../recurring-appointment-seeder');
 const { visitTimeElapsed } = require('../reschedule-eligibility');
 
 // Allowance by the plan's nominal gap in days (intervalDaysForPattern, the
@@ -72,7 +72,11 @@ function slotChanged(row) {
 }
 
 function allowanceDays(svc) {
-  const gap = intervalDaysForPattern(svc.recurring_pattern || null, svc.recurring_interval_days);
+  // Legacy rows store aliases ('bi-monthly'); the shared normalizer reads
+  // them. A value it does not place (monthly_nth_weekday) is passed as stored.
+  const stored = svc.recurring_pattern || null;
+  const pattern = (stored && normalizeRecurringPattern(stored)) || stored;
+  const gap = intervalDaysForPattern(pattern, svc.recurring_interval_days);
   if (!gap) return null;
   return ALLOWANCE_BY_GAP_DAYS.find((band) => gap >= band.from && gap <= band.to)?.days || null;
 }
@@ -112,6 +116,14 @@ function customerMovesSince(rows, svc) {
     if (!slotChanged(row)) return;
     if (row.initiated_by !== SELF_SERVE_INITIATOR || wasMissedRebook(row)) from = idx + 1;
   });
+  // A pick inside CORRECTION_MINUTES of a missed rebook corrects the rebook:
+  // it belongs to it, is not a move, and its date is the appointment's date.
+  while (from > 0 && from < rows.length
+    && rows[from - 1].initiated_by === SELF_SERVE_INITIATOR
+    && rows[from].initiated_by === SELF_SERVE_INITIATOR
+    && new Date(rows[from].created_at).getTime() - new Date(rows[from - 1].created_at).getTime() <= CORRECTION_MINUTES * 60 * 1000) {
+    from += 1;
+  }
   let moves = rows.slice(from).filter((row) => row.initiated_by === SELF_SERVE_INITIATOR && slotChanged(row));
   // A move that does not start where the move before it ended: Waves placed
   // the visit between them with no log row. The history starts at that move.

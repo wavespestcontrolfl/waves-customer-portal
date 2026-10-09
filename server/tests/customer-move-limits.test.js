@@ -73,6 +73,8 @@ describe('late-move limit', () => {
     ['every_6_weeks', null, '2026-10-25'],
     ['monthly', null, '2026-10-22'],
     ['monthly_nth_weekday', null, '2026-10-22'],
+    ['bi-monthly', null, '2026-10-29'],
+    ['Quarterly', null, '2026-11-05'],
     ['custom', 42, '2026-10-25'],
     ['custom', 60, '2026-10-29'],
     ['custom', 30, '2026-10-22'],
@@ -111,6 +113,22 @@ describe('late-move limit', () => {
     expect(moved).toEqual({ dueDate: '2026-11-02', lastDate: '2026-11-23', firstVisitBlocked: false });
     const retimed = await loadMoveLimit(onOct30({ window_start: '13:00:00' }), { database: dbFor({ rows: twoMoves }), now: NOW });
     expect(retimed).toEqual({ dueDate: '2026-10-30', lastDate: '2026-11-20', firstVisitBlocked: false });
+  });
+
+  test('a correction inside 15 minutes of a missed rebook belongs to the rebook', async () => {
+    // Missed Oct 1. Rebooked Oct 2 14:00 to Oct 15, corrected 14:05 to Oct 16, then one real move to Oct 22.
+    const rows = [
+      move({ original_date: '2026-10-01', new_date: '2026-10-15', created_at: '2026-10-02T14:00:00Z' }),
+      move({ original_date: '2026-10-15', new_date: '2026-10-16', created_at: '2026-10-02T14:05:00Z' }),
+      move({ original_date: '2026-10-16', new_date: '2026-10-22', created_at: '2026-10-04T14:00:00Z' }),
+    ];
+    const v = visit({ scheduled_date: '2026-10-22' });
+    expect(customerMovesSince(rows, v)).toHaveLength(1);
+    const limit = await loadMoveLimit(v, { database: dbFor({ rows }), now: NOW });
+    expect(limit).toEqual({ dueDate: '2026-10-16', lastDate: '2026-11-06', firstVisitBlocked: false });
+    // A later pick is a move, not a correction.
+    const late = [rows[0], move({ original_date: '2026-10-15', new_date: '2026-10-22', created_at: '2026-10-02T15:00:00Z' })];
+    expect(customerMovesSince(late, v)).toHaveLength(1);
   });
 
   test('a staff edit BETWEEN two customer moves: the history starts at the move after it', async () => {
