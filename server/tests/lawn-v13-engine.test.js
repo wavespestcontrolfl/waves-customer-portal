@@ -868,18 +868,18 @@ describe('Blindside in the recipe', () => {
     }
   });
 
-  test('November carries the same four weed lines as December (v13 final pass), Blindside at 0.115 oz', () => {
+  test('November carries the same four weed lines as December (v13 final pass), Blindside at 0.149 oz', () => {
     const weed = (month) => lines(visitFor(month).secondary).filter((l) => /^(Celsius|Certainty|Blindside|LESCO 90\/10 Nonionic)/.test(l));
     expect(weed(11)).toHaveLength(4);
     expect(weed(11)).toEqual(weed(12));
-    expect(weed(11).find((l) => l.startsWith(BLINDSIDE))).toContain('0.115 oz per 1,000 sq ft');
+    expect(weed(11).find((l) => l.startsWith(BLINDSIDE))).toContain('0.149 oz per 1,000 sq ft');
   });
 
-  test('every Blindside line states 0.115 oz per 1,000 sq ft (two passes a year fit the label\'s 0.23 oz yearly limit only at that rate)', () => {
+  test('every Blindside line states 0.149 oz per 1,000 sq ft, one application per lawn per year (the label\'s warm-season rate; 0.23 oz is the yearly limit)', () => {
     for (const grass of V13_GRASSES) {
       const blind = v13[grass].visits.flatMap((visit) => lines(visit.secondary)).filter((l) => l.startsWith(`${BLINDSIDE} — `));
       expect(blind).toHaveLength(4);
-      for (const line of blind) expect(line).toContain('0.115 oz per 1,000 sq ft');
+      for (const line of blind) expect(line).toContain('0.149 oz per 1,000 sq ft, one application per lawn per year');
     }
   });
 });

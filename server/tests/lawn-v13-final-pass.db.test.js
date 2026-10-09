@@ -1,8 +1,8 @@
 // Lawn protocol v13, final advisor pass (migration 20261009150000, owner 2026-10-09), through the real migration on PostgreSQL
 // (cloned schema). Synthetic data only. Self-skips without DATABASE_URL.
 //
-// Pinned: every active Blindside row at its staged state becomes 0.115 oz (a retired row, and a row with another rate, are not
-// touched); November gets the December weed rows in their exact shape (Blindside at 0.115 oz); insert-if-missing; no Pythium row is
+// Pinned: every active Blindside row at its staged state becomes 0.149 oz (a retired row, and a row with another rate, are not
+// touched); November gets the December weed rows in their exact shape (Blindside at 0.149 oz); insert-if-missing; no Pythium row is
 // written (the Pythium pair stays Artavia twice, recipe text only); an unresolvable product skips its write with a log; a second up
 // changes nothing; down restores exactly and leaves a protocol that a visit, a completion, an edit or a completion actual holds;
 // the older Blindside down() (20261007179000) still works with the new rate on the row.
@@ -105,12 +105,12 @@ describeDb('v13 final pass migration through PostgreSQL', () => {
     let before;
     beforeAll(async () => { await reset(); before = await snapshot(); await migration.up(knex); });
 
-    test('every active Blindside row at its staged state is 0.115 oz; the retired row and the older version are untouched', async () => {
+    test('every active Blindside row at its staged state is 0.149 oz; the retired row and the older version are untouched', async () => {
       for (const windowKey of [JAN, WINDOWS.DEC]) {
         const rows = await rowsIn(windowKey, BLINDSIDE);
         expect(rows).toHaveLength(KEYS.length);
         for (const row of rows) {
-          expect([Number(row.rate_per_1000), row.rate_unit]).toEqual([0.115, 'oz']);
+          expect([Number(row.rate_per_1000), row.rate_unit]).toEqual([0.149, 'oz']);
           expect(row.gates).toEqual(BLINDSIDE_GATES);
         }
       }
@@ -122,7 +122,7 @@ describeDb('v13 final pass migration through PostgreSQL', () => {
       expect([old.rate_per_1000, old.rate_unit]).toEqual([null, 'label_rate']);
     });
 
-    test('November gets the four December weed rows in the December shape, after its own rows, in the December order; Blindside at 0.115 oz', async () => {
+    test('November gets the four December weed rows in the December shape, after its own rows, in the December order; Blindside at 0.149 oz', async () => {
       for (const [key] of KEYS) {
         const nov = await knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
           .where({ 'l.protocol_key': key, 'l.version': V13, 'w.window_key': WINDOWS.NOV }).orderBy('p.sort_order').select('p.*');
@@ -136,7 +136,7 @@ describeDb('v13 final pass migration through PostgreSQL', () => {
           }
           expect(row.product_id).toBe(ids[row.product_name]);
           expect(row.default_in_plan).toBe(false);
-          if (row.product_name === BLINDSIDE) expect([Number(row.rate_per_1000), row.rate_unit]).toEqual([0.115, 'oz']);
+          if (row.product_name === BLINDSIDE) expect([Number(row.rate_per_1000), row.rate_unit]).toEqual([0.149, 'oz']);
           else expect([row.rate_per_1000 == null ? null : Number(row.rate_per_1000), row.rate_unit]).toEqual([december.rate_per_1000 == null ? null : Number(december.rate_per_1000), december.rate_unit]);
         }
       }
@@ -156,7 +156,7 @@ describeDb('v13 final pass migration through PostgreSQL', () => {
         expect(after.rates.map((r) => r.window).sort()).toEqual([JAN, WINDOWS.DEC].sort());
         for (const rate of after.rates) {
           expect(rate.before).toEqual({ rate_per_1000: null, rate_unit: 'label_rate' });
-          expect(rate.after).toEqual({ rate_per_1000: 0.115, rate_unit: 'oz' });
+          expect(rate.after).toEqual({ rate_per_1000: 0.149, rate_unit: 'oz' });
         }
         expect(after.inserted.map((r) => r.kind)).toEqual(Array(4).fill('november_weed'));
         for (const made of after.inserted) expect(made.owned.product_name).toBe(made.product_name);
@@ -252,7 +252,7 @@ describeDb('v13 final pass migration through PostgreSQL', () => {
       try {
         await migration.down(knex);
         expect((await rowsIn(WINDOWS.NOV, BLINDSIDE)).map((r) => r.protocol_key)).toEqual([KEYS[0][0]]);
-        expect((await rowsIn(JAN, BLINDSIDE)).map((r) => [r.protocol_key, Number(r.rate_per_1000) || null])).toEqual([[KEYS[0][0], 0.115], [KEYS[1][0], null]]);
+        expect((await rowsIn(JAN, BLINDSIDE)).map((r) => [r.protocol_key, Number(r.rate_per_1000) || null])).toEqual([[KEYS[0][0], 0.149], [KEYS[1][0], null]]);
         expect(await ours()).toHaveLength(1);
         expect(log).toHaveBeenCalledWith(expect.stringContaining(`rollback skipped for protocol ${KEYS[0][0]}`));
       } finally {
@@ -332,7 +332,7 @@ describeDb('v13 final pass migration through PostgreSQL', () => {
   });
 
   describe('the older Blindside migration (20261007179000) still works on a row with the new rate', () => {
-    test('its down() deletes the row it inserted although the rate is now 0.115 oz (it reads gates, counter, default_in_plan and name, never the rate)', async () => {
+    test('its down() deletes the row it inserted although the rate is now 0.149 oz (it reads gates, counter, default_in_plan and name, never the rate)', async () => {
       await reset();
       const [row] = (await rowsIn(WINDOWS.DEC, BLINDSIDE)).filter((r) => r.protocol_key === KEYS[0][0]);
       const [protocol] = await knex('lawn_protocols').where({ protocol_key: KEYS[0][0], version: V13 });
@@ -341,7 +341,7 @@ describeDb('v13 final pass migration through PostgreSQL', () => {
         before_snapshot: JSON.stringify({}), after_snapshot: JSON.stringify({ blindsideRows: [row.id], cap: 2 }), metadata: JSON.stringify({}),
       });
       await migration.up(knex);
-      expect(Number((await knex('lawn_protocol_products').where({ id: row.id }).first()).rate_per_1000)).toBe(0.115);
+      expect(Number((await knex('lawn_protocol_products').where({ id: row.id }).first()).rate_per_1000)).toBe(0.149);
       await blindsideRowMigration.down(knex);
       expect(await knex('lawn_protocol_products').where({ id: row.id })).toEqual([]);
       // Its own rollback removed its audit row only; this migration's rows and audit rows stand.

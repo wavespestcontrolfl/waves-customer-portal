@@ -105,13 +105,23 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
     expect(Object.isFrozen(caps.V13_COUNT_CAPS) && Object.isFrozen(caps.V13_MORE_LIMITS) && Object.isFrozen(caps.V13_LIMITS)).toBe(true);
   });
 
-  test('Blindside: count 2 and a yearly amount of 0.23 oz per 1,000 sq ft, an unsized pass counts as the whole year', () => {
+  test('Blindside: program rate 0.149 oz (label warm-season rate), count 2 kept for frozen migrations, yearly amount 0.23 oz holds it to one pass', () => {
     const blindside = entry('Blindside Herbicide');
     expect(blindside.cap).toBe(2);
     expect(blindside.annualAmount).toMatchObject({ cap: 0.23, unit: 'oz/1000sf/year', fallbackRate: 0.23 });
     expect(blindside.annualAmount.description).toContain('EPA 279-3411');
-    // Two passes at the v13 rate fit the yearly amount exactly; one at the label maximum fills it.
-    expect(migration.BLINDSIDE_RATE * 2).toBe(blindside.annualAmount.cap);
+    // One pass at the v13 rate fits the yearly amount; two (0.298 oz) do not; one at the label maximum fills it.
+    expect(migration.BLINDSIDE_RATE).toBe(0.149);
+    expect(migration.BLINDSIDE_RATE).toBeLessThanOrEqual(blindside.annualAmount.cap);
+    expect(migration.BLINDSIDE_RATE * 2).toBeGreaterThan(blindside.annualAmount.cap);
+    expect(blindside.description).toContain('0.149 oz');
+    for (const track of Object.values(v13)) {
+      const text = JSON.stringify(track);
+      expect(text).not.toContain('0.115');
+      expect(track.safety_rules[0]).toContain('Blindside: 1 application per lawn per year');
+      expect(track.safety_rules[0]).toContain('at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: warm-season rate 0.149 to 0.23 oz a pass, no more than 0.23 oz per 1,000 sq ft a year)');
+      expect(track.notes.join('\n')).toContain('Blindside goes on at 0.149 oz per 1,000 sq ft, one application per lawn per year (label: the warm-season rate is 0.149 to 0.23 oz a pass, and no more than 0.23 oz per 1,000 sq ft (10 oz per acre) a year).');
+    }
     expect(migration.BLINDSIDE_UNIT).toBe('oz');
   });
 

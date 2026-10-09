@@ -7,16 +7,18 @@
  *
  * What this writes, on EVERY v13 protocol (version 2026.10-v13, whatever the grass track or status).
  *
- *   1. Blindside rate. Label (Blindside, EPA Reg. No. 279-3411): a single application is 0.075 to 0.23 oz per 1,000 sq ft
- *      (3.25 to 10 oz per acre) and "do not exceed 10 oz. product per acre per year" = 0.23 oz per 1,000 sq ft, so two passes a
- *      year are legal only at 0.115 oz. Every ACTIVE Blindside row that is still at its staged state (no rate, unit
- *      'label_rate') becomes 0.115 'oz' (the unit the Celsius rows use). A retired row (gates.retired true) is not touched, and
+ *   1. Blindside rate. Label (Blindside, EPA Reg. No. 279-3411, Table 1, tolerant grasses): the single-application rate for
+ *      warm-season grasses (bermudagrass, centipedegrass, St. Augustine grass, zoysiagrass) is 0.149 to 0.23 oz per 1,000 sq ft
+ *      (6.5 to 10 oz per acre), and the year limit is "do not exceed 10 oz. product per acre per year" = 0.23 oz per 1,000 sq ft.
+ *      Every v13 lawn is warm season, so the program rate is 0.149 oz, one pass a year (two passes would be 0.298 oz). This
+ *      matches the catalog row (default 0.149, min 0.149, max 0.23, unit oz). Every ACTIVE Blindside row that is still at its
+ *      staged state (no rate, unit 'label_rate') becomes 0.149 'oz' (the unit the Celsius rows use). A retired row (gates.retired true) is not touched, and
  *      a row somebody already gave another rate or unit is left and logged: a stored edit is never overwritten.
  *   2. November weed spots. The program rule is "Blindside November through March" and the recipe's November visit now lists the
  *      December weed lines, but the November window had no weed rows. In the November window (nov_v13_spreader_feeding) each of
  *      Celsius WG, Certainty Turf Herbicide, LESCO 90/10 Nonionic Surfactant and Blindside Herbicide that the December window
  *      (dec_v13_spreader_feeding) carries as an ACTIVE row is inserted with the exact shape of that December row (role, mode,
- *      rate, unit, carrier, default_in_plan, gates, annual_counter, mixing, report_copy), Blindside at 0.115 oz, sort_order after
+ *      rate, unit, carrier, default_in_plan, gates, annual_counter, mixing, report_copy), Blindside at 0.149 oz, sort_order after
  *      the window's rows in the December order. Insert-if-missing: a window that already holds the product (active or retired,
  *      by id or by name) gets nothing.
  *   The Pythium line is recipe text only (owner ruling 2026-10-09): Artavia twice in a row stays, as a named exception to the group
@@ -29,12 +31,12 @@
  * Every product is resolved by exact catalog name (active rows first), else an exact alias. A product that cannot be resolved
  * skips its write with a log line. A table that does not exist skips the whole migration.
  *
- * Idempotent: a second run finds the rates at 0.115 and the rows in place and writes nothing. One 'v13_final_pass' audit row per
+ * Idempotent: a second run finds the rates at 0.149 and the rows in place and writes nothing. One 'v13_final_pass' audit row per
  * protocol that changed records the ids and the values before and after; each inserted row's columns are read back after the
  * insert and kept, because down() deletes it only while every one of them still reads that way.
  *
  * Why the older down() guards still hold. Only two columns of an existing row change: rate_per_1000 and rate_unit of a Blindside
- * row (the staged state becomes 0.115 oz). The downs that touch Blindside rows read other columns: 20261007179000 deletes
+ * row (the staged state becomes 0.149 oz). The downs that touch Blindside rows read other columns: 20261007179000 deletes
  * its inserted row only while product_name, default_in_plan, gates.trigger, gates.annualMaxApps and
  * annual_counter.maxApplications are what it wrote (no rate); 20261005140000 deletes by id and name; 20261007175000 and 20261007177000
  * remove or restore gates.annualMaxApps and annual_counter.maxApplications by row id; 20261008130000 and 20261008132000 un-retire
@@ -66,7 +68,7 @@ const BLINDSIDE = 'Blindside Herbicide';
 const WINDOWS = { NOV: 'nov_v13_spreader_feeding', DEC: 'dec_v13_spreader_feeding' };
 
 // Blindside label EPA 279-3411: 0.075 to 0.23 oz per 1,000 sq ft a pass, no more than 0.23 oz per 1,000 sq ft a year.
-const BLINDSIDE_RATE = 0.115;
+const BLINDSIDE_RATE = 0.149;
 const BLINDSIDE_UNIT = 'oz';
 const STAGED_UNIT = 'label_rate';
 

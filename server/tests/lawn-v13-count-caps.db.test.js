@@ -28,7 +28,7 @@ describe('the recipe text (no database)', () => {
       expect(track.notes.join('\n')).toContain('Florida 2(ee) recommendation for southern chinch bug (EPA Reg. No. 59639-152; expires December 31, 2028)');
       expect(track.notes.join('\n')).not.toContain('never treat the same area twice');
       const safety = track.safety_rules.join('\n');
-      expect(safety).toContain('Celsius, Certainty and Blindside: up to 2 applications per lawn per year each');
+      expect(safety).toContain('Celsius and Certainty: up to 2 applications per lawn per year each; Blindside: 1 application per lawn per year');
       expect(safety).not.toMatch(/per spot/);
     }
   });

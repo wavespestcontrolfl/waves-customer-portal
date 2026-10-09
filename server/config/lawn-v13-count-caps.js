@@ -21,8 +21,10 @@
  *   Certainty Turf Herbicide  2   new cap: synthetic limit. Also minIntervalDays 28 (label: a sequential
  *                                 application "may be made 4 or more weeks after the initial treatment").
  *   Blindside Herbicide       2   new cap: synthetic limit. Also annualAmount 0.23 oz per 1,000 sq ft a year
- *                                 (label EPA 279-3411: "do not exceed 10 oz. product per acre per year"); the
- *                                 v13 rate of 0.115 oz a pass is what lets two passes fit it.
+ *                                 (label EPA 279-3411: "do not exceed 10 oz. product per acre per year"). The
+ *                                 v13 rate is 0.149 oz a pass (the label's warm-season rate is 0.149 to 0.23 oz),
+ *                                 so the yearly amount, not this count of 2, is what holds Blindside to one pass
+ *                                 a year (two passes would be 0.298 oz). The cap stays 2: frozen migrations read it.
  *
  * Entries that carry no yearly count (v13 final pass, 2026-10-09; V13_MORE_LIMITS below). An entry may carry
  * any of: a count `cap`, a `minIntervalDays`, an `annualAmount`; the module adds only the synthetic rows an
@@ -76,10 +78,10 @@ const V13_COUNT_CAPS = Object.freeze([
   {
     name: 'Blindside Herbicide',
     cap: 2,
-    description: `Blindside Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.115 oz per 1,000 sq ft a pass.`,
-    // Blindside label (EPA 279-3411): single rate 0.075 to 0.23 oz per 1,000 sq ft (3.25 to 10 oz per acre); "do not exceed 10 oz.
-    // product per acre per year" = 0.23 oz per 1,000 sq ft. Two passes fit only at the v13 rate of 0.115 oz, so a pass at the
-    // label's high rate fills the year. A spot row's rate is read as recorded (a spot is not scaled to its area).
+    description: `Blindside Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}); at the program rate of 0.149 oz per 1,000 sq ft the yearly amount (0.23 oz) allows one pass a year.`,
+    // Blindside label (EPA 279-3411): warm-season single rate 0.149 to 0.23 oz per 1,000 sq ft (6.5 to 10 oz per acre); "do not
+    // exceed 10 oz. product per acre per year" = 0.23 oz per 1,000 sq ft. At the v13 rate of 0.149 oz one pass fits the year (two
+    // would be 0.298 oz), so this yearly amount, not the count of 2 above, holds Blindside to one pass; a pass at 0.23 fills it. A spot row's rate is read as recorded (a spot is not scaled to its area).
     annualAmount: {
       cap: 0.23,
       unit: 'oz/1000sf/year',

@@ -59,14 +59,21 @@ describeDb('v13 final pass limits through PostgreSQL', () => {
   const amountBlock = (result) => result.blocks.filter((b) => b.type === 'annual_max_rate');
   const dates = (count) => ['2026-01-05', '2026-01-26', '2026-02-16', '2026-03-09', '2026-03-30', '2026-04-20', '2026-04-27', '2026-05-04', '2026-05-08'].slice(0, count);
 
-  describe('Blindside: 0.23 oz per 1,000 sq ft a year (label EPA 279-3411), two passes fit only at 0.115 oz', () => {
-    test('a prior 0.115 oz pass allows a second at 0.115 oz (the year is exactly full) and blocks one at 0.23 oz', async () => {
-      const customerId = await history(BLINDSIDE, [['2026-01-05', 0.115, 'oz']]);
-      const fits = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.115, unit: 'oz' } });
-      expect(fits.allowed).toBe(true);
+  describe('Blindside: 0.23 oz per 1,000 sq ft a year (label EPA 279-3411), one pass a year at the program rate of 0.149 oz', () => {
+    test('a prior 0.149 oz pass blocks a second 0.149 oz pass (the yearly amount), and so does a second pass at 0.23 oz', async () => {
+      const customerId = await history(BLINDSIDE, [['2026-01-05', 0.149, 'oz']]);
+      const second = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.149, unit: 'oz' } });
+      expect(second.allowed).toBe(false);
+      expect(amountBlock(second)[0].message).toMatch(/total 64.8% of the yearly label amount \(0\.23 oz per 1,000 sq ft\).*brings it to 129.6% — THIS APPLICATION WOULD EXCEED IT/);
       const over = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.23, unit: 'oz' } });
       expect(over.allowed).toBe(false);
-      expect(amountBlock(over)[0].message).toMatch(/total 50% of the yearly label amount \(0\.23 oz per 1,000 sq ft\).*brings it to 150% — THIS APPLICATION WOULD EXCEED IT/);
+      expect(amountBlock(over)[0].message).toMatch(/THIS APPLICATION WOULD EXCEED IT/);
+    });
+
+    test('with no earlier pass, one pass at 0.149 oz and one at the label maximum 0.23 oz are both allowed', async () => {
+      const customerId = await history(BLINDSIDE, []);
+      expect((await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.149, unit: 'oz' } })).allowed).toBe(true);
+      expect((await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.23, unit: 'oz' } })).allowed).toBe(true);
     });
 
     test('one pass at the label maximum (0.23 oz) fills the year', async () => {
@@ -78,20 +85,24 @@ describeDb('v13 final pass limits through PostgreSQL', () => {
 
     test('an earlier pass whose rate cannot be read counts as the whole year (0.23 oz)', async () => {
       const customerId = await history(BLINDSIDE, [['2026-01-05', null, null]]);
-      const result = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.115, unit: 'oz' } });
+      const result = await check(customerId, BLINDSIDE, { proposed: { ratePer1000: 0.149, unit: 'oz' } });
       expect(result.allowed).toBe(false);
       expect(amountBlock(result)[0].message).toMatch(/total 100% of the yearly label amount.*1 earlier application sized at the standard rate/);
     });
 
-    test('a proposal with no dose counts the staged row\'s 0.115 oz; with no staged rate it counts the fixed 0.23', async () => {
-      const customerId = await history(BLINDSIDE, [['2026-01-05', 0.115, 'oz']]);
-      expect((await check(customerId, BLINDSIDE, { proposal: true })).allowed).toBe(false);
+    test('a proposal with no dose counts the staged row\'s 0.149 oz; with no staged rate it counts the fixed 0.23', async () => {
+      const customerId = await history(BLINDSIDE, [['2026-01-05', 0.08, 'oz']]);
+      const fixed = await check(customerId, BLINDSIDE, { proposal: true });
+      expect(fixed.allowed).toBe(false);
       const [protocol] = await knex('lawn_protocols').insert({ protocol_key: 'fixture_fp_limits', version: '2026.10-v13', name: 'Fixture', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
       const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: protocol.id, month: 12, window_key: 'dec_fixture', title: 'dec', visit_type: 'fixture', production_mode: 'fixture' }).returning('*');
-      await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[BLINDSIDE].id, product_name: BLINDSIDE, role: 'post_emergent_spot', application_mode: 'spot', rate_per_1000: 0.115, rate_unit: 'oz', default_in_plan: false });
+      await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[BLINDSIDE].id, product_name: BLINDSIDE, role: 'post_emergent_spot', application_mode: 'spot', rate_per_1000: 0.149, rate_unit: 'oz', default_in_plan: false });
       try {
         const staged = await check(customerId, BLINDSIDE, { proposal: true });
         expect(staged.allowed).toBe(true);
+        const forced = await knex('lawn_protocol_products').update({ rate_per_1000: 0.16 });
+        expect(forced).toBe(1);
+        expect((await check(customerId, BLINDSIDE, { proposal: true })).allowed).toBe(false);
       } finally {
         await knex('lawn_protocol_products').del();
         await knex('lawn_protocol_windows').del();
