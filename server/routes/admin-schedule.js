@@ -7993,8 +7993,10 @@ async function scheduleCreateHandler(req, res, next) {
           checkRecurring: linkedEstimate.status !== 'accepted',
         });
         if (addOnRefusal) return res.status(409).json({ error: addOnRefusal.message, code: addOnRefusal.code });
-        // The add-ons' yearly limits on the day being booked (the same recheck the customer's accept runs).
-        const limitRefusal = await require('../services/area-addon-limits').areaAddOnLimitRefusal(db, { estimate: linkedEstimate, appliedOn: scheduledDate, staff: true });
+        // The add-ons' yearly limits on the day being booked (the same recheck the customer's accept runs), read for
+        // the booking's customer and property: an unowned estimate (a lead or standalone quote) is attached to this
+        // customer on book, so its own customer_id is empty here.
+        const limitRefusal = await require('../services/area-addon-limits').areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true });
         if (limitRefusal) return res.status(409).json(limitRefusal.body);
       }
       // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence

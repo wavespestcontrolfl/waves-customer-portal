@@ -374,6 +374,11 @@ async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {})
     throw err;
   }
 }
+// The customer an unowned estimate's phone matches - the one its accept will land on - for the add-ons' yearly-limit
+// recheck at reserve (area-addon-limits.js limitSubject: a customer known by then has their history read).
+async function phoneMatchedCustomerId(row, trx) {
+  return (await matchAcceptCustomerByPhone(row, trx)).match?.id || null;
+}
 // Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release).
 async function respondNoBookingRefusal(res, estimate, refusal) {
   if (refusal.park) await refuseParkedWrite(estimate, refusal.park.rejectedCustomerId);
@@ -738,7 +743,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // not consume capacity).
         revalidateEstimate: async (row, trx) => {
           return (await lockedContactReviewRefusal(row, trx))
-            || require('../services/area-addon-limits').areaAddOnLimitRefusal(trx, { estimate: row });
+            || require('../services/area-addon-limits').areaAddOnLimitRefusal(trx, { estimate: row, resolveCustomer: () => phoneMatchedCustomerId(row, trx) });
         },
       });
       return res.status(201).json({

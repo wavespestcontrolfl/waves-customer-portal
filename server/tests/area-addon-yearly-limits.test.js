@@ -224,7 +224,13 @@ function fakeDb(tables, calls = []) {
       whereIn(col, values) { preds.push((r) => values.map(String).includes(String(get(r, col)))); return q; },
       whereNotIn(col, values) { preds.push((r) => !values.includes(get(r, col))); return q; },
       whereNull(col) { preds.push((r) => get(r, col) == null); return q; },
-      whereNot(col, v) { preds.push((r) => String(get(r, col)) !== String(v)); return q; },
+      whereNot(col, v) {
+        if (col && typeof col === 'object') Object.entries(col).forEach(([k, val]) => preds.push((r) => String(get(r, k)) !== String(val)));
+        else preds.push((r) => String(get(r, col)) !== String(v));
+        return q;
+      },
+      whereNotNull(col) { preds.push((r) => get(r, col) != null); return q; },
+      orderBy() { return q; },
       join() { return q; },
       limit(n) { max = n; return q; },
       select(...c) { cols = c; return q; },
@@ -439,11 +445,16 @@ describe('accept time: the recheck inside the transaction (history can change be
     expect(sweepOnly.calls).toEqual([]);
   });
 
-  test('an estimate with no add-on (a Tree & Shrub or lawn program) or no known customer is never touched', async () => {
+  test('an estimate with no add-on (a Tree & Shrub or lawn program) is never touched', async () => {
     const db = fakeDb(world({ property_application_history: [ledger('p-snap', 1), ledger('p-snap', 2), ledger('p-snap', 3), ledger('p-snap', 4)] }));
     await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: { id: ESTIMATE, customer_id: CUSTOMER, estimate_data: { result: { recurring: { services: [{ name: 'Tree & Shrub', mo: 80 }] }, oneTime: { items: [] } } } } })).resolves.toBeUndefined();
-    await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: estimate(['bed_pre_emergent'], { customer_id: null }) })).resolves.toBeUndefined();
     expect(db.calls).toEqual([]);
+  });
+
+  test('no customer known ANYWHERE passes, and reads no history (only the lookups that could have named one)', async () => {
+    const db = fakeDb(world({ property_application_history: [ledger('p-snap', 1), ledger('p-snap', 2), ledger('p-snap', 3), ledger('p-snap', 4)] }));
+    await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: estimate(['bed_pre_emergent'], { customer_id: null }), resolveCustomer: async () => null })).resolves.toBeUndefined();
+    expect(db.calls).toEqual(['scheduled_services']);
   });
 
   test('an unpriced (custom-quote) add-on row is not a sold add-on', async () => {
@@ -458,6 +469,98 @@ describe('accept time: the recheck inside the transaction (history can change be
       status: 409, body: { error: expect.any(String), code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' },
     });
     expect(await service.areaAddOnLimitRefusal(fakeDb(world()), { estimate: estimate(['bed_pre_emergent']) })).toBeNull();
+  });
+});
+
+describe('booking time: an estimate with no customer_id of its own is checked for the customer the request names (Codex round 8)', () => {
+  // A lead or standalone estimate: customer_id NULL. The history of the customer known by then must be read.
+  const unowned = (keys, over = {}) => ({ id: ESTIMATE, customer_id: null, property_id: null, estimate_data: storedWith(keys), ...over });
+  const snapHistory = world({ property_application_history: [ledger('p-snap', 3)] });
+  const refusal = { code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' };
+
+  test('staff booking: the booking customer (verified) is read, on the booking property, though the estimate has none', async () => {
+    await expect(service.assertAreaAddOnLimitsOpen(fakeDb(snapHistory), { estimate: unowned(['bed_pre_emergent']), customerId: CUSTOMER, property: { property_id: PROPERTY }, staff: true })).rejects.toMatchObject(refusal);
+    // Before the fix the call omitted the customer: the same estimate passed.
+    await expect(service.assertAreaAddOnLimitsOpen(fakeDb(snapHistory), { estimate: unowned(['bed_pre_emergent']), resolveCustomer: async () => null, staff: true })).resolves.toBeUndefined();
+    // The booking property scopes the read: a Snapshot application at another property does not count.
+    const elsewhere = world({ property_application_history: [ledger('p-snap', 3, { property_id: OTHER_PROPERTY })] });
+    await expect(service.assertAreaAddOnLimitsOpen(fakeDb(elsewhere), { estimate: unowned(['bed_pre_emergent']), customerId: CUSTOMER, property: { property_id: PROPERTY }, staff: true })).resolves.toBeUndefined();
+  });
+
+  test('staff booking: the route passes the booking customer and property to the recheck', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(src).toContain('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
+  });
+
+  test('Mark Won and the public accept: a booked appointment linked to the estimate names the customer and its property', async () => {
+    const linked = world({
+      property_application_history: [ledger('p-snap', 3)],
+      scheduled_services: [{ source_estimate_id: ESTIMATE, customer_id: CUSTOMER, property_id: PROPERTY }],
+    });
+    for (const staff of [true, false]) {
+      await expect(service.assertAreaAddOnLimitsOpen(fakeDb(linked), { estimate: unowned(['bed_pre_emergent']), staff })).rejects.toMatchObject(refusal);
+    }
+    // A hold the estimate placed itself has no customer yet: nothing is known.
+    const hold = world({ scheduled_services: [{ source_estimate_id: ESTIMATE, customer_id: null, property_id: null }] });
+    await expect(service.assertAreaAddOnLimitsOpen(fakeDb(hold), { estimate: unowned(['bed_pre_emergent']) })).resolves.toBeUndefined();
+  });
+
+  test('an appointment of ANOTHER customer never lends its property to the customer the caller verified', async () => {
+    const other = '99999999-9999-4999-8999-999999999999';
+    const db = fakeDb(world({
+      property_application_history: [ledger('p-snap', 3)],
+      scheduled_services: [{ source_estimate_id: ESTIMATE, customer_id: other, property_id: OTHER_PROPERTY }],
+    }));
+    // The verified customer's own property is unknown here: the customer's only property is used, and the history is read.
+    await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: unowned(['bed_pre_emergent']), customerId: CUSTOMER })).rejects.toMatchObject(refusal);
+  });
+
+  test('a grouped estimate: the accepted sibling owns the acceptance, so its customer is read', async () => {
+    const GROUP = '55555555-5555-4555-8555-555555555555';
+    const grouped = world({
+      property_application_history: [ledger('p-snap', 3)],
+      estimates: [{ estimate_group_id: GROUP, id: '66666666-6666-4666-8666-666666666666', customer_id: CUSTOMER, accepted_at: '2026-10-01' }],
+      customers: [{ id: CUSTOMER, deleted_at: null }],
+    });
+    await expect(service.assertAreaAddOnLimitsOpen(fakeDb(grouped), { estimate: unowned(['bed_pre_emergent'], { estimate_group_id: GROUP }) })).rejects.toMatchObject(refusal);
+  });
+
+  test('reserve: the customer the estimate phone matches is read (resolveCustomer runs only when nothing else names one)', async () => {
+    const resolve = jest.fn(async () => CUSTOMER);
+    await expect(service.assertAreaAddOnLimitsOpen(fakeDb(snapHistory), { estimate: unowned(['bed_pre_emergent']), resolveCustomer: resolve })).rejects.toMatchObject(refusal);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    const named = jest.fn(async () => CUSTOMER);
+    await service.areaAddOnLimitRefusal(fakeDb(world()), { estimate: unowned(['bed_pre_emergent'], { customer_id: CUSTOMER }), resolveCustomer: named });
+    expect(named).not.toHaveBeenCalled();
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+    expect(src).toContain('areaAddOnLimitRefusal(trx, { estimate: row, resolveCustomer: () => phoneMatchedCustomerId(row, trx) })');
+    expect(src).toMatch(/async function phoneMatchedCustomerId\(row, trx\) \{\s+return \(await matchAcceptCustomerByPhone\(row, trx\)\)\.match\?\.id \|\| null;/);
+  });
+
+  test('a failed lookup of who the customer is fails closed, like a failed history read', async () => {
+    const broken = fakeDb(world({ scheduled_services: () => { throw new Error('connection lost'); } }));
+    await expect(service.assertAreaAddOnLimitsOpen(broken, { estimate: unowned(['bed_pre_emergent']) })).rejects.toMatchObject({ code: 'AREA_ADDON_HISTORY_UNAVAILABLE' });
+  });
+
+  test('the public accept passes its locked or phone-matched customer; the lookups above cover its adopted appointment and group', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect(src).toContain('assertAreaAddOnLimitsOpen(trx, { estimate, customerId: acceptPreLockedCommsId, appliedOn: acceptPreLockedDate })');
+  });
+
+  test('the calculate step reads the history of the customer the staff picked, under either field the estimator route accepts', async () => {
+    const input = (extra) => ({ ...HOME, services: { areaAddOns: [{ key: 'bed_pre_emergent', areaSqFt: 1000 }] }, ...extra });
+    for (const options of [{ existingCustomerId: CUSTOMER }, { customerId: CUSTOMER }]) {
+      const out = await service.attachQuoteAreaAddOnHistory(fakeDb(snapHistory), input(), { ...options, propertyId: PROPERTY });
+      expect(out.services.areaAddOnHistory).toMatchObject({ available: true });
+      expect(generateEstimate(out).lineItems.find((l) => l.addOnKey === 'bed_pre_emergent')).toMatchObject({ quoteRequired: true });
+    }
+    const none = await service.attachQuoteAreaAddOnHistory(fakeDb(snapHistory), input(), { propertyId: PROPERTY });
+    expect(none.services.areaAddOnHistory).toBeUndefined();
+  });
+
+  test('a revision keeps the stored customer: the save body is merged with the row before the history is read', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'admin-estimate-persistence.js'), 'utf8');
+    expect(src).toContain('customerId: body.customerId || estimate.customer_id || null,\n      // The V2 revision payload sends no grouping fields');
   });
 });
 
@@ -500,9 +603,9 @@ describe('where the recheck runs (source order)', () => {
   });
 
   test('the reserve route rechecks inside the reserve transaction (revalidateEstimate), the staff booking before its transaction, Mark Won in its transaction', () => {
-    expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx\) => \{[\s\S]{0,200}areaAddOnLimitRefusal\(trx, \{ estimate: row \}\)/);
+    expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx\) => \{[\s\S]{0,200}areaAddOnLimitRefusal\(trx, \{ estimate: row, resolveCustomer/);
     const schedule = read('routes/admin-schedule.js');
-    const book = schedule.indexOf('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, appliedOn: scheduledDate, staff: true })');
+    const book = schedule.indexOf('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
     expect(book).toBeGreaterThan(0);
     expect(book).toBeLessThan(schedule.indexOf('db.transaction', book));
     expect(read('services/estimate-manual-acceptance.js')).toContain("assertAreaAddOnLimitsOpen(trx, { estimate, staff: true })");

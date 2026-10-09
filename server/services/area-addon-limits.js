@@ -155,7 +155,7 @@ async function quoteAreaAddOnHistory(database, { entries, customerId, propertyId
 async function attachQuoteAreaAddOnHistory(database, v1Input, options) {
   const opts = options && typeof options === 'object' ? options : {};
   const entries = v1Input && v1Input.services && v1Input.services.areaAddOns;
-  return applyAreaAddOnHistory(v1Input, await quoteAreaAddOnHistory(database, { entries, customerId: opts.existingCustomerId, propertyId: opts.propertyId }));
+  return applyAreaAddOnHistory(v1Input, await quoteAreaAddOnHistory(database, { entries, customerId: opts.existingCustomerId || opts.customerId, propertyId: opts.propertyId }));
 }
 async function quoteAreaAddOnHistoryForSave(database, estimateData, body) {
   const fromRequest = estimateData && estimateData.engineRequest && estimateData.engineRequest.options && estimateData.engineRequest.options.areaAddOns;
@@ -191,11 +191,51 @@ function limitError(status, code, message, extra = {}) {
   return Object.assign(new Error(message), { status, statusCode: status, code, isOperational: true, ...extra });
 }
 
-// What the recheck applies to: the limited add-ons the estimate sold (priced rows only), for a known
-// customer, while the gate is on. [] otherwise - nothing to read.
-function recheckKeys(estimate, customer) {
-  if (!isUuid(customer) || !require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return [];
+// What the recheck applies to: the limited add-ons the estimate sold (priced rows only), while the gate
+// is on. [] otherwise - nothing to read.
+function recheckKeys(estimate) {
+  if (!require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return [];
   return limitedKeys(soldAddOnKeys(estimate && (estimate.estimate_data || estimate.estimateData)));
+}
+
+/**
+ * The customer and property whose history the recheck reads. THE RULE: if a customer or property is known
+ * by the time of the check, the history is read; "no customer" passes only when none is known at all. An
+ * estimate row can have no customer_id (a lead or standalone estimate) while the request, the accept, a
+ * booked appointment or its group names one, so the order is: the caller's verified customer and property
+ * (the staff booking's, the public accept's locked or phone-matched customer), the estimate's own, the
+ * appointment linked to the estimate (a staff booking, an adopted appointment), the owner of its estimate
+ * group (the accepted sibling), then `resolveCustomer` (the caller's phone match). A linked appointment
+ * supplies the property only for the customer it belongs to. Throws when a read fails (the caller fails
+ * closed). customerId null = no customer known anywhere.
+ */
+async function limitSubject(database, estimate, { customerId = null, propertyId = null, resolveCustomer = null } = {}) {
+  const customer = [customerId, estimate && estimate.customer_id].find(isUuid) || null;
+  const property = [propertyId, estimate && estimate.property_id].find(isUuid) || null;
+  if (!isUuid(estimate && estimate.id) || (customer && property)) return { customerId: customer, propertyId: property };
+  const visit = await linkedVisit(database, estimate.id, customer);
+  return {
+    customerId: customer || (visit && visit.customer_id) || await unownedEstimateCustomer(database, estimate, resolveCustomer),
+    propertyId: property || (visit && visit.property_id) || null,
+  };
+}
+
+// The appointment linked to the estimate, when it belongs to the known customer (or when no customer is known
+// yet): { customer_id, property_id } as uuids or null. In a savepoint: a failed read must not poison the
+// transaction it runs inside.
+async function linkedVisit(database, estimateId, customer) {
+  const row = await savepointScope(database, (scoped) => scoped('scheduled_services')
+    .where({ source_estimate_id: estimateId }).whereNotNull('customer_id').orderBy('created_at', 'desc').first('customer_id', 'property_id'));
+  if (!row || !isUuid(row.customer_id) || (customer && String(row.customer_id) !== String(customer))) return null;
+  return { customer_id: row.customer_id, property_id: isUuid(row.property_id) ? row.property_id : null };
+}
+
+// The customer of an estimate nothing else names: the owner of its estimate group (the accepted sibling), else
+// the caller's phone match. null when neither finds one.
+async function unownedEstimateCustomer(database, estimate, resolveCustomer) {
+  const owner = await savepointScope(database, (scoped) => require('./recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, scoped, { throwOnError: true }));
+  const resolved = isUuid(owner) ? owner : await (resolveCustomer ? resolveCustomer() : null);
+  return isUuid(resolved) ? resolved : null;
 }
 
 const HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not be read, so the add-on yearly limits cannot be confirmed. Try again, or book the add-on by hand.';
@@ -204,19 +244,23 @@ const HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not
  * The recheck at accept / reserve / commit / staff booking: throws a 409 when a sold add-on's yearly
  * limit is now reached at this property (history can change between quote and accept), and a 409 with
  * its own code when the history cannot be read (fail closed for the chemical add-ons). Nothing for an
- * estimate with no priced add-on, with the gate off (the gated guards own that), or with no known
- * customer. `appliedOn` is the day the add-on will be applied (the booked visit); default today.
- * `database` should be the accept transaction. Staff get the dates; the customer gets the office hand-off.
+ * estimate with no priced add-on, with the gate off (the gated guards own that), or when no customer is
+ * known at all (limitSubject). `customerId` and `property` ({ property_id }) are what the caller has verified (the
+ * booking's customer and property); `resolveCustomer` is the caller's last resort for an unowned estimate
+ * (the phone match), called only when nothing else names a customer. `appliedOn` is the day the add-on will
+ * be applied (the booked visit); default today. `database` should be the accept transaction. Staff get the
+ * dates; the customer gets the office hand-off.
  */
-async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null, appliedOn = null, staff = false } = {}) {
-  const customer = customerId || estimate.customer_id;
-  const keys = recheckKeys(estimate, customer);
+async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null, property = null, resolveCustomer = null, appliedOn = null, staff = false } = {}) {
+  const keys = recheckKeys(estimate);
   if (!keys.length) return;
   let history;
   try {
+    const subject = await limitSubject(database, estimate, { customerId, propertyId: property && property.property_id, resolveCustomer });
+    if (!subject.customerId) return;
     // In a savepoint: a failed read must not poison the transaction it runs inside (the 409 below is the answer).
     history = await savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
-      customerId: customer, propertyId: estimate.property_id, keys, excludeEstimateId: estimate.id,
+      customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeEstimateId: estimate.id,
     }));
   } catch (err) {
     logger.warn(`[area-addon-limits] accept recheck history unavailable for estimate ${estimate.id}: ${err.code || err.name}: ${err.message}`);
@@ -288,4 +332,5 @@ module.exports = {
   assertAreaAddOnLimitsOpen,
   areaAddOnLimitRefusal,
   attachLimitUse,
+  limitSubject,
 };
