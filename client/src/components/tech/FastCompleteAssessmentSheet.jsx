@@ -172,7 +172,7 @@ function EstimateLine({ summary, service }) {
   );
 }
 
-export default function FastCompleteAssessmentSheet({ service, request, operatorId, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteAssessmentSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -221,6 +221,7 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
         dictationPending={dictationPending}
         submitting={submitting}
         onFullForm={onFullForm}
+        onViewDetails={onViewDetails}
         onClose={close}
       />
       <SheetBody

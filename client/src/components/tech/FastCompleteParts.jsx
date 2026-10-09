@@ -157,7 +157,11 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
 
 // `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
 // form button until the sheet itself says the visit needs the full form.
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose, fullFormOffered = true }) {
+// `onViewDetails` (owner 2026-10-09): a Details pill, shown while the visit is
+// open, that opens the appointment details sheet (quick move, cancel,
+// reschedule, price edit) — the same one the full form's Details pill and the
+// lawn sheet open. Absent (the tech portal mounts no such sheet) = no pill.
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
@@ -168,6 +172,9 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
+      {!done && onViewDetails && (
+        <Button variant="ghost" className="tech-visit-action" onClick={() => onViewDetails()} disabled={locked || dictationPending}>Details</Button>
+      )}
       {!done && fullFormOffered && (
         <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
       )}

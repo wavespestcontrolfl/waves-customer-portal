@@ -683,6 +683,30 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByText('9 Live Ln, Parrish')).toBeTruthy();
   });
 
+  // Details (owner 2026-10-09): the appointment details sheet (quick move,
+  // cancel, reschedule, price edit) stays reachable from every Fast Complete
+  // sheet, as it is from the full form and the lawn sheet.
+  test('a Details pill shows only when the parent can open the details, opens them, and goes with the saved view', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+    cleanup();
+
+    const onViewDetails = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={makeRequest()} onClose={() => {}} onViewDetails={onViewDetails} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    expect(onViewDetails).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    expect(await screen.findByText('Re-service complete')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+  });
+
   test('a visit reclassified since the schedule loaded is not completed here', async () => {
     const request = makeRequest({ service: { ...CONTEXT_SERVICE, serviceKey: 'general_pest_control' } });
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);

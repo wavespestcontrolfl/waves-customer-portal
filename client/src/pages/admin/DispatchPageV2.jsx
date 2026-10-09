@@ -2009,6 +2009,13 @@ export default function DispatchPageV2({
             setTreeShrubFastService(null);
             handleComplete(service, { fullForm: true });
           }}
+          // Details: the appointment details sheet (quick move, cancel,
+          // reschedule, price edit), as the lawn sheet's Details pill opens.
+          onViewDetails={() => {
+            const service = treeShrubFastService;
+            setTreeShrubFastService(null);
+            setDetailService(service);
+          }}
         />
       )}
       {lawnReserviceFastService && (
@@ -2033,6 +2040,13 @@ export default function DispatchPageV2({
             const service = lawnReserviceFastService;
             setLawnReserviceFastService(null);
             handleComplete(service, { fullForm: true });
+          }}
+          // Details: the appointment details sheet (quick move, cancel,
+          // reschedule, price edit), as the lawn sheet's Details pill opens.
+          onViewDetails={() => {
+            const service = lawnReserviceFastService;
+            setLawnReserviceFastService(null);
+            setDetailService(service);
           }}
         />
       )}
@@ -2131,6 +2145,13 @@ export default function DispatchPageV2({
             setAssessmentFastService(null);
             handleComplete(service, { fullForm: true });
           }}
+          // Details: the appointment details sheet (quick move, cancel,
+          // reschedule, price edit), as the lawn sheet's Details pill opens.
+          onViewDetails={() => {
+            const service = assessmentFastService;
+            setAssessmentFastService(null);
+            setDetailService(service);
+          }}
         />
       )}
       {pestFastService && (
@@ -2184,6 +2205,13 @@ export default function DispatchPageV2({
             const service = pestFastService;
             setPestFastService(null);
             handleComplete(service, { fullForm: true });
+          }}
+          // Details: the appointment details sheet (quick move, cancel,
+          // reschedule, price edit), as the lawn sheet's Details pill opens.
+          onViewDetails={() => {
+            const service = pestFastService;
+            setPestFastService(null);
+            setDetailService(service);
           }}
         />
       )}
