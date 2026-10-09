@@ -63,8 +63,6 @@ describe('Local Conditions slot', () => {
     await settle();
     const baseline = standalone.container.innerHTML;
     expect(baseline).toContain('Local Conditions');
-    // The daily irrigation figure is gone (owner 2026-10-09): watering advice is weekly, on the lawn report and the Monday email.
-    expect(baseline).not.toMatch(/Irrigation:|recommended/);
     standalone.unmount();
 
     api.getYardMonth.mockResolvedValue({ available: false });
@@ -72,6 +70,16 @@ describe('Local Conditions slot', () => {
     await settle();
     expect(slot.container.innerHTML).toBe(baseline);
     expect(screen.queryByText('Your yard this month')).not.toBeInTheDocument();
+  });
+
+  // The daily irrigation figure is gone (owner 2026-10-09): watering advice is weekly, on the lawn report and the
+  // Monday email. The tile showed only for a lawn customer, so the lawn tiles must be on for this to prove anything.
+  it('a lawn customer sees the lawn tiles and no daily irrigation figure', async () => {
+    api.getLawnHealth.mockResolvedValue({ hasLawnCare: true });
+    const { container } = render(<WeatherPestWidget customer={customer} nextService={null} />);
+    await settle();
+    expect(screen.getByText('Fungus Risk')).toBeInTheDocument();
+    expect(container.innerHTML).not.toMatch(/Irrigation:|recommended/);
   });
 
   it('a failed yard read also keeps the existing widget', async () => {
