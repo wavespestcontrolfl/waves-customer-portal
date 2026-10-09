@@ -6287,3 +6287,11 @@ function agentSessionGuardLive() {
 }
 // GATE_AGENT_SESSION_GUARD reader, on its own line so gate PRs never conflict.
 module.exports.agentSessionGuardLive = agentSessionGuardLive;
+
+// GATE_LEAD_SERVICE_DISPLAY read at CALL time, strict `=== 'true'`: a flip or
+// an unset kill needs no restart.
+function leadServiceDisplayLive() {
+  return process.env.GATE_LEAD_SERVICE_DISPLAY === 'true';
+}
+// GATE_LEAD_SERVICE_DISPLAY reader, on its own line so gate PRs never conflict.
+module.exports.leadServiceDisplayLive = leadServiceDisplayLive;

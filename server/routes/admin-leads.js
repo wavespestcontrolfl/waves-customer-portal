@@ -18,6 +18,25 @@ const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const logger = require('../services/logger');
 const { nanpPhoneProblem } = require('../utils/phone');
+const { leadServiceDisplay, catalogNameIndex } = require('../utils/lead-service-display');
+const { leadServiceDisplayLive } = require('../config/feature-gates');
+
+// GATE_LEAD_SERVICE_DISPLAY: the Leads screen shows each lead's service the
+// way the booking catalog names it. Read-only: service_interest is untouched,
+// and with the gate off the field is absent so the screen shows the stored text.
+async function withServiceDisplay(leads) {
+  if (!leadServiceDisplayLive() || !leads.length) return leads;
+  let catalogNames = null;
+  try {
+    catalogNames = catalogNameIndex(await db('services').pluck('name'));
+  } catch (err) {
+    logger.warn('[leads] service catalog unavailable for service_display', { error: err.message });
+  }
+  return leads.map((lead) => ({
+    ...lead,
+    service_display: leadServiceDisplay(lead.service_interest, { catalogNames }),
+  }));
+}
 
 // Format/length validation for manual lead creation. Permissive by design — it
 // validates shape (email/phone format, string caps, types) without changing
@@ -859,7 +878,7 @@ router.get('/', async (req, res, next) => {
       .offset((pg - 1) * lim);
 
     res.json({
-      leads,
+      leads: await withServiceDisplay(leads),
       total: parseInt(count, 10),
       page: pg,
       limit: lim,
@@ -1090,7 +1109,7 @@ router.get('/:id', async (req, res, next) => {
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    const response = { lead, activities, calls };
+    const response = { lead: (await withServiceDisplay([lead]))[0], activities, calls };
     if (req.query.leadReview === '1') {
       response.linkedHistory = await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead);
       try {
