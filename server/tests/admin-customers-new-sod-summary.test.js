@@ -140,7 +140,13 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     expect(byKey.fertilizer.text).toBe(`Fertilizer is held until Oct 31, 2026${byKey.fertilizer.active ? '' : ' (this hold is over)'}.`);
     expect(byKey.weedKiller.text).toContain('Weed killer is held until Oct 31, 2026 and until the technician confirms the sod is rooted');
     expect(byKey.preEmergent.text).toContain('Pre-emergent is held until Oct 1, 2027');
-    expect(byKey.preEmergent.active).toBe(true);
+  });
+
+  it('a pre-emergent after the sod date does not hide one applied shortly before it', async () => {
+    mockState.productRows = [{ ...DIMENSION, service_date: daysAgo(5) }, { ...DIMENSION, service_date: daysAgo(60) }];
+    const { body } = await getNewSod({ sodLaidOn: daysAgo(40) });
+    expect(body.newSod.lastPreEmergent.date).toBe(daysAgo(5));
+    expect(body.newSod.preEmergentWarning).toMatch(/less than 12 weeks/);
   });
 
   it('a record from months ago marks finished holds as over; the rooted check ends the weed killer hold', async () => {

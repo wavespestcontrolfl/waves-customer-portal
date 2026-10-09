@@ -78,6 +78,9 @@ async function lastWavesPreEmergent(knex, customerId) {
   } catch {
     return { unreadable: true };
   }
+  // Newest first. The first one is what the form names; the warning needs the newest one on or before the sod
+  // date, so every pre-emergent read is kept.
+  const applications = [];
   for (const row of rows || []) {
     const date = ymdOrNull(row.service_date);
     if (!date) continue;
@@ -87,22 +90,23 @@ async function lastWavesPreEmergent(knex, customerId) {
       subcategory: row.catalog_subcategory,
       category: row.catalog_category || row.applied_category,
     };
-    if (isPreEmergent(product)) return { date, product: row.product_name };
+    if (isPreEmergent(product)) applications.push({ date, product: row.product_name });
   }
-  return null;
+  return applications.length ? { ...applications[0], applications } : null;
 }
 
 /**
  * The warning for an entered sod date, or null. A pre-emergent put down 0 to 83
  * days before the sod date warns; one after the sod date, or 84+ days before,
- * does not. An unreadable sod date gives no warning.
+ * does not. With several applications the newest one on or before the sod date decides. An unreadable sod date gives no warning.
  */
 function preEmergentWarning(sodLaidOn, lastPreEmergent) {
   const sod = ymdOrNull(sodLaidOn);
-  const last = ymdOrNull(lastPreEmergent?.date);
-  if (!sod || !last) return null;
-  const gap = daysBetween(last, sod);
-  return gap >= 0 && gap < PRE_EMERGENT_BEFORE_SOD_DAYS ? PRE_EMERGENT_WARNING : null;
+  if (!sod || !lastPreEmergent) return null;
+  // The newest application on or before the sod date: a later one must not hide it.
+  const dates = (lastPreEmergent.applications || [lastPreEmergent]).map((row) => ymdOrNull(row?.date)).filter((date) => date && date <= sod).sort();
+  const before = dates[dates.length - 1];
+  return before && daysBetween(before, sod) < PRE_EMERGENT_BEFORE_SOD_DAYS ? PRE_EMERGENT_WARNING : null;
 }
 
 // The three plain lines for a recorded sod. Dates are the fixed hold end days
