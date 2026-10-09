@@ -165,12 +165,20 @@ async function openSomewhere({ chosen, wide, rows, svc, knex, places }) {
   const closed = chosen.filter(([, c]) => limitBlocks(c, wide).length > 0 && !heldByCity(c.raw));
   if (!closed.length) return wide;
   const open = new Set();
+  const unread = new Set();
   for (const place of places) {
     const here = await readCaps({ products: closed.map(([, c]) => c.raw.product), rows, svc, knex, place });
-    if (!here) continue;
-    for (const [, c] of closed) if (!(here.get(idOf(c.raw.product.id)) || []).length) open.add(idOf(c.raw.product.id));
+    for (const [, c] of closed) {
+      const id = idOf(c.raw.product.id);
+      const blocks = here ? here.get(id) || [] : null;
+      if (blocks && !blocks.length) open.add(id);
+      // A place whose read failed (the whole call, or this product's own typeless block) is UNKNOWN there, not closed: a product
+      // unreadable at ANY place stays reachable by the search with the unreadable note, and a place that read as capped stays closed.
+      else if (!blocks || blocks.every((block) => !block.type)) unread.add(id);
+    }
   }
-  return new Map([...wide].filter(([id]) => !open.has(id)));
+  const UNREAD = [{ message: 'application limits could not be read.' }];
+  return new Map([...wide].filter(([id]) => !open.has(id)).map(([id, blocks]) => [id, unread.has(id) ? UNREAD : blocks]));
 }
 
 // The one add-on each kind may suggest: the FIRST fungicide in program order, the others by trigger.
@@ -233,8 +241,10 @@ function offerFor(kind, candidate, { capped, rows }) {
  */
 function blockedProductIds({ offers, chinch, weedMix }) {
   // Unavailable (a member's own read failed): only the members whose limit WAS read as forbidding stay blocked.
-  const weedOut = weedMix?.mode === 'unavailable' ? weedMix.blockedIds || []
-    : weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [];
+  const weedOut = (weedMix?.mode === 'unavailable' ? weedMix.blockedIds || []
+    : weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [])
+    // Unreadable at some place (GATE_LAWN_TROUBLE_AREAS): not forbidden.
+    .filter((id) => !(weedMix?.unreadableIds || []).includes(id));
   return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];
 }
 
@@ -247,7 +257,7 @@ function blockedProductIds({ offers, chinch, weedMix }) {
 function unreadableProductIds({ offers, chinch, weedMix }) {
   // The mix is withheld as a whole, so the members NOT read as forbidden are released to the search.
   const weedUnread = weedMix?.mode === 'unavailable' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.blockedIds || []).includes(id)) : [];
-  return [...new Set([...(offers?.unreadable || []), ...(chinch?.unreadableIds || []), ...weedUnread].map(idOf))];
+  return [...new Set([...(offers?.unreadable || []), ...(chinch?.unreadableIds || []), ...weedUnread, ...(weedMix?.unreadableIds || [])].map(idOf))];
 }
 
 function weedOffer(weedMix, items) {
@@ -308,7 +318,11 @@ async function resolveChinch({ svc, structured, knex, places = null }) {
     byPlace[place] = withRungs(here ? chooseChinch(products, here) : unreadableChinch(), products);
   }
   const best = places.find((place) => byPlace[place].productId);
-  return { ...(best ? byPlace[best] : wide), byPlace };
+  const top = best ? byPlace[best] : wide;
+  // The sheet's search and reconciliation read the TOP-LEVEL unreadable ids, which follow one place only. A rung unreadable at ANY
+  // place stays unreadable here (released to the search with the note, never dropped by reconciliation) and is not also blocked.
+  const unreadableIds = [...new Set(places.flatMap((place) => byPlace[place].unreadableIds || []))];
+  return { ...top, unreadableIds, blockedIds: (top.blockedIds || []).filter((id) => !unreadableIds.includes(id)), byPlace };
 }
 
 // Every rung's product id (all of them are governed by the guide, offered or not). The rungs a READ limit

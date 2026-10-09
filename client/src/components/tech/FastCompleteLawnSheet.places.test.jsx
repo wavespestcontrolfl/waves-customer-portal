@@ -663,3 +663,56 @@ describe('reachability: the front is capped, the back is open', () => {
     typeArea(weed ? group('Weed spots') : placeGroup(rowNames[0]), weed ? '500' : '100');
   }
 });
+
+// ── reconciliation keeps a row whose limit could not be read at SOME place ──────────────────────────────────────
+// The guide's fresh answer follows one place at the top level. A product unreadable at any place stays released to the search
+// and is never dropped by reconciliation; without that, the same row is dropped as "not offered".
+describe('reconciliation: a product unreadable at one place stays on the sheet', () => {
+  const ARENA_ITEM = { productId: P_ARENA, name: 'Arena 50 WDG', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: 0.147, rateUnit: 'oz', gateNotes: [] };
+  const BIF_ITEM = { productId: P_BIF, name: 'Atticus Talak 7.9 F', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: null, rateUnit: null, gateNotes: [] };
+  const FRESH_CHINCH = (unreadableIds) => ({
+    item: BIF_ITEM, note: null, rungIds: [P_ARENA, P_BIF], blockedIds: [], unreadableIds,
+    byPlace: {
+      front: { item: BIF_ITEM, note: null, unreadableIds: [] },
+      back: { item: null, note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.', unreadableIds: [P_ARENA] },
+    },
+  });
+  const openWithArenaRow = async (fresh) => {
+    // Arena is a planned row; the sheet opened with the context's own chinch decision.
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], chinch: fresh };
+    await open(placeContext({
+      treatmentGuide: true, chinch: FRESH_CHINCH([]), planned: [{ ...ARENA_ITEM, treatedSqft: null }], addOns: [],
+    }));
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+  };
+
+  test('Arena unreadable at the back (top-level unreadableIds): the row stays, nothing is removed', async () => {
+    await openWithArenaRow(FRESH_CHINCH([P_ARENA]));
+    expect(screen.getByRole('group', { name: 'Arena 50 WDG' })).toBeTruthy();
+    expect(screen.queryByText(/^Removed:/)).toBeNull();
+    // Reconciliation and the Complete hold read the same "not offered" test: this row is not held either.
+    expect(footerNote() + completeButton().textContent).not.toMatch(/Remove Arena 50 WDG/);
+    // The place note for a place whose read failed: allowed, recorded, flagged.
+    const where = within(screen.getByRole('group', { name: 'Arena 50 WDG' })).getByRole('group', { name: 'Place for Arena 50 WDG' });
+    expect(chipOf(where, 'Back').disabled).toBe(false);
+  });
+
+  test('the same answer without the unreadable id drops the row (proving the test can fail): Complete is held on the row', async () => {
+    await openWithArenaRow(FRESH_CHINCH([]));
+    // The first answer reconciles nothing (the taps were locked until it came); the same test holds Complete on the row.
+    await waitFor(() => expect(footerNote() + completeButton().textContent).toMatch(/Remove Arena 50 WDG: it is not offered for this lawn right now\./));
+  });
+
+  test('the weed mix: a member unreadable at a place the top level does not follow is searchable and kept', async () => {
+    const mix = MIX({ front: BLIND_SET, back: { mode: 'unavailable', productIds: [], note: 'The weed-spray limits could not be checked. Use Other product for what you sprayed.', surfactant: null, tempF: null, blockedIds: [] } }, BLIND_SET);
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], weedMix: { ...mix, unreadableIds: [P_LEAD, P_CERT, P_SURF, P_BLIND] } };
+    await open(placeContext({ treatmentGuide: true, weedMix: MIX({ front: BLIND_SET, back: LEAD_SET }, LEAD_SET), planned: [addOn(P_LEAD, 'Lead WG', { amount: 1, amountUnit: 'oz' })], addOns: ADD_ONS }));
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    expect(screen.getByRole('group', { name: 'Lead WG' })).toBeTruthy();
+    expect(screen.queryByText(/^Removed:/)).toBeNull();
+    fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Cert Herbicide' } });
+    expect(await screen.findByRole('button', { name: /Cert Herbicide/ })).toBeTruthy();
+  });
+});

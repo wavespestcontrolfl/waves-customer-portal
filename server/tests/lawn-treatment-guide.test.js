@@ -403,14 +403,15 @@ describe('per-place offers: a product is held back only when NO place permits it
     expect(offers.caterpillars).toEqual({ item: { productId: P_ACE, name: 'Acelepryn' } });
   });
 
-  test('a place whose read throws permits nothing (fail closed): the pick stays blocked when no other place is open', async () => {
+  test('a place whose read throws permits nothing (fail closed) and is unknown there: the pick is not offered and is unreadable, not blocked', async () => {
     engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
       if (options?.place) throw new Error('db down');
       return { capped: new Map([[P_ART, CAP]]), warnings: [], blocks: [] };
     });
     const offers = await run();
     expect(offers.fungus).toBeNull();
-    expect(offers.blocked).toEqual([P_ART]);
+    expect(offers.blocked).toEqual([]);
+    expect(offers.unreadable).toEqual([P_ART]);
   });
 
   test('nothing capped: one read, as before; a city hold is blocked at every place', async () => {
@@ -428,6 +429,67 @@ describe('per-place offers: a product is held back only when NO place permits it
     expect(offers.fungus).toBeNull();
     expect(offers.blocked).toEqual([P_ART]);
     expect(engine.v13VisitLimits.mock.calls.every((c) => c.length === 5)).toBe(true);
+  });
+
+  // Mixed reads: a place whose limit read FAILS is unknown, not closed. A product unreadable at ANY place stays unreadable at the
+  // top level (released to the search with the note, never dropped by reconciliation); each place keeps its own answer.
+  describe('mixed successful and failed reads per place', () => {
+    const TYPED = [{ type: 'annual_max_apps', message: 'limit' }];
+    const TYPELESS = [{ message: 'application limits could not be read.' }];
+    const readsBy = (perPlace, wide) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      const answer = options?.place ? perPlace[options.place] : wide;
+      if (answer instanceof Error) throw answer;
+      return { capped: new Map(items.map((i) => i.product.id).filter((id) => answer[id]).map((id) => [id, answer[id]])), warnings: [], blocks: [] };
+    });
+
+    test('chinch: Front takes the bifenthrin product, Back\'s Arena read fails, the others cap Arena: Arena stays unreadable at the top level', async () => {
+      readsBy({ front: { [P_ARENA]: TYPED }, back: { [P_ARENA]: TYPELESS }, left_side: { [P_ARENA]: TYPED }, right_side: { [P_ARENA]: TYPED } }, { [P_ARENA]: TYPED });
+      engine.v13ProtocolRows.mockReturnValue(new Map([[P_ART, {}]]));
+      const found = await resolveChinch({ svc, structured: { id: 'protocol-1', version: 'v13' }, knex: fakeKnex([
+        { product_id: P_ARENA, product_name: 'Arena 50 WDG', gates: { trigger: 'chinch_20_to_25_per_sqft' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 4, catalog_id: P_ARENA, catalog_name: 'Arena 50 WDG', catalog_active: true },
+        { product_id: P_TALAK, product_name: 'Atticus Talak 7.9 F', gates: { trigger: 'chinch_second_product_caterpillars_or_mole_cricket_nymphs' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 7, catalog_id: P_TALAK, catalog_name: 'Atticus Talak 7.9 F', catalog_active: true },
+      ]), places: PLACES });
+      expect(found).toMatchObject({ productId: P_TALAK });
+      expect(found.unreadableIds).toContain(P_ARENA);
+      expect(found.blockedIds).not.toContain(P_ARENA);
+      // Each place keeps its own answer: Front is capped (blocked), Back is unknown (unreadable, nothing offered there).
+      expect(found.byPlace.front).toMatchObject({ productId: P_TALAK, blockedIds: [P_ARENA] });
+      expect(found.byPlace.back).toMatchObject({ productId: null, unreadableIds: expect.arrayContaining([P_ARENA]) });
+      expect(found.byPlace.left_side.unreadableIds).toEqual([]);
+    });
+
+    test('weed mix lives in lawn-weed-mix.test.js; the add-on pick: capped at three places, unreadable at the fourth, is unreadable (not blocked) and not offered', async () => {
+      const ROWS2 = new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } }]]);
+      const c = [{ raw: { product: { id: P_ART, name: 'Artavia' } }, item: { productId: P_ART, name: 'Artavia' } }];
+      const run2 = () => addOnOffers({ candidates: c, rows: ROWS2, svc, knex: {}, places: PLACES });
+      readsBy({ front: { [P_ART]: TYPED }, back: { [P_ART]: TYPELESS }, left_side: { [P_ART]: TYPED }, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      let offers = await run2();
+      expect(offers.fungus).toBeNull();
+      expect(offers.unreadable).toEqual([P_ART]);
+      expect(offers.blocked).toEqual([]);
+      // The whole read at one place throwing is the same unknown; a pick open at another place is simply offered.
+      readsBy({ front: { [P_ART]: TYPED }, back: new Error('db down'), left_side: { [P_ART]: TYPED }, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      offers = await run2();
+      expect(offers.unreadable).toEqual([P_ART]);
+      expect(offers.blocked).toEqual([]);
+      readsBy({ front: { [P_ART]: TYPED }, back: new Error('db down'), left_side: {}, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      offers = await run2();
+      expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' } });
+      expect(offers.unreadable).toEqual([]);
+      // Capped at every place that was read, none unknown: still blocked.
+      readsBy({ front: { [P_ART]: TYPED }, back: { [P_ART]: TYPED }, left_side: { [P_ART]: TYPED }, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      offers = await run2();
+      expect(offers.blocked).toEqual([P_ART]);
+      expect(offers.unreadable).toEqual([]);
+    });
+
+    test('the guide\'s blocked and unreadable lists follow the top-level unreadable ids of the weed mix and the chinch ladder', () => {
+      const { unreadableProductIds, blockedProductIds } = require('../services/lawn-treatment-guide');
+      const weedMix = { mode: 'replacement', productIds: ['b'], groupProductIds: ['a', 'b', 'c'], unreadableIds: ['a'] };
+      expect(unreadableProductIds({ offers: {}, chinch: { unreadableIds: [P_ARENA] }, weedMix })).toEqual([P_ARENA, 'a']);
+      // 'a' is not offered by the top-level mode, but it is unknown somewhere, so it is not reported as forbidden.
+      expect(blockedProductIds({ offers: {}, chinch: { blockedIds: [] }, weedMix })).toEqual(['c']);
+    });
   });
 
   test('weedOffer carries what each place takes; a place whose set the sheet cannot build is left out', () => {

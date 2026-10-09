@@ -174,7 +174,11 @@ async function buildWeedMix({ addOns, svc, structured, knex, places = null }) {
       : wide;
   }
   const best = places.find((place) => byPlace[place].mode === 'lead') || places.find((place) => byPlace[place].mode === 'replacement');
-  return { ...(best ? byPlace[best] : wide), byPlace };
+  // A member whose limit could not be read at ANY place stays reachable by the search and is never dropped by reconciliation
+  // (`unreadableIds`, additive, places only): at a place whose read failed, the members not read as forbidding there.
+  const unreadableIds = [...new Set(places.filter((place) => byPlace[place].mode === 'unavailable')
+    .flatMap((place) => groupProductIds.filter((id) => !(byPlace[place].blockedIds || []).includes(id))))];
+  return { ...(best ? byPlace[best] : wide), ...(unreadableIds.length ? { unreadableIds } : {}), byPlace };
 }
 
 // One place's decision: its own limit read, failing closed (unavailable) when the read throws.

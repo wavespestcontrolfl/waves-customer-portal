@@ -100,3 +100,16 @@ describe('defaults and withPlace', () => {
     expect(withPlace(row(), { areas: every, chosen: '' })).toMatchObject({ place: '', placeNowhere: 'no' });
   });
 });
+
+describe('a place whose limit read failed', () => {
+  const areas = troubleAreasOf(data());
+  test('is allowed and flagged unreadable for the weed rows and the chinch row; a place that read as capped is not', () => {
+    const weedMix = { byPlace: { front: { mode: 'unavailable', productIds: [] }, back: { mode: 'none', productIds: [], note: 'Limit.' } } };
+    const weedRows = [row({ productId: 'w1', weedGroup: true })];
+    expect(withPlace(weedRows[0], { areas, chosen: 'front', weedMix, weedRows })).toMatchObject({ placeBlock: null, placeUnreadable: true });
+    expect(withPlace(weedRows[0], { areas, chosen: 'back', weedMix, weedRows })).toMatchObject({ placeBlock: 'Limit.', placeUnreadable: false });
+    const chinch = { byPlace: { front: { item: null, note: 'n', unreadableIds: ['C1'] }, back: { item: { productId: 'C1' }, note: null, unreadableIds: [] } } };
+    expect(withPlace(row({ productId: 'c1', guided: 'chinch' }), { areas, chosen: 'front', chinch })).toMatchObject({ placeBlock: null, placeUnreadable: true });
+    expect(withPlace(row({ productId: 'c1', guided: 'chinch' }), { areas, chosen: 'back', chinch })).toMatchObject({ placeUnreadable: false });
+  });
+});

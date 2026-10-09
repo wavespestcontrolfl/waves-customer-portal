@@ -486,6 +486,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
     ...lowerIds(answered ? guide.unreadableProductIds : []),
     // The mix is withheld as a whole; the members not read as forbidding are released.
     ...(weedMix?.mode === 'unavailable' ? weedGroup.filter((id) => !lowerIds(weedMix.blockedIds).includes(id)) : []),
+    // GATE_LAWN_TROUBLE_AREAS: a member whose limit could not be read at ANY place is released too, whatever the top-level mode.
+    ...lowerIds(weedMix?.unreadableIds),
     ...lowerIds(chinch?.unreadableIds),
   ] : [];
   const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
@@ -1347,7 +1349,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // surfactant in the heat, a member or the lead at its yearly limit, the replacement before its
   // turn). Only when the limits could not be read does the entry send the tech to the search.
   const searchCatalog = useMemo(() => {
-    const held = weedMix && weedMix.mode !== 'unavailable' ? weedMix.groupProductIds || [] : [];
+    const unreadable = lowerIds(weedMix?.unreadableIds);
+    const held = weedMix && weedMix.mode !== 'unavailable' ? (weedMix.groupProductIds || []).filter((id) => !unreadable.includes(String(id).toLowerCase())) : [];
     // Every guide-governed product that is not released to the generic list comes through its entry
     // or card only (and, before the guide has answered, not at all).
     const hidden = (product) => gov.hidden.has(String(product.id).toLowerCase()) || held.some((id) => sameId(id, product.id));

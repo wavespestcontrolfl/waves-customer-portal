@@ -18,6 +18,7 @@ import { knownPlacesOfType, troubleTypeOfRow } from '../../lib/lawn-trouble-plac
 function placeNote(row) {
   if (row.placeNowhere) return `${row.name} cannot go anywhere on this lawn right now. ${row.placeNowhere}`;
   if (row.placeBlock) return row.placeBlock;
+  if (row.placeUnreadable) return 'The limits could not be checked for this place. Record what you applied; the office will review it.';
   if (row.placeDefaulted) return 'Set from the known trouble area. Tap another place to change it.';
   return null;
 }

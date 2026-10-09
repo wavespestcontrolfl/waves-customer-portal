@@ -257,6 +257,36 @@ describe('buildWeedMix with places: one decision per place', () => {
     expect(mix).toMatchObject({ mode: 'replacement' });
   });
 
+  test('mixed reads: Front takes the replacement, Back\'s read fails: the group stays unreadable at the top level, each place keeps its own answer', async () => {
+    const TYPELESS = [{ message: 'application limits could not be read.' }];
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(options?.place === 'back' ? [[LEAD, TYPELESS]] : [[LEAD, CAP]]), warnings: [], blocks: [],
+    }));
+    const mix = await runPlaces();
+    expect(mix.byPlace.front).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+    expect(mix.byPlace.back).toMatchObject({ mode: 'unavailable' });
+    expect(mix).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+    expect(mix.unreadableIds.sort()).toEqual([LEAD, CERT, SURF, REPL].sort());
+  });
+
+  test('mixed reads: a member read as forbidding at the failed place stays blocked there (not unreadable); a read that throws is the same unknown', async () => {
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      if (options?.place === 'back') throw new Error('db down');
+      if (options?.place === 'left_side') return { capped: new Map([[LEAD, [{ message: 'unreadable' }]], [CERT, CAP]]), warnings: [], blocks: [] };
+      return { capped: new Map([[LEAD, CAP], [REPL, CAP]]), warnings: [], blocks: [] };
+    });
+    const mix = await runPlaces();
+    expect(mix.byPlace.back.mode).toBe('unavailable');
+    expect(mix.byPlace.left_side).toMatchObject({ mode: 'unavailable', blockedIds: [CERT] });
+    expect(mix.unreadableIds).toEqual(expect.arrayContaining([LEAD, CERT, SURF, REPL]));
+    expect(mix.mode).toBe('none');
+  });
+
+  test('every read succeeded: no unreadableIds key', async () => {
+    cappedAt('front');
+    expect(await runPlaces()).not.toHaveProperty('unreadableIds');
+  });
+
   test('the lawn-wide read throwing is unavailable, with no places', async () => {
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
     expect(await runPlaces()).toMatchObject({ mode: 'unavailable', productIds: [] });

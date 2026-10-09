@@ -75,6 +75,15 @@ function chinchProblem(decision, row) {
   return reasonText(decision.note, 'This chinch product is not available at this place.');
 }
 
+// Whether the limits could not be read at a place for this row (the unknown: the row is allowed, recorded and flagged by the
+// closeout). Only the decisions that say so are asked: the weed mix at a place that is 'unavailable', the chinch ladder at a place
+// that lists the product as unreadable.
+function unreadableAt(placeId, row, { weedMix, chinch }) {
+  if (row.weedGroup && weedMix?.byPlace) return weedMix.byPlace[placeId]?.mode === 'unavailable';
+  if (row.guided === 'chinch' && chinch?.byPlace) return (chinch.byPlace[placeId]?.unreadableIds || []).some((id) => sameId(id, row.productId));
+  return false;
+}
+
 /**
  * The place a row starts on when the tech has not tapped one: the lawn's single known trouble area of the row's type
  * whose place is open for the row. Two or more known places of that type, or none, leave the choice to the tech.
@@ -107,6 +116,7 @@ export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows }) {
     placeDefaulted: !picked && !!place,
     // The reason a row may not go where it is (or anywhere), for the hold under the Complete button.
     placeBlock: place && problems[place] ? problems[place] : null,
+    placeUnreadable: !!place && !problems[place] && unreadableAt(place, row, { weedMix, chinch }),
     placeNowhere: Object.values(problems).every(Boolean) ? Object.values(problems)[0] : null,
   };
 }
