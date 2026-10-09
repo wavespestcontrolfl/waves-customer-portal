@@ -180,16 +180,21 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // VERSION_SUFFIX_FACT_MARKERS.m = COMPANY + LABEL + VISIT STATUS & OPEN LOOPS +
 // PAYMENT + the MISSED VISIT scope line). 'house_voice_v12_real_answers7_m': 31 chars,
 // 36 with all four category tags. A later revision mints the next number + its own key.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}7_m`;
+// AFTERCARE FACTS (2026-10-09): four more owner-delegated COMPANY FACTS lines (cleaning
+// after a treatment, more bugs for one to two weeks, drain flies, lawn insects). The exact
+// COMPANY FACTS render changed, so both bases move: gate-off "9", gate-on "10" (see
+// NEXT_OF_SERIES_PROMPT_VERSION). Same cumulative fact key 'm' — no new section.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}9_m`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
-// section, so it is its own cohort: number "8", same cumulative fact key 'm' (the facts
-// block's sections are unchanged). The rule reads the scheduler gate at call time, so the
-// IDENTITY follows the same gate (Codex #6172 r2): gate on stamps '8_m', gate off stamps
-// '7_m' — the gate-off drafter is byte-for-byte the '7_m' one, and the two behaviors can
-// never pool in graduation, exam, pathology or judge evidence whichever way the gate moves.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}8_m`;
+// section, so it is its own cohort: the number one above the gate-off base, same
+// cumulative fact key (the facts block's sections are unchanged). The rule reads the scheduler gate at call time, so the
+// IDENTITY follows the same gate (Codex #6172 r2): gate on stamps this version, gate off
+// stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
+// behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
+// gate moves. A prompt or facts revision moves BOTH numbers.
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}10_m`;
 const SHADOW_STATUS = 'shadow';
 
 /**
