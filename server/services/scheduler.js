@@ -3864,6 +3864,9 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('40 3 * * 1', async () => {
     if (!isEnabled('callReplayEval')) return;
+    // GATE_CALL_REPLAY_EVAL_ON_CHANGE: the replay is started from the terminal
+    // when the extractor changed (the daily check below), not every Monday.
+    if (require('./eval/call-replay-on-change').callReplayOnChangeLive()) return;
     logger.info('Running: call extraction replay eval');
     try {
       await runExclusive('call-extraction-replay-eval', async () => {
@@ -3876,6 +3879,26 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:45AM ET — Call check on change (GATE_CALL_REPLAY_EVAL_ON_CHANGE,
+  // dark). Compares the live extractor's fingerprint with the one the replay
+  // last ran against and raises ONE admin item when it changed. No model
+  // call. Needs GATE_CALL_REPLAY_EVAL on as well: off still means no replay
+  // and no reminder.
+  // =========================================================================
+  cron.schedule('45 3 * * *', async () => {
+    const onChange = require('./eval/call-replay-on-change');
+    if (!isEnabled('callReplayEval') || !onChange.callReplayOnChangeLive()) return;
+    try {
+      await runExclusive('call-replay-on-change', async () => {
+        const result = await onChange.checkCallReplayDue();
+        logger.info(`Call check on change: due=${result.due} extractor=${result.fingerprint}`);
+      });
+    } catch (err) {
+      logger.error(`Call check on change failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

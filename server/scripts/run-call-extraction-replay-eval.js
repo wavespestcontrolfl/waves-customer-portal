@@ -8,6 +8,11 @@
  *   node server/scripts/run-call-extraction-replay-eval.js
  *   node server/scripts/run-call-extraction-replay-eval.js --json
  *   node server/scripts/run-call-extraction-replay-eval.js --notify
+ *   node server/scripts/run-call-extraction-replay-eval.js --no-mark
+ *
+ * A run on the default fixture that reaches a verdict records the extractor
+ * version it ran against (system_settings), which ends the on-change reminder
+ * (GATE_CALL_REPLAY_EVAL_ON_CHANGE). --no-mark skips that write.
  *
  * Needs GEMINI_API_KEY and DATABASE_URL.
  *
@@ -26,6 +31,17 @@ const ARGS = Object.fromEntries(
   })
 );
 
+// A run that reached a verdict (pass or fail) is the check the on-change
+// reminder asks for: record the extractor version it ran against, which ends
+// that reminder. A run that could not execute records nothing. --no-mark and
+// --fixture keep a trial run (another fixture, a branch) from counting.
+async function recordCheckedRun(result) {
+  if (ARGS['no-mark'] || ARGS.fixture || !['pass', 'fail'].includes(result.status)) return;
+  const onChange = require('../services/eval/call-replay-on-change');
+  await onChange.markChecked(onChange.extractorFingerprint().fingerprint);
+  await onChange.checkCallReplayDue().catch((err) => console.error(`Could not close the call check reminder: ${err.message}`));
+}
+
 (async function main() {
   try {
     if (ARGS.json) logger.transports.forEach((t) => { t.silent = true; });
@@ -37,6 +53,8 @@ const ARGS = Object.fromEntries(
     if (ARGS.fixture) opts.fixturePath = ARGS.fixture;
 
     const result = await runCallExtractionReplayEval(opts);
+
+    await recordCheckedRun(result);
 
     if (ARGS.json) {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
