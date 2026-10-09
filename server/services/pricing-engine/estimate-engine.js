@@ -5,6 +5,7 @@
 // ============================================================
 const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2, TERMITE } = require('./constants');
 const { termiteAnnualPlanSelectionEnabled } = require('../../config/feature-gates');
+const { gateEnvValue } = require('../../config/feature-gates');
 
 // Optional logger — the engine must stay requireable from CLI/test harnesses
 // that don't carry the server logger, so binding events log best-effort.
@@ -499,7 +500,14 @@ function generateEstimate(input) {
   // flag or the lawn_pricing_v2.useLawnCostFloor DB key (db-bridge resets
   // it to false on every sync when absent, same kill-value pattern as
   // programMinimumMonthly).
-  const lawnCostFloorArmed = !!(
+  // Cost-plus list price (owner ruling 2026-10-09, GATE_LAWN_COST_PLUS_LIST,
+  // read at call time): same tri-state as the arm switch. A mode-on run
+  // also arms the cost floor so the 35% discount floor is enforced.
+  const lawnCostPlusListArmed = !!(
+    services.lawn?.costPlusList ?? input.lawnCostPlusList
+      ?? gateEnvValue('GATE_LAWN_COST_PLUS_LIST')
+  );
+  const lawnCostFloorArmed = lawnCostPlusListArmed || !!(
     services.lawn?.useLawnCostFloor ?? input.useLawnCostFloor
       ?? LAWN_PRICING_V2.useLawnCostFloor ?? false
   );
@@ -664,6 +672,9 @@ function generateEstimate(input) {
     // (estimate-public estimateLawnFloorArmed reads it first; codex P2
     // round 8 on #2827).
     lawnCostFloorArmed,
+    // Same replay rule for the cost-plus list mode: an estimate priced ON
+    // replays ON after the gate goes off, and one priced OFF stays OFF.
+    lawnCostPlusList: lawnCostPlusListArmed,
     // Resolved program minimum + pest floor state for THIS run — same
     // replay rule as the arm state: a later global re-arm/disarm must never
     // re-price a sent quote (estimate-public reads the stamps first and
@@ -884,6 +895,7 @@ function generateEstimate(input) {
         // Default false since the 2026-07-17 owner ruling ("forget all
         // floors") — callers can still opt in explicitly for previews.
         useLawnCostFloor: lawnCostFloorArmed,
+        costPlusList: lawnCostPlusListArmed,
         programMinimumMonthly: lawnProgramMinimumMonthlyResolved,
         targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
         routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,

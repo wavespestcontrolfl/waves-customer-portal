@@ -106,6 +106,24 @@ into `priceLawnCare`.
 - MODERATE_SHADE: 0.625 lb N, 2 N-apps, Pillar
 - HEAVY_SHADE: 0.50 lb N, 2 N-apps, Pillar
 
+**Cost-plus list price (`GATE_LAWN_COST_PLUS_LIST`, ships OFF; owner 2026-10-09):**
+residential recurring lawn care only. Off, everything above is unchanged. On:
+
+- `annualCost` = v13 whole-lawn product (`LAWN_PRICING_V2.costPlusList.materialPer1000SqftPerYear`
+  by cadence, one program for every grass) + labor with `spotMinutesPerVisit` more
+  minutes a visit + the usual drive, callback and admin costs.
+- List annual = `max(market table, ceil(annualCost / (1 - listMargin) / visits) * visits, minimumPerVisit * visits)`.
+  Defaults: `listMargin` 0.45, `minimumPerVisit` $55, `spotMinutesPerVisit` 10. The lawn size is not rounded.
+- The program minimum, the cadence-ladder lift and the Bermuda adder then apply as before.
+- The mode arms the cost floor: WaveGuard and manual discounts on the lawn line stop at
+  `minimumCollectedAnnualPrice` = `annualCost / 0.65` (a 35% margin).
+- Tier rows read `pricingSource` `COST_PLUS_LIST` or `MINIMUM_PER_VISIT` (else the usual
+  labels) and carry `costPlusListApplied`, `listMargin` and `costPlusListAnnual`.
+- Resolution: `services.lawn.costPlusList ?? input.lawnCostPlusList ?? gate`, stamped as
+  `pricingMetadata.lawnCostPlusList`. A saved estimate replays as stamped; no stamp means OFF.
+  The one-time lawn anchor stays on the market table; commercial lawn is untouched.
+- Invalid `costPlusList` knobs fail the calculation closed (400 `LAWN_COST_PLUS_LIST_KNOBS_INVALID`).
+
 ---
 
 ## 5. Tree & Shrub

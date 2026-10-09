@@ -15,6 +15,7 @@
 const {
   rawEngineInputs,
   estimateLawnFloorArmed,
+  estimateLawnCostPlusList,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedFloorReplaySignals,
@@ -26,6 +27,8 @@ describe('savedFloorReplaySignals — tri-state', () => {
       result: { pricingMetadata: { lawnCostFloorArmed: true, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 62.5 } },
     })).toEqual({
       useLawnCostFloor: true,
+      // A priced estimate with no cost-plus stamp replays the market table.
+      lawnCostPlusList: false,
       pestProgramFloorArmed: true,
       pestProgramFloorPerVisit: 62.5,
     });
@@ -56,7 +59,24 @@ describe('savedFloorReplaySignals — tri-state', () => {
     // re-arm every new estimate.
     expect(savedFloorReplaySignals({
       result: { lineItems: [{ service: 'lawn_care', minimumCollectedAnnualPrice: 900, costFloorAnnual: 900 }] },
-    })).toEqual({});
+    })).toEqual({ lawnCostPlusList: false });
+  });
+
+  it('cost-plus list: a stamp replays as stamped, an unstamped priced estimate replays OFF', () => {
+    expect(savedFloorReplaySignals({
+      result: { pricingMetadata: { lawnCostPlusList: true, lawnCostFloorArmed: true } },
+    }).lawnCostPlusList).toBe(true);
+    expect(savedFloorReplaySignals({
+      result: { pricingMetadata: { lawnCostPlusList: false } },
+    }).lawnCostPlusList).toBe(false);
+    // Saved before the mode existed: no stamp is OFF, never "follow the gate".
+    expect(savedFloorReplaySignals({
+      engineInputs: { services: { lawn: { track: 'st_augustine' } } },
+      result: { pricingMetadata: { lawnCostFloorArmed: false } },
+    }).lawnCostPlusList).toBe(false);
+    expect(estimateLawnCostPlusList({ engineRequest: { options: { lawnCostPlusList: true } } })).toBe(true);
+    // Nothing priced at all injects nothing.
+    expect(estimateLawnCostPlusList({ result: {} })).toBeNull();
   });
 
   it('prefers the engineRequest option over stored inputs, and the stamp over both', () => {

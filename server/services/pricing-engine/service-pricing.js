@@ -2111,6 +2111,39 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
   return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPrice;
 }
 
+// Validated cost-plus list knobs (lawn_pricing_v2.costPlusList). A malformed
+// admin edit under an ON mode fails the calculation instead of silently
+// pricing off the market table (same posture as the Bermuda knob error);
+// persistence rethrows failClosed errors rather than CLIENT_FALLBACK.
+function lawnCostPlusListKnobs(options = {}) {
+  const cfg = LAWN_PRICING_V2.costPlusList || {};
+  const num = (v) => (v === null || v === undefined || v === '' || typeof v === 'boolean' ? NaN : Number(v));
+  const listMargin = num(cfg.listMargin);
+  const minimumPerVisit = num(cfg.minimumPerVisit);
+  const spotMinutesPerVisit = num(cfg.spotMinutesPerVisit);
+  const materialTable = cfg.materialPer1000SqftPerYear && typeof cfg.materialPer1000SqftPerYear === 'object'
+    ? cfg.materialPer1000SqftPerYear
+    : {};
+  const materialPerK = {};
+  let valid = Number.isFinite(listMargin) && listMargin > 0 && listMargin < 0.9
+    && Number.isFinite(minimumPerVisit) && minimumPerVisit >= 0
+    && Number.isFinite(spotMinutesPerVisit) && spotMinutesPerVisit >= 0;
+  if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
+    for (const { freq } of Object.values(LAWN_TIERS)) {
+      materialPerK[freq] = num(materialTable[freq]);
+      if (!(Number.isFinite(materialPerK[freq]) && materialPerK[freq] > 0)) valid = false;
+    }
+  }
+  if (!valid) {
+    const err = new Error('Lawn cost-plus list pricing knobs are invalid (lawn_pricing_v2.costPlusList) — fix listMargin (0 to 0.9), minimumPerVisit, spotMinutesPerVisit and materialPer1000SqftPerYear; the mode never silently prices off the market table.');
+    err.statusCode = 400;
+    err.code = 'LAWN_COST_PLUS_LIST_KNOBS_INVALID';
+    err.failClosed = true;
+    throw err;
+  }
+  return { listMargin, minimumPerVisit, spotMinutesPerVisit, materialPerK };
+}
+
 function priceLawnCare(property, options = {}) {
   const {
     track = 'st_augustine',
@@ -2140,7 +2173,16 @@ function priceLawnCare(property, options = {}) {
     // Callers that re-price something already sold (a stored estimate replay) or that are not the
     // v13 program (the one-time anchor) skip the v13 bahia review below.
     skipBahiaNoProgramReview = false,
+    // Cost-plus list price (owner ruling 2026-10-09, GATE_LAWN_COST_PLUS_LIST):
+    // undefined follows the live gate, so direct callers track the same state
+    // as generateEstimate; an explicit boolean wins. Callers that need the raw
+    // market baseline (the one-time anchor) pass false.
+    costPlusList: costPlusListOption,
   } = options;
+  const costPlusListOn = costPlusListOption == null
+    ? require('../../config/feature-gates').gateEnvValue('GATE_LAWN_COST_PLUS_LIST')
+    : costPlusListOption === true;
+  const costPlusKnobs = costPlusListOn ? lawnCostPlusListKnobs(options) : null;
 
   const requestedGrassType = String(track || '').trim();
   const matchedTrack = matchGrassTrack(track);
@@ -2251,17 +2293,41 @@ function priceLawnCare(property, options = {}) {
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);
     const costFloorOpts = { ...options };
-    if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
+    if (costPlusKnobs) {
+      // v13 whole-lawn product cost: dollars per 1,000 sq ft per VISIT, plus
+      // the spot-work minutes. An explicit caller override still wins.
+      if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
+        costFloorOpts.lawnMaterialCostPerK = costPlusKnobs.materialPerK[tc.freq] / tc.freq;
+        delete costFloorOpts.annualMaterialBudget;
+      }
+      if (!Number.isFinite(Number(options.lawnLaborMinutesBase))) {
+        costFloorOpts.lawnLaborMinutesBase = LAWN_PRICING_V2.laborMinutesBase + costPlusKnobs.spotMinutesPerVisit;
+      }
+    } else if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
       costFloorOpts.annualMaterialBudget = tierAnnualBudget;
     }
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPrice;
     const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
     let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
+    // Cost-plus mode: list = cost / (1 - listMargin) in whole dollars per
+    // application, never below the market table or the per-visit minimum.
+    // The cost floor above is subsumed (list margin > collected-margin floor).
+    let costPlusListAnnual = null;
+    let costPlusListSetPrice = false;
+    let minimumPerVisitSetPrice = false;
+    if (costPlusKnobs) {
+      costPlusListAnnual = Math.ceil(roundMoney(costFloorDetails.annualCost / (1 - costPlusKnobs.listMargin)) / tc.freq) * tc.freq;
+      const minimumPerVisitAnnual = costPlusKnobs.minimumPerVisit * tc.freq;
+      ann = Math.max(marketAnnual, costPlusListAnnual, minimumPerVisitAnnual);
+      costPlusListSetPrice = ann > marketAnnual && ann === costPlusListAnnual;
+      minimumPerVisitSetPrice = ann > marketAnnual && !costPlusListSetPrice;
+    }
     const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
     if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
     return {
       t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, costFloorApplied, programMinimumApplied, ann,
+      costPlusListAnnual, costPlusListSetPrice, minimumPerVisitSetPrice,
       cadenceLadderLiftApplied: false,
     };
   }).filter(Boolean);
@@ -2278,7 +2344,8 @@ function priceLawnCare(property, options = {}) {
   // Disarmed floors — today's prod default (owner 2026-07-17) — skip this
   // entirely, and the lift rides the discount arm switch so migrate:down
   // restores the pre-discount floor behavior bit-for-bit.
-  if (useLawnCostFloor && cadenceDiscountArmed && tierCalcs.some((c) => c.costFloorApplied)) {
+  if ((useLawnCostFloor || costPlusKnobs) && cadenceDiscountArmed
+    && tierCalcs.some((c) => c.costFloorApplied || c.costPlusListSetPrice || c.minimumPerVisitSetPrice)) {
     const byTier = {};
     for (const calc of tierCalcs) byTier[calc.t] = calc;
     const lift = (leg, neededAnnual) => {
@@ -2295,7 +2362,7 @@ function priceLawnCare(property, options = {}) {
   }
 
   const allTiers = tierCalcs.map((calc) => {
-    const { t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, costFloorApplied, programMinimumApplied, cadenceLadderLiftApplied } = calc;
+    const { t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, costFloorApplied, programMinimumApplied, cadenceLadderLiftApplied, costPlusListAnnual, costPlusListSetPrice, minimumPerVisitSetPrice } = calc;
     let { ann } = calc;
     // Bermuda suppression bakes into the per-app AFTER floor/minimum
     // resolution — the adder is add-on revenue, never a way to satisfy them.
@@ -2333,12 +2400,20 @@ function priceLawnCare(property, options = {}) {
         ? LAWN_PRICING_V2.pricingMode
         : (programMinimumApplied
           ? 'PROGRAM_MINIMUM_MONTHLY'
-          : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis)),
+          : (costPlusListSetPrice
+            ? 'COST_PLUS_LIST_MARGIN'
+            : (minimumPerVisitSetPrice
+              ? 'MINIMUM_PER_VISIT_PRICE'
+              : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis)))),
       pricingSource: cadenceLadderLiftApplied
         ? 'CADENCE_LADDER_LIFT'
         : (programMinimumApplied
           ? 'PROGRAM_MINIMUM'
-          : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource)),
+          : (costPlusListSetPrice
+            ? 'COST_PLUS_LIST'
+            : (minimumPerVisitSetPrice
+              ? 'MINIMUM_PER_VISIT'
+              : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource)))),
       programMinimumApplied,
       programMinimumMonthly: programMinimumAnnual > 0 ? programMinimumMonthly : null,
       marketMonthly,
@@ -2348,6 +2423,13 @@ function priceLawnCare(property, options = {}) {
       costFloorApplied,
       costFloorDetails,
       minimumCollectedAnnualPrice: costFloorAnnual,
+      ...(costPlusKnobs
+        ? {
+          costPlusListApplied: costPlusListSetPrice && !cadenceLadderLiftApplied && !programMinimumApplied,
+          listMargin: costPlusKnobs.listMargin,
+          costPlusListAnnual,
+        }
+        : {}),
     };
   }).filter(Boolean);
   const tiers = includeHiddenTiers
@@ -6167,6 +6249,9 @@ function priceOneTimeLawn(property, options = {}) {
     // (9x, discounted) per-app here, inflating every one-time lawn quote.
     includeHiddenTiers: true,
     useLawnCostFloor: false,
+    // The anchor is the raw market rate, never the recurring cost-plus list
+    // (GATE_LAWN_COST_PLUS_LIST).
+    costPlusList: false,
     // One-time derives from the raw recurring per-app market rate; the
     // recurring program minimum (a floor on sold PLANS) must not inflate it.
     applyProgramMinimum: false,

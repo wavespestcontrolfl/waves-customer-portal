@@ -77,6 +77,35 @@ function estimateLawnFloorArmed(estData = {}) {
   return null;
 }
 
+// Lawn cost-plus list mode (GATE_LAWN_COST_PLUS_LIST). Unlike the floor arm
+// state, an ABSENT stamp on a priced estimate means OFF, never "follow the
+// gate": every estimate saved before the mode existed was priced on the
+// market table and must replay there after the gate goes on. The engine
+// stamps its resolved state into pricingMetadata on every run. null only for
+// an object that carries no priced evidence at all (inject nothing).
+function estimateLawnCostPlusList(estData = {}) {
+  const stamped = estData?.result?.pricingMetadata?.lawnCostPlusList
+    ?? estData?.engineResult?.pricingMetadata?.lawnCostPlusList
+    ?? estData?.pricingMetadata?.lawnCostPlusList
+    ?? estData?.result?.routingMetadata?.lawnCostPlusList;
+  if (typeof stamped === 'boolean') return stamped;
+  const reqOptions = estData?.engineRequest?.options;
+  if (reqOptions && typeof reqOptions === 'object' && reqOptions.lawnCostPlusList != null) {
+    return !!reqOptions.lawnCostPlusList;
+  }
+  const engineInputs = rawEngineInputs(estData);
+  const stored = engineInputs?.services?.lawn?.costPlusList ?? engineInputs?.lawnCostPlusList;
+  if (stored != null) return !!stored;
+  const priced = engineInputs
+    || estData?.engineRequest
+    || estData?.result?.pricingMetadata
+    || estData?.engineResult?.pricingMetadata
+    || estData?.pricingMetadata
+    || (Array.isArray(estData?.result?.lineItems) && estData.result.lineItems.length)
+    || (Array.isArray(estData?.engineResult?.lineItems) && estData.engineResult.lineItems.length);
+  return priced ? false : null;
+}
+
 // Legacy pre-disarm estimates (engine armed the cost floor by default, so
 // builder payloads never needed to persist the flag): the floor evidence
 // lives on the stored rows as ENFORCEMENT stamps. Only stamps the armed
@@ -180,6 +209,8 @@ function savedFloorReplaySignals(estData) {
   const signals = { palmAnnualRounding: palm || palmRemoval ? (palmMode === 'cents' ? 'cents' : 'whole') : undefined };
   const lawnArm = estimateLawnFloorArmed(estData);
   if (typeof lawnArm === 'boolean') signals.useLawnCostFloor = lawnArm;
+  const costPlusList = estimateLawnCostPlusList(estData);
+  if (typeof costPlusList === 'boolean') signals.lawnCostPlusList = costPlusList;
   const minSignal = require('./estimate-converter').estimateLawnProgramMinimumSignal(estData);
   if (minSignal != null) signals.lawnProgramMinimumMonthly = minSignal;
   const pest = estimatePestFloorSignal(estData);
@@ -191,6 +222,7 @@ function savedFloorReplaySignals(estData) {
 module.exports = {
   rawEngineInputs,
   estimateLawnFloorArmed,
+  estimateLawnCostPlusList,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedFloorReplaySignals,
