@@ -345,6 +345,7 @@ describe('the completion invoice equals the one-time total with no double count'
 
 describe('closeout requires the L&O license when any add-on on the visit is chemical', () => {
   const reqs = require('../services/service-closeout-requirements');
+  const VISIT_ID = '7c1b0a5e-2f3d-4a6b-9c8d-0e1f2a3b4c5d';
   const { deriveCloseoutFacts } = require('../services/closeout-status');
   const CAT = (key, over = {}) => ({
     id: `id-${key}`, service_key: key, name: key, category: 'lawn_care', requires_service_report: true, requires_application_log: true,
@@ -355,6 +356,7 @@ describe('closeout requires the L&O license when any add-on on the visit is chem
   function stub({ services, addons }) {
     const k = (table) => {
       const qb = { _table: table, _keys: null };
+      k.queries.push(table);
       qb.leftJoin = () => qb;
       qb.where = () => qb;
       qb.whereIn = (col, vals) => { qb._keys = vals; return qb; };
@@ -368,28 +370,30 @@ describe('closeout requires the L&O license when any add-on on the visit is chem
       return qb;
     };
     k.raw = (sql) => sql;
+    k.queries = [];
+    k.schema = { hasColumn: async () => true };
     return k;
   }
   const sweep = CAT('area_addon_web_sweep', { category: 'pest_control' });
   const bed = CAT('area_addon_bed_pre_emergent', { requires_license: true, license_category: 'L&O' });
   const ant = CAT('area_addon_fire_ant_yard', { requires_license: true, license_category: 'L&O' });
   const pest = CAT('pest_initial_cleanout', { category: 'pest_control', requires_license: true, license_category: 'GHP' });
-  const job = (serviceId) => ({ id: 'visit-1', service_id: serviceId, service_type: 'x' });
+  const job = (serviceId) => ({ id: VISIT_ID, service_id: serviceId, service_type: 'x' });
 
   test('a web sweep visit (no license) with a chemical add-on row requires the L&O license', async () => {
-    const knex = stub({ services: [{ ...sweep, id: 'sweep' }, bed], addons: [{ scheduled_service_id: 'visit-1', service_key: 'area_addon_bed_pre_emergent' }] });
+    const knex = stub({ services: [{ ...sweep, id: 'sweep' }, bed], addons: [{ scheduled_service_id: VISIT_ID, service_key: 'area_addon_bed_pre_emergent' }] });
     const map = await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex, strict: true });
-    expect(map.get('visit-1')).toMatchObject({ requiresLicense: true, licenseCategory: 'L&O', requiresApplicationLog: true });
+    expect(map.get(VISIT_ID)).toMatchObject({ requiresLicense: true, licenseCategory: 'L&O', requiresApplicationLog: true });
     const alone = await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex: stub({ services: [{ ...sweep, id: 'sweep' }], addons: [] }), strict: true });
-    expect(alone.get('visit-1')).toMatchObject({ requiresLicense: false, licenseCategory: null });
+    expect(alone.get(VISIT_ID)).toMatchObject({ requiresLicense: false, licenseCategory: null });
   });
 
   test('the license verdict is not "no license required": a web-sweep-primary visit with a chemical add-on is judged against the technician', async () => {
     const knex = stub({ services: [{ ...sweep, id: 'sweep' }, bed, ant], addons: [
-      { scheduled_service_id: 'visit-1', service_key: 'area_addon_bed_pre_emergent' },
-      { scheduled_service_id: 'visit-1', service_key: 'area_addon_fire_ant_yard' },
+      { scheduled_service_id: VISIT_ID, service_key: 'area_addon_bed_pre_emergent' },
+      { scheduled_service_id: VISIT_ID, service_key: 'area_addon_fire_ant_yard' },
     ] });
-    const requirements = (await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex, strict: true })).get('visit-1');
+    const requirements = (await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex, strict: true })).get(VISIT_ID);
     const base = {
       completed: true, requirements, technician: { id: 't', fl_applicator_license: 'JF1', license_expiry: '2099-01-01', license_categories: ['General Household Pest'] },
       visit: { technician_id: 't', scheduled_date: '2026-10-08', status: 'completed' }, record: { id: 'r', status: 'completed', service_date: '2026-10-08' },
@@ -398,13 +402,13 @@ describe('closeout requires the L&O license when any add-on on the visit is chem
     expect(run(base.technician)).toMatchObject({ state: 'failed', reason: 'technician_license_category_mismatch' });
     expect(run({ ...base.technician, license_categories: ['Lawn & Ornamental'] })).toMatchObject({ state: 'done', reason: 'technician_licensed' });
     // With no chemical add-on the same visit would have read "not required".
-    const plain = (await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex: stub({ services: [{ ...sweep, id: 'sweep' }], addons: [] }), strict: true })).get('visit-1');
+    const plain = (await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex: stub({ services: [{ ...sweep, id: 'sweep' }], addons: [] }), strict: true })).get(VISIT_ID);
     expect(deriveCloseoutFacts({ ...base, requirements: plain }).facts.license).toMatchObject({ state: 'not_required' });
   });
 
   test('a visit that needs two categories needs both: a household-pest primary with a lawn add-on', async () => {
-    const knex = stub({ services: [{ ...pest, id: 'pest' }, bed], addons: [{ scheduled_service_id: 'visit-1', service_key: 'area_addon_bed_pre_emergent' }] });
-    const requirements = (await reqs.resolveCloseoutRequirementsForJobs([job('pest')], { knex, strict: true })).get('visit-1');
+    const knex = stub({ services: [{ ...pest, id: 'pest' }, bed], addons: [{ scheduled_service_id: VISIT_ID, service_key: 'area_addon_bed_pre_emergent' }] });
+    const requirements = (await reqs.resolveCloseoutRequirementsForJobs([job('pest')], { knex, strict: true })).get(VISIT_ID);
     expect(requirements).toMatchObject({ licenseCategory: 'GHP', licenseCategories: ['GHP', 'L&O'] });
     const tech = (cats) => ({ id: 't', fl_applicator_license: 'JF1', license_expiry: '2099-01-01', license_categories: cats });
     const facts = (cats) => deriveCloseoutFacts({
@@ -419,16 +423,54 @@ describe('closeout requires the L&O license when any add-on on the visit is chem
   });
 
   test('another add-on row (not an area add-on) is left alone: admin-built visits resolve as before', async () => {
-    const knex = stub({ services: [{ ...sweep, id: 'sweep' }], addons: [{ scheduled_service_id: 'visit-1', service_key: 'lawn_aeration' }] });
+    const knex = stub({ services: [{ ...sweep, id: 'sweep' }], addons: [{ scheduled_service_id: VISIT_ID, service_key: 'lawn_aeration' }] });
     const map = await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex, strict: true });
-    expect(map.get('visit-1').requiresLicense).toBe(false);
+    expect(map.get(VISIT_ID).requiresLicense).toBe(false);
   });
 
   test('an unreadable add-on catalog row is "unavailable" for the strict reader, not a green', async () => {
-    const knex = stub({ services: [{ ...sweep, id: 'sweep' }], addons: [{ scheduled_service_id: 'visit-1', service_key: 'area_addon_bed_pre_emergent' }] });
+    const knex = stub({ services: [{ ...sweep, id: 'sweep' }], addons: [{ scheduled_service_id: VISIT_ID, service_key: 'area_addon_bed_pre_emergent' }] });
     await expect(reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex, strict: true })).rejects.toThrow(/catalog row/);
     const lenient = await reqs.resolveCloseoutRequirementsForJobs([job('sweep')], { knex, strict: false });
-    expect(lenient.get('visit-1').requiresLicense).toBe(false);
+    expect(lenient.get(VISIT_ID).requiresLicense).toBe(false);
+  });
+
+  // The 20260831000080 backfill calls the live resolver with the synthetic id
+  // 'combo'; a non-uuid in a uuid-column IN list is a Postgres cast error that
+  // failed the whole migrate on CI.
+  test('a synthetic job id (the closeout backfill migration) issues no add-on query', async () => {
+    const knex = stub({ services: [{ ...sweep, id: 'sweep' }], addons: [] });
+    const map = await reqs.resolveCloseoutRequirementsForJobs([{ id: 'combo', service_id: 'sweep', service_type: 'x' }], { knex, strict: true });
+    expect(map.get('combo')).toMatchObject({ requiresLicense: false });
+    expect(knex.queries.filter((t) => t.startsWith('scheduled_service_addons'))).toHaveLength(0);
+  });
+
+  test('a mix of a synthetic id and a real uuid queries the add-on rows for the uuid only', async () => {
+    const seen = [];
+    const base = stub({ services: [{ ...sweep, id: 'sweep' }, bed], addons: [{ scheduled_service_id: VISIT_ID, service_key: 'area_addon_bed_pre_emergent' }] });
+    const knex = (table) => {
+      const qb = base(table);
+      const whereIn = qb.whereIn;
+      qb.whereIn = (col, vals) => { if (table.startsWith('scheduled_service_addons')) seen.push(vals); return whereIn(col, vals); };
+      return qb;
+    };
+    Object.assign(knex, base);
+    const map = await reqs.resolveCloseoutRequirementsForJobs([
+      { id: 'combo', service_id: 'sweep', service_type: 'x' }, job('sweep'),
+    ], { knex, strict: true });
+    expect(seen).toEqual([[VISIT_ID]]);
+    expect(map.get(VISIT_ID)).toMatchObject({ requiresLicense: true, licenseCategory: 'L&O' });
+    expect(map.get('combo')).toMatchObject({ requiresLicense: false });
+  });
+
+  test('an old migration that runs before the add-on column exists gets no add-on fold, not an error', async () => {
+    jest.resetModules();
+    const fresh = require('../services/service-closeout-requirements');
+    const knex = stub({ services: [{ ...sweep, id: 'sweep' }], addons: [{ scheduled_service_id: VISIT_ID, service_key: 'area_addon_bed_pre_emergent' }] });
+    knex.schema = { hasColumn: async () => false };
+    const map = await fresh.resolveCloseoutRequirementsForJobs([job('sweep')], { knex, strict: true });
+    expect(map.get(VISIT_ID)).toMatchObject({ requiresLicense: false });
+    expect(knex.queries.filter((t) => t.startsWith('scheduled_service_addons'))).toHaveLength(0);
   });
 });
 

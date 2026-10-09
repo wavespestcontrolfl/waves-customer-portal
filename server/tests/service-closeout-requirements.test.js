@@ -31,6 +31,7 @@ function stubKnex(rowsOrError) {
   };
   k.calls = [];
   k.raw = (sql) => sql;
+  k.schema = { hasColumn: async () => true };
   k.transaction = (fn) => Promise.resolve(fn(k));
   return k;
 }

@@ -104,12 +104,31 @@ const REQUIREMENT_COLUMNS = [
 // has. Scoped to the area add-on catalog keys (area_addon_*) on purpose: an
 // admin-built visit's other add-on rows keep resolving exactly as before.
 const AREA_ADDON_KEY_PREFIX = 'area_addon_';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+let addOnProbeSchemaReady = false;
+async function addOnProbeReady(knex) {
+  if (addOnProbeSchemaReady) return true;
+  const ready = (await knex.schema.hasColumn('scheduled_service_addons', 'service_key_snapshot'))
+    && (await knex.schema.hasColumn('scheduled_service_addons', 'scheduled_service_id'));
+  if (ready) addOnProbeSchemaReady = true;
+  return ready;
+}
 
 async function areaAddOnCatalogRowsByVisit(jobs, { knex, strict }) {
   const byVisit = new Map();
-  const visitIds = [...new Set(jobs.map((job) => job.id).filter(Boolean).map(String))];
+  // Only real scheduled_services ids can carry add-on rows. Callers also pass
+  // synthetic ids (the 20260831000080 backfill uses 'combo'); a non-uuid in a
+  // uuid-column IN list is a Postgres cast error, not "no rows".
+  const visitIds = [...new Set(jobs.map((job) => job.id).filter(Boolean).map(String))]
+    .filter((id) => UUID_RE.test(id));
   if (!visitIds.length) return byVisit;
   const read = async () => {
+    // An old migration can run this resolver before the add-on table or its
+    // snapshot column exist; that is "no add-on rows", not a failure. The
+    // probe is a schema read, not a failed query: inside a migration
+    // transaction a failed query would abort every later statement.
+    if (!(await addOnProbeReady(knex))) return;
     const lines = await knex('scheduled_service_addons as a')
       .leftJoin('services as s', 's.id', 'a.service_id')
       .whereIn('a.scheduled_service_id', visitIds)
