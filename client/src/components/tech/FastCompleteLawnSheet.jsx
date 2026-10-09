@@ -482,7 +482,8 @@ function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 
     return () => { active = false; };
   }, [base, request, enabled, assessmentId, refreshKey, planKey]);
   if (!enabled || !assessmentId) return { guide: null, status: 'idle' };
-  return state.for === assessmentId ? { guide: state.guide, status: state.status } : { guide: null, status: 'pending' };
+  // An answer for an earlier plan is not shown while the new read is on its way: the guide is pending until it settles.
+  return state.for === assessmentId && state.plan === planKey ? { guide: state.guide, status: state.status } : { guide: null, status: 'pending' };
 }
 
 // The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
