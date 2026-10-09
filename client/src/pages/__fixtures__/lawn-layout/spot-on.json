@@ -495,7 +495,8 @@
       "areaValue": "4500.00",
       "areaUnit": "sqft",
       "targets": [],
-      "appliedAt": "2026-10-09T14:56:39.602Z"
+      "appliedAt": "2026-10-09T14:56:39.602Z",
+      "areaUse": "Spot treatment, about 250 sq ft"
     },
     {
       "id": "9b879f03-e1ff-4ef0-b5f2-9831e065fb58",
@@ -1471,17 +1472,20 @@
   "pdfUrl": null,
   "dynamicContext": {
     "reentry": {
-      "generatedAt": "2026-10-09T14:56:39.602Z",
+      "anchorAppliedAt": "2026-10-09T14:56:39.602Z",
+      "generatedAt": "2026-10-09T15:10:00.000Z",
       "displayTimezone": "America/New_York",
-      "customerSummary": "Lawn areas ready at 4:30 PM.",
-      "petAdvisory": "Keep pets off treated turf until it is fully dry.",
       "targets": [
         {
-          "key": "lawn",
-          "label": "Lawn areas",
-          "readyAt": "2026-10-09T20:30:00.000Z"
+          "key": "exterior",
+          "label": "Exterior",
+          "durationMin": 45,
+          "readyAt": "2026-10-09T15:41:39.602Z",
+          "statusAtGeneratedAt": "pending"
         }
-      ]
+      ],
+      "petAdvisory": "Keep pets off treated turf until it is fully dry.",
+      "customerSummary": "Exterior ready at 11:41 AM."
     }
   },
   "planSummary": {

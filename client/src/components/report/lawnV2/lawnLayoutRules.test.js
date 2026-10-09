@@ -14,6 +14,7 @@ import {
   lawnLayoutStatusData,
   mowingLine,
   planShowsNextVisit,
+  reentryIsTimed,
   reentryRow,
   withoutRepeatedApplied,
   bannerRepeatsAftercare,
@@ -77,6 +78,25 @@ describe('the "Your part" rules', () => {
     // A frozen condition has no clock; the builder puts its sentence in customerSummary.
     const condition = { customerSummary: 'Ready to walk on once today’s treatment has dried.', petAdvisory: 'Keep people and pets off the lawn until then.', targets: [], condition: { text: 'Ready to walk on once today’s treatment has dried.' } };
     expect(reentryRow(condition, { allReady: false, status: 'Once dry' }).text).toBe('Ready to walk on once today’s treatment has dried.');
+  });
+
+  it('a frozen condition prints its text AND its keep-off line, whichever field carries the line', () => {
+    const condition = { text: 'Ready to walk on once today’s treatment has dried.', pets: 'Keep people and pets off the lawn until then.', statusLabel: 'Once dry' };
+    const context = { targets: [], condition, customerSummary: condition.text, petAdvisory: condition.pets };
+    expect(reentryRow(context, { allReady: false })).toEqual({ text: condition.text, pets: condition.pets });
+    // the line only on the condition, or only on the advisory: never dropped
+    expect(reentryRow({ targets: [], condition }, { allReady: false }).pets).toBe(condition.pets);
+    expect(reentryRow({ targets: [], condition: { text: condition.text }, petAdvisory: 'Keep pets off.' }, { allReady: false }).pets).toBe('Keep pets off.');
+    // a condition is never "finished": the clock flag does not hide it
+    expect(reentryRow(context, { allReady: true }).text).toBe(condition.text);
+  });
+
+  it('only timed targets count as timed content (the timer-view event); a condition has no timer', () => {
+    expect(reentryIsTimed({ targets: [{ readyAt: '2026-10-09T15:41:39.602Z' }] })).toBe(true);
+    expect(reentryIsTimed({ targets: [{ readyAt: 'x' }], condition: { text: 'x' } })).toBe(false);
+    expect(reentryIsTimed({ targets: [], condition: { text: 'x' } })).toBe(false);
+    expect(reentryIsTimed({ targets: [] })).toBe(false);
+    expect(reentryIsTimed(undefined)).toBe(false);
   });
 
   it('a finished re-entry prints no sentence but keeps the pet advisory the old card printed', () => {

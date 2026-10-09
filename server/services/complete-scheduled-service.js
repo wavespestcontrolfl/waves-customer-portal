@@ -93,6 +93,7 @@ const {
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
+const { pdfPreRenderToken } = require('../services/service-report/lawn-report-facts');
 const { stripPhotoSummaryForRecovery, restorePhotoSummaryAfterRecovery, expectedImageHashesFor } = require('../services/service-report/photo-summary-recovery');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
@@ -2444,6 +2445,20 @@ function completionUsesReportLane({
   // Billed: only with the with-invoice template armed, so the pay link the
   // customer needs is guaranteed to be in the body.
   return Boolean(reportV1InvoiceArmed);
+}
+
+// GATE_LAWN_REPORT_FACTS: the facts freeze alone, under the same conditions as the lawn write gate (auto-send, report v1,
+// not a backfill), run BEFORE the report token is minted and the PDF render is queued. Returns the block or null.
+async function freezeLawnFactsEarly({ serviceReportV1Delivery, typedDeliveryMode, isBackfillCompletion, record }) {
+  if (!(serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion)) return null;
+  return require('../services/service-report/lawn-report-write-gate').freezeReportFactsOnly({ service: record, knex: db });
+}
+
+// Folds the facts block (frozen early, or by the gate) into the in-memory notes the later whole-object writes spread.
+function foldReportFactsFreeze(notes, early, gate) {
+  const block = require('../services/service-report/lawn-report-facts').frozenBlockOf(early);
+  if (block) notes.lawnReportFacts = block;
+  if (gate && gate.reportFactsFreeze) notes.lawnReportFacts = gate.reportFactsFreeze;
 }
 
 // A report-v1 completion text is a gateway to the report: without a public
@@ -6740,6 +6755,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
             ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast),
+            // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
+            // is not an area), so the card never states a whole-lawn fallback as the spot.
+            ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -11061,6 +11079,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // "text withheld" bell (GitHub Codex r1 P1).
     let reportTokenMintError = null;
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
+    // GATE_LAWN_REPORT_FACTS: the re-entry condition, spot text and ties are frozen BEFORE the report token is minted and
+    // before the PDF render is queued below, so no render can build (and cache) a lawn report without them. The lawn
+    // write gate's own call, much later, finds the block and does nothing. Same conditions as that gate; the freeze alone.
+    const earlyReportFactsFreeze = await freezeLawnFactsEarly({ serviceReportV1Delivery, typedDeliveryMode, isBackfillCompletion, record });
     // delivery_mode 'disabled' (typed kill switch) suppresses the customer
     // report entirely — don't mint a public token at all (Codex P2). The
     // record still exists; flipping the mode back later can mint on demand.
@@ -11197,7 +11219,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // JWT, and the public report routes 404 suppressed reports for
     // non-staff. Staff review the shadow via the HTML report; the PDF only
     // feeds customer sends, which are suppressed anyway.
-    if (serviceReportV1Delivery && reportToken && typedDeliveryMode === 'auto_send'
+    // (While the lawn facts freeze is unresolved, nothing renders yet: the later synthesis, then the send, build the PDF.)
+    if (serviceReportV1Delivery && pdfPreRenderToken(reportToken, earlyReportFactsFreeze) && typedDeliveryMode === 'auto_send'
       && !(lawnPdfCorrectionNeeded && !lawnPdfCorrectionMarked)) {
       await enqueuePdfRenderJob({
         serviceRecordId: record.id,
@@ -13821,6 +13844,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.techParagraphFreeze) recordStructuredNotes.lawnTechParagraph = { ...(recordStructuredNotes.lawnTechParagraph || {}), ...gate.techParagraphFreeze };
         // And the Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY), keyed by assessment.
         if (gate.visitSummaryFreeze) recordStructuredNotes.lawnVisitSummary = { ...(recordStructuredNotes.lawnVisitSummary || {}), ...gate.visitSummaryFreeze };
+        // And the report facts (GATE_LAWN_REPORT_FACTS): re-entry condition, spot-product text, finding ties. Frozen early
+        // (before the token and the PDF render); the gate hands back its own freeze only when it made one.
+        foldReportFactsFreeze(recordStructuredNotes, earlyReportFactsFreeze, gate);
         // A token the earlier mint could not create but the gate's own mint did.
         const recovered = adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl });
         if (recovered) {

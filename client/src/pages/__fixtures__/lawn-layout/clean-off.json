@@ -1406,16 +1406,19 @@
   "pdfUrl": null,
   "dynamicContext": {
     "reentry": {
-      "generatedAt": "2026-10-09T14:56:39.602Z",
+      "anchorAppliedAt": "2026-10-09T14:56:39.602Z",
+      "generatedAt": "2026-10-09T15:10:00.000Z",
       "displayTimezone": "America/New_York",
-      "customerSummary": "Treated areas are ready for normal use.",
       "targets": [
         {
-          "key": "lawn",
-          "label": "Lawn areas",
-          "readyAt": "2026-10-09T15:00:00.000Z"
+          "key": "exterior",
+          "label": "Exterior",
+          "durationMin": 10,
+          "readyAt": "2026-10-09T15:06:39.602Z",
+          "statusAtGeneratedAt": "ready"
         }
-      ]
+      ],
+      "customerSummary": "Treated areas are ready for normal use."
     }
   },
   "planSummary": {

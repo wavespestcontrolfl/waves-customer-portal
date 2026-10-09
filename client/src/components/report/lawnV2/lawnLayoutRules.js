@@ -74,22 +74,32 @@ function bannerWateringLines(banner) {
 }
 
 /**
- * The re-entry content the card prints, from the re-entry builder's own sentence (timed or condition)
- * and its pet advisory. The old card printed the same two things, plus tiles that restate the sentence:
- *  - a sentence the builder wrote is printed as written;
+ * The re-entry content the card prints, from the re-entry builder's own output and its keep-off line. The old
+ * card printed the same two things, plus tiles that restate the sentence:
+ *  - a frozen CONDITION (context.condition, no clock) prints its text AND its keep-off line, never one without
+ *    the other (the keep-off line is condition.pets, else the pet advisory);
+ *  - a timed sentence the builder wrote is printed as written, with the pet advisory;
  *  - with no sentence, only a real "Ready after <time>" status stands in (never a status label);
  *  - a finished re-entry prints no sentence but still keeps a pet advisory the old card printed;
  *  - nothing real to say = null, and the card says nothing about re-entry.
  */
 export function reentryRow(context, readiness) {
   if (!context || !readiness) return null;
-  const pets = isText(context.petAdvisory) ? context.petAdvisory.trim() : null;
+  const condition = isText(context.condition?.text) ? context.condition : null;
+  const keepOff = [condition?.pets, context.petAdvisory].find(isText);
+  const pets = keepOff ? keepOff.trim() : null;
   let text = null;
-  if (!readiness.allReady) {
+  if (condition) text = condition.text.trim();
+  else if (!readiness.allReady) {
     if (isText(context.customerSummary)) text = context.customerSummary.trim();
     else if (/^Ready after /.test(readiness.status || '')) text = readiness.status;
   }
   return text || pets ? { text, pets } : null;
+}
+
+/** True when the re-entry content is timed (the clock path), which is what the timer-view event counts. */
+export function reentryIsTimed(context) {
+  return Boolean(context) && !context.condition && Array.isArray(context.targets) && context.targets.length > 0;
 }
 
 /** The lead's own homeowner steps (the top issue's action), as printed lines. */
@@ -110,12 +120,17 @@ export function yourPartIsEmpty({ banner, reentry, lines }) {
  */
 export function pageCarriesInstruction(data, nowMs) {
   const v2 = data?.reportV2 || {};
-  if (alsoSteps(v2.lead).length) return true;
-  if ((data?.recommendations || []).length > 0) return true;
-  if (v2.water?.weekPlan?.title || v2.water?.coverageWatch) return true;
   const care = v2.aftercare || {};
-  if (isText(care.watering) && care.neutral !== true) return true;
-  if (data?.techNote?.tips?.length) return true;
+  const plainInstruction = alsoSteps(v2.lead).length > 0
+    || (data?.recommendations || []).length > 0
+    || Boolean(v2.water?.weekPlan?.title || v2.water?.coverageWatch)
+    || (isText(care.watering) && care.neutral !== true)
+    || Boolean(data?.techNote?.tips?.length);
+  return plainInstruction || findingsCarryStep(v2, nowMs);
+}
+
+// A finding the findings block prints has a next step of its own (after the dedupe against the banner).
+function findingsCarryStep(v2, nowMs) {
   const cards = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare, nowMs }).filter(Boolean);
   const shown = [...cards].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)).slice(0, FINDING_CARD_LIMIT);
   if (!shown.length || shown.every((card) => card.category === 'overall')) return false;

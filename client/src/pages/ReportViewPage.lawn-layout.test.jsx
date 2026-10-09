@@ -115,7 +115,7 @@ describe('gate on: the phone order', () => {
     await waitForReport();
     const card = screen.getByTestId('lawn-your-part');
     expect(card).toHaveTextContent('Walking on the lawn');
-    expect(card).toHaveTextContent('Lawn areas ready at 4:30 PM.');
+    expect(card).toHaveTextContent('Exterior ready at 11:41 AM.');
     expect(card).toHaveTextContent('Keep pets off treated turf until it is fully dry.');
     expect(card).toHaveTextContent('Skip your turf watering until today’s treatment has dried.');
     expect(card).toHaveTextContent('Mowing: hold off until Sat 11 AM');

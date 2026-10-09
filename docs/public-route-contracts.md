@@ -2502,6 +2502,28 @@ row key alike); PDFs cached before a flip re-render, and again when the gate is
 turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
 found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
 not served either.
+`GATE_LAWN_REPORT_FACTS` (dark, read at call time; gate off leaves the payload, the PDF and every
+cached PDF key byte-identical) changes the lawn `/api/reports/:token/data` payload and the PDF that share
+`buildReportV1Data` and `buildServiceReportDynamicContext` (lawn only; no new route, token, privacy or
+rate-limit surface). Three facts are frozen at completion, not computed at render: the lawn write gate stores
+`structured_notes.lawnReportFacts = { v: 1, reentry, productUse, ties, frozenAt }` once per visit (first
+writer wins, before the first report build; nothing is stored when the product or catalog read failed), and a
+render reads only that block, never the gate. New or changed public fields, each present only for a lawn
+record that carries the frozen block (every other record is byte-identical): (1)
+`dynamicContext.reentry.condition = { rule, text, pets, statusLabel }` with `rule` one of `dry`,
+`watered_in_and_dry`, `text` and `pets` fixed sentences chosen by code ("Ready to walk on once the
+application has dried — your technician confirms timing." / "... once today's treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing."
+and "Keep people and pets off the lawn until then."), `statusLabel` a short word ("Once dry", "After watering
+in"); for such a record `dynamicContext.reentry.targets` is `[]` (no ready-at time, no countdown), and
+`customerSummary` / `petAdvisory` carry the same two sentences. A record whose rule is marked `default` (a product with no approved frozen facts or no plain until-dry label), or one an
+admin corrected afterwards, keeps the clock targets. `reportV2.aftercare.reentry` carries the same
+condition `text` for such a record. (2) `applications[].areaUse`, a string ("Spot treatment, about 250 sq ft"
+or "Spot treatment"), present only on a spot-treatment product row of such a record; the report prints it in
+place of the zone text ("Your whole lawn"). (3) The Visit Summary (`reportV2.lead` / recap text, already public)
+may carry the finding-to-product sentences of a version 4 entry; no new key. The tie facts and the per-product
+rules stay in `structured_notes` and never reach the payload. The lawn PDF signature carries `:rf=<hash>` only
+for a record that holds a frozen decision (read from the record's own `structured_notes`, so a partial
+cache-lookup row and a full render row key alike); PDFs cached before the freeze re-render once.
 `GATE_LAWN_REPORT_COPY_FIXES` (dark, strict `true`, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) changes the lawn
 `/api/reports/:token/data` payload and the PDF that share `buildReportV1Data` (lawn

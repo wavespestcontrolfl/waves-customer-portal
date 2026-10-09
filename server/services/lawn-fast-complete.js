@@ -766,6 +766,18 @@ async function loadReCheckNote(svc, knex) {
   }
 }
 
+// GATE_LAWN_REPORT_FACTS: the keys the sheet reads to record what the report facts need. Built here, outside the
+// context builder's decision path, as a small table of key -> live reader; a key exists only while its reader is live
+// (off = byte-identical). `lawnReportTies`: the sheet records the standing chinch tap as a find only while the report
+// ties are live. `lawnReportFacts`: the sheet names the spot rows whose area it recorded (lawnFast.spotAreas).
+const REPORT_FACTS_CONTEXT_KEYS = Object.freeze([
+  ['lawnReportTies', () => featureGates.lawnReportTiesLive()],
+  ['lawnReportFacts', () => featureGates.lawnReportFactsLive()],
+]);
+function reportFactsContextKeys() {
+  return Object.fromEntries(REPORT_FACTS_CONTEXT_KEYS.filter(([, live]) => live()).map(([key]) => [key, true]));
+}
+
 /**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` for a
  * missing visit; an ineligible visit answers `eligible: false` with the reason
@@ -810,6 +822,8 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // A visit whose program rows could not be read has no guide at all (the read failure is named), rather
     // than a guide that claims a clean "no chinch rows staged".
     ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true } : {}),
+    // GATE_LAWN_REPORT_FACTS context keys (the standing chinch find, the recorded spot areas), present only while live.
+    ...reportFactsContextKeys(),
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,

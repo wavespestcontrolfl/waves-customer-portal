@@ -40,9 +40,13 @@ const { applyLawnReportReconciliation } = require('../server/services/service-re
 const { buildLawnCopyV6 } = require('../server/services/service-report/lawn-copy-v6');
 const { buildAftercare } = require('../server/services/service-report/lawn-report-v2');
 const { lawnLayoutPayload } = require('../server/services/service-report/lawn-report-layout');
+const { buildReentryContextFromRecord } = require('../server/services/service-report/reentry');
+const facts = require('../server/services/service-report/lawn-report-facts');
 
 const COMPLETED_AT = '2026-10-09T14:56:39.602Z';
 const VISIT_DAY = '2026-10-09';
+// "Now" for the preview (the harness freezes the page clock to the same instant).
+const NOW = new Date('2026-10-09T15:10:00.000Z');
 const NEXT_VISIT = { label: 'Friday, October 23', source: 'scheduled' };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -97,6 +101,29 @@ function setTreatment(data, products) {
   data.reportV2.snapshot.treatmentSummary = `Today we applied ${products.map((p) => p.name).join(' and ')}.`;
 }
 
+// The re-entry context exactly as the server builds it from a record (reentry.js): timed targets from the
+// stored advisory minutes, or, when the record froze a re-entry rule (GATE_LAWN_REPORT_FACTS), a CONDITION.
+function reentryFromRecord({ exteriorMinutes = null, petAdvisory = null, frozenRows = null } = {}) {
+  const record = {
+    applications: [{ appliedAt: COMPLETED_AT, application_method: 'broadcast_spray' }],
+    // an explicit exterior treatment zone (the traced map), which is what makes the exterior timer apply
+    tracedExteriorZone: true,
+    advisory: exteriorMinutes ? JSON.stringify({ exterior_reentry_min: exteriorMinutes, ...(petAdvisory ? { pet_advisory: petAdvisory } : {}) }) : null,
+    structured_notes: frozenRows
+      ? JSON.stringify({ [facts.FREEZE_KEY]: facts.buildReportFacts({ rows: frozenRows, run: null, assessment: null, techFindings: [], withTies: false, now: NOW }) })
+      : '{}',
+    timezone: 'America/New_York',
+  };
+  return buildReentryContextFromRecord(record, NOW);
+}
+
+// A spot row's frozen card text ("Spot treatment, about 250 sq ft"), from the facts module's own freeze.
+function spotAreaUse(data, row) {
+  const block = facts.buildReportFacts({ rows: [row], run: null, assessment: null, techFindings: [], withTies: false, recordedSpotAreas: new Set([row.product_id]), now: NOW });
+  const texts = facts.frozenProductUseTexts({ [facts.FREEZE_KEY]: block });
+  Object.assign(data.applications[0], facts.areaUseFields(texts, { id: row.id }));
+}
+
 function finish(data, { reentry }) {
   data.dynamicContext = { reentry };
   attachCopyV6(data);
@@ -112,15 +139,9 @@ function spot(base) {
     { name: 'Headway G', activeIngredient: 'Azoxystrobin and propiconazole', kind: 'fungicide', focus: 'Disease protection', whatItDoes: 'protects the turf from disease', targets: ['gray leaf spot'], area: '300 sq ft' },
   ]);
   attachBanner(data, [{ name: 'Headway G', rule: { mode: 'hold', hold_until: 'dry', source: 'label' }, mowHoldDays: 1 }]);
-  return finish(data, {
-    reentry: {
-      generatedAt: COMPLETED_AT,
-      displayTimezone: 'America/New_York',
-      customerSummary: 'Lawn areas ready at 4:30 PM.',
-      petAdvisory: 'Keep pets off treated turf until it is fully dry.',
-      targets: [{ key: 'lawn', label: 'Lawn areas', readyAt: '2026-10-09T20:30:00.000Z' }],
-    },
-  });
+  spotAreaUse(data, { id: 'spot-row-1', product_id: '3f2c1a10-0000-4000-8000-00000000a001', application_method: 'spot_treatment', area_value: 250, area_unit: 'sqft' });
+  // Timed re-entry from the stored advisory (45 minutes after the application), built by reentry.js.
+  return finish(data, { reentry: reentryFromRecord({ exteriorMinutes: 45, petAdvisory: 'Keep pets off treated turf until it is fully dry.' }) });
 }
 
 function granular(base) {
@@ -133,21 +154,18 @@ function granular(base) {
   // No height-of-cut reading this visit: the mowing line comes from the per-grass table.
   data.reportV2.mowing = null;
   attachBanner(data, [{ name: 'Arena 50 WDG', rule: { mode: 'water_in', water_in_inches: 0.5, water_in_hours: 24, source: 'label' } }], { amountOnly: true });
-  // The shape the re-entry builder returns once a lawn visit freezes a condition (no clock).
+  // A frozen re-entry rule (a granule the program waters in) read back by reentry.js: a CONDITION, no clock.
   return finish(data, {
-    reentry: {
-      generatedAt: COMPLETED_AT,
-      displayTimezone: 'America/New_York',
-      targets: [],
-      condition: {
-        rule: 'watered_in_and_dry',
-        text: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing.',
-        pets: 'Keep people and pets off the lawn until then.',
-        statusLabel: 'After watering in',
-      },
-      petAdvisory: 'Keep people and pets off the lawn until then.',
-      customerSummary: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing.',
-    },
+    reentry: reentryFromRecord({
+      frozenRows: [{
+        id: 'gran-row-1',
+        application_method: 'granular_broadcast',
+        approved_report_product_facts: {
+          wateringRule: { mode: 'water_in' },
+          reentrySummary: 'Stay off treated areas until the product has been watered in and the turf is dry.',
+        },
+      }],
+    }),
   });
 }
 
@@ -172,14 +190,8 @@ function clean(base) {
   data.reportV2.mowing = { ...data.reportV2.mowing, status: 'ideal', measuredHeightInches: 3.8, recommendation: 'Mowing height looks good — right in the ideal range for your St. Augustine lawn.' };
   data.reportV2.followUp = { scheduled: false };
   data.reportV2.water = { ...data.reportV2.water, coverageWatch: false, weekPlan: null };
-  return finish(data, {
-    reentry: {
-      generatedAt: COMPLETED_AT,
-      displayTimezone: 'America/New_York',
-      customerSummary: 'Treated areas are ready for normal use.',
-      targets: [{ key: 'lawn', label: 'Lawn areas', readyAt: '2026-10-09T15:00:00.000Z' }],
-    },
-  });
+  // A 10-minute timed re-entry that has finished by the preview's clock.
+  return finish(data, { reentry: reentryFromRecord({ exteriorMinutes: 10 }) });
 }
 
 function write(name, data) {

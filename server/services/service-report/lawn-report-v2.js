@@ -454,6 +454,11 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // wateringHold, water_in sets creditableWaterIn, and a mixed visit is a hold.
 // State none keeps the neutral aftercare; state null (or no instruction)
 // leaves the legacy fail-closed reading exactly as it was.
+// The re-entry line an aftercare card states: the frozen condition when the record has one, else the label's line.
+function pickReentry(labelLine, opts) {
+  return opts && opts.reentryText ? opts.reentryText : labelLine;
+}
+
 function buildAftercare(applications, opts = {}) {
   const apps = Array.isArray(applications) ? applications : [];
   const productNotes = [];
@@ -472,6 +477,9 @@ function buildAftercare(applications, opts = {}) {
     if (productNote && !productNotes.includes(productNote)) productNotes.push(productNote);
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
+  // GATE_LAWN_REPORT_FACTS: the re-entry rule frozen at completion replaces the label's line, so the card, the
+  // hero and the PDF all say the one condition (opts.reentryText comes from the record, never a gate).
+  reentry = pickReentry(reentry, opts);
   const instruction = opts && opts.instruction;
   // The instruction is a record of the visit, never re-phased by the clock
   // (owner ruling 2026-09-30): only the live banner ends at expiresAt.
@@ -555,9 +563,11 @@ const ISSUE_TOPIC = {
  *   has no gauge reading (same shape subset as mowingHeight)
  * @param {object} [input.wateringInstruction]  buildWateringInstruction(...) result
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
+ * @param {string} [input.reentryText]  the re-entry condition frozen at completion
+ *   (GATE_LAWN_REPORT_FACTS); null = the product label's re-entry line, as before
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6 } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6, reentryText } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -655,7 +665,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
-  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null });
+  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null, reentryText });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
   if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
   const insights = buildLawnInsightCards({

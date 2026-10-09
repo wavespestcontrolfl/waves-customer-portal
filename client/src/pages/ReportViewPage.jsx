@@ -9,7 +9,7 @@ import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
-import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryRow } from '../components/report/lawnV2/lawnLayoutRules';
+import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow } from '../components/report/lawnV2/lawnLayoutRules';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -681,6 +681,14 @@ export function latestPendingReentryTarget(targets = [], nowMs = Date.now()) {
   }, null)?.target || null;
 }
 
+// A lawn visit's re-entry is a CONDITION frozen at completion (GATE_LAWN_REPORT_FACTS, server
+// lawn-report-facts.js): fixed sentences chosen by the server, no ready-at time and no countdown. A
+// payload without `reentry.condition` (every other line, every older lawn record) keeps the timed targets.
+export function reentryCondition(reentry) {
+  const condition = reentry?.condition;
+  return condition && typeof condition.text === 'string' && condition.text.trim() ? condition : null;
+}
+
 // Pest reports name no treated areas (owner 2026-10-05: "the areas treated
 // needs to be removed from the report"). The product card, the "What Waves
 // did today" cell, the status fallback line and the Ask Waves suggestions all
@@ -797,6 +805,51 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   return summary;
 }
 
+// The pieces of the status summary that belong to a frozen re-entry condition (GATE_LAWN_REPORT_FACTS). They live
+// here, outside statusSummaryCore, so that function carries no extra decisions for them.
+const visitCondition = (reentry, noTreatmentVisit) => (noTreatmentVisit ? null : reentryCondition(reentry));
+
+// The condition and the keep-off line as one string, or '' (no condition, or a callback that applied nothing).
+function conditionWarningLine(condition, reserviceNoApplication) {
+  return condition && !reserviceNoApplication ? [condition.text, condition.pets].filter(Boolean).join(' ') : '';
+}
+
+function conditionStatus(condition, completedItems, completedAreas) {
+  return {
+    heading: 'your service is complete!',
+    status: 'Service complete',
+    statusTone: 'neutral',
+    result: condition.text,
+    completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service completed today.',
+    detail: condition.pets || '',
+  };
+}
+
+// The detail line of the "we found activity that needs attention" summary.
+function findingStatusDetail({ pendingText, conditionLine, reserviceNotPerformed, reservice, noTreatmentVisit }) {
+  if (pendingText) return 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.';
+  if (conditionLine) return `${conditionLine} We also included the recommended next step below.`;
+  if (reserviceNotPerformed) {
+    // 'incomplete' can include a PARTIAL application — only the two
+    // genuinely non-performed outcomes may claim none (codex r10 P1).
+    return reservice.outcome === 'incomplete'
+      ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
+      : 'No application was made on this visit — we documented what we found and included the recommended next step below.';
+  }
+  return noTreatmentVisit
+    ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
+    : 'We treated the documented area today and included the recommended next step below.';
+}
+
+// The detail line of the "one area needs attention / could not be serviced" summary.
+function actionNeededDetail({ pendingReadyText, conditionLine, inaccessible, item }) {
+  if (pendingReadyText) return 'Keep pets and people away from treated zones until they are ready. Review the recommended next step below.';
+  if (conditionLine) return `${conditionLine} Review the recommended next step below.`;
+  return inaccessible
+    ? 'You can contact Waves if you want us to return for the inaccessible area.'
+    : (item.customerDescription || 'Review the recommended next step below.');
+}
+
 function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const coverage = normalizeServiceCoverage(data);
   const coverageItems = Array.isArray(coverage?.items) ? coverage.items : [];
@@ -818,6 +871,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // payloads without the field keep the treatment presentation.
   const noTreatmentVisit = data.treatmentPerformed === false;
   const pendingTarget = noTreatmentVisit ? null : latestPendingReentryTarget(targets, nowMs);
+  const condition = visitCondition(reentry, noTreatmentVisit);
   const pendingReadyText = pendingTarget
     ? (mode === 'live'
       ? `Ready in ${formatDuration(Date.parse(pendingTarget.readyAt) - nowMs)}`
@@ -841,6 +895,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const reserviceNoApplication = Boolean(reservice && ['inspection_only', 'customer_declined'].includes(reservice.outcome));
   const reserviceIncomplete = Boolean(reservice && reservice.outcome === 'incomplete');
   const reserviceNotPerformed = reserviceNoApplication || reserviceIncomplete;
+  // A frozen re-entry condition (lawn) rides every branch that used to carry the timed warning, except a callback that
+  // applied nothing: the dry / water-in condition and the keep-off line, or '' when there is none.
+  const conditionLine = conditionWarningLine(condition, reserviceNoApplication);
   const reserviceStatus = () => ({
     heading: reservice.heading || 'we came back and took care of it!',
     status: allReady ? 'Ready now' : 'Service complete',
@@ -875,17 +932,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         : (reserviceNotPerformed
           ? (reservice.completedFallback || 'No application was made today.')
           : (noTreatmentVisit ? 'No application was made today.' : 'Service areas completed today.')),
-      detail: pendingText
-        ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
-        : (reserviceNotPerformed
-          // 'incomplete' can include a PARTIAL application — only the two
-          // genuinely non-performed outcomes may claim none (codex r10 P1).
-          ? (reservice.outcome === 'incomplete'
-            ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
-            : 'No application was made on this visit — we documented what we found and included the recommended next step below.')
-          : (noTreatmentVisit
-            ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
-            : 'We treated the documented area today and included the recommended next step below.')),
+      detail: findingStatusDetail({ pendingText, conditionLine, reserviceNotPerformed, reservice, noTreatmentVisit }),
     };
   }
 
@@ -901,6 +948,8 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   if (reserviceIncomplete) {
     // Partial application possible: the standalone re-entry warning stays
     // (safety), everything else yields to the claim-nothing callback copy.
+    // (No frozen lawn condition can exist here: an incomplete closeout returns before the report path, so it mints no
+    // customer report and the lawn write gate never freezes re-entry facts for it. This branch keeps the timed warning.)
     if (pendingTarget && !allReady) {
       return {
         heading: reservice.heading || 'about your visit',
@@ -926,13 +975,12 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         ? `${pendingTarget.label || 'Treated'} areas are still drying. ${area} was marked ${coverageStatusConfig(item.status).label.toLowerCase()}.`
         : `${area} was marked ${coverageStatusConfig(item.status).label.toLowerCase()}.`,
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Accessible areas were serviced.',
-      detail: pendingReadyText
-        ? 'Keep pets and people away from treated zones until they are ready. Review the recommended next step below.'
-        : (inaccessible
-          ? 'You can contact Waves if you want us to return for the inaccessible area.'
-          : (item.customerDescription || 'Review the recommended next step below.')),
+      detail: actionNeededDetail({ pendingReadyText, conditionLine, inaccessible, item }),
     };
   }
+
+  // A frozen re-entry condition (lawn): the result line IS the condition. It never counts down.
+  if (condition) return conditionStatus(condition, completedItems, completedAreas);
 
   if (pendingTarget) {
     return {
@@ -1638,6 +1686,9 @@ export function lawnWateringGuidance(app = {}) {
 }
 
 function applicationZoneText(app = {}, zoneById = new Map(), serviceLine = 'pest') {
+  // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS): the server sends it only for a spot row of a
+  // lawn visit that froze it; every other row keeps the zone text below.
+  if (typeof app.areaUse === 'string' && app.areaUse.trim()) return app.areaUse.trim();
   const zones = applicationZoneIds(app).map((id) => zoneById.get(String(id))).filter(Boolean);
   if (!zones.length) return app.applicationArea || 'Treated area recorded';
   // Applied to every zone → a friendly whole-coverage phrase beats listing each one
@@ -2574,9 +2625,28 @@ function readinessSummary(context, mode = 'live', nowMsOverride) {
   };
 }
 
+// What the readiness card and chip show. A frozen condition (lawn) has no clock: the sentence, one status word, the
+// precaution line. Anything else is the timed summary above.
+function conditionReadiness(condition) {
+  return {
+    allReady: false,
+    condition: true,
+    areaType: 'Lawn',
+    status: condition.statusLabel || 'Once dry',
+    badge: condition.statusLabel || 'Once dry',
+    headline: condition.text,
+    precautions: condition.pets || 'None listed',
+  };
+}
+
+function readinessView(context, mode, nowMsOverride) {
+  const condition = reentryCondition(context);
+  return condition ? conditionReadiness(condition) : readinessSummary(context, mode, nowMsOverride);
+}
+
 export function readinessStatusBadge(context, mode = 'live', nowMsOverride) {
   if (!context) return null;
-  const summary = readinessSummary(context, mode, nowMsOverride);
+  const summary = readinessView(context, mode, nowMsOverride);
   return {
     label: summary.badge,
     ready: summary.allReady,
@@ -2613,10 +2683,10 @@ function useReadinessNow(context, mode) {
 function LawnYourPart({ data, mode, token, othersCarryInstruction = false }) {
   const context = data.dynamicContext?.reentry;
   const nowMs = useReadinessNow(context, mode);
-  const reentry = context ? reentryRow(context, readinessSummary(context, mode, nowMs)) : null;
-  const timed = Array.isArray(context?.targets) && context.targets.length > 0;
-  // The re-entry card records that the customer saw its timer; this card replaces it, so a timed
-  // readiness view records the same event under the same conditions (only when timed targets exist).
+  const reentry = context ? reentryRow(context, readinessView(context, mode, nowMs)) : null;
+  const timed = reentryIsTimed(context);
+  // The re-entry card records that the customer saw its timer; this card replaces it, so TIMED readiness
+  // content records the same event under the same conditions. A condition (no clock) has no timer to view.
   useEffect(() => {
     if (mode !== 'live' || !timed) return;
     trackReportEvent(token, 'reentry_timer_viewed');
@@ -3153,12 +3223,13 @@ function RecapVideoCard({ recap, token }) {
 
 function ReentryReadinessCard({ context, mode, token }) {
   const nowMs = useReadinessNow(context, mode);
-  const readiness = readinessSummary(context, mode, nowMs);
+  const readiness = readinessView(context, mode, nowMs);
   const targets = Array.isArray(context?.targets) ? context.targets : [];
   const timezone = context?.displayTimezone || SERVICE_REPORT_TIME_ZONE;
 
   useEffect(() => {
-    if (mode !== 'live' || !context) return;
+    // A frozen condition has no timer, so there is no timer view to count.
+    if (mode !== 'live' || !context || reentryCondition(context)) return;
     trackReportEvent(token, 'reentry_timer_viewed');
   }, [context, mode, token]);
 
@@ -3173,7 +3244,13 @@ function ReentryReadinessCard({ context, mode, token }) {
         </div>
         <div className="readiness-status-chip">{readiness.status}</div>
       </div>
-      {readiness.allReady ? (
+      {readiness.condition ? (
+        /* A frozen condition: the headline already says it, so only the precaution line follows. */
+        <div className="sr-cell">
+          <div className="sr-cell-label">Precautions</div>
+          <div className="sr-cell-value">{readiness.precautions}</div>
+        </div>
+      ) : readiness.allReady ? (
         /* Everything is ready: the chip + headline already say "Ready now" —
            repeating it in a Status cell and again per-area tile said the same
            thing four times over 1.5 phone screens (audit 2026-07-28). Keep just
@@ -3252,6 +3329,11 @@ function HeroConditions({ conditions, weatherCall, applicationMade = true, live 
   );
 }
 
+// Whether the report has re-entry information to ask about: timed targets, or a frozen condition (lawn).
+function reentryInfoPresent(reentry) {
+  return (Array.isArray(reentry?.targets) && reentry.targets.length > 0) || !!reentryCondition(reentry);
+}
+
 export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   const prompts = [];
   const add = (text) => {
@@ -3259,7 +3341,7 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
     if (clean && !prompts.some((prompt) => prompt.toLowerCase() === clean.toLowerCase())) prompts.push(clean);
   };
   const product = uniqueStrings((data.applications || []).map((app) => applicationProductName(app)))[0];
-  const hasReentry = Array.isArray(data.dynamicContext?.reentry?.targets) && data.dynamicContext.reentry.targets.length > 0;
+  const hasReentry = reentryInfoPresent(data.dynamicContext?.reentry);
   const coverage = normalizeServiceCoverage(data);
   const hasCoverage = Array.isArray(coverage?.items) && coverage.items.length > 0;
   const hasPressure = data.pestPressure
@@ -3918,6 +4000,12 @@ function ReferralCard({ data, token, mode }) {
   );
 }
 
+// A frozen re-entry condition (lawn) is an action item of its own: the sentence, then the keep-off line.
+function addConditionAction(add, data) {
+  const condition = reentryCondition(data.dynamicContext?.reentry);
+  if (condition) add(condition.text, condition.pets);
+}
+
 export function customerActionItems({ data = {}, coverage, primaryMove, aiSummary, nowMs } = {}) {
   const actions = [];
   const add = (label, detail) => {
@@ -3952,6 +4040,7 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
       );
     }
   }
+  addConditionAction(add, data);
   if (pendingTarget) {
     add(
       `Wait until ${formatReadyTime(pendingTarget.readyAt, data.dynamicContext?.reentry?.displayTimezone)} before using treated ${String(pendingTarget.label || 'areas').toLowerCase()}.`,
