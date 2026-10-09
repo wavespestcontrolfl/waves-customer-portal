@@ -4,7 +4,10 @@
 // Prints one JSON object: `due` (each with the branch its PR must use),
 // `inProgress` (an open PR exists), `merged` (the next 9:00 AM run marks them
 // done) and the caps. Writes nothing: it never claims or completes a queue row.
-// Works with the gate on or off.
+//
+// With the gate OFF the API engine is the writer and nothing fences a row for
+// the terminal, so `due` is empty and the rows are shown as `wouldBeDue` for
+// inspection only. Do not write a post from `wouldBeDue`.
 //
 //   railway run --service waves-customer-portal -- railway run --service Postgres -- node ops/agents/content-terminal-due.js
 //
@@ -18,7 +21,7 @@ process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
-const { terminalWriterWork } = require(path.join(__dirname, '..', '..', 'server', 'services', 'content', 'terminal-writer'));
+const { terminalWriterWork, terminalWriterLive } = require(path.join(__dirname, '..', '..', 'server', 'services', 'content', 'terminal-writer'));
 
 const FIELDS = ['id', 'branch', 'pr_url', 'action_type', 'bucket', 'query', 'page_url', 'service', 'city', 'score', 'signal_metadata'];
 const slim = (rows) => rows.map((r) => Object.fromEntries(FIELDS.filter((f) => r[f] != null).map((f) => [f, r[f]])));
@@ -26,7 +29,13 @@ const slim = (rows) => rows.map((r) => Object.fromEntries(FIELDS.filter((f) => r
 (async () => {
   try {
     const { due, inProgress, merged, caps } = await terminalWriterWork({ complete: false });
-    console.log(JSON.stringify({ due: slim(due), inProgress: slim(inProgress), merged: slim(merged), caps }, null, 2));
+    const live = terminalWriterLive();
+    console.log(JSON.stringify({
+      gate: live ? 'on' : 'off',
+      due: live ? slim(due) : [],
+      ...(live ? {} : { wouldBeDue: slim(due) }),
+      inProgress: slim(inProgress), merged: slim(merged), caps,
+    }, null, 2));
   } catch (err) {
     console.error(`content-terminal-due failed: ${err.message}`);
     process.exitCode = 1;

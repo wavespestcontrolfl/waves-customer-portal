@@ -16,7 +16,7 @@ const pr = (c, over = {}) => ({ head: { ref: `terminal-writer/${uid(c)}` }, base
 const mergedPr = (c) => pr(c, { state: 'closed', merged_at: '2026-10-08T12:00:00Z' });
 
 // open / closed: the GitHub pull lists. peek answers per action type, as the queue does.
-function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }) {
+function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0, openKeys = [] }) {
   const updates = [];
   // the module asks the engine's publish counter for the day first, then the week
   const counts = [doneToday, doneThisWeek];
@@ -25,6 +25,7 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }
     const q = {
       where: (...a) => { calls.push(a); return q; },
       whereIn: (...a) => { calls.push(['in', ...a]); return q; },
+      whereNot: (...a) => { calls.push(['not', ...a]); return q; },
       // rows by id, whatever their score or availability
       select: async () => rows.filter((r) => (calls.find((c) => c[0] === 'in' && c[1] === 'id') || [])[2]?.includes(r.id)),
       update: async (patch) => { updates.push({ where: calls, patch }); return 1; },
@@ -42,6 +43,7 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }
       db: Object.assign(() => query([]), { raw: (sql, bindings) => ({ sql, bindings }) }),
       countPublishedSince: jest.fn(async (action) => (action === 'new_supporting_blog' ? counts[counted++ % 2] : 0)),
       raiseAdminAlert: jest.fn(async (category, spec) => { composeAdminAlert(spec); return { id: 'n1' }; }),
+      episodes: { openAdminAlertKeys: jest.fn(async () => openKeys), closeAdminAlertKeys: jest.fn(async () => 0) },
     },
   };
 }
@@ -152,7 +154,7 @@ describe('terminal writer hand-off', () => {
     expect(f.updates[0].patch.expires_at).toEqual({ sql: 'CASE WHEN expires_at IS NULL THEN NULL ELSE GREATEST(expires_at, ?) END', bindings: [new Date('2026-10-12T13:00:00Z')] });
   });
 
-  test('a fenced row with an open PR is still listed as in progress, and an expired row with a merged PR is still settled', async () => {
+  test('a row another writer moved out of pending keeps its PR: open is still in progress, merged is still settled', async () => {
     const now = new Date('2026-10-09T13:00:00Z');
     // the queue no longer serves either row: peek returns only b
     const f = fakes({ rows: [row('b')], open: [pr('a')], closed: [mergedPr('z')] });
@@ -161,7 +163,9 @@ describe('terminal writer hand-off', () => {
       const q = {
         where: (...a) => { calls.push(a); return q; },
         whereIn: (...a) => { calls.push(['in', ...a]); return q; },
-        select: async () => [row('a'), row('z', { status: 'expired' })],
+        whereNot: (...a) => { calls.push(['not', ...a]); return q; },
+        // a: fenced, then superseded to 'skipped' by a page edit; z: expired by the janitor
+        select: async () => [row('a', { status: 'skipped' }), row('z', { status: 'expired' })],
         update: async (patch) => { f.updates.push({ where: calls, patch }); return 1; },
       };
       return q;
@@ -191,7 +195,7 @@ describe('terminal writer hand-off', () => {
     expect(out).toMatchObject({ outcome: 'handed_to_terminal', due: 1, merged: 1 });
     expect(f.updates).toHaveLength(1);
     expect(f.updates[0].patch).toMatchObject({ status: 'done', skip_reason: SETTLED_REASON, completed_at: new Date('2026-10-08T12:00:00Z') });
-    expect(f.updates[0].where).toEqual(expect.arrayContaining([['id', uid('a')], ['in', 'status', ['pending', 'expired']]]));
+    expect(f.updates[0].where).toEqual(expect.arrayContaining([['id', uid('a')], ['not', 'status', 'done']]));
     expect(f.deps.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = f.deps.raiseAdminAlert.mock.calls[0];
     expect(category).toBe('content');
@@ -200,11 +204,21 @@ describe('terminal writer hand-off', () => {
     expect(opts.detail).toContain('ants in the kitchen b');
   });
 
-  test('no post due raises nothing', async () => {
-    const f = fakes({ rows: [row('a')], open: [pr('a')] });
-    const out = await handOffToTerminal({ deps: f.deps });
+  test("no post due raises nothing and closes the open items, today's included", async () => {
+    const now = new Date('2026-10-09T17:00:00Z');
+    const f = fakes({ rows: [row('a')], open: [pr('a')], openKeys: ['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09'] });
+    const out = await handOffToTerminal({ now, deps: f.deps });
     expect(out.due).toBe(0);
     expect(f.deps.raiseAdminAlert).not.toHaveBeenCalled();
+    expect(f.deps.episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09']);
+  });
+
+  test("posts due closes only the earlier days' items", async () => {
+    const now = new Date('2026-10-09T13:00:00Z');
+    const f = fakes({ rows: [row('a')], openKeys: ['content-terminal-due:2026-10-08', 'content-terminal-due:2026-10-09'] });
+    await handOffToTerminal({ now, deps: f.deps });
+    expect(f.deps.episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-08']);
+    expect(f.deps.raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -39,9 +39,12 @@ const BRANCH_PREFIX = 'terminal-writer/';
 // publish counter reads it (autonomous-runner.js _countPublishedSince).
 const SETTLED_REASON = 'terminal_writer_merged';
 const OPEN_PR_FENCE_DAYS = 3;
-// A row a terminal PR can still complete. 'expired' is included: the janitor
-// may have expired a row whose post then merged, and that post was published.
-const OPEN_STATUSES = Object.freeze(['pending', 'expired']);
+// A terminal PR owns its row in every status but 'done'. Other writers of the
+// queue can move a fenced pending row (the janitor expires it, an ordinary
+// page edit supersedes a citability backfill to 'skipped'); the PR is still
+// open or its post still went live, so the row is still counted and settled.
+const SETTLED_STATUS = 'done';
+const ALERT_KEY_PREFIX = 'content-terminal-due:';
 // The action types a writing session can do. Everything else the queue holds
 // (link-only tasks, GBP posts) is left for its own lane.
 const WRITER_ACTIONS = Object.freeze([
@@ -123,7 +126,7 @@ async function pendingWritingRows(queue) {
  */
 async function settleAndFence(conn, prs, unsettled, now) {
   for (const id of unsettled) {
-    const updated = await conn('opportunity_queue').where('id', id).whereIn('status', OPEN_STATUSES)
+    const updated = await conn('opportunity_queue').where('id', id).whereNot('status', SETTLED_STATUS)
       .update({ status: 'done', skip_reason: SETTLED_REASON, completed_at: prs.merged.get(id).mergedAt, updated_at: now });
     if (updated) logger.info(`[terminal-writer] done ${id}: merged ${prs.merged.get(id).url}`);
   }
@@ -164,7 +167,7 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
   // low-scored row is outside the claimable window but its PR still counts.
   const prIds = [...prs.merged.keys(), ...prs.open.keys()];
   const prRows = prIds.length ? await conn('opportunity_queue').whereIn('id', prIds).select('*') : [];
-  const open = (r) => OPEN_STATUSES.includes(r.status);
+  const open = (r) => r.status !== SETTLED_STATUS;
   const merged = prRows.filter((r) => prs.merged.has(r.id) && open(r)).map((r) => ({ ...r, pr_url: prs.merged.get(r.id).url }));
   const inProgress = prRows.filter((r) => !prs.merged.has(r.id) && open(r)).map((r) => ({ ...r, pr_url: prs.open.get(r.id) }));
   const candidates = (await pendingWritingRows(queue)).filter((r) => !prs.merged.has(r.id) && !prs.open.has(r.id));
@@ -197,32 +200,37 @@ const describe = (r) => `${r.action_type.replace(/_/g, ' ')}: ${r.query || r.pag
 async function handOffToTerminal({ now = new Date(), deps = {} } = {}) {
   const work = await terminalWriterWork({ complete: true, now, deps });
   const { due, inProgress, merged } = work;
-  const result = { outcome: 'handed_to_terminal', count: 0, runs: [], due: due.length, inProgress: inProgress.length, merged: merged.length };
-  if (!due.length) {
-    logger.info(`[terminal-writer] nothing due (${inProgress.length} in progress, ${merged.length} merged)`);
-    return result;
-  }
-  const raise = deps.raiseAdminAlert || require('../admin-alert-compose').raiseAdminAlert;
   const n = due.length;
-  await raise('content', {
-    area: 'Content',
-    action: `write ${n} website post${n === 1 ? '' : 's'} in the terminal`,
-    why: `The content queue has ${n} post${n === 1 ? '' : 's'} due today and the portal does not write them.`,
-    severity: 'needs-you',
-    link: '/admin/blog?tab=autopilot',
-    subject: { type: 'check', id: 'content-terminal-writer' },
-    doneWhen: 'posts_written',
-    who: 'claude',
-  }, {
-    dedupeKey: `content-terminal-due:${etDateString(now)}`,
-    detail: [
-      'Run blog-run in the terminal. Due today:',
-      ...due.map((r) => `- ${describe(r)}`),
-      ...(inProgress.length ? ['', `Open and waiting to merge: ${inProgress.length}`] : []),
-    ].join('\n'),
-  });
+  const todayKey = `${ALERT_KEY_PREFIX}${etDateString(now)}`;
+  // Close what no longer holds: every earlier day's item, and today's too
+  // once nothing is due (the posts were opened or merged since the 9am pass).
+  const episodes = deps.episodes || require('../admin-alert-episodes');
+  const conn = deps.db || db;
+  const stale = (await episodes.openAdminAlertKeys(conn, ALERT_KEY_PREFIX)).filter((key) => n === 0 || key !== todayKey);
+  await episodes.closeAdminAlertKeys(conn, stale, 'posts_written', { now, resolution: 'Cleared: these website posts are no longer due' });
+
   logger.info(`[terminal-writer] ${n} due, ${inProgress.length} in progress, ${merged.length} merged`);
-  return result;
+  if (n) {
+    const raise = deps.raiseAdminAlert || require('../admin-alert-compose').raiseAdminAlert;
+    await raise('content', {
+      area: 'Content',
+      action: `write ${n} website post${n === 1 ? '' : 's'} in the terminal`,
+      why: `The content queue has ${n} post${n === 1 ? '' : 's'} due today and the portal does not write them.`,
+      severity: 'needs-you',
+      link: '/admin/blog?tab=autopilot',
+      subject: { type: 'check', id: 'content-terminal-writer' },
+      doneWhen: 'posts_written',
+      who: 'claude',
+    }, {
+      dedupeKey: todayKey,
+      detail: [
+        'Run blog-run in the terminal. Due today:',
+        ...due.map((r) => `- ${describe(r)}`),
+        ...(inProgress.length ? ['', `Open and waiting to merge: ${inProgress.length}`] : []),
+      ].join('\n'),
+    });
+  }
+  return { outcome: 'handed_to_terminal', count: 0, runs: [], due: n, inProgress: inProgress.length, merged: merged.length };
 }
 
 module.exports = { terminalWriterLive, terminalWriterWork, handOffToTerminal, branchFor, BRANCH_PREFIX, WRITER_ACTIONS, SETTLED_REASON };
