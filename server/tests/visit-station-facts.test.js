@@ -593,6 +593,20 @@ describe('stationChecksWriterLines: the tech\'s statuses for the report writer',
     expect(lines('rodent_bait_station', [{ number: 2, status: 'inaccessible' }]).observed).toContain('could not be reached or checked');
   });
 
+  test('the OK remainder is every station that is no exception of any kind, serviced included', () => {
+    // Serviced only: station 3 is work done, and the rest are OK, never "every station".
+    const serviced = lines('rodent_bait_station', [{ number: 3, status: 'serviced' }]);
+    expect(serviced.completed).toContain('station 3: the technician serviced the station');
+    expect(serviced.observed).toMatch(/: Every other station was checked and is OK\.$/);
+    expect(serviced.observed).not.toMatch(/every station was checked/);
+    // Serviced + activity: the remainder follows the observed exception, once.
+    const both = lines('rodent_bait_station', [{ number: 3, status: 'serviced' }, { number: 2, status: 'activity' }]);
+    expect(both.observed).toMatch(/station 2: bait consumption.*\. Every other station was checked and is OK\.$/);
+    expect(both.observed).not.toContain('station 3');
+    // None: every station.
+    expect(lines('rodent_bait_station', []).observed).toMatch(/: every station was checked and is OK\.$/);
+  });
+
   test('an empty list is an observation that every station is OK, with no work done', () => {
     const result = lines('rodent_bait_station', []);
     expect(result.completed).toBe('');
@@ -637,5 +651,35 @@ describe('stationSheetProgramFor and stationFastCompleteEnabled', () => {
       expect(stationFastCompleteEnabled({ findingsType: 'termite_bait_station' })).toBe(false);
       process.env[name] = 'true';
     }
+  });
+});
+
+describe('the roster rule, one copy', () => {
+  const { stationRosterMatches, assertStationRosterUnderLock } = require('../services/visit-station-facts');
+
+  test('the sheet\'s ids must be exactly the registry\'s active ids', () => {
+    expect(stationRosterMatches(['a', 'b'], ['b', 'a'])).toBe(true);
+    expect(stationRosterMatches(['a', 'b'], ['a'])).toBe(false);
+    expect(stationRosterMatches(['a'], ['a', 'b'])).toBe(false);
+    expect(stationRosterMatches(['a', 'b'], ['a', 'c'])).toBe(false);
+    expect(stationRosterMatches([], undefined)).toBe(true);
+    expect(stationRosterMatches([1, 2], ['1', '2'])).toBe(true);
+  });
+
+  const trxWith = (rows) => ({ transaction: async (fn) => fn(() => ({ where: () => ({ select: async () => rows }) })) });
+  const profile = { findingsType: 'termite_bait_station' };
+  const run = (rows, seen, p = profile) => assertStationRosterUnderLock(trxWith(rows), { customerId: 'c1', profile: p, stationRosterSeen: seen });
+
+  test('the completion checks it under the lock, only for a completion that sent the marker', async () => {
+    await expect(run([{ id: 'a', program: 'termite' }], undefined)).resolves.toBeUndefined();
+    await expect(run([{ id: 'a', program: 'termite' }, { id: 'r', program: 'rodent' }], ['a'])).resolves.toBeUndefined();
+    for (const [rows, seen] of [[[{ id: 'a', program: 'termite' }], ['a', 'b']], [[{ id: 'a', program: 'termite' }, { id: 'b', program: 'termite' }], ['a']]]) {
+      await expect(run(rows, seen)).rejects.toMatchObject({ code: 'station_roster_changed' });
+    }
+  });
+
+  test('a marker that cannot be judged fails closed: not a list, or not a station sheet visit', async () => {
+    await expect(run([], 'a')).rejects.toMatchObject({ code: 'station_roster_changed' });
+    await expect(run([{ id: 'a', program: 'termite' }], ['a'], { findingsType: 'rodent_trapping' })).rejects.toMatchObject({ code: 'station_roster_changed' });
   });
 });

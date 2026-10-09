@@ -70,8 +70,10 @@ test('a station the tech corrected to Serviced is work done, under the completed
   const { completed, observed } = sectionsOf(await send({ stationChecks: [{ number: 2, status: 'serviced' }] }));
   expect(completed).toContain(`Actions completed: Not specified\n${DONE}station 2: the technician serviced the station`);
   expect(completed).not.toContain('Technician station checks, observed');
-  // The stations found OK are an observation, with the same authority.
-  expect(observed).toContain(`${OBS}every station was checked and is OK.`);
+  // The stations found OK are an observation, with the same authority: every
+  // OTHER station, since station 2 is an exception (serviced).
+  expect(observed).toContain(`${OBS}Every other station was checked and is OK.`);
+  expect(observed).not.toContain('every station was checked');
   expect(observed).not.toContain('serviced the station');
 });
 

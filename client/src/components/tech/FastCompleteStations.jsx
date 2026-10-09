@@ -39,10 +39,7 @@ import {
 export const NO_STATION_READ = Object.freeze({ body: () => ({}), begin: () => {}, check: () => '' });
 
 // The state machine's event for how a read ended.
-const settlement = (ok, detail, note) => {
-  if (ok) return { type: 'readSucceeded', note };
-  return detail === 'roster_changed' ? { type: 'rosterChanged', note } : { type: 'readFailed', note, detail };
-};
+const settlement = (ok, detail, note) => (ok ? { type: 'readSucceeded', note } : { type: 'readFailed', note, detail });
 
 // What a visit with no stations allows: nothing held.
 export const NO_STATION_GATE = Object.freeze({ generate: '', complete: '' });
@@ -56,6 +53,16 @@ export function useStationChecks({ service, request, enabled = false, note = '' 
   const { registry, registryRef, reload } = useStationRegistry({ serviceId: service?.id, request, program, active });
   const read = useStationReadState(note);
   const marks = useStationMarks({ program, registry, registryRef });
+  // The property's stations changed under the sheet (the server said so while
+  // reading the note, or refused the completion): nothing read or checked against
+  // the old roster stands; the registry loads again. The epoch marks the change
+  // for the draft's signature, so the report is written again.
+  const [rosterEpoch, setRosterEpoch] = useState(0);
+  const rosterChanged = () => {
+    read.send({ type: 'rosterChanged' });
+    setRosterEpoch((n) => n + 1);
+    reload();
+  };
 
   const hold = active ? registryHold(registry) : '';
   const ready = active && registry.state === 'ready' && !hold;
@@ -76,8 +83,8 @@ export function useStationChecks({ service, request, enabled = false, note = '' 
     // the chips for the tech to confirm or change.
     check: (facts, readNote) => {
       const { stationRead: verdict, stationReadDetail: detail } = facts;
-      read.send(settlement(verdict === 'read', detail, readNote));
-      if (detail === 'roster_changed') reload();
+      if (detail === 'roster_changed') rosterChanged();
+      else read.send(settlement(verdict === 'read', detail, readNote));
       if (detail === 'unresolved' && facts.stationExceptions) marks.applyHeard(facts.stationExceptions);
       return verdict === 'read' ? '' : (READ_FAILED_MESSAGES[detail] || READ_FAILED_MESSAGES.default);
     },
@@ -120,6 +127,10 @@ export function useStationChecks({ service, request, enabled = false, note = '' 
     confirmByHand: () => read.send({ type: 'handConfirmed' }),
     readFromNote: () => read.send({ type: 'handCleared' }),
     reloadRegistry: reload,
+    rosterChanged,
+    rosterEpoch,
+    // The ids the completion binds to (stationRosterSeen): the stations checked.
+    rosterIds: () => pinned.map((station) => station.id),
   };
 }
 

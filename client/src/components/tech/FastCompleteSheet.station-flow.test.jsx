@@ -85,7 +85,7 @@ function makeRequest({
     if (path === '/admin/schedule/generate-report') return { report: REPORT };
     if (path.endsWith('/typed-facts')) return typeof typedFacts === 'function' ? typedFacts() : typedFacts;
     if (path.endsWith('/voice-facts') || path.endsWith('/lane-facts')) throw new Error('a typed visit reads only its own form');
-    if (path.endsWith('/complete')) return complete;
+    if (path.endsWith('/complete')) return typeof complete === 'function' ? complete() : complete;
     return {};
   });
   request.bodies = (suffix) => calls.filter((call) => call.path.endsWith(suffix)).map((call) => call.body);
@@ -633,4 +633,46 @@ describe('part of what the note said about the stations could not be pinned down
     await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
     expect(within(stationsCard()).getByText('4 stations, 2 flagged, the rest OK')).toBeTruthy();
   }, 30000);
+});
+
+describe('the completion is bound to the stations the sheet checked', () => {
+  test('the body names the stations it checked (stationRosterSeen), exactly the entries it posts', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    const body = await send(request);
+    expect(body.stationRosterSeen).toEqual(TERMITE_REGISTRY.stations.map((s) => s.id));
+    expect(body.stationRosterSeen).toEqual(body.termiteStations.map((entry) => entry.id));
+  }, 30000);
+
+  test('a station-less sheet sends no marker', async () => {
+    const request = makeRequest({ typedFacts: { ...TERMITE_READ, stationRead: undefined, stationExceptions: undefined, values: { stations_checked: '12', termite_activity: 'Previous feeding noted', bait_consumption: 'Light feeding' } } });
+    await openSheet(request, { ...TERMITE, stationsFlow: false });
+    await generate('Checked all 12 stations.');
+    const body = await send(request);
+    expect(body).not.toHaveProperty('stationRosterSeen');
+  }, 30000);
+
+  test('the server saying the stations changed loads them again, holds the send until the note is read again, and a fresh try goes on', async () => {
+    let completes = 0;
+    const err = Object.assign(new Error('The stations on this property changed, so they are loaded again. Try again.'), { status: 409, code: 'station_roster_changed' });
+    const request = makeRequest({ complete: () => { completes += 1; if (completes === 1) throw err; return { success: true }; } });
+    await openSheet(request);
+    await generate();
+    const mapCalls = () => request.paths().filter((path) => path.endsWith('/property-map')).length;
+    expect(mapCalls()).toBe(1);
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(sendButton());
+    await screen.findByText(/The stations on this property changed, so they are loaded again\. Try again\./, {}, { timeout: 10000 });
+    await waitFor(() => expect(mapCalls()).toBe(2));
+    // What was read against the old roster no longer stands: the report is written again.
+    expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    const body = await send(request);
+    expect(request.bodies('/complete')).toHaveLength(2);
+    // A new key for the corrected completion.
+    expect(request.bodies('/complete')[1].idempotencyKey).not.toBe(request.bodies('/complete')[0].idempotencyKey);
+    expect(body.stationRosterSeen).toHaveLength(4);
+  }, 40000);
 });

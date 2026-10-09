@@ -1520,6 +1520,7 @@ function useLaneRecord(service) {
     // A lane visit has no stations.
     stationRead: NO_STATION_READ,
     stationGate: NO_STATION_GATE,
+    stationsChanged: () => {},
     mode: lane ? 'lane' : null,
     record: lane ? laneRecord : null,
     // What the report is written from, for its stale check.
@@ -1579,6 +1580,8 @@ function useTypedRecord(service, request, note = '') {
       stationStatuses: Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)),
       // What the stations stand on: the note's read, or the tech's hand check.
       stationBasis: stations.byHand ? 'hand' : 'note',
+      // The roster changed under the sheet since: the report is written again.
+      stationEpoch: stations.rosterEpoch,
     }
     : record);
   // The record a read lands on: only fields still empty that nobody picked,
@@ -1607,10 +1610,12 @@ function useTypedRecord(service, request, note = '') {
     // A station visit's per-station statuses are part of what the report says
     // (a chip tap makes the draft stale even when the counts do not move).
     signaturePart: (record) => (record
-      ? { typed: record.stationStatuses ? [record.values, record.score, record.stationStatuses, record.stationBasis] : [record.values, record.score] }
+      ? { typed: record.stationStatuses ? [record.values, record.score, record.stationStatuses, record.stationBasis, record.stationEpoch] : [record.values, record.score] }
       : null),
     // How the report write reads the stations from the note (a no-op when not to).
     stationRead: stations.stationRead,
+    // The server refused the completion: the stations changed since they were read.
+    stationsChanged: stations.rosterChanged,
     // What the stations allow now: Generate waits on the registry (a registry the
     // sheet cannot judge goes to the full form); Complete on the stations being
     // known (the note's read, or the tech's hand check), then on a consumption
@@ -1630,7 +1635,7 @@ function useTypedRecord(service, request, note = '') {
             ...fields.completionExtras,
             ...(creditOffered ? { offerInspectionCredit: offerCredit } : {}),
             // The full form's own body field: a check for every pinned station.
-            ...(entries.length ? { termiteStations: entries } : {}),
+            ...(entries.length ? { termiteStations: entries, stationRosterSeen: entries.map((entry) => entry.id) } : {}),
           },
         }
         : fields;
@@ -1734,6 +1739,10 @@ function ReportFlowForm({
   // A lane or typed visit's own record (or none: a pest visit).
   const recordState = useVisitRecord(service, request, form.note);
   const { lane, mode, record } = recordState;
+  // The server refused the completion because the property's stations changed
+  // since they were read: the sheet loads them again and reads the note again.
+  const { errorCode: submitCode } = submission;
+  useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
   const [step, setStep] = useState('visit');

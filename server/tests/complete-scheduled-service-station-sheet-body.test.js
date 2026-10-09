@@ -124,13 +124,15 @@ function fullFormBody(f, statuses, findingsType, values) {
 // + FastCompleteSheet.jsx reportCompletionBody): the same stations and typed
 // values, beside the sheet's own fields (the report the tech read, no
 // products, no places for a typed form, the customer text off).
-function sheetBody(f, statuses, findingsType, values) {
+function sheetBody(f, statuses, findingsType, values, { seen = f.stationIds } = {}) {
   return {
     visitOutcome: 'completed',
     products: [],
     areasServiced: [],
     structuredFindings: { type: findingsType, values },
     termiteStations: f.stationIds.map((id, i) => (statuses[i] ? { id, status: statuses[i], touched: true } : { id, status: 'ok' })),
+    // The stations the sheet checked, bound to the completion under the visit lock.
+    stationRosterSeen: seen,
     technicianNotes: 'Station 2 had activity. I replaced the bait in 3.',
     reportDraftBase: 'WHAT WE FOUND\nSome activity at one station.',
     sendCompletionSms: false,
@@ -214,5 +216,68 @@ postgres('GATE_STATION_FAST_COMPLETE: the sheet\'s completion body writes the sa
       expect(out).toMatchObject({ status: 400, body: { code: 'rodent_consumption_conflict' } });
       expect(await checksByNumber(f)).toEqual([]);
     } finally { await cleanup(f); }
+  });
+
+  // The roster the sheet checked is bound to the completion: a station retired
+  // or added between the sheet's read and Complete is refused under the lock,
+  // and nothing is written.
+  describe('the roster changed between the sheet\'s read and the completion', () => {
+    const TERMITE = (counts) => ({ ...counts, termite_activity: 'None observed', bait_consumption: 'None — bait intact' });
+    const COUNTS = { total_stations: '4', stations_checked: '4', stations_inaccessible: '0', stations_with_activity: '0' };
+    const nothingWritten = async (f) => {
+      expect(await checksByNumber(f)).toEqual([]);
+      expect(await mockPg('service_records').where({ customer_id: f.customerId })).toEqual([]);
+      const row = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+      expect(row.status).toBe('confirmed');
+    };
+
+    test('a station retired since is refused with station_roster_changed', async () => {
+      const f = await seedVisit();
+      try {
+        await mockPg('termite_stations').where({ id: f.stationIds[3] }).update({ is_active: false });
+        const out = await complete(f, sheetBody(f, [], 'termite_bait_station', TERMITE(COUNTS)));
+        expect(out).toMatchObject({ status: 409, body: { code: 'station_roster_changed' } });
+        await nothingWritten(f);
+      } finally { await cleanup(f); }
+    });
+
+    test('a station added since is refused too', async () => {
+      const f = await seedVisit();
+      try {
+        const added = randomUUID();
+        await mockPg('termite_stations').insert({
+          id: added, customer_id: f.customerId, station_number: 9, program: 'termite', is_active: true, owned_by: 'customer',
+          geometry_image: JSON.stringify({ type: 'circle', cx: 0.9, cy: 0.9, r: 0.02 }),
+        });
+        f.stationIds.push(added);
+        const out = await complete(f, sheetBody(f, [], 'termite_bait_station', TERMITE(COUNTS), { seen: f.stationIds.slice(0, 4) }));
+        expect(out).toMatchObject({ status: 409, body: { code: 'station_roster_changed' } });
+        await nothingWritten(f);
+      } finally { await cleanup(f); }
+    });
+
+    test('the same roster completes; another program\'s station is no part of it', async () => {
+      const f = await seedVisit();
+      try {
+        const other = randomUUID();
+        await mockPg('termite_stations').insert({
+          id: other, customer_id: f.customerId, station_number: 1, program: 'rodent', is_active: true, owned_by: 'waves',
+          geometry_image: JSON.stringify({ type: 'circle', cx: 0.8, cy: 0.2, r: 0.02 }),
+        });
+        f.stationIds.push(other);
+        const out = await complete(f, sheetBody(f, [], 'termite_bait_station', TERMITE(COUNTS), { seen: f.stationIds.slice(0, 4) }));
+        expect(out).toMatchObject({ status: 200 });
+        expect(await mockPg('termite_station_checks').whereIn('station_id', f.stationIds.slice(0, 4))).toHaveLength(4);
+      } finally { await cleanup(f); }
+    });
+
+    test('the full form sends no marker: it may edit the roster, and a retired station does not refuse it', async () => {
+      const f = await seedVisit();
+      try {
+        await mockPg('termite_stations').where({ id: f.stationIds[3] }).update({ is_active: false });
+        const out = await complete(f, fullFormBody(f, [], 'termite_bait_station', TERMITE(COUNTS)));
+        expect(out).toMatchObject({ status: 200 });
+      } finally { await cleanup(f); }
+    });
   });
 });

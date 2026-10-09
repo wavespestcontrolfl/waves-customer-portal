@@ -256,10 +256,55 @@ function stationChecksWriterLines(structuredFindings, checks) {
     .map((check) => `station ${check.number}: ${said[check.status]}`);
   const done = partsOf((status) => status === 'serviced');
   const seenParts = partsOf((status) => status !== 'serviced');
+  // The OK remainder is every station that is NOT an exception of any kind,
+  // serviced ones included: "station 3: serviced" and "every station is OK" are
+  // not both true.
+  const rest = checks.length ? 'Every other station was checked and is OK.' : 'every station was checked and is OK.';
   return {
     completed: done.length ? `\nTechnician station checks, work done ${AUTHORITY}: ${done.join('; ')}.` : '',
-    observed: `\nTechnician station checks, observed ${AUTHORITY}: ${seenParts.length ? `${seenParts.join('; ')}. Every other station was checked and is OK.` : 'every station was checked and is OK.'}`,
+    // With servicing the only exception the observation is the remainder alone.
+    observed: `\nTechnician station checks, observed ${AUTHORITY}: ${seenParts.length ? `${seenParts.join('; ')}. ` : ''}${rest}`,
   };
+}
+
+// THE roster rule, one copy: the stations the sheet shows must be exactly the
+// registry's active stations of the visit's program. A station retired since the
+// sheet loaded would be asserted and counted though it is gone; one added would
+// go unchecked, so the frozen counts and report would claim a roster the stored
+// rows do not cover. Used by the typed-facts route (before a read) and by the
+// completion (under the visit lock, before the checks are written).
+function stationRosterMatches(registryIds, sheetIds) {
+  const live = new Set((registryIds || []).map(String));
+  const sent = new Set((Array.isArray(sheetIds) ? sheetIds : []).map(String));
+  return live.size === sent.size && [...live].every((id) => sent.has(id));
+}
+
+// The completion's own check of that rule, for a completion that came from the
+// station sheet: the sheet sends `stationRosterSeen` (the ids of the stations it
+// checked), as it sends `traceSeen` and `photoCaptionsSeen`. Undefined (the full
+// form, every other caller) checks nothing: there the tech edits the roster on
+// the map. Read under the visit row lock, on the transaction's own connection.
+async function assertStationRosterUnderLock(trx, { customerId, profile, stationRosterSeen }) {
+  if (stationRosterSeen === undefined) return;
+  const program = stationSheetProgramFor(profile);
+  let rows = null;
+  if (program && customerId && Array.isArray(stationRosterSeen)) {
+    rows = await trx.transaction((sp) => sp('termite_stations')
+      .where({ customer_id: customerId, is_active: true })
+      .select('id', 'program'));
+  }
+  const ids = (rows || []).filter((row) => (row.program || 'termite') === program).map((row) => row.id);
+  // A marker that cannot be judged (not a list, not a station-sheet visit) fails closed.
+  if (rows && stationRosterMatches(ids, stationRosterSeen)) return;
+  throw Object.assign(new Error('station roster changed during completion'), { code: 'station_roster_changed' });
+}
+
+// The completion's answer for that refusal (null for any other error), the way
+// completion-consultation-outcome.js answers its own: a distinct 409 the sheet
+// turns into a reload of the stations.
+function stationRosterRefusalResponse(err) {
+  if (err?.code !== 'station_roster_changed') return null;
+  return { status: 409, body: { error: 'The stations on this property changed, so they are loaded again. Try again.', code: 'station_roster_changed' } };
 }
 
 // What the sheet may take from a station read: 'read' only when the note was
@@ -273,6 +318,9 @@ function stationReadVerdict(status) {
 
 module.exports = {
   stationSheetProgramFor,
+  stationRosterMatches,
+  assertStationRosterUnderLock,
+  stationRosterRefusalResponse,
   stationFastCompleteEnabled,
   stationReadVerdict,
   stationChecksWriterLines,
