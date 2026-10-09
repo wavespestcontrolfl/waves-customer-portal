@@ -1068,9 +1068,12 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     // also reads the station exceptions the note names, beside the fields
     // (a separate read; null leaves the answer exactly as it was).
     const [facts, stationFacts] = await Promise.all([
+      // The two reads are independent: a typed read that throws is a failed
+      // typed read, and the station read keeps its own verdict (and the other
+      // way round: readStationFactsForVisit never throws).
       readTypedFacts({
         note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
-      }),
+      }).catch(() => ({ status: 'failed', type: findingsType, values: {}, heard: {}, unclearFields: [] })),
       readStationFactsForVisit({ svc, profile, note, requested: req.body?.stations }),
     ]);
     res.json({

@@ -386,6 +386,68 @@ describe('POST /:serviceId/typed-facts with the sheet\'s stations', () => {
     });
   });
 
+  // The two reads run side by side and each answers with its own verdict: the
+  // four combinations serialize distinctly (Codex P2 on #6205).
+  describe('the typed read and the station read are independent in the answer', () => {
+    const typedOk = { fields: { stations_checked: { said: true, value: 4, quote: 'checked 4 stations' }, termite_activity: { value: 'not_said', quote: '' }, bait_consumption: { value: 'not_said', quote: '' } } };
+    const note = 'Checked 4 stations. Station 4 had activity.';
+    const answerWith = (typed, stations) => dispatchWithFallback.mockImplementation(async (_policy, request) => {
+      const isStation = String(request.system).includes('station number');
+      const verdict = isStation ? stations : typed;
+      if (verdict === 'throws') throw new Error('provider down');
+      return verdict === 'fails' ? { ok: false } : answer(isStation ? { exceptions: [item(4, 'activity', 'station 4 had activity')] } : typedOk);
+    });
+    const call = async (typed, stations) => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER);
+      answerWith(typed, stations);
+      return (await invoke({ serviceId: 'svc-1' }, { note, stations: SHEET_STATIONS })).body;
+    };
+
+    test('typed ok + stations read', async () => {
+      const body = await call('ok', 'ok');
+      expect(body).toMatchObject({ status: 'read', stationRead: 'read' });
+      expect(body.stationExceptions.map((e) => e.number)).toEqual([4]);
+      expect(body.values).toMatchObject({ stations_checked: '4' });
+    });
+
+    test('typed failed + stations read: the stations keep their verdict and exceptions', async () => {
+      for (const typed of ['fails', 'throws']) {
+        const body = await call(typed, 'ok');
+        expect(body).toMatchObject({ available: true, status: 'failed', stationRead: 'read' });
+        expect(body.values).toEqual({});
+        expect(body.stationExceptions.map((e) => e.number)).toEqual([4]);
+      }
+    });
+
+    test('typed ok + stations failed: the form fields stand, the stations say failed with no exceptions', async () => {
+      const body = await call('ok', 'fails');
+      expect(body).toMatchObject({ status: 'read', stationRead: 'failed', stationExceptions: [] });
+      expect(body.values).toMatchObject({ stations_checked: '4' });
+    });
+
+    test('both failed: both say so, nothing is filled or named', async () => {
+      const body = await call('fails', 'fails');
+      expect(body).toMatchObject({ available: true, status: 'failed', stationRead: 'failed', stationExceptions: [], values: {} });
+    });
+
+    test('a typed reader that itself throws is a failed typed read, not a failed route', async () => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER);
+      answerWith('ok', 'ok');
+      const spy = jest.spyOn(require('../services/visit-typed-facts'), 'readTypedFacts').mockRejectedValue(new Error('boom'));
+      try {
+        const res = await invoke({ serviceId: 'svc-1' }, { note, stations: SHEET_STATIONS });
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toMatchObject({ available: true, status: 'failed', stationRead: 'read' });
+      } finally { spy.mockRestore(); }
+    });
+
+    test('the four answers are four different answers', async () => {
+      const answers = [await call('ok', 'ok'), await call('fails', 'ok'), await call('ok', 'fails'), await call('fails', 'fails')];
+      const keys = answers.map((body) => `${body.status}/${body.stationRead}/${body.stationExceptions.length}`);
+      expect(new Set(keys).size).toBe(4);
+    });
+  });
+
   test('a technician reads only their own current visit, stations or not', async () => {
     mockDbCurrent = stationDb(SERVICE, ROSTER);
     const res = await invoke({ serviceId: 'svc-1' }, { note: NOTE, stations: SHEET_STATIONS }, { techRole: 'technician', technicianId: 'tech-2' });

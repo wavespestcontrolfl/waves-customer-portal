@@ -1380,9 +1380,18 @@ function pestFactsOf(heard, { houseMix = false } = {}) {
 // unclear. A record that already holds every field the note could fill is
 // answered without a read (nothing new, nothing failed). Anything else is a
 // read that failed: nothing fills.
+// The answer carries TWO reads that run side by side on the server, the form's
+// fields and (GATE_STATION_FAST_COMPLETE) the stations, each with its own
+// verdict. They are independent in both directions: the typed part is decided
+// by `status` alone, the station part by `stationRead` alone, and no branch of
+// the typed part may drop the station part (Codex P2 on #6205).
 function typedFactsOf(heard) {
+  return { ...typedPartOf(heard), ...stationPartOf(heard) };
+}
+
+function typedPartOf(heard) {
   if (heard?.available === true && heard.status === 'nothing_to_fill') {
-    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false, stationExceptions: stationExceptionsOf(heard), stationRead: stationReadOf(heard) };
+    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
   }
   if (heard?.available !== true || heard.status !== 'read') {
     return { status: 'failed', values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
@@ -1396,9 +1405,11 @@ function typedFactsOf(heard) {
     // The technician's own rating (step 4), on a form whose score they set.
     score: Number.isInteger(heard.score?.value) && typeof heard.score.quote === 'string' ? { value: heard.score.value, quote: heard.score.quote } : null,
     scoreUnclear: heard.scoreUnclear === true,
-    stationExceptions: stationExceptionsOf(heard),
-    stationRead: stationReadOf(heard),
   };
+}
+
+function stationPartOf(heard) {
+  return { stationExceptions: stationExceptionsOf(heard), stationRead: stationReadOf(heard) };
 }
 
 // The station exceptions the note named (GATE_STATION_FAST_COMPLETE): the
@@ -1413,7 +1424,8 @@ function stationExceptionsOf(heard) {
 
 // Whether the note's station read is KNOWN to have succeeded: only the server's
 // explicit 'read'. A missing key (a read that never ran, an answer that never
-// came, a typed read that failed) is never an empty list: it is 'failed'.
+// came) is never an empty list: it is 'failed'. A typed read that failed says
+// nothing about it: the stations have their own verdict.
 const stationReadOf = (heard) => (heard?.available === true && heard.stationRead === 'read' ? 'read' : 'failed');
 
 // Each record mode's reader and the facts it answers.

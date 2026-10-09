@@ -464,3 +464,54 @@ describe('"all stations OK" is only said when the note\'s station read is known 
     expect(body.structuredFindings.values).toMatchObject({ stations_checked: '4', stations_with_activity: '1' });
   }, 40000);
 });
+
+// The note is read twice on the server, side by side: the form's fields and the
+// stations. Each read has its own verdict, and neither may swallow the other's
+// (Codex P2 on #6205). The four combinations, what each ends in.
+describe('the typed read and the station read are independent: all four combinations', () => {
+  const typedFailed = { available: true, status: 'failed', type: 'termite_bait_station', values: {}, heard: {}, unclearFields: [] };
+  const stationsRead = { stationRead: 'read', stationExceptions: TERMITE_READ.stationExceptions };
+  const stationsFailed = { stationRead: 'failed', stationExceptions: [] };
+  const typedOk = { available: true, status: 'read', type: 'termite_bait_station', heard: {}, unclearFields: [], values: TERMITE_READ.values };
+  const TABLE = [
+    ['typed ok, stations read', { ...typedOk, ...stationsRead }, { report: true, typedFilled: true, stationsRead: true }],
+    ['typed failed, stations read', { ...typedFailed, ...stationsRead }, { report: true, typedFilled: false, stationsRead: true }],
+    ['typed ok, stations failed', { ...typedOk, ...stationsFailed }, { report: false, typedFilled: false, stationsRead: false }],
+    ['both failed', { ...typedFailed, ...stationsFailed }, { report: false, typedFilled: false, stationsRead: false }],
+  ];
+
+  test.each(TABLE)('%s', async (_label, typedFacts, expected) => {
+    const request = makeRequest({ typedFacts });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    if (!expected.report) {
+      // Stations not known: no report, nothing asserted, whatever the form read said.
+      await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+      expect(request.bodies('generate-report')).toEqual([]);
+      expect(within(stationsCard()).getByText('4 stations. Couldn’t read them from your note.')).toBeTruthy();
+      expect(within(stationsCard()).queryByText(/all OK/)).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+      return;
+    }
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    // The stations were read, so their verdict stands whatever the form read said.
+    expect(screen.queryByText(/Couldn’t read the stations/)).toBeNull();
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'activity' }, { number: 3, status: 'serviced' }]);
+    expect(within(stationsCard()).getByText('4 stations, 2 flagged, the rest OK')).toBeTruthy();
+    expect(within(stationsCard()).getByRole('button', { name: 'Station 2: Activity' })).toBeTruthy();
+    const recordCard = screen.getByRole('region', { name: 'Termite Bait Station Inspection record heard from you' });
+    if (expected.typedFilled) {
+      expect(within(recordCard).getByText('Previous feeding noted')).toBeTruthy();
+      const body = await send(request);
+      expect(body.termiteStations.filter((entry) => entry.touched)).toHaveLength(2);
+    } else {
+      // A typed read that failed keeps its own behavior: the card says so and
+      // the required fields are the tech's to pick, so the send is held on them.
+      expect(within(recordCard).getByText(/Couldn’t read your note for this just now/)).toBeTruthy();
+      expect(screen.getAllByText('Pick Termite activity: tap Change beside it.').length).toBeGreaterThan(0);
+      expect(sendButton().disabled).toBe(true);
+    }
+  }, 30000);
+});
