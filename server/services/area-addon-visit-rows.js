@@ -459,7 +459,9 @@ function editedAddOnPlan(visit, storedRowKeys, updates, posted) {
   const finalKeys = [ownKey, ...rowsAfter.map((line) => line.key)].filter(isAreaAddOnCatalogKey);
   const before = new Set([visit.service_key_snapshot, ...storedRowKeys]);
   const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
-  return { ownKey, rowsAfter, finalKeys, added, touched: posted !== null || ownKey !== visit.service_key_snapshot };
+  // A save that writes a primary price for a visit whose own service is an add-on touches the add-on too (a price-only edit).
+  const ownPriced = isAreaAddOnCatalogKey(ownKey) && updates.primary_line_price !== undefined;
+  return { ownKey, rowsAfter, finalKeys, added, touched: posted !== null || ownKey !== visit.service_key_snapshot || ownPriced };
 }
 
 // The lines the edit ADDS, each with the gross price the save writes. The visit's own service moved to an add-on is judged at
@@ -471,11 +473,14 @@ function addedAddOnLines(plan, updates) {
   return [...own, ...plan.rowsAfter.filter((line) => addedSet.has(line.key))];
 }
 
-// The visit's own add-on, kept by the edit, posted at a primary price other than the stored one.
-function keptOwnAddOnRepriced(plan, visit, updates) {
+// The visit's own add-on, kept by the edit, with a primary price written that is neither the one stored on the visit nor the
+// locked estimate's price for it (`sold`). A visit booked by the accept stores no primary price (only the total), so the
+// estimate is the reference then. A written blank price is a reprice too. No reference at all: nothing to judge.
+function keptOwnAddOnRepriced(plan, visit, updates, sold) {
   const kept = isAreaAddOnCatalogKey(plan.ownKey) && !plan.added.includes(plan.ownKey);
-  const both = updates.primary_line_price != null && visit.primary_line_price != null;
-  return kept && both && !samePrice(updates.primary_line_price, visit.primary_line_price);
+  if (!kept || updates.primary_line_price === undefined) return false;
+  const references = [visit.primary_line_price, sold.get(plan.ownKey)].filter((price) => price != null);
+  return references.length > 0 && !references.some((price) => samePrice(updates.primary_line_price, price));
 }
 
 const priceLocked = (key) => postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(key)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
@@ -510,9 +515,10 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   }
   // What the visit already carries keeps its price: an add-on is never repriced by hand (the rows, then the visit's own).
   await assertKeptAddOnRowPrices(trx, visitId, plan.rowsAfter.filter((line) => !plan.added.includes(line.key) && line.price !== undefined));
-  if (keptOwnAddOnRepriced(plan, visit, updates)) throw priceLocked(plan.ownKey);
+  const sold = soldAreaAddOnPrices(estimate);
+  if (keptOwnAddOnRepriced(plan, visit, updates, sold)) throw priceLocked(plan.ownKey);
   // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
-  if (estimate) assertCostCarrierKept(estimate, plan.finalKeys.map((key) => ({ key })), soldAreaAddOnPrices(estimate));
+  if (estimate) assertCostCarrierKept(estimate, plan.finalKeys.map((key) => ({ key })), sold);
   return result;
 }
 

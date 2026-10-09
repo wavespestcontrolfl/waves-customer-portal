@@ -14693,11 +14693,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       }
 
       // The edited visit's add-ons are judged at the destination as the save will leave them (its rows are replaced below).
-      if (addressPlan) {
-        addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId, {
-          editedVisit: { id: req.params.id, ownKey: updates.service_key_snapshot, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : undefined },
-        });
-      }
+      // (It rides the plan: `editedVisit`, read by appointment-address assertAreaAddOnLimitsAtDestination.)
+      if (addressPlan) addressPlan.editedVisit = { id: req.params.id, ownKey: updates.service_key_snapshot, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : undefined };
+      if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
       if (reassignSeenVisitId !== undefined) await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);
       if (assignmentShouldRun) {

@@ -85,7 +85,7 @@ async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId, e
   }
 }
 
-async function applyAppointmentAddress(trx, plan, actorId, { editedVisit = null } = {}) {
+async function applyAppointmentAddress(trx, plan, actorId) {
   const fresh = await planAppointmentAddress(trx, plan.anchor.id, plan.propertyId, plan.scope);
   const fingerprint = (p) => JSON.stringify(p.rows.map((row) => [row.id, row.customer_id, row.recurring_parent_id,
     row.property_id, dateOnly(row.scheduled_date), row.technician_id, row.visit_id, row.status]));
@@ -99,7 +99,7 @@ async function applyAppointmentAddress(trx, plan, actorId, { editedVisit = null 
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
-  await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, editedVisit);
+  await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, plan.editedVisit || null);
   const addressRows = locked.filter((row) => row.id === plan.anchor.id || (fresh.packageChildIds || []).includes(row.id)
     || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
   for (const visit of fresh.visits) {

@@ -289,7 +289,7 @@ describe('an address change rechecks every visit it moves, at the destination pr
   test('source: applyAppointmentAddress asks it on the locked rows, before any row is written', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-address.js'), 'utf8');
     const apply = src.slice(src.indexOf('async function applyAppointmentAddress('));
-    const ask = apply.indexOf('await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, editedVisit);');
+    const ask = apply.indexOf('await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, plan.editedVisit || null);');
     expect(ask).toBeGreaterThan(apply.indexOf('.forUpdate()'));
     expect(ask).toBeLessThan(apply.indexOf('const stamp = {'));
   });

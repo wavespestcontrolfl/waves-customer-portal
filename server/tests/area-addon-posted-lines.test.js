@@ -228,6 +228,19 @@ describe('Update Details: what the edit adds', () => {
       await expect(edit({ visit: own, estimate: only }, { updates: { primary_line_price: String(only.prices[WEB]) }, rowLines: [] })).resolves.toEqual({ keys: [WEB], added: [] });
     });
 
+    // Codex round 36: a price-only edit, and a visit the accept booked (no stored primary price: the estimate is the reference).
+    test('a price-only edit of a visit whose own service is an add-on is judged, against the estimate when no primary price is stored', async () => {
+      const only = estimateSelling([{ key: 'web_sweep' }]);
+      const accepted = visit({ service_key_snapshot: WEB, primary_line_price: null });
+      await expect(edit({ visit: accepted, estimate: only }, { updates: { primary_line_price: 5 }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_LOCKED' });
+      await expect(edit({ visit: accepted, estimate: only }, { updates: { primary_line_price: null }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_LOCKED' });
+      await expect(edit({ visit: accepted, estimate: only }, { updates: { primary_line_price: only.prices[WEB] }, rowKeys: null })).resolves.toEqual({ keys: [WEB], added: [] });
+      // a save that writes no primary price is still not an add-on edit: no estimate read
+      const calls = [];
+      await expect(edit({ visit: accepted, estimate: only, calls }, { updates: { notes: 'x' }, rowKeys: null })).resolves.toEqual({ keys: [WEB], added: [] });
+      expect(calls).not.toContain('estimates');
+    });
+
     test('the same add-on twice after the edit is refused', async () => {
       await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: both.prices, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: WEB, price: both.prices[WEB] }] }))
         .rejects.toMatchObject({ code: 'AREA_ADDON_DUPLICATE' });
