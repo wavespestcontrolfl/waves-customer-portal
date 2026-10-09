@@ -579,10 +579,11 @@ async function visitStatusReason(conn, signature, customerId, refs) {
   return unseen ? 'commitment_appeared' : null;
 }
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
-async function scheduleFactsReason(scheduleFacts, customerId) {
+async function scheduleFactsReason(scheduleFacts, customerId, dbh) {
   if (!customerId || typeof scheduleFacts.signature !== 'string' || !scheduleFacts.signature) return 'schedule_unverifiable';
   try {
-    const now = await require('./context-aggregator').upcomingScheduleSignature(customerId);
+    // on the caller's connection when it has one (the provider-boundary handoff transaction)
+    const now = await require('./context-aggregator').upcomingScheduleSignature(customerId, dbh || require('../models/db'));
     return now === scheduleFacts.signature ? null : 'schedule_changed';
   } catch (err) {
     // unreadable = the same retryable verdict as an unreadable open-loop read (never a retire)
@@ -605,7 +606,7 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
   // immediate send, the queued-send fire, the provider boundary) covers it. Fail closed.
   const scheduleFacts = objectOrNull(snapshot.schedule_facts);
   if (scheduleFacts) {
-    const reason = await scheduleFactsReason(scheduleFacts, customerId);
+    const reason = await scheduleFactsReason(scheduleFacts, customerId, dbh);
     if (reason) return reason;
   }
   if (!refs.length && !status) return null;

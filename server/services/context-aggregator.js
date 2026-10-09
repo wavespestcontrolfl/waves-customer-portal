@@ -907,8 +907,8 @@ function perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey) {
 // tracker was active. A customer with no live row, or whose live row is
 // already in the first three, gets EXACTLY the old rows in the old order.
 const LIVE_TRACK_STATES = ['en_route', 'on_property'];
-function upcomingServicesBase(customer) {
-  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
+function upcomingServicesBase(customer, conn = db) {
+  return conn('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
 }
 const UPCOMING_SERVICE_COLUMNS = [
   // series link for the texting AI's next-of-series identity (withSeriesKey)
@@ -940,8 +940,8 @@ const UPCOMING_SERVICE_COLUMNS = [
 // tracking page already shows the live vehicle — UPCOMING_SERVICE_STATUSES
 // would have excluded it. Terminal rows (completed / cancelled / skipped /
 // no_show) stay excluded: customerTrackState treats those as not live.
-function liveServicesQuery(customer) {
-  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
+function liveServicesQuery(customer, conn = db) {
+  return conn('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
     .where('ss.customer_id', customer.id)
     .where('ss.scheduled_date', etDateString())
     .whereIn('ss.track_state', LIVE_TRACK_STATES)
@@ -1000,10 +1000,16 @@ async function stampSeriesExclusive(customer, rows, baseQuery = upcomingServices
 // window_start + 2 h), so an internal window_end / duration edit does NOT change it; status
 // is left out (pending -> confirmed is not a schedule change; a terminal status drops the
 // row). Throws on a failed read: callers fail closed.
-async function upcomingScheduleSignature(customerId) {
+// The row set is the one the drafter can state (Codex #6232 r2): every upcoming visit PLUS
+// today's live-tracked rows loadUpcomingServices merges in (a live track_state with a status
+// outside the upcoming list). `conn`: the caller's connection or transaction — the provider
+// boundary rechecks inside a handoff transaction and must not ask the pool for another one.
+const SCHEDULE_SIGNATURE_COLUMNS = ['ss.id', 'ss.scheduled_date', 'ss.window_start', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name'];
+async function upcomingScheduleSignature(customerId, conn = db) {
   if (!customerId) return null;
-  const rows = await upcomingServicesBase({ id: customerId })
-    .select('ss.id', 'ss.scheduled_date', 'ss.window_start', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name');
+  const upcoming = await upcomingServicesBase({ id: customerId }, conn).select(...SCHEDULE_SIGNATURE_COLUMNS);
+  const live = await liveServicesQuery({ id: customerId }, conn).select(...SCHEDULE_SIGNATURE_COLUMNS);
+  const rows = [...new Map([...upcoming, ...live].map((r) => [String(r.id), r])).values()];
   const parts = rows
     .map((r) => [r.id, dateOnlyString(r.scheduled_date), module.exports.deriveWindow(r), r.service_type, r.technician_name].map((x) => (x == null ? '' : String(x))).join('|'))
     .sort();

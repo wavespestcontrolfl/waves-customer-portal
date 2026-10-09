@@ -96,6 +96,14 @@ describe('send seams: openLoopsBlockReason rechecks the stored schedule signatur
   };
   const decision = (snapshot) => ({ customer_id: 'c1', input_snapshot: JSON.stringify(snapshot) });
 
+  test('the recheck passes its own connection down', async () => {
+    const sig = jest.fn().mockResolvedValue('sig-1');
+    const checks = load(sig);
+    const trx = jest.fn();
+    await checks.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }), dbh: trx });
+    expect(sig).toHaveBeenCalledWith('c1', trx);
+  });
+
   test('unchanged schedule: no block; a moved, added or removed visit: schedule_changed', async () => {
     const same = load(async () => 'sig-1');
     expect(await same.openLoopsBlockReason({ decision: decision({ schedule_facts: STAMP }) })).toBeNull();
@@ -132,8 +140,13 @@ describe('send seams: openLoopsBlockReason rechecks the stored schedule signatur
 
 describe('upcomingScheduleSignature (context-aggregator)', () => {
   const rowsDb = (rows) => {
-    const q = { leftJoin: () => q, where: () => q, whereIn: () => q, whereNotIn: () => q, whereRaw: () => q, orderBy: () => q, select: async () => rows };
-    return jest.fn(() => q);
+    // two queries per signature: the upcoming list, then today's live-tracked rows (`live`)
+    let call = 0;
+    return jest.fn(() => {
+      const mine = call++ % 2 === 0 ? rows : (rows.live || []);
+      const q = { leftJoin: () => q, where: () => q, whereIn: () => q, whereNotIn: () => q, whereRaw: () => q, orderBy: () => q, select: async () => mine };
+      return q;
+    });
   };
   const sigFor = async (rows) => {
     jest.resetModules();
@@ -156,6 +169,28 @@ describe('upcomingScheduleSignature (context-aggregator)', () => {
     expect(await sigFor([visit({ window_end: '12:30:00' }), visit({ id: 'v2', scheduled_date: '2027-01-13' })])).toBe(a);
     expect(await sigFor([visit()])).not.toBe(a);
     expect(await sigFor([])).not.toBe(a);
+  });
+
+  test('a live-tracked row outside the upcoming list is part of the signature, once (Codex r2)', async () => {
+    const plain = await sigFor([visit()]);
+    const withLive = Object.assign([visit()], { live: [visit({ id: 'live-1', technician_name: 'Sam' })] });
+    const a = await sigFor(withLive);
+    expect(a).not.toBe(plain);
+    // the live row changing changes it
+    expect(await sigFor(Object.assign([visit()], { live: [visit({ id: 'live-1', technician_name: 'Alex' })] }))).not.toBe(a);
+    // a row in BOTH lists counts once
+    expect(await sigFor(Object.assign([visit()], { live: [visit()] }))).toBe(plain);
+  });
+
+  test('it reads on the connection it is given (the provider-boundary transaction), never the module pool (Codex r2 P1)', async () => {
+    jest.resetModules();
+    jest.dontMock('../services/context-aggregator');
+    const pool = jest.fn(() => { throw new Error('must not use the module pool'); });
+    jest.doMock('../models/db', () => pool);
+    const trx = rowsDb([visit()]);
+    expect(await require('../services/context-aggregator').upcomingScheduleSignature('c1', trx)).toMatch(/^[0-9a-f]{64}$/);
+    expect(trx).toHaveBeenCalledTimes(2);
+    expect(pool).not.toHaveBeenCalled();
   });
 
   test('no customer id: null, with no read', async () => {

@@ -6222,7 +6222,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // the signature of this customer's upcoming schedule, read BEFORE the drafting context for the
     // same reason as the fingerprint above. null = no card for a scheduling answer (gates off, no
     // customer, or an unreadable schedule).
-    const scheduleFacts = await draftScheduleFacts(customer);
+    const scheduleFacts = schedulingIntent ? await draftScheduleFacts(customer) : null; // scheduling texts only: no extra read for any other draft
     let context = await loadContext(includeLiveEta);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
