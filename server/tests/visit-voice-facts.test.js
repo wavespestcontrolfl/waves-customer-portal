@@ -800,6 +800,25 @@ describe('validateVoiceFacts: the web sweep', () => {
     expect(readSweep("Didn't have time to sweep the eaves.", { done: true, quote: 'sweep the eaves' })).toBeNull();
   });
 
+  test('the removal must be of the webs: a nest removed beside webs only seen is no sweep (Codex P2 on #6147)', () => {
+    const note = 'Removed a wasp nest and saw webs on the eaves.';
+    expect(readSweep(note, { done: true, quote: note })).toBeNull();
+    expect(readSweep('Swept the lanai and noticed webs on the eaves.', { done: true, quote: 'Swept the lanai and noticed webs on the eaves' })).toBeNull();
+    expect(readSweep('Removed the trash. Webs are on the eaves.', { done: true, quote: 'Removed the trash. Webs are on the eaves' })).toBeNull();
+    // The webs before their action still count.
+    expect(readSweep('Webs on the eaves were knocked down.', { done: true, quote: 'Webs on the eaves were knocked down' })).toEqual({ quote: 'webs on the eaves were knocked down' });
+  });
+
+  test('another day said of another action leaves today\'s sweep standing (Codex P2 on #6147)', () => {
+    expect(readSweep('Inspected the eaves last visit and swept the eaves today.', { done: true, quote: 'swept the eaves today' })).toEqual({ quote: 'swept the eaves today' });
+    expect(readSweep('Sprayed the perimeter last visit and swept the webs this time.', { done: true, quote: 'swept the webs' })).toEqual({ quote: 'swept the webs' });
+    // The sweep's own other day still is not today.
+    expect(readSweep('Swept the eaves and webs last visit.', { done: true, quote: 'Swept the eaves and webs' })).toBeNull();
+    expect(readSweep('Last visit we swept the eaves.', { done: true, quote: 'swept the eaves' })).toBeNull();
+    expect(readSweep('Last visit we sprayed and swept the eaves.', { done: true, quote: 'swept the eaves' })).toBeNull();
+    expect(readSweep('Swept the eaves, will spray tomorrow.', { done: true, quote: 'Swept the eaves' })).toEqual({ quote: 'swept the eaves' });
+  });
+
   test('webs only seen are not a sweep', () => {
     const note = 'Saw webs on the eaves and under the lanai. Sprayed the perimeter.';
     expect(said(note, 'Saw webs on the eaves')).toBeNull();
