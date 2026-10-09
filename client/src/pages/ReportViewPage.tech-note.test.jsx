@@ -53,6 +53,13 @@ describe('composeTechNote', () => {
     expect(screen.queryByText(/make a real difference|If you do one thing/)).toBeNull();
   });
 
+  it('a note made only of aftercare tips opens with an aftercare line (owner 2026-10-09)', () => {
+    const after = { id: 'dt_thin_is_normal', copy: 'The lawn looks thin for a few weeks.', source: 'library', aftercare: true };
+    expect(composeTechNote({ tips: [after], customerName: 'Pat', seed: 0 }).opener).toMatch(/^(Here is what to expect after this visit:|A quick note on what comes next:)$/);
+    // Beside an advice tip the note keeps the advice opener.
+    expect(composeTechNote({ tips: [TIPS[0], after], customerName: 'Pat', seed: 0 }).opener).toMatch(/^(Two things|A couple of things)/);
+  });
+
   it('varies across seeds and falls back without a name', () => {
     const greetings = new Set([0, 1, 2].map((seed) => composeTechNote({ tips: TIPS, customerName: 'Chris', seed }).greeting));
     expect(greetings.size).toBe(3);

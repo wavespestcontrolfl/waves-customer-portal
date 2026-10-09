@@ -33,6 +33,16 @@ const HEAD_PRECIP_RATE_IN_PER_HR = Object.freeze({
   rotor: 0.5,
 });
 
+// The Waves owner table (owner 2026-10-09): minutes a head type runs to put down a quarter inch. The lawn
+// watering banner prints minutes from this table; the lawn report's irrigation card derives weekly inches from the
+// SAME constant (OWNER_HEAD_RATE_IN_PER_HR, below), so the card and the banner cannot disagree. The package's own
+// table above stays the default for every other reader (portal preview, weekly email); a caller opts in with
+// deriveIrrigationInchesPerWeek(..., { rates: OWNER_HEAD_RATE_IN_PER_HR }).
+const OWNER_MINUTES_PER_QUARTER_INCH = Object.freeze({ spray: 15, rotor: 40 });
+const OWNER_HEAD_RATE_IN_PER_HR = Object.freeze(Object.fromEntries(
+  Object.entries(OWNER_MINUTES_PER_QUARTER_INCH).map(([head, minutes]) => [head, Math.round((0.25 / (minutes / 60)) * 1000) / 1000]),
+));
+
 const HEAD_LABELS = Object.freeze({
   spray: 'spray heads',
   rotor: 'rotor heads',
@@ -122,18 +132,21 @@ function normalizeHeadTypes(value) {
  *   'unknown_head_type' a type this table has no published rate for
  *   'implausible_total' the math exceeds MAX_INCHES_PER_WEEK — entry artifact
  */
-function deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType } = {}) {
+function deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType } = {}, { rates = HEAD_PRECIP_RATE_IN_PER_HR, ignoreDrip = false } = {}) {
   const minutes = positiveInt(runMinutes, MAX_RUN_MINUTES);
   const days = normalizeDays(wateringDays);
-  const heads = normalizeHeadTypes(systemType);
+  const allHeads = normalizeHeadTypes(systemType);
+  // ignoreDrip (opt-in, the lawn report): drip waters beds, so it is left out when counting turf head types, the way
+  // resolveApplicationRate and the watering banner already count them. Default: every recorded type counts.
+  const heads = ignoreDrip ? allHeads.filter((head) => head !== 'drip') : allHeads;
   const base = { inchesPerWeek: null, runMinutes: minutes, runsPerWeek: days.length, headType: null, rateInPerHr: null };
 
   if (minutes == null) return { ...base, reason: 'missing_minutes' };
   if (!days.length) return { ...base, reason: 'missing_days' };
-  if (!heads.length) return { ...base, reason: 'missing_head_type' };
-  if (heads.length === 1 && heads[0] === 'drip') return { ...base, reason: 'drip_only' };
+  if (!allHeads.length) return { ...base, reason: 'missing_head_type' };
+  if (!heads.length || (heads.length === 1 && heads[0] === 'drip')) return { ...base, reason: 'drip_only' };
   if (heads.length > 1) return { ...base, reason: 'mixed_head_types' };
-  const rate = HEAD_PRECIP_RATE_IN_PER_HR[heads[0]];
+  const rate = rates[heads[0]];
   if (rate == null) return { ...base, reason: 'unknown_head_type' };
 
   const inches = Math.round(((minutes / 60) * rate * days.length) * 100) / 100;
@@ -396,6 +409,8 @@ module.exports = {
   normalizeRuntimeInputs,
   DAY_ALIASES,
   HEAD_PRECIP_RATE_IN_PER_HR,
+  OWNER_MINUTES_PER_QUARTER_INCH,
+  OWNER_HEAD_RATE_IN_PER_HR,
   HEAD_LABELS,
   DAY_KEYS,
   MAX_RUN_MINUTES,

@@ -13,6 +13,15 @@
  *   granular  a granular visit: water-in amount with no sprinkler setup on file, a re-entry CONDITION
  *   clean     a clean visit: nothing for the customer to do
  *
+ * Two more for GATE_LAWN_REPORT_POLISH (the Water card's third state and one label line per product card), each
+ * written as `<name>-base.json` (the gate off: what prints today) and `<name>-polish.json` (the gate on):
+ *
+ *   mixed     rotor + spray + drip heads, 45 min, Mondays, no weekly inches: the third state ("45 min, Mondays")
+ *   single    one rotor head type (plus drip), 45 min, Mondays: a derived figure with its basis line
+ *   fourday   spray heads only, 15 min on four days, one spray product, no banner: a derived figure and the longer-cycles line
+ *   nothing   no irrigation entries at all: today's card ("Not on file"), the button moved to the Irrigation section
+ *   (both visits carry a granule watered in, a spray and a surfactant, so the product cards show the label lines)
+ *
  * Each is written twice: `<name>-off.json` (the payload with the layout gate off) and
  * `<name>-on.json` (the same payload plus the key the server adds while the gate is live).
  *
@@ -42,6 +51,10 @@ const { buildAftercare } = require('../server/services/service-report/lawn-repor
 const { lawnLayoutPayload } = require('../server/services/service-report/lawn-report-layout');
 const { buildReentryContextFromRecord } = require('../server/services/service-report/reentry');
 const facts = require('../server/services/service-report/lawn-report-facts');
+const { buildLawnWaterContext } = require('../server/services/service-report/report-data');
+const { mapWater } = require('../server/services/service-report/lawn-report-v2');
+const { lawnPolishPayload } = require('../server/services/service-report/lawn-report-polish');
+const { waterAdviceBlock, attachLongerCycles } = require('../server/services/service-report/lawn-longer-cycles');
 
 const COMPLETED_AT = '2026-10-09T14:56:39.602Z';
 const VISIT_DAY = '2026-10-09';
@@ -79,8 +92,8 @@ function setPlan(data) {
 
 // The banner and the aftercare note, built the way report-data builds them from the visit's frozen
 // watering instruction (no rules = no instruction = no banner).
-function attachBanner(data, rules, { amountOnly = false } = {}) {
-  const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED_AT, runtime: null, plainWhenNoSetup: amountOnly });
+function attachBanner(data, rules, { amountOnly = false, runtime = null } = {}) {
+  const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED_AT, runtime, plainWhenNoSetup: amountOnly });
   const banner = buildWateringBanner(instruction, null);
   if (banner && amountOnly) banner.setupLine = SETUP_INVITE_LINE;
   if (banner) data.reportV2.banner = banner; else delete data.reportV2.banner;
@@ -204,11 +217,117 @@ function write(name, data) {
   fs.writeFileSync(path.join(OUT_DIR, `${name}-on.json`), `${JSON.stringify(on, null, 2)}\n`);
 }
 
+
+// ── GATE_LAWN_REPORT_POLISH scenarios ───────────────────────────────────────
+// The catalog strings the cards really carry (migrations, approve-5.sql, reentry-9.sql).
+const DRY_LINE = 'Stay off treated areas until the application has dried.';
+const WATERED_IN_LINE = 'Stay off treated areas until the product has been watered in and the turf is dry.';
+const CATALOG = [
+  {
+    id: 'polish-row-granule', name: 'LESCO Dimension 0.21% 18-0-10', method: 'granular_broadcast', category: 'Fertilizer',
+    precaution: 'Granules on sidewalks or driveways are swept back into the turf. Water in with about ½ inch within 24 hours. People and pets can use the lawn once it has been watered in and the turf is dry.',
+    reentry: WATERED_IN_LINE, rule: { mode: 'water_in', water_in_inches: 0.5, water_in_hours: 24, source: 'label' },
+  },
+  {
+    id: 'polish-row-spray', name: 'Gravex 20 EW', method: 'broadcast_spray', category: 'Fungicide',
+    precaution: 'Per the product label: keep people and pets off treated areas until sprays have dried.',
+    reentry: DRY_LINE, rule: { mode: 'none', source: 'label' },
+  },
+  {
+    id: 'polish-row-surfactant', name: 'LESCO 90/10 Nonionic Surfactant', method: 'broadcast_spray', category: 'Surfactant',
+    precaution: 'Used only as part of a spray mix — the precautions of the products it is mixed with apply.',
+    reentry: DRY_LINE, rule: { mode: 'none', source: 'label' },
+  },
+];
+
+const factRow = (item) => ({
+  id: item.id,
+  application_method: item.method,
+  approved_report_product_facts: { wateringRule: item.rule, reentrySummary: item.reentry, precautionSummary: item.precaution },
+});
+
+// The water section exactly as the report builders make it from the customer's portal entries.
+function realWater(prefs, polish) {
+  if (polish) process.env.GATE_LAWN_REPORT_POLISH = 'true'; else delete process.env.GATE_LAWN_REPORT_POLISH;
+  const context = buildLawnWaterContext({ turfProfile: { grass_type: 'st_augustine' }, propertyPrefs: prefs, serviceDate: VISIT_DAY, completionRainfall7dInches: 1.2 });
+  const water = mapWater(context, null);
+  delete process.env.GATE_LAWN_REPORT_POLISH;
+  return water;
+}
+
+// The scenarios: the customer's portal entries and the products on the visit.
+const SPRAY_ONLY = [CATALOG[1]];
+const entries = (extra) => ({ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system: true, ...extra });
+const POLISH_SPECS = {
+  mixed: { catalog: CATALOG, prefs: entries({ irrigation_system_type: ['rotor', 'spray', 'drip'] }) },
+  single: { catalog: CATALOG, prefs: entries({ irrigation_system_type: ['rotor', 'drip'] }) },
+  fourday: { catalog: SPRAY_ONLY, prefs: entries({ irrigation_run_minutes: 15, watering_days: ['Mon', 'Tue', 'Thu', 'Fri'], irrigation_system_type: ['spray'] }) },
+  nothing: { catalog: CATALOG, prefs: null },
+};
+
+function polishVisit(base, { catalog, prefs, polish }) {
+  const data = clone(base);
+  setVisitDate(data);
+  setPlan(data);
+  setTreatment(data, catalog.map((item) => ({ name: item.name, activeIngredient: '', kind: 'fertilizer', focus: item.category, whatItDoes: '', targets: [], area: '4,800 sq ft' })));
+  data.applications = catalog.map((item) => {
+    const app = clone(base.applications[0]);
+    return {
+      ...app,
+      id: item.id,
+      method: item.method,
+      product: { ...app.product, name: item.name, category: item.category, facts_approved: true, precaution_summary: item.precaution, reentry_summary: item.reentry },
+      appliedAt: COMPLETED_AT,
+    };
+  });
+  data.reportV2.mowing = null;
+  data.reportV2.water = realWater(prefs, polish);
+  attachBanner(data, catalog.map((item) => ({ name: item.name, rule: item.rule })), {
+    runtime: prefs ? { runMinutes: prefs.irrigation_run_minutes, wateringDays: prefs.watering_days, headTypes: prefs.irrigation_system_type, explicitInchesPerWeek: null } : null,
+  });
+  // The facts block the lawn write gate freezes at completion (the label-lines and longer-cycles parts only while the
+  // gate is live), then the same read-back the report build does: the re-entry condition, the one-line precaution of
+  // each card, and the longer-cycles line (render-time conditions included).
+  const prefsRow = prefs ? { ...prefs, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null } : null;
+  const block = facts.buildReportFacts({
+    rows: catalog.map(factRow), run: null, assessment: null, techFindings: [], withTies: false, withLabelLines: polish,
+    waterAdvice: polish ? waterAdviceBlock(prefsRow, VISIT_DAY) : null, now: NOW,
+  });
+  const notes = { [facts.FREEZE_KEY]: block };
+  const drops = facts.frozenLabelDropsFor('lawn', JSON.stringify(notes));
+  data.applications.forEach((app) => { app.product.precaution_summary = facts.precautionForCard(drops, { id: app.id }, app.product.precaution_summary); });
+  attachLongerCycles(data.reportV2, facts.frozenLongerCycles('lawn', JSON.stringify(notes)));
+  const reentry = buildReentryContextFromRecord({
+    applications: [{ appliedAt: COMPLETED_AT, application_method: catalog[0].method }],
+    structured_notes: JSON.stringify(notes),
+    timezone: 'America/New_York',
+  }, NOW);
+  return finish(data, { reentry });
+}
+
+function writePolish(name, base) {
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  for (const polish of [false, true]) {
+    const data = polishVisit(base, { ...POLISH_SPECS[name], polish });
+    process.env.GATE_LAWN_REPORT_LAYOUT = 'true';
+    if (polish) process.env.GATE_LAWN_REPORT_POLISH = 'true';
+    const out = {
+      ...clone(data),
+      ...lawnLayoutPayload({ serviceLine: 'lawn', reportV2: data.reportV2, lawnAssessment: data.lawnAssessment, mowingHeight: null }),
+      ...lawnPolishPayload({ serviceLine: 'lawn', reportV2: data.reportV2 }),
+    };
+    delete process.env.GATE_LAWN_REPORT_LAYOUT;
+    delete process.env.GATE_LAWN_REPORT_POLISH;
+    fs.writeFileSync(path.join(OUT_DIR, `${name}-${polish ? 'polish' : 'base'}.json`), `${JSON.stringify(out, null, 2)}\n`);
+  }
+}
+
 function main() {
   const base = JSON.parse(fs.readFileSync(BASE, 'utf8'));
   write('spot', spot(base));
   write('granular', granular(base));
   write('clean', clean(base));
+  Object.keys(POLISH_SPECS).forEach((name) => writePolish(name, base));
   process.stdout.write(`Wrote fixtures to ${path.relative(ROOT, OUT_DIR)}\n`);
   process.exit(0);
 }
