@@ -576,6 +576,7 @@ router.get('/weather', async (req, res, next) => {
         fungus: calcFungusPressure(temp, humidity, nightTemp),
         chinch: calcChinchPressure(temp, humidity),
       },
+      irrigationRecommendation: calcIrrigation(temp, shortForecast, humidity),
       updatedAt: new Date().toISOString(),
     };
 
@@ -745,6 +746,17 @@ function calcChinchPressure(temp, humidity) {
   return { level: 'LOW', color: '#4CAF50', advice: 'Low chinch bug risk this period' };
 }
 
+// No current client reads irrigationRecommendation (the Local Conditions tile is gone, owner 2026-10-09). The field
+// stays in the response for portal pages and app sessions still running the older bundle, which would print
+// 0 inches without it. Remove it, with this function, in a later release.
+function calcIrrigation(temp, forecast, humidity) {
+  if (/rain|storm|shower/i.test(forecast)) return { inches: '0.00', note: 'Rain expected — skip irrigation today' };
+  if (temp >= 90 && humidity < 60) return { inches: '0.75', note: 'Hot and dry — water deeply in early morning' };
+  if (temp >= 85) return { inches: '0.50', note: 'Warm day — standard watering, early morning only' };
+  if (temp >= 75) return { inches: '0.35', note: 'Mild conditions — light watering if needed' };
+  return { inches: '0.25', note: 'Cool day — reduce irrigation to prevent overwatering' };
+}
+
 function buildFallbackWeather(place = WEATHER_FALLBACK_LOCATION, mosquito = null) {
   const month = new Date().getMonth();
   const isSummer = month >= 5 && month <= 9;
@@ -758,6 +770,7 @@ function buildFallbackWeather(place = WEATHER_FALLBACK_LOCATION, mosquito = null
       fungus: { level: 'MODERATE', color: '#FF9800', advice: 'Monitor for large patch' },
       chinch: isSummer ? { level: 'HIGH', color: '#E53935', advice: 'Watch sunny spots' } : { level: 'LOW', color: '#4CAF50', advice: 'Low risk' },
     },
+    irrigationRecommendation: isSummer ? { inches: '0.50', note: 'Standard summer watering' } : { inches: '0.35', note: 'Mild conditions' },
     updatedAt: new Date().toISOString(),
   };
 }
