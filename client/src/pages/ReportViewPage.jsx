@@ -970,7 +970,10 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // e.g. a mosquito/termite callback whose name contains "Re-Service");
   // the legacy pest wording would be false there (codex GH-r2 P1). The
   // regex remains only for payloads from before the gate / while dark.
-  if (!reservice && !data.reserviceGateOn && data.isCallback !== false && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+  // GATE_LAWN_REPORT_COPY_FIXES (the server sets lawnCopyFixes on a lawn report only): this header
+  // is the pest program's wording ("activity you reported", "knock activity down"), so a lawn
+  // report never takes this branch.
+  if (!reservice && !data.reserviceGateOn && data.isCallback !== false && data.lawnCopyFixes !== true && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
     return {
       heading: 'we came back and took care of it!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -10158,14 +10161,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
             See every product we use and our safety protocol
           </a>.
-          {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
+          {/* GATE_LAWN_REPORT_COPY_FIXES: the sentence and its booking link are the pest program's
+              re-service wording; a lawn report (server sets lawnCopyFixes) prints neither. */}
+          {(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard) && data.lawnCopyFixes !== true ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {/* Pair the sentence with a "book it" path. Server-gated boolean
               only (reserviceEligible) — the standing reservice_token must
               never ride this public, forwardable report payload, so the link
               goes to the AUTHENTICATED portal Schedule tab where the picker
               card renders behind login. Live view only — PDF/static/
               sms_preview keep the print pipeline byte-identical. */}
-          {data.reserviceEligible && mode === 'live' ? (
+          {data.reserviceEligible && mode === 'live' && data.lawnCopyFixes !== true ? (
             <>
               {' '}
               <a href="/?tab=schedule" style={{ color: '#04395E', fontWeight: 600 }}>Book a free re-service in your portal</a>.
