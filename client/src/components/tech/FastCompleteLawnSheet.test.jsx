@@ -3309,4 +3309,233 @@ describe('suggested from this lawn', () => {
     const group = await suggested();
     expect(within(group).getAllByRole('button')).toHaveLength(1);
   });
+  // ── take-all fungicide: preventive on MAPPED areas only (owner 2026-10-08) ─────────────────
+  // The month's take-all rows (Artavia in March and September, Headway in April and October) are never in
+  // the plain add-on list and no tap offers them. Once the guide has decided, the search alone reaches
+  // them (the deliberate way for a known mapped lawn), and the row it opens says so. A limit that was
+  // READ keeps one out of the search too. March, April and September put the take-all row first in the
+  // program order (a guide pick, released to the list when no finding holds it); October does not.
+  describe('take-all fungicide is reachable by the search only', () => {
+    const P_HEAD = 'cccccccc-0000-4000-8000-0000000000a1';
+    const HEAD_NOTE = 'Take-all fungicide is for mapped take-all areas only.';
+    const TA_CATALOG = [...GUIDE_CATALOG, { id: P_HEAD, name: 'Head Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 3, default_unit: 'fl_oz' }];
+    const MONTH_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    // [month, protocol line, is the take-all row also the guide's fungus pick]
+    const MONTHS = [
+      [3, 'Head Fungicide — mapped take-all areas, first spring application', true],
+      [4, 'Head Fungicide — mapped take-all areas, second spring application', true],
+      [9, 'Head Fungicide — mapped take-all areas, first fall application', true],
+      [10, 'Head Fungicide — mapped take-all areas, second fall application', false],
+    ];
+    const taContext = (month, line, pick) => guideContext({
+      plannedProducts: {
+        source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', line)], month, weedMix: WEED_MIX,
+        guidedProductIds: pick ? [P_HEAD, P_ACE, P_DISP] : [P_ART, P_ACE, P_DISP], takeAllProductIds: [P_HEAD], chinch: { item: ARENA_ITEM, note: null, rungIds: [P_ARENA, P_BIF] },
+      },
+    });
+    const inList = (month) => {
+      const group = screen.queryByRole('group', { name: `Also in ${MONTH_LONG[month - 1]}’s protocol` });
+      return !!group && !!within(group).queryByText('Head Fungicide');
+    };
+    const inSearch = async () => {
+      fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Head Fungicide' } });
+      try {
+        await waitFor(() => { if (!screen.queryByRole('button', { name: /^Head Fungicide/ })) throw new Error('none'); }, { timeout: 250 });
+        return true;
+      } catch { return false; }
+    };
+    const openTa = (month, line, pick) => openSheet({ request: makeRequest({ ctx: taContext(month, line, pick) }), props: { catalog: TA_CATALOG } });
+    const takeAllHeld = () => card('fungus', {
+      title: 'Fungus', finding: 'Photos show moderate fungus activity.', check: 'Check first: look at the blades and the edge of the patch.',
+      note: 'Take-all is treated on known trouble areas only. None is on file for this lawn.', heldProductIds: [P_HEAD], actionLabel: null,
+    });
+    const UNREAD_NOTE = 'The limits could not be checked. Use Search products for what you applied; the office will review it.';
+    const STATE_CASES = [
+      ['before the guide has decided', () => { guideAnswer = () => new Promise(() => {}); }, { list: false, search: false }],
+      ['no finding, nothing blocked', () => { answer([]); }, { list: false, search: true }],
+      ['a take-all check-only card', () => { answer([takeAllHeld()]); }, { list: false, search: true }],
+      ['a limit that was read forbids it', () => { answer([], WEED_MIX, { blockedProductIds: [P_HEAD] }); }, { list: false, search: false }],
+      ['the guide request failed', () => { guideAnswer = refusal(500, 'boom', 'Internal error'); }, { list: false, search: true }],
+      ['the limit could not be read', () => { answer([], WEED_MIX, { unreadableProductIds: [P_HEAD], unreadableNote: UNREAD_NOTE }); }, { list: false, search: true }],
+    ];
+    for (const [month, line, pick] of MONTHS) {
+      test.each(STATE_CASES)(`month ${month} (${pick ? 'a guide pick' : 'not a pick'}), %s`, async (_name, arrange, expected) => {
+        arrange();
+        await openTa(month, line, pick);
+        await analyze();
+        await waitFor(() => expect(document.querySelector('.tech-protocol-addons')).toBeTruthy());
+        if (_name !== 'before the guide has decided') await waitFor(() => expect(guideCalls()).toHaveLength(1));
+        expect(inList(month)).toBe(expected.list);
+        expect(await inSearch()).toBe(expected.search);
+      });
+    }
+
+    test('guide off: Head Fungicide is a plain add-on and searchable, as before', async () => {
+      await openSheet({ request: makeRequest({ ctx: guideContext({ treatmentGuide: false, plannedProducts: { source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', MONTHS[3][1])], month: 10, weedMix: WEED_MIX } }) }), props: { catalog: TA_CATALOG } });
+      await analyze();
+      expect(inList(10)).toBe(true);
+      expect(await inSearch()).toBe(true);
+    });
+
+    test('a take-all row added from the search says it is for mapped areas only, and Complete is not held by the guide', async () => {
+      answer([takeAllHeld()]);
+      await openTa(4, MONTHS[1][1], true);
+      await analyze();
+      await suggested();
+      await addProductByName('Head Fungicide');
+      expect(within(editorFor('Head Fungicide')).getByText(HEAD_NOTE)).toBeTruthy();
+      expect(footerNote()).not.toMatch(/not offered for this lawn/);
+    });
+
+    test('the check-only card still names no product to tap', async () => {
+      answer([takeAllHeld()]);
+      await openTa(10, MONTHS[3][1], false);
+      await analyze();
+      const group = await suggested();
+      expect(within(group).queryAllByRole('button')).toHaveLength(0);
+      expect(within(group).getByText('Take-all is treated on known trouble areas only. None is on file for this lawn.')).toBeTruthy();
+    });
+
+    test('a take-all row whose limit could not be read shows the unreadable-limit warning first, then the take-all note', async () => {
+      answer([], WEED_MIX, { unreadableProductIds: [P_HEAD], unreadableNote: UNREAD_NOTE });
+      await openTa(10, MONTHS[3][1], false);
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await addProductByName('Head Fungicide');
+      expect(within(editorFor('Head Fungicide')).getByText(`${UNREAD_NOTE} ${HEAD_NOTE}`)).toBeTruthy();
+    });
+
+    test('the fresh guide answer\'s take-all ids replace the context\'s once it settles', async () => {
+      // The context (read at open) knows no take-all row; the fresh answer (the plan as read now) names Head Fungicide.
+      answer([], WEED_MIX, { takeAllProductIds: [P_HEAD] });
+      await openSheet({ request: makeRequest({ ctx: guideContext({ plannedProducts: { ...taContext(10, MONTHS[3][1], false).plannedProducts, takeAllProductIds: [] } }) }), props: { catalog: TA_CATALOG } });
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(inList(10)).toBe(false));
+      expect(await inSearch()).toBe(true);
+    });
+
+    test('a fresh answer with no take-all row releases what the context named', async () => {
+      answer([], WEED_MIX, { takeAllProductIds: [] });
+      await openTa(10, MONTHS[3][1], false);
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(inList(10)).toBe(true));
+    });
+  });
+  // ── one soft prompt for a blade-and-crown close-up when the photos include a problem area ──
+  describe('the close-up prompt', () => {
+    const PROMPT = 'Add one close-up of the blades and crown at the edge of the damaged spot so the insect check can read it.';
+    const tagPhoto = (n, zone) => fireEvent.change(screen.getByLabelText(`Slot for photo ${n}`), { target: { value: zone } });
+    const addAnother = async (n) => {
+      fireEvent.change(screen.getByLabelText('Add turf photos'), { target: { files: [new File(['b'], `b${n}.jpg`, { type: 'image/jpeg' })] } });
+      await screen.findByLabelText(`Slot for photo ${n}`);
+    };
+
+    test('a photo tagged Problem area shows the prompt once; it never blocks Analyze', async () => {
+      await open();
+      await addPhoto();
+      expect(screen.queryByText(PROMPT)).toBeNull();
+      tagPhoto(1, 'trouble');
+      expect(await screen.findByText(PROMPT)).toBeTruthy();
+      expect(screen.getAllByText(PROMPT)).toHaveLength(1);
+      expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
+    });
+
+    test('another overview photo does not take it away; a photo tagged Blade and crown does, for the rest of the visit', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      await addAnother(2);
+      tagPhoto(2, 'front');
+      expect(screen.getByText(PROMPT)).toBeTruthy();
+      tagPhoto(2, 'blade_crown');
+      await waitFor(() => expect(screen.queryByText(PROMPT)).toBeNull());
+      // Taking the Blade and crown tag away again does not bring it back.
+      tagPhoto(2, 'back');
+      expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
+    test('Add close-up opens the photo picker with the shot set: the photo arrives tagged Blade and crown and the prompt closes', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      const input = screen.getByLabelText('Add turf photos');
+      const clicked = vi.spyOn(input, 'click');
+      fireEvent.click(screen.getByRole('button', { name: 'Add close-up' }));
+      expect(clicked).toHaveBeenCalledTimes(1);
+      fireEvent.change(input, { target: { files: [new File(['c'], 'c.jpg', { type: 'image/jpeg' })] } });
+      await screen.findByLabelText('Slot for photo 2');
+      expect(screen.getByLabelText('Slot for photo 2').value).toBe('blade_crown');
+      await waitFor(() => expect(screen.queryByText(PROMPT)).toBeNull());
+      // Analyze is still open to the tech, and the prompt does not come back.
+      expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
+    });
+
+    test('Add close-up is off while the Blade and crown shot is full or the photo cap is reached, as the slot button is', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      expect(screen.getByRole('button', { name: 'Add close-up' }).disabled).toBe(false);
+      for (let n = 2; n <= 8; n += 1) await addAnother(n);
+      expect(screen.getByRole('button', { name: 'Add close-up' }).disabled).toBe(true);
+    });
+
+    test('a Blade and crown photo already on the sheet means no prompt', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'blade_crown');
+      await addAnother(2);
+      tagPhoto(2, 'trouble');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
+    test('retagging the Problem area photo closes it for the visit: a second Problem area tag does not show it again', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      tagPhoto(1, 'front');
+      await waitFor(() => expect(screen.queryByText(PROMPT)).toBeNull());
+      tagPhoto(1, 'trouble');
+      expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
+    test('Dismiss takes it away', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
+    test('Analyze then Retake: a new Problem area photo does not show it a second time', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+      await screen.findByLabelText('Density score');
+      expect(screen.queryByText(PROMPT)).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+      await screen.findByTestId('lawn-shot-list');
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
+    test('guide off: the sheet shows no prompt', async () => {
+      await open(guideContext({ treatmentGuide: false }, null));
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByTestId('lawn-close-up-prompt')).toBeNull();
+    });
+  });
 });
