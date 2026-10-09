@@ -47,6 +47,7 @@ const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../confi
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
+const { resolveRateTable, storedRateTable, rateOptionsForTable } = require('./irrigation-rates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts, lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
@@ -224,7 +225,7 @@ const TECH_SCHEDULE_NOTE = "That schedule came from our records rather than from
  * customer's own entries run through a published head rate — say so, and
  * say which rate, so the customer can overrule it with a real number.
  */
-function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = false }) {
+function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = false, rateTable = undefined }) {
   if (scheduleSource !== 'portal_derived' || !derived) return TECH_SCHEDULE_NOTE;
   // A rain sensor can skip programmed runs in a wet week. Which runs it
   // skipped is unknowable (threshold and hold time are not on file), so the
@@ -234,7 +235,9 @@ function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = 
   const sensorClause = rainSensor
     ? ' Since you have a rain sensor, some of those runs may have been skipped after rain — this figure assumes the full schedule ran, so read it as the most your system would have applied.'
     : '';
-  return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate from University of Florida turf guidance (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
+  // The owner table is not UF's: with GATE_IRRIGATION_OWNER_RATES on the sentence drops the attribution.
+  const rateSource = rateTable === 'owner' ? '' : ' from University of Florida turf guidance';
+  return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate${rateSource} (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
 }
 
 const lastCompletedWeekEnding = lastCompletedWeekEndingET;
@@ -417,8 +420,12 @@ function decideWeeklyEmail({
   // Jurisdiction for the restriction policy (resolveRestrictionCounty).
   county = null,
   weekPlanEnabled = false,
+  // Head rate table ('owner' | 'package') for this decision. Omitted = a NEW decision, so the live
+  // GATE_IRRIGATION_OWNER_RATES picks it; a replay of a stored plan passes the stored table (storedRateTable).
+  rateTable = undefined,
   now = new Date(),
 } = {}, rawArgs = {}) {
+  const table = resolveRateTable(rateTable);
   // Same fallback chain, same precedence, as the lawn report's
   // buildLawnWaterContext (report-data.js): PORTAL ENTRY WINS, then a
   // tech-recorded turf-profile reading, then the latest assessment. The two
@@ -436,7 +443,7 @@ function decideWeeklyEmail({
   // tech reading — but their explicit inches number always outranks it: the
   // head rate is a published typical, not a measurement of their system.
   const runtimeInputs = normalizeRuntimeInputs({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
-  const derived = deriveIrrigationInchesPerWeek({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType });
+  const derived = deriveIrrigationInchesPerWeek({ runMinutes: irrigationRunMinutes, wateringDays, systemType: irrigationSystemType }, rateOptionsForTable(table));
   // A toggle turned OFF means the runtime entries describe a system the
   // customer says is not running — no figure may be derived from them, and
   // any tech reading falls through as before. (A typed inches value keeps
@@ -630,7 +637,7 @@ function decideWeeklyEmail({
         total_inches: totalFmt,
         target_inches: targetFmt,
         summary_line: neutralLead,
-        schedule_note: buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor: rainSensor === true || rainSensor === 't' }),
+        schedule_note: buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor: rainSensor === true || rainSensor === 't', rateTable: table }),
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -709,6 +716,7 @@ function decideWeeklyEmail({
       priorWeekEvents,
       priorWeekPrescribedInches,
       rainOnlyCarryover: scheduleUnconfirmed,
+      rateTable: table,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -721,6 +729,7 @@ function decideWeeklyEmail({
       omitRateNote: scheduleSource === 'portal_derived',
       omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
       scheduleUnconfirmed,
+      rateTable: table,
     });
     // No plan to render (no policy in force) for an unconfirmed schedule:
     // never fall through with the former home's payload — re-enter the
@@ -771,7 +780,7 @@ function decideWeeklyEmail({
       // summary quotes the full programmed amount as "received", and a
       // sensor may have skipped some of it (codex #3478 r13 / #3565 r5).
       const provenance = scheduleSource === 'portal_derived' && !scheduleUnconfirmed
-        ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: sensorOn })
+        ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: sensorOn, rateTable: table })
         : '';
       const planNote = [planCopy.plan_note, provenance].filter(Boolean).join(' ');
       const planReason = plan.action === 'hold' ? 'plan_hold' : (plan.conditionalOnForecast ? 'plan_conditional' : 'plan_run');
@@ -1119,13 +1128,19 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
 }
 
 // Shared customer/home normalization for the sender and saved-plan validation.
-function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now }) {
+// `rateTable` pins the head rate table ('owner' | 'package') the decision is built on: a replay passes the STORED table,
+// the sweep pins the live one once per customer. Omitted = a NEW decision: the live gate is read ONCE here, and that one
+// table feeds both the move guard below and (through the returned `rateTable`) the decision, so the two can never
+// disagree about a runtime near the plausibility ceiling.
+function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined }) {
+  const table = resolveRateTable(rateTable);
   // After a move, every NON-NULL sizing field must have been re-saved
   // (irrigation_confirmed_fields, reset by the move, accrues one field
   // per portal autosave) before any of them sizes an instruction — a
   // single re-saved field, a non-sizing irrigation edit, or the row-wide
   // updated_at never re-confirms the rest (codex gh-r20/r21).
-  const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
+  // The move guard derives with the decision's own table (a replay: the stored one), never a second read of the gate.
+  const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer, table);
   const priorWeekEvents = priorWeek ? priorWeek.events : null;
   const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
   return {
@@ -1170,6 +1185,7 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
     // The restriction must cover the WHOLE plan week (through this Sunday).
     planWeekEnd,
+    rateTable: table,
     now,
   };
 }
@@ -1187,6 +1203,8 @@ function replayWeekPlanForCustomer(snapshot, current) {
       weekPlanEnabled: true,
       planWeekEnd: inputs.planWeekEnd,
       now: new Date(snapshot.planAsOf),
+      // The stored table, never the live gate: a gate flip after publication must not change a published decision.
+      rateTable: storedRateTable(inputs),
     }),
     forecastRainInches: inputs.forecastRainInches,
     forecastEt0Inches: inputs.forecastEt0Inches,
@@ -1371,7 +1389,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         const currentDecision = snapshotArgs
           ? replayWeekPlanForCustomer(snapshotArgs, current)
           : buildWeeklyEmailDecision({
-            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now }),
+            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now, rateTable: decisionInputs.rateTable }),
             forecastRainInches, forecastEt0Inches,
           });
         if (!currentDecision || !isDeepStrictEqual(currentDecision.payload, decision.payload)) {
@@ -1664,6 +1682,8 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         : weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
       const decisionInputs = weeklyInputsForCustomer(customer, {
         weekEnding, weekWeather, priorWeek, weekPlanEnabled, planWeekEnd, now: saved ? new Date(saved.planAsOf) : planAsOf,
+        // A published row keeps the table it was decided on; a new decision pins today's gate once for every pass below.
+        rateTable: frozen ? storedRateTable(frozen) : resolveRateTable(),
       });
       // Replay already validated this premise and the current settings. Keep
       // its saved spelling so a formatting edit cannot change the claim hash.

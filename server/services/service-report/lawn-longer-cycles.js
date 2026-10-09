@@ -28,6 +28,7 @@
 const { normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
 const { sodHolds } = require('../lawn-sod-holds');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
+const { liveRateTable } = require('../irrigation-rates');
 
 const MIN_WATERING_DAYS = 3;
 
@@ -59,7 +60,8 @@ function longerCyclesDecision(prefs, visitDate) {
   // After an address change the row can still hold the former home's schedule, which the report withholds until the
   // customer confirms a new one: the same guard the report uses, applied at completion, fails closed (a permanent
   // record never carries advice built from another house).
-  if (scheduleUnconfirmedAfterMove(prefs)) return false;
+  // LIVE by design: decided once at completion and FROZEN in the record (waterAdviceBlock); later reads use the frozen answer.
+  if (scheduleUnconfirmedAfterMove(prefs, liveRateTable())) return false;
   const days = normalizeRuntimeInputs({ wateringDays: prefs.watering_days }).wateringDays;
   return days.length >= MIN_WATERING_DAYS && sodIsEstablished(prefs, visitDate);
 }
