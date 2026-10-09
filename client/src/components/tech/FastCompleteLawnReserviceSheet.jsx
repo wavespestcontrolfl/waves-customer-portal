@@ -465,10 +465,10 @@ function completionBody({ form, rows, ctx }) {
   };
 }
 
-export default function FastCompleteLawnReserviceSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, voiceFillEnabled = false }) {
+export default function FastCompleteLawnReserviceSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
@@ -496,7 +496,7 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   const locked = submissionHolds(submission);
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
       <SheetHeader titleId={titleId} title={done ? 'Lawn re-service complete' : 'Complete lawn re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} />
     </FastCompleteFrame>

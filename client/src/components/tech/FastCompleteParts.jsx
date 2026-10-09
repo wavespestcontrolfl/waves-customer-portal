@@ -129,12 +129,16 @@ export function customerNameOf(visit, service) {
 // dialog (a photo manager opened over the sheet); `hiddenProps` makes the
 // dialog inert while it is up.
 // `dialogClassName` (the lawn sheet): a class on the dialog, for its scoped look.
-export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, children }) {
+// `suspended` (owner 2026-10-09): the appointment details sheet is open over
+// this visit. The sheet stays mounted, so everything entered is kept, but it is
+// hidden and inert until Details closes.
+export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, suspended = false, children }) {
   const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
     <UiSurface
       density="touch"
+      {...(suspended ? { style: { display: 'none' }, 'aria-hidden': true, inert: '' } : {})}
       className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onDismiss(); }}
     >

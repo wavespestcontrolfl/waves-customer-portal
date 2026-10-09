@@ -172,10 +172,10 @@ function EstimateLine({ summary, service }) {
   );
 }
 
-export default function FastCompleteAssessmentSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails }) {
+export default function FastCompleteAssessmentSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
@@ -202,6 +202,7 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
 
   return (
     <FastCompleteFrame
+      suspended={suspended}
       isMobile={isMobile}
       dialogRef={dialogRef}
       titleId={titleId}

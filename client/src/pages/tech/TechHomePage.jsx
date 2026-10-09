@@ -343,6 +343,14 @@ export default function TechHomePage({ section = 'today' }) {
   // edit) a Fast Complete sheet's Details pill opens (owner 2026-10-09):
   // the same sheet Dispatch opens, over the same /admin/schedule row.
   const [detailService, setDetailService] = useState(null);
+  // A fast sheet left mounted (suspended) behind the details sheet; plain
+  // Close returns to it, a change to the visit closes it (owner 2026-10-09).
+  const fastSheetBehindDetails = !!(detailService && (fastCompleteService || treeShrubFastService || lawnReserviceFastService));
+  const closeFastSheetsBehindDetails = () => {
+    setFastCompleteService(null);
+    setTreeShrubFastService(null);
+    setLawnReserviceFastService(null);
+  };
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -1025,13 +1033,10 @@ export default function TechHomePage({ section = 'today' }) {
             // form is retired (codex local r1 on #5629).
             openTypedCompletion(raw);
           }}
-          // Details: the appointment details sheet (quick move, cancel,
-          // reschedule, price edit), as the sheets on Dispatch open.
-          onViewDetails={() => {
-            const raw = fastCompleteService;
-            setFastCompleteService(null);
-            setDetailService(raw);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(fastCompleteService)}
+          suspended={!!detailService}
         />
       )}
 
@@ -1065,13 +1070,10 @@ export default function TechHomePage({ section = 'today' }) {
             setTreeShrubFastService(null);
             openTypedCompletion(raw);
           }}
-          // Details: the appointment details sheet (quick move, cancel,
-          // reschedule, price edit), as the sheets on Dispatch open.
-          onViewDetails={() => {
-            const raw = treeShrubFastService;
-            setTreeShrubFastService(null);
-            setDetailService(raw);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(treeShrubFastService)}
+          suspended={!!detailService}
         />
       )}
 
@@ -1107,13 +1109,10 @@ export default function TechHomePage({ section = 'today' }) {
             setLawnReserviceFastService(null);
             openTypedCompletion(raw);
           }}
-          // Details: the appointment details sheet (quick move, cancel,
-          // reschedule, price edit), as the sheets on Dispatch open.
-          onViewDetails={() => {
-            const raw = lawnReserviceFastService;
-            setLawnReserviceFastService(null);
-            setDetailService(raw);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          suspended={!!detailService}
         />
       )}
 
@@ -1128,13 +1127,16 @@ export default function TechHomePage({ section = 'today' }) {
           // A move only refreshes: the sheet closes itself after a clean move
           // and keeps Quick Move open on a partial, not-texted or overlap
           // result so its warning stays readable (as Dispatch does).
-          onCancelled={() => { setDetailService(null); fetchSchedule(); }}
-          onRescheduled={() => { fetchSchedule(); }}
-          onBillingChanged={() => { setDetailService(null); fetchSchedule(); }}
-          // Complete from the details sheet: back into this visit's own sheet.
+          // A move, cancel or billing change also closes the fast sheet behind
+          // Details: that visit changed, so its entries must not complete it.
+          onCancelled={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          onRescheduled={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
+          onBillingChanged={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          // Complete from the details sheet: back to the fast sheet behind it,
+          // entries intact, or into this visit's own sheet when none is open.
           onCompleteService={(svc) => {
             setDetailService(null);
-            openServiceReport(svc);
+            if (!fastSheetBehindDetails) openServiceReport(svc);
           }}
           // Edit, checkout, treatment plan and book-next live on Dispatch;
           // the sheet reopens there (?appointment=, DispatchPageV2) with

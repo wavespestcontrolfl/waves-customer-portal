@@ -930,6 +930,19 @@ export default function DispatchPageV2({
   // mounted here uses it for the same escape.
   // A Fast Complete sheet's own close: put the sheet away, and refresh the
   // schedule when the sheet says its row may be stale.
+  // A fast sheet left mounted (suspended) behind the appointment details sheet
+  // (owner 2026-10-09). Plain Close returns to it; any action that changes the
+  // visit or leaves for another screen (move, cancel, billing, edit, checkout,
+  // treatment plan, book next) closes it too, so it never completes a stale row.
+  const fastSheetBehindDetails = !!(detailService && (pestFastService || treeShrubFastService
+    || lawnReserviceFastService || lawnFastService || assessmentFastService));
+  const closeFastSheetsBehindDetails = () => {
+    setPestFastService(null);
+    setTreeShrubFastService(null);
+    setLawnReserviceFastService(null);
+    setLawnFastService(null);
+    setAssessmentFastService(null);
+  };
   const closeFastSheet = (setSheetService) => (options) => {
     setSheetService(null);
     if (options?.refresh) {
@@ -2105,13 +2118,11 @@ export default function DispatchPageV2({
             setTreeShrubFastService(null);
             handleComplete(service, { fullForm: true });
           }}
-          // Details: the appointment details sheet (quick move, cancel,
-          // reschedule, price edit), as the lawn sheet's Details pill opens.
-          onViewDetails={() => {
-            const service = treeShrubFastService;
-            setTreeShrubFastService(null);
-            setDetailService(service);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(treeShrubFastService)}
+          suspended={!!detailService}
         />
       )}
       {lawnReserviceFastService && (
@@ -2137,13 +2148,11 @@ export default function DispatchPageV2({
             setLawnReserviceFastService(null);
             handleComplete(service, { fullForm: true });
           }}
-          // Details: the appointment details sheet (quick move, cancel,
-          // reschedule, price edit), as the lawn sheet's Details pill opens.
-          onViewDetails={() => {
-            const service = lawnReserviceFastService;
-            setLawnReserviceFastService(null);
-            setDetailService(service);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          suspended={!!detailService}
         />
       )}
       {lawnFastService && (
@@ -2168,13 +2177,11 @@ export default function DispatchPageV2({
             setLawnFastService(null);
             handleComplete(service, { fullForm: true });
           }}
-          // Details: the appointment details sheet (price, reschedule, cancel),
-          // the same one the full form's Details pill opens.
-          onViewDetails={() => {
-            const service = lawnFastService;
-            setLawnFastService(null);
-            setDetailService(service);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnFastService)}
+          suspended={!!detailService}
         />
       )}
       {assessmentFastService && (
@@ -2214,13 +2221,11 @@ export default function DispatchPageV2({
             setAssessmentFastService(null);
             handleComplete(service, { fullForm: true });
           }}
-          // Details: the appointment details sheet (quick move, cancel,
-          // reschedule, price edit), as the lawn sheet's Details pill opens.
-          onViewDetails={() => {
-            const service = assessmentFastService;
-            setAssessmentFastService(null);
-            setDetailService(service);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(assessmentFastService)}
+          suspended={!!detailService}
         />
       )}
       {pestFastService && (
@@ -2247,13 +2252,11 @@ export default function DispatchPageV2({
             setPestFastService(null);
             handleComplete(service, { fullForm: true });
           }}
-          // Details: the appointment details sheet (quick move, cancel,
-          // reschedule, price edit), as the lawn sheet's Details pill opens.
-          onViewDetails={() => {
-            const service = pestFastService;
-            setPestFastService(null);
-            setDetailService(service);
-          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive, and comes back
+          // when Details closes (owner 2026-10-09).
+          onViewDetails={() => setDetailService(pestFastService)}
+          suspended={!!detailService}
         />
       )}
       {projectService && (
@@ -2516,10 +2519,12 @@ export default function DispatchPageV2({
           adminActions={verifiedRole === "admin"}
           onClose={() => setDetailService(null)}
           onEdit={(svc) => {
+            closeFastSheetsBehindDetails();
             setDetailService(null);
             setEditingService(svc);
           }}
           onTreatmentPlan={(svc) => {
+            closeFastSheetsBehindDetails();
             // Same trap as onReviewCheckout: TreatmentPlanPanel renders inline
             // (fixed z-1000) and would mount behind this body-level portaled
             // detail sheet. Close the detail sheet first. (Only this in-detail
@@ -2529,6 +2534,7 @@ export default function DispatchPageV2({
             setTreatmentPlanService(svc);
           }}
           onReviewCheckout={(svc) => {
+            closeFastSheetsBehindDetails();
             // Close the detail sheet before opening checkout. The detail sheet
             // portals to document.body (z-100), while the checkout sheet renders
             // inline in this tree (z-105) where an ancestor stacking context
@@ -2540,12 +2546,19 @@ export default function DispatchPageV2({
             setCheckoutService(svc);
           }}
           onCompleteService={(svc) => {
+            // Complete from Details over an open fast sheet: back to that sheet,
+            // its entries intact, rather than opening a second completion.
+            if (fastSheetBehindDetails) {
+              setDetailService(null);
+              return;
+            }
             setDetailService(null);
             if (shouldReopenCompletionAfterPayment(svc)) {
               handleComplete(svc);
             }
           }}
           onBookNext={(svc) => {
+            closeFastSheetsBehindDetails();
             setDetailService(null);
             setNewApptDefaults({
               customer: {
@@ -2564,6 +2577,7 @@ export default function DispatchPageV2({
             setShowNewAppt(true);
           }}
           onBillingChanged={() => {
+            closeFastSheetsBehindDetails();
             // The annual-prepay switch rewrote this visit's money state (lane,
             // attached invoice — possibly under a NEW invoice id after an
             // abort's restore). The open sheet still holds the pre-switch
@@ -2575,6 +2589,7 @@ export default function DispatchPageV2({
             setScheduleRefreshKey((k) => k + 1);
           }}
           onCancelled={() => {
+            closeFastSheetsBehindDetails();
             // Silent only while the project editor is mounted underneath —
             // ordinary day-row sheets keep the loud gate so a failed
             // refresh can't quietly leave the pre-mutation row active
@@ -2596,6 +2611,7 @@ export default function DispatchPageV2({
             );
           }}
           onRescheduled={async () => {
+            closeFastSheetsBehindDetails();
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.
             setScheduleRefreshKey((k) => k + 1);

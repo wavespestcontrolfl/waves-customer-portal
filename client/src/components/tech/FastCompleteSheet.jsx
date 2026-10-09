@@ -526,11 +526,11 @@ function prepareFor(service, onPrepared) {
   return plain ? onPrepared : () => { throw new Error(PREPARE_REFUSAL); };
 }
 
-export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, onViewDetails, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
+export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
-  const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!embedded && !suspended, () => closeRef.current?.());
   useLockBodyScroll(!embedded);
   const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
   // As a part of a stop, every write the sheet sends is counted as work in flight (see useWriteTracking).
@@ -601,6 +601,7 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
 
   return (
     <Frame
+      suspended={suspended}
       isMobile={isMobile}
       dialogRef={dialogRef}
       titleId={titleId}

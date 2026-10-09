@@ -477,10 +477,10 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
   };
 }
 
-export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails }) {
+export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
@@ -508,7 +508,7 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
   const locked = submissionHolds(submission);
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
       <SheetHeader titleId={titleId} title={done ? 'Tree & shrub complete' : 'Complete tree & shrub'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
     </FastCompleteFrame>
