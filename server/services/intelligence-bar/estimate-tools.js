@@ -3199,7 +3199,9 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
 
     if (lead.estimate_id) {
       const existing = await trx('estimates').where({ id: lead.estimate_id }).first();
-      if (existing?.status === 'draft' && existing?.source === 'estimator_engine') {
+      // An archived draft is never reused (the revise path refuses it): the
+      // creation path below replaces the stale link.
+      if (existing?.status === 'draft' && existing?.source === 'estimator_engine' && !existing.archived_at) {
         const existingData = parseStoredJson(existing.estimate_data);
         if (existingData?.estimatorEngine?.origin === 'manual_agent') {
           // Leave the phone-lock transaction before revising the row in its

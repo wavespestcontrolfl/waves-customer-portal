@@ -137,8 +137,11 @@ function sameProperty(pair) {
 // counts only when the customer opened the estimate (viewed_at). Its time
 // is the EARLIER of attemptedAt and viewed_at: a later suppressed resend
 // overwrites attemptedAt, but the first view never moves.
-const SENT_CHANNELS_SQL = (alias) => `(jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
-  AND jsonb_array_length(${alias}.estimate_data #> '{deliveryState,sentChannels}') > 0
+// CASE, not AND: Postgres may evaluate AND arms in any order, and
+// jsonb_array_length throws on a non-array value.
+const SENT_CHANNELS_SQL = (alias) => `(jsonb_array_length(
+    CASE WHEN jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
+      THEN ${alias}.estimate_data #> '{deliveryState,sentChannels}' ELSE '[]'::jsonb END) > 0
   AND ${alias}.viewed_at IS NOT NULL)`;
 // Shape AND validity: the shape regex alone lets an ISO-looking but invalid
 // value abort the whole candidate query at the cast, and pg_input_is_valid

@@ -385,6 +385,8 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const bad = await customer();
     const replaced = await estimate(bad, { createdAt: minutesAgo(200) });
     await estimate(bad, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { lastDeliveredAt: '2026-not-a-date', attemptedAt: '2026-also-bad', sentChannels: ['sms'] } }, viewed_at: minutesAgo(80) });
+    // A non-array sentChannels on an unrelated estimate must not break the sweep either.
+    await estimate(bad, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), viewed_at: minutesAgo(80), data: { deliveryState: { sentChannels: { sms: true } } } });
     // An invalid claim timestamp on a draft is a dead claim, not a query error.
     const badClaim = await estimate(bad, { createdAt: minutesAgo(200), data: { estimatorEngine: { delivering_at: '2026-not-a-date' } } });
     // 'infinity' is a valid timestamptz but not an application timestamp: not a delivery, not a live claim.
