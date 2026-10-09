@@ -169,6 +169,16 @@ describe('findReusableTreatmentZone', () => {
       expect(knex.state.wheres).toEqual(expect.arrayContaining([['scheduled_services as ss', 'null', 'ss.property_id']]));
     });
 
+    test('does not match another unit at the same street address', async () => {
+      const here = { addr_line1: '1 Example Ln', addr_line2: 'Unit 2', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' };
+      const otherUnit = makeKnex({ candidates: [{ ...sameAddress, addr_line2: 'Unit 5' }], here });
+      expect(await findReusableTreatmentZone(NO_PROP, { knex: otherUnit })).toBeNull();
+      const noUnit = makeKnex({ candidates: [{ ...sameAddress, addr_line2: null }], here });
+      expect(await findReusableTreatmentZone(NO_PROP, { knex: noUnit })).toBeNull();
+      const sameUnit = makeKnex({ candidates: [{ ...sameAddress, addr_line2: 'unit  2' }], here });
+      expect((await findReusableTreatmentZone(NO_PROP, { knex: sameUnit }))?.sourceServiceId).toBe('svc-0');
+    });
+
     test('does not match a different address', async () => {
       const knex = makeKnex({ candidates: [{ ...sameAddress, addr_line1: '99 Other St' }] });
       expect(await findReusableTreatmentZone(NO_PROP, { knex })).toBeNull();

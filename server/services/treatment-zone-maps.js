@@ -417,7 +417,8 @@ function addressKey(parts) {
   const clean = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
   const line1 = clean(parts.line1);
   if (!line1) return null;
-  return [line1, clean(parts.city), clean(parts.state), clean(parts.zip).slice(0, 5)].join('|');
+  // The unit is part of the place: two units at one street address are two homes.
+  return [line1, clean(parts.line2), clean(parts.city), clean(parts.state), clean(parts.zip).slice(0, 5)].join('|');
 }
 
 // The address STAMPED on the visit only, never the customer's current one: a
@@ -426,6 +427,7 @@ function addressKey(parts) {
 // stamped address has no fixed place, so it neither gives nor takes a trace.
 const EFFECTIVE_ADDRESS_COLUMNS = () => [
   'ss.service_address_line1 as addr_line1',
+  'ss.service_address_line2 as addr_line2',
   'ss.service_address_city as addr_city',
   'ss.service_address_state as addr_state',
   'ss.service_address_zip as addr_zip',
@@ -435,7 +437,7 @@ async function visitAddressKey(knex, scheduledServiceId) {
   const row = await knex('scheduled_services as ss')
     .where('ss.id', scheduledServiceId)
     .first(...EFFECTIVE_ADDRESS_COLUMNS());
-  return row ? addressKey({ line1: row.addr_line1, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) : null;
+  return row ? addressKey({ line1: row.addr_line1, line2: row.addr_line2, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) : null;
 }
 
 // The newest offerable trace for `visit` (a scheduled_services row with id,
@@ -496,7 +498,7 @@ function reuseRowMatches(row, visit, visitDate, hereAddress) {
     || !(Number(row.linear_ft) > 0)) return false;
   if (visit.property_id) return String(row.source_property_id ?? '') === String(visit.property_id);
   return !row.source_property_id
-    && addressKey({ line1: row.addr_line1, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) === hereAddress;
+    && addressKey({ line1: row.addr_line1, line2: row.addr_line2, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) === hereAddress;
 }
 
 function dateOnlyOrNull(value) {
