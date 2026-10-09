@@ -10640,7 +10640,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       ? String(existingAppointmentRow.id)
       : (slotId ? null : await linkedScheduledServiceId(estimate));
     // A sold area add-on needs a visit to ride on: the /book fallback link creates none of its add-on rows.
-    assertAreaAddOnsHaveAppointment(estimate, Boolean(slotId || existingAppointmentId || acceptLinkedSsId));
+    // A visit only linked to the estimate (the fallback above) is financial scope, not an adopted visit: it gets no add-on rows,
+    // so it does not count. The page sends existingAppointmentId for a visit it shows.
+    assertAreaAddOnsHaveAppointment(estimate, Boolean(slotId || existingAppointmentId));
     // resolveDepositPolicyForEstimate adds the LIVE plan-customer fallback
     // (legacy customer-linked estimates have no membershipSnapshot) and
     // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
@@ -19931,7 +19933,7 @@ function assertAreaAddOnsAcceptedOneTime(estimate, treatAsOneTime) {
 }
 
 // Throws the 400 AREA_ADDON_APPOINTMENT_REQUIRED for an accept of an estimate that carries an area add-on and
-// names no appointment (no slot, no adopted visit, no visit already booked from it). Without a visit the sold
+// names no appointment (no slot, no adopted visit). Without a visit this accept books or adopts, the sold
 // add-on gets no add-on row, so its limit recheck, governed rate and closeout would never run.
 function assertAreaAddOnsHaveAppointment(estimate, hasAppointment) {
   const mapper = require('../services/pricing-engine/v1-legacy-mapper');

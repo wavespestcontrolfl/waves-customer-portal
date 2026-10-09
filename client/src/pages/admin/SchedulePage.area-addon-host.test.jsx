@@ -169,10 +169,10 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
     expect(within(blockText()).getByLabelText("Product used for Bed Pre-Emergent Weed Control")).toBeInTheDocument();
   });
 
-  it("the completion asks for an add-on row's rate, unit and treated square feet before it submits, except on an incomplete visit", () => {
+  it("the completion asks for an add-on row's rate, unit and treated square feet before it submits; an incomplete visit skips only the ordinary row checks", () => {
     const call = pageSource.indexOf("completionProductRowProblem(service, selectedProducts, typeFor)");
     expect(call).toBeGreaterThan(0);
-    expect(pageSource.slice(call - 60, call)).toContain("isIncompleteVisit ? null :");
+    expect(pageSource.slice(call - 80, call)).toContain("isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) :");
     expect(pageSource.indexOf("setSubmitting(true);", call) - call).toBeLessThan(300);
     // the one helper: the method's treated-area rule first (unchanged sentence), then the add-on row's actuals
     const helper = pageSource.slice(pageSource.indexOf("function completionProductRowProblem("), pageSource.indexOf("function productApplicationMethod("));

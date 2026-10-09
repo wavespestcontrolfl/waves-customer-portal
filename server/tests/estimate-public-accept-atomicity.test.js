@@ -4281,6 +4281,7 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
     });
 
     // Codex round 19 on #6135: with no appointment the accept would hand back the generic /book link, which writes no add-on row.
+    // Round 20: a visit merely linked to the estimate does not count either (only a slot or an adopted visit gets the add-on rows).
     test('area add-on accepted in one-time mode with no appointment -> coded 400 before any write', async () => {
       const prior = process.env.GATE_AREA_ADDONS;
       process.env.GATE_AREA_ADDONS = 'true';

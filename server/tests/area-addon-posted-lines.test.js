@@ -92,7 +92,9 @@ describe('the staff booking transaction asks it of the locked row, before anythi
 
   test('the posted lines are the visit\'s own service and each add-on line with its gross price', () => {
     expect(postedAreaAddOnLines({ primaryServiceKey: WEB, addonLines: [{ serviceKey: BED, base: 99, price: 89 }, { serviceKey: null, base: null }] }))
-      .toEqual([{ key: WEB }, { key: BED, price: 99 }, { key: null, price: null }]);
+      .toEqual([{ key: WEB, price: null }, { key: BED, price: 99 }, { key: null, price: null }]);
+    // Codex round 20: the visit's own service carries its gross price too, so a primary add-on at a stale price is refused.
+    expect(postedAreaAddOnLines({ primaryServiceKey: WEB, primaryBase: 89, addonLines: [] })).toEqual([{ key: WEB, price: 89 }]);
   });
 
   test('source order: the locked read, then the guard, then the first insert; the locked row carries pricing_authority', () => {

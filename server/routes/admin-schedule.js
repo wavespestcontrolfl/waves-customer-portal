@@ -2032,10 +2032,10 @@ async function assertLockedEstimateAddOns(trx, estimate, { billingTerm, customer
   });
 }
 
-// The visit's own service and each add-on line of a staff booking as the area add-on guard reads them (catalog key; the add-on
-// line's gross price): area-addon-visit-rows assertPostedAreaAddOnsSold.
+// The visit's own service and each add-on line of a staff booking as the area add-on guard reads them (catalog key; the gross
+// price of the line, the visit's own included: a primary add-on booked at a stale price is refused too): area-addon-visit-rows assertPostedAreaAddOnsSold.
 const postedAreaAddOnLines = (pricing) => [
-  { key: pricing.primaryServiceKey },
+  { key: pricing.primaryServiceKey, price: pricing.primaryBase ?? null },
   ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base })),
 ];
 
