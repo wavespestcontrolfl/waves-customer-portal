@@ -280,6 +280,15 @@ const toCount = (v) => (v === null || v === undefined || v === '' || !Number.isF
  *   openai     usage.{input_tokens, input_tokens_details.cached_tokens, output_tokens, output_tokens_details.reasoning_tokens}
  *   gemini     usageMetadata.{promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount}
  */
+// A Managed Agents session reports cache writes only as the per-TTL object
+// (`cache_creation: { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens }`),
+// with no `cache_creation_input_tokens` total. Null when there is no object,
+// so a provider that reports neither stays "unknown", not zero.
+function cacheCreationTotal(cacheCreation) {
+  if (!cacheCreation || typeof cacheCreation !== 'object') return null;
+  return Object.values(cacheCreation).reduce((sum, v) => sum + (Number(v) || 0), 0);
+}
+
 function extractUsage(provider, data) {
   const out = { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null };
   try {
@@ -288,7 +297,7 @@ function extractUsage(provider, data) {
       if (!u || typeof u !== 'object') return out;
       out.input_tokens = toCount(u.input_tokens);
       out.cached_input_tokens = toCount(u.cache_read_input_tokens);
-      out.cache_write_tokens = toCount(u.cache_creation_input_tokens);
+      out.cache_write_tokens = toCount(u.cache_creation_input_tokens ?? cacheCreationTotal(u.cache_creation));
       out.output_tokens = toCount(u.output_tokens);
     } else if (provider === 'openai') {
       const u = data?.usage;
@@ -741,7 +750,9 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
           policyLabel: lane || `anthropic/${model || 'session'}`,
           provider: 'anthropic',
           requestedModel: model,
-          servedModel: session.model,
+          // a session names its model on the agent it ran (`agent.model.id`);
+          // it has no top-level `model`
+          servedModel: session.agent?.model?.id || session.model,
           ok: !errorCode,
           errorCode,
           tokens,
