@@ -149,18 +149,21 @@ function EstimateLine({ summary, service }) {
   const canOpen = useCanOpenEstimates();
   const line = estimateLineOf(summary);
   if (!line) return null;
+  // Open needs the estimate's id, which only an admin's answer carries. Create
+  // prefills the visit's FULL address (the sheet's own `address` is the short
+  // display line, and the estimate tool looks the property up by this text).
   const href = line.kind === 'found'
-    ? adminEstimateHref(line.estimateId)
+    ? (line.estimateId ? adminEstimateHref(line.estimateId) : null)
     : customerEstimateHref({
       id: service?.routedCustomerId,
       name: service?.customerName,
-      address: service?.address,
+      address: service?.fullAddress || service?.address,
       phone: service?.customerPhone,
     });
   return (
     <section className="tech-visit-card" aria-label="Estimate">
       <p className="tech-visit-muted" role="status">{line.text}</p>
-      {canOpen && (
+      {canOpen && href && (
         <a href={href} target="_blank" rel="noopener noreferrer">
           {line.kind === 'found' ? 'Open estimate' : 'Create estimate'}
         </a>

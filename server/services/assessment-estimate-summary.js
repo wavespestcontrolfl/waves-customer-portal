@@ -50,23 +50,35 @@ const COLUMNS = [
   'archived_at', 'created_at', 'expires_at', 'viewed_at', 'estimate_slug', 'estimate_data',
 ];
 
-function isLive(row, now = new Date()) {
+// May this estimate be shown as current. The same two verdicts, in the same
+// order, as the customer payload (routes/estimate-public.js GET /:token/data):
+// first the durable CALL-SIDE verdict (callSideBlockForEstimateData: an
+// engine-drafted estimate whose call was rejected, repointed, is missing or is
+// still being reprocessed, even when no marker reached the estimate row), then
+// the estimate-side rule. That handler runs its staff-preview, document-pin
+// and group-link bypasses between the two, so the pair is called here as it is
+// there rather than pulled out of it.
+async function isLive(conn, row, now = new Date()) {
   const status = String(row.status || '');
+  const { isEstimateCustomerViewable, parseEstimateDataSafe } = require('../routes/estimate-public');
+  const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+  if (await callSideBlockForEstimateData(conn, parseEstimateDataSafe(row), { estimateStatus: row.status })) return false;
   if (status === 'declined') return false;
-  const { isEstimateCustomerViewable } = require('../routes/estimate-public');
   return isEstimateCustomerViewable(UNSENT_STATUSES.includes(status) ? { ...row, status: 'sent' } : row, now);
 }
 const iso = (value) => (value ? new Date(value).toISOString() : null);
 
-function summaryOf(row) {
+// `identify`: only an admin gets the estimate's id and number. A technician's
+// answer carries nothing that names the estimate: an id is a handle to the
+// estimate routes a technician can still reach, and the sheet shows a
+// technician no link anyway.
+function summaryOf(row, { identify }) {
   const { latestHandoffAt } = require('./call-commitments');
   return {
-    id: row.id,
-    slug: row.estimate_slug || null,
+    ...(identify ? { id: row.id, slug: row.estimate_slug || null } : {}),
     status: String(row.status || ''),
     // The last real handoff; null when nothing reached the customer.
     sentAt: iso(latestHandoffAt(row)),
-    createdAt: iso(row.created_at),
   };
 }
 
@@ -92,7 +104,7 @@ async function candidateIds(conn, visit, now) {
   return [...ids];
 }
 
-async function assessmentEstimateSummary(visit, { conn = db, now = new Date() } = {}) {
+async function assessmentEstimateSummary(visit, { conn = db, now = new Date(), identify = false } = {}) {
   if (!visit || !visit.customer_id) return { state: 'none' };
   try {
     const ids = await candidateIds(conn, visit, now);
@@ -101,9 +113,12 @@ async function assessmentEstimateSummary(visit, { conn = db, now = new Date() } 
     const { HANDOFF_COLS } = require('./call-commitments');
     const rows = await conn('estimates').whereIn('id', ids).where({ customer_id: visit.customer_id })
       .select([...HANDOFF_COLS(conn), ...COLUMNS]);
-    const live = rows.filter((row) => isLive(row, now));
+    const live = [];
+    for (const row of rows) {
+      if (await isLive(conn, row, now)) live.push(row);
+    }
     if (live.length > 1) return { state: 'ambiguous' };
-    if (live.length === 1) return { state: 'found', estimate: summaryOf(live[0]) };
+    if (live.length === 1) return { state: 'found', estimate: summaryOf(live[0], { identify }) };
     if (!rows.length) return { state: 'none' };
     // Only dead estimates: say the newest one's status, never its price.
     const newest = [...rows].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];

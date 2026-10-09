@@ -58,8 +58,12 @@ async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
 // admin reads any visit. One definition for every guarded read in this router;
 // each caller aliases its visit table as `ss`. The three predicates travel
 // together and their text is pinned (technician-scope-r8-sweep.test.js).
+// The one "is this an admin request" for this router: an admin skips the
+// assignment scope below and is the only role given an estimate's identity.
+const isAdminRequest = (req) => req.techRole === 'admin';
+
 function scopeToCurrentAssignment(q, req) {
-  if (req.techRole !== 'admin') {
+  if (!isAdminRequest(req)) {
     q.where('ss.technician_id', req.technicianId)
       .whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
       .where('ss.scheduled_date', '>=', techAccessCutoff());
@@ -89,7 +93,7 @@ router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmi
       followUpAt,
       recordedBy: req.technician?.name || req.technicianId || null,
       actingTechnicianId: req.technicianId || null,
-      actingIsAdmin: req.techRole === 'admin',
+      actingIsAdmin: isAdminRequest(req),
     }, { trx: db });
 
     res.json({ outcome: saved });
@@ -156,7 +160,7 @@ router.get('/:scheduledServiceId/estimate', adminAuthenticate, requireTechOrAdmi
     if (!(await require('../services/assessment-booking').isAssessmentBooking(visit))) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const estimate = await require('../services/assessment-estimate-summary').assessmentEstimateSummary(visit);
+    const estimate = await require('../services/assessment-estimate-summary').assessmentEstimateSummary(visit, { identify: isAdminRequest(req) });
     res.json({ estimate });
   } catch (err) {
     next(err);

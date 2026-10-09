@@ -416,6 +416,30 @@ describe('the estimate line', () => {
     expect(screen.queryByRole('link')).toBeNull();
   });
 
+  // A technician's answer carries no estimate id or number (the server withholds them).
+  test.each([
+    ['sent', { status: 'sent', sentAt: '2026-10-03T14:00:00.000Z' }, 'Estimate sent Oct 3'],
+    ['draft', { status: 'draft', sentAt: null }, 'Estimate draft, not sent yet'],
+  ])('a technician\'s %s line renders without an estimate id, and has no link', async (_label, estimate, text) => {
+    mockRole = 'technician';
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate } }));
+    expect(await screen.findByText(text)).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('an admin answer with no id offers no dead Open link', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'found', estimate: { status: 'sent', sentAt: '2026-10-03T14:00:00.000Z' } } }));
+    expect(await screen.findByText('Estimate sent Oct 3')).toBeTruthy();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('Create estimate prefills the visit\'s full address, not the short display line', async () => {
+    await openSheet(makeRequest({ estimate: { state: 'none' } }), { ...SERVICE, address: '123 Main St', fullAddress: '123 Main St, Bradenton, FL 34201' });
+    await screen.findByText('No estimate yet');
+    const href = screen.getByRole('link', { name: 'Create estimate' }).getAttribute('href');
+    expect(new URL(href, 'http://x').searchParams.get('address')).toBe('123 Main St, Bradenton, FL 34201');
+  });
+
   test('a technician with no estimate sees "No estimate yet" and no Create estimate link', async () => {
     mockRole = 'technician';
     await openSheet(makeRequest({ estimate: { state: 'none' } }));

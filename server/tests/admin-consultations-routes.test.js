@@ -307,7 +307,8 @@ describe('GET /:scheduledServiceId/estimate (Fast Complete estimate line)', () =
     const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ estimate: { state: 'found', estimate: { id: 'est-1' } } });
-    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID }));
+    // A technician's read asks for no estimate identity.
+    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID }), { identify: false });
   });
 
   test('a technician reassigned right after the ownership check gets 403 and no estimate fields', async () => {
@@ -327,7 +328,7 @@ describe('GET /:scheduledServiceId/estimate (Fast Complete estimate line)', () =
     mockEstimateSummary.mockResolvedValue({ state: 'none' });
     const res = await call('get', `/api/admin/consultations/${ID}/estimate`);
     expect(res.status).toBe(200);
-    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID, customer_id: 'cust-1' }));
+    expect(mockEstimateSummary).toHaveBeenCalledWith(expect.objectContaining({ id: ID, customer_id: 'cust-1' }), { identify: true });
   });
 
   test.each([['technician'], ['admin']])('a visit that is not a Waves Assessment is 404 for %s, and no estimate is read', async (role) => {

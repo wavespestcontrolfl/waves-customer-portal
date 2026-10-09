@@ -74,7 +74,8 @@ export function estimateStatusLabel(estimate) {
 export function estimateLineOf(summary) {
   if (!summary) return null;
   if (summary.state === 'found' && summary.estimate) {
-    return { kind: 'found', estimateId: summary.estimate.id, text: estimateStatusLabel(summary.estimate) };
+    // The id comes only in an admin's answer; a technician's line has none.
+    return { kind: 'found', estimateId: summary.estimate.id || null, text: estimateStatusLabel(summary.estimate) };
   }
   if (summary.state === 'none') return { kind: 'none', text: 'No estimate yet' };
   if (summary.state === 'retired') {

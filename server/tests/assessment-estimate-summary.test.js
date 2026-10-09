@@ -19,7 +19,8 @@ const { assessmentEstimateSummary: readSummary } = require('../services/assessme
 const NOW = new Date('2026-10-09T15:00:00.000Z');
 const DAY = 86400000;
 const at = (days) => new Date(NOW.getTime() + days * DAY).toISOString();
-const assessmentEstimateSummary = (visit, opts = {}) => readSummary(visit, { now: NOW, ...opts });
+// An admin's read unless a test says otherwise (`identify: false` = a technician's).
+const assessmentEstimateSummary = (visit, opts = {}) => readSummary(visit, { now: NOW, identify: true, ...opts });
 
 const VISIT = { id: 'visit-1', customer_id: 'cust-1', source_estimate_id: null };
 const row = (over = {}) => ({
@@ -32,9 +33,15 @@ const row = (over = {}) => ({
 });
 
 // A conn whose estimates table answers the two reads the service makes.
-function makeConn({ linked = [], rows = [] } = {}) {
+function makeConn({ linked = [], rows = [], calls = {} } = {}) {
   const reads = [];
   const conn = jest.fn((table) => {
+    // The call-side verdict's one lookup, only for an engine-drafted estimate.
+    if (table === 'call_log') {
+      let id;
+      const q = { where: (f) => { id = f.id; return q; }, first: async () => calls[id] || null };
+      return q;
+    }
     expect(table).toBe('estimates');
     const state = { filters: [] };
     const chain = {
@@ -71,7 +78,6 @@ describe('assessmentEstimateSummary', () => {
     expect(out.state).toBe('found');
     expect(out.estimate).toEqual({
       id: 'est-1', slug: 'EST-2026-0001', status: 'sent', sentAt: at(-5),
-      createdAt: at(-7),
     });
     expect(JSON.stringify(out)).not.toMatch(/secret-token|token/);
     // The link is read for THIS visit and customer.
@@ -88,8 +94,57 @@ describe('assessmentEstimateSummary', () => {
   ])('%s: no amount of any kind leaves the server', async (_label, over) => {
     const out = await assessmentEstimateSummary(VISIT, { conn: makeConn({ linked: ['est-1'], rows: [row(over)] }) });
     expect(out.state).toBe('found');
-    expect(Object.keys(out.estimate).sort()).toEqual(['createdAt', 'id', 'sentAt', 'slug', 'status']);
+    expect(Object.keys(out.estimate).sort()).toEqual(['id', 'sentAt', 'slug', 'status']);
     expect(JSON.stringify(out)).not.toMatch(/50|59|100|249|600|708|total|monthly|perApp/i);
+  });
+
+  // An estimate id is a handle to the estimate routes a technician can still
+  // reach, so only an admin's answer names the estimate.
+  describe('a technician\'s answer (identify: false) names no estimate', () => {
+    const handles = /est-1|EST-2026|secret-token|"id"|"slug"/;
+    test.each([
+      ['a sent estimate', row(), { state: 'found', estimate: { status: 'sent', sentAt: at(-5) } }],
+      ['a draft', row({ status: 'draft', sent_at: null, handed_off_at: null, expires_at: null }), { state: 'found', estimate: { status: 'draft', sentAt: null } }],
+      ['a retired estimate', row({ status: 'declined' }), { state: 'retired', status: 'declined' }],
+    ])('%s', async (_label, estimate, expected) => {
+      const out = await assessmentEstimateSummary(VISIT, { conn: makeConn({ linked: ['est-1'], rows: [estimate] }), identify: false });
+      expect(out).toEqual(expected);
+      expect(JSON.stringify(out)).not.toMatch(handles);
+    });
+
+    test('the default is the technician\'s answer', async () => {
+      const out = await readSummary(VISIT, { conn: makeConn({ linked: ['est-1'], rows: [row()] }), now: NOW });
+      expect(out.estimate).not.toHaveProperty('id');
+      expect(out.estimate).not.toHaveProperty('slug');
+    });
+  });
+
+  // The call-side verdict comes first, as on the customer payload: an
+  // engine-drafted estimate blocked on its call is not current even though the
+  // estimate row itself reads as a viewable sent estimate.
+  describe('the call-side verdict', () => {
+    const engineRow = (over = {}) => row({ estimate_data: { estimatorEngine: { callLogId: 'call-1' } }, ...over });
+
+    test('an estimate whose call row is gone is not the current estimate', async () => {
+      const conn = makeConn({ linked: ['est-1'], rows: [engineRow()] });
+      expect(await assessmentEstimateSummary(VISIT, { conn })).toEqual({ state: 'retired', status: 'withdrawn' });
+    });
+
+    test('a blocked estimate is not counted toward "ambiguous": the other live one is shown', async () => {
+      const conn = makeConn({ linked: ['est-1', 'est-2'], rows: [engineRow(), row({ id: 'est-2' })] });
+      const out = await assessmentEstimateSummary(VISIT, { conn });
+      expect(out.state).toBe('found');
+      expect(out.estimate.id).toBe('est-2');
+    });
+
+    test('an engine-drafted estimate whose settled call carries no block is still current', async () => {
+      const conn = makeConn({
+        linked: ['est-1'], rows: [engineRow()],
+        calls: { 'call-1': { metadata: {}, processing_token: null, processing_status: 'processed', extraction_attempts: 1, created_at: at(-8), twilio_call_sid: null } },
+      });
+      const out = await assessmentEstimateSummary(VISIT, { conn });
+      expect(out.state).toBe('found');
+    });
   });
 
   test('a draft shows no sent date', async () => {
