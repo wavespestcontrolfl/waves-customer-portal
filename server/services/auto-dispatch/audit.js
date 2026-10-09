@@ -146,39 +146,129 @@ async function completeRun(runId, { status, totals, error = null }) {
   } catch (_) { /* non-critical */ }
 }
 
+// Close admin cards of one key family whose visit no longer matches. Retires
+// even if staff already acknowledged the card: the shared deduper needs changed
+// content to reopen a later recurrence. Skips resolved cards so repeated
+// recovery passes do not rewrite history. `stillOpen` adds the family's own
+// conditions to the correlated "visit still matches" subquery.
+async function retireResolvedNotices({ keyPattern, stillOpen, resolvedTitle, resolution, body }, nowDate) {
+  await db('notifications')
+    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+    .whereNot('title', resolvedTitle)
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [keyPattern])
+    .whereNotExists(function stillMatches() {
+      this.select('s.id').from('scheduled_services as s')
+        .join('customers as c', 'c.id', 's.customer_id')
+        .where('c.active', true)
+        .whereNull('c.deleted_at')
+        .whereRaw("s.id::text = notifications.metadata->>'scheduledServiceId'");
+      stillOpen(this);
+    })
+    .update({
+      ...require('../notification-service')._private.doneColumns({
+        by: 'auto-dispatch', resolution, at: nowDate, keepExisting: true, conn: db,
+      }),
+      title: resolvedTitle,
+      body,
+      // The alert's original instruction was stored as the full text; a
+      // resolved row must not keep it behind "Show full text".
+      detail: null,
+    });
+}
+
+// How far ahead a recurring visit with no arrival time and no due date raises
+// a notice: far enough to set a time in dispatch before the lock window.
+const NO_WINDOW_HORIZON_DAYS = 45;
+
+// Recurring children that have neither an arrival window nor a due date, so
+// auto-dispatch cannot place them and nothing else would tell staff.
+function noWindowVisits(conn, from, to) {
+  return conn('scheduled_services as s')
+    .join('customers as c', 'c.id', 's.customer_id')
+    .where('s.is_recurring', true)
+    .whereNotNull('s.recurring_parent_id')
+    .whereNull('s.window_start')
+    .whereNull('s.recurring_dispatch_due_date')
+    .whereIn('s.status', ['pending', 'confirmed'])
+    .where('s.scheduled_date', '>=', from)
+    .where('s.scheduled_date', '<=', to)
+    .where('c.active', true)
+    .whereNull('c.deleted_at');
+}
+
+async function retireNoWindowNotices(nowDate, today) {
+  await retireResolvedNotices({
+    keyPattern: 'recurring-no-window:%',
+    stillOpen: (sub) => sub
+      .whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'")
+      .where('s.is_recurring', true)
+      .whereNotNull('s.recurring_parent_id')
+      .whereNull('s.window_start')
+      .whereNull('s.recurring_dispatch_due_date')
+      .where('s.scheduled_date', '>=', today)
+      .whereIn('s.status', ['pending', 'confirmed']),
+    resolvedTitle: 'Recurring visit time alert resolved',
+    resolution: 'The visit now has an arrival time, or is no longer waiting on one for that date',
+    body: 'This visit no longer needs an arrival time set.',
+  }, nowDate);
+}
+
+// One notice per windowless recurring visit. Same row lock + shared dedupe as
+// the due-date notice, so a staff placement that wins the lock makes this a no-op.
+async function flagNoWindowVisits(today, to) {
+  const { shortDateET } = require('../admin-alert-names');
+  const rows = await noWindowVisits(db, today, to)
+    .select('s.id', 's.customer_id', 's.scheduled_date');
+  let flagged = 0;
+  for (const row of rows) {
+    const date = toDateStr(row.scheduled_date);
+    const notice = await db.transaction(async (trx) => {
+      const current = await noWindowVisits(trx, today, to)
+        .where({ 's.id': row.id, 's.customer_id': row.customer_id, 's.scheduled_date': date })
+        .forNoKeyUpdate('s')
+        .first('s.id');
+      if (!current) return null;
+      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+        area: 'Schedule',
+        action: 'set an arrival time for a recurring visit',
+        why: `The ${shortDateET(`${date}T12:00:00Z`)} visit has no arrival time; set one in dispatch so it can be placed.`,
+        severity: 'needs-you',
+        link: `/admin/dispatch?tab=schedule&date=${date}`,
+        subject: { type: 'visit', id: String(row.id) },
+        doneWhen: 'visit_has_arrival_time',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: `recurring-no-window:${row.id}:${date}`,
+        refreshOnDedupe: true,
+        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date },
+        trx,
+      });
+      if (!inserted) throw new Error(`Recurring no-window notice could not be recorded for ${row.id}`);
+      return inserted;
+    });
+    if (notice) flagged += 1;
+  }
+  return flagged;
+}
+
 // Include skipped/locked rows: unplaced due dates must not disappear behind
 // eligibility filters or the run cap. The existing bell dedupes repeated runs.
 async function flagUnplacedVisits(config, nowDate = new Date()) {
   const { etDateString, addETDays } = require('../../utils/datetime-et');
   const { toDateStr } = require('./dates');
-  // Retire obsolete content even if staff already acknowledged the card:
-  // the shared deduper needs changed content to reopen a later recurrence.
-  // Skip resolved cards so repeated recovery passes do not rewrite history.
-  const resolvedTitle = 'Recurring placement alert resolved';
-  await db('notifications')
-    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
-    .whereNot('title', resolvedTitle)
-    .whereRaw("metadata->>'dedupeKey' LIKE ?", ['recurring-dispatch:%'])
-    .whereNotExists(function stillUnplaced() {
-      this.select('s.id').from('scheduled_services as s')
-        .join('customers as c', 'c.id', 's.customer_id')
-        .where('c.active', true)
-        .whereNull('c.deleted_at')
-        .whereRaw("s.id::text = notifications.metadata->>'scheduledServiceId'")
-        .whereRaw("s.recurring_dispatch_due_date::text = notifications.metadata->>'dueDate'")
-        .whereNull('s.window_start')
-        .whereIn('s.status', ['pending', 'confirmed']);
-    })
-    .update({
-      ...require('../notification-service')._private.doneColumns({
-        by: 'auto-dispatch', resolution: 'The visit is no longer awaiting placement', at: nowDate, keepExisting: true, conn: db,
-      }),
-      title: resolvedTitle,
-      body: 'This visit is no longer awaiting placement for the recorded due date.',
-      // The alert's original instruction was stored as the full text; a
-      // resolved row must not keep it behind "Show full text".
-      detail: null,
-    });
+  await retireResolvedNotices({
+    keyPattern: 'recurring-dispatch:%',
+    stillOpen: (sub) => sub
+      .whereRaw("s.recurring_dispatch_due_date::text = notifications.metadata->>'dueDate'")
+      .whereNull('s.window_start')
+      .whereIn('s.status', ['pending', 'confirmed']),
+    resolvedTitle: 'Recurring placement alert resolved',
+    resolution: 'The visit is no longer awaiting placement',
+    body: 'This visit is no longer awaiting placement for the recorded due date.',
+  }, nowDate);
+  const today = etDateString(nowDate);
+  await retireNoWindowNotices(nowDate, today);
   const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
   const rows = await db('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
@@ -226,7 +316,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     });
     if (notice) flagged += 1;
   }
-  return flagged;
+  return flagged + await flagNoWindowVisits(today, etDateString(addETDays(nowDate, NO_WINDOW_HORIZON_DAYS)));
 }
 
 module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits };

@@ -452,6 +452,32 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   };
 }
 
+// The move is committed but appointment_reminders still names the old slot, so
+// the 72h/24h reminder could go out for the wrong time. A log line nobody reads
+// is not enough: tell staff to check that visit's reminder. Best-effort — the
+// notice is raised after the move and must never fail it.
+async function flagReminderSyncFailed(service, best) {
+  try {
+    const { shortDateET } = require('../admin-alert-names');
+    await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+      area: 'Schedule',
+      action: 'check the reminder time on a moved visit',
+      why: `Auto-dispatch moved the visit to ${shortDateET(`${best.date}T12:00:00Z`)} but its reminder did not update.`,
+      severity: 'needs-you',
+      link: `/admin/dispatch?tab=schedule&date=${best.date}`,
+      subject: { type: 'visit', id: String(service.id) },
+      doneWhen: 'reminder_time_checked',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `auto-dispatch-reminder-sync:${service.id}:${best.date}`,
+      metadata: { scheduledServiceId: service.id, customerId: service.customer_id, newDate: best.date },
+    });
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder-sync notice failed for ${service && service.id}: ${err.message}`);
+  }
+}
+
 /**
  * One placement attempt against a specific candidate `best` — the ENTIRE
  * original applyAutoDispatchMove body, parameterized on the candidate and
@@ -628,6 +654,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     }
   } catch (remErr) {
     logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
+    await flagReminderSyncFailed(service, best);
   }
 
   const movedCount = 1 + siblingMembers.length;

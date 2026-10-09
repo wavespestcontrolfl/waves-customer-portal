@@ -17,6 +17,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
@@ -35,6 +36,7 @@ const eligibility = require('../services/auto-dispatch/eligibility');
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 const apply = require('../services/auto-dispatch/apply');
 const geocoder = require('../services/geocoder');
+const notifications = require('../services/notification-service');
 const audit = require('../services/auto-dispatch/audit');
 const { runAutoDispatch, _internals } = require('../services/auto-dispatch');
 
@@ -193,6 +195,7 @@ test('self-heals a MISSING_GEO customer by geocoding, then re-checks (not skippe
   const res = await runAutoDispatch({ mode: 'dry_run' });
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
   expect(res).toMatchObject({ skipped: 0, evaluated: 1, geocoded: 1, recommended: 1 });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled(); // healed: nothing to tell staff
 });
 
 test('still skips MISSING_GEO when geocoding cannot resolve the address', async () => {
@@ -202,6 +205,38 @@ test('still skips MISSING_GEO when geocoding cannot resolve the address', async 
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
   expect(res).toMatchObject({ skipped: 1, evaluated: 0, geocoded: 0 });
   expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
+});
+
+test('a visit still without a map point after the geocode retry raises one admin notice, deduped per visit', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+    'schedule_conflict', 'Schedule — fix the address pin on a visit', expect.stringContaining('Aug 4'),
+    expect.objectContaining({
+      bell: false,
+      link: '/admin/dispatch?tab=schedule&date=2026-08-04',
+      dedupeKey: 'auto-dispatch-missing-geo:s1',
+      metadata: expect.objectContaining({ scheduledServiceId: 's1', customerId: 'c1' }),
+    }),
+  );
+});
+
+test('a failed missing-geo notice is logged and fails neither the visit nor the run', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
+});
+
+test('an ineligible visit for any other reason raises no missing-geo notice', async () => {
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'LOCKED', reason_description: 'locked' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
 });
 
 test('caps geocode ATTEMPTS even when they all fail (counts attempts, not successes)', async () => {

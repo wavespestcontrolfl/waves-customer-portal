@@ -233,6 +233,17 @@ function noSlotReason(drops, skipped) {
     : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
 }
 
+// A flex visit whose window collapsed for a stale anchor and found no same-day
+// re-time: say why day moves were never possible, instead of an opaque
+// NO_VALID_SLOT. Label only — the search itself is unchanged.
+function staleAnchorReason(reason, tierMeta) {
+  if (reason.code !== 'NO_VALID_SLOT' || !(tierMeta && tierMeta.anchor_stale)) return reason;
+  return {
+    code: 'DRIFT_ANCHOR_STALE',
+    description: `Day moves are blocked: the visit was re-dated after an earlier auto move and is now more than ${2 * flexTier.FLEX_TIER_RADIUS_DAYS} days from its original date ${tierMeta.anchor}; no same-day re-time found either`,
+  };
+}
+
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
     current, candidates, drops, skipped,
@@ -240,7 +251,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const prefsSnapshot = prefs.raw_snapshot;
 
   if (!current || candidates.length === 0) {
-    const reason = noSlotReason(drops, skipped);
+    const reason = staleAnchorReason(noSlotReason(drops, skipped), ctx.tierMeta);
     return {
       kind: 'no_change',
       reason_code: reason.code,
@@ -417,6 +428,32 @@ async function loadGuardContext(guardMode, services, nowDate) {
   };
 }
 
+// Why the flex tier's own-schedule freeze holds a visit. A recurring child with
+// no arrival window and no due date has no instant to freeze on (the freeze
+// reads an uncomposable instant as frozen, fail closed), so it is skipped as
+// before — but labelled for what it is, not as a 73-hour cutoff weeks away. A
+// combined-allocation member can still take its arrival from the group's stamp,
+// so it keeps the cutoff label.
+function frozenSkipReason(service) {
+  const noWindow = !service.window_start && !service.recurring_dispatch_due_date
+    && !(service.reservation_service_mix && service.reservation_service_mix.allocatedServiceIds);
+  return noWindow
+    ? { code: 'NO_ARRIVAL_WINDOW', description: 'Visit has no arrival window and no due date; auto-dispatch cannot place it' }
+    : { code: 'WITHIN_73H', description: '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)' };
+}
+
+// Label only: flexTierMoveWindow collapses to the visit's own date when the
+// band around the durable anchor no longer reaches it (a visit re-dated far
+// from its anchor after an earlier auto move — the two ±radius bands cannot
+// overlap beyond twice the radius). The same-day re-time search still runs on
+// that one-day window; this only records why a day move cannot exist.
+function staleAnchorMeta(window, origDate, anchor) {
+  const orig = toDateStr(origDate);
+  const collapsed = window.dateFrom === orig && window.dateTo === orig;
+  const apart = Math.abs(routeTiers.daysBetween(anchor, orig)) > 2 * flexTier.FLEX_TIER_RADIUS_DAYS;
+  return collapsed && apart ? { anchor_stale: true } : {};
+}
+
 // FLEX-TIER window for one visit (past the shared reminder freeze), shared
 // by pass 1 (the bulk-read neighbor map and anchor) and the apply-time
 // recheck (a fresh neighbor read, the pass-1 anchor — durable evidence).
@@ -436,7 +473,8 @@ async function flexWindowFor(service, {
 }) {
   const skip = (code, description, degraded) => ({ window: null, meta: null, skip: { code, description, ...(degraded ? { degraded } : {}) } });
   if (await flexTier.ownScheduleFrozen(db, service, nowDate)) {
-    return skip('WITHIN_73H', '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)');
+    const frozen = frozenSkipReason(service);
+    return skip(frozen.code, frozen.description);
   }
   if (!neighborMap) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Series occurrence order could not be read — no move (fail closed)', true);
   const neighbors = neighborMap.get(service.id);
@@ -448,7 +486,7 @@ async function flexWindowFor(service, {
   }
   return {
     window, meta: {
-      mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, anchor, neighbors, window,
+      mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, anchor, neighbors, window, ...staleAnchorMeta(window, service.scheduled_date, anchor),
     }, skip: null,
   };
 }
@@ -568,6 +606,38 @@ function guardSkipReason(skip) {
   return { reason_code: skip.code, reason_description: skip.description };
 }
 
+// One admin notice per visit that stays without a usable map point after the
+// geocode self-heal, so a visit skipped every night is not left to nobody.
+// Best-effort: a notice failure is logged and never fails the visit or the run.
+async function flagMissingGeo(service) {
+  try {
+    const date = toDateStr(service.scheduled_date);
+    const { shortDateET } = require('../admin-alert-names');
+    await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+      area: 'Schedule',
+      action: 'fix the address pin on a visit',
+      why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
+      severity: 'needs-you',
+      link: `/admin/dispatch?tab=schedule&date=${date}`,
+      subject: { type: 'visit', id: String(service.id) },
+      doneWhen: 'visit_has_map_pin',
+      who: 'person',
+    }, {
+      bell: false,
+      dedupeKey: `auto-dispatch-missing-geo:${service.id}`,
+      metadata: { scheduledServiceId: service.id, customerId: service.customer_id },
+    });
+  } catch (err) {
+    logger.warn(`[auto-dispatch] missing-geo notice failed for ${service && service.id}: ${err.message}`);
+  }
+}
+
+// An ineligible visit's skip: logged, plus the missing-map-point notice.
+async function logIneligible(run, service, elig) {
+  await logSkip(run, service, elig);
+  if (elig.reason_code === 'MISSING_GEO') await flagMissingGeo(service);
+}
+
 // Eligibility, self-healing a not-yet-geocoded customer first — but BEFORE
 // the plan-active gate (don't spend the geocode budget on a lapsed plan we'd
 // skip anyway) and deduped per customer (a customer's later visits would
@@ -605,7 +675,7 @@ async function evaluateServiceForRun(service, run) {
   const eligCtx = buildEligCtx(guardMode, run.today, run.lockBoundary, config.lockWindowDays);
   const gate = await eligibilityWithGeoHeal(service, eligCtx, run);
   if (gate.skip) return logSkip(run, service, gate.skip);
-  if (!gate.elig.eligible) return logSkip(run, service, gate.elig);
+  if (!gate.elig.eligible) return logIneligible(run, service, gate.elig);
 
   // ── Day-move guard (only when a guard mode is active) ──
   const guard = dayMoveGuarded(guardMode, service)

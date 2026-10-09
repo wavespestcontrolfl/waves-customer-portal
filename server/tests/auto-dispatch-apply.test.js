@@ -10,6 +10,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn().mockResolvedValue({ failed: false, frozen: new Set() }),
@@ -19,6 +20,7 @@ jest.mock('../services/auto-dispatch/route-tiers', () => ({
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const AppointmentReminders = require('../services/appointment-reminders');
+const notifications = require('../services/notification-service');
 const { applyAutoDispatchMove, makeMemberGuard } = require('../services/auto-dispatch/apply');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
@@ -147,6 +149,46 @@ test('re-arms a still-pending creation confirmation after the silent reminder sy
 
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
   expect(rearm).toHaveBeenCalledWith({ confirmation_sent: false, confirmation_sent_at: null });
+});
+
+describe('reminder sync failure after a committed move', () => {
+  function movableQueue() {
+    const queue = [
+      readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+      { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+    ];
+    db.mockImplementation(() => queue.shift());
+  }
+
+  test('keeps the move, and tells staff to check that visit\'s reminder', async () => {
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+    movableQueue();
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(res).toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+      'schedule_conflict', 'Schedule — check the reminder time on a moved visit', expect.stringContaining('Aug 11'),
+      expect.objectContaining({
+        bell: true,
+        link: '/admin/dispatch?tab=schedule&date=2026-08-11',
+        dedupeKey: 'auto-dispatch-reminder-sync:s1:2026-08-11',
+        metadata: expect.objectContaining({ scheduledServiceId: 's1' }),
+      }),
+    );
+  });
+
+  test('a failed notice never fails the committed move', async () => {
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+    notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
+    movableQueue();
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+  });
+
+  test('a clean reminder sync raises no notice', async () => {
+    movableQueue();
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
 });
 
 test('aborts (STALE_PLACEMENT) when the visit was locked after scoring', async () => {
