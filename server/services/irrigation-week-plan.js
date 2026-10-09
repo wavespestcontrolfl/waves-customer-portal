@@ -23,6 +23,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const WATERING_COPY = require('../../shared/watering-copy.json');
 const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
@@ -32,7 +33,8 @@ const { etParts } = require('../utils/datetime-et');
 
 const { classifySeason } = advicePrivate;
 
-const WILT_CUES = 'a dull blue-gray tint, or footprints that stay pressed in';
+// UF/IFAS (LH025) names three signs; the shared sentence lists all three.
+const WILT_CUES = WATERING_COPY.wiltSigns;
 
 function fmtInches(n) {
   if (n == null || !Number.isFinite(Number(n))) return null;

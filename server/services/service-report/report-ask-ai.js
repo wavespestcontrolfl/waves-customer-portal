@@ -783,6 +783,8 @@ function lawnWaterFacts(water, text, aftercare) {
   return orNull(dropEmpty({
     rain_last_7_days_inches: inchesOf(water.rainInches),
     irrigation_inches_per_week: scheduleShown ? inchesOf(water.irrigationInches) : null,
+    // GATE_LAWN_REPORT_POLISH: a sprinkler schedule on file with no weekly inches (the card's third state).
+    irrigation_schedule_on_file: text(water.scheduleText, 80),
     total_inches_7_days: scheduleShown ? inchesOf(water.totalInches) : null,
     target_inches_per_week: inchesOf(water.targetInches),
     status: water.status === 'unknown' ? null : cleanText(water.status),

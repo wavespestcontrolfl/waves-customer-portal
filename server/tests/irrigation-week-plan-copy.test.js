@@ -52,7 +52,7 @@ describe('renderWeekPlanEmail', () => {
     const copy = renderWeekPlanEmail(plan, CTX);
     expect(copy.plan_subject).toBe('Skip your turf watering this week, Jordan');
     expect(copy.week_plan).toMatch(/^This week: skip your turf watering\. Last week's rain and irrigation left more in the soil/);
-    expect(copy.week_plan).toContain('dull blue-gray tint, or footprints that stay pressed in');
+    expect(copy.week_plan).toContain('folded blades, a blue-gray tint, or footprints that stay pressed in');
     expect(copy.week_plan).toContain("run one cycle of about 20 minutes per turf zone on your permitted watering day (on your assigned day, during your area's allowed hours)");
     expect(allText(copy)).not.toMatch(/turn .*off|controller/i);
   });
