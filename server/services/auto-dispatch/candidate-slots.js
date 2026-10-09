@@ -804,6 +804,9 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     dateTo,
     excludeServiceIds: await movingUnitIds(service, ctx),
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
+    // Owner closed days: an unreadable list must stop the search, not read as
+    // "open" (owner 2026-10-09; find-time's default fails open for customers).
+    strictBlackout: true,
     // HARD time preference must enter slot GENERATION, not just post-filtering:
     // find-time emits only each gap's earliest-feasible start, so an empty day
     // with an afternoon preference would yield a single 08:00 candidate that the

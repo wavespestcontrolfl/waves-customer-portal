@@ -92,7 +92,7 @@ function moveRuleConfig(overrides) {
     // A DAY move must save at least this many modeled drive minutes on the
     // visit's own detour (owner 2026-10-09: 16 of 50 moves in a week cleared
     // the score bar on the default time window and a lighter day alone, some
-    // with no drive saved). A same-day re-time is not held to it. 0 = off.
+    // with no drive saved). A same-day re-time is held to it too. 0 = off.
     minDayMoveDriveSavingMinutes: overrides.minDayMoveDriveSavingMinutes
       ?? intEnv('AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES', 6, { min: 0, max: 120 }),
     // CONFLICT MOVES (GATE_AUTO_DISPATCH_CONFLICT_MOVES): a visit that overlaps
@@ -105,6 +105,11 @@ function moveRuleConfig(overrides) {
     // closed-day move too. Owner decision pending on the number.
     conflictMaxAddedDriveMinutes: overrides.conflictMaxAddedDriveMinutes
       ?? intEnv('AUTO_DISPATCH_CONFLICT_MAX_ADDED_DRIVE_MINUTES', 15, { min: 0, max: 240 }),
+    // The most automatic moves one visit may have (owner 2026-10-09: "at most
+    // two"), counted from the durable reschedule_log (move-limit.js). Day
+    // moves, same-day re-times and forced moves all count. 0 = no limit.
+    maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
+      ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', 2, { min: 0, max: 20 }),
   };
 }
 

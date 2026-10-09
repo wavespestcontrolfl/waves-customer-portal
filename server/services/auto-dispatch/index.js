@@ -32,6 +32,8 @@ const audit = require('./audit');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveRules = require('./move-rules');
+const moveLimit = require('./move-limit');
+const needsPerson = require('./needs-person-notice');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -260,6 +262,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       kind: 'no_change',
       reason_code: reason.code,
       reason_description: reason.description,
+      conflict: (current && current.conflict) || null,
       audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
     };
   }
@@ -302,7 +305,11 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     newPlacement, scores, prefsSnapshot, routeMetrics, constraints,
   };
 
-  if (!ranked.qualifies) return { kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), audit: auditCtx };
+  if (!ranked.qualifies) {
+    return {
+      kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), conflict: current.conflict || null, audit: auditCtx,
+    };
+  }
   return {
     kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
     withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
@@ -385,7 +392,7 @@ function wouldMoveDescription(evalResult) {
   return `Would move${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(evalResult.improvement)})`;
 }
 
-// Why the nearest candidate did not move the visit: a day move that cleared
+// Why the nearest candidate did not move the visit: a move that cleared
 // the score bar and saved too little drive, or a gain under the bar.
 function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
   if (ranked.ceilingFailed) {
@@ -397,7 +404,7 @@ function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
   if (ranked.floorFailed) {
     return {
       reason_code: 'NO_DRIVE_SAVING',
-      reason_description: `Best day move saves ${routeMetrics.drive_saving_minutes} drive minutes < ${config.minDayMoveDriveSavingMinutes} required`,
+      reason_description: `Best move saves ${routeMetrics.drive_saving_minutes} drive minutes < ${config.minDayMoveDriveSavingMinutes} required`,
     };
   }
   return { reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}` };
@@ -685,6 +692,36 @@ async function logSkip(run, service, { reason_code: reasonCode, reason_descripti
   });
 }
 
+// The move limit (move-limit.js) for one visit, from `counts` (the run's bulk
+// read, or a fresh single-visit read in pass 2). Returns the skip row, or null
+// when the visit may move. A visit that MUST move (an unplaced due date, or in
+// conflict) and is at the limit is not moved, and a person is told instead.
+async function moveLimitGate(service, ctx, run, counts) {
+  const skip = moveLimit.limitSkip(service, counts, run.config);
+  if (!skip) return null;
+  if (!skip.unknown) {
+    // Required lazily, like apply.js's conflict re-read.
+    const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, ctx);
+    if (conflict || moveRules.isUnplacedDueDate(service)) needsPerson.collect(run.needsPerson, service, 'move_limit', conflict);
+  }
+  return skip;
+}
+
+// Pass 1's one bulk read of every loaded visit's automatic-move count. A
+// failed read leaves null: every visit then skips, and the run is degraded.
+async function loadRunMoveCounts(run, services) {
+  run.moveCounts = await moveLimit.loadMoveCounts(db, services.map((s) => s.id), run.config);
+  if (!run.moveCounts) run.guardReadDegraded = true;
+}
+
+// Pass 2's recheck: a fresh count for this one visit, so a move another run
+// landed since pass 1 is seen. Returns the skip row or null.
+async function recheckMoveLimit(pm, run) {
+  const counts = await moveLimit.loadMoveCounts(db, [pm.service.id], run.config);
+  if (!counts) run.guardReadDegraded = true;
+  return moveLimitGate(pm.service, pm.ctx, run, counts);
+}
+
 // A day-move guard skip (or a grouped-move refusal), both { code,
 // description }, in the { reason_code, reason_description } shape logged.
 function guardSkipReason(skip) {
@@ -936,8 +973,13 @@ async function evaluateServiceForRun(service, run) {
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
   };
+  // At most N automatic moves per visit: decided before any candidate search.
+  const limited = await moveLimitGate(service, ctx, run, run.moveCounts);
+  if (limited) return logSkip(run, service, limited);
+
   const evalResult = await evaluatePlacement(service, prefs, ctx, config, run.lockBoundary);
   totals.evaluated++;
+  needsPerson.collectFromEvaluation(run.needsPerson, service, evalResult);
 
   // A grouped move is only as legal as its siblings (Codex #4995 r4 P2) —
   // preview the apply-time member guard now, in every mode (Codex #6055 r2:
@@ -1054,8 +1096,14 @@ async function applyPlannedMove(pm, run, attempt) {
     return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: guardSkip.code, reason_description: guardSkip.description, ...pm.result.audit });
   }
 
+  const limited = await recheckMoveLimit(pm, run);
+  if (limited) {
+    return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: limited.reason_code, reason_description: limited.reason_description, ...pm.result.audit });
+  }
+
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
+  needsPerson.collectFromEvaluation(run.needsPerson, pm.service, fresh);
   if (fresh.kind !== 'move') {
     // Re-scoring against the live schedule no longer clears the bar (an
     // earlier apply this run captured the gain, or the row changed).
@@ -1198,6 +1246,9 @@ async function runAutoDispatch(opts = {}) {
     plannedMoves: [],
     dryRunOverlaps: [],
     quarantinedIds: new Set(),
+    // Visits auto-dispatch cannot fix alone; raised once at run end (needs-person-notice.js).
+    needsPerson: new Map(),
+    moveCounts: new Map(),
     guardReadDegraded: false, // a failed guard read must not report a green run
     // Visits skipped for a missing pin on a live plan this run, and whether
     // pass 1 looked at every visit (their notices close only then).
@@ -1217,6 +1268,7 @@ async function runAutoDispatch(opts = {}) {
     // without the check.
     run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate);
     run.guardReadDegraded = run.guardCtx.degraded;
+    await loadRunMoveCounts(run, services);
 
     for (const service of services) {
       try {
@@ -1253,6 +1305,7 @@ async function runAutoDispatch(opts = {}) {
   }
   await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
+  await needsPerson.raiseNotices(run.needsPerson);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {

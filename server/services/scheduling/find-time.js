@@ -1129,7 +1129,7 @@ function startFloorFor(date, earliestStartMin, startFloorByDate) {
 // empty techs array short-circuits (no services/dates query) — the caller
 // still owns the "no assignable technicians" early return, since that
 // shape is a findAvailableSlots response contract, not a loading concern.
-async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates }) {
+async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout }) {
   // Only assignable techs (active employment AND field-dispatchable). Every
   // slot consumer (booking, estimate availability, reschedule, re-service,
   // voice relay, auto-dispatch) inherits this filter, so a prospective
@@ -1195,11 +1195,12 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   // commits consume the same shared helper.) Admin manual scheduling stays
   // unblocked by design — staff callers (the dispatch Find-best-times tool)
   // pass includeBlackoutDates:true to keep their recommendations complete.
-  // The helper fails open.
+  // The helper fails open, unless the caller passes strictBlackout (the
+  // nightly auto-dispatch search): then an unreadable list throws.
   let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
   if (dates.length && !includeBlackoutDates) {
     const { getBlackoutDates } = require('./blackout-dates');
-    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1]);
+    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1], undefined, { strict: strictBlackout === true });
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
   return { techs, services, dates, absentDays };
@@ -1251,7 +1252,7 @@ async function findAvailableSlots(opts) {
   const dayClose = dayEndHour * 60;
 
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
-    dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates,
+    dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
   });
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
