@@ -8,6 +8,8 @@ import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
+import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
+import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryRow } from '../components/report/lawnV2/lawnLayoutRules';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -2603,6 +2605,40 @@ function useReadinessNow(context, mode) {
   }, [context, mode]);
 
   return nowMs;
+}
+
+// GATE_LAWN_REPORT_LAYOUT: the "Your part" card. The re-entry sentence is the report's own (the
+// re-entry builder's customerSummary, a timed line or a condition, with its pet advisory); the
+// card prints the watering banner once and the lead's own homeowner step beside it.
+function LawnYourPart({ data, mode }) {
+  const context = data.dynamicContext?.reentry;
+  const nowMs = useReadinessNow(context, mode);
+  const reentry = context ? reentryRow(context, readinessSummary(context, mode, nowMs)) : null;
+  return (
+    <LawnYourPartCard
+      banner={data.reportV2?.banner}
+      reentry={reentry}
+      lines={alsoSteps(data.reportV2?.lead)}
+      style={{ marginTop: 16 }}
+    />
+  );
+}
+
+// Technician recommendations (owner 2026-08-27): the completion form's recommendation lines
+// finally reach the customer. Sourced from data.recommendations (protocol recommendations +
+// findings recommendations, already banned-copy-screened upstream). Renders for every layout.
+function RecommendationsSection({ data }) {
+  if (!(data.recommendations || []).length) return null;
+  return (
+    <section data-glass="card" className="sr-section" id="recommendations">
+      <h2>What we recommend</h2>
+      <ul style={{ margin: 0, paddingLeft: 20, lineHeight: 1.6 }}>
+        {data.recommendations.map((rec, i) => (
+          <li key={`${i}-${rec}`}>{rec}</li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 function ServiceStatusCard({ data, mode, resultOverride = null }) {
@@ -6389,6 +6425,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
   if (mode === 'sms_preview') return <SmsReportPreview data={data} />;
 
+  // The technician-traced map mount of the V2 lead layouts. A const so the lawn layout
+  // (GATE_LAWN_REPORT_LAYOUT) can place the same element; the standard page prints it where it was.
+  const tracedMapMount = isV2LeadLayout && data.treatmentMap?.traced?.snapshotUrl && (
+    <div id="map">
+      <ServiceCoverageCard
+        coverage={serviceCoverage}
+        evidenceLevel={data.evidenceLevel}
+        mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+        mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+        tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+        tracedVariant={tracedVariantFallback(data.treatmentMap?.traced, data.serviceLine)}
+        live={mode === 'live'}
+        applications={data.applications || []}
+      />
+    </div>
+  );
   return (
     <div className="service-report-v1">
       <style>{`
@@ -9511,6 +9563,38 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             document keeps the legacy section below instead. */}
         <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
+        {/* GATE_LAWN_REPORT_LAYOUT: from the status card down to the review ask the page body is the
+            standard one, unless the payload carries the lawn layout key on a live lawn report: then
+            LawnLayoutBody prints the same sections in the phone order (LAYOUT_ORDER), built from the
+            elements in `slots`. LawnLayoutSwitch returns these children unchanged otherwise. The
+            children below are not re-indented, to keep this change reviewable. */}
+        <LawnLayoutSwitch
+          data={data}
+          mode={mode}
+          layout={(
+            <LawnLayoutBody
+              data={data}
+              slots={{
+                status: <ServiceStatusCard data={lawnLayoutStatusData(data, mode)} mode={mode} resultOverride={lawnTodaysResult(data)} />,
+                reservice: <ReserviceReportCard data={data} mode={mode} />,
+                plan: <PlanSummaryCard data={data} mode={mode} />,
+                upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
+                yourPart: <LawnYourPart data={data} mode={mode} />,
+                recap: <RecapVideoCard recap={data.recap} token={token} />,
+                recordedFindings: recordedFindingsList,
+                visitSummary: <ReportText text={visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })} sections={reportSections} nextVisitLabel={nextSameServiceLabel} />,
+                recommendations: <RecommendationsSection data={data} />,
+                tracedMap: tracedMapMount,
+                techNote: <TechNoteCard data={data} mode={mode} />,
+                nearYou: <NearYouCard data={data} mode={mode} />,
+                crossSell: <CrossSellCard data={data} token={token} mode={mode} />,
+                review: <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />,
+                referral: <ReferralCard data={data} token={token} mode={mode} />,
+                products: <AppliedProductsSection data={data} mode={mode} />,
+              }}
+            />
+          )}
+        >
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
         {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
@@ -9835,16 +9919,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             from data.recommendations (protocol recommendations + findings
             recommendations, already banned-copy-screened upstream). Renders
             for every layout — V2 dashboards own the SUMMARY slot, not this. */}
-        {(data.recommendations || []).length > 0 && (
-          <section data-glass="card" className="sr-section" id="recommendations">
-            <h2>What we recommend</h2>
-            <ul style={{ margin: 0, paddingLeft: 20, lineHeight: 1.6 }}>
-              {data.recommendations.map((rec, i) => (
-                <li key={`${i}-${rec}`}>{rec}</li>
-              ))}
-            </ul>
-          </section>
-        )}
+        <RecommendationsSection data={data} />
 
         {/* V2 lead layout (lawn + tree_shrub WITH reportV2) leads with the factual
             record — products applied right after the assessment; the visit
@@ -9867,20 +9942,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             otherwise saved traces would silently vanish from these reports.
             Mutually exclusive with the !isV2LeadLayout mount below, so the
             #map id never duplicates. */}
-        {isV2LeadLayout && data.treatmentMap?.traced?.snapshotUrl && (
-          <div id="map">
-            <ServiceCoverageCard
-              coverage={serviceCoverage}
-              evidenceLevel={data.evidenceLevel}
-              mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
-              mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-              tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={tracedVariantFallback(data.treatmentMap?.traced, data.serviceLine)}
-              live={mode === 'live'}
-              applications={data.applications || []}
-            />
-          </div>
-        )}
+        {tracedMapMount}
 
         {/* Pest V2 reports: the dashboard already tells the findings story —
             the tile card duplicated it ("What we found: German cockroaches")
@@ -10145,6 +10207,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
         {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+        </LawnLayoutSwitch>
 
         {/* The Waves blog post picked at completion, at the bottom of the
             report on every layout (live only). */}

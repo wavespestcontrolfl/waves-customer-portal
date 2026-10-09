@@ -210,7 +210,7 @@ export function StatusPill({ status, small = false }) {
   );
 }
 
-function Card({ children, style }) {
+export function Card({ children, style }) {
   // data-glass is inert without html[data-glass-theme] (set unconditionally on
   // the live report view) — glass-theme.css supplies all material.
   return (
@@ -220,7 +220,7 @@ function Card({ children, style }) {
   );
 }
 
-function CardTitle({ children, sub }) {
+export function CardTitle({ children, sub }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <h2 style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: 0 }}>{children}</h2>
@@ -241,7 +241,7 @@ function inchLabel(v) {
 // The next-visit sentence the hero and the lead share: a scheduled label as-is,
 // a cadence estimate as "Expected around …", and nothing for a missing or
 // 'Invalid Date' label (an older cached payload).
-function nextVisitSentence(nextVisit) {
+export function nextVisitSentence(nextVisit) {
   const hasNextVisit = nextVisit && nextVisit.label && nextVisit.label !== 'Invalid Date';
   return hasNextVisit
     ? (nextVisit.source === 'estimated'
@@ -488,7 +488,7 @@ function ProgramDetail({ detail }) {
   );
 }
 
-function KeyLine({ label, value, dot, valueSize = 14.5 }) {
+export function KeyLine({ label, value, dot, valueSize = 14.5 }) {
   return (
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />

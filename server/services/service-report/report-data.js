@@ -20,6 +20,7 @@ const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
+const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
@@ -7451,6 +7452,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // GATE_LAWN_REPORT_COPY_FIXES (lawn only): the page prints none of the pest program's re-service
     // wording. Absent = byte-identical payload.
     ...copyFixesPayloadFlag(serviceLine),
+    // GATE_LAWN_REPORT_LAYOUT (lawn only): the key the page orders the web report from. Absent =
+    // byte-identical payload.
+    ...lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {
