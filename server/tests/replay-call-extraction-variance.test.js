@@ -972,21 +972,21 @@ describe('replay extraction gets the call facts production gives the extractor',
   const callStart = new Date('2026-09-10T14:00:00Z');
   const call = { id: 'c1', direction: 'inbound', created_at: '2026-09-10T14:05:00Z', metadata: { addons: { results: { twilio_caller_name: { status: 'successful', result: { caller_name: { caller_name: 'PAT EXAMPLE' } } } } } } };
   const customer = (createdAt) => ({ id: 'cust-1', first_name: 'Pat', last_name: 'Example', pipeline_stage: 'active_customer', address_line1: '1 Example St', created_at: createdAt });
-  const fakeCRP = (priorCall = null) => ({
+  const fakeCRP = (priorCall = null, phoneCustomer = null) => ({
     summarizePriorCall: jest.fn(async () => priorCall),
-    _test: CRP._test,
+    _test: { ...CRP._test, findCustomerForCallContact: jest.fn(async () => phoneCustomer) },
   });
 
   test('the extractor call spreads the facts', () => {
     const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
     const at = src.indexOf('CRP._test.extractCallDataV2(transcriptForExtraction');
     expect(src.slice(at, at + 300)).toMatch(/\.\.\.callFacts,/);
-    expect(src).toMatch(/productionCallFacts\(\{ call, contactPhone, linkedCustomer, bookableServices, CRP, db, callStart: new Date\(extractionCallStart\) \}\)/);
+    expect(src).toMatch(/productionCallFacts\(\{ call, contactPhone, bookableServices, CRP, db, callStart: new Date\(extractionCallStart\) \}\)/);
   });
 
   test('catalog names, caller-ID name, direction and the prior call are passed the way production builds them', async () => {
     const crp = fakeCRP({ summary: 'earlier call' });
-    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: null, bookableServices: [{ name: 'General Pest Control' }, { name: '' }, null], CRP: crp, db: 'DB', callStart });
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [{ name: 'General Pest Control' }, { name: '' }, null], CRP: crp, db: 'DB', callStart });
     expect(facts.bookableServiceNames).toEqual(['General Pest Control']);
     expect(facts.callerIdName).toBe(CRP._test.callerIdNameForPrompt(call));
     expect(facts.callDirection).toBe('inbound');
@@ -998,27 +998,50 @@ describe('replay extraction gets the call facts production gives the extractor',
 
   test('an outbound call is labeled outbound', async () => {
     const outbound = { ...call, direction: 'outbound-api' };
-    const facts = await productionCallFacts({ call: outbound, contactPhone: '+19415550100', linkedCustomer: null, bookableServices: null, CRP: fakeCRP(), db: 'DB', callStart });
+    const facts = await productionCallFacts({ call: outbound, contactPhone: '+19415550100', bookableServices: null, CRP: fakeCRP(), db: 'DB', callStart });
     expect(facts.callDirection).toBe(CRP._test.isOutboundCall(outbound) ? 'outbound' : 'inbound');
     expect(facts.bookableServiceNames).toEqual([]);
   });
 
   test('a customer on file before the call is the known caller', async () => {
     const before = customer('2026-01-05T12:00:00Z');
-    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: before, bookableServices: [], CRP: fakeCRP(), db: 'DB', callStart });
+    const crp = fakeCRP(null, before);
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: 'DB', callStart });
     expect(facts.knownCaller).toEqual(CRP._test.summarizeKnownCaller(before));
+    expect(crp._test.findCustomerForCallContact).toHaveBeenCalledWith('+19415550100', {}, { db: 'DB' });
+  });
+
+  test('an operator link or unlink made after the call does not change the prompt customer (codex #6214 r1 P1)', async () => {
+    const before = customer('2026-01-05T12:00:00Z');
+    // Unlinked later: the first pass still saw the phone match.
+    const unlinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: null, at: '2026-09-12T10:00:00Z' } } };
+    const seen = await productionCallFacts({ call: unlinked, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, before), db: 'DB', callStart });
+    expect(seen.knownCaller).toEqual(CRP._test.summarizeKnownCaller(before));
+    // Linked later to an old customer the phone never matched: the first pass saw nobody.
+    const relinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-old', at: '2026-09-12T10:00:00Z' } } };
+    const none = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, null), db: 'DB', callStart });
+    expect(none.knownCaller).toBeNull();
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    const at = src.indexOf('async function productionCallFacts');
+    expect(src.slice(at, at + 1500)).not.toContain('resolveKnownCallerCustomer');
+  });
+
+  test('a failed phone lookup degrades to no known caller', async () => {
+    const crp = { summarizePriorCall: jest.fn(async () => null), _test: { ...CRP._test, findCustomerForCallContact: jest.fn(async () => { throw new Error('db down'); }) } };
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: 'DB', callStart });
+    expect(facts.knownCaller).toBeNull();
   });
 
   test('a customer row created by the call or after it is NOT a known caller: production had none', async () => {
     for (const createdAt of ['2026-09-10T14:00:00Z', '2026-09-10T14:20:00Z', '2026-10-01T09:00:00Z', null, 'not a date']) {
-      const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: customer(createdAt), bookableServices: [], CRP: fakeCRP(), db: 'DB', callStart });
+      const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, customer(createdAt)), db: 'DB', callStart });
       expect(facts.knownCaller).toBeNull();
     }
   });
 
   test('a failed prior-call lookup degrades to no prior call', async () => {
     const crp = { summarizePriorCall: jest.fn(async () => { throw new Error('db down'); }), _test: CRP._test };
-    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: null, bookableServices: [], CRP: crp, db: 'DB', callStart });
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: 'DB', callStart });
     expect(facts.priorCall).toBeNull();
   });
 });

@@ -1318,7 +1318,16 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
 // very call created (or an operator created afterwards) is a customer today, but
 // production's prompt for that call had no known caller: telling the model
 // "existing customer" would change the answer the review recorded.
-async function productionCallFacts({ call, contactPhone, linkedCustomer, bookableServices, CRP, db, callStart }) {
+//
+// An operator's link or unlink (metadata.customer_link_override) is ignored here
+// (codex #6214 r1 P1): staff set it on the admin page AFTER the call was
+// extracted, so the prompt the review judged never carried it. Linking an old
+// customer later would pass the predates-call test and add a known caller the
+// extraction never saw; a later unlink would hide one it did see. The prompt's
+// customer is the phone lookup, which is what the first pass ran. The routing
+// context below keeps the override: it replays today's routing decision.
+async function productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart }) {
+  const linkedCustomer = await CRP._test.findCustomerForCallContact(contactPhone, {}, { db }).catch(() => null);
   const startMs = callStart instanceof Date ? callStart.getTime() : NaN;
   const createdMs = linkedCustomer?.created_at ? new Date(linkedCustomer.created_at).getTime() : NaN;
   const predatesCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
@@ -1462,7 +1471,7 @@ async function replayCall(call, context) {
   const extractionCallStart = require('../utils/call-timeline').callStartedAt(call)
     || (call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date());
   const callFacts = transcriptForExtraction
-    ? await productionCallFacts({ call, contactPhone, linkedCustomer, bookableServices, CRP, db, callStart: new Date(extractionCallStart) })
+    ? await productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart: new Date(extractionCallStart) })
     : null;
   const startedAt = Date.now();
   const current = transcriptForExtraction
