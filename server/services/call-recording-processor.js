@@ -22488,6 +22488,9 @@ const CallRecordingProcessor = {
         }
       }
 
+      // Suggest a last name to the office (GATE_CALL_LAST_NAME_LOOKUP): fire-and-forget, never awaited.
+      if (customerId) require('./call-last-name-lookup').enqueueCallLastNameLookup({ callLogId: call.id, customerId });
+
       // The window this booking call committed needs no capture step either:
       // the visit row carries source_call_log_id, written in the booking
       // transaction, and no-show-detector.js derives the promise from that

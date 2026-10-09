@@ -189,6 +189,12 @@ const SERVICE_KEY_RULES = {
   // gel/IGR treatment — no exterior perimeter or lawn trace.
   german_roach: { eligible: false, reason: 'interior_only_lane' },
   german_roach_initial: { eligible: false, reason: 'interior_only_lane' },
+  // Vehicle German roach (migration 20261008190000): gel/IGR inside a car —
+  // the typed cockroach form's exterior-chip rule would not stop a perimeter
+  // trace of the home, so the KEY rule overrides it. The add-on is a billing
+  // rider on a home roach visit.
+  vehicle_german_roach: { eligible: false, reason: 'interior_only_lane' },
+  vehicle_roach_addon: { eligible: false, reason: 'billing_rider' },
   // lawn programs — coverage outline/highlight, not a spray-mist replay
   lawn_care_6week: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_care_monthly: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },

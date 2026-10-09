@@ -164,7 +164,9 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Tenacity Herbicide', null],
   ['Certainty Turf Herbicide', null],
   ['Blindside Herbicide', null],
-  // Fire ant bait (optional add-on the office prices): no result timing the owner has approved.
+  // Fire ant granule (optional add-on the office prices): no result timing the owner has approved.
+  ['Topchoice Granular Insecticide', null],
+  // The old fire ant bait left the program 2026-10-09; its catalog row stays loggable, so the entry stays.
   ['Advion Fire Ant Bait', null],
 ];
 

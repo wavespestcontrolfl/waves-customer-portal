@@ -314,6 +314,73 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
   });
 });
 
+describe('take-all fungicide rows are governed in every month they are staged (the v13 migrations\' own rows)', () => {
+  const { takeAllAddOns } = require('../services/lawn-treatment-guide');
+  const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
+  const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
+  const round2 = require('../models/migrations/20261007182000_lawn_v13_matrix_adds_round2');
+  const round11 = require('../models/migrations/20261007188000_lawn_v13_matrix_adds_round11');
+  const MONTH_OF = new Map(staged.WINDOWS.map(([month, key]) => [key, month]));
+
+  // The staged rows of one window after the migrations that touch fungicide rows: the first migration's
+  // products, the matrix adds (inserts, then the guarded updates), the round 2 trigger rewrites, round 11.
+  function windowRows(windowKey) {
+    const rows = staged.PRODUCTS.filter(([key]) => key === windowKey).map(([, [name, role, , , , , , gates]]) => ({ name, role, trigger: gates?.trigger || null }));
+    for (const row of matrix.INSERTS.filter((insert) => insert.windowKey === windowKey)) rows.push({ name: row.name, role: row.role, trigger: row.gates?.trigger || null });
+    for (const update of matrix.UPDATES.filter((u) => u.windowKey === windowKey)) {
+      const hit = rows.find((row) => row.name === update.guard.product_name && row.trigger === update.guard.trigger);
+      if (hit) { if (update.columns.product_name) hit.name = update.columns.product_name; if (update.gates.trigger) hit.trigger = update.gates.trigger; }
+    }
+    for (const [, name, from, to] of round2.TRIGGERS.filter(([window]) => window === windowKey)) {
+      const hit = rows.find((row) => row.name === name && row.trigger === from);
+      if (hit) hit.trigger = to;
+    }
+    for (const row of rows) if (windowKey === matrix.WINDOWS.SEP && row.name === staged.NAMES.ART && row.trigger === round11.OLD_TRIGGER) row.trigger = round11.NEW_TRIGGER;
+    return rows;
+  }
+  const idFor = (windowKey, name) => uuid(500 + MONTH_OF.get(windowKey) * 20 + [...new Set(windowRows(windowKey).map((row) => row.name))].indexOf(name));
+
+  const EXPECTED = new Map([
+    [3, ['Artavia 2 SC (Azoxy)']], [4, ['Headway Fungicide']], [9, ['Artavia 2 SC (Azoxy)']], [10, ['Headway Fungicide']],
+  ]);
+
+  test.each(staged.TRACKS.map((track) => [track.track, track]))('%s: every take-all row of every month is found, and no other row is', (_name) => {
+    for (const [windowKey, month] of MONTH_OF) {
+      const rowsOf = windowRows(windowKey);
+      const rows = new Map(rowsOf.map((row) => [idFor(windowKey, row.name), { role: row.role, gates: { trigger: row.trigger } }]));
+      const candidates = rowsOf.map((row) => ({ raw: { product: { id: idFor(windowKey, row.name), name: row.name } }, item: { productId: idFor(windowKey, row.name), name: row.name, line: null } }));
+      const names = takeAllAddOns(candidates, rows).map((candidate) => candidate.item.name);
+      expect(names).toEqual(EXPECTED.get(month) || []);
+    }
+  });
+
+  test('the October Headway row follows the large patch row, so the first-fungicide pick passes it over: it is still read, and a forbidden one is blocked', async () => {
+    const rowsOf = windowRows(matrix.WINDOWS.OCT);
+    const rows = new Map(rowsOf.map((row) => [idFor(matrix.WINDOWS.OCT, row.name), { role: row.role, gates: { trigger: row.trigger } }]));
+    const candidates = rowsOf.map((row) => ({ raw: { product: { id: idFor(matrix.WINDOWS.OCT, row.name), name: row.name } }, item: { productId: idFor(matrix.WINDOWS.OCT, row.name), name: row.name, line: null } }));
+    const head = idFor(matrix.WINDOWS.OCT, 'Headway Fungicide');
+    const art = idFor(matrix.WINDOWS.OCT, staged.NAMES.ART);
+    limited([[head, [{ type: 'min_interval_days', message: 'too soon' }]]]);
+    const offers = await addOnOffers({ candidates, rows, svc, knex: {} });
+    expect(offers.fungus.item.productId).toBe(art);
+    expect(offers.blocked).toEqual([head]);
+    // The limit read is asked about the pick and the take-all row, nothing else.
+    expect(engine.v13VisitLimits.mock.calls[0][2].map((entry) => entry.product.id).sort()).toEqual([art, head].sort());
+    // A read that failed releases it to the search with the note, as for any governed product.
+    engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
+    expect((await addOnOffers({ candidates, rows, svc, knex: {} })).unreadable.sort()).toEqual([art, head].sort());
+  });
+
+  test('a take-all row that is also the pick is read once', async () => {
+    const rowsOf = windowRows(matrix.WINDOWS.APR);
+    const rows = new Map(rowsOf.map((row) => [idFor(matrix.WINDOWS.APR, row.name), { role: row.role, gates: { trigger: row.trigger } }]));
+    const candidates = rowsOf.map((row) => ({ raw: { product: { id: idFor(matrix.WINDOWS.APR, row.name), name: row.name } }, item: { productId: idFor(matrix.WINDOWS.APR, row.name), name: row.name, line: null } }));
+    await addOnOffers({ candidates, rows, svc, knex: {} });
+    const asked = engine.v13VisitLimits.mock.calls[0][2].map((entry) => entry.product.id);
+    expect(asked).toEqual([...new Set(asked)]);
+  });
+});
+
 describe('blockedProductIds: what the fresh read kept out, per governed kind', () => {
   const { blockedProductIds } = require('../services/lawn-treatment-guide');
   test('a clean read blocks nothing, and a pick with no finding is not blocked', () => {

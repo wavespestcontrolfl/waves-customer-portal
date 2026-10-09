@@ -2550,6 +2550,29 @@ row key alike); PDFs cached before a flip re-render, and again when the gate is
 turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
 found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
 not served either.
+`GATE_LAWN_REPORT_COPY_FIXES` (dark, strict `true`, read at call time; gate off leaves the
+payload, the PDF and every cached PDF key byte-identical) changes the lawn
+`/api/reports/:token/data` payload and the PDF that share `buildReportV1Data` (lawn
+only; no new route, token, privacy or rate-limit surface; tree & shrub and pest
+payloads never change). New optional keys, absent while the gate is off:
+top-level `lawnCopyFixes: true` (the page then prints none of the pest program's
+re-service wording: the footer sentence, its booking link and the legacy re-service
+header), `reportV2.water.targetNote` (one fixed sentence from the closed table
+`WATER_TARGET_NOTES` in `lawn-report-copy-fixes.js`, only when the target came from the property's own weather or
+the seasonal lookup; none for an area-snapshot target). Changed values while the
+gate is live: the `weed_pressure` card's `label` reads "Weed Cleanliness";
+`reportV2.snapshot.treatmentSummary` names product categories, never an active
+ingredient or a product name (the AI treatment narrative is not called for a lawn
+report); `reportV2.progressionNote`, `reportV2.trends.seasonalNote` and the
+shoulder/dormant `snapshot.seasonalNote` are null/absent unless the visit month is in
+the cool season and the overall score did not rise; `reportV2.trends.waterGap` and
+`.mowing` (with `.mowingBand`) are absent when the newest point is more than 45 days
+before the visit, and `reportV2.trends` is null when that leaves no chart. The v6
+"what we applied" field and the technician paragraph freeze their category form only
+for a visit completed or first rendered while the gate is live (the paragraph's slots
+gain a `categories` list); every older frozen entry replays unchanged. The lawn PDF
+signature carries `:copyfix=1` only while the gate is live, and the narrative key
+part is the `-tn0` sentinel for a lawn report.
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit

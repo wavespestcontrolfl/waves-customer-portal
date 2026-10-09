@@ -181,6 +181,15 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // PAYMENT + the MISSED VISIT scope line). 'house_voice_v12_real_answers7_m': 31 chars,
 // 36 with all four category tags. A later revision mints the next number + its own key.
 const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}7_m`;
+// NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
+// scheduling text from a customer whose upcoming visits are ONE recurring series gets
+// OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
+// section, so it is its own cohort: number "8", same cumulative fact key 'm' (the facts
+// block's sections are unchanged). The rule reads the scheduler gate at call time, so the
+// IDENTITY follows the same gate (Codex #6172 r2): gate on stamps '8_m', gate off stamps
+// '7_m' — the gate-off drafter is byte-for-byte the '7_m' one, and the two behaviors can
+// never pool in graduation, exam, pathology or judge evidence whichever way the gate moves.
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}8_m`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -217,22 +226,27 @@ const SHADOW_STATUS = 'shadow';
 // not joined by comma) keeps the worst case (all four) short; this bound
 // is enforced defensively below rather than trusted to stay true by eye.
 const PROMPT_VERSION_COLUMN_MAX = 40;
+// The real-answers identity before any '+category' tags (see NEXT_OF_SERIES_PROMPT_VERSION).
+function realAnswersBaseVersion() {
+  return gateEnvValue('GATE_SMS_OFFERS_SCHEDULER') ? NEXT_OF_SERIES_PROMPT_VERSION : REAL_ANSWERS_PROMPT_VERSION;
+}
 function currentPromptVersion() {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return PROMPT_VERSION;
   const activeCategoryTags = REAL_ANSWERS_HANDOFF_CATEGORIES
     .filter((c) => gateEnvValue(c.gate))
     .map((c) => c.tag)
     .sort();
+  const base = realAnswersBaseVersion();
   const version = activeCategoryTags.length
-    ? `${REAL_ANSWERS_PROMPT_VERSION}+${activeCategoryTags.join('')}`
-    : REAL_ANSWERS_PROMPT_VERSION;
+    ? `${base}+${activeCategoryTags.join('')}`
+    : base;
   if (version.length > PROMPT_VERSION_COLUMN_MAX) {
     // Fail closed to the bare identity rather than risk a DB write erroring
     // out mid-draft — a truncated-to-the-wrong-thing label is a smaller
     // problem than losing the draft entirely, and this can only happen if a
     // future category tag is added without keeping it a single character.
     logger.error(`[sms-shadow] currentPromptVersion() would exceed the varchar(${PROMPT_VERSION_COLUMN_MAX}) prompt_version columns (${version.length} chars: ${version}) — falling back to the bare identity`);
-    return REAL_ANSWERS_PROMPT_VERSION;
+    return base;
   }
   return version;
 }
@@ -445,7 +459,7 @@ function openTimesDayLabel(d) {
 const {
   SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE,
 } = require('./sms-offer-sources');
-const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'named_scheduled_visit']);
+const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'next_of_series', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
 // service's availability build with a possible geocode and the find-time
 // travel probe) is much heavier than the zone finder OPEN_TIMES_TIMEOUT_MS
@@ -3540,13 +3554,24 @@ function serviceIdentityVisits(context) {
   const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type)
     // scheduledServiceId stays on this internal object only — the identity
     // prompt renders id/type/date, never the row id.
-    .map((s, i) => ({ id: `V${i + 1}`, type: String(s.type), date: s.date, upcoming: true, scheduledServiceId: s.scheduledServiceId ?? null }));
+    .map((s, i) => ({ id: `V${i + 1}`, type: String(s.type), date: s.date, upcoming: true, scheduledServiceId: s.scheduledServiceId ?? null, seriesKey: s.seriesKey ?? null, seriesExclusive: s.seriesExclusive === true }));
   const last = (context?.serviceHistory || []).find((s) => s && s.type);
   return last ? [...upcoming, { id: 'C1', type: String(last.type), date: last.date, upcoming: false }] : upcoming;
 }
 
+// The calendar year of a DATE value (pg Date at local midnight, or 'YYYY-MM-DD…'), or null.
+function visitYear(value) {
+  const year = value instanceof Date ? value.getFullYear() : Number((String(value || '').match(/^(\d{4})-/) || [])[1]);
+  return Number.isInteger(year) && year > 1900 ? year : null;
+}
+
 function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
-  const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${formatEtDate(v.date)})` : ''}`);
+  // The next-one instruction exists only for a real series (the same deterministic test the
+  // fallback uses), and then every visit date carries its YEAR (Codex #6172 r2): a series
+  // crossing New Year reads "Oct 2" then "Jan 2" without one, and "earliest" would be a guess.
+  const seriesNext = nextOfSeriesLive() ? nextVisitOfSeries(visits.filter((v) => v.upcoming)) : null;
+  const dateLabel = (v) => (seriesNext && visitYear(v.date) ? `${formatEtDate(v.date)}, ${visitYear(v.date)}` : formatEtDate(v.date));
+  const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${dateLabel(v)})` : ''}`);
   return [
     'A customer of Waves Pest Control texted:',
     JSON.stringify(String(inboundMessage || '')),
@@ -3562,6 +3587,7 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
     ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
     ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
     ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
+    ...(seriesNext ? [`- Their scheduled visits above are one recurring series. When the text is about their appointment without saying which one, it is about the NEXT one: answer "visit" with "${seriesNext.id}".`] : []),
     '- "none": the text names no service and points at no particular visit.',
     '- "unclear": it could be more than one visit or service, or it asks about several at once.',
     'Choose only from the lists above. When unsure, answer "unclear".',
@@ -3601,10 +3627,43 @@ function visitIdField(visit, visits = []) {
   return twin ? {} : { scheduledServiceId: visit.scheduledServiceId };
 }
 
-function unnamedServiceIdentity(visits, openEstimate) {
+// A recurring customer always has the next few dates of their series on file, and a
+// text that names no visit ("can we move my appointment?") is about the NEXT one. Before
+// this, every recurring customer read as ambiguous and got no OPEN TIMES (10-08 audit:
+// 14 of 23 scheduling drafts without times had several upcoming visits).
+// "Series" is the schedule's own link, never a matching label (Codex #6172 r2): every
+// upcoming visit must carry the SAME seriesKey (context-aggregator: the parent row's id
+// for a recurring visit, null for a one-time job) AND seriesExclusive: the context lists
+// at most three visits, so the aggregator asks the schedule whether any other upcoming
+// work exists beyond them. Two one-time jobs of one service, a visit outside the series
+// (listed or not), a missing date, or two visits on the earliest date all stay ambiguous.
+function nextVisitOfSeries(upcoming) {
+  if (upcoming.length < 2) return null;
+  const key = upcoming[0].seriesKey;
+  if (!key || upcoming.some((v) => v.seriesKey !== key || v.type !== upcoming[0].type || v.seriesExclusive !== true)) return null;
+  const times = upcoming.map((v) => (v.date ? new Date(v.date).getTime() : NaN));
+  if (times.some((t) => !Number.isFinite(t))) return null;
+  const order = upcoming.map((v, i) => i).sort((x, y) => times[x] - times[y]);
+  const [first, second] = [upcoming[order[0]], upcoming[order[1]]];
+  return formatEtDate(first.date) === formatEtDate(second.date) ? null : first;
+}
+
+// The next-of-series rule sizes OPEN TIMES from ONE visit's own reschedule picker, so it
+// exists only while GATE_SMS_OFFERS_SCHEDULER is on (Codex #6172 r1): with the gate off the
+// identity ladder is exactly what it was, and the zone finder never gets a series visit.
+function nextOfSeriesLive() {
+  return gateEnvValue('GATE_SMS_OFFERS_SCHEDULER');
+}
+
+function unnamedServiceIdentity(visits, openEstimate, { nextOfSeries = nextOfSeriesLive() } = {}) {
   const upcoming = visits.filter((v) => v.upcoming);
   if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming', ...visitIdField(upcoming[0]) };
-  if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
+  if (upcoming.length > 1) {
+    const next = nextOfSeries ? nextVisitOfSeries(upcoming) : null;
+    return next
+      ? { serviceType: next.type, certain: true, reason: 'next_of_series', ...visitIdField(next, visits) }
+      : { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
+  }
   if (openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
   const completed = visits.find((v) => !v.upcoming);
   if (completed) return { serviceType: completed.type, certain: true, reason: 'last_completed' };
@@ -6557,6 +6616,7 @@ module.exports = {
   DRAFTER,
   PROMPT_VERSION,
   REAL_ANSWERS_PROMPT_VERSION,
+  NEXT_OF_SERIES_PROMPT_VERSION,
   REAL_ANSWERS_VERSION_FAMILY,
   currentPromptVersion,
   VERIFY_ENABLED,

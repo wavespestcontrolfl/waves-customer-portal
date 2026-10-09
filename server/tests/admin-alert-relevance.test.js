@@ -376,6 +376,43 @@ describe('class rules', () => {
     expect(classify(note({ category: 'schedule', metadata: { triggerKey: 'reservice_self_booked', dedupeKey: `reservice-booked:${VISIT}` } })).key).toBe('reservice_booked');
   });
 
+  test('call last-name suggestion: done once the customer has a last name or is gone; a live customer with a blank one keeps it (owner 2026-10-08)', async () => {
+    const bell = (over = {}) => note({
+      category: 'customer',
+      link: `/admin/customers?customerId=${CUST}`,
+      metadata: { dedupeKey: `call-last-name-suggestion:${CUST}`, customerId: CUST, callLogId: uid(40), suggestions: [{ surname: 'Sample', sources: ['email'] }], ...over },
+    });
+    const pat = (over = {}) => ({ id: CUST, first_name: 'Pat', last_name: '', ...over });
+    // Live customer, blank (or whitespace-only, or null) last name: the bell stays.
+    for (const last_name of ['', '   ', null]) {
+      mockTables.customers = [pat({ last_name })];
+      expect(await reasonFor(bell())).toEqual({ cls: 'call_last_name_suggestion', reason: null });
+    }
+    mockTables.customers = [pat({ last_name: 'Sample' })];
+    expect((await reasonFor(bell())).reason).toBe('Last name was saved');
+    // Deleted (soft-deleted rows are not loaded) or hard-deleted: gone.
+    mockTables.customers = [pat({ deleted_at: AFTER_BELL })];
+    expect((await reasonFor(bell())).reason).toBe('Customer is gone');
+    mockTables.customers = [];
+    expect((await reasonFor(bell())).reason).toBe('Customer is gone');
+    // The customer id falls back to the link when the metadata has none.
+    mockTables.customers = [pat({ last_name: 'Sample' })];
+    expect((await reasonFor(bell({ customerId: undefined }))).reason).toBe('Last name was saved');
+    // A bell naming no usable customer is never judged and reads no customer.
+    mockQueries = [];
+    expect((await reasonFor(bell({ customerId: 'not-an-id' }))).reason).toBeNull();
+    const nobody = note({ category: 'customer', link: '/admin/customers', metadata: { dedupeKey: 'call-last-name-suggestion:x', customerId: 42 } });
+    expect(await reasonFor(nobody)).toEqual({ cls: 'call_last_name_suggestion', reason: null });
+    expect(mockQueries.filter((q) => q.table === 'customers')).toEqual([]);
+    // Another category with a look-alike key, or another customer-category bell, is not this class.
+    expect(classify(note({ category: 'alert', metadata: { dedupeKey: `call-last-name-suggestion:${CUST}`, customerId: CUST } }))).toBeNull();
+    expect(classify(note({ category: 'customer', metadata: { dedupeKey: `missing-last-name:${CUST}`, customerId: CUST } }))).toBeNull();
+    // Other classes' bells that carry a customerId read no customer.
+    mockQueries = [];
+    await loadSubjects([staleNote(uid(41)), note({ category: 'alert', metadata: { dedupeKey: 'portal-chat-escalation:e', customerId: CUST, topic: 'add_service' } })]);
+    expect(mockQueries.filter((q) => q.table === 'customers')).toEqual([]);
+  });
+
   test('promise chaser: settled once the promise it chases is closed; a missing promise or another missed-call bell is never judged (owner 2026-10-03)', async () => {
     const P = uid(520);
     const chaser = (over = {}) => note({
@@ -839,6 +876,21 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     return row;
   };
 
+  test('a last-name suggestion is retired by the sweep once the name is saved, and put back (unread) if the name is blanked again', async () => {
+    const bell = () => note({ category: 'customer', link: `/admin/customers?customerId=${CUST}`, metadata: { dedupeKey: `call-last-name-suggestion:${CUST}`, customerId: CUST } });
+    const row = bell();
+    mockTables.customers = [{ id: CUST, first_name: 'Pat', last_name: 'Sample' }];
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 1, byClass: { call_last_name_suggestion: 1 } });
+    expect(row).toMatchObject({ done_at: NOW, done_by: 'relevance', resolution: 'Last name was saved' });
+    expect(JSON.parse(row.metadata).retired).toEqual({ by: 'alert-relevance', reason: 'Last name was saved', at: NOW.toISOString() });
+    // The office blanks the name again inside the window: the bell comes back.
+    mockTables.customers[0].last_name = '';
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1, retired: 0 });
+    expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
+    expect(JSON.parse(row.metadata).retired).toBeUndefined();
+  });
+
   test('a promise-chaser retirement is final: the promise reopened later does not put the bell back (its emitter\'s own close is final too)', async () => {
     const P = uid(720);
     mockTables.call_commitments = [{ id: P, status: 'open', human_state: null }];
@@ -942,4 +994,11 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
     expect([row.read_at, row.done_at]).toEqual([null, null]);
   });
+});
+
+test('the last-name suggestion prefix here is the emitter\'s own (the two files each hold the constant)', () => {
+  const emitter = jest.requireActual('../services/call-last-name-lookup').SUGGESTION_KEY_PREFIX;
+  const src = require('fs').readFileSync(require.resolve('../services/admin-alert-relevance'), 'utf8');
+  expect(emitter).toBe('call-last-name-suggestion:');
+  expect(src).toContain(`const SUGGESTION_KEY_PREFIX = '${emitter}';`);
 });
