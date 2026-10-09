@@ -24,6 +24,7 @@ const {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
+  takeAllProductIdsFor,
   preflightLawnFastCompletion,
   assertLawnFastVisitTypeUnderLock,
 } = require('../services/lawn-fast-complete');
@@ -55,7 +56,7 @@ function fakeKnex(tables) {
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'select']) chain[m] = () => chain;
+    for (const m of ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'select']) chain[m] = () => chain;
     chain.first = async () => {
       if (data instanceof Error) throw data;
       return Array.isArray(data) ? data[0] : data;
@@ -439,6 +440,81 @@ describe('buildLawnFastContext', () => {
       });
     });
 
+    describe('places and trouble areas (GATE_LAWN_TROUBLE_AREAS)', () => {
+      const KNOWN = { id: uuid(31), place: 'back', type: 'fungus', last_treated_on: '2026-09-12', last_seen_on: '2026-09-12' };
+      const readWith = (extraTables = {}) => buildLawnFastContext(VISIT, {
+        knex: fakeKnex({ scheduled_services: visit({ property_id: uuid(40) }), customers: { billing_mode: null }, products_catalog: [herbicide], lawn_trouble_areas: [KNOWN], ...extraTables }),
+      });
+      // The lead is at its yearly count at the front only; everywhere else it is open.
+      const leadCappedAtFront = () => v13VisitLimits.mockImplementation(async (knex, svcRow, items, rows, targets, options) => ({
+        capped: options?.place === 'front' || !options?.place ? new Map([[P_LEAD, [{ type: 'annual_max_apps', message: 'Lead: 2/2 applications this year — LIMIT REACHED.' }]]]) : new Map(),
+        warnings: [], blocks: [],
+      }));
+      beforeEach(() => { process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; });
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN_TREATMENT_GUIDE; });
+
+      test('gate off (spot rules on): no troubleAreas, no byPlace, and the limits are read once per product as before', async () => {
+        const ctx = await readWith();
+        expect('troubleAreas' in ctx).toBe(false);
+        expect('byPlace' in ctx.plannedProducts.weedMix).toBe(false);
+        expect(v13VisitLimits.mock.calls.every((call) => call.length === 5)).toBe(true);
+      });
+
+      test('gate on, nothing capped: the closed list, the known areas, no closed place, and every place takes the lawn-wide mix', async () => {
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+        const ctx = await readWith();
+        expect(ctx.troubleAreas).toEqual({
+          v: 1,
+          places: [{ id: 'front', label: 'Front' }, { id: 'back', label: 'Back' }, { id: 'left_side', label: 'Left side' }, { id: 'right_side', label: 'Right side' }],
+          known: [{ id: KNOWN.id, place: 'back', placeLabel: 'Back', type: 'fungus', typeLabel: 'Fungus', lastTreatedOn: '2026-09-12' }],
+          knownUnavailable: false,
+          blocked: {},
+          blockedTypes: {},
+        });
+        expect(Object.keys(ctx.plannedProducts.weedMix.byPlace)).toEqual(['front', 'back', 'left_side', 'right_side']);
+        expect(ctx.plannedProducts.weedMix.byPlace.front).toMatchObject({ mode: 'lead', productIds: [P_LEAD, P_SURF] });
+        // Nothing was capped lawn-wide, so no place was read again.
+        expect(v13VisitLimits.mock.calls.every((call) => !call[5])).toBe(true);
+      });
+
+      test('gate on, the lead capped at the front only: the front takes the replacement, the others the lead; the top level follows the first place that can take the lead', async () => {
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+        leadCappedAtFront();
+        const mix = (await readWith()).plannedProducts.weedMix;
+        expect(mix.byPlace.front).toMatchObject({ mode: 'replacement', productIds: [P_BLIND] });
+        expect(mix.byPlace.back).toMatchObject({ mode: 'lead', productIds: [P_LEAD, P_SURF] });
+        expect(mix).toMatchObject({ mode: 'lead', productIds: [P_LEAD, P_SURF] });
+      });
+
+      test('gate on: the temperature is read once however many places are judged', async () => {
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+        leadCappedAtFront();
+        await readWith();
+        expect(getCurrent).toHaveBeenCalledTimes(1);
+      });
+
+      test('the gate needs the spot rules and the v13 program: without either, nothing changes', async () => {
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+        delete process.env.GATE_LAWN_V13;
+        expect('troubleAreas' in (await readWith())).toBe(false);
+      });
+
+      test('a failed read of the known areas is named and sends an empty line, never invented areas', async () => {
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+        const ctx = await readWith({ lawn_trouble_areas: new Error('synthetic read failure') });
+        expect(ctx.troubleAreas).toMatchObject({ known: [], knownUnavailable: true });
+        expect(ctx.readFailures).toContain('trouble_areas');
+      });
+
+      test('a visit with no plan (one-time) still carries the places, with nothing closed', async () => {
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+        resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+        const ctx = await readWith();
+        expect(ctx.troubleAreas).toMatchObject({ v: 1, blocked: {} });
+        expect(ctx.troubleAreas.places).toHaveLength(4);
+      });
+    });
+
     test('gate on, a visit with no plan (one-time): spotRules only, no weedMix', async () => {
       process.env.GATE_LAWN_SPOT_RULES = 'true';
       resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
@@ -784,6 +860,76 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       });
     });
 
+    describe('places (GATE_LAWN_TROUBLE_AREAS): a product is held back only when no place permits it', () => {
+      // Capped lawn-wide and at the places named; open elsewhere.
+      const cappedAt = (id, ...places) => v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+        capped: new Map(items.filter((i) => i.product.id === id && (!options?.place || places.includes(options.place))).map((i) => [id, YEARLY])), warnings: [], blocks: [],
+      }));
+      const fungusTables = () => tablesFor({ lawn_assessment_runs: run({ fungal_activity: { level: 'severe' } }) });
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+      test('gate off: a fungicide capped at the front is blocked lawn-wide, as before', async () => {
+        live();
+        cappedAt(P_ART, 'front');
+        const result = await guide(fungusTables());
+        expect(result.blockedProductIds).toContain(P_ART);
+        expect(result.cards.map((card) => card.kind)).not.toContain('fungus');
+      });
+
+      test('gate off: the guide answer has no placeBlocked key', async () => {
+        live();
+        cappedAt(P_ART, 'front');
+        const answer = await guide(fungusTables());
+        expect(answer).not.toHaveProperty('placeBlocked');
+        expect(answer).not.toHaveProperty('placeBlockedTypes');
+      });
+
+      test('gate on: the answer carries the per-place blocks it just read, for every product it read, so the sheet can drop the opening map', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        cappedAt(P_ART, 'front');
+        const result = await guide(fungusTables());
+        expect(result.placeBlocked[P_ART]).toEqual({ front: 'limit' });
+        // The limit type rides with each closed place (the sheet drops a yearly-amount block when the row's dose changes, never a count).
+        expect(result.placeBlockedTypes).toEqual({ [P_ART]: { front: 'annual_max_apps' } });
+        // Products the read found open everywhere are empty entries, not absent: "no longer closed" is an answer.
+        expect(result.placeBlocked[P_ACE]).toEqual({});
+        expect(result.placeBlocked[P_DISP]).toEqual({});
+      });
+
+      test('gate on: capped at the front only, the fungus card is offered and the pick is not blocked', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        cappedAt(P_ART, 'front');
+        const result = await guide(fungusTables());
+        expect(result.blockedProductIds).not.toContain(P_ART);
+        expect(result.cards.find((card) => card.kind === 'fungus')).toMatchObject({ productIds: [P_ART] });
+      });
+
+      test('gate on: capped at every place, it is blocked and has no card', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        cappedAt(P_ART, 'front', 'back', 'left_side', 'right_side');
+        const result = await guide(fungusTables());
+        expect(result.blockedProductIds).toContain(P_ART);
+        expect(result.cards.map((card) => card.kind)).not.toContain('fungus');
+      });
+
+      test('gate on: the lead capped at the front only gives the weeds card a set per place (the front takes the replacement)', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        buildPlanForService.mockResolvedValue(plan([
+          ...addOns(), row(uuid(44), 'Test Blind Herbicide', { trigger: 'celsius_annual_cap_reached' }),
+        ]));
+        cappedAt(P_LEAD, 'front');
+        const result = await guide(tablesFor({ lawn_assessments: assessmentRow({ weed_suppression: 50 }) }));
+        const weeds = result.cards.find((card) => card.kind === 'weeds');
+        expect(weeds.byPlace.front.productIds).toEqual([uuid(44)]);
+        expect(weeds.byPlace.back.productIds).toEqual([P_LEAD, P_CERT]);
+        expect(weeds.productIds).toEqual([P_LEAD, P_CERT]);
+      });
+    });
+
     test('the plan\'s take-all fungicide rows, read now, ride the answer', async () => {
       live();
       const takeAllPlan = plan(addOns());
@@ -791,6 +937,22 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       buildPlanForService.mockResolvedValue(takeAllPlan);
       v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
       expect((await guide(tablesFor())).takeAllProductIds).toEqual([P_ART]);
+    });
+
+    test('takeAllProductIdsFor: the visit\'s take-all fungicide ids by the staged-row rule (what the completion confirms a take_all claim against)', async () => {
+      live();
+      const takeAllPlan = plan(addOns());
+      takeAllPlan.completionDefaults.addOns[2].raw = 'Test Artavia — mapped take-all areas, second spring application';
+      buildPlanForService.mockResolvedValue(takeAllPlan);
+      v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
+      const knex = fakeKnex(tablesFor());
+      expect([...(await takeAllProductIdsFor(visit({ scheduled_date: '2026-07-14' }), knex))]).toEqual([P_ART]);
+      // Large patch is not take-all; a lawn with no plan has none.
+      v13ProtocolRows.mockReturnValue(PROGRAM);
+      buildPlanForService.mockResolvedValue(plan(addOns()));
+      expect((await takeAllProductIdsFor(visit({ scheduled_date: '2026-07-14' }), knex)).size).toBe(0);
+      buildPlanForService.mockResolvedValue(plan(addOns(), false));
+      expect((await takeAllProductIdsFor(visit({ scheduled_date: '2026-07-14' }), knex)).size).toBe(0);
     });
 
     test('the fresh chinch decision rides the answer: the product, then the fallback, then nothing', async () => {
@@ -992,6 +1154,106 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [], actionLabel: null, note: 'Take-all is treated on known trouble areas only. None is on file for this lawn.' });
     });
 
+    describe('take-all areas on file (GATE_LAWN_TROUBLE_AREAS)', () => {
+      const AREA = { id: uuid(70), place: 'back', type: 'take_all', last_treated_on: '2026-06-01', last_seen_on: '2026-06-01' };
+      const takeAllMonth = () => {
+        const takeAllPlan = plan(addOns());
+        takeAllPlan.completionDefaults.addOns[2].raw = 'Test Artavia — mapped take-all areas, second spring application';
+        buildPlanForService.mockResolvedValue(takeAllPlan);
+        v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
+      };
+      const read = (areasOnFile) => guide(tablesFor({
+        scheduled_services: visit({ scheduled_date: '2026-07-14', property_id: uuid(40) }),
+        lawn_trouble_areas: areasOnFile,
+        lawn_assessment_runs: run({ fungal_activity: { level: 'moderate' } }),
+      }));
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+      test('gate off: an area on file changes nothing (the check only, as before)', async () => {
+        live();
+        takeAllMonth();
+        const result = await read([AREA]);
+        expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [], actionLabel: null });
+      });
+
+      test('gate on, a take_all area on file: the card offers the take-all product with one tap, and the note names the stored place', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        const result = await read([AREA]);
+        expect(result.cards[0]).toMatchObject({ kind: 'fungus', productIds: [P_ART], actionLabel: 'I checked. Add it', note: 'Take-all area on file: Back.', allowedPlaces: ['back'] });
+        // Still governed: the answer lists it as a take-all product, so the sheet never lists it with the plain add-ons.
+        expect(result.takeAllProductIds).toEqual([P_ART]);
+      });
+
+      test('gate on: no area on file (or only another type) is the check only; a cleared area is not returned by the store, so it offers nothing', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        expect((await read([])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+        expect((await read([{ ...AREA, type: 'fungus' }])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+      });
+
+      test('gate on: the stored place where the product is capped is not offered; with no other stored place the card is the check only', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+          capped: new Map(items.filter((i) => i.product.id === P_ART && (!options?.place || options.place === 'back')).map((i) => [P_ART, YEARLY])), warnings: [], blocks: [],
+        }));
+        expect((await read([AREA])).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+        // The same product capped at the back but a second stored area at the front: the card stands, naming the front only.
+        expect((await read([AREA, { ...AREA, id: uuid(71), place: 'front' }])).cards[0]).toMatchObject({ productIds: [P_ART], note: 'Take-all area on file: Front.', allowedPlaces: ['front'] });
+      });
+
+      test('gate on: a failed read of the store is the check only, never a guess', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        takeAllMonth();
+        expect((await read(new Error('synthetic read failure'))).cards[0]).toMatchObject({ productIds: [], actionLabel: null });
+      });
+    });
+
+    describe('products the sheet names (Search-added rows outside the month\'s recipe)', () => {
+      const P_SEARCHED = uuid(80);
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+      test('gate on: they are read per place and ride the answer in the context\'s shape; the guide\'s own reads stand', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+          capped: new Map(items.filter((i) => i.product.id === P_SEARCHED && (!options?.place || options.place === 'front')).map((i) => [P_SEARCHED, YEARLY])), warnings: [], blocks: [],
+        }));
+        const tables = tablesFor({ products_catalog: [{ id: P_SEARCHED, name: 'Searched Product' }] });
+        const result = await buildLawnTreatmentGuide({ serviceId: VISIT, assessmentId: CONFIRMED, knex: fakeKnex(tables), productIds: [P_SEARCHED, 'not-a-uuid'] });
+        expect(result.placeBlocked[P_SEARCHED]).toEqual({ front: 'limit' });
+        expect(result.placeBlockedTypes[P_SEARCHED]).toEqual({ front: 'annual_max_apps' });
+        expect(result.placeBlocked[P_ART]).toEqual({});
+      });
+
+      test('gate off, or no ids named: the answer is as it was', async () => {
+        live();
+        const tables = tablesFor();
+        expect(await buildLawnTreatmentGuide({ serviceId: VISIT, assessmentId: CONFIRMED, knex: fakeKnex(tables), productIds: [P_SEARCHED] })).not.toHaveProperty('placeBlocked');
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        expect((await guide(tables)).placeBlocked).not.toHaveProperty(P_SEARCHED);
+      });
+
+      test('the context reads them too (a one-time visit with no plan has an empty seed)', async () => {
+        live();
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+        v13VisitLimits.mockImplementation(async (_k, _s, items, _r, _t, options) => ({
+          capped: new Map(items.filter((i) => i.product.id === P_SEARCHED && (!options?.place || options.place === 'back')).map((i) => [P_SEARCHED, YEARLY])), warnings: [], blocks: [],
+        }));
+        const knex = fakeKnex({ ...tablesFor(), products_catalog: [{ id: P_SEARCHED, name: 'Searched Product' }] });
+        expect((await buildLawnFastContext(VISIT, { knex })).troubleAreas.blocked).toEqual({});
+        const named = await buildLawnFastContext(VISIT, { knex, productIds: [P_SEARCHED] });
+        expect(named.troubleAreas.blocked).toEqual({ [P_SEARCHED]: { back: 'limit' } });
+        expect(named.troubleAreas.blockedTypes).toEqual({ [P_SEARCHED]: { back: 'annual_max_apps' } });
+      });
+    });
+
     test('the chinch card is seasonal: October has none, and the caterpillar card stays', async () => {
       live();
       const result = await guide(tablesFor({
@@ -1179,7 +1441,7 @@ describe('preflightLawnFastCompletion', () => {
   };
   const run = (tables, args = {}) => preflightLawnFastCompletion({
     knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: null }, ...tables }),
-    svc: { id: VISIT, customer_id: 'cust-1' },
+    svc: { id: VISIT, customer_id: 'cust-1', property_id: 'prop-1' },
     lawnAssessmentId: ASSESSMENT,
     expectedVisit: IDENTITY,
     lawnFast: { visitType: 'recurring' },
@@ -1216,6 +1478,38 @@ describe('preflightLawnFastCompletion', () => {
   ])('a confirmed assessment on a %s visit passes, even with no photos at all (advisory floor)', async (label, profile) => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
     expect(await run({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] }, { lawnFast: { visitType: label === 'one-time' ? 'one_time' : 'recurring' } })).toBeNull();
+  });
+
+  describe('the places (GATE_LAWN_TROUBLE_AREAS)', () => {
+    const CONFIRMED = { lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] };
+    const spotRow = (extra = {}) => ({ productId: P_HERB, name: 'Test Weed Spray', applicationMethod: 'spot_treatment', ...extra });
+    beforeEach(() => {
+      process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+      v13VisitLimits.mockReset().mockResolvedValue({ capped: new Map(), warnings: [], blocks: [] });
+    });
+    afterEach(() => { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_TREATMENT_GUIDE; });
+
+    test('gate off: the products are not looked at', async () => {
+      delete process.env.GATE_LAWN_TROUBLE_AREAS;
+      expect(await run(CONFIRMED, { products: [spotRow()] })).toBeNull();
+    });
+
+    test('a spot row with no place: 400 lawn_place_required, naming the product; a bad place: 400 lawn_place_invalid', async () => {
+      expect(await run(CONFIRMED, { products: [spotRow()] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_required', error: 'Pick where on the lawn Test Weed Spray went.' } });
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'roof' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_invalid' } });
+    });
+
+    test('a row with a place, and a whole-lawn row without one, pass the preflight', async () => {
+      expect(await run(CONFIRMED, { products: [spotRow({ areaPlace: 'front' }), { productId: P_GRAN, applicationMethod: 'granular_broadcast' }] })).toBeNull();
+    });
+
+    test('an incomplete outcome is exempt, as for every other check', async () => {
+      expect(await run(CONFIRMED, { isIncompleteVisit: true, products: [spotRow()] })).toBeNull();
+    });
+
+    test('the earlier checks come first: no confirmed assessment is still lawn_fast_assessment_required', async () => {
+      expect(await run({ lawn_assessments: undefined }, { products: [spotRow()] })).toMatchObject({ status: 400, payload: { code: 'lawn_fast_assessment_required' } });
+    });
   });
 
   // The visit type the sheet opened with, echoed in the lawnFast block and recomputed with

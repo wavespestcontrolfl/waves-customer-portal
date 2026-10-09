@@ -2003,10 +2003,11 @@ async function hardLimitedProductNames(database, ids) {
 // interval are reported separately), or one 'unavailable' finding when the audit read fails. The audit
 // covers the whole calendar year of the service date and the nearest applications on both sides,
 // so a backdated closeout is judged against the applications recorded after it too.
-async function productLimitFindings({ svc, productId, productName, serviceDate, database }) {
+async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null }) {
   try {
-    const violations = await savepointRead(database, (k) => require('../services/application-limits')
-      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }));
+    // GATE_LAWN_TROUBLE_AREAS: a spot application that carries a place is audited at that place (the yearly limits are per place).
+    const violations = await savepointRead(database, async (k) => require('../services/application-limits')
+      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (place && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, ...(place ? { place } : {}) }));
     return violations.map((violation) => overLimitFinding(productId, productName, violation));
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
@@ -2016,7 +2017,7 @@ async function productLimitFindings({ svc, productId, productName, serviceDate, 
 
 // Every finding for the products a closeout recorded (ids from its ledger rows or its submitted
 // list). Never throws: a failed batch read is one 'unavailable' finding.
-async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db } = {}) {
+async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db, places = null } = {}) {
   if (!svc || require('../config/feature-gates').lawnV13Live?.() !== true) return [];
   if (detectServiceLine(svc.service_type) !== 'lawn') return [];
   const ids = [...new Set((productIds || []).filter(Boolean).map(String))].filter((id) => UUID_SHAPE.test(id));
@@ -2031,7 +2032,7 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
   const day = serviceDateOnly(serviceDate || svc.scheduled_date);
   const findings = [];
   for (const [productId, productName] of limited) {
-    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database }));
+    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database, place: places?.get(String(productId)) || null }));
   }
   return findings;
 }
@@ -2044,13 +2045,16 @@ async function recordedProductLimitFindings({ svc, record, database = db } = {})
   if (!svc || !record?.id) return [];
   if (require('../config/feature-gates').lawnV13Live?.() !== true || detectServiceLine(svc.service_type) !== 'lawn') return [];
   try {
+    // GATE_LAWN_TROUBLE_AREAS: the place each spot application was recorded at, so the audit judges it there.
+    const placed = require('../config/feature-gates').lawnTroubleAreasLive();
     const rows = await savepointRead(database, (k) => k('property_application_history')
-      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id'));
+      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place'] : ['product_id'])));
     return await submittedProductLimitFindings({
       svc,
       productIds: (rows || []).map((row) => row.product_id),
       serviceDate: serviceDateOnly(record.service_date),
       database,
+      ...(placed ? { places: new Map((rows || []).filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
     });
   } catch (err) {
     logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
@@ -4748,6 +4752,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           isIncompleteVisit,
           expectedVisit,
           lawnFast,
+          products,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(
@@ -6775,7 +6780,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
-            ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast),
+            ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
@@ -7907,6 +7912,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Shared closeout allowlist (inventory-units.js) — the pest
           // recap validates against the same vocabulary (codex P1 r11).
           const { isValidRateUnit } = require('../services/inventory-units');
+          // GATE_LAWN_TROUBLE_AREAS: a visit whose property cannot be resolved records no place (the gate acts as off for that visit).
+          const placesOn = !!(await savepointRead(trx, (k) => require('../services/lawn-trouble-areas').propertyOf(k, svc)).catch(() => null));
           for (const p of products) {
             if (!p.productId) continue;
             // One row per product AND add-on: a host row and an add-on row of the same product are two applications.
@@ -7995,6 +8002,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
             Object.assign(serviceProductInsert, areaAddOnGovernedRate.addOnProductColumns(serviceProductCols, addOnTags, p));
+            // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went, beside the product record (nothing is added while the gate is off).
+            Object.assign(serviceProductInsert, require('../services/lawn-trouble-areas').placeFields({ cols: serviceProductCols, applicationMethod, input: p, enabled: placesOn }));
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
             insertedServiceProducts.push(serviceProduct);
 
@@ -8038,6 +8047,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
+          // GATE_LAWN_TROUBLE_AREAS: the lawn's trouble-area store, from the spot rows that carry a place (secondary; never fails the visit).
+          await require('../services/lawn-trouble-areas').recordStore(trx, { svc, record, products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById, confirm: () => require('./lawn-fast-complete').troubleTypeIdsFor(svc) });
         }
 
         // Ledger row: legacy = completed WaveGuard visits with a structured
@@ -15612,6 +15623,7 @@ module.exports = {
 // The method vocabulary and area rules /complete enforces per product row,
 // exported so the lawn re-service fast-context offers exactly what it accepts.
 module.exports.normalizeServiceReportApplicationMethod = normalizeServiceReportApplicationMethod;
+module.exports.inferServiceReportApplicationMethod = inferServiceReportApplicationMethod;
 module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
 module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;

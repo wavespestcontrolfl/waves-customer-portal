@@ -205,6 +205,34 @@ describe('closeout: hard count limits flag, they never refuse', () => {
   });
 });
 
+describe('closeout: a spot application is audited at its place (GATE_LAWN_TROUBLE_AREAS)', () => {
+  const record = { id: 'record-1', service_date: etDateString() };
+  // The ledger lookup answers `rows`; every other table is the suite's mocked database.
+  const placedLedger = (rows) => (table) => (table === 'property_application_history'
+    ? { where: () => ({ whereNull: () => ({ whereNotNull: () => ({ distinct: async (...columns) => { placedLedger.columns = columns; return rows; } }) }) }) }
+    : db(table));
+
+  test('the place of the recorded product is handed to the audit; a product with none is audited on the lawn', async () => {
+    process.env.GATE_LAWN_SPOT_RULES = 'true';
+    process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+    try {
+      const database = placedLedger([{ product_id: CELSIUS_ID, treated_place: 'back' }, { product_id: DEFAULT_ID, treated_place: null }]);
+      limitedIds.add(DEFAULT_ID);
+      await recordedProductLimitFindings({ svc: service, record, database });
+      expect(placedLedger.columns).toEqual(['product_id', 'treated_place']);
+      expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID, place: 'back' });
+      expect(checkLimits).toHaveBeenCalledWith(service.customer_id, DEFAULT_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
+    } finally { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_TREATMENT_GUIDE; }
+  });
+
+  test('gate off: the ledger is read for the product ids alone and the audit gets no place', async () => {
+    const database = placedLedger([{ product_id: CELSIUS_ID }]);
+    await recordedProductLimitFindings({ svc: service, record, database });
+    expect(placedLedger.columns).toEqual(['product_id']);
+    expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
+  });
+});
+
 describe('the findings path never goes quiet', () => {
   const record = { id: 'record-1', service_date: etDateString() };
   const unavailable = [expect.objectContaining({ code: 'application_limit_check_unavailable', message: 'Recorded. The office will review: product limits could not be checked for this visit.' })];
