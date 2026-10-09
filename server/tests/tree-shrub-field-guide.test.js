@@ -27,7 +27,17 @@ test('Talus and Headway are not in the reference; TriStar carries the verified C
   expect(reference.products.headway).toBeUndefined();
   expect(JSON.stringify(reference)).not.toMatch(/talus|headway/i);
   expect(reference.products.tristar).toMatchObject({ name: 'TriStar 8.5 SL', equipment: ['bg', 'flowzone', 'rig'] });
-  expect(reference.products.tristar.rates[0][0]).toBe('8.5–16.5 fl oz / 100 gal');
+  // One rate row per label pest group (EPA 8033-106 ornamental table; Codex r3 #6185).
+  expect(reference.products.tristar.rates).toEqual([
+    ['4.0 fl oz / 100 gal', 'Aphids.'],
+    ['8.5 fl oz / 100 gal', 'Mealybugs.'],
+    ['8.5–16.5 fl oz / 100 gal', 'Whiteflies and soft scales. Use the higher rate when pressure is high.'],
+  ]);
+  expect(reference.products.tristar.mixes).toEqual([
+    ['Aphids', 0.04, 0.04], ['Mealybugs', 0.085, 0.085], ['Whitefly or soft scale', 0.085, 0.165],
+  ]);
+  // The TriTek label lists sooty mold only for citrus: not an oil target here.
+  expect(JSON.stringify([reference.products.tritek, reference.products.tritek15])).not.toMatch(/sooty/i);
   expect(reference.products.tristar.source).toMatch(/8033-106-1001/);
   // Every product a month card names exists in the reference.
   for (const row of program.visits) {
