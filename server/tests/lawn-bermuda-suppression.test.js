@@ -259,7 +259,12 @@ describe('send-boundary gate for persisted suppression estimates', () => {
     // never a result or engineResult (retained engine rows) that carries the suppression.
     const withAddOn = { result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: pricedEngine };
     expect(carries({ ...withAddOn, proposal: { enabled: true, buildings: [{ lineItems: [{ name: 'Lawn Care', frequency: 'monthly' }] }] } })).toBe(false);
-    expect(carries({ ...withAddOn, proposal: { enabled: true } })).toBe(false);
+    // An enabled proposal with NO itemization is not an authored quote (normalizeProposal shows the
+    // customer the fallback synthesized from the priced result), so the result is the evidence
+    // (codex r52 P1; r27 had pinned this case the other way).
+    expect(carries({ ...withAddOn, proposal: { enabled: true } })).toBe(true);
+    expect(carries({ ...withAddOn, proposal: { enabled: true, buildings: [], programs: [], correctiveWork: [] } })).toBe(true);
+    expect(carries({ ...withAddOn, proposal: { enabled: true, correctiveWork: [{ name: 'One-time cleanup' }] } })).toBe(false);
     expect(carries({ ...withAddOn, proposal: { enabled: true, buildings: [{ lineItems: [{ name: 'Lawn Care', bermudaSuppression: true }] }] } })).toBe(true);
     // A disabled proposal does not take over.
     expect(carries({ ...withAddOn, proposal: { enabled: false } })).toBe(true);

@@ -102,6 +102,18 @@ function yearRateTotal(limit, history, ctx) {
   return { totalApplied: applied + adds, note: adds ? ` (${applied.toFixed(3)} recorded plus ${adds.toFixed(3)} for this application)` : '' };
 }
 
+// The refusal for a spray inside the minimum interval. The usual anchor is the LAST application,
+// and the message says when the next one is allowed. A write-time bermuda check can anchor on a
+// LATER recorded application (a backdated completion): then the message names that one and gives
+// the latest day this spray could have been, never a forward date.
+function intervalViolationMessage(product, { daysSince, minDays, lastApp, proposedDay }) {
+  const day = (ms) => new Date(ms).toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+  if (lastApp > proposedDay) {
+    return `${product.name}: only ${daysSince} days before the next recorded app on ${day(lastApp.getTime())} (min ${minDays}). Latest allowed before it: ${day(lastApp.getTime() - minDays * 86400000)}.`;
+  }
+  return `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${day(lastApp.getTime() + minDays * 86400000)}.`;
+}
+
 // What could not be counted exactly, for the end of a cap message.
 function sizingNote(unsized, estimated) {
   const notes = [
@@ -336,7 +348,7 @@ class ApplicationLimitChecker {
         // Whole days between the two, whichever came first (a write-time bermuda check may read a LATER spray).
         const daysSince = Math.floor(Math.abs(proposedDay - lastApp) / 86400000);
         const minDays = limitValue;
-        if (daysSince < minDays) return { violated: true, message: `${product.name}: only ${daysSince} days since last app (min ${minDays}). Next allowed: ${new Date(lastApp.getTime() + minDays * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}.`, current: daysSince, max: minDays };
+        if (daysSince < minDays) return { violated: true, message: intervalViolationMessage(product, { daysSince, minDays, lastApp, proposedDay }), current: daysSince, max: minDays };
         if (daysSince < minDays + 7) return { approaching: true, message: `${product.name}: ${daysSince} days since last app (min ${minDays}). Just cleared.`, current: daysSince, max: minDays };
         return { violated: false, current: daysSince, max: minDays };
       }

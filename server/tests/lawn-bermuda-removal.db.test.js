@@ -641,7 +641,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       setGates();
       const late = await lawn({ date: '2026-04-14', bermuda: true });
       await spray(late.customerId, late.property.id, '2026-05-01');
-      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: late.visit.id })).toMatch(/only 17 days since last app \(min 42\)/);
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: late.visit.id })).toMatch(/only 17 days before the next recorded app on 5\/1\/2026 \(min 42\)\. Latest allowed before it: 3\/20\/2026\./);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: late.visit.id })))
         .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
       const full = await lawn({ date: '2026-04-14', bermuda: true });

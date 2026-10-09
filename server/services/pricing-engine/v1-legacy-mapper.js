@@ -1506,6 +1506,9 @@ function proposalCarriesBermudaSuppression(proposal) {
   return lines.some((line) => line?.bermudaSuppression === true);
 }
 
+const proposalIsItemized = (proposal) => ['buildings', 'programs', 'correctiveWork']
+  .some((key) => Array.isArray(proposal?.[key]) && proposal[key].length > 0);
+
 function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAuthority = null } = {}) {
   let d = estimateDataRaw;
   if (typeof d === 'string') {
@@ -1516,7 +1519,11 @@ function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAutho
   // An enabled authored proposal is the accepted quote: the evidence comes only from the proposal,
   // and only when one of its lines explicitly carries the suppression add-on. Nothing in
   // result or engineResult (retained engine rows, not the accepted quote) is read.
-  if (proposalIsAuthoritative(d)) return proposalCarriesBermudaSuppression(d.proposal);
+  // "Authored" is normalizeProposal's own test (estimate-proposal.js): the stored proposal carries
+  // itemization (building lines, programs or corrective work). An enabled proposal with none is
+  // not an authored quote: the customer was shown the synthesized fallback built from the priced
+  // result, so the result below is the evidence.
+  if (proposalIsAuthoritative(d) && proposalIsItemized(d.proposal)) return proposalCarriesBermudaSuppression(d.proposal);
   // The current result only: when `result` exists it is authoritative and a stale engineResult
   // left behind by a revision is never read (see estimate-result-container.js).
   // The pick is the audit's own, with the audit's own "prices something" detector (required
