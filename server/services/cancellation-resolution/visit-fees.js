@@ -50,7 +50,8 @@ async function previewVisitFees(pulledVisitKeys, now = new Date()) {
 
 // The two facts the customer's cancel screens render (portal C1 impact):
 //   lateCancelFee         the dollars that WILL be charged when every
-//                         fee-applying visit has a known amount, else null;
+//                         fee-applying visit has a known amount AND a
+//                         verified window, else null;
 //   lateCancelFeeMayApply true when a fee applies (or cannot be ruled out)
 //                         but the amount is not known.
 // A thrown preview is fee-may-apply for an account with visits to pull, never
@@ -61,7 +62,10 @@ async function customerLateFeeFacts(pulledVisitKeys, now = new Date()) {
   try {
     const fees = await previewVisitFees(keys, now);
     if (!fees.applies) return { lateCancelFee: null, lateCancelFeeMayApply: false };
-    return fees.total != null && fees.total > 0
+    // unresolved = the helpers could not VERIFY the window (an appointment-time
+    // or reschedule-history read failed) even when the amount is known — the
+    // commit may park that fee for office review, so never promise a charge.
+    return fees.total != null && fees.total > 0 && !fees.unresolved
       ? { lateCancelFee: fees.total, lateCancelFeeMayApply: false }
       : { lateCancelFee: null, lateCancelFeeMayApply: true };
   } catch (err) {

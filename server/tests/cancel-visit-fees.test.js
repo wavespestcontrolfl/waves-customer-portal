@@ -51,6 +51,14 @@ describe('customerLateFeeFacts', () => {
     expect(await customerLateFeeFacts(['v1:d'])).toEqual({ lateCancelFee: null, lateCancelFeeMayApply: true });
   });
 
+  test('a KNOWN amount whose window could not be verified (unresolved) is may-apply, never a promised charge', async () => {
+    mockHold.mockResolvedValue({ held: true, feeApplies: true, feeAmount: 75, unresolved: true });
+    expect(await customerLateFeeFacts(['v1:d'])).toEqual({ lateCancelFee: null, lateCancelFeeMayApply: true });
+    // one verified + one unverified visit: still no dollar promise
+    mockHold.mockImplementation(async (id) => ({ held: true, feeApplies: true, feeAmount: 75, unresolved: id === 'v2' }));
+    expect(await customerLateFeeFacts(['v1:d', 'v2:d'])).toEqual({ lateCancelFee: null, lateCancelFeeMayApply: true });
+  });
+
   test('a preview lookup that throws is may-apply, never a silent "no fee"', async () => {
     mockHold.mockRejectedValue(new Error('db down'));
     expect(await customerLateFeeFacts(['v1:d'])).toEqual({ lateCancelFee: null, lateCancelFeeMayApply: true });
