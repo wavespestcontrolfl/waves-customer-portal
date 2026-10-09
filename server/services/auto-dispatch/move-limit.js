@@ -33,7 +33,9 @@ async function countAutoMoves(conn, serviceIds) {
     .whereIn('scheduled_service_id', serviceIds)
     .where('reason_code', 'auto_dispatch')
     .where('initiated_by', 'auto_dispatch')
-    .whereRaw(SLOT_CHANGED_SQL)
+    // The first placement of a visit that had no arrival window is not a
+    // move: the customer was never told an earlier time.
+    .whereRaw(`${SLOT_CHANGED_SQL} AND original_window IS NOT NULL`)
     .groupBy('scheduled_service_id')
     .count('* as moves')
     .select('scheduled_service_id');

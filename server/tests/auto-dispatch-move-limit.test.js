@@ -49,7 +49,7 @@ describe('the count', () => {
       ['table', 'reschedule_log'],
       ['where', 'reason_code', 'auto_dispatch'],
       ['where', 'initiated_by', 'auto_dispatch'],
-      ['whereRaw', SLOT_CHANGED_SQL],
+      ['whereRaw', `${SLOT_CHANGED_SQL} AND original_window IS NOT NULL`],
       ['groupBy', 'scheduled_service_id'],
     ]));
     // The predicate: a changed date OR a changed window, so a same-day re-time counts.
