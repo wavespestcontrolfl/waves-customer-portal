@@ -4424,6 +4424,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Which area add-on each application row belongs to (service_products.area_addon_key): only an add-on the
     // visit really carries; the closeout counts one application row for each chemical add-on.
     const addOnTags = await areaAddOnGovernedRate.resolveApplicationAddOnTags(db, svc, products);
+    // The visit's whole area add-on set as this request read it (its own add-on and every attached row, the web sweep
+    // included): compared again under the visit lock. null = unreadable, and then nothing is compared.
+    const addOnKeysBeforeLock = await failSoftRead(db, (k) => areaAddOnGovernedRate.visitAreaAddOnKeySet(k, svc), null);
     const serviceFindingsAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_findings'), false);
     const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
@@ -6253,6 +6256,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // longer carries: resolved again on the LOCKED visit, and any difference rolls the record back as a changed visit
           // (the form reloads and is submitted against what the visit carries now). No add-on row submitted: no query.
           if (lockedSvcRow && !areaAddOnGovernedRate.sameAddOnTags(addOnTags, await areaAddOnGovernedRate.resolveApplicationAddOnTags(trx, lockedSvcRow, products))) {
+            throw Object.assign(new Error('add-on treatments changed during completion'), { code: 'visit_identity_changed' });
+          }
+          // ... and the visit's COMPLETE add-on set, whatever the submitted products claim (an add-on added or removed with
+          // no product row of its own, a web sweep): any change rolls back the same way.
+          if (lockedSvcRow && addOnKeysBeforeLock !== null
+            && addOnKeysBeforeLock !== await areaAddOnGovernedRate.visitAreaAddOnKeySet(trx, lockedSvcRow)) {
             throw Object.assign(new Error('add-on treatments changed during completion'), { code: 'visit_identity_changed' });
           }
           // Identity drift on the LOCKED row, for a client that sent the

@@ -572,6 +572,25 @@ describe('sameAddOnTags', () => {
     expect(governed.sameAddOnTags(a, tags([['p-1|area_addon_fire_ant_yard', 'area_addon_bed_pre_emergent']]))).toBe(false);
     expect(governed.sameAddOnTags(tags([]), tags([], true))).toBe(false);
   });
+  // Codex round 43: the complete set, not only what the submitted products claim.
+  test('visitAreaAddOnKeySet: own add-on plus attached rows, sorted; the completion compares it before and under the lock', async () => {
+    const VISIT = '10000000-0000-4000-8000-0000000000c1';
+    const visitRows = require('../services/area-addon-visit-rows');
+    // (the row reader is mocked in this suite: it returns the visit's area add-on row keys)
+    visitRows.areaAddOnKeysByVisit.mockResolvedValueOnce(new Map([[VISIT, ['area_addon_web_sweep']]]));
+    await expect(governed.visitAreaAddOnKeySet({}, { id: VISIT, service_key_snapshot: 'area_addon_fire_ant_yard' }))
+      .resolves.toBe('area_addon_fire_ant_yard,area_addon_web_sweep');
+    visitRows.areaAddOnKeysByVisit.mockResolvedValueOnce(new Map());
+    await expect(governed.visitAreaAddOnKeySet({}, { id: VISIT, service_key_snapshot: 'pest_control' })).resolves.toBe('');
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const before = src.indexOf('const addOnKeysBeforeLock = await failSoftRead(db, (k) => areaAddOnGovernedRate.visitAreaAddOnKeySet(k, svc), null);');
+    const lock = src.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const under = src.indexOf('addOnKeysBeforeLock !== await areaAddOnGovernedRate.visitAreaAddOnKeySet(trx, lockedSvcRow)');
+    expect(before).toBeGreaterThan(0);
+    expect(before).toBeLessThan(lock);
+    expect(under).toBeGreaterThan(lock);
+  });
+
   test('the completion asks it on the locked visit row, before the record is written (source)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
     const lock = src.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");

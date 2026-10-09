@@ -234,6 +234,13 @@ const mayHaveAddOnRows = (tags) => !!tags && (tags.size > 0 || tags.unreadable =
 
 // The service_products columns an application row gets for its add-on tag: {} when it has none or the
 // column is not migrated yet. The completion saves a row once per identity: productId plus the resolved tag.
+// The visit's whole area add-on set as one comparable string: its own add-on and every attached add-on row, sorted. One row
+// read (none for an id that is not a uuid). Throws when the read fails.
+async function visitAreaAddOnKeySet(knex, svc) {
+  const attached = (await areaAddOnKeysByVisit(knex, [svc?.id])).get(String(svc?.id)) || [];
+  return [...new Set([ownAreaAddOnKey(svc), ...attached].filter(Boolean))].sort().join(',');
+}
+
 // Are two tag maps the same answer (the same rows tagged to the same add-ons, the same readability)?
 function sameAddOnTags(a, b) {
   if (Boolean(a && a.unreadable) !== Boolean(b && b.unreadable) || a.size !== b.size) return false;
@@ -488,6 +495,7 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
 
 module.exports = {
   sameAddOnTags,
+  visitAreaAddOnKeySet,
   noProductSentence,
   UNCONFIRMED_PRODUCT_SENTENCE,
   addOnKeyOfVisit,
