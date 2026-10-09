@@ -35,6 +35,7 @@ function deps(rows, extra = {}) {
     dayHours: { DAY_START_HOUR: 8, DAY_END_HOUR: 17 },
     customerName: jest.fn(async () => 'Test Person'),
     raiseAdminAlert: jest.fn(async () => ({ notification: { id: 'n1' } })),
+    standingKeys: jest.fn(async () => []),
     ...extra,
   };
 }
@@ -52,7 +53,7 @@ describe('auto-dispatch rain pass', () => {
   test('an outdoor visit in rain gets one notice that names the nearest dry open hour and passes the admin-alert rule', async () => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
     const d = deps([stop()]);
-    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 1, wet: 1, noticed: 1 });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 1, wet: 1, noticed: 1, deferred: 0 });
     expect(d.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = d.raiseAdminAlert.mock.calls[0];
     expect(category).toBe('schedule');
@@ -62,6 +63,9 @@ describe('auto-dispatch rain pass', () => {
     expect(composed.why).toMatch(/2:00 PM has 80% rain; 10:00 AM is dry and open\.$/);
     expect(spec.link).toBe(`/admin/dispatch?tab=schedule&date=${D1}&appointment=visit-1`);
     expect(opts.dedupeKey).toBe(`rain-pass:visit-1:${D1}:14:00`);
+    // A later run rewrites the standing notice (a new chance, a new dry hour) and never rings it again.
+    expect(opts.refreshOnDedupe).toBe(true);
+    expect(opts.ringOnRefresh()).toBe(false);
     // The relevance sweep reads these to close the notice when the visit moves.
     expect(opts.metadata).toMatchObject({ scheduledServiceId: 'visit-1', scheduled_date: D1, window_start: '14:00', proposed_start: '10:00' });
   });
@@ -124,6 +128,26 @@ describe('auto-dispatch rain pass', () => {
     expect(d.rainOut.conflictsForTarget.mock.calls[0][4]).toEqual({ excludeServiceIds: ['visit-1', 'visit-2'], technicianId: 'tech-1' });
   });
 
+  test('two services stored in the same hour on one stop are done one after the other', async () => {
+    // Both stored 10:00-11:00: two hours of work, drying through 14:00, in the 13:00 rain.
+    const d = deps([
+      stop({ window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60, visit_id: 'stop-1' }),
+      stop({ id: 'visit-2', window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60, visit_id: 'stop-1' }),
+    ]);
+    const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+    expect(row).toMatchObject({ wet: true, peak: 80, proposal: '09:00' });
+  });
+
+  test('a storm rings at most ten new notices a run; a standing notice is rewritten outside the budget', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const rows = Array.from({ length: 13 }, (_, i) => stop({ id: `visit-${i}` }));
+    const d = deps(rows, { standingKeys: jest.fn(async () => [`rain-pass:visit-12:${D1}:14:00`]) });
+    d.raiseAdminAlert = jest.fn(async (_category, _spec, opts) => (opts.dedupeKey.includes('visit-12:')
+      ? { notification: { id: 'old' }, deduped: true, refreshed: true, rung: false } : { notification: { id: 'new' } }));
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 13, wet: 13, noticed: 10, deferred: 2 });
+    expect(d.raiseAdminAlert).toHaveBeenCalledTimes(11);
+  });
+
   test('a date column value (a Date at UTC midnight) keeps its calendar date', async () => {
     const d = deps([stop({ scheduled_date: new Date(`${D1}T00:00:00Z`) })]);
     const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
@@ -142,7 +166,7 @@ describe('auto-dispatch rain pass', () => {
       .mockRejectedValueOnce(new Error('db down'))
       .mockResolvedValueOnce({ notification: { id: 'n1' }, deduped: true });
     const d = deps([stop(), stop({ id: 'visit-2' })], { raiseAdminAlert });
-    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 2, wet: 2, noticed: 0 });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 2, wet: 2, noticed: 0, deferred: 0 });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
   });
 });

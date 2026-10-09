@@ -20,7 +20,8 @@
  * Noise limits: outdoor work only; MOVE_PCT is above the booking ranking's
  * RAIN_PCT (in the wet season most afternoons read 60%); one notice per
  * visit at a given date and start (dedupeKey), so a forecast that goes back
- * and forth never rings twice; a visit that starts within LEAD_MINUTES is
+ * and forth never rings twice; at most MAX_NOTICES_PER_RUN new notices a
+ * run; a visit that starts within LEAD_MINUTES is
  * left to storm-watch.js, which nudges the technician. Never throws.
  */
 const logger = require('../logger');
@@ -36,7 +37,11 @@ const KEY_PREFIX = 'rain-pass:';
 const MOVE_PCT = 70;
 const DRY_PCT = 40;
 const LEAD_MINUTES = 120;
+// docs/admin-notifications.md section 3: at most this many new notices a run.
+// The rest ring on the next run; a standing notice never uses the budget.
+const MAX_NOTICES_PER_RUN = 10;
 // 'rescheduled' rows wait for a new place: their date and window are stale.
+// A NULL status is a live row too (rebooker.js, visit-groups.js).
 const LIVE_STATUSES = ['pending', 'confirmed'];
 const VISIT_COLUMNS = ['id', 'customer_id', 'property_id', 'lat', 'lng', 'service_type', 'service_key_snapshot',
   'visit_id', 'technician_id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes'];
@@ -74,7 +79,7 @@ function rowReach(row) {
   if (start == null) return null;
   const length = Number(row.estimated_duration_minutes);
   const end = Math.max(start + 60, toMin(row.window_end) ?? 0, Number.isFinite(length) && length > 0 ? start + length : 0);
-  return { startMin: start, endMin: Math.min(end, 24 * 60) };
+  return { startMin: start, endMin: Math.min(end, 24 * 60), workMin: Number.isFinite(length) && length > 0 ? length : end - start };
 }
 
 // The dry, open start on the same date that is nearest the visit's own
@@ -100,7 +105,7 @@ function dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin, dayEn
 async function loadStops(db, from, to) {
   const rows = await db('scheduled_services')
     .whereBetween('scheduled_date', [from, to])
-    .whereIn('status', LIVE_STATUSES)
+    .where((q) => q.whereNull('status').orWhereIn('status', LIVE_STATUSES))
     .whereNotNull('customer_id')
     .whereNotNull('window_start')
     .select(...VISIT_COLUMNS)
@@ -108,8 +113,11 @@ async function loadStops(db, from, to) {
   return groupStops(rows);
 }
 
-// The earliest row stands for the stop (rows arrive in start order); the
-// stop's reach covers every member's own window and length.
+// The earliest row stands for the stop (rows arrive in start order). The
+// stop's reach covers every member's own window, and never less than the
+// members' work added together from the stop's start: services on one stop
+// are done one after the other, whatever their stored windows say (the sum
+// visit-groups.js visitSummariesForRows and route-model.js use).
 function groupStops(rows) {
   const stops = new Map();
   for (const row of rows) {
@@ -121,9 +129,12 @@ function groupStops(rows) {
       stops.set(key, { ...row, memberIds: [String(row.id)], reach: { ...reach, ownStartMin: reach.startMin } });
     } else {
       stop.memberIds.push(String(row.id));
-      stop.reach.startMin = Math.min(stop.reach.startMin, reach.startMin);
+      stop.reach.workMin += reach.workMin;
       stop.reach.endMin = Math.max(stop.reach.endMin, reach.endMin);
     }
+  }
+  for (const stop of stops.values()) {
+    stop.reach.endMin = Math.min(24 * 60, Math.max(stop.reach.endMin, stop.reach.startMin + stop.reach.workMin));
   }
   return [...stops.values()];
 }
@@ -211,6 +222,8 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   return rows.sort((a, b) => Number(b.wet) - Number(a.wet) || (b.peak ?? 0) - (a.peak ?? 0));
 }
 
+const noticeKey = (row) => `${KEY_PREFIX}${row.visit.id}:${row.date}:${row.start}`;
+
 // The notice, by the shared composer: the customer's name in the headline, a
 // spoken day and time in the why (no ISO date), a link that opens the visit.
 async function sendNotice(row, { db, deps }) {
@@ -239,9 +252,13 @@ async function sendNotice(row, { db, deps }) {
       who: 'person',
     },
     {
-      // One notice per visit at this date and start: the same forecast read
-      // again, or a forecast that dried and turned wet again, adds nothing.
-      dedupeKey: `${KEY_PREFIX}${visit.id}:${date}:${start}`,
+      // One notice per visit at this date and start: it rings once. A later
+      // run that reads another chance or another dry hour rewrites the
+      // standing notice without ringing, so the office never acts on an
+      // hour that has since turned wet or been taken.
+      dedupeKey: noticeKey(row),
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
       detail: `${name || 'A customer'}: ${service} on ${date} at ${start}. `
         + `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `
         + (proposal ? `${proposal} that day reads below ${DRY_PCT}% and no other stop is in it. ` : `No hour that day is both below ${DRY_PCT}% and open. `)
@@ -252,7 +269,7 @@ async function sendNotice(row, { db, deps }) {
 }
 
 /**
- * The cron entry. Resolves to { ran, checked, wet, noticed } (for logs and
+ * The cron entry. Resolves to { ran, checked, wet, noticed, deferred } (for logs and
  * tests); never rejects.
  */
 async function runRainPass({ now = new Date(), db = require('../../models/db'), deps = {} } = {}) {
@@ -261,8 +278,14 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
     if (!gateEnvValue(GATE)) return { ran: false, reason: 'gate_off' };
     const rows = await planRainPass({ now, db, deps });
     const wet = rows.filter((row) => row.wet);
+    const standing = new Set(wet.length
+      ? await (deps.standingKeys || ((conn) => require('../admin-alert-episodes').openAdminAlertKeys(conn, KEY_PREFIX)))(db)
+      : []);
     let noticed = 0;
+    let deferred = 0;
     for (const row of wet) {
+      // A standing notice is only rewritten; a new one needs room in the budget.
+      if (!standing.has(noticeKey(row)) && noticed >= MAX_NOTICES_PER_RUN) { deferred += 1; continue; }
       try {
         const result = await sendNotice(row, { db, deps });
         if (result && !result.deduped && !result.suppressed) noticed += 1;
@@ -270,12 +293,13 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
         logger.warn(`[rain-pass] notice for visit ${row.visit.id} failed: ${err.message}`);
       }
     }
-    logger.info(`[rain-pass] checked=${rows.length} wet=${wet.length} noticed=${noticed}`);
-    return { ran: true, checked: rows.length, wet: wet.length, noticed };
+    if (deferred) logger.warn(`[rain-pass] notice budget hit (${MAX_NOTICES_PER_RUN}); ${deferred} wait for the next run`);
+    logger.info(`[rain-pass] checked=${rows.length} wet=${wet.length} noticed=${noticed} deferred=${deferred}`);
+    return { ran: true, checked: rows.length, wet: wet.length, noticed, deferred };
   } catch (err) {
     logger.warn(`[rain-pass] run skipped: ${err.message}`);
     return { ran: false, reason: 'error' };
   }
 }
 
-module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, _test: { spanRain, dryStart, groupStops } };
+module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_RUN, _test: { spanRain, dryStart, groupStops } };
