@@ -1792,7 +1792,7 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
 // The server picks the source trace itself (treatment-zone-maps.js,
 // findReusableTreatmentZone); a client never names a zone.
 const TRACE_REUSE_SVC_COLUMNS = ['id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type', 'property_id'];
-const TRACE_REUSE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, trace_exists: 409, no_reusable_trace: 409, visit_changed: 409, service_not_assigned: 403, not_found: 404, trace_image_copy_failed: 502 };
+const TRACE_REUSE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, trace_exists: 409, no_reusable_trace: 409, reuse_in_progress: 409, visit_changed: 409, service_not_assigned: 403, not_found: 404, trace_image_copy_failed: 502 };
 
 // GET /api/tech/services/:id/treatment-zone/last — is there a trace to reuse,
 // and how big? No path points: the sheet only needs the size and the day.
@@ -1817,7 +1817,17 @@ router.get('/:id/treatment-zone/last', async (req, res, next) => {
 // openVisitOnly? }, the save route's own fence fields. Saves a copy of the
 // last trace onto this visit through saveTreatmentZoneMap, so the property
 // fence, the completed-visit refusal and the capture check all apply.
-router.post('/:id/treatment-zone/reuse', async (req, res, next) => {
+// A copy reads and re-uploads pictures, so the route has its own tight limit
+// (one tap per visit is the honest cadence; Codex security P2 r7 on #6175).
+const traceReuseLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many copies at once. Trace this visit by hand.', code: 'reuse_rate_limited' },
+});
+router.post('/:id/treatment-zone/reuse', traceReuseLimiter, async (req, res, next) => {
   try {
     if (!featureGates.traceReuseLive() || !featureGates.isEnabled('treatmentZoneMap')) {
       return res.status(404).json({ error: 'Not enabled' });

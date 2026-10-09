@@ -728,7 +728,28 @@ async function readStoredImage(key) {
 // again under that lock.
 // The pictures are read BEFORE the save: a picture that cannot be copied
 // fails the request instead of saving a zone with a missing picture.
-async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null, expectedPropertyId, openVisitOnly = false, knex = db }) {
+// One copy per visit at a time in this process (Codex security P2 r7 on
+// #6175): the copy buffers and re-uploads the source pictures BEFORE the
+// create-only save decides a winner, so a burst of taps (or requests) for one
+// visit would each hold megabytes and write storage objects only to delete
+// them. A second copy for the same visit while one runs is refused at once,
+// with nothing read or uploaded. The route's rate limit bounds the rest.
+const reuseInFlight = new Set();
+function reuseInProgressError() {
+  return Object.assign(operationalError('The last trace is already being copied. Wait a moment.', 409), { code: 'reuse_in_progress' });
+}
+async function reuseLastTreatmentZone(args) {
+  const key = String(args?.visit?.id ?? '');
+  if (reuseInFlight.has(key)) throw reuseInProgressError();
+  reuseInFlight.add(key);
+  try {
+    return await copyLastTreatmentZone(args);
+  } finally {
+    reuseInFlight.delete(key);
+  }
+}
+
+async function copyLastTreatmentZone({ visit, actor = null, technicianId = null, expectedPropertyId, openVisitOnly = false, knex = db }) {
   // A visit that gained a trace since the offer was read (another device) is
   // told so by name, so the sheet reads that trace: the lookup below answers
   // nothing for it and would read as "no trace to reuse" (pre-push P1).

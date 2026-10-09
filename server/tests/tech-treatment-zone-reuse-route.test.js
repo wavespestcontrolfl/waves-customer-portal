@@ -21,6 +21,11 @@ jest.mock('../models/db', () => {
   return jest.fn(() => chain);
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The route's own rate limit (12 copies a minute per caller) is not what these
+// tests exercise: every case posts from one caller, so it is passed through,
+// and its settings are asserted once below.
+const mockRateLimit = jest.fn(() => (req, res, next) => next());
+jest.mock('express-rate-limit', () => (options) => mockRateLimit(options));
 jest.mock('../services/treatment-zone-maps', () => ({
   saveTreatmentZoneMap: jest.fn(),
   deleteTreatmentZoneMap: jest.fn(),
@@ -223,5 +228,15 @@ describe('treatment-zone reuse routes', () => {
       });
       expect(mockReuse).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Codex security P2 r7 on #6175.
+describe('the reuse route\'s rate limit', () => {
+  test('a copy has its own tight limit, keyed like the other tech limits, with a message the sheet can show', () => {
+    const reuseLimit = mockRateLimit.mock.calls.map(([options]) => options).find((options) => options?.message?.code === 'reuse_rate_limited');
+    expect(reuseLimit).toMatchObject({ windowMs: 60 * 1000, max: 12 });
+    expect(typeof reuseLimit.keyGenerator).toBe('function');
+    expect(reuseLimit.message.error).toMatch(/Trace this visit by hand/);
   });
 });

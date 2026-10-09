@@ -540,6 +540,35 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
   });
 });
 
+// Codex security P2 r7 on #6175: one copy per visit at a time.
+describe('reuseLastTreatmentZone: one copy per visit at a time', () => {
+  test('a second copy for the same visit while one runs is refused before anything is read or uploaded', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    mockS3Send.mockImplementation(async (cmd) => {
+      if (cmd.commandType === 'get') { await gate; return { Body: { transformToByteArray: async () => new Uint8Array([1, 2, 3]) } }; }
+      return {};
+    });
+    const first = reuseLastTreatmentZone({ visit: VISIT, knex: makeKnex() });
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = makeKnex();
+    await expect(reuseLastTreatmentZone({ visit: VISIT, knex: second })).rejects.toMatchObject({ code: 'reuse_in_progress', statusCode: 409 });
+    expect(second.state.inserted).toBeNull();
+    expect(second.state.locationReads).toBe(0);
+    // Another visit is not held up.
+    const other = makeKnex({ candidates: [] });
+    await expect(reuseLastTreatmentZone({ visit: { ...VISIT, id: 'svc-2' }, knex: other })).rejects.toMatchObject({ code: 'no_reusable_trace' });
+    release();
+    expect((await first).linear_ft).toBe(220);
+  });
+
+  test('the claim is released after a copy ends, whether it saved or was refused', async () => {
+    await expect(reuseLastTreatmentZone({ visit: VISIT, knex: makeKnex({ candidates: [] }) })).rejects.toMatchObject({ code: 'no_reusable_trace' });
+    expect((await reuseLastTreatmentZone({ visit: VISIT, knex: makeKnex() })).linear_ft).toBe(220);
+    expect((await reuseLastTreatmentZone({ visit: VISIT, knex: makeKnex() })).linear_ft).toBe(220);
+  });
+});
+
 describe('reuseLastTreatmentZone', () => {
   test('copies the points, size, loop, centre, zoom, address and mode onto this visit, with new picture objects', async () => {
     const knex = makeKnex();
