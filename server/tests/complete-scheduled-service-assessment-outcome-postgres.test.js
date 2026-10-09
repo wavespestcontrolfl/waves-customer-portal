@@ -94,7 +94,15 @@ async function ensureAssessmentCatalog() {
   return { catalogId: service.id, made };
 }
 
-async function seedVisit({ type = 'Waves Assessment', catalogId, windowStart = '09:00' } = {}) {
+// `sameCustomerAs`: a second visit for the first fixture's customer, property and technician.
+async function seedVisit({ type = 'Waves Assessment', catalogId, windowStart = '09:00', sameCustomerAs = null } = {}) {
+  if (sameCustomerAs) {
+    const g = { ...sameCustomerAs, serviceId: randomUUID() };
+    await mockPg('scheduled_services').insert({ id: g.serviceId, customer_id: g.customerId, property_id: g.propertyId, technician_id: g.techId, service_id: catalogId || null,
+      service_type: type, scheduled_date: etDateString(new Date()), window_start: windowStart, window_end: '23:59', status: 'confirmed',
+      estimated_price: 0, estimated_duration_minutes: 45, create_invoice_on_complete: false });
+    return g;
+  }
   const f = { customerId: randomUUID(), techId: randomUUID(), serviceId: randomUUID() };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Assessment', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
     email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false });
@@ -109,10 +117,10 @@ async function seedVisit({ type = 'Waves Assessment', catalogId, windowStart = '
 
 async function cleanup(f) {
   const records = await mockPg('service_records').where({ customer_id: f.customerId }).pluck('id').catch(() => []);
-  await mockPg('consultation_outcomes').where({ scheduled_service_id: f.serviceId }).del().catch(() => {});
+  await mockPg('consultation_outcomes').where({ customer_id: f.customerId }).del().catch(() => {});
   await mockPg('notifications').whereRaw("metadata->>'customerId' = ?", [f.customerId]).del().catch(() => {});
   await mockPg('service_products').whereIn('service_record_id', records).del().catch(() => {});
-  await mockPg('service_completion_attempts').where('service_id', f.serviceId).del().catch(() => {});
+  await mockPg('service_completion_attempts').whereIn('service_id', mockPg('scheduled_services').where({ customer_id: f.customerId }).select('id')).del().catch(() => {});
   await mockPg('invoices').where({ customer_id: f.customerId }).update({ service_record_id: null }).catch(() => {});
   await mockPg('service_records').where({ customer_id: f.customerId }).del().catch(() => {});
   await mockPg('invoices').where({ customer_id: f.customerId }).del().catch(() => {});
@@ -224,6 +232,29 @@ postgres('closeout: the Waves Assessment read of the visit rides the completion 
       expect(await outcomeOf(f)).toBeUndefined();
       expect(await recordOf(f)).toBeUndefined();
     } finally { await cleanup(f); }
+  });
+
+  // The completion takes the customer FOR NO KEY UPDATE up front when it carries the read (the mode recordOutcome
+  // needs), so two completions for one customer queue on that lock instead of both holding FOR SHARE and deadlocking
+  // on the upgrade. GATE_LAWN_PROPERTY_HISTORY off: no earlier customer baseline lock reorders anything.
+  test('two assessments of one customer completed together, both carrying the read: both commit, no deadlock', async () => {
+    const savedHistory = process.env.GATE_LAWN_PROPERTY_HISTORY;
+    delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+    const first = await seedVisit({ catalogId: catalog.catalogId });
+    const second = await seedVisit({ catalogId: catalog.catalogId, sameCustomerAs: first });
+    try {
+      const [a, b] = await Promise.all([
+        complete(first, { expectedVisit: { customerId: first.customerId, propertyId: first.propertyId, serviceType: 'Waves Assessment', scheduledDate: etDateString(new Date()) } }),
+        complete(second, { expectedVisit: { customerId: first.customerId, propertyId: first.propertyId, serviceType: 'Waves Assessment', scheduledDate: etDateString(new Date()) } }),
+      ]);
+      expect([a.status, b.status]).toEqual([200, 200]);
+      for (const out of [a, b]) expect(out.body?.code).not.toBe('CONCURRENT_UPDATE');
+      expect(await mockPg('consultation_outcomes').where({ customer_id: first.customerId }).pluck('scheduled_service_id'))
+        .toEqual(expect.arrayContaining([first.serviceId, second.serviceId]));
+    } finally {
+      if (savedHistory === undefined) delete process.env.GATE_LAWN_PROPERTY_HISTORY; else process.env.GATE_LAWN_PROPERTY_HISTORY = savedHistory;
+      await cleanup(first);
+    }
   });
 
   test('the field with the gate off is refused (422) and writes nothing', async () => {

@@ -125,4 +125,11 @@ describe('wiring in completeScheduledService', () => {
     expect(block).toBeLessThan(lock);
     at('consultationOutcomeRefusalResponse(err)');
   });
+
+  test('the customer read before the visit lock is FOR NO KEY UPDATE when the completion carries the read', () => {
+    const read = at("const customerForSnapshot = trx('customers').where({ id: svc.customer_id });");
+    const lock = at("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    expect(read).toBeLessThan(lock);
+    expect(source.slice(read, read + 400)).toContain('consultationOutcome != null ? customerForSnapshot.forNoKeyUpdate() : customerForSnapshot.forShare()');
+  });
 });

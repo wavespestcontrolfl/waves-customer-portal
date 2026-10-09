@@ -6123,9 +6123,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // (customers locked first, then the loser's scheduled visits
           // updated), so a merge racing a completion cannot form a lock
           // cycle (codex P1 #3742 r4). Feeds the report identity snapshot.
-          const snapshotCustomerRow = await trx('customers')
-            .where({ id: svc.customer_id })
-            .forShare()
+          // A completion that records the assessment's read (consultationOutcome)
+          // takes the customer FOR NO KEY UPDATE here instead, the mode
+          // recordOutcome needs (lockCustomerRow): the same customer -> visit
+          // order the office route has, and no FOR SHARE -> FOR NO KEY UPDATE
+          // upgrade that two such completions for one customer would deadlock on.
+          const customerForSnapshot = trx('customers').where({ id: svc.customer_id });
+          const snapshotCustomerRow = await (consultationOutcome != null ? customerForSnapshot.forNoKeyUpdate() : customerForSnapshot.forShare())
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', ...(billingModeColumnsExist ? ['billing_mode'] : []));
           if (completionPricingPlan) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
