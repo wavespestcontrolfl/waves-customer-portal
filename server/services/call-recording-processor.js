@@ -66,7 +66,7 @@ const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
-const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { buildExtractionPrompt, buildExtractionPromptParts, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { appointmentConfirmedRules } = require('./prompts/appointment-confirmed-rules');
 const { dispatchWithFallback, anthropicText } = require('./llm/call');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
@@ -8525,13 +8525,22 @@ function callTimeETString(callStartedAt) {
 }
 
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
+const V2_OUTPUT_CONTRACT = '\n\n═══ OUTPUT CONTRACT ═══\n'
+  + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
+  + 'every required field present, every enum value exact, no extra fields, '
+  + 'use null for unknown nullable fields.\n'
+  + JSON.stringify(modelOutputSchema);
+
 function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
-  return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
-    + '\n\n═══ OUTPUT CONTRACT ═══\n'
-    + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
-    + 'every required field present, every enum value exact, no extra fields, '
-    + 'use null for unknown nullable fields.\n'
-    + JSON.stringify(modelOutputSchema);
+  return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts) + V2_OUTPUT_CONTRACT;
+}
+
+// The system layout (GATE_CALL_EXTRACTION_SYSTEM_PROMPT): the rules and the output
+// contract are one static system part, the same for every call under one catalog and
+// one gate state, so the provider caches it; the user message is the call alone.
+function buildV2ExtractionParts(transcription, callerPhone, callDateET, promptOpts = {}) {
+  const { system, user } = buildExtractionPromptParts(transcription, callerPhone, callDateET, promptOpts);
+  return { system: system + V2_OUTPUT_CONTRACT, text: user };
 }
 
 // Parse → validate(model-output) → inject server meta → normalize → validate(persisted).
@@ -8597,7 +8606,13 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   }
 
   const callDateET = etDateString(opts.callStartedAt || new Date());
-  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
+  // GATE_CALL_EXTRACTION_SYSTEM_PROMPT. The processor reads the gate once per call and
+  // hands the value in, so the request and every version stamp for that call agree; a
+  // caller that hands nothing in (the reviewed-call replay) reads the gate here.
+  const systemLayout = opts.systemPromptLayout === undefined
+    ? require('../config/feature-gates').callExtractionSystemPromptLive() === true
+    : opts.systemPromptLayout === true;
+  const promptOpts = {
     bookableServiceNames: opts.bookableServiceNames,
     // The call's own ET clock time, so a time agreed with no day ("I'll be
     // there at three") can be judged against it: today when still ahead.
@@ -8617,7 +8632,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // slot, the caller says yes and staff commit. Absent (false) off, so the prompt is
     // byte-identical off.
     ...(opts.agentProposedSlotCommitment === true ? { agentProposedSlotCommitment: true } : {}),
-  });
+  };
+  const request = systemLayout
+    ? buildV2ExtractionParts(transcription, callerPhone, callDateET, promptOpts)
+    : { text: buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts) };
 
   // Cross-provider dispatch with the model-output schema validated INSIDE
   // the dispatcher — contract-invalid primary output (valid JSON, wrong
@@ -8632,7 +8650,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   // default decoding.
   const res = await dispatchWithFallback(CALL_EXTRACTION_ROUTE, {
     laneId: 'call_extraction',
-    text: prompt,
+    ...request,
     jsonMode: true,
     maxTokens: 16384,
     temperature: 0,
@@ -8663,7 +8681,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
     // The catalog block is part of the rendered prompt, so the stamped
     // version must carry its hash or cohorts mix under one version.
-    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true }),
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout }),
   });
 }
 
@@ -10280,7 +10298,10 @@ const CallRecordingProcessor = {
     // lanes all use this one value, so a flip mid-pass can never stamp a cohort the prompt
     // did not render (or route on a block the prompt never carried).
     const assessmentLaneActive = commercialAssessmentBookingActive(call);
-    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });
+    // GATE_CALL_EXTRACTION_SYSTEM_PROMPT, read ONCE for this pass for the same reason: the
+    // request layout and every prompt-version stamp for this call use this one value.
+    const systemPromptLayout = require('../config/feature-gates').callExtractionSystemPromptLive() === true;
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout });
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -10371,6 +10392,7 @@ const CallRecordingProcessor = {
           // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): read the
           // agent-proposed slot shape for the booking this lane can now clear.
           ...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),
+          systemPromptLayout,
         });
         // An impossible spoken caller number (no NANP line has an area
         // code starting 0 or 1) is dropped from the V2 extraction
