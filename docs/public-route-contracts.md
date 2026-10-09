@@ -2502,6 +2502,51 @@ row key alike); PDFs cached before a flip re-render, and again when the gate is
 turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
 found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
 not served either.
+`GATE_LAWN_REPORT_FACTS` (dark, read at call time; gate off leaves the payload, the PDF and every
+cached PDF key byte-identical) changes the lawn `/api/reports/:token/data` payload and the PDF that share
+`buildReportV1Data` and `buildServiceReportDynamicContext` (lawn only; no new route, token, privacy or
+rate-limit surface). Three facts are frozen at completion, not computed at render: the lawn write gate stores
+`structured_notes.lawnReportFacts = { v: 1, reentry, productUse, ties, frozenAt }` once per visit (first
+writer wins, before the first report build; nothing is stored when the product or catalog read failed), and a
+render reads only that block, never the gate. New or changed public fields, each present only for a lawn
+record that carries the frozen block (every other record is byte-identical): (1)
+`dynamicContext.reentry.condition = { rule, text, pets, statusLabel }` with `rule` one of `dry`,
+`watered_in_and_dry`, `text` and `pets` fixed sentences chosen by code ("Ready to walk on once the
+application has dried — your technician confirms timing." / "... once today's treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing."
+and "Keep people and pets off the lawn until then."), `statusLabel` a short word ("Once dry", "After watering
+in"); for such a record `dynamicContext.reentry.targets` is `[]` (no ready-at time, no countdown), and
+`customerSummary` / `petAdvisory` carry the same two sentences. A record whose rule is marked `default` (a product with no approved frozen facts or no plain until-dry label), or one an
+admin corrected afterwards, keeps the clock targets. `reportV2.aftercare.reentry` carries the same
+condition `text` for such a record. (2) `applications[].areaUse`, a string ("Spot treatment, about 250 sq ft"
+or "Spot treatment"), present only on a spot-treatment product row of such a record; the report prints it in
+place of the zone text ("Your whole lawn"). (3) The Visit Summary (`reportV2.lead` / recap text, already public)
+may carry the finding-to-product sentences of a version 4 entry; no new key. The tie facts and the per-product
+rules stay in `structured_notes` and never reach the payload. The lawn PDF signature carries `:rf=<hash>` only
+for a record that holds a frozen decision (read from the record's own `structured_notes`, so a partial
+cache-lookup row and a full render row key alike); PDFs cached before the freeze re-render once.
+`GATE_LAWN_REPORT_COPY_FIXES` (dark, strict `true`, read at call time; gate off leaves the
+payload, the PDF and every cached PDF key byte-identical) changes the lawn
+`/api/reports/:token/data` payload and the PDF that share `buildReportV1Data` (lawn
+only; no new route, token, privacy or rate-limit surface; tree & shrub and pest
+payloads never change). New optional keys, absent while the gate is off:
+top-level `lawnCopyFixes: true` (the page then prints none of the pest program's
+re-service wording: the footer sentence, its booking link and the legacy re-service
+header), `reportV2.water.targetNote` (one fixed sentence from the closed table
+`WATER_TARGET_NOTES` in `lawn-report-copy-fixes.js`, only when the target came from the property's own weather or
+the seasonal lookup; none for an area-snapshot target). Changed values while the
+gate is live: the `weed_pressure` card's `label` reads "Weed Cleanliness";
+`reportV2.snapshot.treatmentSummary` names product categories, never an active
+ingredient or a product name (the AI treatment narrative is not called for a lawn
+report); `reportV2.progressionNote`, `reportV2.trends.seasonalNote` and the
+shoulder/dormant `snapshot.seasonalNote` are null/absent unless the visit month is in
+the cool season and the overall score did not rise; `reportV2.trends.waterGap` and
+`.mowing` (with `.mowingBand`) are absent when the newest point is more than 45 days
+before the visit, and `reportV2.trends` is null when that leaves no chart. The v6
+"what we applied" field and the technician paragraph freeze their category form only
+for a visit completed or first rendered while the gate is live (the paragraph's slots
+gain a `categories` list); every older frozen entry replays unchanged. The lawn PDF
+signature carries `:copyfix=1` only while the gate is live, and the narrative key
+part is the `-tn0` sentinel for a lawn report.
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit

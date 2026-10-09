@@ -24,8 +24,22 @@ function isSessionTerminal(event, data) {
   return TERMINAL_EVENTS.has(event) || stopReasonOf(data) === 'end_turn';
 }
 
+// The session reached its spend cap and paused (session-guard.js sessionBudget).
+// Not an end: no event resumes it, so a runner files it as `budget_exhausted`.
+function isBudgetReached(data) {
+  return stopReasonOf(data) === 'budget_reached';
+}
+
 function isSessionError(event) {
   return ERROR_EVENTS.has(event);
 }
 
-module.exports = { stopReasonOf, isSessionTerminal, isSessionError };
+// The failure code a non-terminal event ends a run with, or null: the spend
+// cap (`budget_exhausted`) or an error event (`session_error_event`). One
+// read for the runners that end both the same way.
+function streamFailureOf(event, data) {
+  if (isBudgetReached(data)) return 'budget_exhausted';
+  return isSessionError(event) ? 'session_error_event' : null;
+}
+
+module.exports = { stopReasonOf, isSessionTerminal, isSessionError, isBudgetReached, streamFailureOf };

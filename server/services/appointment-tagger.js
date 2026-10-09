@@ -54,6 +54,30 @@ const TREATMENT_AUTOMATION_BY_PEST_TYPE = Object.freeze({
 // (rescheduled rows are phantom placeholders kept while staff rebooks).
 const PREP_TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']);
 
+// Ordered: the first matching rule wins, so a narrower rule sits above the
+// broader one it would otherwise fall into.
+// A car job (vehicle_german_roach / vehicle_roach_addon) is not household roach
+// work: prep.cockroach tells the customer to empty kitchen cabinets, and the
+// cockroach sequence is home advice. Its own tag has no automation case in
+// onServiceScheduled, so the car job gets no prep email, prep text or sequence
+// enrollment (codex #6162 r1 P1). Admin Schedule books any active catalog row,
+// and both names carry "vehicle" and "roach".
+const APPOINTMENT_TYPE_RULES = [
+  { tag: 'wdo_inspection', label: 'WDO Inspection', test: (s) => ['wdo', 'wood destroying', 'termite inspection', 'real estate inspection'].some((k) => s.includes(k)) },
+  { tag: 'vehicle_roach', label: 'Vehicle Roach Treatment', test: (s) => s.includes('vehicle') && s.includes('roach') },
+  { tag: 'german_roach', label: 'German Roach Treatment', test: (s) => s.includes('german') || (s.includes('roach') && s.includes('interior')) },
+  { tag: 'cockroach', label: 'Cockroach Treatment Service', test: (s) => s.includes('roach') },
+  { tag: 'bed_bug', label: 'Bed Bug Treatment Service', test: (s) => s.includes('bed bug') },
+  { tag: 'flea', label: 'Flea Treatment', test: (s) => s.includes('flea') },
+  { tag: 'tent_fumigation', label: 'Tent Fumigation', test: (s) => s.includes('fumigat') || s.includes('tent') },
+  { tag: 'termite_treatment', label: 'Termite Treatment', test: (s) => s.includes('termite') && !s.includes('inspect') && !s.includes('monitor') },
+  { tag: 'rodent_exclusion', label: 'Rodent Exclusion', test: (s) => s.includes('rodent') && s.includes('exclusion') },
+  { tag: 'mosquito', label: 'Mosquito Treatment', test: (s) => s.includes('mosquito') },
+  { tag: 'lawn', label: 'Lawn Care', test: (s) => s.includes('lawn') || s.includes('turf') },
+  { tag: 'tree_shrub', label: 'Tree & Shrub', test: (s) => s.includes('tree') || s.includes('shrub') },
+  { tag: 'pest_general', label: 'Pest Control', test: (s) => s.includes('pest') },
+];
+
 class AppointmentTagger {
 
   // opts.suppressWelcome skips the new-recurring welcome branch. Callers
@@ -145,19 +169,8 @@ class AppointmentTagger {
 
   classifyAppointmentType(serviceType) {
     const s = (serviceType || '').toLowerCase();
-    if (s.includes('wdo') || s.includes('wood destroying') || s.includes('termite inspection') || s.includes('real estate inspection')) return { tag: 'wdo_inspection', label: 'WDO Inspection' };
-    if (s.includes('german') || (s.includes('roach') && s.includes('interior'))) return { tag: 'german_roach', label: 'German Roach Treatment' };
-    if (s.includes('cockroach') || s.includes('roach')) return { tag: 'cockroach', label: 'Cockroach Treatment Service' };
-    if (s.includes('bed bug')) return { tag: 'bed_bug', label: 'Bed Bug Treatment Service' };
-    if (s.includes('flea')) return { tag: 'flea', label: 'Flea Treatment' };
-    if (s.includes('fumigat') || s.includes('tent')) return { tag: 'tent_fumigation', label: 'Tent Fumigation' };
-    if (s.includes('termite') && !s.includes('inspect') && !s.includes('monitor')) return { tag: 'termite_treatment', label: 'Termite Treatment' };
-    if (s.includes('rodent') && s.includes('exclusion')) return { tag: 'rodent_exclusion', label: 'Rodent Exclusion' };
-    if (s.includes('mosquito')) return { tag: 'mosquito', label: 'Mosquito Treatment' };
-    if (s.includes('lawn') || s.includes('turf')) return { tag: 'lawn', label: 'Lawn Care' };
-    if (s.includes('tree') || s.includes('shrub')) return { tag: 'tree_shrub', label: 'Tree & Shrub' };
-    if (s.includes('pest')) return { tag: 'pest_general', label: 'Pest Control' };
-    return { tag: 'general', label: 'General Service' };
+    const rule = APPOINTMENT_TYPE_RULES.find((r) => r.test(s));
+    return rule ? { tag: rule.tag, label: rule.label } : { tag: 'general', label: 'General Service' };
   }
 
   // WDO — AI property search + AI pre-inspection brief

@@ -90,6 +90,8 @@ describe('catalog identity beats the words in a name', () => {
     ['waves_assessment', null, 'ok'],
     ['bed_bug_treatment', 'bed_bug', 'ok'],
     ['german_roach', null, 'ok'],
+    ['vehicle_german_roach', 'cockroach', 'ok'],
+    ['vehicle_roach_addon', null, 'skip'],
     ['rodent_bait_quarterly', 'rodent_bait_station', 'ok'],
     ['rodent_trapping_followup', 'rodent_trapping', 'ok'],
     ['rodent_trap_check_additional', 'rodent_trapping', 'ok'],

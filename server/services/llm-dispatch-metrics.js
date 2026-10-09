@@ -280,6 +280,17 @@ const toCount = (v) => (v === null || v === undefined || v === '' || !Number.isF
  *   openai     usage.{input_tokens, input_tokens_details.cached_tokens, output_tokens, output_tokens_details.reasoning_tokens}
  *   gemini     usageMetadata.{promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount}
  */
+// Cache-write tokens of an Anthropic usage block. A message gives the total
+// (`cache_creation_input_tokens`); a Managed Agents session gives only the
+// per-TTL object (`cache_creation: { ephemeral_5m_input_tokens,
+// ephemeral_1h_input_tokens }`). Neither present = unknown (null), not zero.
+function anthropicCacheWrites(usage) {
+  if (usage.cache_creation_input_tokens != null) return usage.cache_creation_input_tokens;
+  const perTtl = usage.cache_creation;
+  if (!perTtl || typeof perTtl !== 'object') return null;
+  return Object.values(perTtl).reduce((sum, v) => sum + (Number(v) || 0), 0);
+}
+
 function extractUsage(provider, data) {
   const out = { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null };
   try {
@@ -288,7 +299,7 @@ function extractUsage(provider, data) {
       if (!u || typeof u !== 'object') return out;
       out.input_tokens = toCount(u.input_tokens);
       out.cached_input_tokens = toCount(u.cache_read_input_tokens);
-      out.cache_write_tokens = toCount(u.cache_creation_input_tokens);
+      out.cache_write_tokens = toCount(anthropicCacheWrites(u));
       out.output_tokens = toCount(u.output_tokens);
     } else if (provider === 'openai') {
       const u = data?.usage;
@@ -695,11 +706,22 @@ async function upsertSessionRow(trx, row, turnKey) {
  * billed session never vanishes from the ledger during API degradation.
  * `agentId` is accepted for the runners' convenience but has no column yet —
  * the session id (provider_ref) resolves it in the Console.
+ * `abandoned` is not an outcome: a runner sets it when its run succeeded but
+ * it left the stream before the session said it ended, so the session is
+ * told to stop (agent-control/session-guard.js) and the row stays ok.
  */
-async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null } = {}) {
+async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null, abandoned = false } = {}) {
+  // The runner's own time: taken before the interrupt and the usage GET
+  // below, which are cleanup and observability time.
+  const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
+  // Every runner exit passes through here, so this is the one place a session
+  // its runner gave up on is told to stop (GATE_AGENT_SESSION_GUARD; never
+  // throws; not the customer assistant). It returns once the session has
+  // stopped, so the usage GET below reads the settled figure. Independent of
+  // the ledger gate.
+  await require('./agent-control/session-guard').stopAbandonedSession({ laneId, sessionId, failure, abandoned });
   try {
     if (!ledgerEnabled() || !sessionId) return null;
-    const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
     // The usage GET runs OUTSIDE the transaction below: a pooled connection
@@ -730,7 +752,9 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
           policyLabel: lane || `anthropic/${model || 'session'}`,
           provider: 'anthropic',
           requestedModel: model,
-          servedModel: session.model,
+          // a session names its model on the agent it ran (`agent.model.id`);
+          // it has no top-level `model`
+          servedModel: session.agent?.model?.id || session.model,
           ok: !errorCode,
           errorCode,
           tokens,
