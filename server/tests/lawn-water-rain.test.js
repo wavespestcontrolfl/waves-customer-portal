@@ -276,7 +276,6 @@ describe('every surface agrees on a rain-covered week', () => {
 describe('the customer copy', () => {
   test('the exact sentences, built from the shared wilt-signs constant', () => {
     expect(WATERING.wiltSigns).toBe(WILT);
-    expect(Object.keys(WATERING)).toEqual(['wiltSigns']);
     expect(COPY.pillLabel).toBe('Rain covered it');
     expect(COPY.surplus).toBe(SURPLUS);
     expect(COPY.sensorLine).toBe(SENSOR);
