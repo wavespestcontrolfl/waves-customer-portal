@@ -672,8 +672,15 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   // rodent_guarantee_combo bundle is NOT excluded — it carries real field
   // work.
   const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee'];
+  // The area add-ons the estimate sells NOW, by its row's pricing authority (estimate-result-container storedAreaAddOnRows:
+  // a SERVER reprice can leave an empty `result` beside a stale `engineResult` that still lists an add-on). The gate and
+  // the limit recheck read this set; the booking profile must not carry an add-on they do not see.
+  const currentAddOnKeys = new Set(require('./estimate-result-container')
+    .storedAreaAddOnRows(estData, { pricingAuthority: estimate.pricing_authority ?? estimate.pricingAuthority ?? null })
+    .map((row) => row.addOnKey));
   for (const item of (normalizeOneTimeBreakdown(estData).items || [])) {
     if (!item || typeof item !== 'object') continue;
+    if (item.service === AREA_ADDON_ENGINE_KEY && !currentAddOnKeys.has(item.addOnKey)) continue;
     if (item.quoteRequired === true || item.kind === 'discount') continue;
     const service = String(item.service || '').toLowerCase();
     if (NON_SERVICE.includes(service)) continue;

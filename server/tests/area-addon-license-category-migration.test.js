@@ -96,6 +96,19 @@ describe('area add-on license category migration', () => {
       expect(db.system_settings).toEqual([]);
     });
 
+    // Codex round 48: a legacy visit references the service by name only; the simplest safe rule is to reset nothing.
+    test('20261010240000: a rollback resets no license requirement at all, whatever references exist', async () => {
+      const never = require('../models/migrations/20261010240000_area_addon_license_never_reset');
+      const db = { ...seeded(), scheduled_services: [{ id: 'v-legacy', service_id: null, service_type: 'Fire Ant Yard Treatment' }], scheduled_service_addons: [] };
+      await migration.up(fakeKnex(db));
+      await never.up(fakeKnex(db));
+      const knex = fakeKnex(db);
+      await never.down(knex); await guard.down(knex); await migration.down(knex);
+      for (const key of migration.CHEMICAL_SERVICE_KEYS) expect(byKey(db, key)).toMatchObject({ requires_license: true, license_category: 'L&O' });
+      expect(db.system_settings).toEqual([]);
+      await expect(never.down(fakeKnex({ system_settings: [] }))).resolves.toBeUndefined();
+    });
+
     test('a reference read that fails keeps the requirement', async () => {
       const broken = () => { throw new Error('down'); };
       broken.schema = { hasTable: async () => true };
