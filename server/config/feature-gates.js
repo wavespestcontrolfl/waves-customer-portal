@@ -17,7 +17,7 @@
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer. Auto clock-in's vehicle-agreement rule does NOT depend on this gate. Flip order: this gate, issue the vehicle agreement, technicians sign, then GATE_GEOFENCE_AUTO_CLOCK_IN.)
- *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets the last name filled in after the call: a homeowner from the county owner record, anyone else from another record with the same email or phone or from a first.last email address; fill-only, never changes a name that exists. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
+ *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_GEOFENCE_AUTO_CLOCK_IN=true (owner 2026-10-06: in automatic geofence mode, a technician with no shift today who arrives at their own scheduled visit for today is clocked in automatically (source geofence_auto) and the job timer starts, so the first stop starts the paid day; never on an unscheduled, multi-stop, other-tech, other-day, stale, inactive-tech or already-clocked-in arrival. Read at call time via geofenceAutoClockInLive(), dark by default; off = today's behavior; rollback = unset)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
@@ -1993,8 +1993,8 @@ const gates = {
   // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
   // the canonical CALL-TIME reader is callFirstNameAdvisoryLive() below.
   callFirstNameAdvisory: process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true',
-  // Last-name fill for a phone caller who gave only a first name (owner ruling
-  // 2026-10-08). Ships DARK: off unless exactly 'true'. This entry is for
+  // Last-name suggestion for a phone caller who gave only a first name (owner
+  // ruling 2026-10-08). Ships DARK: off unless exactly 'true'. This entry is for
   // logGateStatus only — the canonical CALL-TIME reader is
   // callLastNameLookupLive() below.
   callLastNameLookup: process.env.GATE_CALL_LAST_NAME_LOOKUP === 'true',
@@ -5561,9 +5561,10 @@ function callFirstNameAdvisoryLive() {
 // GATE_CALL_LAST_NAME_LOOKUP read at CALL time — strict `=== 'true'`, dark by
 // default (owner ruling 2026-10-08). The canonical reader for
 // services/call-last-name-lookup.js: on, a call that left a customer with a
-// first name and no last name fires a background lookup that fills the empty
-// last name (county owner record for the homeowner; our own records or a
-// first.last email for anyone else). Fill-only. Off, nothing runs. Kill: unset.
+// first name and no last name fires a background lookup (county owner record
+// for the homeowner, our own records, the email address, the Twilio caller
+// name) that posts ONE admin notification suggesting the last name. It never
+// writes the name; the office saves it. Off, nothing runs. Kill: unset.
 function callLastNameLookupLive() {
   return process.env.GATE_CALL_LAST_NAME_LOOKUP === 'true';
 }

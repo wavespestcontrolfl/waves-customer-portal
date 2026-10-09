@@ -1,10 +1,12 @@
 /**
- * Last-name fill for a phone caller who gave only a first name.
+ * Last-name SUGGESTION for a phone caller who gave only a first name.
  *
- * Pins: the gate (off = no reads), the eligibility facts re-read from the DB,
- * the source order (county owner record only for an owner caller, then our own
- * records, then a first.last email), fill-only writes in one locked
- * transaction, and the never-throws / no-PII-in-logs contract.
+ * The module never writes customers.last_name. Pins: the gate (off = no
+ * reads), the eligibility facts re-read from the DB, all four sources run and
+ * are collected (county owner record only for an owner caller, our own
+ * records, a first.last email, the Twilio caller name), ONE admin
+ * notification grouped by surname, no customers write of any kind, and the
+ * never-throws / no-PII-in-logs contract.
  * Test data is invented: example.com emails, 555 numbers, made-up names.
  */
 
@@ -18,10 +20,17 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/property-lookup/county-parcel-gis', () => ({ lookupCountyParcelByPoint: jest.fn() }));
 jest.mock('../services/outbound-call-reason', () => ({ nanpStoredPhoneClause: (col) => `PHONE_MATCH(${col}) = ?` }));
+// The real composer validates every spec against docs/admin-notifications.md
+// (it throws under NODE_ENV=test); only the notifyAdmin leg is replaced.
+jest.mock('../services/admin-alert-compose', () => {
+  const actual = jest.requireActual('../services/admin-alert-compose');
+  return { ...actual, raiseAdminAlert: jest.fn(async (category, spec) => { actual.composeAdminAlert(spec); return { id: 'note-1' }; }) };
+});
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { lookupCountyParcelByPoint } = require('../services/property-lookup/county-parcel-gis');
+const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { runCallLastNameLookup, enqueueCallLastNameLookup } = require('../services/call-last-name-lookup');
 
 const flushImmediates = () => new Promise((resolve) => setImmediate(resolve));
@@ -53,7 +62,7 @@ const PARCEL = { county: 'Manatee', situsAddress: '100 SAMPLE AVE', ownerNames: 
 // same-contact clause is exercised and recorded.
 function builder(result, record) {
   const b = {};
-  for (const m of ['where', 'whereNot', 'whereNull', 'whereRaw', 'orWhereRaw', 'forUpdate', 'select', 'first', 'update']) {
+  for (const m of ['where', 'whereNot', 'whereNull', 'whereRaw', 'orWhereRaw', 'forUpdate', 'select', 'first', 'update', 'insert', 'del']) {
     b[m] = jest.fn((...args) => {
       if (record) record.push([m, ...args]);
       if (m === 'where' && typeof args[0] === 'function') args[0](b);
@@ -64,51 +73,69 @@ function builder(result, record) {
   return b;
 }
 
-// opts: call, customer, customers (records rows), leads (records rows),
-// current (the locked row inside the transaction), updates (captured payloads).
+// opts: call, customer (eligibility read), customers (own-records rows),
+// leads (own-records rows), recheck (the pre-post last_name read).
 function setupDb(opts = {}) {
-  const calls = [];
-  const updates = [];
   const records = [];
   const tables = {
     call_log: [opts.call === undefined ? CALL : opts.call],
-    customers: [opts.customer === undefined ? CUSTOMER : opts.customer, opts.customers || []],
+    customers: [
+      opts.customer === undefined ? CUSTOMER : opts.customer,
+      opts.customers || [],
+      opts.recheck === undefined ? { id: 'cust-1', last_name: null } : opts.recheck,
+    ],
     leads: [opts.leads || []],
   };
   const seen = {};
   db.mockImplementation((table) => {
-    calls.push(table);
     seen[table] = (seen[table] || 0) + 1;
     return builder(tables[table][seen[table] - 1], records);
   });
-  const current = opts.current === undefined
-    ? { id: 'cust-1', first_name: 'Pat', last_name: '', crm_notes: opts.crmNotes ?? null }
-    : opts.current;
-  db.transaction.mockImplementation(async (cb) => {
-    const trx = (table) => {
-      const b = builder(current);
-      b.update = jest.fn((payload) => { updates.push({ table, payload }); return Promise.resolve(1); });
-      return b;
-    };
-    return cb(trx);
-  });
-  return { calls, updates, records };
+  return { records };
+}
+
+// The module must never change customers: no write verb on any builder, no transaction.
+function expectNoWrites(records) {
+  expect(records.filter(([verb]) => ['update', 'insert', 'del'].includes(verb))).toEqual([]);
+  expect(db.transaction).not.toHaveBeenCalled();
 }
 
 const inbound = (overrides = {}) => ({ ...CALL, ...overrides });
 const withExtraction = (caller) => inbound({ ai_extraction_enriched: { caller: { first_name: 'Pat', last_name: null, relationship_to_property: 'owner', ...caller } } });
+const tenant = () => withExtraction({ relationship_to_property: 'tenant' });
 
+const twilioAnswers = (name, callerType = 'CONSUMER') => jest.fn().mockResolvedValue({
+  ok: true,
+  json: async () => ({ caller_name: { caller_name: name, caller_type: callerType, error_code: null } }),
+});
+
+const realFetch = global.fetch;
 beforeEach(() => {
   process.env.GATE_CALL_LAST_NAME_LOOKUP = 'true';
+  process.env.TWILIO_ACCOUNT_SID = 'ACtest';
+  process.env.TWILIO_AUTH_TOKEN = 'tokentest';
   lookupCountyParcelByPoint.mockResolvedValue(PARCEL);
+  global.fetch = twilioAnswers(null);
+  raiseAdminAlert.mockImplementation(async (category, spec) => {
+    jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec);
+    return { id: 'note-1' };
+  });
 });
 
 afterEach(() => {
   delete process.env.GATE_CALL_LAST_NAME_LOOKUP;
+  delete process.env.TWILIO_ACCOUNT_SID;
+  delete process.env.TWILIO_AUTH_TOKEN;
+  global.fetch = realFetch;
   jest.resetAllMocks();
 });
 
 const run = () => runCallLastNameLookup({ callLogId: 'call-1', customerId: 'cust-1' });
+const posted = () => {
+  expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
+  return { category, spec, opts };
+};
 
 describe('gate', () => {
   test('off: run skips before any read, enqueue schedules nothing', async () => {
@@ -118,14 +145,16 @@ describe('gate', () => {
     enqueueCallLastNameLookup({ callLogId: 'call-1', customerId: 'cust-1' });
     await flushImmediates();
     expect(db).not.toHaveBeenCalled();
-    expect(db.transaction).not.toHaveBeenCalled();
     expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('anything but exactly "true" is off', async () => {
     process.env.GATE_CALL_LAST_NAME_LOOKUP = '1';
     setupDb();
     expect(await run()).toEqual({ skipped: 'gated' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('missing ids skip without a read', async () => {
@@ -135,299 +164,399 @@ describe('gate', () => {
   });
 });
 
-describe('county owner record', () => {
-  test('an owner caller whose first name matches an owner: writes last_name, updated_at and the note only', async () => {
-    const { updates } = setupDb();
-    expect(await run()).toEqual({ filled: true, source: 'county' });
-    expect(lookupCountyParcelByPoint).toHaveBeenCalledWith(27.4, -82.4, expect.objectContaining({ includeOwners: true }));
-    expect(updates).toHaveLength(1);
-    expect(updates[0].table).toBe('customers');
-    expect(Object.keys(updates[0].payload).sort()).toEqual(['crm_notes', 'last_name', 'updated_at']);
-    expect(updates[0].payload.last_name).toBe('Example');
-    expect(updates[0].payload.crm_notes).toBe('[call 2026-10-08] Last name added by the call agent from the county owner record.');
-    expect(updates[0].payload.crm_notes).not.toMatch(/Example/);
+describe('the notification', () => {
+  test('one source (county): title, why, link, dedupe key, metadata, detail, bell', async () => {
+    const { records } = setupDb();
+    expect(await run()).toEqual({ suggested: true, outcome: 'posted', sources: ['county'] });
+    const { category, spec, opts } = posted();
+    expect(category).toBe('customer');
+    expect(spec).toMatchObject({
+      area: 'Customers',
+      action: 'review a last name for Pat',
+      why: 'Pat may be Pat Example, per county record; open the customer to save it.',
+      severity: 'needs-you',
+      link: '/admin/customers?customerId=cust-1',
+      subject: { type: 'customer', id: 'cust-1' },
+      doneWhen: 'last_name_saved',
+      who: 'person',
+    });
+    expect(opts).toEqual({
+      bell: true,
+      dedupeKey: 'call-last-name-suggestion:cust-1',
+      detail: 'Pat Example: county record\nOpen the customer to save the last name.',
+      metadata: { customerId: 'cust-1', callLogId: 'call-1', suggestions: [{ surname: 'Example', sources: ['county'] }] },
+    });
+    expectNoWrites(records);
   });
 
-  test('the transaction locks the customer row for update', async () => {
+  test('two agreeing sources: one surname, both labels', async () => {
+    global.fetch = twilioAnswers('EXAMPLE,PAT');
+    const { records } = setupDb();
+    expect(await run()).toEqual({ suggested: true, outcome: 'posted', sources: ['county', 'twilio'] });
+    const { spec, opts } = posted();
+    expect(spec.why).toBe('Pat may be Pat Example, per county record + Twilio caller name; open the customer to save it.');
+    expect(opts.detail).toBe('Pat Example: county record + Twilio caller name\nOpen the customer to save the last name.');
+    expect(opts.metadata.suggestions).toEqual([{ surname: 'Example', sources: ['county', 'twilio'] }]);
+    expectNoWrites(records);
+  });
+
+  test('the same surname in different case is one group', async () => {
+    global.fetch = twilioAnswers('example pat');
     setupDb();
     await run();
-    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(posted().opts.metadata.suggestions).toHaveLength(1);
   });
 
-  test('the note is appended after existing notes with a blank line and the Eastern call day', async () => {
-    const { updates } = setupDb({
-      call: inbound({ created_at: '2026-10-09T02:30:00Z' }), // 10:30 PM ET on Oct 8
-      crmNotes: 'Prefers mornings.',
-    });
+  test('two disagreeing sources: the body picks none, the full text lists both', async () => {
+    global.fetch = twilioAnswers('SAMPLETON PAT');
+    const { records } = setupDb();
     await run();
-    expect(updates[0].payload.crm_notes).toBe('Prefers mornings.\n\n[call 2026-10-08] Last name added by the call agent from the county owner record.');
+    const { spec, opts } = posted();
+    expect(spec.why).toBe('2 different answers for Pat; open the full text and the customer.');
+    expect(spec.why).not.toMatch(/Example|Sampleton/);
+    expect(opts.detail).toBe([
+      'Different answers for Pat\'s last name (none is picked):',
+      'Pat Example: county record',
+      'Pat Sampleton: Twilio caller name',
+      'Open the customer and save the right one, or none.',
+    ].join('\n'));
+    expect(opts.metadata.suggestions).toEqual([
+      { surname: 'Example', sources: ['county'] },
+      { surname: 'Sampleton', sources: ['twilio'] },
+    ]);
+    expectNoWrites(records);
+  });
+
+  test('each source alone is labelled with its own name', async () => {
+    setupDb({ call: tenant(), customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
+    await run();
+    expect(posted().spec.why).toContain('per our records;');
+    raiseAdminAlert.mockClear();
+    setupDb({ call: tenant(), customer: { ...CUSTOMER, email: 'pat.sampleton@example.com' } });
+    await run();
+    expect(posted().spec.why).toContain('per email address;');
+  });
+
+  test('the headline stays inside 60 characters for a long first name', async () => {
+    setupDb({ customer: { ...CUSTOMER, first_name: 'Pat'.repeat(12) } });
+    lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: [`EXAMPLE, ${'PAT'.repeat(12)}`] });
+    await run();
+    const { spec } = posted();
+    expect(`Customers — ${spec.action}`.length).toBeLessThanOrEqual(60);
+  });
+
+  test('a notification that was not stored (deduped) is not reported as posted', async () => {
+    raiseAdminAlert.mockResolvedValue({ id: null, suppressed: true });
+    setupDb();
+    expect(await run()).toEqual({ suggested: false, outcome: 'not_posted', sources: ['county'] });
+  });
+
+  test('no source answers: nothing is posted', async () => {
+    lookupCountyParcelByPoint.mockResolvedValue(null);
+    const { records } = setupDb();
+    expect(await run()).toEqual({ suggested: false, outcome: 'no_answer' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expectNoWrites(records);
+  });
+
+  test('the last name appeared meanwhile: nothing is posted', async () => {
+    setupDb({ recheck: { id: 'cust-1', last_name: 'Landed' } });
+    expect(await run()).toEqual({ suggested: false, outcome: 'last_name_appeared' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('the customer was deleted meanwhile: nothing is posted', async () => {
+    setupDb({ recheck: null });
+    expect(await run()).toEqual({ suggested: false, outcome: 'last_name_appeared' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a notification failure never throws out and is logged as a code', async () => {
+    raiseAdminAlert.mockRejectedValue(Object.assign(new Error('boom for Pat Example'), { code: 'XX001' }));
+    setupDb();
+    await expect(run()).resolves.toEqual({ suggested: false, outcome: 'error' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), { callLogId: 'call-1', customerId: 'cust-1', error: 'XX001' });
+  });
+});
+
+describe('county owner record', () => {
+  test('asks for owner names with the customer coordinates', async () => {
+    setupDb();
+    await run();
+    expect(lookupCountyParcelByPoint).toHaveBeenCalledWith(27.4, -82.4, expect.objectContaining({ includeOwners: true }));
   });
 
   test('an unknown relationship may read the county record', async () => {
-    const { updates } = setupDb({ call: withExtraction({ relationship_to_property: 'unknown' }) });
+    setupDb({ call: withExtraction({ relationship_to_property: 'unknown' }) });
     await run();
     expect(lookupCountyParcelByPoint).toHaveBeenCalled();
-    expect(updates[0].payload.last_name).toBe('Example');
+    expect(posted().opts.metadata.suggestions[0].surname).toBe('Example');
   });
 
   test.each(['real_estate_agent', 'tenant', 'home_buyer', 'family_member', 'property_manager', 'spouse_partner', 'other', ''])(
-    'relationship %p never calls the county lookup',
+    'relationship %p never calls the county lookup, but the other sources still run',
     async (relationship) => {
-      const { updates } = setupDb({ call: withExtraction({ relationship_to_property: relationship }) });
-      expect(await run()).toEqual({ filled: false, outcome: 'no_surname' });
+      global.fetch = twilioAnswers('SAMPLETON PAT');
+      setupDb({ call: withExtraction({ relationship_to_property: relationship }), customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
+      await run();
       expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
-      expect(updates).toHaveLength(0);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(posted().opts.metadata.suggestions).toEqual([{ surname: 'Sampleton', sources: ['records', 'twilio'] }]);
     },
   );
 
-  test('a realtor with a first.last email still gets the surname from the email, never the owner', async () => {
-    const { updates } = setupDb({
-      call: withExtraction({ relationship_to_property: 'real_estate_agent' }),
-      customer: { ...CUSTOMER, email: 'pat.sampleton@example.com' },
-    });
-    await run();
-    expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
-    expect(updates[0].payload.last_name).toBe('Sampleton');
-  });
-
   test('a parcel whose house number is not the customer\'s is not used', async () => {
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, situsAddress: '102 SAMPLE AVE' });
-    const { updates } = setupDb();
-    expect(await run()).toEqual({ filled: false, outcome: 'no_surname' });
-    expect(updates).toHaveLength(0);
+    setupDb();
+    expect(await run()).toEqual({ suggested: false, outcome: 'no_answer' });
   });
 
-  test('no coordinates, no parcel, or no owner names: no county write', async () => {
-    let { updates } = setupDb({ customer: { ...CUSTOMER, latitude: null, longitude: null } });
+  test('no coordinates, no parcel, or no owner names: no county answer', async () => {
+    setupDb({ customer: { ...CUSTOMER, latitude: null, longitude: null } });
     await run();
     expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
-    expect(updates).toHaveLength(0);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
 
     lookupCountyParcelByPoint.mockResolvedValue(null);
-    ({ updates } = setupDb());
+    setupDb();
     await run();
-    expect(updates).toHaveLength(0);
-
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: [] });
-    ({ updates } = setupDb());
+    setupDb();
     await run();
-    expect(updates).toHaveLength(0);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
-  test('two owners with the caller first name and different surnames: no write', async () => {
+  test('two owners with the caller first name and different surnames, or an entity owner: no county answer', async () => {
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: ['EXAMPLE, PAT Q', 'SAMPLE, PAT'] });
-    const { updates } = setupDb();
+    setupDb();
     await run();
-    expect(updates).toHaveLength(0);
-  });
-
-  test('an entity owner gives nothing', async () => {
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: ['EXAMPLE PAT HOLDINGS LLC'] });
-    const { updates } = setupDb();
+    setupDb();
     await run();
-    expect(updates).toHaveLength(0);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
-  test('a thrown county lookup falls through to the next source and never throws out', async () => {
+  test('a thrown county lookup contributes nothing; the other sources still answer', async () => {
     lookupCountyParcelByPoint.mockRejectedValue(Object.assign(new Error('boom 100 Sample Ave'), { code: 'ETIMEDOUT' }));
-    const { updates } = setupDb({ customer: { ...CUSTOMER, email: 'pat.sampleton@example.com' } });
-    await expect(run()).resolves.toEqual({ filled: true, source: 'email' });
-    expect(updates[0].payload.last_name).toBe('Sampleton');
+    setupDb({ customer: { ...CUSTOMER, email: 'pat.sampleton@example.com' } });
+    await expect(run()).resolves.toEqual({ suggested: true, outcome: 'posted', sources: ['email'] });
   });
 });
 
 describe('our own records', () => {
   test('another customer with the same contact, same first name and a last name', async () => {
-    const { updates, records } = setupDb({
-      call: withExtraction({ relationship_to_property: 'tenant' }),
+    const { records } = setupDb({
+      call: tenant(),
       customer: { ...CUSTOMER, email: 'Pat@Example.com' },
       customers: [{ first_name: 'Pat', last_name: 'Sampleton' }],
     });
-    expect(await run()).toEqual({ filled: true, source: 'records' });
-    expect(updates[0].payload.last_name).toBe('Sampleton');
-    expect(updates[0].payload.crm_notes).toBe('[call 2026-10-08] Last name added by the call agent from another record with the same email or phone.');
+    await run();
+    expect(posted().opts.metadata.suggestions).toEqual([{ surname: 'Sampleton', sources: ['records'] }]);
     // email compared lower-cased; phone matched on the NANP identity key
     expect(records).toContainEqual(['whereRaw', 'LOWER(TRIM(email)) = ?', ['pat@example.com']]);
     expect(records).toContainEqual(['orWhereRaw', 'PHONE_MATCH(phone) = ?', ['9415550100']]);
   });
 
   test('a lead record counts too, and a nickname first name matches', async () => {
-    const { updates } = setupDb({
-      call: withExtraction({ relationship_to_property: 'tenant' }),
+    setupDb({
+      call: tenant(),
       customer: { ...CUSTOMER, first_name: 'Bill' },
-      current: { id: 'cust-1', first_name: 'Bill', last_name: null, crm_notes: null },
       leads: [{ first_name: 'William', last_name: 'Sampleton' }],
     });
     await run();
-    expect(updates[0].payload.last_name).toBe('Sampleton');
+    expect(posted().opts.metadata.suggestions[0].surname).toBe('Sampleton');
   });
 
-  test('the same surname on a customer and a lead (any case) is one surname', async () => {
-    const { updates } = setupDb({
-      call: withExtraction({ relationship_to_property: 'tenant' }),
+  test('the same surname on a customer and a lead (any case) is one answer', async () => {
+    setupDb({
+      call: tenant(),
       customers: [{ first_name: 'Pat', last_name: 'Sampleton' }],
       leads: [{ first_name: 'Pat', last_name: 'SAMPLETON' }],
     });
     await run();
-    expect(updates[0].payload.last_name).toBe('Sampleton');
+    expect(posted().opts.metadata.suggestions).toEqual([{ surname: 'Sampleton', sources: ['records'] }]);
   });
 
-  test('two different surnames: ambiguous, no write', async () => {
-    const { updates } = setupDb({
-      call: withExtraction({ relationship_to_property: 'tenant' }),
+  test('two different surnames in our records: no answer', async () => {
+    setupDb({
+      call: tenant(),
       customers: [{ first_name: 'Pat', last_name: 'Sampleton' }],
       leads: [{ first_name: 'Pat', last_name: 'Exampleson' }],
     });
     await run();
-    expect(updates).toHaveLength(0);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
-  test('a record with another first name is ignored', async () => {
-    const { updates } = setupDb({
-      call: withExtraction({ relationship_to_property: 'tenant' }),
-      customers: [{ first_name: 'Robin', last_name: 'Sampleton' }],
-    });
+  test('a record with another first name, or a last name that is not a name, is ignored', async () => {
+    setupDb({ call: tenant(), customers: [{ first_name: 'Robin', last_name: 'Sampleton' }, { first_name: 'Pat', last_name: '555-0100' }] });
     await run();
-    expect(updates).toHaveLength(0);
-  });
-
-  test('a stored last name that is not a plain name is ignored', async () => {
-    const { updates } = setupDb({
-      call: withExtraction({ relationship_to_property: 'tenant' }),
-      customers: [{ first_name: 'Pat', last_name: '555-0100' }],
-    });
-    await run();
-    expect(updates).toHaveLength(0);
-  });
-
-  test('a county record that found nothing falls through to the records', async () => {
-    lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: ['EXAMPLE, ROBIN'] });
-    const { updates } = setupDb({ customers: [{ first_name: 'Pat', last_name: 'Sampleton' }] });
-    await run();
-    expect(updates[0].payload.last_name).toBe('Sampleton');
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 });
 
 describe('caller email', () => {
-  const tenant = (email) => ({ call: withExtraction({ relationship_to_property: 'tenant' }), customer: { ...CUSTOMER, email } });
-
-  test('first.last@ gives the surname and the email note', async () => {
-    const { updates } = setupDb(tenant('pat.sampleton@example.com'));
-    expect(await run()).toEqual({ filled: true, source: 'email' });
-    expect(updates[0].payload.last_name).toBe('Sampleton');
-    expect(updates[0].payload.crm_notes).toBe('[call 2026-10-08] Last name added by the call agent from the caller\'s email address.');
-  });
-
-  test('a run-together address with a business word yields no write', async () => {
-    const { updates } = setupDb({
-      call: withExtraction({ relationship_to_property: 'tenant' }),
-      customer: { ...CUSTOMER, first_name: 'Elizabeth', email: 'elizabethrealty@example.com' },
-      current: { id: 'cust-1', first_name: 'Elizabeth', last_name: null, crm_notes: null },
-    });
-    expect(await run()).toEqual({ filled: false, outcome: 'no_surname' });
-    expect(updates).toHaveLength(0);
-  });
-
-  test('a business word after a separator yields no write', async () => {
-    const { updates } = setupDb(tenant('pat.realty@example.com'));
+  test('first.last@ gives an email answer', async () => {
+    setupDb({ call: tenant(), customer: { ...CUSTOMER, email: 'pat.sampleton@example.com' } });
     await run();
-    expect(updates).toHaveLength(0);
+    expect(posted().opts.metadata.suggestions).toEqual([{ surname: 'Sampleton', sources: ['email'] }]);
+  });
+
+  test('a run-together address, or a business word after a separator: no answer', async () => {
+    setupDb({
+      call: tenant(),
+      customer: { ...CUSTOMER, first_name: 'Elizabeth', email: 'elizabethrealty@example.com' },
+    });
+    await run();
+    setupDb({ call: tenant(), customer: { ...CUSTOMER, email: 'pat.realty@example.com' } });
+    await run();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+});
+
+describe('Twilio caller name', () => {
+  const tenantTwilio = (name, callerType, customer = CUSTOMER) => {
+    global.fetch = twilioAnswers(name, callerType);
+    return setupDb({ call: tenant(), customer });
+  };
+  const suggested = async () => { await run(); return raiseAdminAlert.mock.calls.length === 1 ? raiseAdminAlert.mock.calls[0][2].metadata.suggestions : null; };
+
+  test('a consumer name with the first name and one other word is an answer', async () => {
+    tenantTwilio('SAMPLETON,PAT');
+    expect(await suggested()).toEqual([{ surname: 'Sampleton', sources: ['twilio'] }]);
+  });
+
+  test('the request is the Lookup v2 caller_name for the +1 number, with Basic auth and a timeout signal', async () => {
+    tenantTwilio('SAMPLETON PAT');
+    await run();
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(url).toBe('https://lookups.twilio.com/v2/PhoneNumbers/%2B19415550100?Fields=caller_name');
+    expect(init.headers.Authorization).toBe(`Basic ${Buffer.from('ACtest:tokentest').toString('base64')}`);
+    expect(init.signal).toBeDefined();
+  });
+
+  test.each([
+    ['no name', null, 'CONSUMER'],
+    ['UNKNOWN', 'UNKNOWN', 'CONSUMER'],
+    ['a business', 'SAMPLETON PAT', 'BUSINESS'],
+    ['a 15-character name', 'SAMPLETONXX PAT', 'CONSUMER'],
+    ['no first-name token', 'SAMPLETON ROBIN', 'CONSUMER'],
+    ['two leftover tokens', 'SAMPLETON EX PAT', 'CONSUMER'],
+  ])('%s: no answer', async (label, name, callerType) => {
+    tenantTwilio(name, callerType);
+    expect(await suggested()).toBeNull();
+  });
+
+  test('a non-US or impossible number is never looked up', async () => {
+    tenantTwilio('SAMPLETON PAT', 'CONSUMER', { ...CUSTOMER, phone: '+44 20 7946 0958' });
+    await run();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('missing credentials: no lookup', async () => {
+    delete process.env.TWILIO_AUTH_TOKEN;
+    tenantTwilio('SAMPLETON PAT');
+    await run();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('an HTTP error or a thrown fetch contributes nothing and logs only a code', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+    setupDb({ call: tenant() });
+    await run();
+    global.fetch = jest.fn().mockRejectedValue(Object.assign(new Error('fetch failed for https://lookups.twilio.com/v2/PhoneNumbers/%2B19415550100'), { name: 'AbortError' }));
+    setupDb({ call: tenant() });
+    await run();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    const logged = JSON.stringify([...logger.info.mock.calls, ...logger.warn.mock.calls]);
+    expect(logged).toContain('twilio:http_404');
+    expect(logged).toContain('twilio:AbortError');
+    expect(logged).not.toMatch(/lookups\.twilio|9415550100|%2B/);
+  });
+
+  test('a failing Twilio lookup does not stop the other sources', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('down'));
+    setupDb();
+    await expect(run()).resolves.toMatchObject({ suggested: true, sources: ['county'] });
   });
 });
 
 describe('eligibility', () => {
-  test('a last name already on the customer: no write, no lookup', async () => {
-    const { updates } = setupDb({ customer: { ...CUSTOMER, last_name: 'Existing' } });
+  test('a last name already on the customer: nothing runs', async () => {
+    const { records } = setupDb({ customer: { ...CUSTOMER, last_name: 'Existing' } });
     expect(await run()).toEqual({ skipped: 'has_last_name' });
-    expect(updates).toHaveLength(0);
     expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expectNoWrites(records);
   });
 
   test('a blank (spaces) last name counts as empty', async () => {
-    const { updates } = setupDb({ customer: { ...CUSTOMER, last_name: '   ' } });
+    setupDb({ customer: { ...CUSTOMER, last_name: '   ' } });
     await run();
-    expect(updates).toHaveLength(1);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
   test('no first name: skipped', async () => {
-    const { updates } = setupDb({ customer: { ...CUSTOMER, first_name: ' ' } });
+    setupDb({ customer: { ...CUSTOMER, first_name: ' ' } });
     expect(await run()).toEqual({ skipped: 'no_first_name' });
-    expect(updates).toHaveLength(0);
   });
 
-  test('the caller phone is not the customer phone: no write, no lookup', async () => {
-    const { updates } = setupDb({ call: inbound({ from_phone: '+19415550188' }) });
+  test('the caller phone is not the customer phone: nothing runs, nothing is paid for', async () => {
+    setupDb({ call: inbound({ from_phone: '+19415550188' }) });
     expect(await run()).toEqual({ skipped: 'caller_not_customer' });
-    expect(updates).toHaveLength(0);
     expect(lookupCountyParcelByPoint).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('a customer without a phone, or a call without one: skipped', async () => {
-    expect(await (setupDb({ customer: { ...CUSTOMER, phone: null } }), run())).toEqual({ skipped: 'caller_not_customer' });
-    expect(await (setupDb({ call: inbound({ from_phone: null }) }), run())).toEqual({ skipped: 'caller_not_customer' });
+    setupDb({ customer: { ...CUSTOMER, phone: null } });
+    expect(await run()).toEqual({ skipped: 'caller_not_customer' });
+    setupDb({ call: inbound({ from_phone: null }) });
+    expect(await run()).toEqual({ skipped: 'caller_not_customer' });
   });
 
   test('an outbound call compares the dialed number', async () => {
-    const { updates } = setupDb({ call: inbound({ direction: 'outbound-api', from_phone: '+19415550199', to_phone: '+19415550100' }) });
+    setupDb({ call: inbound({ direction: 'outbound-api', from_phone: '+19415550199', to_phone: '+19415550100' }) });
     await run();
-    expect(updates[0].payload.last_name).toBe('Example');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
   test('the call is linked to another customer, or is gone: skipped', async () => {
-    expect(await (setupDb({ call: inbound({ customer_id: 'cust-2' }) }), run())).toEqual({ skipped: 'call_not_linked' });
+    setupDb({ call: inbound({ customer_id: 'cust-2' }) });
+    expect(await run()).toEqual({ skipped: 'call_not_linked' });
     setupDb({ call: null });
     expect(await run()).toEqual({ skipped: 'call_not_linked' });
   });
 
   test('a soft-deleted or missing customer: skipped', async () => {
-    const { updates } = setupDb({ customer: null });
+    setupDb({ customer: null });
     expect(await run()).toEqual({ skipped: 'customer_gone' });
-    expect(updates).toHaveLength(0);
   });
 
   test('the V2 caller already gave a last name: skipped', async () => {
-    const { updates } = setupDb({ call: withExtraction({ last_name: 'Heard' }) });
+    setupDb({ call: withExtraction({ last_name: 'Heard' }) });
     expect(await run()).toEqual({ skipped: 'caller_gave_last_name' });
-    expect(updates).toHaveLength(0);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('an extraction that is not valid, or is missing: skipped', async () => {
-    expect(await (setupDb({ call: inbound({ v2_extraction_status: 'schema_invalid' }) }), run())).toEqual({ skipped: 'no_valid_extraction' });
-    expect(await (setupDb({ call: inbound({ ai_extraction_enriched: null }) }), run())).toEqual({ skipped: 'no_valid_extraction' });
+    setupDb({ call: inbound({ v2_extraction_status: 'schema_invalid' }) });
+    expect(await run()).toEqual({ skipped: 'no_valid_extraction' });
+    setupDb({ call: inbound({ ai_extraction_enriched: null }) });
+    expect(await run()).toEqual({ skipped: 'no_valid_extraction' });
   });
 
   test('a JSON-string extraction is read', async () => {
-    const { updates } = setupDb({ call: inbound({ ai_extraction_enriched: JSON.stringify(CALL.ai_extraction_enriched) }) });
+    setupDb({ call: inbound({ ai_extraction_enriched: JSON.stringify(CALL.ai_extraction_enriched) }) });
     await run();
-    expect(updates).toHaveLength(1);
-  });
-});
-
-describe('the write is fill-only and re-checked under the row lock', () => {
-  test('a last name that landed meanwhile is not overwritten', async () => {
-    const { updates } = setupDb({ current: { id: 'cust-1', first_name: 'Pat', last_name: 'Landed', crm_notes: null } });
-    expect(await run()).toEqual({ filled: false, outcome: 'changed_meanwhile' });
-    expect(updates).toHaveLength(0);
-  });
-
-  test('a first name that changed meanwhile blocks the write', async () => {
-    const { updates } = setupDb({ current: { id: 'cust-1', first_name: 'Patricia', last_name: null, crm_notes: null } });
-    expect(await run()).toEqual({ filled: false, outcome: 'changed_meanwhile' });
-    expect(updates).toHaveLength(0);
-  });
-
-  test('a customer deleted meanwhile blocks the write', async () => {
-    const { updates } = setupDb({ current: undefined });
-    db.transaction.mockImplementation(async (cb) => cb(() => builder(undefined)));
-    expect(await run()).toEqual({ filled: false, outcome: 'changed_meanwhile' });
-    expect(updates).toHaveLength(0);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('never throws, never logs PII', () => {
   test('a database error is swallowed into an outcome code', async () => {
     db.mockImplementation(() => { throw Object.assign(new Error('relation for pat.sampleton@example.com'), { code: 'XX000' }); });
-    await expect(run()).resolves.toEqual({ filled: false, outcome: 'error' });
+    await expect(run()).resolves.toEqual({ suggested: false, outcome: 'error' });
     expect(logger.warn).toHaveBeenCalledWith(expect.any(String), { callLogId: 'call-1', customerId: 'cust-1', error: 'XX000' });
   });
 
@@ -437,18 +566,20 @@ describe('never throws, never logs PII', () => {
     expect(db).not.toHaveBeenCalled();
     await flushImmediates();
     await flushImmediates();
-    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db).toHaveBeenCalled();
   });
 
   test('no log call carries a name, phone, email or address', async () => {
-    lookupCountyParcelByPoint.mockRejectedValueOnce(Object.assign(new Error('county down for 100 Sample Ave'), { code: 'ETIMEDOUT' }));
+    global.fetch = twilioAnswers('EXAMPLE PAT');
     setupDb({ customer: { ...CUSTOMER, email: 'pat.sampleton@example.com' } });
-    await run();
+    await run(); // posts: logs the sources
+    lookupCountyParcelByPoint.mockRejectedValueOnce(Object.assign(new Error('county down for 100 Sample Ave'), { code: 'ETIMEDOUT' }));
     setupDb({ customer: { ...CUSTOMER, email: null } });
     lookupCountyParcelByPoint.mockResolvedValue({ ...PARCEL, ownerNames: ['EXAMPLE, ROBIN'] });
-    await run();
+    global.fetch = twilioAnswers(null);
+    await run(); // no answer
     db.mockImplementation(() => { throw new Error('pat.sampleton@example.com 100 Sample Ave 9415550100'); });
-    await run();
+    await run(); // error
     const logged = JSON.stringify([...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls]);
     expect(logged).toContain('call-last-name-lookup');
     for (const secret of ['Pat', 'Example', 'Sampleton', 'Sample', '555', '941', 'example.com', 'Ave', '100']) {

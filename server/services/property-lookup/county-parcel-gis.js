@@ -435,7 +435,7 @@ const COUNTY_LAYERS = {
       imperviousAreaSf: positiveOrNull(g('FEATS_SQFT_IMPERV')),
     }),
     // Owner fields are requested ONLY for an `includeOwners` lookup (the call
-    // last-name fill) — never part of outFields, so every other lookup path
+    // last-name suggestion) — never part of outFields, so every other lookup path
     // asks for, receives and caches exactly what it did before.
     ownerFields: ['PAR_OWNER_NAME1', 'PAR_OWNER_NAME2'],
     parseOwners: (g) => [g('PAR_OWNER_NAME1'), g('PAR_OWNER_NAME2')],
@@ -515,7 +515,7 @@ function ownerNamesFrom(values) {
 }
 
 // Owner columns ride along ONLY for an includeOwners lookup (the call
-// last-name fill): the default request and result stay exactly as they were,
+// last-name suggestion): the default request and result stay exactly as they were,
 // so no owner name can reach a lookup cache or log.
 function layerOutFields(layer, includeOwners) {
   return includeOwners ? [...layer.outFields, ...layer.ownerFields] : layer.outFields;
@@ -800,7 +800,7 @@ const MIN_COUNTY_GIS_QUERY_MS = 500;
 // county hint can't spend 3x the GIS budget and starve the FDOR/PAO fallbacks.
 // `options.includeOwners: true` also asks the layer for the owner fields and adds
 // `ownerNames: string[]` (raw strings; [] for a stacked association) — used only
-// by the call last-name fill, never cached or logged.
+// by the call last-name suggestion, never cached or logged.
 async function lookupCountyParcelByPoint(lat, lng, options = {}) {
   if (isDisabled()) {
     logger.info('[county-parcel-gis] skipped — COUNTY_PARCEL_GIS_DISABLED');

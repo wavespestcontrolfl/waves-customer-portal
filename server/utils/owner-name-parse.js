@@ -3,10 +3,9 @@
 /**
  * Surname from a county parcel-owner string, for ONE caller first name.
  *
- * The call pipeline (services/call-last-name-lookup.js) uses this to fill an
- * empty customers.last_name from the county owner record. It is deliberately
- * strict: a wrong surname on a customer is worse than a blank one, so every
- * doubtful shape returns null.
+ * The call pipeline (services/call-last-name-lookup.js) uses this to suggest a
+ * last name from the county owner record. It is deliberately strict: a wrong
+ * suggestion costs the office time, so every doubtful shape returns null.
  *
  * County formats (live-probed 2026-10-08; the examples below are invented):
  *   Manatee   `LAST, FIRST M`                   "SAMPLE, PAT Q"

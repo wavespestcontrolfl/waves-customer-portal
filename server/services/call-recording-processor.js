@@ -22488,7 +22488,7 @@ const CallRecordingProcessor = {
         }
       }
 
-      // Fill an empty last name (GATE_CALL_LAST_NAME_LOOKUP): fire-and-forget, never awaited.
+      // Suggest a last name to the office (GATE_CALL_LAST_NAME_LOOKUP): fire-and-forget, never awaited.
       if (customerId) require('./call-last-name-lookup').enqueueCallLastNameLookup({ callLogId: call.id, customerId });
 
       // The window this booking call committed needs no capture step either:
