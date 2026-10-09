@@ -162,6 +162,16 @@ describe('blockedMap: the products a TYPED limit closes at a place', () => {
       [uuid(2)]: { front: 'Celsius: 2/2 — LIMIT REACHED.' },
     });
   });
+
+  test('blockedTypeMap carries the limit type of each listed entry (same keys), so the sheet can tell a dose-dependent amount from a count', () => {
+    const amount = [{ type: 'annual_max_rate', matchType: 'v13_amount', message: 'amount' }];
+    const wide = new Map([[P_CEL, CAP], [uuid(2), amount], [uuid(3), [{ message: 'could not be read' }]]]);
+    const byPlace = { front: new Map([[P_CEL, CAP], [uuid(2), amount], [uuid(3), [{ message: 'could not be read' }]]]), back: none, left_side: none, right_side: new Map([[P_CEL, [{ type: 'min_interval_days', message: 'wait' }]]]) };
+    expect(areas.blockedTypeMap({ wide, byPlace })).toEqual({
+      [P_CEL]: { front: 'annual_max_apps', right_side: 'min_interval_days' },
+      [uuid(2)]: { front: 'annual_max_rate' },
+    });
+  });
 });
 
 describe('cappedByPlace: the plan\'s own limit reader, once for the lawn and again only for what is capped', () => {

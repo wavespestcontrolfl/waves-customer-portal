@@ -259,3 +259,29 @@ describe('a take-all row from the guide card is held to the mapped places', () =
   });
 });
 
+
+describe('a block of the yearly AMOUNT ends when the row\'s dose moved; a count or interval block never does', () => {
+  const withMoved = (extra, moved) => ({ ...troubleAreasOf(data(extra)), moved });
+  const map = (type) => ({ blocked: { p1: { front: 'closed up front' } }, blockedTypes: { p1: { front: type } } });
+
+  test('the maps: amount ends for the moved product only; count, interval and an untyped entry stay', () => {
+    expect(placeProblems(row(), { areas: withMoved(map('annual_max_rate'), []) }).front).toBe('closed up front');
+    expect(placeProblems(row(), { areas: withMoved(map('annual_max_rate'), ['p1']) }).front).toBeNull();
+    expect(placeProblems(row(), { areas: withMoved(map('annual_max_rate'), ['other']) }).front).toBe('closed up front');
+    for (const type of ['annual_max_apps', 'min_interval_days']) expect(placeProblems(row(), { areas: withMoved(map(type), ['p1']) }).front).toBe('closed up front');
+    expect(placeProblems(row(), { areas: withMoved({ blocked: { p1: { front: 'closed up front' } } }, ['p1']) }).front).toBe('closed up front');
+  });
+
+  test('the weed decision and the chinch decision: amountBlocked ends for a moved row; without it they stay', () => {
+    const weedRows = [row({ productId: 'w1', weedGroup: true })];
+    const weedMix = (extra) => ({ byPlace: { front: { mode: 'none', productIds: [], note: 'At the limit.', ...extra } } });
+    expect(placeProblems(weedRows[0], { areas: withMoved({}, ['w1']), weedMix: weedMix({ amountBlocked: true }), weedRows }).front).toBeNull();
+    expect(placeProblems(weedRows[0], { areas: withMoved({}, []), weedMix: weedMix({ amountBlocked: true }), weedRows }).front).toBe('At the limit.');
+    expect(placeProblems(weedRows[0], { areas: withMoved({}, ['w1']), weedMix: weedMix({}), weedRows }).front).toBe('At the limit.');
+    const chinchRow = row({ productId: 'c1', guided: 'chinch' });
+    const chinch = (extra) => ({ byPlace: { front: { item: null, note: 'Arena is at its limit.', unreadableIds: [], blockedIds: ['c1'], ...extra } } });
+    expect(placeProblems(chinchRow, { areas: withMoved({}, ['c1']), chinch: chinch({ amountBlocked: true }) }).front).toBeNull();
+    expect(placeProblems(chinchRow, { areas: withMoved({}, []), chinch: chinch({ amountBlocked: true }) }).front).toBe('Arena is at its limit.');
+    expect(placeProblems(chinchRow, { areas: withMoved({}, ['c1']), chinch: chinch({}) }).front).toBe('Arena is at its limit.');
+  });
+});

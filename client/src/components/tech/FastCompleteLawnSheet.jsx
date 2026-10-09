@@ -251,6 +251,7 @@ const chinchByPlace = (chinch) => {
     note: decision?.note || null,
     unreadableIds: Array.isArray(decision?.unreadableIds) ? decision.unreadableIds : [],
     ...(Array.isArray(decision?.blockedIds) ? { blockedIds: decision.blockedIds } : {}),
+    ...(decision?.amountBlocked === true ? { amountBlocked: true } : {}),
   }]));
 };
 const chinchShape = (chinch) => {
@@ -393,6 +394,7 @@ const searchedIdsQuery = (refreshKey, idsRef, lead) => (refreshKey && idsRef?.cu
 
 // GATE_LAWN_TROUBLE_AREAS: what the guide's read found closed at each place, `{ [productId]: { [place]: message } }` (an empty entry =
 // open everywhere), or undefined when the answer carries none (then the context's map stands).
+const freshPlaceTypes = (data) => (data.placeBlockedTypes && typeof data.placeBlockedTypes === 'object' && !Array.isArray(data.placeBlockedTypes) ? data.placeBlockedTypes : undefined);
 const freshPlaceBlocked = (data) => (data.placeBlocked && typeof data.placeBlocked === 'object' && !Array.isArray(data.placeBlocked) ? data.placeBlocked : undefined);
 
 // The standing chinch tap's decision the guide read fresh (the limits are read again after Confirm):
@@ -435,7 +437,7 @@ function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
+          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), placeBlockedTypes: freshPlaceTypes(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
         } else failed();
       })
       .catch(() => { if (active) failed(); });
@@ -1343,6 +1345,15 @@ function useStockHold({ ctx, service, rows, products, request }) {
   return { stockRow, checkingStock, checkStock };
 }
 
+// Whether a row's dose signature (see dosesRef) holds an amount: [totalAmount, unit, area, rate].
+const hadAmount = (signature) => { try { const [amount] = JSON.parse(signature); return amount !== null && amount !== undefined && amount !== ''; } catch { return false; } };
+
+// What /complete refused, less the amount refusals whose row's dose is not the dose it was refused at; a count or interval refusal stays.
+function pruneAmountRefusals(refused, doses) {
+  const kept = Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).filter(([, e]) => e.dose === null || e.dose === doses[id]))]).filter(([, byPlace]) => Object.keys(byPlace).length));
+  return JSON.stringify(kept) === JSON.stringify(refused) ? refused : kept;
+}
+
 // GATE_LAWN_TROUBLE_AREAS: reads the place maps again after /complete refused a place (400 lawn_place_limit). The context is read aside
 // (the sheet is never reset): its troubleAreas, weed mix and chinch decision replace the opening ones where it carries them, and
 // `tick` makes the treatment guide read again. A read that fails changes nothing. `slot` is the ref the submit's error handler calls.
@@ -1353,9 +1364,14 @@ function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
   // A refusal of the yearly AMOUNT depends on the dose the tech entered (`dose`: that row's amount, unit, area and rate then); a count or an
   // interval refusal does not (`dose` null), so only the amount kind is dropped when the dose changes (pruneRefused).
   const [refused, setRefused] = useState({});
+  // The products whose dose changed since /complete last refused them. A yearly-AMOUNT block in ANY map (the opening context, a refresh,
+  // the guide's answer) was judged at the program dose, so it stops closing a chip once that row's dose has moved (see problemAt).
+  const [moved, setMoved] = useState([]);
+  const lastDoses = useRef(null);
   const refresh = useCallback((err) => {
     const { productId, place, error, limitType } = err?.details || {};
     const id = String(productId || '').toLowerCase();
+    if (id) setMoved((prev) => (prev.includes(id) ? prev.filter((other) => other !== id) : prev));
     const entry = { message: error || err?.message, dose: limitType === 'annual_max_rate' ? (dosesRef?.current?.[id] ?? '') : null };
     if (productId && place) setRefused((prev) => ({ ...prev, [id]: { ...prev[id], [place]: entry } }));
     setTick((n) => n + 1);
@@ -1366,20 +1382,25 @@ function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
   slot.current = refresh;
   const placeCtx = useMemo(() => ({ ...ctx, ...Object.fromEntries(Object.entries(fresh || {}).filter(([, value]) => value)) }), [ctx, fresh]);
   // Drops the amount refusals whose row's dose is not the dose it was refused at; never touches a count or interval refusal.
-  const pruneRefused = useCallback((doses) => setRefused((prev) => {
-    const kept = Object.fromEntries(Object.entries(prev).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).filter(([, e]) => e.dose === null || e.dose === doses[id]))]).filter(([, byPlace]) => Object.keys(byPlace).length));
-    return JSON.stringify(kept) === JSON.stringify(prev) ? prev : kept;
-  }), []);
+  const pruneRefused = useCallback((doses) => {
+    const before = lastDoses.current;
+    lastDoses.current = doses;
+    // A row that had no amount yet gets its first one: that is the dose the maps judged, not a change of it.
+    const changed = before ? Object.keys(doses).filter((id) => id in before && before[id] !== doses[id] && hadAmount(before[id])) : [];
+    if (changed.length) setMoved((prev) => [...new Set([...prev, ...changed])]);
+    setRefused((prev) => pruneAmountRefusals(prev, doses));
+  }, []);
   const messages = useMemo(() => Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).map(([place, e]) => [place, e.message]))])), [refused]);
-  return { tick, placeCtx, refused: messages, pruneRefused };
+  return { tick, placeCtx, refused: messages, moved, pruneRefused };
 }
 
 // The sheet's places: the context's closed list and known areas (less the ones cleared here), with what is closed where taken from the
 // guide's fresh read once it has answered, else the context's.
-function useSheetAreas({ placeCtx, guide, cleared, refused }) {
+function useSheetAreas({ placeCtx, guide, cleared, refused, moved }) {
   const base = placeCtx.troubleAreas;
   const fresh = guide?.placeBlocked;
-  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, refused } : null), [base, fresh, cleared, refused]);
+  const freshTypes = guide?.placeBlockedTypes;
+  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, blockedTypes: { ...base.blockedTypes, ...freshTypes }, refused, moved } : null), [base, fresh, freshTypes, cleared, refused, moved]);
 }
 
 function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
@@ -1387,7 +1408,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
   const searchedIds = useRef([]);
   const dosesRef = useRef({});
-  const { tick: placeTick, placeCtx, refused, pruneRefused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
+  const { tick: placeTick, placeCtx, refused, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
@@ -1420,7 +1441,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlace, setWeedPlace] = useState('');
   const [clearedAreas, setClearedAreas] = useState([]);
-  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused });
+  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, moved });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
     setClearedAreas((prev) => [...prev, id]);

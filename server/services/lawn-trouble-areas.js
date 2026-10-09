@@ -249,13 +249,28 @@ async function cappedByPlace({ knex, svc, products, rows }) {
  */
 function blockedMap({ wide, byPlace }) {
   const out = {};
+  for (const [id, place, block] of typedBlocks({ wide, byPlace })) (out[id] = out[id] || {})[place] = block.message || 'A yearly limit is reached for this place.';
+  return out;
+}
+
+/**
+ * The limit type of each entry of blockedMap, `{ [productId]: { [place]: limitType } }` (same keys). The sheet needs it because a
+ * block of the yearly AMOUNT (`annual_max_rate`) depends on the dose the tech enters, while a count or an interval block does not:
+ * a refresh judges the program dose, so the chip reopens when the row's own dose changes. Pure.
+ */
+function blockedTypeMap({ wide, byPlace }) {
+  const out = {};
+  for (const [id, place, block] of typedBlocks({ wide, byPlace })) (out[id] = out[id] || {})[place] = block.type;
+  return out;
+}
+
+function* typedBlocks({ wide, byPlace }) {
   for (const [id] of wide) {
     for (const place of PLACE_IDS) {
       const block = (byPlace[place].get(id) || []).find((b) => b.type);
-      if (block) (out[id] = out[id] || {})[place] = block.message || 'A yearly limit is reached for this place.';
+      if (block) yield [id, place, block];
     }
   }
-  return out;
 }
 
 /**
@@ -273,8 +288,8 @@ async function buildContextBlock({ knex, svc, seed = null, readFailures, extraId
   // Products the sheet names that the month's recipe does not (Search-added rows, sent after /complete refused a place) are read too.
   const named = await withSearched(knex, products, extraIds).catch(failed('searched products', 'trouble_area_limits')) || products;
   const known = await loadActive(knex, svc.property_id).catch(failed('known areas', 'trouble_areas'));
-  const blocked = await cappedByPlace({ knex, svc, products: named, rows }).then(blockedMap).catch(failed('place limits', 'trouble_area_limits'));
-  return { troubleAreas: { v: 1, places: placeChoices(), known: known || [], knownUnavailable: known === null, blocked: blocked || {} } };
+  const read = await cappedByPlace({ knex, svc, products: named, rows }).catch(failed('place limits', 'trouble_area_limits'));
+  return { troubleAreas: { v: 1, places: placeChoices(), known: known || [], knownUnavailable: known === null, blocked: read ? blockedMap(read) : {}, blockedTypes: read ? blockedTypeMap(read) : {} } };
 }
 
 const MAX_SEARCHED_PRODUCTS = 20;
@@ -294,9 +309,9 @@ async function withSearched(knex, products, ids) {
  */
 async function searchedPlaceBlocks({ knex, svc, rows, ids }) {
   const products = await withSearched(knex, [], ids);
-  if (!products.length) return {};
+  if (!products.length) return { blocked: {}, types: {} };
   const result = await cappedByPlace({ knex, svc, products, rows });
-  return { ...Object.fromEntries(products.map((product) => [String(product.id), {}])), ...blockedMap(result) };
+  return { blocked: { ...Object.fromEntries(products.map((product) => [String(product.id), {}])), ...blockedMap(result) }, types: blockedTypeMap(result) };
 }
 
 // ── the /complete preflight ─────────────────────────────────────────────────
@@ -467,6 +482,7 @@ module.exports = {
   recordStore,
   cappedByPlace,
   blockedMap,
+  blockedTypeMap,
   buildContextBlock,
   searchedPlaceBlocks,
   preflightPlaces,

@@ -231,6 +231,20 @@ describe('buildWeedMix with places: one decision per place', () => {
     expect(engine.v13VisitLimits.mock.calls.map((call) => call[5]?.place)).toEqual([undefined, 'front', 'back', 'left_side', 'right_side']);
   });
 
+  test('a yearly AMOUNT limit at a place marks that place\'s decision amountBlocked (the sheet drops it when the dose changes); a count or an interval limit does not', async () => {
+    const at = (type) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(options?.place === 'front' || !options?.place ? [[LEAD, [{ type, matchType: type === 'annual_max_rate' ? 'v13_amount' : 'product', message: 'x' }]]] : []), warnings: [], blocks: [],
+    }));
+    at('annual_max_rate');
+    const amount = await runPlaces();
+    expect(amount.byPlace.front.amountBlocked).toBe(true);
+    expect('amountBlocked' in amount.byPlace.back).toBe(false);
+    at('annual_max_apps');
+    expect('amountBlocked' in (await runPlaces()).byPlace.front).toBe(false);
+    at('min_interval_days');
+    expect('amountBlocked' in (await runPlaces()).byPlace.front).toBe(false);
+  });
+
   test('capped at every place: every place is none and so is the top level', async () => {
     cappedAt(...PLACES);
     const mix = await runPlaces();

@@ -988,6 +988,83 @@ describe('the guide answer carries the fresh per-place blocks; a refused place r
     });
   });
 
+  // A block that arrives in a MAP (the opening context, the re-read context, the guide's answer) carries its limit type too: the
+  // yearly amount was judged at the program dose, so it ends when the row's dose changes; a count or an interval block does not.
+  describe('what ends a block read from a map', () => {
+    const MESSAGE = 'Spot Fungicide: LIMIT REACHED at the front.';
+    const mapped = (limitType) => ({ blocked: { [P_FUNG]: { front: MESSAGE } }, blockedTypes: { [P_FUNG]: { front: limitType } } });
+    const guideMapped = (limitType) => ({ ...guideWith({ [P_FUNG]: { front: MESSAGE } }), placeBlockedTypes: { [P_FUNG]: { front: limitType } } });
+    const amountBox = () => within(placeGroup('Spot Fungicide')).getByLabelText('Spot Fungicide');
+    const takeFungus = async () => {
+      await openSheet({ request: makeRequest({ ctx: placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: areasBlock(mapped(limitTypeUnderTest)) }) }), props: { catalog: CAT } });
+      await analyze();
+      fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+      typeArea(placeGroup('Spot Fungicide'), '100');
+    };
+    let limitTypeUnderTest;
+
+    test.each([
+      ['the area', () => typeArea(placeGroup('Spot Fungicide'), '250')],
+      ['the amount', () => fireEvent.change(amountBox(), { target: { value: '0.5' } })],
+    ])('an amount block in the opening and guide maps ends when %s of its row changes', async (_name, change) => {
+      limitTypeUnderTest = 'annual_max_rate';
+      guideAnswer = guideMapped('annual_max_rate');
+      await takeFungus();
+      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+      change();
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(false));
+      expect(chipOf(chipsOf(), 'Back').disabled).toBe(false);
+    });
+
+    test.each(['annual_max_apps', 'min_interval_days'])('a %s block in the maps stays closed when the dose changes', async (limitType) => {
+      limitTypeUnderTest = limitType;
+      guideAnswer = guideMapped(limitType);
+      await takeFungus();
+      typeArea(placeGroup('Spot Fungicide'), '250');
+      fireEvent.change(amountBox(), { target: { value: '0.5' } });
+      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    });
+
+    test('a map without limit types (an older answer) never ends on a dose change', async () => {
+      limitTypeUnderTest = undefined;
+      guideAnswer = guideWith({ [P_FUNG]: { front: MESSAGE } });
+      await takeFungus();
+      typeArea(placeGroup('Spot Fungicide'), '250');
+      expect(chipOf(chipsOf(), 'Front').disabled).toBe(true);
+    });
+
+    // The re-read after a refusal judges the program dose and can put the very product and place into the maps it returns.
+    test.each([
+      ['annual_max_rate', false],
+      ['annual_max_apps', true],
+    ])('a %s refusal whose re-read maps carry the block too: after a dose change the chip is closed = %s', async (limitType, stillClosed) => {
+      const reread = areasBlock(mapped(limitType));
+      const base = makeRequest({ ctx: ctxWith({}) });
+      const request = vi.fn(async (path, options) => (path.includes('/lawn-fast/context') && /productIds=/.test(path) ? placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: reread }) : base(path, options)));
+      guideAnswer = guideWith({ [P_FUNG]: {} });
+      await openSheet({ request, props: { catalog: CAT } });
+      await analyze();
+      fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+      typeArea(placeGroup('Spot Fungicide'), '100');
+      fireEvent.click(chipOf(chipsOf(), 'Front'));
+      guideAnswer = guideMapped(limitType);
+      completeErrors.push(refusal(400, 'lawn_place_limit', MESSAGE, { productId: P_FUNG, place: 'front', limitType }));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
+      await waitFor(() => expect(request.mock.calls.some(([path]) => /context\?productIds=/.test(path))).toBe(true));
+      typeArea(placeGroup('Spot Fungicide'), '250');
+      await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(stillClosed));
+      // A second refusal at the new dose closes the chip again, for an amount block too (the server stays authoritative).
+      if (!stillClosed) {
+        completeErrors.push(refusal(400, 'lawn_place_limit', MESSAGE, { productId: P_FUNG, place: 'front', limitType }));
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        await waitFor(() => expect(chipOf(chipsOf(), 'Front').disabled).toBe(true));
+      }
+    });
+  });
+
   test('other refusals do not re-read the place maps; a failed refresh changes nothing', async () => {
     let contextReads = 0;
     const base = makeRequest({ ctx: ctxWith({}) });

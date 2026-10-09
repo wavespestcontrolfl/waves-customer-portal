@@ -930,10 +930,10 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
 
 // GATE_LAWN_TROUBLE_AREAS: the guide's per-place blocks with the products the sheet names (Search-added rows outside the month's recipe)
 // read per place too, in the context's shape; an entry the guide already read stands. `undefined` while the gate is off or nothing was read.
-async function withSearchedProducts({ svc, knex, rows, ids, known }) {
-  if (!featureGates.lawnTroubleAreasLive() || !Array.isArray(ids) || !ids.length) return known;
+async function withSearchedProducts({ svc, knex, rows, ids, known, knownTypes }) {
+  if (!featureGates.lawnTroubleAreasLive() || !Array.isArray(ids) || !ids.length) return { blocked: known, types: knownTypes };
   const extra = await require('./lawn-trouble-areas').searchedPlaceBlocks({ knex, svc, rows, ids });
-  return { ...extra, ...(known || {}) };
+  return { blocked: { ...extra.blocked, ...(known || {}) }, types: { ...extra.types, ...(knownTypes || {}) } };
 }
 
 // GATE_LAWN_TROUBLE_AREAS: the lawn's active take_all areas (a stored area is server-confirmed; a cleared one is not active), less the
@@ -982,7 +982,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
     // The take-all fungicide rows of the plan as read now (an assignment or a substitution may have changed them since the sheet opened).
     takeAllProductIds: ids.takeAll || [],
     // GATE_LAWN_TROUBLE_AREAS: the per-place blocks this read found (the key exists only while the gate is live).
-    ...(ids.placeBlocked ? { placeBlocked: ids.placeBlocked } : {}),
+    ...(ids.placeBlocked ? { placeBlocked: ids.placeBlocked, placeBlockedTypes: ids.placeBlockedTypes || {} } : {}),
   });
   // Only a recurring program visit has a plan, and so any product to suggest.
   const loaded = visitType === 'recurring' ? await loadPlan(svc, knex) : null;
@@ -1002,6 +1002,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   // A read that throws fails the request (the sheet then follows the context's decisions); only a
   // missing run row, which a legacy assessment legitimately has, reads as no run.
   const run = (await require('./lawn-visit-runs').loadRun(assessment.id, knex)) || null;
+  const searched = await withSearchedProducts({ svc, knex, rows, ids: productIds, known: offers.placeBlocked, knownTypes: offers.placeTypes });
   return result(guide.buildCards({
     signals: guide.signalsFromAssessment(assessment, run),
     month: visitMonthOf(svc),
@@ -1009,7 +1010,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active) at places the take-all product is not closed at.
     troubleAreas: await takeAllAreasOn({ svc, knex, offers }),
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId), placeBlocked: await withSearchedProducts({ svc, knex, rows, ids: productIds, known: offers.placeBlocked }) });
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId), placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

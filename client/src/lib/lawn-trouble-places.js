@@ -24,7 +24,8 @@ export function troubleAreasOf(data) {
       id: area.id, place: area.place, placeLabel: area.placeLabel || area.place, type: area.type, typeLabel: area.typeLabel || area.type, lastTreatedOn: area.lastTreatedOn || null,
     }));
   const blocked = block.blocked && typeof block.blocked === 'object' && !Array.isArray(block.blocked) ? block.blocked : {};
-  return { places, known, knownUnavailable: block.knownUnavailable === true, blocked };
+  const blockedTypes = block.blockedTypes && typeof block.blockedTypes === 'object' && !Array.isArray(block.blockedTypes) ? block.blockedTypes : {};
+  return { places, known, knownUnavailable: block.knownUnavailable === true, blocked, blockedTypes };
 }
 
 // The trouble-area type a row is for. The guide card or entry that opened the row says it; a plain row follows the
@@ -68,20 +69,37 @@ const uncapped = (row, weedMix) => lowerIds(weedMix?.noAreaProductIds).includes(
 const unmappedTakeAll = (row, placeId, places) => !!(row.takeAllRow && row.troubleSource === 'guide_card' && places && !places.has(placeId));
 const NOT_MAPPED = 'Take-all is treated on mapped take-all areas only. Pick a mapped place, or add the fungicide through Search to map a new one.';
 
+// A block of the yearly AMOUNT was judged at the program dose, so it stands only until the dose of the row it closes is changed (the
+// tech's own entry is judged by /complete, which stays authoritative: at worst one more refusal, with its reason). A count or an
+// interval block does not depend on the dose and is never dropped here. `areas.moved` lists the products whose dose changed since
+// /complete last refused them (see usePlaceRefresh).
+const AMOUNT_LIMIT = 'annual_max_rate';
+const doseMoved = (areas, rows) => { const moved = lowerIds(areas.moved); return rows.some((row) => moved.includes(String(row.productId).toLowerCase())); };
+
 function problemAt(placeId, row, { areas, weedMix, chinch, weedRows, takeAllPlaces }) {
   // What /complete itself refused for this product at this place is authoritative, whatever any map says.
   const refused = areas.refused?.[String(row.productId).toLowerCase()]?.[placeId];
   if (refused) return reasonText(refused, 'A yearly limit is reached at this place.');
   // A take-all row the guide CARD opened may go only on a mapped take-all place; one added through Search maps a new place (the server enforces the same).
   if (unmappedTakeAll(row, placeId, takeAllPlaces)) return NOT_MAPPED;
-  if (weedMix?.byPlace && inWeedGroup(row, weedMix)) {
-    if (uncapped(row, weedMix)) return null;
-    // The rows of the entry share one set; a group product that is on the sheet on its own is judged on its own.
-    return weedProblem(weedMix.byPlace[placeId], row.weedGroup ? weedRows.filter((other) => !uncapped(other, weedMix)) : [row]);
-  }
-  if (chinch?.byPlace && inChinchLadder(row, chinch)) return chinchProblem(chinch.byPlace[placeId], row);
+  if (weedMix?.byPlace && inWeedGroup(row, weedMix)) return weedProblemAt(placeId, row, { areas, weedMix, weedRows });
+  if (chinch?.byPlace && inChinchLadder(row, chinch)) return chinch.byPlace[placeId]?.amountBlocked && doseMoved(areas, [row]) ? null : chinchProblem(chinch.byPlace[placeId], row);
+  return mapProblemAt(placeId, row, areas);
+}
+
+function weedProblemAt(placeId, row, { areas, weedMix, weedRows }) {
+  if (uncapped(row, weedMix)) return null;
+  if (weedMix.byPlace[placeId]?.amountBlocked && doseMoved(areas, row.weedGroup ? weedRows : [row])) return null;
+  // The rows of the entry share one set; a group product that is on the sheet on its own is judged on its own.
+  return weedProblem(weedMix.byPlace[placeId], row.weedGroup ? weedRows.filter((other) => !uncapped(other, weedMix)) : [row]);
+}
+
+// What the context's and the guide's maps say about this product at this place (a typed amount block ends with the row's dose).
+function mapProblemAt(placeId, row, areas) {
   const closed = areas.blocked?.[String(row.productId).toLowerCase()] || areas.blocked?.[row.productId];
-  return closed?.[placeId] ? reasonText(closed[placeId], 'A yearly limit is reached at this place.') : null;
+  if (!closed?.[placeId]) return null;
+  const types = areas.blockedTypes?.[String(row.productId).toLowerCase()] || areas.blockedTypes?.[row.productId];
+  return types?.[placeId] === AMOUNT_LIMIT && doseMoved(areas, [row]) ? null : reasonText(closed[placeId], 'A yearly limit is reached at this place.');
 }
 
 const KNOWN_WEED_BLOCK = 'A yearly limit is reached for a weed product on the sheet at this place.';

@@ -190,7 +190,10 @@ async function decideAtPlace({ place, base, lead, members, replacement, all, svc
     logger.warn(`[lawn-weed-mix] limits unavailable at ${place} for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return { ...base, mode: 'unavailable', note: LIMITS_UNREAD, blockedIds: [] };
   }
-  return decideMix({ base, lead, members, replacement, all, capped: here, svc, readTemp });
+  const decision = await decideMix({ base, lead, members, replacement, all, capped: here, svc, readTemp });
+  // `amountBlocked`: a yearly AMOUNT limit shaped this place's answer. It was judged at the program dose, so the sheet drops it
+  // when the tech changes a weed row's dose (/complete judges the entered dose and stays authoritative).
+  return all.some((item) => (here.get(idOf(item)) || []).some((block) => block.type === 'annual_max_rate')) ? { ...decision, amountBlocked: true } : decision;
 }
 
 // One decision from one limit read (see buildWeedMix): the mode, what the tap adds and the line under the entry.

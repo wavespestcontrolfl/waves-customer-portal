@@ -771,6 +771,18 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
       expect(engine.v13VisitLimits.mock.calls.map((call) => call[5]?.place)).toEqual([undefined, 'front', 'back', 'left_side', 'right_side']);
     });
 
+    test('a yearly AMOUNT limit at a place marks that place amountBlocked; a count limit does not', async () => {
+      const at = (type) => engine.v13VisitLimits.mockImplementation(async (_k, _s, _i, _r, _t, options) => ({
+        capped: new Map(!options?.place || options.place === 'front' ? [[P_ARENA, [{ type, matchType: type === 'annual_max_rate' ? 'v13_amount' : 'product', message: 'x' }]]] : []), warnings: [], blocks: [],
+      }));
+      at('annual_max_rate');
+      const amount = await withPlaces();
+      expect(amount.byPlace.front.amountBlocked).toBe(true);
+      expect('amountBlocked' in amount.byPlace.back).toBe(false);
+      at('annual_max_apps');
+      expect('amountBlocked' in (await withPlaces()).byPlace.front).toBe(false);
+    });
+
     test('both rungs capped at every place: nothing anywhere, and why', async () => {
       engine.v13VisitLimits.mockImplementation(async () => ({ capped: new Map([[P_ARENA, CAP], [P_TALAK, CAP]]), warnings: [], blocks: [] }));
       const found = await withPlaces();

@@ -469,6 +469,7 @@ describe('buildLawnFastContext', () => {
           known: [{ id: KNOWN.id, place: 'back', placeLabel: 'Back', type: 'fungus', typeLabel: 'Fungus', lastTreatedOn: '2026-09-12' }],
           knownUnavailable: false,
           blocked: {},
+          blockedTypes: {},
         });
         expect(Object.keys(ctx.plannedProducts.weedMix.byPlace)).toEqual(['front', 'back', 'left_side', 'right_side']);
         expect(ctx.plannedProducts.weedMix.byPlace.front).toMatchObject({ mode: 'lead', productIds: [P_LEAD, P_SURF] });
@@ -878,7 +879,9 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       test('gate off: the guide answer has no placeBlocked key', async () => {
         live();
         cappedAt(P_ART, 'front');
-        expect(await guide(fungusTables())).not.toHaveProperty('placeBlocked');
+        const answer = await guide(fungusTables());
+        expect(answer).not.toHaveProperty('placeBlocked');
+        expect(answer).not.toHaveProperty('placeBlockedTypes');
       });
 
       test('gate on: the answer carries the per-place blocks it just read, for every product it read, so the sheet can drop the opening map', async () => {
@@ -887,6 +890,8 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         cappedAt(P_ART, 'front');
         const result = await guide(fungusTables());
         expect(result.placeBlocked[P_ART]).toEqual({ front: 'limit' });
+        // The limit type rides with each closed place (the sheet drops a yearly-amount block when the row's dose changes, never a count).
+        expect(result.placeBlockedTypes).toEqual({ [P_ART]: { front: 'annual_max_apps' } });
         // Products the read found open everywhere are empty entries, not absent: "no longer closed" is an answer.
         expect(result.placeBlocked[P_ACE]).toEqual({});
         expect(result.placeBlocked[P_DISP]).toEqual({});
@@ -1222,6 +1227,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         const tables = tablesFor({ products_catalog: [{ id: P_SEARCHED, name: 'Searched Product' }] });
         const result = await buildLawnTreatmentGuide({ serviceId: VISIT, assessmentId: CONFIRMED, knex: fakeKnex(tables), productIds: [P_SEARCHED, 'not-a-uuid'] });
         expect(result.placeBlocked[P_SEARCHED]).toEqual({ front: 'limit' });
+        expect(result.placeBlockedTypes[P_SEARCHED]).toEqual({ front: 'annual_max_apps' });
         expect(result.placeBlocked[P_ART]).toEqual({});
       });
 
@@ -1244,6 +1250,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         expect((await buildLawnFastContext(VISIT, { knex })).troubleAreas.blocked).toEqual({});
         const named = await buildLawnFastContext(VISIT, { knex, productIds: [P_SEARCHED] });
         expect(named.troubleAreas.blocked).toEqual({ [P_SEARCHED]: { back: 'limit' } });
+        expect(named.troubleAreas.blockedTypes).toEqual({ [P_SEARCHED]: { back: 'annual_max_apps' } });
       });
     });
 
