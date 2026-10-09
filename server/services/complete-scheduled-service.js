@@ -4743,6 +4743,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           expectedVisit,
           lawnFast,
           products,
+          technicianNotes,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(

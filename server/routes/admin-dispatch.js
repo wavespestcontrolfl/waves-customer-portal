@@ -4753,6 +4753,38 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
   }
 });
 
+// POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/sod-rooted
+// body: { sodLaidOn: 'YYYY-MM-DD' } (the sod date the sheet rendered)
+// The technician's "Sod mowed twice and does not lift" tick on a home with new sod (GATE_LAWN_NEW_SOD_NOTE, 404
+// {enabled:false} while off, nothing read or written). Saves property_preferences.sod_rooted_on = the visit's ET day, from
+// day 31 of the record whose sod date the sheet rendered (a changed record is 409 sod_record_changed). Idempotent; never
+// moves or clears a saved day. The customer's property-preferences advisory lock is taken first, then the visit row lock
+// (lockOwnedLiveVisit, as the clear route above), then the customer and preferences rows: writeAdminPreferences' lock order.
+// Technician and office only; no customer text, no report change. See services/lawn-sod-sheet.js.
+router.post('/:lawnFastServiceId/lawn-fast/sod-rooted', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').lawnNewSodNoteLive()) return res.status(404).json({ enabled: false });
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const owner = await db('scheduled_services').where({ id: serviceId }).first('customer_id');
+    if (!owner?.customer_id) return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    const outcome = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(owner.customer_id)]);
+      await lockOwnedLiveVisit(trx, req, serviceId, ['id']);
+      const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false });
+      if (!eligibility.ok) return { status: recapStatusForReason(eligibility.reason), body: { error: eligibility.reason, code: eligibility.reason } };
+      if (eligibility.reason) return { status: 409, body: { error: 'This visit cannot be completed on the quick sheet.', code: 'lawn_fast_not_eligible', reason: eligibility.reason } };
+      // The customer changed since the lock was taken: the lock covers another customer, so write nothing.
+      if (String(eligibility.svc.customer_id) !== String(owner.customer_id)) return { status: 409, body: { error: 'This visit changed. Close the sheet and open it again.', code: 'visit_identity_changed' } };
+      return require('../services/lawn-sod-sheet').confirmSodRooted(trx, { svc: eligibility.svc, expectedLaidOn: req.body?.sodLaidOn });
+    });
+    return res.status(outcome.status).json(outcome.status === 200 ? { enabled: true, ...outcome.body } : outcome.body);
+  } catch (err) {
+    if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
 // POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip
 // multipart: audio (the recording), sheet: 'pest_reservice', duration_seconds
 // Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL). Owner

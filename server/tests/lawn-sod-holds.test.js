@@ -3,6 +3,8 @@ const path = require('path');
 const {
   NEW_SOD_COLUMNS,
   SOD_SWAP_BAG,
+  SOD_SWAP_BAG_APRIL,
+  swapBagFor,
   FERTILIZER_HOLD_DAYS,
   TETRINO_HOLD_DAYS,
   clearedNewSodColumns,
@@ -85,21 +87,30 @@ describe('sodHolds: no result', () => {
   });
 });
 
-describe('sodHolds: fertilizer and Dylox (30 days, whole lawn only)', () => {
+describe('sodHolds: fertilizer (30 days, whole lawn only) and Dylox (30 days on the sod area)', () => {
   test('held through day 30, free on day 31', () => {
     const d30 = holds('2026-10-30');
     expect(d30.day).toBe(30);
     expect(d30.fertilizer).toEqual({ held: true, until: '2026-10-31', scope: 'whole' });
     expect(d30.dylox).toEqual({ held: true, until: '2026-10-31', scope: 'whole' });
+    expect(d30.fertilizerKeepOff.on).toBe(false);
     const d31 = holds('2026-10-31');
     expect(d31.day).toBe(31);
     expect(d31.fertilizer).toEqual({ held: false, until: null, scope: 'whole' });
-    expect(d31.dylox).toEqual({ held: false, until: null, scope: 'whole' });
+    expect(d31.dylox).toEqual({ held: false, until: '2026-10-31', scope: 'whole' });
   });
-  test('never held when only part of the lawn is sod', () => {
+  test('fertilizer is never held when only part of the lawn is sod, but keep-off runs through day 30', () => {
+    const part = (visitDate) => holds(visitDate, { sodCovers: 'part', sodArea: 'back lawn' });
+    expect(part('2026-10-05').fertilizer).toEqual({ held: false, until: null, scope: 'whole' });
+    expect(part('2026-10-05').fertilizerKeepOff).toEqual({ on: true, until: '2026-10-31' });
+    expect(part('2026-10-30').fertilizerKeepOff.on).toBe(true);
+    expect(part('2026-10-31').fertilizerKeepOff).toEqual({ on: false, until: '2026-10-31' });
+  });
+  test('Dylox is held on the sod area for 30 days whether the sod is whole or part (same scope rule as Tetrino)', () => {
     const part = holds('2026-10-05', { sodCovers: 'part', sodArea: 'back lawn' });
-    expect(part.fertilizer).toEqual({ held: false, until: null, scope: 'whole' });
-    expect(part.dylox).toEqual({ held: false, until: null, scope: 'whole' });
+    expect(part.dylox).toEqual({ held: true, until: '2026-10-31', scope: 'area' });
+    expect(part.dylox.scope).toBe(part.tetrino.scope);
+    expect(holds('2026-10-31', { sodCovers: 'part', sodArea: 'back lawn' }).dylox.held).toBe(false);
   });
   test('leap day and year end count real calendar days', () => {
     const leap = (visitDate) => sodHolds({ sodLaidOn: '2024-02-29', visitDate });
@@ -188,6 +199,15 @@ describe('sodHolds: large patch watch', () => {
   test('a grass label is read loosely', () => {
     expect(watch('2026-10-01', 'St. Augustine').on).toBe(true);
     expect(watch('2026-10-01', ' ZOYSIA ').on).toBe(true);
+  });
+});
+
+describe('swapBagFor: the swap rate follows the month of the replaced pass', () => {
+  test('October (and any month but April) is 2.5 lb per 1,000; April is 2.1 lb per 1,000 (0.50 lb N)', () => {
+    expect(swapBagFor('2026-10-10')).toBe(SOD_SWAP_BAG);
+    expect(swapBagFor('2027-04-12')).toBe(SOD_SWAP_BAG_APRIL);
+    expect(SOD_SWAP_BAG_APRIL).toEqual({ name: SOD_SWAP_BAG.name, lbPer1000: 2.1, lbN: 0.5 });
+    expect(swapBagFor('nonsense')).toBe(SOD_SWAP_BAG);
   });
 });
 

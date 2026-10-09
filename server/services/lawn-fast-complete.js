@@ -887,6 +887,10 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
   const { unavailable: plannedProductsUnavailable, troubleSeed, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
   const reCheck = await loadReCheckNote(svc, knex);
+  // GATE_LAWN_NEW_SOD_NOTE: the visit's new-sod holds (lawn-sod-sheet.js). Absent while the gate is off.
+  const sod = featureGates.lawnNewSodNoteLive()
+    ? await require('./lawn-sod-sheet').loadSodForContext({ svc, knex, readFailures, plannedProducts, ruleFor: (row) => productRuleEntry(String(row.id), row) })
+    : null;
 
   return {
     ok: true,
@@ -901,7 +905,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     // The height-of-cut capture is a lawn-visit feature the typed lawn form
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture,
-    plannedProducts,
+    plannedProducts: sod ? sod.plannedProducts : plannedProducts,
+    // GATE_LAWN_NEW_SOD_NOTE: the banner, the held lines and the rooted tick, only for a home with a sod record that holds something today.
+    ...(sod?.newSod ? { newSod: sod.newSod } : {}),
     // GATE_LAWN_SPOT_RULES: the sheet asks for a spot row's area (and holds Complete without
     // one). The key exists only while the gate is live, so gate off is byte-identical.
     ...(featureGates.lawnSpotRulesLive() ? { spotRules: true } : {}),
@@ -1120,7 +1126,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes = null } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
   if (!featureGates.lawnFastCompleteLive()) {
@@ -1220,9 +1226,40 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
+  const noProductRefusal = await noProductNoteRefusal({ knex, svc, products, technicianNotes });
+  if (noProductRefusal) return noProductRefusal;
   // GATE_LAWN_TROUBLE_AREAS: every spot row names a place, and the place the yearly limits forbid is refused
   // (lawn-trouble-areas.js preflightPlaces; null while the gate is off).
   return require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products });
+}
+
+// GATE_LAWN_NEW_SOD_NOTE: a completion with NO product is an honest record only when the new-sod holds
+// really took every planned line off the visit. The server never takes the sheet's word for it: it builds
+// the sheet's own context again and reads the same `noProductAllowed` flag (lawn-sod-sheet.js). In that
+// state the note must say why, or the visit would read as a treated visit with nothing on it (400
+// lawn_sod_no_product_note_required, correctable: the sheet always sends it). In every other state an
+// empty list is judged exactly as it was before this gate (nothing here), and so is a failed read.
+async function noProductNoteRefusal({ knex, svc, products, technicianNotes }) {
+  if (!featureGates.lawnNewSodNoteLive()) return null;
+  if (Array.isArray(products) && products.length) return null;
+  let sod = null;
+  try {
+    const ctx = await buildLawnFastContext(svc.id, { knex });
+    sod = ctx.ok && ctx.eligible ? ctx.newSod : null;
+  } catch (err) {
+    logger.warn(`[lawn-fast] no-product check unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
+  if (!sod?.noProductAllowed) return null;
+  const { NO_PRODUCT_NOTE_PREFIX } = require('./lawn-sod-sheet');
+  if (String(technicianNotes || '').includes(NO_PRODUCT_NOTE_PREFIX)) return null;
+  return {
+    status: 400,
+    payload: {
+      error: 'Say why no product was applied: the new sod holds every planned product. Reopen the sheet and complete it again.',
+      code: 'lawn_sod_no_product_note_required',
+    },
+  };
 }
 
 // The visit type re-judged INSIDE the completion transaction, beside the main flow's
