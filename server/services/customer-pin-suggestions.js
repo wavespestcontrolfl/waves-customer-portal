@@ -70,24 +70,39 @@ function visibleSuggestion(detail, row) {
   return publicShape(row);
 }
 
+/**
+ * The per-customer lock that serializes everything that creates, rings or closes this customer's suggestion:
+ * the daily run's insert, the bell post, and apply / dismiss / supersede. Transaction-scoped, so it is released
+ * at commit and is re-entrant for a caller that already holds it. `trx` must be a transaction.
+ */
+async function lockCustomer(trx, customerId) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['pin-parked-check', String(customerId)]);
+}
+
+// Errors propagate: inside the close transaction a failed bell close must roll the close back (the suggestion stays
+// open and is retried), never leave a closed suggestion beside a live bell.
 async function closeBell(id, reason, resolution, conn = db) {
-  try {
-    await closeAdminAlertKeys(conn, [alertKey(id)], reason, { resolution });
-  } catch (err) {
-    logger.warn('[pin-suggestions] could not close the notification', { suggestionId: id, error: err.code || err.name });
-  }
+  await closeAdminAlertKeys(conn, [alertKey(id)], reason, { resolution });
 }
 
 /**
- * Moves an OPEN suggestion to a final status. The status test is in the UPDATE, so two callers can never both
- * close it. Returns the closed row, or null when it was not open any more.
+ * Moves an OPEN suggestion to a final status. Takes the customer's lock first, so it cannot interleave with the
+ * bell being posted: either the bell is posted first and is closed here, or the close comes first and the bell
+ * post finds the suggestion no longer open and posts nothing. The status test is in the UPDATE, so two callers can
+ * never both close it. The bell is closed in the same transaction. Returns the closed row, or null when it was
+ * not open any more.
  */
 async function closeSuggestion(id, status, { actorId = null, reason, resolution, conn = db } = {}) {
-  const [row] = await conn('customer_pin_suggestions').where({ id, status: 'open' })
-    .update({ status, resolved_at: conn.fn.now(), resolved_by: actorId, updated_at: conn.fn.now() })
-    .returning(COLUMNS);
-  if (row) await closeBell(row.id, reason || status, resolution, conn);
-  return row || null;
+  return conn.transaction(async (trx) => {
+    const current = await trx('customer_pin_suggestions').where({ id }).first('customer_id');
+    if (!current) return null;
+    await lockCustomer(trx, current.customer_id);
+    const [row] = await trx('customer_pin_suggestions').where({ id, status: 'open' })
+      .update({ status, resolved_at: trx.fn.now(), resolved_by: actorId, updated_at: trx.fn.now() })
+      .returning(COLUMNS);
+    if (row) await closeBell(row.id, reason || status, resolution, trx);
+    return row || null;
+  });
 }
 
 /** Closes the customer's open suggestion (if any) as superseded. */
@@ -132,6 +147,6 @@ async function closeAfterVerify(customerId, { suggestionId = null, actorId = nul
 }
 
 module.exports = {
-  alertKey, evidenceText, publicShape, openForCustomer, visibleSuggestion, closeSuggestion, supersedeOpen, dismiss,
+  alertKey, lockCustomer, evidenceText, publicShape, openForCustomer, visibleSuggestion, closeSuggestion, supersedeOpen, dismiss,
   closeAfterVerify, closeBell, same7, dayText, SOURCE, COLUMNS,
 };

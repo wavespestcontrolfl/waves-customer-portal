@@ -43,20 +43,24 @@ describe('visibleSuggestion (a GET never writes)', () => {
 });
 
 describe('closing', () => {
-  // A stand-in for knex that supports the calls the store makes.
+  // A stand-in for knex that supports the calls the store makes. Records the order of lock, update and bell close.
   function conn({ open = row, updates = [] } = {}) {
+    const order = [];
     const c = (table) => {
       const state = { where: null, set: null };
       const b = {
         where(w) { state.where = w; return b; },
         first: async () => (open && (!state.where.status || state.where.status === 'open') && (!state.where.id || state.where.id === open.id) ? open : undefined),
-        update(set) { state.set = set; updates.push({ table, where: state.where, set }); return b; },
+        update(set) { state.set = set; updates.push({ table, where: state.where, set }); order.push('update'); return b; },
         returning: async () => (open && state.where.id === open.id && state.where.status === 'open' ? [{ ...open, status: state.set.status }] : []),
       };
       return b;
     };
     c.fn = { now: () => 'NOW' };
+    c.raw = async (sql, bindings) => { order.push(`lock:${bindings[1]}`); return {}; };
+    c.transaction = async (fn) => fn(c);
     c.updates = updates;
+    c.order = order;
     return c;
   }
   beforeEach(() => closeAdminAlertKeys.mockClear());
@@ -67,6 +71,8 @@ describe('closing', () => {
     expect(closed.status).toBe('dismissed');
     expect(c.updates[0].set).toMatchObject({ status: 'dismissed', resolved_by: 'actor-1' });
     expect(closeAdminAlertKeys).toHaveBeenCalledWith(c, [`pin-suggestion:${row.id}`], 'dismissed', expect.any(Object));
+    // The customer's lock comes before the close, so it cannot interleave with the bell being posted.
+    expect(c.order).toEqual(['lock:c1', 'update']);
     expect(await store.dismiss('c1', 'another-id', 'actor-1', conn())).toBeNull();
     expect(await store.dismiss('c1', row.id, 'actor-1', conn({ open: null }))).toBeNull();
   });
@@ -77,10 +83,16 @@ describe('closing', () => {
     expect((await store.closeAfterVerify('c1', { suggestionId: 'someone-elses', conn: conn() })).status).toBe('superseded');
   });
 
+  test('a bell that cannot be closed rolls the close back instead of leaving a live bell', async () => {
+    closeAdminAlertKeys.mockRejectedValueOnce(new Error('notifications down'));
+    await expect(store.closeSuggestion(row.id, 'dismissed', { conn: conn() })).rejects.toThrow('notifications down');
+  });
+
   test('nothing open means nothing to close, and a failure never throws into the verify_pin response', async () => {
     expect(await store.closeAfterVerify('c1', { conn: conn({ open: null }) })).toBeNull();
     const broken = () => { throw new Error('boom'); };
     broken.fn = { now: () => 'NOW' };
+    broken.transaction = async (fn) => fn(broken);
     expect(await store.closeAfterVerify('c1', { conn: broken })).toBeNull();
   });
 });

@@ -35,7 +35,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { pinParkedCheckLive } = require('../config/feature-gates');
 const { distanceMeters, loadArrivalConfig } = require('./gps-arrival-detector');
-const { loadTruckStops } = require('./bouncie-truck-stops');
+const truckStops = require('./bouncie-truck-stops');
 const { effectiveReview, reviewEnabled } = require('./customer-geocode-review');
 const { stampedAddressDiverges } = require('./stamped-address');
 const { isInServiceAreaBox } = require('./service-area');
@@ -203,7 +203,7 @@ const BLOCKED_REVIEW = ['verified', 'outside_area'];
 async function recordSuggestion(conn, visit, verdict) {
   try {
     return await conn.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['pin-parked-check', String(visit.customer_id)]);
+      await store.lockCustomer(trx, visit.customer_id);
       // Share lock: a verify_pin on this customer waits for this transaction, so its own "close the
       // suggestion" step always runs after the insert below, never before it.
       const customer = await trx('customers').where({ id: visit.customer_id }).whereNull('deleted_at').forShare().first();
@@ -282,22 +282,34 @@ function alertDetail(row, customer) {
   ].filter(Boolean).join('\n').slice(0, 2000);
 }
 
-/** Rings the bell for one open suggestion and stamps notified_at. The bell is keyed on the suggestion id. */
-async function notifyOne(conn, row) {
-  const customer = await conn('customers').where({ id: row.customer_id }).whereNull('deleted_at')
-    .first('first_name', 'last_name', 'address_line1', 'city');
-  if (!customer) return false;
-  const posted = await raiseAdminAlert('customer', alertSpec(row, customer), {
-    bell: true,
-    dedupeKey: store.alertKey(row.id),
-    detail: alertDetail(row, customer),
-    metadata: { customerId: row.customer_id, suggestionId: row.id },
+/**
+ * Rings the bell for one open suggestion and stamps notified_at, all inside the per-customer lock that every close
+ * path (apply, dismiss, supersede) also takes. The suggestion is read again under the lock: if it is no longer
+ * open, nothing is posted. If a close wins the lock later, it finds the bell this transaction committed and closes
+ * it. So a settled pin can never be left beside a live bell, whatever the order. The bell is keyed on the
+ * suggestion id, so a retry never rings twice.
+ */
+async function notifyOne(conn, listed) {
+  return conn.transaction(async (trx) => {
+    await store.lockCustomer(trx, listed.customer_id);
+    const row = await trx('customer_pin_suggestions').where({ id: listed.id, status: 'open' }).whereNull('notified_at')
+      .forUpdate().first(store.COLUMNS);
+    if (!row) return false;
+    const customer = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at')
+      .first('first_name', 'last_name', 'address_line1', 'city');
+    if (!customer) return false;
+    const posted = await raiseAdminAlert('customer', alertSpec(row, customer), {
+      bell: true,
+      dedupeKey: store.alertKey(row.id),
+      detail: alertDetail(row, customer),
+      metadata: { customerId: row.customer_id, suggestionId: row.id },
+      trx,
+    });
+    // A suppressed row (a preference or an internal test customer) has nothing left to post, so it counts as done.
+    if (!posted || !(posted.id || posted.deduped || posted.suppressed)) return false;
+    await trx('customer_pin_suggestions').where({ id: row.id }).update({ notified_at: trx.fn.now() });
+    return true;
   });
-  // A suppressed row (a preference or an internal test customer) has nothing left to post, so it counts as done.
-  if (!posted || !(posted.id || posted.deduped || posted.suppressed)) return false;
-  await conn('customer_pin_suggestions').where({ id: row.id, status: 'open' }).whereNull('notified_at')
-    .update({ notified_at: conn.fn.now() });
-  return true;
 }
 
 async function postPendingNotifications(conn) {
@@ -348,7 +360,7 @@ function settledReason(row, customer, review) {
 
 async function stopsFor(conn, imei, { fromMs, toMs, radius, now }) {
   try {
-    return await loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters: radius, now: now.getTime() });
+    return await truckStops.loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters: radius, now: now.getTime() });
   } catch (err) {
     logger.warn(`${LOG} could not read truck stops`, { error: err.code || err.name });
     return null;
@@ -361,22 +373,55 @@ const neighbourPins = (visit, visits) => visits
   .map((other) => destinationOf(other) || usablePin(other.customer_latitude, other.customer_longitude))
   .filter(Boolean);
 
-/** Applies one verdict: a flag becomes a suggestion; a stop at the pin closes an older open one. */
-async function applyVerdict(conn, visit, verdict, openByCustomer, tally) {
-  tally[verdict.flag ? 'flagged' : verdict.reason] = (tally[verdict.flag ? 'flagged' : verdict.reason] || 0) + 1;
-  const open = openByCustomer.get(String(visit.customer_id));
-  if (verdict.flag) {
-    const result = await recordSuggestion(conn, visit, verdict);
-    if (result.created) tally.created += 1;
-    return;
+const tallyKey = (tally, key) => { tally[key] = (tally[key] || 0) + 1; };
+
+/** Each vehicle's stops and home base, read once. A vehicle whose stops cannot be read maps to null. */
+async function loadVehicles(conn, visits, window) {
+  const vehicles = new Map();
+  for (const imei of new Set(visits.map((visit) => visit.bouncie_imei))) {
+    const stops = await stopsFor(conn, imei, window);
+    vehicles.set(imei, stops ? { stops, home: await loadHomeBase(conn, imei, window.now).catch(() => null) } : null);
   }
-  if (verdict.reason === 'stop_at_pin' && open && etDateString(new Date(visit.completed_at)) >= store.dayText(open.visit_date)) {
-    if (await store.closeSuggestion(open.id, 'superseded', {
-      reason: 'stop_at_pin', resolution: 'Closed: the truck stopped at the pin on a later visit', conn,
-    })) {
-      openByCustomer.delete(String(visit.customer_id));
-      tally.closed += 1;
-    }
+  return vehicles;
+}
+
+/** One verdict per visit, judged against its own technician's truck. An unreadable vehicle is `unknown`, not "no stop". */
+function judgeVisits(visits, vehicles, { radius, fences }) {
+  return visits.map((visit) => {
+    const vehicle = vehicles.get(visit.bouncie_imei);
+    if (!vehicle) return { visit, verdict: { flag: false, reason: 'stops_unreadable', unknown: true } };
+    const mine = visitDays(visit);
+    const stops = vehicle.stops.filter((stop) => mine.includes(etDateString(new Date(stop.startMs))));
+    const context = { home: vehicle.home, fences, neighbours: neighbourPins(visit, visits) };
+    return { visit, verdict: judgeVisit({ visit, stops, radius, context }) };
+  });
+}
+
+/**
+ * ONE decision for a customer, from every visit of theirs in the window (every technician, every truck):
+ *   ok    some visit had a stop inside the arrival radius, so the pin works: close any open suggestion, create none
+ *   skip  no such stop, but a truck's data could not be read, so the pin cannot be judged today
+ *   flag  none had a stop at the pin and at least one qualifies: suggest from the NEWEST qualifying visit
+ *   none  nothing to say
+ */
+function decideCustomer(judged) {
+  if (judged.some((j) => j.verdict.reason === 'stop_at_pin')) return { action: 'ok' };
+  if (judged.some((j) => j.verdict.unknown)) return { action: 'skip' };
+  const flagged = judged.filter((j) => j.verdict.flag)
+    .sort((a, b) => new Date(b.visit.completed_at) - new Date(a.visit.completed_at));
+  return flagged.length ? { action: 'flag', visit: flagged[0].visit, verdict: flagged[0].verdict } : { action: 'none' };
+}
+
+async function applyDecision(conn, customerId, decision, openByCustomer, tally) {
+  const open = openByCustomer.get(String(customerId));
+  if (decision.action === 'ok' && open) {
+    const closed = await store.closeSuggestion(open.id, 'superseded', {
+      reason: 'stop_at_pin', resolution: 'Closed: the truck stopped at the pin', conn,
+    });
+    if (closed) tally.closed += 1;
+  } else if (decision.action === 'flag') {
+    const result = await recordSuggestion(conn, decision.visit, decision.verdict);
+    if (result.created) tally.created += 1;
   }
 }
 
@@ -388,36 +433,24 @@ async function runPinParkedCheck({ now = new Date(), conn = db } = {}) {
   if (!pinParkedCheckLive()) return { skipped: 'gated' };
   // The suggestion is applied through verify_pin, which needs address review on. Without it a bell would have no action.
   if (!reviewEnabled()) return { skipped: 'review_disabled' };
-  const config = await loadArrivalConfig();
-  const radius = config.radiusMeters;
+  const radius = (await loadArrivalConfig()).radiusMeters;
   const days = [etDateString(addETDays(now, -1)), etDateString(now)];
-  const fromMs = etDayBounds(days[0]).startMs;
-  const toMs = etDayBounds(days[1]).endMs;
+  const window = { fromMs: etDayBounds(days[0]).startMs, toMs: etDayBounds(days[1]).endMs, radius, now };
   const tally = { created: 0, closed: 0 };
   tally.closed += await closeSettledSuggestions(conn);
-  const visits = oneRowPerVisit(await loadCompletedVisits(conn, { fromMs, toMs }));
+  const visits = oneRowPerVisit(await loadCompletedVisits(conn, window));
   const openByCustomer = new Map((await conn('customer_pin_suggestions').where({ status: 'open' }).select(store.COLUMNS))
     .map((row) => [String(row.customer_id), row]));
-  const fences = await loadFences(conn);
-  const flaggedCustomers = new Set();
-  for (const imei of new Set(visits.map((visit) => visit.bouncie_imei))) {
-    const stops = await stopsFor(conn, imei, { fromMs, toMs, radius, now });
-    if (!stops) { tally.stops_unreadable = (tally.stops_unreadable || 0) + 1; continue; }
-    const home = await loadHomeBase(conn, imei, now).catch(() => null);
-    for (const visit of visits.filter((v) => v.bouncie_imei === imei)) {
-      if (flaggedCustomers.has(String(visit.customer_id))) continue;
-      const mine = visitDays(visit);
-      const dayStops = stops.filter((stop) => mine.includes(etDateString(new Date(stop.startMs))));
-      const verdict = judgeVisit({
-        visit, stops: dayStops, radius,
-        context: { home, fences, neighbours: neighbourPins(visit, visits) },
-      });
-      try {
-        await applyVerdict(conn, visit, verdict, openByCustomer, tally);
-        if (verdict.flag) flaggedCustomers.add(String(visit.customer_id));
-      } catch (err) {
-        logger.warn(`${LOG} visit skipped`, { visitId: visit.id, error: err.code || err.name });
-      }
+  const vehicles = await loadVehicles(conn, visits, window);
+  const judged = judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn) });
+  for (const { verdict } of judged) tallyKey(tally, verdict.flag ? 'flagged' : verdict.reason);
+  const byCustomer = new Map();
+  for (const j of judged) byCustomer.set(String(j.visit.customer_id), [...(byCustomer.get(String(j.visit.customer_id)) || []), j]);
+  for (const [customerId, group] of byCustomer) {
+    try {
+      await applyDecision(conn, customerId, decideCustomer(group), openByCustomer, tally);
+    } catch (err) {
+      logger.warn(`${LOG} customer skipped`, { customerId, error: err.code || err.name });
     }
   }
   const notified = await postPendingNotifications(conn);
@@ -429,7 +462,7 @@ module.exports = {
   runPinParkedCheck,
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
-    alertDetail, settledReason, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    alertDetail, settledReason, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

@@ -19,7 +19,7 @@ jest.mock('../services/admin-alert-compose', () => ({
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const migration = require('../models/migrations/20261009150000_customer_pin_suggestions');
-const { runPinParkedCheck } = require('../services/pin-parked-check');
+const { runPinParkedCheck, _private: pin } = require('../services/pin-parked-check');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { loadTruckStops } = require('../services/bouncie-truck-stops');
 const gps = require('../services/gps-arrival-detector');
@@ -33,6 +33,7 @@ let mockPg;
 const NOW = new Date('2026-10-09T12:00:00Z'); // 08:00 ET on Oct 9
 const PIN = { lat: 27.35, lng: -82.45 };
 const north = (metres) => ({ lat: PIN.lat + metres / 111195, lng: PIN.lng });
+const east = (metres) => ({ lat: PIN.lat, lng: PIN.lng + metres / (111195 * Math.cos((PIN.lat * Math.PI) / 180)) });
 const IMEI = 'TESTIMEI0001';
 
 describeDb('pin check after a visit (PostgreSQL)', () => {
@@ -94,13 +95,14 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       }),
     });
   }
-  // The truck drives in, stands `minutes` at `spot`, then drives off.
+  // The truck drives in, stands `minutes` at `spot`, then drives off. `at` is when it arrives (default Oct 8, 10:20 ET).
   async function truckStopsAt(spot, minutes = 30, opts = {}) {
     const away = north(4000);
-    const arrive = Date.parse('2026-10-08T14:20:00Z');
+    const arrive = Date.parse(opts.at || '2026-10-08T14:20:00Z');
     const leave = arrive + minutes * 60000;
-    await tripData(`trip-in-${randomUUID()}`, [['2026-10-08T14:00:00Z', away], [new Date(arrive).toISOString(), spot]], opts);
-    await tripData(`trip-out-${randomUUID()}`, [[new Date(leave).toISOString(), spot], [new Date(leave + 600000).toISOString(), away]], opts);
+    const received = { ...opts, receivedAt: opts.receivedAt || new Date(leave + 15 * 60000).toISOString() };
+    await tripData(`trip-in-${randomUUID()}`, [[new Date(arrive - 1200000).toISOString(), away], [new Date(arrive).toISOString(), spot]], received);
+    await tripData(`trip-out-${randomUUID()}`, [[new Date(leave).toISOString(), spot], [new Date(leave + 600000).toISOString(), away]], received);
   }
   const open = (customerId) => mockPg('customer_pin_suggestions').where({ customer_id: customerId, status: 'open' });
   const all = (customerId) => mockPg('customer_pin_suggestions').where({ customer_id: customerId }).orderBy('created_at');
@@ -351,6 +353,164 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     await mockPg('customers').where({ id: customerId }).update({ deleted_at: new Date() });
     await run();
     expect((await all(customerId))[0].status).toBe('superseded');
+  });
+
+  describe('one decision per customer, from every visit in the window', () => {
+    const OLD_VISIT = {}; // Oct 8, 11:30 ET, truck parked 540 m away at 10:20 ET
+    const NEW_VISIT = { scheduled_date: '2026-10-09', completed_at: new Date('2026-10-09T11:00:00Z') }; // Oct 9, 7:00 ET
+    const NEW_STOP = { at: '2026-10-09T10:00:00Z' };
+
+    test('a newer visit with a stop at the pin closes the suggestion the older visit made and nothing comes back', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, OLD_VISIT);
+      await truckStopsAt(north(540), 30);
+      expect(await run()).toMatchObject({ created: 1 });
+      const [first] = await open(customerId);
+
+      await completedVisit(customerId, techId, NEW_VISIT);
+      await truckStopsAt(north(40), 30, NEW_STOP);
+      const second = await run();
+      expect(second).toMatchObject({ created: 0, stop_at_pin: 1, flagged: 1 });
+      expect(second.closed).toBeGreaterThanOrEqual(1);
+      expect((await mockPg('customer_pin_suggestions').where({ id: first.id }).first()).status).toBe('superseded');
+      expect(await open(customerId)).toHaveLength(0);
+
+      expect((await run()).created).toBe(0); // and the next run does not bring it back
+      expect(await all(customerId)).toHaveLength(1);
+    });
+
+    test('a stop at the pin on the older visit also settles the newer visit that parked away', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, OLD_VISIT);
+      await truckStopsAt(north(40), 30);
+      await completedVisit(customerId, techId, NEW_VISIT);
+      await truckStopsAt(north(540), 30, NEW_STOP);
+      expect((await run()).created).toBe(0);
+      expect(await all(customerId)).toHaveLength(0);
+    });
+
+    test("two technicians' trucks: a stop at the pin by either settles the customer", async () => {
+      const techA = await technician();
+      const techB = await technician('TESTIMEI0002');
+      const customerId = await customer();
+      await completedVisit(customerId, techA, OLD_VISIT);
+      await truckStopsAt(north(540), 30);
+      await completedVisit(customerId, techB, NEW_VISIT);
+      await truckStopsAt(north(40), 30, { ...NEW_STOP, imei: 'TESTIMEI0002' });
+      const result = await run();
+      expect(result).toMatchObject({ visits: 2, created: 0, stop_at_pin: 1 });
+      expect(await all(customerId)).toHaveLength(0);
+    });
+
+    test("with no stop at the pin anywhere, the NEWEST qualifying visit's stop is the suggestion", async () => {
+      const techA = await technician();
+      const techB = await technician('TESTIMEI0002');
+      const customerId = await customer();
+      await completedVisit(customerId, techA, OLD_VISIT);
+      await truckStopsAt(north(540), 30);
+      const newerId = await completedVisit(customerId, techB, NEW_VISIT);
+      await truckStopsAt(east(700), 30, { ...NEW_STOP, imei: 'TESTIMEI0002' });
+      expect(await run()).toMatchObject({ created: 1, flagged: 2 });
+      const rows = await all(customerId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ scheduled_service_id: newerId, technician_id: techB, distance_m: 700 });
+    });
+
+    test('a truck whose data cannot be read today makes no new suggestion for its customer', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, OLD_VISIT);
+      await truckStopsAt(north(540), 30);
+      // The trip-data read fails for this run only.
+      const spy = jest.spyOn(require('../services/bouncie-truck-stops'), 'loadTruckStops').mockRejectedValueOnce(new Error('log unreadable'));
+      try {
+        const result = await run();
+        expect(result.created).toBe(0);
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await all(customerId)).toHaveLength(0);
+    });
+  });
+
+  describe('the bell and the close are serialized per customer', () => {
+    const lockCount = async () => Number((await mockPg.raw(
+      "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()",
+    )).rows[0].n);
+    async function pendingSuggestion() {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId);
+      raiseAdminAlert.mockRejectedValueOnce(new Error('bell down')); // the run leaves it pending
+      await truckStopsAt(north(540), 30);
+      await run();
+      const [row] = await open(customerId);
+      expect(row.notified_at).toBeNull();
+      return { customerId, row };
+    }
+    // A fake that really inserts the notification, on the transaction it is given.
+    const realBell = () => raiseAdminAlert.mockImplementation(async (_category, _spec, opts) => {
+      const [made] = await opts.trx('notifications').insert({
+        recipient_type: 'admin', category: 'customer', title: 'Customers — check the map pin for Fixture', body: 'Truck parked 540 m from the pin.',
+        metadata: JSON.stringify({ dedupeKey: opts.dedupeKey }),
+      }).returning('id');
+      return { id: made.id, deduped: false };
+    });
+
+    test('a suggestion dismissed after the pending list was read posts no bell', async () => {
+      const { customerId, row } = await pendingSuggestion();
+      raiseAdminAlert.mockClear();
+      realBell();
+      await store.dismiss(customerId, row.id, null); // between the read of the pending list and the post
+      expect(await pin.notifyOne(mockPg, row)).toBe(false); // the list still holds the stale row
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      expect(await mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`pin-suggestion:${row.id}`])).toHaveLength(0);
+    });
+
+    test('a suggestion verified (superseded) after the list was read posts no bell either', async () => {
+      const { customerId, row } = await pendingSuggestion();
+      raiseAdminAlert.mockClear();
+      realBell();
+      await store.closeAfterVerify(customerId, { suggestionId: null });
+      expect(await pin.notifyOne(mockPg, row)).toBe(false);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('the bell is posted first, then the close: the close finds it and closes it', async () => {
+      const { customerId, row } = await pendingSuggestion();
+      raiseAdminAlert.mockClear();
+      realBell();
+      expect(await pin.notifyOne(mockPg, row)).toBe(true);
+      const bellKey = `pin-suggestion:${row.id}`;
+      const bell = () => mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [bellKey]).first();
+      expect((await bell()).done_at).toBeNull();
+      await store.dismiss(customerId, row.id, null);
+      expect((await bell()).done_at).not.toBeNull();
+    });
+
+    test('the bell is posted on the caller transaction and both paths take the customer lock', async () => {
+      realBell();
+      const pending = async () => {
+        const customerId = await customer();
+        const [made] = await mockPg('customer_pin_suggestions').insert({
+          customer_id: customerId, visit_date: '2026-10-08', pin_lat: 1, pin_lng: 1, parked_lat: 1, parked_lng: 1, distance_m: 1, stop_minutes: 1,
+        }).returning('*');
+        return { customerId, made };
+      };
+      const first = await pending();
+      const before = await lockCount();
+      expect(await pin.notifyOne(mockPg, first.made)).toBe(true);
+      expect(raiseAdminAlert.mock.calls[0][2].trx).toBeDefined();
+      const afterBell = await lockCount();
+      expect(afterBell).toBe(before + 1);
+      const second = await pending();
+      expect(await lockCount()).toBe(afterBell);
+      await store.dismiss(second.customerId, second.made.id, null);
+      expect(await lockCount()).toBe(afterBell + 1);
+    });
   });
 
   describe('closing from the review screen (real SQL, real notification close)', () => {

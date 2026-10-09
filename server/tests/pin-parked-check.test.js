@@ -176,6 +176,31 @@ describe('the bell', () => {
   });
 });
 
+describe('one decision per customer', () => {
+  const judged = (verdict, completedAt = '2026-10-08T15:30:00Z') => ({ visit: visit({ completed_at: new Date(completedAt) }), verdict });
+  const flagged = (metres, completedAt) => judged({ flag: true, distanceM: metres }, completedAt);
+  const atPin = (completedAt) => judged({ flag: false, reason: 'stop_at_pin' }, completedAt);
+
+  test('a stop at the pin on ANY visit means the pin works, whichever visit is newer or whose truck it was', () => {
+    expect(p.decideCustomer([flagged(540, '2026-10-07T15:00:00Z'), atPin('2026-10-08T15:00:00Z')]).action).toBe('ok');
+    expect(p.decideCustomer([atPin('2026-10-07T15:00:00Z'), flagged(540, '2026-10-08T15:00:00Z')]).action).toBe('ok');
+  });
+  test('an unreadable truck means the pin cannot be judged, unless another visit already shows the pin works', () => {
+    const unknown = judged({ flag: false, reason: 'stops_unreadable', unknown: true });
+    expect(p.decideCustomer([unknown, flagged(540)]).action).toBe('skip');
+    expect(p.decideCustomer([unknown, atPin()]).action).toBe('ok');
+  });
+  test('with no stop at the pin the NEWEST qualifying visit makes the suggestion', () => {
+    const older = flagged(600, '2026-10-07T15:00:00Z');
+    const newer = flagged(540, '2026-10-08T15:00:00Z');
+    expect(p.decideCustomer([older, newer])).toMatchObject({ action: 'flag', verdict: { distanceM: 540 } });
+    expect(p.decideCustomer([newer, older]).verdict.distanceM).toBe(540);
+  });
+  test('nothing qualifying means nothing to do', () => {
+    expect(p.decideCustomer([judged({ flag: false, reason: 'stop_too_short' })]).action).toBe('none');
+  });
+});
+
 describe('settled suggestions', () => {
   const open = { pin_lat: '27.4900000', pin_lng: '-82.5700000' };
   const customer = { id: 'c1', address_line1: '100 Fixture Rd', address_line2: null, city: 'Fixture City', state: 'FL', zip: '34201', latitude: '27.4900000', longitude: '-82.5700000' };
