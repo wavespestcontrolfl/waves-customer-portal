@@ -6036,5 +6036,11 @@ AppointmentReminders.callbackNumberHoldConfirmedForVisit = callbackNumberHoldCon
 // The statuses the send loop skips: auto-dispatch's post-move reminder check
 // reads the same list (Codex #6208 r23 P2).
 AppointmentReminders.REMINDER_BLOCKING_STATUSES = REMINDER_BLOCKING_STATUSES;
+// Can this reminder row still send? Not when it is cancelled, or carries a
+// non-delivering marker: sibling-suppressed (its slot owner carries the
+// messaging) or a pre-closed windowless placeholder. One rule for callers
+// that judge a stale appointment_time (Codex #6208 r24 P2).
+AppointmentReminders.reminderRowCanSend = (row) => !!row
+  && row.cancelled !== true && row.suppressed_by_sibling !== true && row.windows_preclosed !== true;
 
 module.exports = AppointmentReminders;

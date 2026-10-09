@@ -15,7 +15,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
+const { isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
 const { resolveGeo } = require('./geo');
@@ -786,9 +786,9 @@ async function logIneligible(run, service, elig, planCheck) {
 function stillLiveOn(row, date) {
   return !!row && ['pending', 'confirmed'].includes(String(row.status)) && toDateStr(row.scheduled_date) === date
     && row.customer_active !== false && !row.customer_deleted_at
-    // Locked or excluded after pass 1: eligibility denies it outright, so it
-    // is no longer skipped for its pin (Codex #6208 r21 P2).
-    && row.auto_dispatch_locked !== true && row.auto_dispatch_excluded !== true;
+    // Locked, excluded or customer-confirmed after pass 1: eligibility denies
+    // it outright, so it is no longer skipped for its pin (r21, r24 P2).
+    && !heldOutOfAutoDispatch(row);
 }
 
 async function stillMissingPin(run, picked) {

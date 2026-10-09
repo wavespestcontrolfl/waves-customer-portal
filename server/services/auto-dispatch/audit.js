@@ -474,15 +474,14 @@ async function maintainMissingGeoNotices(nowDate = new Date()) {
     .whereIn('scheduled_services.id', ids)
     .select('scheduled_services.*', 'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
       'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip');
-  const { lapsedPlanKeys, planKey } = require('./eligibility');
-  // A pin that resolves, a plan that lapsed, or a visit staff took out of
-  // auto-dispatch (locked or excluded): the visit is no longer skipped for
+  const { lapsedPlanKeys, planKey, heldOutOfAutoDispatch } = require('./eligibility');
+  // A pin that resolves, a plan that lapsed, or a visit held out of
+  // auto-dispatch (locked, excluded or customer-confirmed): the visit is no longer skipped for
   // its pin, so the notice closes (the run applies the same tests; r18, r21
   // P2). One plan read for all; an unreadable plan keeps the notice.
   const lapsed = await lapsedPlanKeys(rows, db);
-  const optedOut = (row) => row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true;
   const close = new Set(rows
-    .filter((row) => resolveGeo(row) || lapsed.has(planKey(row)) || optedOut(row))
+    .filter((row) => resolveGeo(row) || lapsed.has(planKey(row)) || heldOutOfAutoDispatch(row))
     .map((row) => String(row.id)));
   await retireMissingGeoNotices(close, nowDate);
 }

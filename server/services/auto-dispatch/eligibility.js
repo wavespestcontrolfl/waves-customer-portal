@@ -67,6 +67,20 @@ function resolveDateLockDenial(service, ctx, dateStr) {
   return null;
 }
 
+// A visit a person took out of auto-dispatch, whatever its date or pin: staff
+// locked or excluded it, or the customer confirmed it. The ONE rule for the
+// eligibility check and for the missing-pin notice, which is moot for such a
+// visit (Codex #6208 r21, r24 P2). Returns the denial, or null.
+function heldOutOfAutoDispatch(service) {
+  if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
+  if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
+  // Any visit the customer confirmed holds its day and time (owner
+  // 2026-10-09; before, only a due-date occurrence was held, and two
+  // confirmed visits moved silently in one week).
+  if (service.customer_confirmed === true) return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this visit');
+  return null;
+}
+
 function isEligibleForAutoDispatch(service, ctx = {}) {
   if (!service) return deny('NOT_FOUND', 'Service row missing');
 
@@ -85,15 +99,8 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
     return deny(STATUS_REASON[status] || 'INVALID_STATUS', `Status '${status}' is not auto-dispatchable`);
   }
 
-  if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
-  if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
-
-  // Any visit the customer confirmed holds its day and time (owner
-  // 2026-10-09; before, only a due-date occurrence was held, and two
-  // confirmed visits moved silently in one week).
-  if (service.customer_confirmed === true) {
-    return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this visit');
-  }
+  const held = heldOutOfAutoDispatch(service);
+  if (held) return held;
 
   const dateStr = toDateStr(service.scheduled_date) || '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return deny('INVALID_DATE', 'Missing/invalid scheduled_date');
@@ -270,4 +277,4 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
   }
 }
 
-module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES };
+module.exports = { isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES };

@@ -12,6 +12,7 @@ jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedVal
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue(),
   REMINDER_BLOCKING_STATUSES: new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show', 'rescheduled']),
+  reminderRowCanSend: (row) => !!row && row.cancelled !== true && row.suppressed_by_sibling !== true && row.windows_preclosed !== true,
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
@@ -298,6 +299,8 @@ describe('reminder sync failure after a committed move', () => {
   // (Codex #6208 r22 P2).
   test.each([
     ['the reminder is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
+    ['the reminder is sibling-suppressed', { appointment_time: '2026-08-04T13:00:00Z', suppressed_by_sibling: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
+    ['the reminder is a pre-closed placeholder', { appointment_time: '2026-08-04T13:00:00Z', windows_preclosed: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
     ['the visit is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: false }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'cancelled' }],
     ['the visit waits for a new slot (rescheduled)', { appointment_time: '2026-08-04T13:00:00Z', cancelled: false }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'rescheduled' }],
   ])('a stale reminder time raises nothing when %s', async (_label, reminder, visit) => {

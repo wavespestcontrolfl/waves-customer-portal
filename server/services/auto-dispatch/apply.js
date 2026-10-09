@@ -638,10 +638,11 @@ async function reminderOffNewSlot(AppointmentReminders, service) {
     // that writer syncs its own reminder, and a compare of the old reminder
     // with the new visit would ring for nothing (Codex #6208 r20 P2).
     const before = await committedReminderTime(AppointmentReminders, service);
-    const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time', 'cancelled');
-    // A cancelled reminder cannot go out, and neither can one for a visit
-    // that is no longer open: its stale time needs no check (r22 P2).
-    if (!row || row.cancelled === true || !(await visitStillOpen(AppointmentReminders, service))) return false;
+    const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time', 'cancelled', 'suppressed_by_sibling', 'windows_preclosed');
+    // A reminder that cannot go out (cancelled, sibling-suppressed, pre-closed
+    // placeholder: the reminder job's own rule), or one for a visit that is no
+    // longer open: its stale time needs no check (r22, r24 P2).
+    if (!AppointmentReminders.reminderRowCanSend(row) || !(await visitStillOpen(AppointmentReminders, service))) return false;
     const expected = await committedReminderTime(AppointmentReminders, service);
     if (timeOf(before) !== timeOf(expected)) return false;
     const actual = new Date(row.appointment_time).getTime();

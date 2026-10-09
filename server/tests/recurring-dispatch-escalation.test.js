@@ -10,6 +10,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
   lapsedPlanKeys: jest.fn(async () => new Set()),
   planKey: jest.requireActual('../services/auto-dispatch/eligibility').planKey,
+  heldOutOfAutoDispatch: jest.requireActual('../services/auto-dispatch/eligibility').heldOutOfAutoDispatch,
 }));
 
 const db = require('../models/db');
@@ -453,17 +454,18 @@ test('missing-pin upkeep closes a standing notice whose visit now has a pin', as
 // auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2).
 test('missing-pin upkeep closes a standing notice whose plan lapsed or whose visit staff locked or excluded', async () => {
   const audit = require('../services/auto-dispatch/audit');
-  existingNoticeKeys = ['v1', 'v2', 'v3', 'v4'].map((id) => `auto-dispatch-missing-geo:${id}:2026-08-20`);
+  existingNoticeKeys = ['v1', 'v2', 'v3', 'v4', 'v5'].map((id) => `auto-dispatch-missing-geo:${id}:2026-08-20`);
   query.select = jest.fn().mockResolvedValue([
     { id: 'v1', customer_id: 'c1', recurring_parent_id: 'p1' },
     { id: 'v2', customer_id: 'c2', recurring_parent_id: 'p2' },
     { id: 'v3', customer_id: 'c3', recurring_parent_id: 'p3', auto_dispatch_locked: true },
     { id: 'v4', customer_id: 'c4', recurring_parent_id: 'p4', auto_dispatch_excluded: true },
+    { id: 'v5', customer_id: 'c5', recurring_parent_id: 'p5', customer_confirmed: true },
   ]);
   query.leftJoin = jest.fn(() => query);
   eligibility.lapsedPlanKeys.mockResolvedValue(new Set(['c1:p1']));
   await audit.maintainMissingGeoNotices(new Date('2026-08-01T16:00:00Z'));
   const retireSql = retireStatements[retireStatements.length - 1];
-  expect(retireSql.bindings).toEqual(expect.arrayContaining(['v1', 'v3', 'v4']));
+  expect(retireSql.bindings).toEqual(expect.arrayContaining(['v1', 'v3', 'v4', 'v5']));
   expect(retireSql.bindings).not.toContain('v2');
 });

@@ -7,6 +7,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+  heldOutOfAutoDispatch: jest.requireActual('../services/auto-dispatch/eligibility').heldOutOfAutoDispatch,
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -385,6 +386,7 @@ test.each([
   // Staff took the visit out of auto-dispatch after pass 1 (r21 P2).
   ['with a visit locked', { auto_dispatch_locked: true }],
   ['with a visit excluded', { auto_dispatch_excluded: true }],
+  ['who confirmed the visit', { customer_confirmed: true }],
 ])('a customer %s after pass 1 raises no missing-geo notice', async (_label, change) => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
