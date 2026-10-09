@@ -3904,6 +3904,18 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(screen.queryByText('Saved for this stop')).toBeNull();
   });
 
+  test('embedded: no dialog, no portal; the part renders in place and still prepares', async () => {
+    const onPrepared = vi.fn();
+    const { container } = render(<div id="host"><FastCompleteLawnSheet service={SERVICE} request={makeRequest()} catalog={CATALOG} embedded operatorId="op-1" onClose={() => {}} onPrepared={onPrepared} /></div>);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(container.querySelector('#host .tech-visit-embedded-part')).not.toBeNull();
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+  });
+
   test('a refused hand-over shows its message and leaves the sheet editable', async () => {
     const onPrepared = vi.fn(async () => { throw new Error('Could not save this on the device'); });
     await openSheet({ props: { operatorId: 'op-1', onPrepared } });

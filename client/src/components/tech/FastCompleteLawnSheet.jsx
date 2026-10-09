@@ -121,7 +121,7 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
+  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
   RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
@@ -1297,11 +1297,13 @@ function TimeOnSite({ since }) {
 // `onPrepared` (GATE_COMBO_FAST_COMPLETE; a part of a grouped stop): Complete hands the body it would have
 // posted to onPrepared(serviceId, body) and posts nothing. `sharedNote` is the stop's one note: it stands
 // in for this sheet's own, which hides. Without them the sheet is as it was.
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, onPrepared, sharedNote }) {
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, onPrepared, sharedNote, embedded }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
-  useLockBodyScroll(true);
+  // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
+  const dialogRef = useModalFocus(!embedded, () => closeRef.current?.());
+  useLockBodyScroll(!embedded);
+  const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   // A part of a grouped stop (onPrepared) says so on every lawn-fast read: the server lifts its grouped-stop
@@ -1357,10 +1359,10 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const locked = submissionHolds(submission);
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
+    <Frame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
       <SheetBody operatorId={operatorId} service={service} request={stopRequest} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} sharedNote={sharedNote} />
-    </FastCompleteFrame>
+    </Frame>
   );
 }
 

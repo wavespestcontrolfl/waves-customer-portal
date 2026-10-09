@@ -155,6 +155,20 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
+// A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no
+// dialog of its own. The container owns the one frame, the one scroll and the header; the part's header is hidden, its
+// body flows with the page and its footer (its own action button) stays at the end of the part (tech-workflow.css).
+export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, dialogClassName, children }) {
+  return (
+    <>
+      <section ref={dialogRef} aria-labelledby={titleId} className={cn('tech-visit-embedded-part', dialogClassName)} {...hiddenProps}>
+        {children}
+      </section>
+      {overlay}
+    </>
+  );
+}
+
 // `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
 // form button until the sheet itself says the visit needs the full form.
 export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose, fullFormOffered = true }) {

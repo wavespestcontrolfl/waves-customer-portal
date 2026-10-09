@@ -229,6 +229,15 @@
 .tech-visit-amount-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 88px; align-items: center; gap: 8px; margin: 8px 0; }
 .tech-visit-amount-label { font-size: 14px; color: var(--tech-text); overflow-wrap: anywhere; }
 
+/* A Fast Complete sheet as one part of a stop (the combo container, GATE_COMBO_FAST_COMPLETE): the container's one scroll
+   carries every part, so the part's own header is hidden and its body and footer flow with the page. */
+.tech-visit-embedded-part { display: flex; flex-direction: column; margin-bottom: 16px; border: 0.5px solid var(--tech-border-strong); border-radius: 6px; background: var(--tech-page); }
+.tech-visit-embedded-part .tech-visit-header,
+.tech-visit-embedded-part.tech-visit-embedded-part .tech-lawn-header { display: none; }
+.tech-visit-embedded-part .tech-visit-form-area { flex: none; min-height: 0; }
+.tech-visit-embedded-part .tech-visit-body { flex: none; overflow: visible; }
+.tech-visit-embedded-part .tech-visit-footer { position: static; }
+
 /* Fast Complete "+ Other product" (slice 1b). The form area under the sheet
    header holds the phone picker, so the header stays in view above it. */
 .tech-visit-form-area { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }

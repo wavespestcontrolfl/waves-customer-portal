@@ -312,4 +312,27 @@ postgres('a pest + lawn Fast Complete packet on PostgreSQL', () => {
     expect(saved.status).toBe(409);
     expect(saved.body).toMatchObject({ reason: 'grouped_visit' });
   });
+
+  test('photos staged for each member (the sheets\' photo manager) are promoted to that member\'s own record by the packet', async () => {
+    const grouped = await makeStop({ grouped: true });
+    worlds.push(grouped);
+    for (const [serviceId, caption] of [[grouped.pestId, 'Pest kitchen counter'], [grouped.lawnId, 'Lawn front yard']]) {
+      await mockPg('scheduled_service_photo_staging').insert({ scheduled_service_id: serviceId, technician_id: grouped.techId, photo_type: 'progress',
+        s3_key: `fixture/${serviceId}.jpg`, image_sha256: serviceId.replace(/-/g, '').padEnd(64, '0'), caption });
+    }
+    const bodies = await sheetBodies(grouped);
+    // The sheets send the captions they saw.
+    bodies.pest.photoCaptionsSeen = ['Pest kitchen counter'];
+    const saved = await saveVisitCompletionPacket({
+      visitId: grouped.visitId, idempotencyKey: randomUUID(), actor: { techRole: 'technician', technicianId: grouped.techId },
+      items: [{ serviceId: grouped.pestId, body: bodies.pest }, { serviceId: grouped.lawnId, body: bodies.lawn }],
+    });
+    expect(saved.status).toBe(202);
+    for (const [serviceId, caption] of [[grouped.pestId, 'Pest kitchen counter'], [grouped.lawnId, 'Lawn front yard']]) {
+      const record = await mockPg('service_records').where({ scheduled_service_id: serviceId }).first('id');
+      const photos = await mockPg('service_photos').where({ service_record_id: record.id });
+      expect(photos.map((photo) => photo.caption)).toEqual([caption]);
+    }
+    expect(await mockPg('scheduled_service_photo_staging').whereIn('scheduled_service_id', [grouped.pestId, grouped.lawnId])).toHaveLength(0);
+  });
 });

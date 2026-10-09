@@ -190,6 +190,20 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(onPrepared).not.toHaveBeenCalled();
   });
 
+  test('embedded: no dialog, no portal, no scroll lock; the part renders in place and still prepares', async () => {
+    const onPrepared = vi.fn();
+    const request = makeRequest();
+    const { container } = render(<div id="host"><FastCompleteSheet service={SERVICE} request={request} embedded onClose={() => {}} onCompleted={() => {}} onPrepared={onPrepared} sharedNote={NOTE} /></div>);
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(container.querySelector('#host .tech-visit-embedded-part')).not.toBeNull();
+    expect(document.body.style.overflow).not.toBe('hidden');
+    await generate({ type: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Save for this stop' }));
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+  });
+
   test('a visit that is not the plain pest report flow refuses to prepare and never posts', async () => {
     const onPrepared = vi.fn();
     const request = makeRequest({ service: { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' } });
