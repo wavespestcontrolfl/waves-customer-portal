@@ -45,6 +45,8 @@ const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
 // source of its two extraction functions is taken.
 const PIPELINE_FILES = Object.freeze([
   ['services', 'prompts', 'call-extraction-v1.js'],
+  // rule text the prompt module builds into the prompt
+  ['services', 'prompts', 'appointment-confirmed-rules.js'],
   ['schemas', 'validate-extraction.js'],
   ['schemas', 'call-extraction.model-output.schema.json'],
   ['schemas', 'call-extraction.persisted.schema.json'],
