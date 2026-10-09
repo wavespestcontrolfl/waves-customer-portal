@@ -89,13 +89,13 @@ const { createScheduledService } = require('./booking/create-scheduled-service')
 const { FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
-// Owner scope 2026-10-04: cockroach, flea and bed bug — the same set as
+// Owner scope 2026-10-04: cockroach, flea and bed bug (+ vehicle roach 10-06) — the same set as
 // typed-followup-obligation TWO_TREATMENT_PACKAGE_KEYS.
 // Log tag for an error: code or name only. A driver message can carry the
 // rejected row's bound values (a customer's service address).
 const errTag = (err) => (err && (err.code || err.name)) || 'error';
 
-const PACKAGE_FOLLOWUP_SERVICE_KEYS = Object.freeze(['cockroach_control', 'flea_tick', 'bed_bug_treatment']);
+const PACKAGE_FOLLOWUP_SERVICE_KEYS = Object.freeze(['cockroach_control', 'flea_tick', 'bed_bug_treatment', 'vehicle_german_roach']);
 // scheduled_services.source_action is varchar(30).
 const PACKAGE_FOLLOWUP_SOURCE_ACTION = 'package_followup_auto';
 const DEFAULT_PACKAGE_FOLLOWUP_DAYS = 14;

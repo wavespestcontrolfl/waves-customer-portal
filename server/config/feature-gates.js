@@ -1938,6 +1938,13 @@ const gates = {
   // of a strip-mall caller who has a suite. Both directions. Off →
   // byte-identical.
   callBusinessWholeBuildingNoUnit: process.env.GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT === 'true',
+  // Vehicle German roach booking (owner ruling 2026-10-06): a call about
+  // roaches inside a car, truck or van books the vehicle_german_roach catalog
+  // row ($199, two visits) instead of the home roach package, and a unit-less
+  // apartment address does not hold it for the "which unit?" ask (the job is
+  // the car in the lot). Matcher in call-booking-catalog.js, waiver in
+  // call-triage-flags.js. Off → byte-identical.
+  callVehicleRoachBooking: process.env.GATE_CALL_VEHICLE_ROACH_BOOKING === 'true',
   // Agent-commitment booking authorization: when OUR agent explicitly
   // committed to the confirmed slot on the call ("we'll confirm it for noon
   // on Sunday" — evidence-pinned to an AGENT-spoken quote), a third-party
