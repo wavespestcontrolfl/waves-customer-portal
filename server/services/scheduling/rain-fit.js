@@ -66,9 +66,13 @@ const RAIN_OK_KEYS = new Set([
   'wdo_inspection', 'termite_inspection', 'pest_inspection', 'rodent_inspection', 'lawn_inspection',
   // interior-only treatment
   'bed_bug_treatment', 'german_roach', 'german_roach_initial', 'vehicle_german_roach',
-  // Cockroach Treatment Service: normally inside-only bait work (owner
-  // 2026-10-09, after the rain pass flagged two of these visits). The native
-  // roach knockdown, a perimeter spray, stays outdoor.
+  // Cockroach Treatment Service (owner 2026-10-09, after the rain pass
+  // flagged two of these visits): inside work. The key also covers the
+  // native-roach package sold from the public quote, whose only outside
+  // step is perimeter GRANULAR, which rain does not wash away (rain-out.js
+  // EFFICACY_EXEMPT_SERVICE treats granular the same way). No liquid goes
+  // down outside under this key; the native roach knockdown, a perimeter
+  // spray with its own key, stays outdoor.
   'cockroach_control',
   // rodent checks and attic work (not trap setup, exclusion or station install)
   'rodent_bait_quarterly', 'rodent_monitoring',
