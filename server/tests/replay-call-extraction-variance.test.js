@@ -957,9 +957,69 @@ describe('call extraction replay variance reporting', () => {
 describe('replay extraction grounds relative dates on the real call start (codex #5377)', () => {
   test('extractCallDataV2 receives callStartedAt(call), not the fallback row insert time', () => {
     const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    expect(src).toMatch(/const extractionCallStart = require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(call\)/);
     const at = src.indexOf('CRP._test.extractCallDataV2(transcriptForExtraction');
     expect(at).toBeGreaterThan(-1);
-    expect(src.slice(at, at + 600)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(call\)/);
+    expect(src.slice(at, at + 300)).toMatch(/callStartedAt: extractionCallStart,/);
+  });
+});
+
+// The replay passed only the call id and start, so the reviewed-call eval scored
+// a thinner prompt than live calls get (2026-10-09 advisor finding).
+describe('replay extraction gets the call facts production gives the extractor', () => {
+  const { productionCallFacts } = require('../scripts/replay-call-extraction-variance');
+  const CRP = require('../services/call-recording-processor');
+  const callStart = new Date('2026-09-10T14:00:00Z');
+  const call = { id: 'c1', direction: 'inbound', created_at: '2026-09-10T14:05:00Z', metadata: { addons: { results: { twilio_caller_name: { status: 'successful', result: { caller_name: { caller_name: 'PAT EXAMPLE' } } } } } } };
+  const customer = (createdAt) => ({ id: 'cust-1', first_name: 'Pat', last_name: 'Example', pipeline_stage: 'active_customer', address_line1: '1 Example St', created_at: createdAt });
+  const fakeCRP = (priorCall = null) => ({
+    summarizePriorCall: jest.fn(async () => priorCall),
+    _test: CRP._test,
+  });
+
+  test('the extractor call spreads the facts', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    const at = src.indexOf('CRP._test.extractCallDataV2(transcriptForExtraction');
+    expect(src.slice(at, at + 300)).toMatch(/\.\.\.callFacts,/);
+    expect(src).toMatch(/productionCallFacts\(\{ call, contactPhone, linkedCustomer, bookableServices, CRP, db, callStart: new Date\(extractionCallStart\) \}\)/);
+  });
+
+  test('catalog names, caller-ID name, direction and the prior call are passed the way production builds them', async () => {
+    const crp = fakeCRP({ summary: 'earlier call' });
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: null, bookableServices: [{ name: 'General Pest Control' }, { name: '' }, null], CRP: crp, db: 'DB', callStart });
+    expect(facts.bookableServiceNames).toEqual(['General Pest Control']);
+    expect(facts.callerIdName).toBe(CRP._test.callerIdNameForPrompt(call));
+    expect(facts.callDirection).toBe('inbound');
+    expect(facts.priorCall).toEqual({ summary: 'earlier call' });
+    expect(facts.knownCaller).toBeNull();
+    // Bounded to calls before this one, exactly as the processor asks.
+    expect(crp.summarizePriorCall).toHaveBeenCalledWith('+19415550100', 'c1', 'DB', call.created_at);
+  });
+
+  test('an outbound call is labeled outbound', async () => {
+    const outbound = { ...call, direction: 'outbound-api' };
+    const facts = await productionCallFacts({ call: outbound, contactPhone: '+19415550100', linkedCustomer: null, bookableServices: null, CRP: fakeCRP(), db: 'DB', callStart });
+    expect(facts.callDirection).toBe(CRP._test.isOutboundCall(outbound) ? 'outbound' : 'inbound');
+    expect(facts.bookableServiceNames).toEqual([]);
+  });
+
+  test('a customer on file before the call is the known caller', async () => {
+    const before = customer('2026-01-05T12:00:00Z');
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: before, bookableServices: [], CRP: fakeCRP(), db: 'DB', callStart });
+    expect(facts.knownCaller).toEqual(CRP._test.summarizeKnownCaller(before));
+  });
+
+  test('a customer row created by the call or after it is NOT a known caller: production had none', async () => {
+    for (const createdAt of ['2026-09-10T14:00:00Z', '2026-09-10T14:20:00Z', '2026-10-01T09:00:00Z', null, 'not a date']) {
+      const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: customer(createdAt), bookableServices: [], CRP: fakeCRP(), db: 'DB', callStart });
+      expect(facts.knownCaller).toBeNull();
+    }
+  });
+
+  test('a failed prior-call lookup degrades to no prior call', async () => {
+    const crp = { summarizePriorCall: jest.fn(async () => { throw new Error('db down'); }), _test: CRP._test };
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', linkedCustomer: null, bookableServices: [], CRP: crp, db: 'DB', callStart });
+    expect(facts.priorCall).toBeNull();
   });
 });
 

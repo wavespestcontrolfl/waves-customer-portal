@@ -23540,6 +23540,7 @@ CallRecordingProcessor._test = {
   buildFailOpenRoutingContext,
   commercialDictatedBookingActive,
   commercialAssessmentBookingActive,
+  callerIdNameForPrompt,
   outboundAutoBookingEnabled,
   commercialAssessmentRoutingOptions,
   commercialAssessmentBookableFor,

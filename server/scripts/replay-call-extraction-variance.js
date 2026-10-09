@@ -1308,6 +1308,32 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
     .catch(() => null);
 }
 
+// The call facts production gives the extractor besides the transcript (the
+// processor's Step 2): who dialed, the caller-ID name, the linked customer, the
+// contact's previous call and the bookable catalog. The replay used to pass only
+// the call id and start, so the reviewed-call eval scored a thinner prompt than
+// the one live calls get. Built from production's own helpers.
+//
+// The linked customer is given only when its row PREDATES the call. A lead this
+// very call created (or an operator created afterwards) is a customer today, but
+// production's prompt for that call had no known caller: telling the model
+// "existing customer" would change the answer the review recorded.
+async function productionCallFacts({ call, contactPhone, linkedCustomer, bookableServices, CRP, db, callStart }) {
+  const startMs = callStart instanceof Date ? callStart.getTime() : NaN;
+  const createdMs = linkedCustomer?.created_at ? new Date(linkedCustomer.created_at).getTime() : NaN;
+  const predatesCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
+  const priorCall = await CRP.summarizePriorCall(contactPhone, call.id, db, call.created_at).catch(() => null);
+  return {
+    bookableServiceNames: (Array.isArray(bookableServices) ? bookableServices : []).map((svc) => svc?.name).filter(Boolean),
+    knownCaller: predatesCall ? CRP._test.summarizeKnownCaller(linkedCustomer) : null,
+    callerIdName: CRP._test.callerIdNameForPrompt(call),
+    priorCall: priorCall || null,
+    callDirection: CRP._test.isOutboundCall(call) ? 'outbound' : 'inbound',
+    // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the same per-call read production makes.
+    ...(CRP._test.commercialAssessmentBookingActive(call) ? { agentProposedSlotCommitment: true } : {}),
+  };
+}
+
 async function replayCall(call, context) {
   const { helpers, CRP, db, scheduledColumns, includeValues, retranscribe, fixtureCaseByCallId } = context;
   const contactPhone = contactPhoneForCall(call, CRP);
@@ -1431,14 +1457,19 @@ async function replayCall(call, context) {
     }
   }
 
+  // The real call start, not the post-call fallback row's insert time, so relative dates resolve
+  // against the day the call began exactly as the routing context below verifies them (codex #5377).
+  const extractionCallStart = require('../utils/call-timeline').callStartedAt(call)
+    || (call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date());
+  const callFacts = transcriptForExtraction
+    ? await productionCallFacts({ call, contactPhone, linkedCustomer, bookableServices, CRP, db, callStart: new Date(extractionCallStart) })
+    : null;
   const startedAt = Date.now();
   const current = transcriptForExtraction
     ? await CRP._test.extractCallDataV2(transcriptForExtraction, contactPhone, {
         callId: call.id,
-        // The real call start, not the post-call fallback row's insert time, so relative dates resolve
-        // against the day the call began exactly as the routing context below verifies them (codex #5377).
-        callStartedAt: require('../utils/call-timeline').callStartedAt(call)
-          || (call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date()),
+        callStartedAt: extractionCallStart,
+        ...callFacts,
       })
     : { status: replayTranscription.status || 'no_transcription', extraction: null, errors: null };
   const durationMs = Date.now() - startedAt;
@@ -1802,4 +1833,5 @@ module.exports = {
   etScheduleParts,
   routeForV2,
   defaultReplayHelpers,
+  productionCallFacts,
 };
