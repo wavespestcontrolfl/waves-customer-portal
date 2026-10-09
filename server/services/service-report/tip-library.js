@@ -26,6 +26,12 @@
  * Lawn tips (owner 2026-09-29) may also carry `findings` and `months`, which
  * only reorder the picker (see LAWN_FINDINGS).
  *
+ * A tip may carry `aftercare: true` (owner 2026-10-09): it says what to expect
+ * or do after this service's work ("thin for a few weeks is normal"), not a
+ * standing habit. The flag freezes with the tip, and the report opens such a
+ * note with an aftercare line instead of "One thing that will make a real
+ * difference:".
+ *
  * A tip may carry `pests` (owner 2026-10-09): the pest sheet's chips
  * (TIP_PESTS) it is advice for. The pest sheet lifts it when the tech taps or
  * names that pest, on any visit; it never selects a tip. Only a tip that
@@ -681,7 +687,7 @@ const TIPS = Object.freeze([
     // are priced on the native-roach scale, so German-roach advice is not
     // theirs (Codex #5582).
     id: 'gr_bait_spots', group: 'roaches', label: "Clean around the bait spots",
-    keywords: ["bait", "gel", "cabinet", "wipe", "cleaner"], lines: ["pest"], season: 'all',
+    aftercare: true, keywords: ["bait", "gel", "cabinet", "wipe", "cleaner"], lines: ["pest"], season: 'all',
     services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
     copy: "The small dots of bait in the cabinet corners and hinges are doing the work. Cleaner wiped over them, or anything sprayed near them, makes roaches stay away, so for the next few weeks clean around those spots instead of over them.",
   },
@@ -718,7 +724,7 @@ const TIPS = Object.freeze([
   // ── Fleas and ticks (service tips, owner-approved 2026-10-02) ─────────────────────────────────────────────
   {
     id: 'flea_keep_vacuuming', group: 'fleas', label: "Keep vacuuming after the treatment",
-    keywords: ["vacuum", "carpet", "after treatment", "still seeing fleas", "cocoon"], lines: ["pest"], season: 'all',
+    aftercare: true, keywords: ["vacuum", "carpet", "after treatment", "still seeing fleas", "cocoon"], lines: ["pest"], season: 'all',
     services: ["flea_tick"],
     copy: "Flea pupae sit in cocoons the treatment can't reach and hatch when something moves nearby, so you may still see a few for a couple of weeks. Vacuuming every day brings them out sooner, onto the treated carpet.",
   },
@@ -759,7 +765,7 @@ const TIPS = Object.freeze([
   // ── Fire ants (service tips, owner-approved 2026-10-02) ───────────────────────────────────────────────────
   {
     id: 'fa_leave_mounds', group: 'fire_ants', label: "Leave the mounds alone",
-    keywords: ["mound", "dig", "kick", "drench", "bait"], lines: ["pest"], season: 'all',
+    aftercare: true, keywords: ["mound", "dig", "kick", "drench", "bait"], lines: ["pest"], season: 'all',
     services: ["fire_ant"],
     copy: "After a fire ant treatment, digging, kicking, or drenching a mound sends the colony to start over a few feet away. Leave the mounds alone and let the workers carry the bait back to the queen; it works through the colony over the next few weeks.",
   },
@@ -998,7 +1004,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'gp_first_days', group: 'exterior', label: "A few more bugs for a few days",
-    keywords: ["more bugs", "flush", "dead bugs", "first week", "after treatment"], lines: ["pest"], season: 'all',
+    aftercare: true, keywords: ["more bugs", "flush", "dead bugs", "first week", "after treatment"], lines: ["pest"], season: 'all',
     services: GENERAL_PEST_SERVICES,
     copy: "For the first few days after a visit you may see more insects than usual, often slow or on their backs. That is the treatment bringing them out of the cracks they hide in, and it settles down over a week or two. If it does not, let me know.",
   },
@@ -1021,7 +1027,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'cr_dead_ones', group: 'roaches', label: "Dead ones are a good sign",
-    keywords: ["dead roaches", "dying", "after treatment", "sweep", "lanai"], lines: ["pest"], season: 'all',
+    aftercare: true, keywords: ["dead roaches", "dying", "after treatment", "sweep", "lanai"], lines: ["pest"], season: 'all',
     services: NATIVE_ROACH_SERVICES,
     copy: "Over the next two weeks you may find large roaches dead or slow in the garage, on the lanai, or by the doors. Those are the ones coming in from outside and crossing what I put down. Sweep them up; there is no need to spray anything yourself.",
   },
@@ -1033,13 +1039,13 @@ const TIPS = Object.freeze([
   },
   {
     id: 'rs_give_it_time', group: 'exterior', label: "Give it 10 to 14 days",
-    keywords: ["how long", "days", "still seeing", "patience", "two weeks"], lines: ["pest"], season: 'all',
+    aftercare: true, keywords: ["how long", "days", "still seeing", "patience", "two weeks"], lines: ["pest"], season: 'all',
     services: ["pest_re_service"],
     copy: "Most of what I put down works over days, not minutes. Insects cross it and carry it back to where they hide, and the activity drops over the next 10 to 14 days. If you still see steady activity after that, let me know.",
   },
   {
     id: 'vr_no_food', group: 'roaches', label: "No food in the car for two weeks",
-    keywords: ["car", "crumbs", "wrappers", "trash", "food"], lines: ["pest"], season: 'all',
+    aftercare: true, keywords: ["car", "crumbs", "wrappers", "trash", "food"], lines: ["pest"], season: 'all',
     services: ["vehicle_german_roach", "vehicle_roach_addon"],
     copy: "Roaches stay in a car for the crumbs under the seats and the wrappers in the door pockets. For the next two weeks, keep food out of the car and empty the trash at the end of every day, so the bait is the only meal they can find.",
   },
@@ -1057,31 +1063,31 @@ const TIPS = Object.freeze([
   },
   {
     id: 'plug_light_water', group: 'lawn', label: "Light water every day at first",
-    keywords: ["plugs", "watering", "new plugs", "roots", "daily"], lines: ["lawn"], season: 'all',
+    aftercare: true, keywords: ["plugs", "watering", "new plugs", "roots", "daily"], lines: ["lawn"], season: 'all',
     services: ["plugging"],
     copy: "New plugs have short roots and dry out fast. Water them lightly once or twice a day for the first two weeks, then go back to deeper watering two days a week so the roots follow the water down.",
   },
   {
     id: 'plug_stay_off', group: 'lawn', label: "Mower and feet off the plugs",
-    keywords: ["plugs", "mower", "traffic", "dog", "rooted"], lines: ["lawn"], season: 'all',
+    aftercare: true, keywords: ["plugs", "mower", "traffic", "dog", "rooted"], lines: ["lawn"], season: 'all',
     services: ["plugging"],
     copy: "A plug has rooted when it does not lift with a gentle tug, usually in about three weeks. Until then, keep the mower, the dog, and foot traffic off those spots so the roots are not torn loose.",
   },
   {
     id: 'td_water_in', group: 'lawn', label: "Water the top dressing in",
-    keywords: ["top dressing", "sand", "compost", "water in", "mow"], lines: ["lawn"], season: 'all',
+    aftercare: true, keywords: ["top dressing", "sand", "compost", "water in", "mow"], lines: ["lawn"], season: 'all',
     services: ["top_dressing"],
     copy: "The top dressing works once it settles down between the grass blades. Water it in well today, and wait to mow until the grass tips show through, so the mower does not pick the material back up.",
   },
   {
     id: 'td_rake_level', group: 'lawn', label: "Rake the piles level",
-    keywords: ["top dressing", "piles", "rake", "smother", "level"], lines: ["lawn"], season: 'all',
+    aftercare: true, keywords: ["top dressing", "piles", "rake", "smother", "level"], lines: ["lawn"], season: 'all',
     services: ["top_dressing"],
     copy: "If the top dressing sits in small piles after it dries, pull a leaf rake over them so the grass tips show. A pile left thick smothers the grass under it.",
   },
   {
     id: 'dt_thin_is_normal', group: 'lawn', label: "Thin for a few weeks is normal",
-    keywords: ["dethatch", "thin", "rough", "recovery", "verticut"], lines: ["lawn"], season: 'all',
+    aftercare: true, keywords: ["dethatch", "thin", "rough", "recovery", "verticut"], lines: ["lawn"], season: 'all',
     services: ["dethatching"],
     copy: "The lawn looks thin and a little rough after dethatching because the dead layer is out and the soil shows. Keep it watered on your normal schedule and, while the grass is growing in warm weather, it fills back in over the next few weeks. Hold off on mowing short until it does.",
   },
@@ -1093,19 +1099,19 @@ const TIPS = Object.freeze([
   },
   {
     id: 'lk_fills_from_edges', group: 'lawn', label: "Brown spots fill in from the edges",
-    keywords: ["brown spots", "dead grass", "runners", "chinch", "recovery"], lines: ["lawn"], season: 'all',
+    aftercare: true, keywords: ["brown spots", "dead grass", "runners", "chinch", "recovery"], lines: ["lawn"], season: 'all',
     services: ["lawn_pest_knockdown"],
     copy: "Grass that the insects already killed stays brown; it does not turn green again. St. Augustine and Zoysia fill those spots by sending runners in from the healthy edges over several weeks. Regular watering and a normal mowing height help it cover faster.",
   },
   {
     id: 'lk_watch_the_edge', group: 'lawn', label: "Watch the edge of the spot",
-    keywords: ["edge", "spreading", "chinch", "webworm", "brown"], lines: ["lawn"], season: 'all',
+    aftercare: true, keywords: ["edge", "spreading", "chinch", "webworm", "brown"], lines: ["lawn"], season: 'all',
     services: ["lawn_pest_knockdown"],
     copy: "The insects feed where the brown grass meets the green, not in the middle of a dead spot. Look at that edge once a week. If the brown keeps moving outward, let me know before your next visit.",
   },
   {
     id: 'pi_new_fronds', group: 'tree_shrub', label: "Watch the new fronds",
-    keywords: ["palm", "injection", "new fronds", "results", "yellow"], lines: ["tree_shrub"], season: 'all',
+    aftercare: true, keywords: ["palm", "injection", "new fronds", "results", "yellow"], lines: ["tree_shrub"], season: 'all',
     services: ["palm_injection", "palm_injection_semiannual"],
     copy: "What I put into the palm reaches the growth that comes after it. Older fronds that are already yellow or spotted will not change. Look at the new fronds that open over the coming months, sometimes a year or more, for the difference.",
   },
@@ -1360,7 +1366,7 @@ function resolveTipIds(ids) {
     seen.add(id);
     // The link is a snapshot, never the registry's own object — a caller
     // that edits its payload must not edit the registry for every later call.
-    resolved.push({ id, copy: tip.copy, source: 'library', ...(tip.link ? { link: { ...tip.link } } : {}) });
+    resolved.push({ id, copy: tip.copy, source: 'library', ...(tip.aftercare ? { aftercare: true } : {}), ...(tip.link ? { link: { ...tip.link } } : {}) });
     if (resolved.length >= MAX_TIPS_PER_VISIT) break;
   }
   return resolved;

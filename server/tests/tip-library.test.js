@@ -432,6 +432,14 @@ describe('resolveTipIds', () => {
     }
   });
 
+  test('an aftercare tip freezes its flag; an advice tip carries none (owner 2026-10-09)', () => {
+    const [after, advice] = resolveTipIds(['dt_thin_is_normal', 'light_warm_bulbs']);
+    expect(after.aftercare).toBe(true);
+    expect(advice).not.toHaveProperty('aftercare');
+    expect(TIPS.filter((tip) => tip.aftercare).length).toBeGreaterThanOrEqual(10);
+    for (const tip of TIPS) if ('aftercare' in tip) expect(tip.aftercare).toBe(true);
+  });
+
   test('never carries client-supplied copy', () => {
     const resolved = resolveTipIds([{ id: 'light_warm_bulbs', copy: 'unreviewed text' }]);
     expect(resolved).toEqual([]);

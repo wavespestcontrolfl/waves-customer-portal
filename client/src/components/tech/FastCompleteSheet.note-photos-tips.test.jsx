@@ -375,6 +375,23 @@ describe('FastCompleteSheet tip for the customer', () => {
     expect(screen.getByRole('button', { name: /Open up where pets rest outside/ }).getAttribute('aria-pressed')).toBe('true');
   });
 
+  test('the tech\'s own line has the note\'s microphone, and a spoken line joins what is there (owner 2026-10-09)', async () => {
+    const request = makeRequest({ tips: TIP_LIBRARY });
+    await openSheet(request);
+    await screen.findByText('Tip for the customer');
+    expect(screen.queryByRole('button', { name: 'Say your own tip' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Fix drips at hose bibs/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Write your own' }));
+    expect(screen.getByRole('button', { name: 'Say your own tip' })).toBeTruthy();
+    // The last mic mounted is the tip's: its words go on the tip line, not the note.
+    React.act(() => dictation.onTranscript('I brushed the mud dauber nests off the lanai'));
+    React.act(() => dictation.onTranscript('and it is ready for paint.'));
+    expect(screen.getByLabelText('Your own tip (one sentence)').value).toBe('I brushed the mud dauber nests off the lanai and it is ready for paint.');
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('');
+    // The spoken line replaces the library pick, as a typed one does.
+    expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ }).getAttribute('aria-pressed')).toBe('false');
+  });
+
   test('a tip the tech writes replaces a library pick, and the other way round', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
