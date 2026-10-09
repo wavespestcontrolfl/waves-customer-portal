@@ -2,7 +2,8 @@
  * No application record, profile update, inventory write or delivery occurs here.
  */
 const { gateEnvValue } = require('../config/feature-gates');
-const { stepOptionFields } = require('./lawn-bermuda-removal');
+const bermudaRemoval = require('./lawn-bermuda-removal');
+const { stepOptionFields } = bermudaRemoval;
 const { addressKey } = require('./customer-properties');
 const history = require('./lawn-assessment-history');
 const { etCalendarDayOf } = require('../utils/datetime-et');
@@ -237,7 +238,8 @@ function buildLawnCompletionDefaults(plan, context) {
   const protocolMatches = matchesLawnCompletionProtocol(protocol, assigned, plan.propertyGate.trackKey);
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
   const products = protocol?.products || [];
-  const protocolProductFor = (item) => products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
+  // A step line reads the step's own row, an ordinary line its own (the two may name one product).
+  const protocolProductFor = (item) => bermudaRemoval.productRowFor(products, item.substitution?.originalProductId || item.product?.id, item.bermudaStep === true);
   const items = eligible ? plan.mixCalculator.items.filter((item) => {
     const product = protocolProductFor(item);
     // defaultInPlan distinguishes defaults from opt-in rows. Gates can also

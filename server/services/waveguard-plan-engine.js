@@ -508,7 +508,8 @@ function resolveProtocolItems(lines, products, options = {}, context = {}) {
 // is live and that version is the one resolved; empty otherwise.
 function v13ProtocolRows(structuredProtocol) {
   if (featureGates.lawnV13Live?.() !== true || structuredProtocol?.version !== LAWN_V13_VERSION) return new Map();
-  return new Map((structuredProtocol.products || []).filter((row) => row.productId).map((row) => [String(row.productId), row]));
+  // A step row and an ordinary row may name one catalog product: each line reads its own kind (rowFor).
+  return bermudaRemoval.rowsByProduct((structuredProtocol.products || []).filter((row) => row.productId));
 }
 
 // GATE_LAWN_V13: every lawn visit plans from the staged v13 protocol or not at
@@ -1661,8 +1662,8 @@ function planLineFields(item) {
 //   capped:      a hard application limit (annual cap, interval, blackout) is reached;
 //   spot:        a spot or label-rate row, no quantity (enter the area and amount used);
 //   calculate:   a whole-lawn row that states a rate or a nutrient target.
-function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {}) {
-  const row = v13Rows.get(String(product.id)) || null;
+function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {}, item = {}) {
+  const row = bermudaRemoval.rowFor(v13Rows, product.id, item.bermudaStep === true);
   if (!row) return { row, state: 'unavailable' };
   if (v13NorthPortHold(row, gateContext.municipality)) return { row, state: 'held' };
   if (cappedIds.has(String(product.id))) return { row, state: 'capped' };
@@ -1681,7 +1682,7 @@ function v13NorthPortHold(row, municipality) {
 
 // The matched items a North Port visit may not apply: not selected, so no default, no amount.
 function holdNorthPortProducts(items, v13Rows, municipality) {
-  return items.map((item) => (item.product && v13NorthPortHold(v13Rows.get(String(item.product.id)), municipality)
+  return items.map((item) => (item.product && v13NorthPortHold(bermudaRemoval.rowFor(v13Rows, item.product.id, item.bermudaStep === true), municipality)
     ? { ...item, selected: false, selectionReason: NORTH_PORT_HOLD_REASON } : item));
 }
 
@@ -1747,7 +1748,7 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     }
     // Every product here is selected, i.e. about to be applied: a proposal. A product with no row in this visit's window (Arena in
     // October, a search-added product) has no stated dose here; the limit reader then counts the product's staged v13 dose.
-    const row = rows.get(id);
+    const row = bermudaRemoval.rowFor(rows, id, item.bermudaStep === true);
     const proposed = v13ProposedApplication(item.product, row, targets);
     // A step line is judged for the property the step was proven for (the visit's own, or a
     // one-property customer's sole one), the same as the completion check.
@@ -2008,12 +2009,15 @@ async function buildPlanForService(serviceId, options = {}) {
   // Dimension 18-0-10 where every other plan takes 24-0-11) reads the cadence
   // from the booked service; unknown keeps the 12x step and warns.
   const { visit, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
-  const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
+  const assignedProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   // The April and June bermuda removal step: its three spot lines join the visit's secondary
   // list (opt-in lines, like every other spot product).
-  const step = bermuda.resolve({ structuredProtocol, trackKey, month, parseLines: (text) => parseProtocolLines(text, 'conditional', { exactName }) });
+  const step = await bermuda.resolve({ structuredProtocol: assignedProtocol, trackKey, parseLines: (text) => parseProtocolLines(text, 'conditional', { exactName }) });
+  // The protocol products this appointment reads: the assigned window's, with the appointment month's step rows when
+  // the visit moved across months. The rows, the completion defaults and the ledger all read this one list.
+  const structuredProtocol = step.protocol(assignedProtocol);
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
     ...step.lines,

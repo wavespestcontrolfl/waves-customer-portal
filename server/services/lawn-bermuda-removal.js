@@ -100,6 +100,54 @@ function bermudaRemovalVisit({ trackKey, month }) {
     && BERMUDA_REMOVAL_MONTHS.includes(month);
 }
 
+// The ONE month rule: the month whose step this appointment carries, or null. It is the
+// appointment's OWN month (ET calendar month of its scheduled date), never the assigned protocol
+// window's, and only when that is a step month for the track (gate, track, April or June). Every
+// reader of "does this visit carry the step" (the plan, the tank sheet, the completion actions and
+// the completion checks) decides month through this: an April-window visit moved into June has the
+// June step, one moved into May has none.
+function stepMonthOf(visit, trackKey) {
+  const month = visitMonthOf(visit);
+  return bermudaRemovalVisit({ trackKey, month }) ? month : null;
+}
+
+// The protocol rows an appointment reads, and which row a line reads. A staged row tagged
+// gates.bermudaRemoval belongs to the STEP; an untagged row to the window's ordinary recipe, and the two
+// may name one catalog product (the May weed mix and the June step both use LESCO 90/10), so a line
+// reads the row of its own kind and the two never stand in for each other:
+//   - an ordinary line reads the untagged row (a product that only a step row names still reads that);
+//   - a step line reads only a tagged row, never the ordinary one: with no tagged row it has no row
+//     and the step is withheld.
+const isStepRow = (row) => row?.gates?.bermudaRemoval === true;
+// The key a step row is stored under in a rows Map (rows by catalog id), beside the plain id key.
+const stepRowKey = (id) => `bermuda:${id}`;
+// The rows Map (by catalog id) of a window's product rows, built by waveguard-plan-engine
+// v13ProtocolRows: the plain id holds the ordinary row (else the step row), and every step row is also
+// held under its stepRowKey.
+function rowsByProduct(products) {
+  const rows = new Map();
+  for (const row of products.filter(isStepRow)) rows.set(String(row.productId), row);
+  for (const row of products) rows.set(isStepRow(row) ? stepRowKey(row.productId) : String(row.productId), row);
+  return rows;
+}
+// The row a line reads out of a rows Map; `step`: the line is one of the step's three.
+function rowFor(rows, id, step = false) {
+  if (!step) return rows.get(String(id)) || null;
+  const own = rows.get(stepRowKey(id)) || rows.get(String(id));
+  return isStepRow(own) ? own : null;
+}
+// The same choice over a list of product rows (the structured protocol's, the completion ledger's).
+function productRowFor(products, id, step = false) {
+  const named = products.filter((row) => String(row.productId ?? row.product_id) === String(id));
+  return named.find((row) => isStepRow(row) === !!step) || (step ? null : named[0]) || null;
+}
+// The ONE definition of the product rows an appointment reads: the assigned window's own rows, and
+// when the visit's step month is another month's, the step rows of THAT month's window in place of
+// the assigned window's own step rows (those belong to another month). `stepProducts` null = the
+// window's own rows stand.
+const withStepProducts = (windowProducts, stepProducts) => (stepProducts
+  ? [...windowProducts.filter((row) => !isStepRow(row)), ...stepProducts] : windowProducts);
+
 // The track the ACTIVE turf profile's grass says (St. Augustine or Zoysia), or null. The
 // request's own track never decides eligibility: a caller's track that differs from the
 // profile's opens nothing.
@@ -181,13 +229,12 @@ const isLawnV13Visit = (visit) => detectServiceLine(visit?.service_type) === 'la
 // month, or no visit reads as inactive with no read at all.
 async function stepForVisit(knex, visit, { trackKey, month, strict = false, profile: loadedProfile }) {
   const off = { active: false, excluded: false, source: null, cultivar: null, addOn: null };
-  if (!bermudaRemovalVisit({ trackKey, month }) || !visit?.customer_id) return off;
+  // The month is the VISIT's, never the request's (stepMonthOf): a request month that is not the
+  // visit's own step month opens nothing.
+  if (!month || stepMonthOf(visit, trackKey) !== month || !visit?.customer_id) return off;
   // A step visit is a LAWN visit on the v13 program (isLawnV13Visit), whoever asks: the
   // completion checks, the tank sheet and the completion actions.
   if (!isLawnV13Visit(visit)) return off;
-  // The month is the VISIT's, never the request's: a request month that is not the
-  // visit's own month opens nothing.
-  if (visitMonthOf(visit) !== month) return off;
   // A caller that already read the active profile passes it (null when there is none): one read.
   const profile = loadedProfile !== undefined ? loadedProfile : await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
   const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile, trackKey, propertyId: visit.property_id, strict });
@@ -680,7 +727,7 @@ const stepProgramConsistent = (ids, bound) => ids.tagged
 
 // The three step lines can be applied only when each has an active catalog product LINKED to a
 // staged row of the serving window. One rule, for the projection and for stepOffered.
-const stepLinesAvailable = (members, rows) => members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
+const stepLinesAvailable = (members, rows) => members.every((m) => m.product && m.product.active !== false && rowFor(rows, m.product.id, true));
 
 // The ONE decision about whether the step stands, for the plan, the tank sheet and the
 // completion actions alike. `items` carry the three marked step lines among the visit's
@@ -751,7 +798,7 @@ function withRowGateNotes(items, rows) {
   // `gateNotes: []`, and binding it to the staged row's linked (alias-named) product must bring
   // that row's conditions with it.
   return items.map((item) => (isStepLine(item) && !item.gateNotes?.length && item.product
-    ? { ...item, ...optionNotes({ gateNotes: v13GateNotes(rows.get(String(item.product.id))?.gates) }) } : item));
+    ? { ...item, ...optionNotes({ gateNotes: v13GateNotes(rowFor(rows, item.product.id, true)?.gates) }) } : item));
 }
 
 // The spray conditions the tech must see before choosing the step, in the order they are
@@ -792,15 +839,31 @@ const once = (load) => {
   return () => { pending = pending || load(); return pending; };
 };
 
+// The bermuda removal rows of the serving window for `month` (not the assigned window's), as a list
+// of product rows. A missing staged v13 protocol reads as no rows (the step is then withheld with its
+// warning); any other read error is thrown for a strict caller and reads as no rows otherwise.
+async function loadStepRows(knex, trackKey, month, strict) {
+  const { loadV13RowsForMonth } = require('./waveguard-plan-engine');
+  try {
+    const rows = await loadV13RowsForMonth(knex, trackKey, month, { includeBermudaRemoval: true });
+    return [...new Set(rows.values())].filter(isStepRow);
+  } catch (err) {
+    if (strict && err.code !== 'lawn_v13_protocol_missing') throw err;
+    return [];
+  }
+}
+
 // The step as the visit PLAN sees it, in the order the planner needs it, so the planner holds no
 // bermuda decision of its own: every eligibility, cultivar, month, projection and output-shaping
 // rule lives here, and every method is a no-op while the step is off.
 //   openPlanStep(...)        before the protocol window is read: is the step wanted (gate, v13, an
 //                            eligible grass, the account's switch or estimate); `protocolOptions`
 //                            is what the window read must add to load the staged rows.
-//   .resolve(...)            once the serving window and month are known: is the step active for
-//                            THIS appointment (v13 resolved, the step month, the cultivar policy);
-//                            returns the stage below.
+//   .resolve(...)            once the serving window is known: is the step active for THIS
+//                            appointment (v13 resolved, the appointment's own step month, the
+//                            cultivar policy); async, returns the stage below.
+//   stage.protocol(assigned) the structured protocol the plan reads: the assigned window's products with
+//                            the appointment month's step rows (the same object when the months agree).
 //   stage.lines              the three marked recipe lines to add to the visit's conditional lines.
 //   stage.select(items)      the one atomic selection of the three lines.
 //   stage.project(items,..)  the shared projection: usable or not, the limits, the warnings and blocks
@@ -825,22 +888,33 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
   const readsRows = wanted.requested && cultivarState(calendarTrackKey, profile?.cultivar) !== 'excluded';
   return {
     protocolOptions: readsRows ? { includeBermudaRemoval: true } : {},
-    resolve({ structuredProtocol, trackKey, month, parseLines }) {
-      // The step month is the APPOINTMENT's own (ET calendar month of its date), never the assigned
-      // protocol window's: an April-window visit rescheduled into May has no step.
-      const visit = wanted.requested && structuredProtocol?.version === LAWN_V13_VERSION
-        && bermudaRemovalVisit({ trackKey, month }) && visitMonthOf({ scheduled_date: service.scheduled_date }) === month;
+    async resolve({ structuredProtocol, trackKey, parseLines }) {
+      // The step month is the APPOINTMENT's own (stepMonthOf), never the assigned protocol window's: an
+      // April-window visit rescheduled into June has the June step, one moved into May has none.
+      const stepMonth = structuredProtocol?.version === LAWN_V13_VERSION ? stepMonthOf(service, trackKey) : null;
+      const visit = wanted.requested && !!stepMonth;
       const cultivar = cultivarState(trackKey, profile?.cultivar);
-      const addOn = visit ? stepAddOn(trackKey, month) : null;
+      const addOn = visit ? stepAddOn(trackKey, stepMonth) : null;
       const active = !!addOn && cultivar !== 'excluded';
-      const unreadVisit = unavailable && structuredProtocol?.version === LAWN_V13_VERSION
-        && bermudaRemovalVisit({ trackKey, month }) && visitMonthOf({ scheduled_date: service.scheduled_date }) === month;
+      const unreadVisit = unavailable && !!stepMonth;
+      // The staged step rows are the APPOINTMENT month's, as the tank sheet and the completion actions
+      // read them (servingStepRows): when the assigned window is another month's, they are loaded here.
+      // The window's month is the stored number (4, 6); the step month is its abbreviation.
+      // No protocol resolved (a grass with no v13 program, a missing staged protocol): no window, no step.
+      const windowMonth = MONTH_ABBR[Number(structuredProtocol?.window?.month) - 1] || structuredProtocol?.window?.month;
+      const stepRows = active && windowMonth !== stepMonth
+        ? await loadStepRows(knex, trackKey, stepMonth, strict) : null;
       const excludedWarnings = [
         ...(visit && cultivar === 'excluded' ? [EXCLUDED_CULTIVAR_WARNING] : []),
         ...(unreadVisit ? [ELIGIBILITY_UNAVAILABLE_WARNING] : []),
       ];
       return {
         lines: active ? markStepLines(parseLines(addOn.secondary)) : [],
+        // The structured protocol the plan reads for this appointment: the assigned window's products with
+        // the appointment month's step rows in place of its own (withStepProducts), so the plan's rows and
+        // the completion defaults read one list. A missing or partial load leaves the step unavailable,
+        // never offered on the other month's conditions.
+        protocol: (assigned) => (stepRows ? { ...assigned, products: withStepProducts(assigned.products || [], stepRows) } : assigned),
         select: (items) => (active ? selectStepAtomically(items) : items),
         async project(items, { enabled: v13Active, rows, probeLimits, productOf }) {
           const projected = active && v13Active
@@ -852,7 +926,8 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
           const probeWarnings = items.some((item) => isStepLine(item) && item.selected) ? [] : (projected.limitWarnings || []).map((warning) => ({ ...warning, code: 'lawn_bermuda_limit_warning' }));
           return { ...projected, warnings: [...excludedWarnings, ...projected.warnings, ...probeWarnings] };
         },
-        field: active ? { bermudaRemoval: { active: true, source: wanted.source, mix: addOn.summary } } : {},
+        // `month`: the appointment month the step is read from (the completion attributes to that month's rows).
+        field: active ? { bermudaRemoval: { active: true, source: wanted.source, mix: addOn.summary, month: stepMonth } } : {},
         mixOrderField,
       };
     },
@@ -920,7 +995,7 @@ module.exports = {
   openPlanStep,
   withoutBermudaRemovalRows,
   refuseStepSprayOnRecap,
-  visitMonthOf,
+  visitMonthOf, stepMonthOf, isStepRow, rowsByProduct, rowFor, productRowFor, withStepProducts,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
