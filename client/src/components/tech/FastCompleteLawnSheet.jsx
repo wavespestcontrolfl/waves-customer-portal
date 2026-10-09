@@ -211,7 +211,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, chinch: null, guidedProductIds: [],
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, chinch: null, guidedProductIds: [], takeAllProductIds: [],
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -278,6 +278,7 @@ const optionalContextFields = (data) => ({
   chinch: chinchOf(data),
   // The add-ons a guide card may own: their taps wait for the fresh guide.
   guidedProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.guidedProductIds) ? data.plannedProducts.guidedProductIds : [],
+  takeAllProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.takeAllProductIds) ? data.plannedProducts.takeAllProductIds : [],
 });
 
 const sameText = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -409,11 +410,15 @@ function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable
   return { guide, status, locked, guideChecks: checkedState.for === forId ? checkedState.map : {}, onGuideCheck };
 }
 
+// The note under a take-all fungicide row (it is added from the search only).
+const TAKE_ALL_ROW_NOTE = 'Take-all fungicide is for mapped take-all areas only.';
+
 const lowerIds = (ids) => (ids || []).filter(Boolean).map((id) => String(id).toLowerCase());
 
 // The products a visible guide card owns or holds: out of the generic add-ons list and the search,
 // so the card's check is the only way in. A dismissed card releases its product ("looked and
-// decided"); a held product (take-all, no trouble area on file) has no dismiss and stays out.
+// decided"); a held product (take-all, no trouble area on file) has no dismiss and stays out of the
+// list; the search alone still reaches it (guideGovernance: takeAll).
 function cardOwnedIds(guide, checks) {
   return lowerIds((guide?.cards || []).filter((card) => checks[card.kind] !== 'none')
     .flatMap((card) => [...card.productIds, ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
@@ -434,7 +439,7 @@ function cardOwnedIds(guide, checks) {
 // cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
 // is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
 // leave no way to record a real application. Completion records the visit and flags it to the office.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
 
 function guideGovernance({ ctx, guide, status, checks }) {
   if (!ctx.treatmentGuide) return NO_GOVERNANCE;
@@ -458,15 +463,23 @@ function guideGovernance({ ctx, guide, status, checks }) {
     ...(weedMix?.mode === 'unavailable' ? weedGroup.filter((id) => !lowerIds(weedMix.blockedIds).includes(id)) : []),
     ...lowerIds(chinch?.unreadableIds),
   ] : [];
-  const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
+  // Take-all fungicide (preventive on mapped areas only, never curative on an unmapped lawn): never
+  // released to the plain list, and no tap offers it. Once the decision is in, it is reachable by the
+  // search alone, the deliberate way to record it for a known mapped lawn, unless a limit that was READ
+  // forbids it. The row it opens carries TAKE_ALL_ROW_NOTE.
+  const takeAll = lowerIds(ctx.takeAllProductIds);
+  const searchOnly = settled ? takeAll.filter((id) => !blocked.includes(id)) : [];
+  const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id) && !takeAll.includes(id)) : [];
   const owned = cardOwnedIds(answered ? guide : null, checks);
-  const governed = [...picks, ...weedGroup, ...lowerIds(chinch?.rungIds), ...chinchItem];
+  const governed = [...picks, ...takeAll, ...weedGroup, ...lowerIds(chinch?.rungIds), ...chinchItem];
   return {
     enabled: true,
     locked: !settled,
     governed: new Set(governed),
-    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable]),
-    hidden: new Set(governed.filter((id) => (!free.includes(id) && !unreadable.includes(id)) || owned.includes(id))),
+    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable, ...searchOnly]),
+    // Hidden from the add-ons list AND the search; a take-all product reachable by the search is not.
+    hidden: new Set(governed.filter((id) => !searchOnly.includes(id) && ((!free.includes(id) && !unreadable.includes(id)) || owned.includes(id)))),
+    takeAll: new Set(takeAll),
     unreadable: new Set(unreadable),
     unreadableNote: answered ? guide.unreadableNote : '',
     weedOffered: new Set(weedOffered),
@@ -1356,6 +1369,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               gaugeHeightIn={gaugeHeightIn}
               onGaugeHeight={setGaugeHeightIn}
               technicianNotes={form.note}
+              closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
           <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
@@ -1448,7 +1462,7 @@ function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: 
             methods={ctx.methods}
             lawnSqft={lawnSqft}
             locked={locked}
-            note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : null}
+            note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : (gov.takeAll.has(String(row.productId).toLowerCase()) ? TAKE_ALL_ROW_NOTE : null)}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
           />
@@ -1495,7 +1509,10 @@ function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, cat
   return {
     // Before the guide has answered a governed product waits in the list; after, the ones the latest
     // decision does not release to the list are not listed.
-    items: split.items.filter((item) => gov.locked || !gov.hidden.has(String(item.productId).toLowerCase())),
+    items: split.items.filter((item) => {
+      const id = String(item.productId).toLowerCase();
+      return !gov.takeAll.has(id) && (gov.locked || !gov.hidden.has(id));
+    }),
     weedEntry: split.weedEntry,
     showWeed: !cardShown('weeds') && !!weedMix && (split.weedEntry?.length > 0 || (!weedMix.productIds.length && !!weedMix.note)),
     showChinch: !cardShown('chinch') && !!chinch,

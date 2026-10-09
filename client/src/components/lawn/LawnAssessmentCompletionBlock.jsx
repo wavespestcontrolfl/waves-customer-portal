@@ -197,6 +197,9 @@ function LawnAssessmentCompletionBlock({
   // completion form passes neither and is unchanged.
   compact = false,
   onProgress,
+  // The lawn sheet's treatment guide (GATE_LAWN_TREATMENT_GUIDE): one soft prompt for a close-up of
+  // the blades and crown when the photos include a problem area. Off everywhere else.
+  closeUpPrompt = false,
 }, ref) {
   const [photos, setPhotosState] = useState([]);
   // The photo list's source of truth is this ref: every change goes through
@@ -226,6 +229,20 @@ function LawnAssessmentCompletionBlock({
   // quick picks cannot each decode a full batch.
   const inFlightRef = useRef({ total: 0, byShot: {} });
   const photoCap = shotList ? LAWN_SHOT_CAP : 3;
+  // The close-up prompt: `at` is the photo count when it first showed, `off` once a photo was added
+  // after it or it was dismissed (at most one showing per visit; a retake does not bring it back).
+  const [closeUp, setCloseUp] = useState({ at: null, off: false });
+  const hasTroubleSpot = photos.some((photo) => photo.zone === "trouble");
+  useEffect(() => {
+    if (!closeUpPrompt) return;
+    setCloseUp((prev) => {
+      if (prev.off) return prev;
+      if (!hasTroubleSpot) return prev.at === null ? prev : { at: null, off: false };
+      if (prev.at === null) return { at: photos.length, off: false };
+      return photos.length > prev.at ? { at: prev.at, off: true } : prev;
+    });
+  }, [closeUpPrompt, hasTroubleSpot, photos.length]);
+  const showCloseUp = closeUpPrompt && hasTroubleSpot && closeUp.at !== null && !closeUp.off;
   const [result, setResult] = useState(null);
   const [visitReview, setVisitReview] = useState(null);
   const [techScores, setTechScores] = useState(null);
@@ -698,6 +715,14 @@ function LawnAssessmentCompletionBlock({
           {!shotList && photos.length < 2 && (
             <div data-testid="lawn-photo-nudge" className="text-14 leading-snug text-zinc-500">
               2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
+            </div>
+          )}
+          {showCloseUp && (
+            <div role="status" data-testid="lawn-close-up-prompt" className="flex items-start justify-between gap-2 text-14 text-zinc-500">
+              <span>Add one close-up of the blades and crown at the edge of the damaged spot so the insect check can read it.</span>
+              <Button variant="secondary" className={PILL_OUTLINE} onClick={() => setCloseUp((prev) => ({ ...prev, off: true }))}>
+                Dismiss
+              </Button>
             </div>
           )}
           <Button

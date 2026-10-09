@@ -542,8 +542,13 @@ function guidedProductIds(loaded, sheet) {
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   const guide = require('./lawn-treatment-guide');
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
-  const picks = guide.pickAddOns(loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows);
-  return { guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId) };
+  const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
+  const picks = guide.pickAddOns(candidates, rows);
+  return {
+    guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId),
+    // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons.
+    takeAllProductIds: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId),
+  };
 }
 
 async function chinchOffer({ svc, structured, sheetAddOns, knex }) {

@@ -617,6 +617,18 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect('guidedProductIds' in (await context(tablesFor())).plannedProducts).toBe(false);
     });
 
+    test('the month\'s take-all fungicide rows are named, a pick or not; with the guide off or no take-all row the key says so', async () => {
+      live();
+      expect((await context(tablesFor())).plannedProducts.takeAllProductIds).toEqual([]);
+      const takeAllPlan = plan(addOns());
+      takeAllPlan.completionDefaults.addOns[2].raw = 'Test Artavia — mapped take-all areas, second spring application';
+      buildPlanForService.mockResolvedValue(takeAllPlan);
+      v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
+      expect((await context(tablesFor())).plannedProducts.takeAllProductIds).toEqual([P_ART]);
+      delete process.env.GATE_LAWN_TREATMENT_GUIDE;
+      expect('takeAllProductIds' in (await context(tablesFor())).plannedProducts).toBe(false);
+    });
+
     test('the staged row\'s gate notes ride an off-plan chinch product', async () => {
       live();
       v13GateNotes.mockReturnValue([{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }]);
