@@ -348,6 +348,20 @@ describe('the history reader', () => {
     expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
   });
 
+  // Codex round 12 on #6135: the add-on's product is found by catalog identity (names and aliases), the same resolver the
+  // job card, the feed and the completion use.
+  test('a product renamed in the Service Library, its old name kept as an alias, keeps its history in the limit', async () => {
+    const catalog = CATALOG.map((row) => (row.id === 'p-snap' ? { ...row, name: 'Snapshot Pro Granular' } : row));
+    const out = await load(world({ products_catalog: catalog, product_aliases: [{ product_id: 'p-snap', alias_name: 'Snapshot 2.5TG' }], property_application_history: [ledger('p-snap', 25)] }));
+    expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
+  });
+
+  test('duplicate-named active and inactive rows of one product: the history counts both ids', async () => {
+    const catalog = [...CATALOG, { id: 'p-snap-old', name: 'Snapshot 2.5TG', active: false }];
+    const out = await load(world({ products_catalog: catalog, property_application_history: [ledger('p-snap', 25), ledger('p-snap-old', 40)] }));
+    expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(40), daysBefore(25)]);
+  });
+
   test('a limited add-on whose product has no catalog row is an unreadable history, never an empty one', async () => {
     const catalog = CATALOG.filter((row) => row.id !== 'p-snap');
     await expect(load(world({ products_catalog: catalog, property_application_history: [ledger('p-snap', 25)] })))

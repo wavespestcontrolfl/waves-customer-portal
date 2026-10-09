@@ -16,7 +16,7 @@ import { areaAddOnRowServiceType, hostAreaAddOns, soldAreaText } from "../../lib
 const topchoice = { id: "prod-topchoice", name: "Topchoice", category: "insecticide", application_method: "granular_broadcast", rate_unit: "lb", default_rate_per_1000: 2 };
 const catalog = [topchoice, { id: "prod-other", name: "Test general product", category: "insecticide", application_method: "perimeter_spray" }];
 
-const fireAnt = { key: "area_addon_fire_ant_yard", name: "Fire Ant Yard Treatment", areaSqFt: 4200, tierSqFt: 5000, areaLabel: "lawn", grassType: null };
+const fireAnt = { key: "area_addon_fire_ant_yard", name: "Fire Ant Yard Treatment", areaSqFt: 4200, tierSqFt: 5000, areaLabel: "lawn", grassType: null, governed: { ratePer1000: 2, rateUnit: "lb", productName: "Topchoice Granular Insecticide", productId: "prod-topchoice", withheld: "The label rate is not verified yet." } };
 const sweep = { key: "area_addon_web_sweep", name: "Web Sweep", areaSqFt: null, tierSqFt: null, areaLabel: null, grassType: null };
 const bed = { key: "area_addon_bed_pre_emergent", name: "Bed Pre-Emergent Weed Control", areaSqFt: 900, tierSqFt: 1000, areaLabel: "bed", grassType: null };
 const attached = (addOns) => ({ areaAddOnRowsAttached: true, areaAddOns: addOns });
@@ -122,7 +122,7 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
   const snapshot = { id: "prod-snapshot", name: "Snapshot 2.5TG", category: "herbicide", application_method: "granular_broadcast", rate_unit: "lb", default_rate_per_1000: 3.45 };
   // The Tree & Shrub sheet has its own typed lane; the product list under test is the shared one every other host uses.
   const tsHost = pestHost;
-  const bedAddOn = { ...bed, governed: { ratePer1000: 3.45, rateUnit: "lb", productName: "Snapshot 2.5TG", withheld: null } };
+  const bedAddOn = { ...bed, governed: { ratePer1000: 3.45, rateUnit: "lb", productId: "prod-snapshot", productName: "Snapshot 2.5TG", withheld: null } };
   async function mountTs(service = { ...tsHost, ...attached([bedAddOn]) }) {
     await act(async () => { render(<CompletionPanel service={service} products={[snapshot, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
   }
@@ -194,7 +194,7 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
 describe("the add-on's product picker offers only the governed product", () => {
   const arena = { id: "prod-arena", name: "Arena 50 WDG", category: "insecticide", application_method: "broadcast_spray", rate_unit: "oz", default_rate_per_1000: 0.29 };
   const spot = (governed) => ({ key: "area_addon_lawn_insect_spot", name: "Lawn Insect Spot Treatment", areaSqFt: 1800, tierSqFt: 2000, areaLabel: "treated lawn", grassType: "st_augustine", governed });
-  const arenaRate = { ratePer1000: 0.147, rateUnit: "oz", productName: "Arena 50 WDG", withheld: null };
+  const arenaRate = { ratePer1000: 0.147, rateUnit: "oz", productId: "prod-arena", productName: "Arena 50 WDG", withheld: null };
   const optionsOf = (label) => within(screen.getByLabelText(label)).getAllByRole("option").map((option) => option.textContent);
 
   it("with the governed product known, it is the only choice (a rate the server holds back does not change that)", async () => {
@@ -205,12 +205,34 @@ describe("the add-on's product picker offers only the governed product", () => {
     expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Arena 50 WDG"]);
   });
 
-  it("with no governed product known, or none of it in the catalog, every product is offered (the server still flags a wrong one)", async () => {
-    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot(undefined)]) }} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
-    expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Arena 50 WDG", "Topchoice"]);
+  // Codex round 12 on #6135: the product is found by catalog identity on the server and sent by ID. The form never falls back to
+  // the whole catalog, and never matches a name.
+  it("a product renamed in the Service Library is still the governed one: the picker offers it by ID and its row takes the governed rate", async () => {
+    const renamed = { ...arena, name: "Arena Pro WDG" };
+    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot(arenaRate)]) }} products={[renamed, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Arena Pro WDG"]);
+    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: arena.id } });
+    expect(await screen.findByPlaceholderText("Rate")).toHaveValue(0.147);
+  });
+
+  it.each([
+    ["the feed carried no governed rate", undefined, [arena, topchoice], /could not be confirmed right now/],
+    ["the governed product is inactive or not in the catalog (the server says so)", { ...arenaRate, productId: null, productStatus: "inactive", productNote: "Arena 50 WDG is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.", withheld: "x" }, [arena, topchoice], /^Arena 50 WDG is not an active product in the Service Library, so no product can be chosen for this add-on\. Ask the office\.$/],
+    ["the governed product is not in the product list the form holds", arenaRate, [topchoice], /could not be confirmed right now/],
+  ])("nothing is offered when %s: no picker, the plain sentence", async (_name, governed, products, sentence) => {
+    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot(governed)]) }} products={products} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(screen.queryByLabelText("Product used for Lawn Insect Spot Treatment")).not.toBeInTheDocument();
+    expect(within(blockText()).getByTestId("area-addon-no-product")).toHaveTextContent(sentence);
+    expect(within(blockText()).queryByText(/Rate not filled in/)).not.toBeInTheDocument();
+  });
+
+  it("the add-on that IS the visit says so when its product cannot be chosen, and says nothing when it can", async () => {
+    const own = (productNote) => ({ ...addOnAsPrimary, areaAddOnOwn: { key: "area_addon_fire_ant_yard", governed: { ratePer1000: 2, rateUnit: "lb", productName: "Topchoice Granular Insecticide", productId: productNote ? null : "x", productNote, withheld: null } } });
+    await act(async () => { render(<CompletionPanel service={own("Topchoice Granular Insecticide is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.")} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(screen.getByTestId("area-addon-own-note")).toHaveTextContent("so no product can be chosen for this add-on");
     cleanup();
-    await act(async () => { render(<CompletionPanel service={{ ...lawnHost, ...attached([spot(arenaRate)]) }} products={[topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
-    expect(optionsOf("Product used for Lawn Insect Spot Treatment")).toEqual(["Choose a product", "Topchoice"]);
+    await act(async () => { render(<CompletionPanel service={own(null)} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(screen.queryByTestId("area-addon-own-note")).not.toBeInTheDocument();
   });
 });
 
@@ -243,7 +265,7 @@ describe("the add-on's row starts at the GOVERNED rate, never the catalog defaul
   const acelepryn = { id: "prod-acel", name: "Acelepryn Insecticide", category: "insecticide", application_method: "broadcast_spray", rate_unit: "fl_oz", default_rate_per_1000: 0.05 };
   const catalogWithRates = [arena, acelepryn, topchoice];
   const spot = (governed) => ({ key: "area_addon_lawn_insect_spot", name: "Lawn Insect Spot Treatment", areaSqFt: 1800, tierSqFt: 2000, areaLabel: "treated lawn", grassType: "st_augustine", governed });
-  const arenaRate = { ratePer1000: 0.147, rateUnit: "oz", productName: "Arena 50 WDG", withheld: null };
+  const arenaRate = { ratePer1000: 0.147, rateUnit: "oz", productId: "prod-arena", productName: "Arena 50 WDG", withheld: null };
 
   async function mountWith(service, products = catalogWithRates, width = 1024) {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
@@ -267,7 +289,7 @@ describe("the add-on's row starts at the GOVERNED rate, never the catalog defaul
   });
 
   it("the Acelepryn add-on prefills 0.184 fl oz, not the catalog 0.05", async () => {
-    const preventive = { key: "area_addon_lawn_insect_preventive", name: "Yearly Lawn Insect Preventive", areaSqFt: 4000, tierSqFt: 5000, areaLabel: "lawn", grassType: null, governed: { ratePer1000: 0.184, rateUnit: "fl_oz", productName: "Acelepryn Insecticide", withheld: null } };
+    const preventive = { key: "area_addon_lawn_insect_preventive", name: "Yearly Lawn Insect Preventive", areaSqFt: 4000, tierSqFt: 5000, areaLabel: "lawn", grassType: null, governed: { ratePer1000: 0.184, rateUnit: "fl_oz", productId: "prod-acel", productName: "Acelepryn Insecticide", withheld: null } };
     await mountWith({ ...pestHost, ...attached([preventive]) });
     fireEvent.change(screen.getByLabelText("Product used for Yearly Lawn Insect Preventive"), { target: { value: acelepryn.id } });
     expect(await screen.findByPlaceholderText("Rate")).toHaveValue(0.184);
@@ -282,17 +304,18 @@ describe("the add-on's row starts at the GOVERNED rate, never the catalog defaul
     expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
   });
 
-  it("a feed that carried no governed rate starts with no rate", async () => {
-    await mountWith({ ...lawnHost, ...attached([spot(undefined)]) });
-    fireEvent.change(screen.getByLabelText("Product used for Lawn Insect Spot Treatment"), { target: { value: arena.id } });
+  it("an own-visit row of a product other than the governed one starts with no rate (matched by ID, never by name)", async () => {
+    const own = { ...addOnAsPrimary, serviceType: "Yearly Lawn Insect Preventive", completionProfile: { serviceKey: "area_addon_lawn_insect_preventive", category: "lawn_care", requiresProducts: false },
+      areaAddOnOwn: { key: "area_addon_lawn_insect_preventive", governed: { ratePer1000: 0.184, rateUnit: "fl_oz", productName: "Acelepryn Insecticide", productId: "some-other-id", withheld: null } } };
+    await mountWith(own);
+    fireEvent.change(screen.getByPlaceholderText("Search products..."), { target: { value: "Acelepryn" } });
+    fireEvent.click(await screen.findByText("Acelepryn Insecticide"));
     expect(await screen.findByPlaceholderText("Rate")).toHaveValue(null);
-    cleanup();
-    // (With the governed product known, the picker offers no other product at all - see the next suite.)
   });
 
   it("the add-on that IS the visit: its product from the ordinary picker prefills the governed rate too", async () => {
     const own = { ...addOnAsPrimary, serviceType: "Yearly Lawn Insect Preventive", completionProfile: { serviceKey: "area_addon_lawn_insect_preventive", category: "lawn_care", requiresProducts: false },
-      areaAddOnOwn: { key: "area_addon_lawn_insect_preventive", governed: { ratePer1000: 0.184, rateUnit: "fl_oz", productName: "Acelepryn Insecticide", withheld: null } } };
+      areaAddOnOwn: { key: "area_addon_lawn_insect_preventive", governed: { ratePer1000: 0.184, rateUnit: "fl_oz", productId: "prod-acel", productName: "Acelepryn Insecticide", withheld: null } } };
     await mountWith(own);
     fireEvent.change(screen.getByPlaceholderText("Search products..."), { target: { value: "Acelepryn" } });
     fireEvent.click(await screen.findByText("Acelepryn Insecticide"));

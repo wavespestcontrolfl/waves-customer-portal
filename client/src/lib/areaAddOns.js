@@ -93,6 +93,11 @@ export function addOnForRow(service, row) {
   return ownKey ? { key: ownKey, governed: service?.areaAddOnOwn?.key === ownKey ? service.areaAddOnOwn.governed || null : null } : null;
 }
 
+// Is this catalog product the add-on's governed product? By the ID the feed carries (`governed.productId`), never by name.
+export function isGovernedProduct(governed, product) {
+  return governed?.productId != null && product?.id != null && String(governed.productId) === String(product.id);
+}
+
 // "0.147 oz per 1,000 sq ft" for the governed rate shown beside an add-on, or null when there is none.
 export function governedRateText(governed) {
   const rate = Number(governed?.ratePer1000);
@@ -103,15 +108,15 @@ export function governedRateText(governed) {
 // A product row built for an area add-on, with the GOVERNED rate in place of the catalog's default rate
 // (Arena 0.29 oz and Acelepryn 0.05 fl oz per 1,000 sq ft are not the add-on rates: 0.147 and 0.184). The
 // row prefills the governed rate and unit, and the governed rate is its ceiling for the existing high-rate
-// review. Only the add-on's own product has a governed rate: any other product on the row, a rate the
-// server holds back (unverified label, wrong grass) or a feed that carried none starts with NO rate, never the
-// catalog default. A row that belongs to no add-on comes back unchanged.
+// review. Only the add-on's own product has a governed rate, found by the catalog ID the server resolved (never the
+// name: a product renamed in the Service Library is still the same product): any other product on the row, a rate the
+// server holds back (unverified label, wrong grass), a product the server could not resolve or a feed that carried none
+// starts with NO rate, never the catalog default. A row that belongs to no add-on comes back unchanged.
 export function withGovernedAddOnRate(service, product, row) {
   const addOn = addOnForRow(service, product);
   if (!addOn) return row;
   const governed = addOn.governed;
-  const name = (value) => String(value || "").trim().toLowerCase();
-  const applies = governed && !governed.withheld && name(governed.productName) === name(product?.name);
+  const applies = governed && !governed.withheld && isGovernedProduct(governed, product);
   const rate = applies ? Number(governed.ratePer1000) : "";
   const unit = applies ? governed.rateUnit : row.rateUnit;
   return {

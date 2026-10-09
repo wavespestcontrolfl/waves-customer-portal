@@ -42,32 +42,90 @@ describe('the governed rate, one place', () => {
     expect(governed.isGoverned(SWEEP)).toBe(false);
   });
 
-  test('feedRate holds the rate back for the wrong grass or an unverified label, and says why', () => {
-    const verified = new Set(['arena 50 wdg', 'acelepryn insecticide']);
-    expect(governed.feedRate(ARENA, { grassType: 'st_augustine', verified })).toMatchObject({ ratePer1000: 0.147, rateUnit: 'oz', withheld: null });
-    expect(governed.feedRate(ARENA, { grassType: 'bahia', verified }).withheld).toBe('The rate is for St. Augustine only and the grass on the estimate is not.');
-    expect(governed.feedRate(ARENA, { grassType: null, verified }).withheld).toMatch(/St\. Augustine only/);
-    expect(governed.feedRate(ACEL, { verified }).withheld).toBeNull();
-    expect(governed.feedRate(SNAP, { verified }).withheld).toBe('The label rate is not verified yet.');
-    // The label check failing (null) holds every rate back.
-    expect(governed.feedRate(ACEL, { verified: null }).withheld).toBe('The label rate is not verified yet.');
-    expect(governed.feedRate(SWEEP, { verified })).toBeNull();
+  // The resolution of one add-on's product (resolveGovernedProducts): an active row to select, or none.
+  const active = (id, name, verifiedAt) => ({ status: 'active', ids: [id], product: { id, name, active: true, label_verified_at: verifiedAt } });
+
+  test('feedRate holds the rate back for the wrong grass or an unverified label, and says why; the product rides by ID', () => {
+    const arena = active('p-arena', 'Arena 50 WDG', '2026-08-01');
+    const acel = active('p-acel', 'Acelepryn Insecticide', '2026-08-01');
+    expect(governed.feedRate(ARENA, { grassType: 'st_augustine', resolution: arena })).toEqual({ ratePer1000: 0.147, rateUnit: 'oz', productName: 'Arena 50 WDG', productId: 'p-arena', productStatus: 'active', productNote: null, withheld: null });
+    expect(governed.feedRate(ARENA, { grassType: 'bahia', resolution: arena }).withheld).toBe('The rate is for St. Augustine only and the grass on the estimate is not.');
+    expect(governed.feedRate(ARENA, { grassType: null, resolution: arena }).withheld).toMatch(/St\. Augustine only/);
+    expect(governed.feedRate(ACEL, { resolution: acel }).withheld).toBeNull();
+    expect(governed.feedRate(SNAP, { resolution: active('p-snap', 'Snapshot 2.5TG', null) })).toMatchObject({ productId: 'p-snap', withheld: 'The label rate is not verified yet.' });
+    // The read failing (null) holds every rate back and names no product.
+    expect(governed.feedRate(ACEL, { resolution: null })).toMatchObject({
+      productId: null, productStatus: 'unknown', productNote: 'The product for this add-on could not be confirmed right now. Reload the visit or ask the office.', withheld: 'The label rate is not verified yet.',
+    });
+    expect(governed.feedRate(SWEEP, { resolution: arena })).toBeNull();
+  });
+
+  test.each([
+    ['inactive', { status: 'inactive', ids: ['p-snap'], product: null }],
+    ['unresolved', { status: 'unresolved', ids: [], product: null }],
+  ])('a governed product that is %s has no selectable product: the plain sentence, no product ID, no rate', (status, resolution) => {
+    expect(governed.feedRate(SNAP, { resolution })).toMatchObject({
+      productId: null,
+      productStatus: status,
+      productNote: 'Snapshot 2.5TG is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.',
+      withheld: 'Snapshot 2.5TG is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.',
+    });
+  });
+
+  describe('the one resolver: the catalog product of an add-on, by identity', () => {
+    const row = (id, name, extra = {}) => ({ id, name, active: true, aliases: [], ...extra });
+
+    test('a product renamed in the Service Library, its old name kept as an alias, is the same product', () => {
+      const renamed = row('p-snap', 'Snapshot Pro Granular', { aliases: ['Snapshot 2.5TG'], label_verified_at: '2026-08-01' });
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-other', 'Demand CS'), renamed])).toMatchObject({ status: 'active', ids: ['p-snap'], product: { id: 'p-snap' } });
+    });
+
+    test('duplicate-named active and inactive rows: the active one is selected, history counts both ids', () => {
+      const inactive = row('p-old', 'Snapshot 2.5TG', { active: false });
+      const live = row('p-new', 'Snapshot 2.5TG');
+      for (const catalog of [[inactive, live], [live, inactive]]) {
+        const out = governed.resolveProductIn('Snapshot 2.5TG', catalog);
+        expect(out.status).toBe('active');
+        expect(out.product.id).toBe('p-new');
+        expect([...out.ids].sort()).toEqual(['p-new', 'p-old']);
+      }
+    });
+
+    test('only inactive rows: nothing to select, history still counts them; no row at all: unresolved', () => {
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-old', 'Snapshot 2.5TG', { active: false })])).toEqual({ status: 'inactive', product: null, ids: ['p-old'] });
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-x', 'Demand CS')])).toEqual({ status: 'unresolved', product: null, ids: [] });
+      // A null `active` is active (the catalog's own rule), like the job card's.
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-n', 'Snapshot 2.5TG', { active: null })]).status).toBe('active');
+    });
+
+    test('resolveGovernedProducts reads the catalog and its aliases once, for every governed key, and skips the sweep', async () => {
+      const calls = [];
+      const knex = (table) => { calls.push(table); return fakeKnex({ products_catalog: [{ id: 'p-snap', name: 'Snapshot Pro Granular', active: true }, { id: 'p-arena', name: 'Arena 50 WDG', active: false }], product_aliases: [{ product_id: 'p-snap', alias_name: 'Snapshot 2.5TG' }] })(table); };
+      const out = await governed.resolveGovernedProducts(knex, [SNAP, ARENA, SNAP, SWEEP]);
+      expect(calls).toEqual(['products_catalog', 'product_aliases']);
+      expect([...out.keys()]).toEqual([SNAP, ARENA]);
+      expect(out.get(SNAP)).toMatchObject({ status: 'active', ids: ['p-snap'] });
+      expect(out.get(ARENA)).toMatchObject({ status: 'inactive', ids: ['p-arena'], product: null });
+      expect(await governed.resolveGovernedProducts(knex, [SWEEP])).toEqual(new Map());
+      expect(calls).toHaveLength(2);
+    });
   });
 });
 
 describe('the schedule feed', () => {
   test('every attached add-on carries its governed rate, the visit that IS an add-on carries its own, in ONE catalog read', async () => {
     const calls = [];
-    const knex = (table) => { calls.push(table); return fakeKnex({ products_catalog: [{ name: 'Arena 50 WDG' }] })(table); };
+    const knex = (table) => { calls.push(table); return fakeKnex({ products_catalog: [{ id: 'p-arena', name: 'Arena 50 WDG', active: true, label_verified_at: '2026-08-01' }] })(table); };
     const byVisit = new Map([[VISIT, [{ key: ACEL, name: 'Yearly Lawn Insect Preventive' }, { key: SWEEP, name: 'Web Sweep' }]]]);
     const ownRow = { id: 'v-own', service_key_snapshot: ARENA, area_addon_scope: JSON.stringify({ grassType: 'st_augustine' }) };
     const own = await governed.areaAddOnFeed(knex, byVisit, [{ id: VISIT }, ownRow]);
-    expect(calls).toEqual(['products_catalog']);
+    // One catalog read (its aliases follow it).
+    expect(calls).toEqual(['products_catalog', 'product_aliases']);
     const [acel, sweep] = byVisit.get(VISIT);
-    // Arena is verified; Acelepryn is not in the verified set, so its rate is held back (not the catalog default).
-    expect(acel.governed).toMatchObject({ ratePer1000: 0.184, rateUnit: 'fl_oz', productName: 'Acelepryn Insecticide', withheld: 'The label rate is not verified yet.' });
+    // Arena is verified; Acelepryn has no catalog row here, so nothing is selectable and its rate is held back (not the catalog default).
+    expect(acel.governed).toMatchObject({ ratePer1000: 0.184, rateUnit: 'fl_oz', productName: 'Acelepryn Insecticide', productId: null, productStatus: 'unresolved', withheld: expect.stringContaining('no product can be chosen') });
     expect(sweep.governed).toBeUndefined();
-    expect(own.get('v-own')).toEqual({ key: ARENA, governed: { ratePer1000: 0.147, rateUnit: 'oz', productName: 'Arena 50 WDG', withheld: null } });
+    expect(own.get('v-own')).toEqual({ key: ARENA, governed: { ratePer1000: 0.147, rateUnit: 'oz', productName: 'Arena 50 WDG', productId: 'p-arena', productStatus: 'active', productNote: null, withheld: null } });
     expect(own.has(VISIT)).toBe(false);
   });
 
@@ -79,9 +137,25 @@ describe('the schedule feed', () => {
     expect(calls).toEqual([]);
   });
 
-  test('a failed label read never fails the feed: every rate is held back', async () => {
+  test('a failed label read never fails the feed: every rate is held back and no product is named', async () => {
     const own = await governed.areaAddOnFeed(fakeKnex({ products_catalog: new Error('connection lost') }), new Map(), [{ id: 'v', service_key_snapshot: ACEL }]);
-    expect(own.get('v').governed.withheld).toBe('The label rate is not verified yet.');
+    expect(own.get('v').governed).toMatchObject({ withheld: 'The label rate is not verified yet.', productId: null, productStatus: 'unknown', productNote: expect.stringContaining('could not be confirmed') });
+  });
+
+  test('a renamed product (old name kept as an alias) rides the feed by ID with its verified label; an inactive one is not offered', async () => {
+    const knex = fakeKnex({
+      products_catalog: [
+        { id: 'p-arena', name: 'Arena Pro WDG', active: true, label_verified_at: '2026-08-01' },
+        { id: 'p-acel', name: 'Acelepryn Insecticide', active: false, label_verified_at: '2026-08-01' },
+      ],
+      product_aliases: [{ product_id: 'p-arena', alias_name: 'Arena 50 WDG' }],
+    });
+    const byVisit = new Map([[VISIT, [{ key: ARENA, grassType: 'st_augustine' }, { key: ACEL }]]]);
+    const own = await governed.areaAddOnFeed(knex, byVisit, [{ id: 'v-own', service_key_snapshot: ARENA, area_addon_scope: { grassType: 'st_augustine' } }]);
+    const [arena, acel] = byVisit.get(VISIT);
+    expect(arena.governed).toMatchObject({ productId: 'p-arena', productName: 'Arena 50 WDG', withheld: null });
+    expect(own.get('v-own').governed).toMatchObject({ productId: 'p-arena', withheld: null });
+    expect(acel.governed).toMatchObject({ productId: null, productStatus: 'inactive', withheld: expect.stringContaining('not an active product in the Service Library') });
   });
 
   test('the route carries it on both feed payloads and only when the visit has an add-on', () => {
@@ -346,8 +420,12 @@ describe('a row recorded above the governed rate is flagged, never blocked', () 
       message: 'Recorded. The office will review: Some other product was recorded for an add-on that uses Arena 50 WDG.',
     })]);
     // A catalog row the matcher resolved from the protocol's hint is the governed product, whatever its name says.
-    expect(governed.rateFindings([row({ product_name: 'Arena 50 WDG Insecticide', product_id: 'p-arena', application_rate: 0.147 })], new Map([[ARENA, 'p-arena']]))).toEqual([]);
-    expect(governed.rateFindings([row({ product_id: 'p-other', application_rate: 0.147 })], new Map([[ARENA, 'p-arena']]))).toHaveLength(1);
+    expect(governed.rateFindings([row({ product_name: 'Arena 50 WDG Insecticide', product_id: 'p-arena', application_rate: 0.147 })], new Map([[ARENA, ['p-arena']]]))).toEqual([]);
+    expect(governed.rateFindings([row({ product_id: 'p-other', application_rate: 0.147 })], new Map([[ARENA, ['p-arena']]]))).toHaveLength(1);
+    // Any row of the product counts (a duplicate-named or deactivated row of it); a renamed product recorded under its new name passes.
+    expect(governed.rateFindings([row({ product_name: 'Arena Pro WDG', product_id: 'p-arena-old', application_rate: 0.147 })], new Map([[ARENA, ['p-arena', 'p-arena-old']]]))).toEqual([]);
+    // No row resolved (an empty list): the recorded name is compared with the hint, as before.
+    expect(governed.rateFindings([row({ product_name: 'Some other product', product_id: 'p-other' })], new Map([[ARENA, []]]))).toHaveLength(1);
     // The wrong product is not ALSO compared with the rate.
     expect(governed.rateFindings([row({ product_name: 'Some other product', application_rate: 5 })])).toHaveLength(1);
   });
@@ -370,6 +448,17 @@ describe('a row recorded above the governed rate is flagged, never blocked', () 
     const broken = fakeKnex({ service_products: new Error('connection lost') }, { columns: { service_products: { area_addon_key: {} } } });
     expect(await governed.flagRatesAboveGoverned({ svc: {}, record: { id: 'r' }, database: broken, advisory, notify })).toBe(advisory);
     expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  test('the completion check resolves the governed product through the catalog (a renamed product is still the governed one)', async () => {
+    const tables = {
+      service_products: [row({ product_name: 'Arena Pro WDG', product_id: 'p-arena', application_rate: 0.147 }), row({ product_name: 'Other', product_id: 'p-other', application_rate: 0.147 })],
+      products_catalog: [{ id: 'p-arena', name: 'Arena Pro WDG', active: true }],
+      product_aliases: [{ product_id: 'p-arena', alias_name: 'Arena 50 WDG' }],
+    };
+    const notify = jest.fn(async () => {});
+    const out = await governed.flagRatesAboveGoverned({ svc: {}, record: { id: 'r' }, database: fakeKnex(tables, { columns: { service_products: { area_addon_key: {} } } }), advisory: null, notify });
+    expect(out.blocks).toEqual([expect.objectContaining({ productId: 'p-other', message: expect.stringContaining('was recorded for an add-on that uses Arena 50 WDG') })]);
   });
 
   test('the completion wires it: the tags before the insert, the column on the row, the check after the limit findings', () => {

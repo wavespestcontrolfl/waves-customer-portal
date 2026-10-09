@@ -49,7 +49,7 @@ const { isServingProtocol } = require('./lawn-program');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
-const { addOnKeyOfVisit } = require('./area-addon-governed-rate');
+const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -1231,11 +1231,14 @@ function resolveAddOnLines({ name, category, serviceKey = null, areaAddOnScope =
       name,
       products: lines.length,
       visit: resolved.visit ? { number: resolved.visit.visit || null, month: resolved.visit.month || null } : null,
-      note: resolved.visit ? null : 'No protocol matched this add-on',
+      note: resolved.visit ? noProductNote(addOnKey, lines) : 'No protocol matched this add-on',
       procedure: resolved.procedure || null,
     },
   };
 }
+
+// The plain sentence for a chemical add-on whose governed product is not a selectable catalog row (no lines), else null.
+const noProductNote = (addOnKey, lines) => (addOnKey && !lines.length && governedRateFor(addOnKey) ? noProductSentence(governedRateFor(addOnKey).productName) : null);
 
 /**
  * The primary line plus every add-on line attached to the visit. Add-ons
@@ -1254,7 +1257,9 @@ async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {
     lines.push(...found.lines);
     addons.push(found.report);
   }
-  return { ...primary, lines, addons };
+  // The add-on that IS the visit has no product to select: say so plainly in place of the generic "no protocol products".
+  const ownNote = noProductNote(ownKey, primary.lines);
+  return { ...primary, lines, addons, ...(ownNote ? { note: ownNote } : {}) };
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1281,7 +1286,9 @@ function linesFromLineMeta(visit, catalog) {
   // them onto one card as extraLines.
   for (const [raw, meta] of Object.entries(visit?.lineMeta || {})) {
     for (const hint of meta?.catalogProductHints || []) {
-      const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
+      // An area add-on visit (labelFacts) finds its product through the one resolver the feed, the picker and the
+      // yearly limit use (area-addon-governed-rate.js), so a renamed product is the same row on every surface.
+      const product = visit?.labelFacts ? resolveProductIn(hint, catalog).product : matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
       if (!product || lines.some((l) => l.raw === raw && l.product.id === product.id)) continue;
       // Conditional when the line sits in the visit's secondary text OR is
       // phrased as a condition (isConditionalLine).

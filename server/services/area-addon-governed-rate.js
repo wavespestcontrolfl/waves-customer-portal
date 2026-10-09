@@ -24,6 +24,7 @@ const protocols = require('../config/protocols.json');
 const { MATCH_RULES } = require('./protocol-matcher');
 const { areaAddOnKeysByVisit } = require('./area-addon-visit-rows');
 const { rateUnitsMatch } = require('./waveguard-approval-engine');
+const { matchCatalogProduct } = require('./waveguard-plan-engine');
 const { describeInventoryConversion, unitDefinition } = require('./inventory-units');
 
 const AREA_ADDON_KEY_PREFIX = 'area_addon_';
@@ -66,32 +67,82 @@ function governedRateFor(serviceKey) {
   return found ? { ratePer1000: Number(found.facts.ratePer1000), rateUnit: found.facts.rateUnit, productName: found.productName } : null;
 }
 
-// The rate the completion form may show, with the reason it is held back, or null: the same two
-// holds the job card applies (job-card.js governedForCard): the grass the rate is bound to is not
-// the grass on the estimate, or the catalog label is not verified. `verified` is the set of lower-cased
-// product names whose label is verified (null = the check could not run).
-function feedRate(serviceKey, { grassType = null, verified = null } = {}) {
+// ---------------------------------------------------------------------------------------------------------------
+// The catalog product of an add-on (Codex round 12 on #6135). ONE resolver, by catalog identity (the matcher the job
+// card and the plan engine use: the protocol's hint against every product name and alias), never an exact name. A
+// product renamed in the Service Library keeps its old name as an alias and stays the same product everywhere:
+//   - the job card line, the schedule feed (verified label, `productId`), the completion picker and rate prefill
+//     (by ID), the wrong-product and over-rate checks at completion, and the yearly-limit history (limits.js).
+// The answer is a resolution { status, product, ids }:
+//   active      `product` is the row to select (an active row; of duplicate-named rows the active one wins).
+//   inactive    every row of that product is deactivated: history still counts `ids`, nothing can be selected.
+//   unresolved  no catalog row at all: nothing to select and nothing to read history for (the limit reader fails closed).
+// `ids` is every row of the product, active or not: the ledger of a deactivated or duplicate row is still the product's.
+// ---------------------------------------------------------------------------------------------------------------
+const isActiveRow = (row) => row.active !== false;
+
+// The resolution of one product hint against catalog rows ({ id, name, active, aliases }). Pure.
+function resolveProductIn(productHint, catalog) {
+  const top = productHint ? matchCatalogProduct({ raw: productHint, catalogProductHints: [productHint] }, catalog) : null;
+  if (!top) return { status: 'unresolved', product: null, ids: [] };
+  const same = catalog.filter((row) => lower(row.name) === lower(top.name));
+  const live = same.filter(isActiveRow);
+  const product = live.find((row) => String(row.id) === String(top.id)) || live[0] || null;
+  return { status: product ? 'active' : 'inactive', product, ids: same.map((row) => row.id) };
+}
+
+// Every catalog row with its aliases, active or not. Throws when a read fails: the callers decide what that means.
+async function loadProductCatalog(knex) {
+  const products = await knex('products_catalog').select('id', 'name', 'active', 'label_verified_at');
+  const aliases = products.length ? await knex('product_aliases').whereIn('product_id', products.map((row) => row.id)).select('product_id', 'alias_name') : [];
+  const byProduct = new Map();
+  for (const row of aliases) byProduct.set(row.product_id, [...(byProduct.get(row.product_id) || []), row.alias_name]);
+  return products.map((row) => ({ ...row, aliases: byProduct.get(row.id) || [] }));
+}
+
+/**
+ * The resolution of each chemical add-on's governed product, as a Map of catalog service key to resolution (keys with no
+ * governed product are left out). One catalog read for all of them, or none when `catalog` is passed. Throws when the read
+ * fails.
+ */
+async function resolveGovernedProducts(knex, serviceKeys, { catalog = null } = {}) {
+  const keys = [...new Set(serviceKeys || [])].filter(isGoverned);
+  const out = new Map();
+  if (!keys.length) return out;
+  const rows = catalog || await loadProductCatalog(knex);
+  for (const key of keys) out.set(key, resolveProductIn(governedRateFor(key).productName, rows));
+  return out;
+}
+
+// The plain sentence for an add-on that has no product to select (the card, the form and the feed say the same), and the one
+// for a product lookup that could not run.
+const noProductSentence = (productName) => `${productName} is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.`;
+const UNCONFIRMED_PRODUCT_SENTENCE = 'The product for this add-on could not be confirmed right now. Reload the visit or ask the office.';
+
+// The rate the completion form may show, with the reason it is held back, or null: the same holds the job card
+// applies (job-card.js governedForCard): the grass the rate is bound to is not the grass on the estimate, or the
+// product's label is not verified. `resolution` is the add-on's resolveGovernedProducts entry (null = the read could not
+// run: every rate is held back). `productId` is the product to select, by ID; null when none can be selected.
+function feedRate(serviceKey, { grassType = null, resolution = null } = {}) {
   const found = governedVisit(serviceKey);
   if (!found) return null;
   const needed = found.facts.requiresGrass || null;
+  const product = resolution ? resolution.product : null;
+  // Why the form has no product to offer (null when it has one): the picker is filled from `productId` alone.
+  const productNote = product ? null : (resolution ? noProductSentence(found.productName) : UNCONFIRMED_PRODUCT_SENTENCE);
   const withheld = (needed && grassType !== needed && `The rate is for ${GRASS_NAMES[needed] || needed} only and the grass on the estimate is not.`)
-    || (!(verified && verified.has(lower(found.productName))) && 'The label rate is not verified yet.')
+    || (resolution && productNote)
+    || (!(product && product.label_verified_at) && 'The label rate is not verified yet.')
     || null;
-  return { ratePer1000: Number(found.facts.ratePer1000), rateUnit: found.facts.rateUnit, productName: found.productName, withheld };
-}
-
-// Lower-cased names of the add-on products whose catalog label is verified. null when the read fails
-// (every rate is then held back; the completion check still applies).
-async function verifiedProductNames(knex, serviceKeys) {
-  const names = [...new Set(serviceKeys.map((key) => governedRateFor(key)?.productName).filter(Boolean))];
-  if (!names.length) return new Set();
-  try {
-    const rows = await knex('products_catalog').whereIn('name', names).whereNotNull('label_verified_at').select('name');
-    return new Set(rows.map((row) => lower(row.name)));
-  } catch (err) {
-    logger.warn(`[area-addon-governed-rate] label check failed: ${err.message}`);
-    return null;
-  }
+  return {
+    ratePer1000: Number(found.facts.ratePer1000),
+    rateUnit: found.facts.rateUnit,
+    productName: found.productName,
+    productId: product ? product.id : null,
+    productStatus: resolution ? resolution.status : 'unknown',
+    productNote,
+    withheld,
+  };
 }
 
 function parseScope(value) {
@@ -108,19 +159,26 @@ function ownAreaAddOnKey(service) {
 
 /**
  * Adds the governed rate to the schedule feed. `byVisit` is areaAddOnSoldByVisit's map (visit id to its
- * attached add-on entries); each entry gains `governed`. Returns a map of visit id to `{ key, governed }`
- * for the visits whose OWN service is a chemical add-on. One products_catalog read for the whole feed,
- * and none when no visit carries a chemical add-on. Never throws: a failed read holds every rate back.
+ * attached add-on entries); each entry gains `governed`, which names the product to select by ID (`productId`). Returns a
+ * map of visit id to `{ key, governed }` for the visits whose OWN service is a chemical add-on. One catalog read for the
+ * whole feed, and none when no visit carries a chemical add-on. Never throws: a failed read holds every rate back and
+ * sends no product ID.
  */
 async function areaAddOnFeed(knex, byVisit, serviceRows = []) {
   const own = new Map();
   const ownRows = serviceRows.map((row) => [row, ownAreaAddOnKey(row)]).filter(([, key]) => key && isGoverned(key));
   const attached = [...byVisit.values()].flat().filter((entry) => isGoverned(entry.key));
   if (!ownRows.length && !attached.length) return own;
-  const verified = await verifiedProductNames(knex, [...ownRows.map(([, key]) => key), ...attached.map((entry) => entry.key)]);
-  for (const entry of attached) entry.governed = feedRate(entry.key, { grassType: entry.grassType, verified });
+  let resolved = null;
+  try {
+    resolved = await resolveGovernedProducts(knex, [...ownRows.map(([, key]) => key), ...attached.map((entry) => entry.key)]);
+  } catch (err) {
+    logger.warn(`[area-addon-governed-rate] governed product lookup failed: ${err.message}`);
+  }
+  const resolutionOf = (key) => (resolved && resolved.get(key)) || null;
+  for (const entry of attached) entry.governed = feedRate(entry.key, { grassType: entry.grassType, resolution: resolutionOf(entry.key) });
   for (const [row, key] of ownRows) {
-    own.set(String(row.id), { key, governed: feedRate(key, { grassType: parseScope(row.area_addon_scope)?.grassType || null, verified }) });
+    own.set(String(row.id), { key, governed: feedRate(key, { grassType: parseScope(row.area_addon_scope)?.grassType || null, resolution: resolutionOf(key) }) });
   }
   return own;
 }
@@ -236,6 +294,15 @@ function recordedRateText(rate, rateUnit) {
   return `${rate} ${unitWords(parts.base)} per ${parts.sqft === SQFT_PER_ACRE ? 'acre' : '1,000 sq ft'}`;
 }
 
+// Is the recorded row the add-on's governed product? The governed product is the catalog product resolveGovernedProducts
+// finds from the protocol's hint (the same product the job card, the picker and the yearly-limit reader use), so a row
+// is held to the product's ID, any of its rows; only when no row resolves is the hint compared with the recorded name.
+function isGovernedProduct(row, governed, expectedIds) {
+  return expectedIds && expectedIds.length
+    ? expectedIds.some((id) => String(id) === String(row.product_id))
+    : lower(row.product_name) === lower(governed.productName);
+}
+
 // One finding for each tagged row that breaks its add-on's governing: recorded with a product other than the
 // governed one; recorded with no usable rate, or in a unit that has no safe conversion to the governed unit (it
 // could not be checked, and is never a silent pass); or recorded above the governed rate once converted to the
@@ -246,11 +313,7 @@ function rateFindings(rows, expectedProductIds = new Map()) {
     const governed = governedRateFor(row.area_addon_key);
     if (!governed) continue;
     const rate = Number(row.application_rate);
-    // The governed product is the catalog row the job card's matcher resolves from the protocol's hint (the same row the
-    // yearly-limit reader uses); only when no row resolves is the hint compared with the recorded name.
-    const expectedId = expectedProductIds.get(row.area_addon_key);
-    const sameProduct = expectedId ? String(row.product_id) === String(expectedId) : lower(row.product_name) === lower(governed.productName);
-    if (!sameProduct) {
+    if (!isGovernedProduct(row, governed, expectedProductIds.get(row.area_addon_key))) {
       findings.push({
         code: 'application_limit_exceeded',
         productId: row.product_id || null,
@@ -373,8 +436,7 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
     const addOnKeys = [...new Set(rows.map((row) => row.area_addon_key))];
     const expected = new Map();
     try {
-      const byShortKey = await require('./area-addon-limits').productIdsByKey(database, addOnKeys.map((key) => key.slice(AREA_ADDON_KEY_PREFIX.length)));
-      for (const key of addOnKeys) if (byShortKey.has(key.slice(AREA_ADDON_KEY_PREFIX.length))) expected.set(key, byShortKey.get(key.slice(AREA_ADDON_KEY_PREFIX.length)));
+      for (const [key, resolution] of await resolveGovernedProducts(database, addOnKeys)) expected.set(key, resolution.ids);
     } catch (err) {
       logger.warn(`[area-addon-governed-rate] governed product lookup failed for record ${record.id}: ${err.message}`);
     }
@@ -389,7 +451,11 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
 }
 
 module.exports = {
+  noProductSentence,
+  UNCONFIRMED_PRODUCT_SENTENCE,
   addOnKeyOfVisit,
+  resolveProductIn,
+  resolveGovernedProducts,
   LIMIT_TYPE,
   WRONG_PRODUCT_LIMIT_TYPE,
   UNCHECKED_RATE_LIMIT_TYPE,

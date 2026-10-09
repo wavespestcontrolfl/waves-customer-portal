@@ -2180,6 +2180,22 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
         expect(merged[1]).toMatchObject({ raw: 'b', extraLines: ['a'], addOnKey: BED });
       });
 
+      test('a product with no selectable catalog row says so plainly, as an add-on and as the visit', async () => {
+        const without = catalog.filter((row) => row.id !== 'gov0');
+        const hosted = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [bedAddOn] }, {}, fullProtocols, without);
+        const sentence = 'Snapshot 2.5TG is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.';
+        expect(hosted.out.addons).toMatchObject([{ products: 0, note: sentence }]);
+        const own = await cardsOf({ isLawn: true, serviceId: 'svc1', serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: BED, scheduledDate: '2026-09-04', addons: [] }, {}, fullProtocols, without);
+        expect(own.out.note).toBe(sentence);
+        expect(own.cards).toEqual([]);
+      });
+
+      test('a product renamed with its old name kept as an alias is still the add-on line (the one resolver)', async () => {
+        const renamed = catalog.map((row) => (row.id === 'gov0' ? { ...row, name: 'Snapshot Pro Granular', aliases: ['Snapshot 2.5TG'] } : row));
+        const { cards } = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [bedAddOn] }, {}, fullProtocols, renamed);
+        expect(cards.find((card) => card.addOnKey === BED)).toMatchObject({ id: 'gov0', name: 'Snapshot Pro Granular', rowId: `gov0::${BED}` });
+      });
+
       test('the readiness strip asks no carrier rate for a governed add-on line (it is never a tank amount)', () => {
         const base = { facts: { serviceId: 's' }, blocks: [], sprayCheck: { hold: false, verdicts: [] }, tank: { calibrated: false }, isToday: true, now: new Date('2026-09-04T12:00:00Z') };
         const line = (extra) => ({ raw: 'x', role: 'base', selected: true, product: { id: 'a', name: 'Arena', formulation: 'WDG', application_method: 'foliar', default_rate_per_1000: 0.29 }, ...extra });

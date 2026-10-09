@@ -194,7 +194,7 @@ describe("isAreaAddOnPricedPerApplication", () => {
 describe("the governed rate on an add-on's product row", () => {
   const arena = { id: "prod-arena", name: "Arena 50 WDG" };
   const catalogRow = { rate: 0.29, rateUnit: "oz", amountUnit: "oz", catalogRateUnit: "oz", maxLabelRatePer1000: 0.37, totalAmount: 0.58, areaValue: 2000, areaUnit: "sqft" };
-  const governed = { ratePer1000: 0.147, rateUnit: "oz", productName: "Arena 50 WDG", withheld: null };
+  const governed = { ratePer1000: 0.147, rateUnit: "oz", productName: "Arena 50 WDG", productId: "prod-arena", withheld: null };
   const spot = { key: "area_addon_lawn_insect_spot", name: "Lawn Insect Spot Treatment", governed };
   const host = { completionProfile: { serviceKey: "lawn_standard" }, areaAddOns: [spot] };
   const ownVisit = { completionProfile: { serviceKey: "area_addon_lawn_insect_spot" }, areaAddOnOwn: { key: "area_addon_lawn_insect_spot", governed } };
@@ -220,6 +220,17 @@ describe("the governed rate on an add-on's product row", () => {
     expect(withGovernedAddOnRate({ ...host, areaAddOns: [{ ...spot, governed: { ...governed, withheld: "The label rate is not verified yet." } }] }, { ...arena, areaAddOnKey: spot.key }, catalogRow)).toMatchObject(blank);
     expect(withGovernedAddOnRate({ ...host, areaAddOns: [{ key: spot.key, name: spot.name }] }, { ...arena, areaAddOnKey: spot.key }, catalogRow)).toMatchObject(blank);
     expect(withGovernedAddOnRate({ ...ownVisit, areaAddOnOwn: undefined }, arena, catalogRow)).toMatchObject(blank);
+    // No product ID in the feed (the server could not resolve the product): never matched by name.
+    expect(withGovernedAddOnRate({ ...host, areaAddOns: [{ ...spot, governed: { ...governed, productId: null } }] }, { ...arena, areaAddOnKey: spot.key }, catalogRow)).toMatchObject(blank);
+  });
+
+  it("the governed product is matched by ID: a renamed product still gets the rate, a same-named other product does not", async () => {
+    const { withGovernedAddOnRate, isGovernedProduct } = await import("./areaAddOns");
+    expect(withGovernedAddOnRate(host, { id: "prod-arena", name: "Arena Pro WDG", areaAddOnKey: spot.key }, catalogRow)).toMatchObject({ rate: 0.147 });
+    expect(withGovernedAddOnRate(host, { id: "prod-other", name: "Arena 50 WDG", areaAddOnKey: spot.key }, catalogRow)).toMatchObject({ rate: "" });
+    expect(isGovernedProduct(governed, { id: "prod-arena" })).toBe(true);
+    expect(isGovernedProduct({ ...governed, productId: null }, { id: "prod-arena" })).toBe(false);
+    expect(isGovernedProduct(undefined, { id: "prod-arena" })).toBe(false);
   });
 
   it("a row that belongs to no add-on comes back unchanged (ordinary visits, a web sweep, an add-on the visit does not carry)", async () => {

@@ -43,26 +43,24 @@ const configOf = (key) => (Object.prototype.hasOwnProperty.call(AREA_ADDONS.item
 const limitedKeys = (keys) => [...new Set(keys || [])].filter((key) => addOnLimit(configOf(key)));
 const dayOf = (value) => (value ? etCalendarDayOf(value) : null);
 
-// The catalog product each limited add-on reads its history for: the governed protocol's own hint
-// resolved by the job card's matcher, so the card and the check name the same row.
-async function productIdsByKey(database, keys) {
-  const { matchCatalogProduct } = require('./waveguard-plan-engine');
-  // Every catalog row, active or not: a product deactivated in the Service Library keeps its ledger history, and
-  // filtering it out here would make those applications invisible to the limit.
-  const products = await database('products_catalog').select('id', 'name');
-  const aliases = products.length
-    ? await database('product_aliases').whereIn('product_id', products.map((p) => p.id)).select('product_id', 'alias_name')
-    : [];
-  const byProduct = new Map();
-  for (const row of aliases) byProduct.set(row.product_id, [...(byProduct.get(row.product_id) || []), row.alias_name]);
-  const catalog = products.map((p) => ({ ...p, aliases: byProduct.get(p.id) || [] }));
-  const out = new Map();
-  for (const key of keys) {
-    const hint = configOf(key)?.limitProduct;
-    const product = hint ? matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog) : null;
-    if (product) out.set(key, product.id);
+// The catalog rows each limited add-on reads its history for, as a Map of key to ids: every row of the add-on's governed
+// product, active or not (area-addon-governed-rate.js resolveGovernedProducts, the one resolver). A product deactivated
+// in the Service Library keeps its ledger history, and so does a duplicate-named row of it. A limited add-on whose
+// governed product has no catalog row has no readable ledger: that is an unreadable history (the callers answer it with
+// the custom-quote line or the history-unavailable refusal), never an empty one.
+async function limitProductIds(database, keys) {
+  const serviceKeys = new Map(keys.map((key) => [configOf(key).serviceKey, key]));
+  const resolved = await require('./area-addon-governed-rate').resolveGovernedProducts(database, [...serviceKeys.keys()]);
+  const idsByKey = new Map();
+  for (const [serviceKey, key] of serviceKeys) {
+    const resolution = resolved.get(serviceKey);
+    if (resolution && resolution.ids.length) idsByKey.set(key, resolution.ids);
   }
-  return out;
+  const unresolved = keys.filter((key) => !idsByKey.has(key));
+  if (unresolved.length) {
+    throw Object.assign(new Error(`No catalog product for the limit of: ${unresolved.join(', ')}`), { code: 'AREA_ADDON_LIMIT_PRODUCT_UNRESOLVED' });
+  }
+  return idsByKey;
 }
 
 // The treated property: the one the caller names, else the customer's only active property, else
@@ -75,7 +73,7 @@ async function resolvePropertyId(database, customerId, propertyId) {
 
 // Applications of each key's product on the property in the last 12 months, from the ledger.
 async function ledgerDates(database, { customerId, propertyId, productByKey, asOf, excludeVisitId }) {
-  const ids = [...productByKey.values()];
+  const ids = [...productByKey.values()].flat();
   const out = new Map();
   if (!ids.length) return out;
   const applicationLimits = require('./application-limits');
@@ -85,7 +83,7 @@ async function ledgerDates(database, { customerId, propertyId, productByKey, asO
     .where('application_date', '>', addDays(asOf, -WINDOW_DAYS))
     .whereNull('retracted_at'), database, { propertyId, excludeScheduledServiceId: excludeVisitId }, 'property_application_history')
     .select('product_id', 'application_date');
-  const keyOfProduct = new Map([...productByKey].map(([key, id]) => [String(id), key]));
+  const keyOfProduct = new Map([...productByKey].flatMap(([key, productIds]) => productIds.map((id) => [String(id), key])));
   for (const row of rows) {
     const key = keyOfProduct.get(String(row.product_id));
     if (key) out.set(key, [...(out.get(key) || []), dayOf(row.application_date)]);
@@ -157,18 +155,6 @@ async function heldDates(database, { customerId, keys, place, prospect }) {
     }
   }
   return out;
-}
-
-// The catalog row each limited add-on reads its history for. A limited add-on whose governed product has no catalog row has
-// no readable ledger: that is an unreadable history (the callers answer it with the custom-quote line or the
-// history-unavailable refusal), never an empty one.
-async function limitProductIds(database, keys) {
-  const productByKey = await productIdsByKey(database, keys);
-  const unresolved = keys.filter((key) => !productByKey.has(key));
-  if (unresolved.length) {
-    throw Object.assign(new Error(`No catalog product for the limit of: ${unresolved.join(', ')}`), { code: 'AREA_ADDON_LIMIT_PRODUCT_UNRESOLVED' });
-  }
-  return productByKey;
 }
 
 // Is anyone known to read a history for? A customer, or a prospect with a phone or an address (their holds count).
@@ -475,7 +461,6 @@ module.exports = {
   areaAddOnLimitRefusal,
   fenceCustomerBookings,
   attachLimitUse,
-  productIdsByKey,
   limitSubject,
   phoneKey,
   addressKey,
