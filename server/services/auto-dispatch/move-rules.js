@@ -49,8 +49,10 @@ function moveGain({ service, current, currentScore, cand, candScore }) {
 // Whether a candidate is a legal KIND of move at all, before the score bar:
 // a same-day re-time always is; a day move needs the drive saving.
 function meetsDriveFloor({ current, cand, config }) {
-  if (!isDayMove(current, cand)) return true;
-  return driveSavingMinutes(current, cand) >= (config.minDayMoveDriveSavingMinutes || 0);
+  const floor = config.minDayMoveDriveSavingMinutes || 0;
+  // 0 turns the floor off: the score bar alone decides, as before.
+  if (floor <= 0 || !isDayMove(current, cand)) return true;
+  return driveSavingMinutes(current, cand) >= floor;
 }
 
 // A visit that must leave its slot whatever the score says.

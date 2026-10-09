@@ -56,6 +56,8 @@ describe('drive floor', () => {
 
   test('0 turns the floor off', () => {
     expect(meetsDriveFloor({ current: CURRENT, cand: dayMove(), config: { minDayMoveDriveSavingMinutes: 0 } })).toBe(true);
+    // Off means off: a day move that adds drive is left to the score bar.
+    expect(meetsDriveFloor({ current: CURRENT, cand: dayMove({ detour_minutes: 20 }), config: { minDayMoveDriveSavingMinutes: 0 } })).toBe(true);
   });
 });
 
