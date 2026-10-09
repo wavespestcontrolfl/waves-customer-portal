@@ -1083,7 +1083,7 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // `productsFromNote` (voice fill, a note not yet read for products): Generate
 // reads the products out of the note first, so neither an empty list nor a row
 // still missing its amount holds it; both are judged again once the note is read.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, stationHold = '', ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
@@ -1094,6 +1094,10 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
     [!photosLoaded, 'Loading photos…'],
     [photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
+    // A station visit's stations (GATE_STATION_FAST_COMPLETE): the first report
+    // is never written without them, and one that cannot be judged goes to the
+    // Full form.
+    [stationHold, stationHold],
     [!active.length && noProduct, noProduct],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
@@ -1217,7 +1221,7 @@ function typedScoreOf(schema, record) {
   return Number.isInteger(derived) ? derived : null;
 }
 
-function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true, stationHold = '' }) {
+function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true, stationConflict = '' }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const values = record.values;
   const missing = typedCardFields(typedSchema).find((field) => typedFieldRequiredNow(field, values) && !String(values[field.key] ?? '').trim());
@@ -1245,9 +1249,9 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
     : typedFormTakesPlaces(typedSchema.type, { sprayed }));
   return [
     ...ready.report,
-    // The stations come first: their counts fill the station count fields, so
-    // a station that cannot be judged holds before those read as missing.
-    [stationHold, stationHold],
+    // A consumption mark beside "None" contradicts itself (the completion
+    // refuses it); it holds before the count fields read as missing.
+    [stationConflict, stationConflict],
     [missing, missing && (typedIn ? `Fill in ${missing.label}.` : `Pick ${missing.label}: tap Change beside it.`)],
     [setupConflict, setupConflict],
     [placesMissing, areaField
@@ -1522,15 +1526,21 @@ function useTypedRecord(service, request) {
   const stations = useStationChecks({ service, request, enabled: !!schema && service.stationsFlow === true });
   // The record with the station counts the stations give (they replace anything
   // typed for those fields, which the card hides).
-  const withCounts = (record, counts) => (record && counts ? { ...record, values: { ...record.values, ...counts } } : record);
+  // Their per-station statuses ride on it for the draft's signature, sorted so
+  // the same marks always read the same.
+  const withCounts = (record, counts, statuses = {}) => (record && counts
+    ? { ...record, values: { ...record.values, ...counts }, stationStatuses: Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)) }
+    : record);
   // The record a read lands on: only fields still empty that nobody picked,
   // and only from an answer for this form.
   const recordFor = (facts) => {
     if (!schema) return null;
     const merged = facts?.type === schema.type ? mergeTypedRecord(ref.current, facts) : ref.current;
-    return stations.active ? withCounts(merged, stations.countsFor(stations.heardMarks(facts?.stationExceptions))) : merged;
+    if (!stations.active) return merged;
+    const heardMarks = stations.heardMarks(facts?.stationExceptions);
+    return withCounts(merged, stations.countsFor(heardMarks), heardMarks.statuses);
   };
-  const shown = withCounts(schema ? typedRecord : null, stations.counts);
+  const shown = withCounts(schema ? typedRecord : null, stations.counts, stations.marks.statuses);
   // The card hides the count fields the stations fill.
   const cardSchema = schema && stations.active && stations.counts
     ? { ...schema, fields: schema.fields.filter((field) => !Object.hasOwn(stations.counts, field.key)) }
@@ -1544,18 +1554,27 @@ function useTypedRecord(service, request) {
     // whether the tech's rating is already set.
     current: shown ? shown.values : typedRecord.values,
     scoreSet: typedRecord.score != null,
-    signaturePart: (record) => (record ? { typed: [record.values, record.score] } : null),
+    // A station visit's per-station statuses are part of what the report says
+    // (a chip tap makes the draft stale even when the counts do not move).
+    signaturePart: (record) => (record
+      ? { typed: record.stationStatuses ? [record.values, record.score, record.stationStatuses] : [record.values, record.score] }
+      : null),
     // The stations the sheet shows, for the note's read (null: none).
     stationRoster: stations.roster,
     // What holds the send: a registry the sheet cannot judge (the full form
     // does), or a consumption mark beside "None".
-    stationHold: stations.active ? (stations.hold || stations.conflictFor(shown?.values) || '') : '',
+    stationHold: stations.active ? stations.hold : '',
+    stationConflict: stations.active ? (stations.conflictFor(shown?.values) || '') : '',
     inputs: (record, facts) => {
       const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
       const entries = stations.entries();
-      return creditOffered || entries.length
+      // The tech's station statuses go to the report writer as theirs, over
+      // what the note says (the writer's correction, as the sweep chip's).
+      const stationChecks = stations.currentChecks();
+      return creditOffered || entries.length || stationChecks
         ? {
           ...fields,
+          ...(stationChecks ? { writerExtras: { ...fields.writerExtras, stationChecks } } : {}),
           completionExtras: {
             ...fields.completionExtras,
             ...(creditOffered ? { offerInspectionCredit: offerCredit } : {}),
@@ -1691,6 +1710,7 @@ function ReportFlowForm({
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
     form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
+    stationHold: recordState.stationHold,
   };
   const noteText = form.note.trim();
   const generateMissing = reportFlowMissing({
@@ -1698,7 +1718,7 @@ function ReportFlowForm({
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
-    stationHold: recordState.stationHold,
+    stationConflict: recordState.stationConflict,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
   // The header's Full form button: a hold that sends the tech to the full

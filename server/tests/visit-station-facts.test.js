@@ -57,7 +57,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 }));
 const { dispatchWithFallback } = require('../services/llm/call');
 const {
-  readStationExceptions, validateStationExceptions, namableStations, stationFactsSchema, STATION_SHEET_PROGRAMS, EXCEPTION_STATUSES,
+  readStationExceptions, validateStationExceptions, stationChecksWriterLine, namableStations, stationFactsSchema, STATION_SHEET_PROGRAMS, EXCEPTION_STATUSES,
 } = require('../services/visit-station-facts');
 const router = require('../routes/admin-dispatch');
 
@@ -327,5 +327,23 @@ describe('POST /:serviceId/typed-facts with the sheet\'s stations', () => {
     const res = await invoke({ serviceId: 'svc-1' }, { note: NOTE, stations: SHEET_STATIONS }, { techRole: 'technician', technicianId: 'tech-2' });
     expect(res.statusCode).toBe(403);
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+});
+
+describe('stationChecksWriterLine: the tech\'s statuses for the report writer', () => {
+  test('names each exception by number in the program\'s words, and says the rest are OK', () => {
+    expect(stationChecksWriterLine('termite_bait_station', [{ number: 7, status: 'serviced' }, { number: 4, status: 'activity' }]))
+      .toMatch(/station 4: termite activity.*; station 7: the technician serviced the station.*Every other station was checked and is OK\.$/);
+    expect(stationChecksWriterLine('rodent_bait_station', [{ number: 2, status: 'activity' }])).toContain('bait consumption');
+    expect(stationChecksWriterLine('rodent_bait_station', [])).toContain('every station was checked and is OK');
+  });
+
+  test('adds nothing for a trap check, another form, or anything that is not a clean list', () => {
+    expect(stationChecksWriterLine('rodent_trapping', [{ number: 2, status: 'activity' }])).toBe('');
+    expect(stationChecksWriterLine('cockroach', [])).toBe('');
+    expect(stationChecksWriterLine('rodent_bait_station', undefined)).toBe('');
+    expect(stationChecksWriterLine('rodent_bait_station', [{ number: 2, status: 'ok' }])).toBe('');
+    expect(stationChecksWriterLine('rodent_bait_station', [{ number: '2', status: 'activity' }])).toBe('');
+    expect(stationChecksWriterLine('rodent_bait_station', [{ number: 2, status: 'activity' }, { number: 2, status: 'activity' }])).toBe('');
   });
 });

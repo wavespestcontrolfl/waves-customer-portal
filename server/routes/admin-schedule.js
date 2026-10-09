@@ -25657,6 +25657,10 @@ router.post('/generate-report', async (req, res) => {
       // The Fast Complete sweep chip (owner 2026-10-08): an exact true means
       // the technician tapped the sweep OFF, over whatever the note says.
       sweepNotDone,
+      // GATE_STATION_FAST_COMPLETE: the technician's per-station statuses from
+      // the Fast Complete sheet, [{ number, status }]; they stand over the note
+      // (visit-station-facts.js stationChecksWriterLine).
+      stationChecks,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -25677,6 +25681,10 @@ router.post('/generate-report', async (req, res) => {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
 
+    // The technician's station statuses, with the gate on and a bait station form.
+    const stationChecksLine = require('../config/feature-gates').stationFastCompleteLive()
+      ? require('../services/visit-station-facts').stationChecksWriterLine(structuredFindings?.type, stationChecks)
+      : '';
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
     const areas = asArray(areasServiced);
     const actions = asArray(actionsCompleted);
@@ -26594,7 +26602,7 @@ Arrival Time: ${arrivalTime || 'Not specified'}
 ${writerRulesOn
     ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}${stationChecksLine ? `\n${stationChecksLine}` : ''}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
 ${writerRulesOn
     ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)

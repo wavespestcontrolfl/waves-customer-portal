@@ -193,7 +193,33 @@ async function readStationExceptions({ note, stations, program = null } = {}) {
   };
 }
 
+// The technician's own station statuses for the report writer
+// (GATE_STATION_FAST_COMPLETE): they stand over what the note says, so a chip
+// tapped to Serviced is never written up as consumption because the note said
+// so. `checks` is [{ number, status }], an exception each; an empty list says
+// every station was checked and is OK. Anything that is not a list of known
+// statuses on a bait station form adds nothing.
+const MAX_STATION_CHECKS = 80;
+function stationChecksWriterLine(formType, checks) {
+  const program = STATION_SHEET_PROGRAMS[formType];
+  if (!program || !Array.isArray(checks) || checks.length > MAX_STATION_CHECKS) return '';
+  const words = PROGRAM_WORDS[program];
+  const said = { activity: words.activity, serviced: words.serviced, inaccessible: 'could not be reached or checked' };
+  const seen = new Set();
+  const parts = [];
+  for (const check of checks) {
+    const number = check?.number;
+    if (!Number.isInteger(number) || number < 1 || seen.has(number) || !EXCEPTION_STATUSES.includes(check?.status)) return '';
+    seen.add(number);
+    parts.push({ number, text: `station ${number}: ${said[check.status]}` });
+  }
+  const head = 'Technician station checks (authoritative: they override anything the note says about a station)';
+  if (!parts.length) return `${head}: every station was checked and is OK.`;
+  return `${head}: ${parts.sort((a, b) => a.number - b.number).map((part) => part.text).join('; ')}. Every other station was checked and is OK.`;
+}
+
 module.exports = {
+  stationChecksWriterLine,
   readStationExceptions,
   validateStationExceptions,
   namableStations,

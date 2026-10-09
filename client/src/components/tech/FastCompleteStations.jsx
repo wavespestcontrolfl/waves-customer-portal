@@ -123,6 +123,14 @@ export function useStationChecks({ service, request, enabled = false }) {
       ? pinnedOf(registryRef.current).map((station) => stationCheckEntry(station.id, marksRef.current.statuses))
       : []),
     hold,
+    // The tech's per-station statuses for the report writer, an exception each
+    // by station number (an empty list: every station is OK); null while the
+    // stations cannot be judged. Authoritative over what the note says.
+    currentChecks: () => (active && registryRef.current.state === 'ready' && !hold
+      ? pinnedOf(registryRef.current)
+        .filter((station) => marksRef.current.statuses[station.id])
+        .map((station) => ({ number: station.number, status: marksRef.current.statuses[station.id] }))
+      : null),
     // The rodent program: a consumption mark beside "None" contradicts itself.
     conflictFor: (values) => (active ? rodentConsumptionHold({ program, statuses: marks.statuses, values }) : null),
     heardMarks,

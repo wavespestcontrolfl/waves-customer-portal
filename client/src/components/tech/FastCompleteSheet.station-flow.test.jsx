@@ -215,22 +215,22 @@ describe('a termite bait station visit with the station map on', () => {
 });
 
 describe('what the sheet hands to the full form', () => {
+  // Generate is held too, so the first report is never written without the
+  // station read; the footer says why and the header offers the Full form.
   const heldWith = async (registry, message, request = makeRequest({ registry })) => {
     await openSheet(request);
-    await generate();
-    // The card says it, and so does the footer hold.
-    expect(screen.getAllByText(message).length).toBeGreaterThan(0);
-    expect(sendButton().disabled).toBe(true);
-    // The header offers the full form once the sheet says so.
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getAllByText(message).length).toBeGreaterThan(0), { timeout: 10000 });
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
     expect(screen.getByRole('button', { name: /full form/i })).toBeTruthy();
+    expect(request.bodies('/typed-facts')).toEqual([]);
+    expect(request.bodies('generate-report')).toEqual([]);
     return request;
   };
 
   test('a station with no pin (hidden by drift)', async () => {
     const registry = { ...TERMITE_REGISTRY, stations: [station(1), station(2), station(3, 'termite', { geometryImage: null, staleMark: true })] };
-    const request = await heldWith(registry, 'Station 3 has no pin on the map. Use the Full form.');
-    // No reader call carries a roster it cannot judge.
-    expect(request.bodies('/typed-facts')[0]).not.toHaveProperty('stations');
+    await heldWith(registry, 'Station 3 has no pin on the map. Use the Full form.');
   }, 20000);
 
   test('a registry that failed to load, or a map that is not available', async () => {
@@ -297,4 +297,73 @@ describe('gate off is today\'s sheet', () => {
     expect(body).not.toHaveProperty('termiteStations');
     expect(body.structuredFindings.values.stations_checked).toBe('12');
   }, 20000);
+});
+
+describe('the report is written from the tech\'s station statuses', () => {
+  test('Generate waits for the stations to load: the first report is never written without the station read', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const request = makeRequest();
+    const inner = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/property-map')) await gate;
+      return inner(path, options);
+    });
+    render(<FastCompleteSheet service={TERMITE} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByLabelText('Tell me about the visit', {}, { timeout: 10000 });
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getAllByText('Loading the stations…').length).toBeGreaterThan(0));
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    release();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    // The first read carried the stations, and the writer was told their statuses.
+    expect(request.bodies('/typed-facts')[0].stations).toHaveLength(4);
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'activity' }, { number: 3, status: 'serviced' }]);
+  }, 30000);
+
+  const rodentRegistry = { available: true, stationsLoaded: true, stations: [station(1, 'rodent'), station(2, 'rodent'), station(3, 'rodent')] };
+  const rodentRequest = () => makeRequest({
+    visit: { ...VISIT, serviceType: 'Rodent Bait Stations', serviceKey: 'rodent_bait_quarterly' },
+    typedType: 'rodent_bait_station',
+    registry: rodentRegistry,
+    typedFacts: {
+      available: true, status: 'read', type: 'rodent_bait_station', heard: {}, unclearFields: [], values: { bait_consumption: 'Light' },
+      stationRead: 'read', stationExceptions: [{ id: 'st-rodent-2', number: 2, status: 'activity', quote: 'bait eaten at station 2' }],
+    },
+  });
+
+  test('a chip tap after Generate marks the report stale even when the counts do not move, and the regenerated writer payload carries the corrected status', async () => {
+    const request = rodentRequest();
+    await openSheet(request, RODENT);
+    await generate('Bait eaten at station 2.');
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'activity' }]);
+    expect(screen.queryByText(/You changed the visit after this report was written/)).toBeNull();
+    const countsBefore = request.bodies('generate-report')[0].structuredFindings.values;
+    // Consumption -> Serviced: the rodent counts are the same.
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 2: Consumption' }));
+    expect(within(stationsCard()).getByRole('button', { name: 'Station 2: Serviced' })).toBeTruthy();
+    expect(screen.getByText(/You changed the visit after this report was written/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    const second = request.bodies('generate-report')[1];
+    expect(second.stationChecks).toEqual([{ number: 2, status: 'serviced' }]);
+    expect(second.structuredFindings.values).toEqual(countsBefore);
+    // The read does not write over the tap, and the completion matches the report.
+    const body = await send(request);
+    expect(body.termiteStations.find((entry) => entry.id === 'st-rodent-2')).toEqual({ id: 'st-rodent-2', status: 'serviced', touched: true });
+  }, 30000);
+
+  test('clearing a heard exception sends an empty list: every station OK, over the note', async () => {
+    const request = rodentRequest();
+    await openSheet(request, RODENT);
+    await generate('Bait eaten at station 2.');
+    for (let i = 0; i < 3; i += 1) fireEvent.click(within(stationsCard()).getByRole('button', { name: /^Station 2:/ }));
+    expect(within(stationsCard()).getByText('3 stations, all OK')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    expect(request.bodies('generate-report')[1].stationChecks).toEqual([]);
+  }, 30000);
 });
