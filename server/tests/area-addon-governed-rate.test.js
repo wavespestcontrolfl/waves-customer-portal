@@ -224,10 +224,18 @@ describe('a row tagged to a chemical add-on must carry its application actuals',
     expect(await run([bare], tagOf({ productId: 'other' }))).toBeNull();
     expect(await run(undefined, tagOf(bare))).toBeNull();
     expect(await run([full()], new Map())).toBeNull();
-    // A replay or resume of a committed completion, and an incomplete visit, are not checked (the row below would be refused).
+    // A replay or resume of a committed completion is not checked (the row below would be refused).
     const empty = full({ rate: '' });
     expect(await run([empty], tagOf(empty), { fresh: false })).toBeNull();
-    expect(await run([empty], tagOf(empty), { incomplete: true })).toBeNull();
+  });
+
+  test('an incomplete visit is not exempt: a product that was applied needs its actuals whatever the outcome', async () => {
+    const noArea = full({ areaValue: '', totalAmount: '' });
+    const err = await check(noArea, undefined, { incomplete: true });
+    expect(err).toMatchObject({ statusCode: 400, code: 'area_addon_actuals_required' });
+    // The completion no longer passes the outcome to the check at all.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).not.toMatch(/requireAddOnActuals\([^)]*isIncompleteVisit/);
   });
 
   test('the host\'s untagged row of the same product is not an add-on row', async () => {
@@ -245,7 +253,7 @@ describe('a row tagged to a chemical add-on must carry its application actuals',
 
   test('the completion refuses a fresh closeout before any write, and the office alert reads the new finding', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
-    const refuse = src.indexOf("await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });");
+    const refuse = src.indexOf("await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });");
     expect(refuse).toBeGreaterThan(src.indexOf('areaAddOnGovernedRate.resolveApplicationAddOnTags(db, svc, products)'));
     // before the inventory preflight and the insert read the amount it fills in
     expect(refuse).toBeLessThan(src.indexOf('await actualProductInventoryBlocks(products, db)'));

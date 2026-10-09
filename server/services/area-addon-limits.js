@@ -193,9 +193,13 @@ async function loadAreaAddOnHistory(database, { customerId, propertyId = null, k
 // apply (gate off, no add-on with a limit, no known customer), the summary on success, and
 // { available: false } when the read failed so the engine returns the custom-quote line, never a silent pass.
 // `entries` are the request's add-on entries ({ key }), `customerId` the verified customer.
-async function quoteAreaAddOnHistory(database, { entries, customerId, propertyId = null } = {}) {
+async function quoteAreaAddOnHistory(database, { entries, customerId, propertyId = null, requesterRole = null } = {}) {
   const keys = limitedKeys((Array.isArray(entries) ? entries : []).map((entry) => entry && entry.key));
   if (!keys.length || !isUuid(customerId) || !require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return undefined;
+  // A customer's treatment history (product, last date, next allowed date) is office data: only an admin requester
+  // reads it at quote time. Anyone else gets the history-unavailable custom-quote line and no read is made; the accept,
+  // reserve and booking rechecks still enforce the limit.
+  if (requesterRole !== 'admin') return { available: false, reason: 'history_not_authorized' };
   try {
     return await loadAreaAddOnHistory(database, { customerId, propertyId, keys });
   } catch (err) {
@@ -207,18 +211,34 @@ async function quoteAreaAddOnHistory(database, { entries, customerId, propertyId
 // The same read for the estimator's two quote steps. `calculate` takes the engine input the translator built and
 // the request options (existingCustomerId, propertyId); `save` takes the posted estimate data and body. Both return
 // what to hand the engine (or undefined) and never throw.
-async function attachQuoteAreaAddOnHistory(database, v1Input, options) {
+// `requesterRole` is the authenticated staff role (req.techRole), never a value from the request body.
+async function attachQuoteAreaAddOnHistory(database, v1Input, options, { requesterRole = null } = {}) {
   const opts = options && typeof options === 'object' ? options : {};
   const entries = v1Input && v1Input.services && v1Input.services.areaAddOns;
-  return applyAreaAddOnHistory(v1Input, await quoteAreaAddOnHistory(database, { entries, customerId: opts.existingCustomerId || opts.customerId, propertyId: opts.propertyId }));
+  return applyAreaAddOnHistory(v1Input, await quoteAreaAddOnHistory(database, { entries, customerId: opts.existingCustomerId || opts.customerId, propertyId: opts.propertyId, requesterRole }));
 }
-async function quoteAreaAddOnHistoryForSave(database, estimateData, body) {
+// The save knows the saving technician's id, not the role: the role is read from the technicians row (active staff only).
+async function requesterRoleOf(database, technicianId) {
+  if (!isUuid(technicianId)) return null;
+  const row = await database('technicians').where({ id: technicianId, active: true }).first('role');
+  return row ? row.role : null;
+}
+async function quoteAreaAddOnHistoryForSave(database, estimateData, body, { technicianId = null } = {}) {
   const fromRequest = estimateData && estimateData.engineRequest && estimateData.engineRequest.options && estimateData.engineRequest.options.areaAddOns;
   const fromInputs = estimateData && estimateData.engineInputs && estimateData.engineInputs.services && estimateData.engineInputs.services.areaAddOns;
+  const entries = fromRequest || fromInputs;
+  // No limited add-on, no customer or the gate off: nothing is read, not even the role.
+  const keys = limitedKeys((Array.isArray(entries) ? entries : []).map((entry) => entry && entry.key));
+  if (!keys.length || !isUuid(body && body.customerId) || !require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return undefined;
+  let requesterRole = null;
+  try { requesterRole = await requesterRoleOf(database, technicianId); } catch (err) {
+    logger.warn(`[area-addon-limits] requester role unavailable: ${err.code || err.name}: ${err.message}`);
+  }
   return quoteAreaAddOnHistory(database, {
-    entries: fromRequest || fromInputs,
+    entries,
     customerId: body && body.customerId,
     propertyId: body && body.propertyId,
+    requesterRole,
   });
 }
 

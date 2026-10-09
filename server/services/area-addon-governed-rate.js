@@ -336,11 +336,12 @@ async function addOnDisplayNames(knex, keys) {
  * code `area_addon_actuals_required`) naming the first add-on and the fields it lacks when a tagged row does not carry its
  * actuals; returns nothing otherwise. `tags` is resolveApplicationAddOnTags' map. Mutates the submitted row (`totalAmount`,
  * `amountUnit`) only when the client sent no total, so the inventory check, the N budget and the deduction all read the same
- * amount. Not a fresh execution (a replay or resume of a committed completion), an incomplete visit, no tag: nothing is checked
- * and no query runs.
+ * amount. Not a fresh execution (a replay or resume of a committed completion), or no tag: nothing is checked and no query
+ * runs. The visit's OUTCOME does not matter: an incomplete visit still writes the compliance row for a product that was
+ * applied, so a tagged row needs its actuals whenever it is submitted.
  */
-async function requireAddOnActuals(knex, products, tags, { fresh = true, incomplete = false } = {}) {
-  if (!fresh || incomplete || !tags?.size || !Array.isArray(products)) return;
+async function requireAddOnActuals(knex, products, tags, { fresh = true } = {}) {
+  if (!fresh || !tags?.size || !Array.isArray(products)) return;
   const rows = products.filter((p) => p && p.productId && tags.has(productRowKey(p)));
   const problem = rows.map((p) => ({ p, tag: tags.get(productRowKey(p)), missing: completeActuals(p) })).find((row) => row.missing.length);
   if (!problem) return;

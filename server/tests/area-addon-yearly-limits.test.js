@@ -275,8 +275,11 @@ const CATALOG = [
   { id: 'p-top', name: 'Topchoice Granular Insecticide', active: true }, { id: 'p-acel', name: 'Acelepryn Insecticide', active: true },
   { id: 'p-round', name: 'Roundup QuikPro SC', active: true },
 ];
+const ADMIN_TECH = '99999999-9999-4999-8999-999999999999';
+const FIELD_TECH = '88888888-8888-4888-8888-888888888888';
 function world(over = {}) {
   return {
+    technicians: [{ id: ADMIN_TECH, role: 'admin', active: true }, { id: FIELD_TECH, role: 'technician', active: true }],
     products_catalog: CATALOG,
     product_aliases: [],
     customer_properties: [{ id: PROPERTY, customer_id: CUSTOMER, active: true }],
@@ -351,7 +354,7 @@ describe('the history reader', () => {
       .rejects.toMatchObject({ code: 'AREA_ADDON_LIMIT_PRODUCT_UNRESOLVED' });
     // The quote step turns that into the custom-quote line, not a pass.
     process.env.GATE_AREA_ADDONS = 'true';
-    const quoted = await service.quoteAreaAddOnHistory(fakeDb(world({ products_catalog: catalog })), { entries: [{ key: 'bed_pre_emergent' }], customerId: CUSTOMER, propertyId: PROPERTY });
+    const quoted = await service.quoteAreaAddOnHistory(fakeDb(world({ products_catalog: catalog })), { entries: [{ key: 'bed_pre_emergent' }], customerId: CUSTOMER, propertyId: PROPERTY, requesterRole: 'admin' });
     expect(quoted).toEqual({ available: false, reason: 'history_unavailable' });
   });
 
@@ -379,7 +382,7 @@ describe('quote time: attached to the engine input by the route, never by the cl
 
   test('a known customer gets the summary; the engine then returns the custom-quote line', async () => {
     const db = fakeDb(world({ property_application_history: [ledger('p-snap', 25)] }));
-    const v1 = await service.attachQuoteAreaAddOnHistory(db, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER, propertyId: PROPERTY });
+    const v1 = await service.attachQuoteAreaAddOnHistory(db, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER, propertyId: PROPERTY }, { requesterRole: 'admin' });
     const est = generateEstimate(v1);
     expect(est.lineItems.filter((l) => l.service === 'area_addon').map((l) => [l.addOnKey, l.price, l.customQuoteReason || null]))
       .toEqual([['bed_pre_emergent', null, 'area_addon_yearly_limit_reached'], ['web_sweep', 89, null]]);
@@ -387,19 +390,19 @@ describe('quote time: attached to the engine input by the route, never by the cl
 
   test('an unknown property or a new lead (no customer): no history, priced normally', async () => {
     const db = fakeDb(world({ property_application_history: [ledger('p-snap', 25)] }));
-    const v1 = await service.attachQuoteAreaAddOnHistory(db, { ...HOME, services: { areaAddOns: entries } }, {});
+    const v1 = await service.attachQuoteAreaAddOnHistory(db, { ...HOME, services: { areaAddOns: entries } }, {}, { requesterRole: 'admin' });
     expect(v1.services.areaAddOnHistory).toBeUndefined();
     expect(db.calls).toEqual([]);
     expect(generateEstimate(v1).lineItems.find((l) => l.addOnKey === 'bed_pre_emergent').price).toBe(99);
     // A customer with two properties and none named: the whole customer history counts (nothing can be proven elsewhere).
     const two = fakeDb(world({ customer_properties: [{ id: PROPERTY, customer_id: CUSTOMER, active: true }, { id: OTHER_PROPERTY, customer_id: CUSTOMER, active: true }], property_application_history: [ledger('p-snap', 25, { property_id: OTHER_PROPERTY })] }));
-    const out = await service.attachQuoteAreaAddOnHistory(two, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER });
+    const out = await service.attachQuoteAreaAddOnHistory(two, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER }, { requesterRole: 'admin' });
     expect(out.services.areaAddOnHistory.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
   });
 
   test('a history read failure becomes the custom-quote line, never a silent pass', async () => {
     const broken = fakeDb(world({ property_application_history: () => { throw new Error('connection lost'); } }));
-    const v1 = await service.attachQuoteAreaAddOnHistory(broken, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER, propertyId: PROPERTY });
+    const v1 = await service.attachQuoteAreaAddOnHistory(broken, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER, propertyId: PROPERTY }, { requesterRole: 'admin' });
     expect(v1.services.areaAddOnHistory).toEqual({ available: false, reason: 'history_unavailable' });
     expect(generateEstimate(v1).lineItems.filter((l) => l.service === 'area_addon').map((l) => [l.addOnKey, l.price, l.customQuoteReason || null]))
       .toEqual([['bed_pre_emergent', null, 'area_addon_history_unavailable'], ['web_sweep', 89, null]]);
@@ -408,7 +411,7 @@ describe('quote time: attached to the engine input by the route, never by the cl
   test('gate off: no read at all (the engine refuses the add-on on its own)', async () => {
     delete process.env.GATE_AREA_ADDONS;
     const db = fakeDb(world());
-    const v1 = await service.attachQuoteAreaAddOnHistory(db, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER });
+    const v1 = await service.attachQuoteAreaAddOnHistory(db, { ...HOME, services: { areaAddOns: entries } }, { existingCustomerId: CUSTOMER }, { requesterRole: 'admin' });
     expect(db.calls).toEqual([]);
     expect(v1.services.areaAddOnHistory).toBeUndefined();
     expect(await service.areaAddOnLimitRefusal(db, { estimate: { id: ESTIMATE, customer_id: CUSTOMER, estimate_data: storedWith(['bed_pre_emergent']) } })).toBeNull();
@@ -427,9 +430,9 @@ describe('quote time: attached to the engine input by the route, never by the cl
 
   test('the save reads the history for the posted add-ons from the verified customer', async () => {
     const db = fakeDb(world({ property_application_history: [ledger('p-snap', 25)] }));
-    const out = await service.quoteAreaAddOnHistoryForSave(db, { engineRequest: { options: { areaAddOns: entries } } }, { customerId: CUSTOMER, propertyId: PROPERTY });
+    const out = await service.quoteAreaAddOnHistoryForSave(db, { engineRequest: { options: { areaAddOns: entries } } }, { customerId: CUSTOMER, propertyId: PROPERTY }, { technicianId: ADMIN_TECH });
     expect(out.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
-    expect(await service.quoteAreaAddOnHistoryForSave(db, { engineRequest: { options: { areaAddOns: entries } } }, {})).toBeUndefined();
+    expect(await service.quoteAreaAddOnHistoryForSave(db, { engineRequest: { options: { areaAddOns: entries } } }, {}, { technicianId: ADMIN_TECH })).toBeUndefined();
   });
 });
 
@@ -442,7 +445,7 @@ describe('accept time: the recheck inside the transaction (history can change be
 
   test('quote vs accept race: priced at quote time, then another Snapshot application lands: the accept is refused with its own code', async () => {
     const before = fakeDb(world());
-    const quoted = await service.attachQuoteAreaAddOnHistory(before, { ...HOME, services: { areaAddOns: [{ key: 'bed_pre_emergent', areaSqFt: 1000 }] } }, { existingCustomerId: CUSTOMER, propertyId: PROPERTY });
+    const quoted = await service.attachQuoteAreaAddOnHistory(before, { ...HOME, services: { areaAddOns: [{ key: 'bed_pre_emergent', areaSqFt: 1000 }] } }, { existingCustomerId: CUSTOMER, propertyId: PROPERTY }, { requesterRole: 'admin' });
     expect(generateEstimate(quoted).lineItems.find((l) => l.addOnKey === 'bed_pre_emergent').price).toBe(99);
     await expect(service.assertAreaAddOnLimitsOpen(before, { estimate: estimate(['bed_pre_emergent']) })).resolves.toBeUndefined();
     // A Tree & Shrub visit applies Snapshot, or a second estimate books the add-on, before this one is accepted.
@@ -618,11 +621,11 @@ describe('booking time: an estimate with no customer_id of its own is checked fo
   test('the calculate step reads the history of the customer the staff picked, under either field the estimator route accepts', async () => {
     const input = (extra) => ({ ...HOME, services: { areaAddOns: [{ key: 'bed_pre_emergent', areaSqFt: 1000 }] }, ...extra });
     for (const options of [{ existingCustomerId: CUSTOMER }, { customerId: CUSTOMER }]) {
-      const out = await service.attachQuoteAreaAddOnHistory(fakeDb(snapHistory), input(), { ...options, propertyId: PROPERTY });
+      const out = await service.attachQuoteAreaAddOnHistory(fakeDb(snapHistory), input(), { ...options, propertyId: PROPERTY }, { requesterRole: 'admin' });
       expect(out.services.areaAddOnHistory).toMatchObject({ available: true });
       expect(generateEstimate(out).lineItems.find((l) => l.addOnKey === 'bed_pre_emergent')).toMatchObject({ quoteRequired: true });
     }
-    const none = await service.attachQuoteAreaAddOnHistory(fakeDb(snapHistory), input(), { propertyId: PROPERTY });
+    const none = await service.attachQuoteAreaAddOnHistory(fakeDb(snapHistory), input(), { propertyId: PROPERTY }, { requesterRole: 'admin' });
     expect(none.services.areaAddOnHistory).toBeUndefined();
   });
 
@@ -816,8 +819,8 @@ describe('where the recheck runs (source order)', () => {
   });
 
   test('the quote steps attach the history; the engine file never queries', () => {
-    expect(read('routes/property-lookup-v2.js')).toContain('attachQuoteAreaAddOnHistory(require(\'../models/db\'), v1Input, options)');
-    expect(read('services/admin-estimate-persistence.js')).toContain('quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body)');
+    expect(read('routes/property-lookup-v2.js')).toContain('attachQuoteAreaAddOnHistory(require(\'../models/db\'), v1Input, options, { requesterRole: req.techRole })');
+    expect(read('services/admin-estimate-persistence.js')).toContain('quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId })');
     for (const rel of ['services/pricing-engine/area-addon-limits.js', 'services/pricing-engine/service-pricing.js']) {
       expect(read(rel)).not.toMatch(/require\(['"](\.\.\/)+models\/db['"]\)|knex\(/);
     }
@@ -893,5 +896,51 @@ describe('the booking fence: every reader of a customer\'s add-on history holds 
     const extend = slots.slice(slots.indexOf("router.post('/:token/reserve/:scheduledServiceId/extend'"));
     expect(extend).not.toContain('area-addon-limits');
     expect(slots.slice(slots.indexOf("router.post('/:token/card-hold-intent'"), slots.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"))).not.toContain('area-addon-limits');
+  });
+});
+
+describe('quote time: only an admin requester reads a customer\'s treatment history', () => {
+  const entries = [{ key: 'bed_pre_emergent', areaSqFt: 1000 }];
+  const history = () => world({ property_application_history: [ledger('p-snap', 25)] });
+  const saved = process.env.GATE_AREA_ADDONS;
+  beforeEach(() => { process.env.GATE_AREA_ADDONS = 'true'; });
+  afterAll(() => { if (saved === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = saved; });
+
+  test.each([['technician'], [null], [undefined], ['ADMIN'], ['']])('a %s requester gets the history-unavailable line and no table is read', async (requesterRole) => {
+    const calls = [];
+    const out = await service.quoteAreaAddOnHistory(fakeDb(history(), calls), { entries, customerId: CUSTOMER, propertyId: PROPERTY, requesterRole });
+    expect(out).toEqual({ available: false, reason: 'history_not_authorized' });
+    expect(calls).toEqual([]);
+  });
+
+  test('the calculate step takes the role from the authenticated request, never from the posted options', async () => {
+    const calls = [];
+    const v1 = await service.attachQuoteAreaAddOnHistory(fakeDb(history(), calls), { ...HOME, services: { areaAddOns: entries } },
+      { existingCustomerId: CUSTOMER, propertyId: PROPERTY, requesterRole: 'admin' }, { requesterRole: 'technician' });
+    expect(v1.services.areaAddOnHistory).toEqual({ available: false, reason: 'history_not_authorized' });
+    expect(calls).toEqual([]);
+  });
+
+  test('the save reads the saving technician\'s role: a technician, an unknown id and an inactive admin read no history', async () => {
+    const data = { engineRequest: { options: { areaAddOns: entries } } };
+    const body = { customerId: CUSTOMER, propertyId: PROPERTY };
+    for (const technicianId of [FIELD_TECH, '77777777-7777-4777-8777-777777777777', null]) {
+      const calls = [];
+      const out = await service.quoteAreaAddOnHistoryForSave(fakeDb(history(), calls), data, body, { technicianId });
+      expect(out).toEqual({ available: false, reason: 'history_not_authorized' });
+      expect(calls).not.toContain('property_application_history');
+    }
+    const inactive = world({ technicians: [{ id: ADMIN_TECH, role: 'admin', active: false }], property_application_history: [ledger('p-snap', 25)] });
+    expect(await service.quoteAreaAddOnHistoryForSave(fakeDb(inactive), data, body, { technicianId: ADMIN_TECH })).toEqual({ available: false, reason: 'history_not_authorized' });
+    // An admin reads it.
+    const ok = await service.quoteAreaAddOnHistoryForSave(fakeDb(history()), data, body, { technicianId: ADMIN_TECH });
+    expect(ok.byKey.bed_pre_emergent.dates).toEqual([daysBefore(25)]);
+  });
+
+  test('with no limited add-on or no customer the save reads nothing, not even the role', async () => {
+    const calls = [];
+    expect(await service.quoteAreaAddOnHistoryForSave(fakeDb(history(), calls), { engineRequest: { options: { areaAddOns: [{ key: 'web_sweep' }] } } }, { customerId: CUSTOMER }, { technicianId: ADMIN_TECH })).toBeUndefined();
+    expect(await service.quoteAreaAddOnHistoryForSave(fakeDb(history(), calls), { engineRequest: { options: { areaAddOns: entries } } }, {}, { technicianId: ADMIN_TECH })).toBeUndefined();
+    expect(calls).toEqual([]);
   });
 });

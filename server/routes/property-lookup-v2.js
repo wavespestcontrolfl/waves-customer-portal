@@ -6242,7 +6242,7 @@ router.post('/calculate-estimate', async (req, res) => {
       });
     }
     // The add-ons' yearly-limit history of the matched customer's property (read here; the engine never queries).
-    v1Input = await require('../services/area-addon-limits').attachQuoteAreaAddOnHistory(require('../models/db'), v1Input, options);
+    v1Input = await require('../services/area-addon-limits').attachQuoteAreaAddOnHistory(require('../models/db'), v1Input, options, { requesterRole: req.techRole });
     v1Input = await require('../services/pricing-engine/trusted-catalog-pricing')
       .withTrustedCatalogPricing(v1Input);
     const v1 = pricingEngine.generateEstimate(v1Input);

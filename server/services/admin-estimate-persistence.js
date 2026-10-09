@@ -2049,7 +2049,7 @@ async function resolveEstimateWritePayload({
     setupWaiverPriorQualifyingServices,
     recurringCustomer,
     // The add-ons' yearly-limit history, read here from the verified customer (never from the posted data).
-    areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body),
+    areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   const totals = pricing.totals;
