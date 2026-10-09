@@ -75,6 +75,15 @@ function propertyChangedError() {
   );
 }
 
+// The visit is no longer the one the request read (another customer or
+// service on the row since): a trace picked for the old one must not land.
+function visitChangedError() {
+  return Object.assign(
+    operationalError('This visit changed. Close it and reopen it from the schedule.', 409),
+    { code: 'visit_changed' },
+  );
+}
+
 function traceExistsError() {
   return Object.assign(
     operationalError('This visit already has a trace. Remove it first to use the last visit\'s.', 409),
@@ -101,6 +110,21 @@ async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, o
     throw propertyChangedError();
   }
   if (openVisitOnly && visit.status === 'completed') throw visitCompletedError();
+}
+
+// The reuse path's lock (Codex P1 on #6175): the copy reads and copies images
+// between the route's checks and this write, so the visit is read again under
+// the lock, inside the technician's own scope (a reassigned visit is refused
+// as on the remove path), and must still be the visit the request read: same
+// customer, same service, same property, still open.
+async function lockScopedVisitForTrace(conn, scheduledServiceId, { actor, visit }, openVisitOnly) {
+  const { lockOwnedLiveVisit } = require('./technician-visit-scope');
+  const locked = await lockOwnedLiveVisit(conn, actor, scheduledServiceId,
+    ['property_id', 'status', 'customer_id', 'service_id', 'service_type'], { allowCompleted: true });
+  if (String(locked.property_id ?? '') !== String(visit.property_id ?? '')) throw propertyChangedError();
+  if (openVisitOnly && locked.status === 'completed') throw visitCompletedError();
+  const same = (key) => String(locked[key] ?? '') === String(visit[key] ?? '');
+  if (!same('customer_id') || !same('service_id') || !same('service_type')) throw visitChangedError();
 }
 
 // One visit's row: the keys it replaces, then the upsert.
@@ -144,6 +168,10 @@ async function saveTreatmentZoneMap({
   // Reusing the last visit's trace never replaces a trace this visit already
   // has (a hand trace is the tech's claim for today): refused under the lock.
   createOnly = false,
+  // Reuse only: { actor, visit } re-reads the visit under the lock inside the
+  // technician's own scope and against the row the request read (see
+  // lockScopedVisitForTrace).
+  lockedScope = null,
   knex = db,
 }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
@@ -229,7 +257,8 @@ async function saveTreatmentZoneMap({
     updated_at: knex.fn.now(),
   });
   const persist = async (conn) => {
-    await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
+    if (lockedScope) await lockScopedVisitForTrace(conn, scheduledServiceId, lockedScope, openVisitOnly);
+    else await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
     if (createOnly && await conn('treatment_zone_maps').where({ scheduled_service_id: scheduledServiceId }).first('id')) {
       throw traceExistsError();
     }
@@ -241,7 +270,7 @@ async function saveTreatmentZoneMap({
     saved = await knex.transaction(persist);
   } catch (err) {
     // A refused save leaves no orphaned upload behind (best effort).
-    if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed' || err?.code === 'trace_exists') {
+    if (['visit_property_changed', 'visit_completed', 'trace_exists', 'visit_changed', 'service_not_assigned', 'not_found'].includes(err?.code)) {
       for (const key of [snapshotKey, maskKey].filter(Boolean)) {
         try {
           await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
@@ -411,7 +440,10 @@ async function treatmentZonePdfSignature(service, knex = db) {
 // mode must also pass the same capture check the save route runs for THIS
 // visit, so a lawn or bait visit is never offered a spray outline.
 const REUSE_CAPTURE_MODE = 'perimeter';
-const REUSE_CANDIDATE_LIMIT = 10;
+// Enough rows that a valid trace is never hidden behind others of the same
+// customer (Codex P2 on #6175): the length filter runs in SQL, and a
+// property-less visit's address is judged per row below.
+const REUSE_CANDIDATE_LIMIT = 200;
 
 function addressKey(parts) {
   const clean = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -467,21 +499,41 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     .whereNot('ss.id', visit.id)
     .where('ss.scheduled_date', '<', visitDate)
     .where('tz.capture_mode', REUSE_CAPTURE_MODE)
+    .where('tz.linear_ft', '>', 0)
     .modify((q) => (propertyId ? q.where('ss.property_id', propertyId) : q.whereNull('ss.property_id')))
     .orderBy('ss.scheduled_date', 'desc')
     .orderBy('tz.updated_at', 'desc')
     .limit(REUSE_CANDIDATE_LIMIT)
     .select('tz.*', 'ss.id as source_service_id', 'ss.customer_id as source_customer_id',
       'ss.property_id as source_property_id', 'ss.status as source_status',
-      'ss.scheduled_date as source_date', ...EFFECTIVE_ADDRESS_COLUMNS());
+      'ss.scheduled_date as source_date', 'ss.service_id as source_service_catalog_id',
+      'ss.service_type as source_service_type', ...EFFECTIVE_ADDRESS_COLUMNS());
 
   const { traceCaptureBlockPayload } = require('./service-report/trace-eligibility');
   for (const row of rows) {
     if (!reuseRowMatches(row, visit, visitDate, hereAddress)) continue;
     if (await traceCaptureBlockPayload(visit, knex, { captureMode: row.capture_mode })) continue;
+    // The SOURCE visit must itself be one whose trace may be captured and
+    // shown: a legacy perimeter trace saved on an inspection, a trapping or
+    // another service the report hides the map for is never copied onto a
+    // visit that would show it (Codex P1 on #6175).
+    if (await traceCaptureBlockPayload(sourceVisitOf(row), knex, { captureMode: row.capture_mode })) continue;
     return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date) };
   }
   return null;
+}
+
+// The source visit as the eligibility check reads a scheduled service.
+function sourceVisitOf(row) {
+  return {
+    id: row.source_service_id,
+    customer_id: row.source_customer_id,
+    property_id: row.source_property_id,
+    scheduled_date: row.source_date,
+    status: row.source_status,
+    service_id: row.source_service_catalog_id,
+    service_type: row.source_service_type,
+  };
 }
 
 // One candidate row against this visit: same customer, an earlier COMPLETED
@@ -537,7 +589,7 @@ async function readStoredImage(key) {
 // fence, the completed-visit refusal and the one-row-per-visit lock all run.
 // The pictures are read BEFORE the save: a picture that cannot be copied
 // fails the request instead of saving a zone with a missing picture.
-async function reuseLastTreatmentZone({ visit, technicianId = null, expectedPropertyId, openVisitOnly = false, knex = db }) {
+async function reuseLastTreatmentZone({ visit, actor = null, technicianId = null, expectedPropertyId, openVisitOnly = false, knex = db }) {
   const found = await findReusableTreatmentZone(visit, { knex });
   if (!found) {
     throw Object.assign(operationalError('There is no earlier trace for this property to reuse.', 409), { code: 'no_reusable_trace' });
@@ -563,6 +615,7 @@ async function reuseLastTreatmentZone({ visit, technicianId = null, expectedProp
     ...(expectedPropertyId !== undefined ? { expectedPropertyId } : {}),
     openVisitOnly,
     createOnly: true,
+    ...(actor ? { lockedScope: { actor, visit } } : {}),
     knex,
   });
   // No column records where a copy came from; the log line does.

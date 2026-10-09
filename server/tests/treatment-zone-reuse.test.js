@@ -223,6 +223,63 @@ describe('describeReusableTreatmentZone', () => {
   });
 });
 
+describe('findReusableTreatmentZone: the source visit (Codex P1 on #6175)', () => {
+  test('a trace saved on a visit whose own trace may not be captured or shown is never offered', async () => {
+    traceEligibility.traceCaptureBlockPayload.mockImplementation(async (visit) => (
+      visit.id === 'svc-0' ? { status: 400, payload: { code: 'trace_not_eligible' } } : null));
+    expect(await findReusableTreatmentZone(VISIT, { knex: makeKnex() })).toBeNull();
+    // Asked of the source as a scheduled service: its own id, customer, service.
+    expect(traceEligibility.traceCaptureBlockPayload).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'svc-0', customer_id: 'cust-1' }), expect.anything(), { captureMode: 'perimeter' });
+  });
+
+  test('an older eligible trace is offered when the newest source is not eligible', async () => {
+    traceEligibility.traceCaptureBlockPayload.mockImplementation(async (visit) => (
+      visit.id === 'svc-0' ? { status: 400, payload: { code: 'trace_not_eligible' } } : null));
+    const older = { ...ZONE, id: 'zone-older', scheduled_service_id: 'svc-older', source_service_id: 'svc-older', source_date: '2026-04-01' };
+    expect((await findReusableTreatmentZone(VISIT, { knex: makeKnex({ candidates: [ZONE, older] }) }))?.sourceServiceId).toBe('svc-older');
+  });
+
+  test('the length filter runs in the query, so traces with no length never crowd out a valid one', async () => {
+    const knex = makeKnex();
+    await findReusableTreatmentZone(VISIT, { knex });
+    expect(knex.state.wheres).toEqual(expect.arrayContaining([['scheduled_services as ss', 'tz.linear_ft', '>', 0]]));
+  });
+});
+
+// Codex P1 on #6175: the write reads the visit again under its lock, inside
+// the caller's own scope and against the row the request read.
+describe('reuseLastTreatmentZone: the locked recheck', () => {
+  const admin = { techRole: 'admin', technicianId: 'admin-1' };
+  const locked = (over = {}) => ({ property_id: 'prop-1', status: 'confirmed', customer_id: 'cust-1', service_id: 'cat-1', service_type: 'Quarterly Pest Control', ...over });
+
+  test('an unchanged visit saves', async () => {
+    const knex = makeKnex({ lock: locked() });
+    const row = await reuseLastTreatmentZone({ visit: VISIT, actor: admin, expectedPropertyId: 'prop-1', openVisitOnly: true, knex });
+    expect(row.linear_ft).toBe(220);
+  });
+
+  test.each([
+    ['another customer', { customer_id: 'cust-9' }, 'visit_changed'],
+    ['another service', { service_id: 'cat-9' }, 'visit_changed'],
+    ['another service name', { service_type: 'WDO Inspection' }, 'visit_changed'],
+    ['another property', { property_id: 'prop-9' }, 'visit_property_changed'],
+    ['a completed visit', { status: 'completed' }, 'visit_completed'],
+  ])('a visit that became %s during the copy is refused and nothing is saved', async (_label, over, code) => {
+    const knex = makeKnex({ lock: locked(over) });
+    await expect(reuseLastTreatmentZone({ visit: VISIT, actor: admin, expectedPropertyId: 'prop-1', openVisitOnly: true, knex }))
+      .rejects.toMatchObject({ code });
+    expect(knex.state.inserted).toBeNull();
+  });
+
+  test('a visit no longer in the caller\'s scope is refused', async () => {
+    const knex = makeKnex({ lock: null });
+    await expect(reuseLastTreatmentZone({ visit: VISIT, actor: admin, expectedPropertyId: 'prop-1', openVisitOnly: true, knex }))
+      .rejects.toMatchObject({ code: 'not_found' });
+    expect(knex.state.inserted).toBeNull();
+  });
+});
+
 describe('reuseLastTreatmentZone', () => {
   test('copies the points, size, loop, centre, zoom, address and mode onto this visit, with new picture objects', async () => {
     const knex = makeKnex();

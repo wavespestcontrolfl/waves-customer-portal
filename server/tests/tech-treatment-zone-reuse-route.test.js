@@ -146,7 +146,7 @@ describe('treatment-zone reuse routes', () => {
         await postReuse(baseUrl, { zoneId: 'zone-other', sourceServiceId: 'svc-other', scheduledServiceId: 'svc-other', pathPoints: [] });
       });
       const args = mockReuse.mock.calls[0][0];
-      expect(Object.keys(args).sort()).toEqual(['expectedPropertyId', 'openVisitOnly', 'technicianId', 'visit']);
+      expect(Object.keys(args).sort()).toEqual(['actor', 'expectedPropertyId', 'openVisitOnly', 'technicianId', 'visit']);
       expect(args.visit.id).toBe('svc-1');
     });
 

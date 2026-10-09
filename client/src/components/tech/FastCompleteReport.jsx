@@ -493,14 +493,18 @@ export function useTraceReuse({ serviceId, request, propertyId, trace, plain, se
     setReusing(true);
     setError('');
     try {
-      await request(`/tech/services/${serviceId}/treatment-zone/reuse`, {
+      const data = await request(`/tech/services/${serviceId}/treatment-zone/reuse`, {
         method: 'POST',
         body: JSON.stringify({
           ...(propertyId !== undefined ? { expectedPropertyId: propertyId ?? null } : {}),
           openVisitOnly: true,
         }),
       });
-      trace.reload();
+      // The answer IS the saved trace, as after a hand trace: the hold clears
+      // and the button goes at once, whatever a later read does (a second tap
+      // would only meet trace_exists; Codex P2 on #6175).
+      if (data?.treatmentZone) trace.saved(data.treatmentZone);
+      else trace.reload();
     } catch (err) {
       setError(err?.message || 'Couldn’t copy the last trace. Trace it by hand.');
     }

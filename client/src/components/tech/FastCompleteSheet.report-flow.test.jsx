@@ -1010,7 +1010,27 @@ describe('complete and send', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
       await waitFor(() => expect(screen.getByRole('button', { name: 'Trace where we sprayed' }).disabled).toBe(true));
       release();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Trace where we sprayed' }).disabled).toBe(false));
+      // The answer is the saved trace: it shows at once.
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Trace again' }).disabled).toBe(false);
+    });
+
+    // Codex P2 on #6175: the POST's own answer is applied, so the hold clears
+    // and the button goes even when no later read of the trace succeeds.
+    test('the copy\'s answer is applied without another read of the trace', async () => {
+      let reads = 0;
+      const request = reusableRequest({
+        trace: () => { reads += 1; return { enabled: true, treatmentZone: null }; },
+        reuse: () => ({ treatmentZone: { linear_ft: 220, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' } }),
+      });
+      await openSheet(request);
+      await generate();
+      const before = reads;
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      expect(reads).toBe(before);
+      expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
     });
 
     test('a reused trace can still be removed or traced again by hand', async () => {

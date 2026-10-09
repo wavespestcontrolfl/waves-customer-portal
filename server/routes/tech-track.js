@@ -1791,7 +1791,7 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
 // tap. The server picks the source trace itself (treatment-zone-maps.js,
 // findReusableTreatmentZone); a client never names a zone.
 const TRACE_REUSE_SVC_COLUMNS = ['id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type', 'property_id'];
-const TRACE_REUSE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, trace_exists: 409, no_reusable_trace: 409, trace_image_copy_failed: 502 };
+const TRACE_REUSE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, trace_exists: 409, no_reusable_trace: 409, visit_changed: 409, service_not_assigned: 403, not_found: 404, trace_image_copy_failed: 502 };
 
 // GET /api/tech/services/:id/treatment-zone/last — is there a trace to reuse,
 // and how big? No path points: the sheet only needs the size and the day.
@@ -1841,6 +1841,9 @@ router.post('/:id/treatment-zone/reuse', async (req, res, next) => {
     // sheet check above (pre-push P1).
     const row = await reuseLastTreatmentZone({
       visit: svc,
+      // The write reads the visit again under its lock, inside this caller's
+      // own scope (a visit reassigned or edited during the image copy).
+      actor: req,
       technicianId: req.technicianId,
       expectedPropertyId: svc.property_id ?? null,
       openVisitOnly: true,
