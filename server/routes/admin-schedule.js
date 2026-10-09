@@ -2015,7 +2015,7 @@ async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons, r
 // FOR SHARE inside it. The locked read is the row every add-on decision of the transaction uses.
 const LINKED_ESTIMATE_COLUMNS = Object.freeze([
   'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
-  'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id', 'address',
+  'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id', 'address', 'pricing_authority',
 ]);
 
 // The add-on decisions of a staff booking made inside its transaction, on the linked estimate row that transaction holds locked:
@@ -2029,6 +2029,22 @@ async function assertLockedEstimateAddOns(trx, estimate, { billingTerm, customer
   if (refusal) throw Object.assign(httpError(409, refusal.message), { code: refusal.code });
   await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
     estimate, customerId, property, appliedOn, staff: true,
+  });
+}
+
+// The visit's own service and each add-on line of a staff booking as the area add-on guard reads them (catalog key; the add-on
+// line's gross price): area-addon-visit-rows assertPostedAreaAddOnsSold.
+const postedAreaAddOnLines = (pricing) => [
+  { key: pricing.primaryServiceKey },
+  ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base })),
+];
+
+// The Update Details save and the area add-ons (Codex round 18 P1): what the edit ADDS must be sold by the visit's source estimate
+// and never joins a repeating series (area-addon-visit-rows assertEditedAreaAddOns), inside the save's transaction before the
+// visit is written. A visit with no area add-on after the edit costs the visit read and one row read.
+async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons }) {
+  await areaAddOnRows.assertEditedAreaAddOns(trx, visitId, {
+    updates, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : null,
   });
 }
 
@@ -3058,6 +3074,9 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
 // a restore — must stay safe, so the check lives here rather than at each
 // of the many call sites below.
 const ONE_TIME_ADDON_SERVICE_KEYS = new Set(['waveguard_membership']);
+// An area add-on treatment (area_addon_<key>) is one application, sold and limited from one estimate: it is due only on the visit it
+// was sold on, whatever its stored `recurring_pattern` holds (a staff-built line leaves it NULL, which would ride the parent cadence).
+const isOneTimeOnlyAddonKey = (serviceKey) => ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey) || isAreaAddOnCatalogKey(serviceKey);
 
 // `blackoutDates` must be the same layers the visit-date generator used:
 // a visit nudged off a closure (Oct 15 → Oct 16) still owes the add-ons due
@@ -3068,7 +3087,7 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   // later occurrence. Returning true on the anchor date keeps the fee in the
   // booking's own price-floor gate, which also filters the parent's date.
   const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
-  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) {
+  if (serviceKey && isOneTimeOnlyAddonKey(serviceKey)) {
     const anchor = normalizeDateOnly(baseDateStr);
     return !!anchor && anchor === normalizeDateOnly(targetDateStr);
   }
@@ -3105,7 +3124,7 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
 // 'one_time' pattern is due on the anchor only; every other line recurs.
 function addonRecursAfterAnchor(line) {
   const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
-  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) return false;
+  if (serviceKey && isOneTimeOnlyAddonKey(serviceKey)) return false;
   return (line?.recurringPattern || line?.recurring_pattern || null) !== 'one_time';
 }
 
@@ -8843,6 +8862,10 @@ async function scheduleCreateHandler(req, res, next) {
           });
         }
       }
+      // The area add-ons the posted lines carry, against the estimate row this transaction holds locked (an estimate revised after
+      // the modal built its request is refused here, with nothing inserted): a posted add-on the estimate does not sell, or sells at
+      // another price, never books; fewer than sold is the office's choice. None posted: no query. A repeating series never carries one.
+      require('../services/area-addon-visit-rows').assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring });
       // Global lock order for recurring creators: CUSTOMER ROW first, series
       // advisory lock second — the same order estimate-converter uses (it
       // updates the customer, then waits on the advisory lock). Taking the
@@ -15201,6 +15224,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           ? await trx('scheduled_services').where({ id: req.params.id, source_action: 'package_followup_auto' })
             .first('customer_id', 'scheduled_date')
           : null;
+        await assertAreaAddOnEdit(trx, req.params.id, { updates, replaceAddons, addressPlan });
         await areaAddOnRows.clearOwnAreaAddOnScopeOnServiceChange(trx, req.params.id, updates);
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
@@ -28274,7 +28298,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
-  assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS,
+  assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,

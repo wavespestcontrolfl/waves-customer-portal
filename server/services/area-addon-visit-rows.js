@@ -22,7 +22,7 @@
  * (a replayed accept, a second adoption) is skipped.
  */
 const logger = require('./logger');
-const { areaAddOnConfig } = require('./pricing-engine/constants');
+const { areaAddOnConfig, isAreaAddOnCatalogKey, AREA_ADDONS } = require('./pricing-engine/constants');
 
 const AREA_ADDON_ENGINE_KEY = 'area_addon';
 const AREA_ADDON_KEY_PREFIX = 'area_addon_';
@@ -290,6 +290,92 @@ async function writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId, estima
   return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });
 }
 
+// ---------------------------------------------------------------------------
+// What a staff booking or edit may put on a visit (Codex round 18 P1)
+//
+// The Create Appointment modal builds its lines from the estimate as it read it; the estimate can be revised before the
+// booking transaction locks it. An area add-on line is therefore judged on the LOCKED estimate, inside the transaction, before
+// anything is inserted: a posted add-on the estimate does not sell, or sells at another price, is refused (409, nothing
+// written). Staff may still book FEWER add-ons than were sold (round 9: a line the office removed is not added back). An area
+// add-on is priced and limited from an estimate, so one with no estimate to sell it is refused as well (the stored scope is
+// what the job card, the governed rate and the yearly limits read; a hand-made line has none). An area add-on is one
+// application: it never rides a repeating series (the series children skip it, see admin-schedule lineDueOnRecurringDate).
+// ---------------------------------------------------------------------------
+const nameOfServiceKey = (serviceKey) => (Object.values(AREA_ADDONS.items).find((cfg) => cfg.serviceKey === serviceKey) || {}).name || 'This add-on';
+
+function postedRefusal(code, message) {
+  return Object.assign(new Error(message), { status: 409, statusCode: 409, code, isOperational: true });
+}
+
+// The catalog service key of each add-on the estimate sells, with its price: a Map. Empty with no estimate or no sold add-on.
+function soldAreaAddOnPrices(estimate) {
+  if (!estimate) return new Map();
+  const sold = require('./area-addon-limits').soldAddOnKeys(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
+  const soldServiceKeys = new Set(sold.map((key) => (AREA_ADDONS.items[key] || {}).serviceKey).filter(Boolean));
+  if (!soldServiceKeys.size) return new Map();
+  const profile = require('./estimate-slot-availability').resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+  const prices = new Map([...soldServiceKeys].map((key) => [key, null]));
+  for (const row of areaAddOnProfileRows(profile)) if (prices.has(row.catalogServiceKey)) prices.set(row.catalogServiceKey, row.addOnPrice ?? null);
+  return prices;
+}
+
+const samePrice = (posted, sold) => Number.isFinite(Number(posted)) && posted !== null && Math.round(Number(posted) * 100) === Math.round(Number(sold) * 100);
+
+/**
+ * Refuses (409, nothing written) a posted visit line that the estimate does not sell. `posted` is [{ key, price }]: the catalog
+ * service key of the visit's own service and of each add-on line, with the add-on line's gross price (`price` undefined for the
+ * visit's own service and for an edit that does not post prices). Only area add-on keys are judged; no such line: no query.
+ * `estimate` is the row the caller holds locked (null when the visit has none). `recurring`: the visit is, or becomes, part of a
+ * repeating series.
+ */
+function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false } = {}) {
+  const wanted = posted.filter((line) => line && isAreaAddOnCatalogKey(line.key));
+  if (!wanted.length) return;
+  const name = nameOfServiceKey(wanted[0].key);
+  if (recurring) throw postedRefusal('AREA_ADDON_ONE_TIME_ONLY', `${name} is a one-time application. Book it as its own appointment, not in a repeating series.`);
+  const sold = soldAreaAddOnPrices(estimate);
+  for (const line of wanted) {
+    const lineName = nameOfServiceKey(line.key);
+    if (!sold.has(line.key)) {
+      throw postedRefusal(estimate ? 'AREA_ADDON_NOT_ON_ESTIMATE' : 'AREA_ADDON_NEEDS_ESTIMATE', estimate
+        ? `${lineName} is not sold on the linked estimate any more. The estimate changed after this appointment was built: reopen the estimate and build the appointment again.`
+        : `${lineName} is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate.`);
+    }
+    if (line.price !== undefined && sold.get(line.key) !== null && !samePrice(line.price, sold.get(line.key))) {
+      throw postedRefusal('AREA_ADDON_PRICE_CHANGED', `The price of ${lineName} on the estimate changed after this appointment was built: reopen the estimate and build the appointment again.`);
+    }
+  }
+}
+
+/**
+ * The Update Details save: the area add-ons the edit ADDS to a visit (its own service moved to one, or a new add-on row) must be
+ * sold by the visit's source estimate, and a repeating series never carries one. What the visit already carries is kept as it
+ * is (the stored scopes are carried over by restoreCarriedAreaAddOnScopes). `updates` are the planned visit columns; `rowKeys`
+ * are the catalog keys of the posted add-on rows (null when the save does not replace them). Returns { keys, added }: the area
+ * add-on keys the visit carries after the edit and the ones the edit adds (both [] and no further query for a visit that has none).
+ */
+async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = null } = {}) {
+  const visit = await trx('scheduled_services').where({ id: visitId }).first();
+  if (!visit) return { keys: [], added: [] };
+  const storedRowKeys = (await areaAddOnKeysByVisit(trx, [visitId])).get(String(visitId)) || [];
+  const ownKey = updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : visit.service_key_snapshot;
+  const finalKeys = [ownKey, ...(rowKeys === null ? storedRowKeys : rowKeys)].filter(isAreaAddOnCatalogKey);
+  if (!finalKeys.length) return { keys: [], added: [] };
+  const before = new Set([visit.service_key_snapshot, ...storedRowKeys]);
+  const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
+  const inSeries = visit.is_recurring === true || Boolean(visit.recurring_parent_id);
+  // Becoming a series, or adding to one, with an area add-on on it.
+  if ((updates.is_recurring === true && !inSeries) || (inSeries && added.length > 0)) {
+    assertPostedAreaAddOnsSold(null, finalKeys.map((key) => ({ key })), { recurring: true });
+  }
+  if (!added.length) return { keys: finalKeys, added };
+  const estimate = visit.source_estimate_id
+    ? await trx('estimates').where({ id: visit.source_estimate_id }).first('id', 'estimate_data', 'pricing_authority', 'show_one_time_option')
+    : null;
+  assertPostedAreaAddOnsSold(estimate, added.map((key) => ({ key })));
+  return { keys: finalKeys, added };
+}
+
 // The attached area add-on rows of these visits (a `scheduled_service_addons` row
 // whose catalog key is an area add-on): a Map of visit id to the catalog keys. ONE
 // batched read. A visit with such a row has work the lightweight completion flows
@@ -365,6 +451,8 @@ module.exports = {
   secondaryAreaAddOns,
   writeAreaAddOnVisitRows,
   writeStaffBookedAreaAddOnScopes,
+  assertPostedAreaAddOnsSold,
+  assertEditedAreaAddOns,
   readAreaAddOnScopesToCarry,
   restoreCarriedAreaAddOnScopes,
   clearOwnAreaAddOnScopeOnServiceChange,
