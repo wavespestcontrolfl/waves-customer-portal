@@ -571,6 +571,103 @@ test.each(INVALID_AREAS)('invalid lawn visit area %j fails a fresh completion at
   expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ message: 'lawn_completion_area_invalid' }), expect.anything());
 });
 
+// GATE_LAWN_BERMUDA_REMOVAL pair check (Recognition or Fusilade II without the other):
+// a FRESH attempt only, like the lawn area validation. A committed completion's replay
+// or resume is never judged by today's account flag.
+describe('the bermuda removal pair check judges only a fresh attempt', () => {
+  const removal = require('../services/lawn-bermuda-removal');
+  let pair;
+  beforeEach(() => { pair = jest.spyOn(removal, 'bermudaPairViolation').mockResolvedValue('Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.'); });
+  afterEach(() => pair.mockRestore());
+
+  test('a fresh attempt is refused with 400 and the attempt is marked failed', async () => {
+    const completionAttempt = { id: 'fixture-attempt' };
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+    const result = await complete({ products: [] });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_pair_required' } });
+    expect(pair).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
+    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_pair_required' }), expect.anything());
+  });
+
+  test('a replay of a committed completion returns its stored result and never runs the check', async () => {
+    const payload = { success: true, serviceRecordId: 'fixture-record' };
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+    await expect(complete({ products: [] })).resolves.toEqual({ status: 200, body: payload });
+    expect(pair).not.toHaveBeenCalled();
+    expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+  });
+
+  test.each(['pair', 'limit'])('an error reading the account in the %s check fails the attempt (marked failed, nothing committed), never "not requested"', async (which) => {
+    const completionAttempt = { id: 'fixture-attempt' };
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+    const boom = new Error('properties read failed');
+    const limit = jest.spyOn(removal, 'bermudaLimitViolation').mockResolvedValue(null);
+    pair.mockResolvedValue(null);
+    (which === 'pair' ? pair : limit).mockRejectedValue(boom);
+    try {
+      await expect(complete({ products: [] })).rejects.toBe(boom);
+      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, boom, expect.anything());
+    } finally { limit.mockRestore(); }
+  });
+
+  describe('the step limits (a 3rd spray this year, or fewer than 42 days after the last)', () => {
+    let limit;
+    beforeEach(() => {
+      pair.mockResolvedValue(null);
+      limit = jest.spyOn(removal, 'bermudaLimitViolation').mockResolvedValue('Recognition Post Emergent Herbicide: 2/2 applications this year — LIMIT REACHED. Bermuda removal cannot be recorded on this visit.');
+    });
+    afterEach(() => limit.mockRestore());
+
+    test('a fresh attempt is refused with 400 lawn_bermuda_limit_reached and the limit message', async () => {
+      const completionAttempt = { id: 'fixture-attempt' };
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+      const result = await complete({ products: [] });
+      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_limit_reached', error: expect.stringContaining('LIMIT REACHED') } });
+      expect(limit).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
+      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
+    });
+
+    test('a replay and a resume never run the limit check', async () => {
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload: { success: true } });
+      await complete({ products: [] });
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'resume', attempt: { id: 'fixture-attempt' }, releasedForResume: false });
+      try { await complete({ products: [] }); } catch { /* the resume proceeds into the committed flow */ }
+      expect(limit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a recorded step spray needs its treated area or a rate (fresh attempts only)', () => {
+    let area;
+    beforeEach(() => {
+      pair.mockResolvedValue(null);
+      area = jest.spyOn(removal, 'bermudaAreaViolation').mockResolvedValue('Enter the area treated and the amount used for the bermuda mix.');
+    });
+    afterEach(() => area.mockRestore());
+
+    test('a fresh attempt is refused with 400 lawn_bermuda_area_required and the attempt is marked failed', async () => {
+      const completionAttempt = { id: 'fixture-attempt' };
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+      const result = await complete({ products: [] });
+      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_area_required', error: 'Enter the area treated and the amount used for the bermuda mix.' } });
+      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
+    });
+
+    test('a replay never runs the area check', async () => {
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload: { success: true } });
+      await complete({ products: [] });
+      expect(area).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a resume of a committed completion is never refused by the check, even after the account was flagged', async () => {
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'resume', attempt: { id: 'fixture-attempt' }, releasedForResume: false });
+    let result;
+    try { result = await complete({ products: [] }); } catch (err) { result = { thrown: err.message }; }
+    expect(pair).not.toHaveBeenCalled();
+    expect(result?.body?.code).not.toBe('lawn_bermuda_pair_required');
+  });
+});
+
 test('a missing service returns the existing 404 payload', async () => {
   service = null;
   await expect(complete()).resolves.toEqual({ status: 404, body: { error: 'Service not found' } });

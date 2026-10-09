@@ -52,7 +52,7 @@ describe('turf-profile editor stamps a staff grass', () => {
   mockTrx.schema = { hasColumn: async () => false };
 
   jest.mock('../models/db', () => () => ({ where: () => ({ first: async () => ({ id: 'cust-1' }) }) }));
-  jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: (r, s, n) => n(), requireTechOrAdmin: (r, s, n) => n() }));
+  jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: (r, s, n) => n(), requireTechOrAdmin: (r, s, n) => n(), requireAdmin: (r, s, n) => n() }));
   jest.mock('../services/technician-visit-scope', () => ({ technicianServicesCustomer: async () => true }));
   jest.mock('../services/customer-pricing-ai', () => ({ withTurfProfileFence: async (_db, _id, fn) => fn(mockTrx) }));
   jest.mock('../services/irrigation-schedule-confirmation', () => ({ COUNTY_CONFIRMED_FIELD: 'county', GRASS_CONFIRMED_FIELD: 'turf_grass', confirmIrrigationFields: jest.fn() }));

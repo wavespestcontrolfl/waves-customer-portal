@@ -351,7 +351,7 @@ function isoOrNull(value) {
 // ("14:00:00-04:00"): an Eastern offset of either season is the wall clock
 // it spells (the isoOrNull rule above), so it reads as the bare time. Any
 // other offset is not a bare ET time and falls through.
-const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:-0[45]:?00)?$/;
+const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:-0[45](?::?00)?)?$/;
 // The schema checks a dated callback time as digits only. A date that does
 // not exist ("2026-02-30T14:00") would be rolled forward by the ET parser's
 // Date.UTC into a real-looking deadline on another day: no due time instead
@@ -368,11 +368,13 @@ const DATED_WALL_RE = /^(\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})(?::\d{2})?)(?:\.\d+)?(-
 // clock must occur once that day: 2:30 on the spring-forward night does not
 // exist and 1:30 on the fall-back night happens twice. No guessed deadline
 // (codex #6215 r3 P2; the rule admin-leads applies to an office-typed callback).
-function oneETWallClock(iso, hhmm) {
-  const at = new Date(iso);
-  const p = etParts(at);
+function readsBackAs(iso, hhmm) {
+  const p = etParts(new Date(iso));
   const pad = (n) => String(n).padStart(2, '0');
-  return `${pad(p.hour)}:${pad(p.minute)}` === hhmm && etWallClockOccurrences(at) === 1;
+  return `${pad(p.hour)}:${pad(p.minute)}` === hhmm;
+}
+function oneETWallClock(iso, hhmm) {
+  return readsBackAs(iso, hhmm) && etWallClockOccurrences(new Date(iso)) === 1;
 }
 function callbackDueAt(value, callStartedAt) {
   if (value == null || value === '') return null;
@@ -387,7 +389,12 @@ function callbackDueAt(value, callStartedAt) {
     const dated = DATED_WALL_RE.exec(text);
     if (!dated || !realWallDate(text)) return null;
     const due = isoOrNull(`${dated[1]}${dated[3] || ''}`);
-    return due && oneETWallClock(due, dated[2]) ? due : null;
+    if (!due) return null;
+    // A written Eastern offset already says WHICH 1:30 on the fall-back night:
+    // the instant stands (isoOrNull keeps a valid offset as written). Only an
+    // offset-free clock can be missing or repeated (codex #6215 r5 P2).
+    // A clock that does not exist stays invalid with any offset (r6 P2).
+    return (dated[3] ? readsBackAs(due, dated[2]) : oneETWallClock(due, dated[2])) ? due : null;
   }
   const start = callStartedAt ? new Date(callStartedAt) : null;
   if (!start || Number.isNaN(start.getTime())) return null;

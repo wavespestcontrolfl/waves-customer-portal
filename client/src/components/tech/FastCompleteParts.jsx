@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
-import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
+import { rankTechTips, techTipSubtext, techTipSentLabel, unsentTipsFirst } from '../../lib/tech-tips';
 import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
 import { isMlUnit } from '../../lib/measure-units';
 import RATE_UNITS from '../../../../shared/rate-units.json';
@@ -695,10 +695,12 @@ function tipMark(tip, library) {
 
 // The tips on screen: search results, the whole list, or the short list,
 // with the pick always kept in view. `noMatch` is about the search alone, so
-// a pinned pick never hides that a search found nothing.
-function visibleTips(allTips, { query, showAll, tipId }) {
-  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
-  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
+// a pinned pick never hides that a search found nothing. A search reads
+// `searchable` (the whole library, owner 2026-10-09); `pinnable` is where a
+// pick that is off the list is found.
+function visibleTips(allTips, { query, showAll, tipId, searchable = allTips, pinnable = allTips }) {
+  const listed = query ? rankTechTips(searchable, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
+  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? pinnable.find((tip) => tip.id === tipId) : null;
   return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
 }
 
@@ -726,30 +728,119 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // resolves and freezes the copy. `priorityTipIds` (optional, the tree & shrub
 // sheet's seen watch items) lifts those tips above the list under their own
 // heading, in library order; a search ignores it, and nothing is ever picked
-// for the tech.
+// for the tech. A lifted tip may come from the whole library (`library.more`),
+// which a search also reads. Tips this customer had lately (`library.lastSent`)
+// go last in each list, so a recurring visit's short list changes; `sentLast`
+// off (the lawn sheet) keeps the server's order, which ranks by today's findings.
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false }) {
-  const [query, setQuery] = useState('');
-  const [showAll, setShowAll] = useState(false);
-  const [writing, setWriting] = useState(false);
+// Two mics on one sheet (the note's and the tip's own line) report one
+// "dictating" state up: the sheet holds Complete while either records. Each
+// source has its own setter, so one mic stopping never clears the other.
+export function useDictationSources(onDictationPending) {
+  const pending = useRef({ note: false, tip: false });
+  const report = useCallback((key, on) => {
+    pending.current[key] = !!on;
+    onDictationPending?.(pending.current.note || pending.current.tip);
+  }, [onDictationPending]);
+  const note = useCallback((on) => report('note', on), [report]);
+  const tip = useCallback((on) => report('tip', on), [report]);
+  return { note, tip };
+}
+
+// One suggested tip, offered where the sheet has read the note (the report
+// step). One tap adds it; it is never picked for the tech.
+export function TipSuggestion({ library, tip, pressed, locked, onPick }) {
+  if (!tip) return null;
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Tip for the customer</h3>
+        <span className="tech-visit-muted">{pressed ? '1 picked' : 'Suggested from your note'}</span>
+      </div>
+      <div className="tech-visit-tip-list">
+        <TipOption tip={tip} library={library} pressed={pressed} locked={locked} onPick={onPick} />
+      </div>
+    </section>
+  );
+}
+
+// The picker's lists for one render: the lifted tips, the tips under them, and
+// the row set on screen (a search reads the whole library).
+function useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast, q, showAll }) {
   const allTips = useMemo(
     () => (library?.groups || []).flatMap((group) => group.tips || []),
     [library],
   );
-  const q = query.trim().toLowerCase();
+  const everyTip = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
+  const lastSent = sentLast ? library?.lastSent : null;
   const priority = useMemo(() => {
     if (!priorityTipIds?.length) return [];
     const ids = new Set(priorityTipIds);
-    const lifted = allTips.filter((tip) => ids.has(tip.id));
+    const lifted = everyTip.filter((tip) => ids.has(tip.id));
     // Library order by default (the tree & shrub Seen list); `priorityOrdered`
     // keeps the caller's own ranking (the lawn sheet's note matches, best first).
-    return priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted;
-  }, [allTips, priorityTipIds, priorityOrdered]);
+    return unsentTipsFirst(priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted, lastSent);
+  }, [everyTip, priorityTipIds, priorityOrdered, lastSent]);
   const lifted = !q && priority.length > 0;
-  const rest = lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips;
-  const { tips: visible, noMatch } = visibleTips(rest, { query: q, showAll, tipId });
+  const rest = useMemo(
+    () => unsentTipsFirst(lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips, lastSent),
+    [allTips, lifted, priority, lastSent],
+  );
+  const { tips: visible, noMatch } = visibleTips(rest, {
+    query: q, showAll, tipId, searchable: everyTip, pinnable: lifted ? everyTip.filter((tip) => !priority.includes(tip)) : everyTip,
+  });
+  return { priority, lifted, rest, visible, noMatch };
+}
+
+// The tech's own line. With `mic`, the note's microphone sits beside it and
+// each dictated chunk joins what is already on the line.
+function OwnTipField({ customTip, onCustom, locked, mic }) {
+  const ownRef = useRef({ customTip, onCustom });
+  ownRef.current = { customTip, onCustom };
+  // Stable for the mic.
+  const appendOwn = useCallback((text) => {
+    const said = String(text || '').trim();
+    const own = ownRef.current;
+    if (said) own.onCustom(own.customTip.trim() ? `${own.customTip.trimEnd()} ${said}` : said);
+  }, []);
+  const ownId = useId();
+  const field = (
+    <Input id={ownId} className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
+  );
+  return (
+    <>
+      {mic ? (
+        // Field labels its one child; here the label must name the box, not the row.
+        <div className="ui-field tech-visit-field">
+          <label className="ui-label" htmlFor={ownId}>Your own tip (one sentence)</label>
+          <div className="tech-visit-note-row tech-visit-tip-own-row">
+            <DictationButton onAppend={appendOwn} onPendingChange={mic.onPendingChange} palette={MIC_PALETTE} size={48} title="Say your own tip" disabled={locked} uploadServiceId={mic.serviceId} clipHandler={mic.onClip} />
+            {field}
+          </div>
+        </div>
+      ) : (
+        <Field label="Your own tip (one sentence)" className="tech-visit-field">{field}</Field>
+      )}
+      {customTip.length > CUSTOM_TIP_MAX_CHARS && (
+        <p className="tech-visit-muted tech-visit-status--warn" role="status">Too long. Keep it to one sentence, {CUSTOM_TIP_MAX_CHARS} characters.</p>
+      )}
+      {mic?.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{mic.error}</p>}
+    </>
+  );
+}
+
+// `mic` (optional): the note's own microphone on the tech's own line, so the
+// line is spoken the way the visit note is (owner 2026-10-09): `serviceId`,
+// `onClip` (our own transcriber, where the sheet's note uses it),
+// `onPendingChange`, `error`.
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false, sentLast = true, mic = null }) {
+  const [query, setQuery] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const q = query.trim().toLowerCase();
+  const { priority, lifted, rest, visible, noMatch } = useTipLists({ library, tipId, priorityTipIds, priorityOrdered, sentLast, q, showAll });
   const hasPick = !!tipId || !!customTip.trim();
   const writingOwn = writing || !!customTip;
   return (
@@ -790,11 +881,7 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
         )}
         {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
       </div>
-      {writingOwn && (
-        <Field label="Your own tip (one sentence)" className="tech-visit-field">
-          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
-        </Field>
-      )}
+      {writingOwn && <OwnTipField customTip={customTip} onCustom={onCustom} locked={locked} mic={mic} />}
     </section>
   );
 }

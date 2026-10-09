@@ -440,6 +440,10 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
     const accepted = values.filter((value) => oldForm(value));
     expect(accepted.length).toBeGreaterThan(80);
     for (const value of accepted) expect([value, new RegExp(pattern).test(value)]).toEqual([value, true]);
+    // And not wider on the offset: what the old format refused stays refused (codex #6215 r8 P2).
+    for (const value of ['14:00:00+99', '14:00:00+2460', '14:00:00+23:99', '14:00:00-24:00']) {
+      expect([value, oldForm(value), new RegExp(pattern).test(value)]).toEqual([value, false, false]);
+    }
   });
 
   test('the callback fields are on the evidence pinning list, with the agent quote (codex #6215 r2 P1)', () => {
@@ -450,6 +454,14 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
     expect(pinning).toMatch(/AGENT's own words agreeing that Waves will call back/);
     const evidence = require('../schemas/call-extraction.model-output.schema.json').properties.evidence.description;
     expect(evidence).toMatch(/scheduling\.callback_window_start \/ _end when set/);
+  });
+
+  test('the end description lets a deadline stand alone, as the prompt rule asks (codex #6215 r5 P1)', () => {
+    for (const file of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
+      const description = field(file, 'callback_window_end').description;
+      expect(description).toMatch(/A deadline with no start is set here alone/);
+      expect(description).not.toMatch(/Null when the caller gave one time or none/);
+    }
   });
 
   test('null stays valid in both schemas', () => {

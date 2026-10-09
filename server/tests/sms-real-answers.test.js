@@ -137,7 +137,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers9_m');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers13_n');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -205,11 +205,39 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(prompt.match(/HELD FOR A PERSON:[^.]*\./)[0]).not.toMatch(/cancellation/i);
   });
 
-  test('CANCELLATIONS are answered, never escalated as their own category: skip/reschedule from OPEN TIMES only, never an invented discount/credit/refund, plus escalate/cancel_request', () => {
+  test('CANCELLATIONS are accepted plainly: no "why", no owner-call promise, options only on request, escalate/cancel_request kept (owner 2026-10-09)', () => {
     const prompt = buildSystemPrompt();
-    expect(prompt).toContain(
-      "- CANCELLATIONS are never escalated as their own category: acknowledge, ask what's driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {\"type\":\"escalate\",\"note\":\"cancel_request\"} to intended_actions so a person still processes the actual cancellation."
-    );
+    const bullet = prompt.split('\n').find((l) => l.startsWith('- CANCELLATIONS'));
+    expect(bullet).toBeTruthy();
+    expect(bullet).toContain('Accept it in ONE plain sentence: no question about why, no attempt to change their mind, and NEVER a promise that the owner or anyone will call them.');
+    expect(bullet).toContain('Say the team will confirm the cancellation, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
+    expect(bullet).toContain('Offer skipping or rescheduling the next visit (2–3 SPECIFIC times from OPEN TIMES) ONLY when the customer asks what their options are.');
+    expect(bullet).toContain('NEVER invent a discount, credit, or refund.');
+    expect(bullet).toContain('Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
+    // the 2026-09-27 wording is gone
+    expect(prompt).not.toContain("ask what's driving it");
+  });
+
+  test('the portal self-cancel is mentioned ONLY on the exact available fact line, for a whole-plan cancel, and never claimed as done', () => {
+    const bullet = buildSystemPrompt().split('\n').find((l) => l.startsWith('- CANCELLATIONS'));
+    const { PORTAL_CANCEL_AVAILABLE_LINE, PORTAL_CANCEL_UNAVAILABLE_LINE } = require('../services/sms-portal-cancel-fact');
+    expect(bullet).toContain(`ONLY when the customer wants to end their recurring service plan altogether (not skip, move or cancel ONE visit) AND the facts carry the exact line "${PORTAL_CANCEL_AVAILABLE_LINE}"`);
+    expect(bullet).toContain('When that line reads "not available" or is missing, NEVER mention cancelling in the portal.');
+    expect(bullet).toContain('Never say the plan is cancelled, and never point a one-visit request at the portal plan cancellation.');
+    expect(PORTAL_CANCEL_UNAVAILABLE_LINE).toBe('PORTAL SELF-CANCEL: not available');
+  });
+
+  test('behavior rules (part 3, 2026-10-09): pest report asks where and how many AND still sends the link; three attention rules; gate-off prompt has none', () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("say CONCRETELY that you're sending their free re-service booking link now, ALSO ask in the same reply where they are seeing the activity and about how many (so the technician treats the right place — ask AND send the link, never ask instead of sending it), and add {\"type\":\"escalate\",\"note\":\"send_reservice_link\"}");
+    expect(prompt).toContain('- A text with MORE THAN ONE question or request gets an answer to EACH one.');
+    expect(prompt).toContain('- When part of the text needs a person, still answer the parts the facts DO answer in the same reply.');
+    expect(prompt).toContain('- When two facts give DIFFERENT dates or times for what looks like the same visit, do not pick one and do not tell the customer our records disagree: say you will confirm the exact time, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}.');
+    const prior = process.env.GATE_SMS_REAL_ANSWERS;
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      expect(buildSystemPrompt()).not.toMatch(/MORE THAN ONE question|DIFFERENT dates or times/);
+    } finally { if (prior !== undefined) process.env.GATE_SMS_REAL_ANSWERS = prior; }
   });
 
   test('each category gate removes exactly that category from HELD and adds its own instruction', () => {
@@ -309,7 +337,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     for (const g of CATEGORY_GATES) process.env[g] = 'true';
     const allFour = currentPromptVersion();
     expect(allFour).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`);
-    expect(allFour.length).toBe(36); // '7_m' + '+bclm': the compact scheme (#5610) leaves room under PROMPT_VERSION_COLUMN_MAX
+    expect(allFour.length).toBe(37); // '7_m' + '+bclm': the compact scheme (#5610) leaves room under PROMPT_VERSION_COLUMN_MAX
     expect(allFour.length).toBeLessThanOrEqual(40);
   });
 
@@ -938,7 +966,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers9_m');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers13_n');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1432,7 +1460,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers9_m');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers13_n');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1441,7 +1469,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers9_m'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers13_n'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 

@@ -190,6 +190,8 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     // The season slipped (-05:00 in September): the spoken hour still stands.
     expect(at('09:00:00-05:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
     expect(at('09:00:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    // Every Eastern spelling the old format allowed: -04, -0400, -04:00 (codex #6215 r7 P2).
+    for (const zone of ['-04', '-05', '-0400', '-0500']) expect(at(`09:00:00${zone}`, '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
     // A UTC time is not a bare ET wall clock: no invented instant.
     expect(at('09:00:00Z', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
   });
@@ -255,6 +257,12 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
       expect(cbFor('2026-03-08T02:30', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null, due_basis: null });
       expect(cbFor('2026-11-01T01:30', null, '2026-10-30T09:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
       expect(cbFor('2026-11-01T09:30', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T09:30:00-05:00').toISOString());
+      // An offset does not make a missing clock real (r6 P2).
+      expect(cbFor('2026-03-08T02:30:00-05:00', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null });
+      expect(cbFor('2026-03-08T02:30:00-04:00', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null });
+      // A written offset names which 1:30 it is: the instant stands (r5 P2).
+      expect(cbFor('2026-11-01T01:30:00-04:00', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T01:30:00-04:00').toISOString());
+      expect(cbFor('2026-11-01T01:30:00-05:00', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T01:30:00-05:00').toISOString());
     });
 
     test('a bare end beside a dated start gets the same DST checks; the start then stands (codex #6215 r4 P2)', () => {
