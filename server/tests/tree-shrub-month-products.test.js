@@ -148,7 +148,7 @@ describe('resolveMonthProducts', () => {
     for (const month of ['Mar', 'Jun', 'Oct']) {
       const visit = program.visits.find((v) => v.month === month);
       expect(visit.primary).not.toMatch(/kphite|reliant/i);
-      const reliant = visit.secondary.split('\n').find((l) => /^Reliant \(phosphite\) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp\/gal, repeat at 14–21 days;/.test(l));
+      const reliant = visit.secondary.split('\n').find((l) => /^Reliant Systemic Fungicide \(phosphite\) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp\/gal, repeat at 14–21 days;/.test(l));
       expect(reliant).toBeDefined();
       for (const limit of [
         'not on dormant, heat-stressed or drought-stressed plants', 'not when rain is forecast within 24 hours',

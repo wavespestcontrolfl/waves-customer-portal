@@ -227,6 +227,23 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(mainspring.program).toMatch(/never Mainspring/);
   });
 
+  test('a card that names Distance or Reliant in its text carries the guide row, and the reverse (Codex r5 #6218)', () => {
+    for (const visit of visits) {
+      const text = `${visit.primary}\n${visit.secondary}`;
+      for (const [key, pattern] of [['distance', /^Distance IGR/m], ['reliant', /^Reliant Systemic Fungicide/m]]) {
+        expect([visit.month, key, visit.fieldGuide.conditional.some((row) => row.key === key)]).toEqual([visit.month, key, pattern.test(text)]);
+      }
+      expect(text).not.toMatch(/Distance IGR on live crawlers only/);
+    }
+  });
+
+  test('the Reliant line resolves to the catalog row once it exists; copper is an absolute no in the guide too', () => {
+    const { matchCatalogProduct } = require('../services/waveguard-plan-engine');
+    const line = visits.find((v) => v.month === 'Mar').secondary.split('\n').find((l) => /^Reliant/.test(l));
+    expect(matchCatalogProduct({ raw: line }, [{ id: 'reliant', name: 'Reliant Systemic Fungicide', best_price: 96.99 }])?.id).toBe('reliant');
+    expect(guide.products.reliant.limits).toContain('Do not tank mix with copper. Jar test and small plant test before a mix with foliar fertilizer.');
+  });
+
   test('every card key has a guide entry', () => {
     for (const visit of visits) {
       for (const section of ['routine', 'conditional']) {
