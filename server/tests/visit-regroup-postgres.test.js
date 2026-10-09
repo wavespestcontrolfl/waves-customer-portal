@@ -343,9 +343,9 @@ postgres('same-stop regroup sweep', () => {
     const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:00', '10:00']] });
     const at = new Date(Date.now() + 86400000 * 30);
     await mockPg('appointment_reminders').insert([
-      { scheduled_service_id: f.rows[0].id, appointment_time: at, source: 'test' },
+      { scheduled_service_id: f.rows[0].id, customer_id: f.rows[0].customer_id, appointment_time: at, source: 'test' },
       {
-        scheduled_service_id: f.rows[1].id, appointment_time: at, source: 'test', suppressed_by_sibling: true,
+        scheduled_service_id: f.rows[1].id, customer_id: f.rows[1].customer_id, appointment_time: at, source: 'test', suppressed_by_sibling: true,
         confirmation_sent: true, reminder_72h_sent: true, reminder_24h_sent: true,
       },
     ]);
@@ -361,14 +361,29 @@ postgres('same-stop regroup sweep', () => {
     const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:00', '10:00'], ['09:30', '10:30']] });
     const at = new Date(Date.now() + 86400000 * 30);
     await mockPg('appointment_reminders').insert([
-      { scheduled_service_id: f.rows[0].id, appointment_time: at, source: 'test', reminder_72h_sent: true },
+      { scheduled_service_id: f.rows[0].id, customer_id: f.rows[0].customer_id, appointment_time: at, source: 'test', reminder_72h_sent: true },
       {
-        scheduled_service_id: f.rows[1].id, appointment_time: at, source: 'test', suppressed_by_sibling: true,
+        scheduled_service_id: f.rows[1].id, customer_id: f.rows[1].customer_id, appointment_time: at, source: 'test', suppressed_by_sibling: true,
         confirmation_sent: true, reminder_72h_sent: true, reminder_24h_sent: true,
       },
     ]);
     const out = await sweep(f);
     expect(out.groups).toHaveLength(0);
     expect(out.left.map((l) => l.reason)).toContain('reminder_state_differs');
+  });
+
+  test('a suppressed row whose slot owner is outside the set is not folded with an unsent row', async () => {
+    // The owner of the 09:00 reminder is another appointment that this pair
+    // does not hold (suppression is keyed by customer + time only).
+    const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:30', '10:30']] });
+    await mockPg('appointment_reminders').insert({
+      scheduled_service_id: f.rows[0].id, customer_id: f.rows[0].customer_id,
+      appointment_time: new Date(Date.now() + 86400000 * 30), source: 'test', suppressed_by_sibling: true,
+      confirmation_sent: true, reminder_72h_sent: true, reminder_24h_sent: true,
+    });
+    const out = await sweep(f);
+    expect(out.groups).toHaveLength(0);
+    expect(out.left.map((l) => l.reason)).toContain('reminder_state_differs');
+    expect((await visitIds(f.rows)).every((v) => v === null)).toBe(true);
   });
 });

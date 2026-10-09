@@ -64,18 +64,31 @@ function visitStartInstant(row) {
 async function reminderStateKey(database, rowIds) {
   const reminders = await database('appointment_reminders')
     .whereIn('scheduled_service_id', rowIds)
-    .select('scheduled_service_id', 'reminder_72h_sent', 'reminder_24h_sent', 'suppressed_by_sibling');
+    .select('scheduled_service_id', 'customer_id', 'appointment_time', 'cancelled',
+      'reminder_72h_sent', 'reminder_24h_sent', 'suppressed_by_sibling');
   const byRow = new Map(reminders.map((r) => [String(r.scheduled_service_id), r]));
-  // A missing reminder row arms fresh (unsent) later, so it reads as unsent.
+  const slotKey = (r) => `${r.customer_id}|${new Date(r.appointment_time).getTime()}`;
   // A row suppressed by its same-slot sibling (appointment-reminders.js: two
   // services booked at one time share ONE reminder, and the second row is
-  // stored with every tier pre-closed) never sent and never will, so it has
-  // no state of its own to compare: the sibling that owns the slot decides.
-  // Without this, every same-time pair read as "one reminded, one not" and
-  // the sweep left all of them loose (owner 2026-10-08: existing same-day
-  // pest + lawn pairs become one stop).
+  // stored with every tier pre-closed) never sent and never will. When the
+  // sibling that owns that slot is ALSO in this set, the suppressed row has
+  // no state of its own to compare: the owner's state decides. Without this
+  // every same-time pair read as "one reminded, one not" and the sweep left
+  // all of them loose (owner 2026-10-08: existing same-day pest + lawn pairs
+  // become one stop).
+  // Suppression is keyed by customer + appointment time only, so the owner
+  // can sit outside this set (another property or technician). Then the
+  // suppressed row keeps its closed flags and the set reads as differing:
+  // folding it with an unsent row would let the outside owner and the new
+  // visit both name it in a reminder.
+  const ownedSlots = new Set(reminders
+    .filter((r) => !r.suppressed_by_sibling && !r.cancelled && r.customer_id && r.appointment_time)
+    .map(slotKey));
+  const ownerInSet = (r) => Boolean(r && r.suppressed_by_sibling && r.customer_id && r.appointment_time
+    && ownedSlots.has(slotKey(r)));
+  // A missing reminder row arms fresh (unsent) later, so it reads as unsent.
   return rowIds
-    .filter((id) => !byRow.get(String(id))?.suppressed_by_sibling)
+    .filter((id) => !ownerInSet(byRow.get(String(id))))
     .map((id) => {
       const r = byRow.get(String(id));
       return `${r && r.reminder_72h_sent ? 1 : 0}${r && r.reminder_24h_sent ? 1 : 0}`;
