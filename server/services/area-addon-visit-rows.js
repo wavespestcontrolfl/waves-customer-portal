@@ -285,7 +285,7 @@ async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownSe
  * office keeps its own rows (`addMissingRows: false`): nothing is added or removed. No sold add-on: no query.
  */
 async function writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId, estimate, ownServiceKey = null }) {
-  if (!estimate || require('./area-addon-limits').soldAddOnKeys(estimate.estimate_data).length === 0) return 0;
+  if (!estimate || require('./area-addon-limits').soldAddOnKeys(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority }).length === 0) return 0;
   const profile = require('./estimate-slot-availability').resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
   return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });
 }

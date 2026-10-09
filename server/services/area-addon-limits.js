@@ -28,6 +28,7 @@ const {
 } = require('./pricing-engine/area-addon-limits');
 const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { savepointScope } = require('../utils/savepoint-read');
+const { storedAreaAddOnRows } = require('./estimate-result-container');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A visit in one of these statuses is not a pending booking (it is done, or it will not happen).
@@ -147,8 +148,8 @@ async function heldDates(database, { customerId, keys, place, prospect }) {
       if (phone) this.orWhereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone]);
       else if (address) this.orWhereRaw("regexp_replace(lower(COALESCE(address, '')), '[^a-z0-9]', '', 'g') = ?", [address]);
     })
-    .select('id', 'estimate_data');
-  const soldBy = new Map(estimates.map((row) => [String(row.id), soldAddOnKeys(row.estimate_data)]));
+    .select('id', 'estimate_data', 'pricing_authority');
+  const soldBy = new Map(estimates.map((row) => [String(row.id), soldAddOnKeys(row.estimate_data, { pricingAuthority: row.pricing_authority })]));
   for (const hold of holds) {
     for (const key of (soldBy.get(String(hold.source_estimate_id)) || []).filter((k) => keys.includes(k))) {
       if (hold.scheduled_date) out.set(key, [...(out.get(key) || []), dayOf(hold.scheduled_date)]);
@@ -255,20 +256,18 @@ function applyAreaAddOnHistory(v1Input, history) {
   return v1Input;
 }
 
-// The sold (priced) add-on keys of a stored estimate: the rows an accept would book. Every one-time shape the booking
-// normalizer accepts is read (mapped oneTime.items, and the raw engine lines under lineItems on the root, `result` or
-// `engineResult`), and a row is priced by any amount field that normalizer reads. An unpriced custom-quote row is not booked.
+// The sold (priced) add-on keys of a stored estimate: the rows an accept would book. The rows are the
+// authoritative container's (storedAreaAddOnRows, estimate-result-container.js: one answer for every
+// reader, so a stale `engineResult` a revision left behind is never rechecked or booked, and an estimate
+// whose only container is `engineResult` still is), and a row is priced by any amount field the booking
+// normalizer reads. An unpriced custom-quote row is not booked. `pricingAuthority` is the row's
+// `pricing_authority`.
 const SOLD_AMOUNT_FIELDS = ['priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total'];
-const isSoldAddOnRow = (row) => !!row && row.service === 'area_addon' && typeof row.addOnKey === 'string'
+const isSoldAddOnRow = (row) => typeof row.addOnKey === 'string'
   && row.quoteRequired !== true && row.requiresCustomQuote !== true
   && SOLD_AMOUNT_FIELDS.some((field) => Number(row[field]) > 0);
-const rowsOf = (value) => (Array.isArray(value) ? value : []);
-function soldAddOnKeys(estimateData) {
-  let data = estimateData;
-  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return []; } }
-  const roots = [data, data?.result, data?.engineResult].filter((root) => root && typeof root === 'object');
-  const rows = roots.flatMap((root) => [...rowsOf(root.oneTime?.items), ...rowsOf(root.lineItems)]);
-  return [...new Set(rows.filter(isSoldAddOnRow).map((row) => row.addOnKey))];
+function soldAddOnKeys(estimateData, options = {}) {
+  return [...new Set(storedAreaAddOnRows(estimateData, options).filter(isSoldAddOnRow).map((row) => row.addOnKey))];
 }
 
 function limitError(status, code, message, extra = {}) {
@@ -291,7 +290,7 @@ async function fenceCustomerBookings(trx, customerId) {
 // is on. [] otherwise - nothing to read.
 function recheckKeys(estimate) {
   if (!require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return [];
-  return limitedKeys(soldAddOnKeys(estimate && (estimate.estimate_data || estimate.estimateData)));
+  return limitedKeys(soldAddOnKeys(estimate && (estimate.estimate_data || estimate.estimateData), { pricingAuthority: estimate && estimate.pricing_authority }));
 }
 
 /**

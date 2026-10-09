@@ -614,7 +614,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // is LIVE: the send path serves stored rows without re-entering the pricer, so a
   // save-then-gate-off sequence would otherwise publish a disabled add-on (codex #3272 r2).
   // Same fail-closed rail as pricing.
-  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending');
+  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending', { pricingAuthority: estimate.pricing_authority });
   if (gatedAddOn) {
     const err = new Error(gatedAddOn.message);
     err.statusCode = 409;

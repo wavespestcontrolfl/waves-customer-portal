@@ -18,24 +18,17 @@
  */
 const DEFAULTS = require('./pricing-engine/constants').areaAddOnPricingDefaults();
 const { areaAddOnKnobsFor } = require('./pricing-engine/area-addon-config');
+const { storedAreaAddOnRows } = require('./estimate-result-container');
 
-function parse(estData) {
-  if (typeof estData === 'string') { try { return JSON.parse(estData); } catch { return null; } }
-  return estData && typeof estData === 'object' ? estData : null;
-}
-
-// Every stored row of a priced area add-on, mapped or raw.
+// Every stored row of a priced area add-on, from the authoritative container (a revision's stale
+// `engineResult` never supplies a knob stamp for an add-on the revision removed).
 function pricedAddOnRows(estData) {
-  const roots = [estData, estData && estData.result].filter((root) => root && typeof root === 'object');
-  const lists = roots.flatMap((root) => [root.oneTime && root.oneTime.items, root.oneTime && root.oneTime.specItems, root.specItems, root.lineItems]);
-  lists.push(estData && estData.engineResult && estData.engineResult.lineItems);
-  return lists.filter(Array.isArray).flat()
-    .filter((row) => row && row.service === 'area_addon' && typeof row.addOnKey === 'string'
-      && Object.prototype.hasOwnProperty.call(DEFAULTS.items, row.addOnKey) && Number(row.price) > 0);
+  return storedAreaAddOnRows(estData).filter((row) => typeof row.addOnKey === 'string'
+    && Object.prototype.hasOwnProperty.call(DEFAULTS.items, row.addOnKey) && Number(row.price) > 0);
 }
 
 function areaAddOnKnobSignalForReplay(estDataRaw) {
-  const rows = pricedAddOnRows(parse(estDataRaw));
+  const rows = pricedAddOnRows(estDataRaw);
   if (!rows.length) return null;
   const stampedRow = rows.find((row) => row.pricingKnobs && typeof row.pricingKnobs === 'object');
   const group = stampedRow ? stampedRow.pricingKnobs : DEFAULTS;

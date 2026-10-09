@@ -24,6 +24,7 @@ const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
+const { storedEstimateContainer } = require('../services/estimate-result-container');
 const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
 const {
   computeContactGaps,
@@ -759,7 +760,7 @@ async function releaseHoldsIfStillParked(estimate) {
     // A Bermuda-suppression estimate (gate off) is never priced: its park was decided with suppressionGated, so
     // the recheck uses the same semantics, or the gate-disabled pricing path throws and the hold is never released.
     // A gated area add-on estimate is never priced either (the replay would throw AREA_ADDONS_GATED).
-    const suppressionGated = !!require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(row.estimate_data);
+    const suppressionGated = !!require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(row.estimate_data, { pricingAuthority: row.pricing_authority });
     const state = await estimatePublicBlockingState(row, { database: trx, lock: true, fresh: true, suppressionGated });
     if (state?.state !== 'contact_review') return { released: 0 };
     return slotReservation.releaseEstimateHolds({ estimateId: estimate.id, database: trx });
@@ -10077,7 +10078,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // priced for it (`suppressionGated`: only the park is judged).
     // A persisted area add-on (GATE_AREA_ADDONS off) is refused the same way and never priced for the park check
     // either (its replay would throw AREA_ADDONS_GATED).
-    const gatedAddOn = require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data);
+    const gatedAddOn = require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
     if (!estimate.customer_id && estimate.customer_phone) {
       let blocking = null;
       try { blocking = await estimatePublicBlockingState(estimate, { suppressionGated: !!gatedAddOn }); } catch { /* the authoritative in-transaction match decides */ }
@@ -19922,7 +19923,7 @@ async function writeAdoptedAreaAddOnRows(trx, { treatAsOneTime, appointmentId, e
 // recurring-mode accept of an estimate that carries an area add-on; nothing otherwise.
 function assertAreaAddOnsAcceptedOneTime(estimate, treatAsOneTime) {
   const mapper = require('../services/pricing-engine/v1-legacy-mapper');
-  if (treatAsOneTime || !mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data)) return;
+  if (treatAsOneTime || !mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) return;
   logger.warn(`[estimate-accept] estimate ${estimate.id} carries area add-ons and was accepted in recurring mode - ${mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE}; office books the add-on by hand`);
   throw Object.assign(new Error(mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE), { status: 409, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE });
 }
@@ -20273,9 +20274,8 @@ function findInitialRoachItem(_pestTiers, estData) {
 }
 
 function normalizeOneTimeBreakdown(estData) {
-  const result = estData?.result && typeof estData.result === 'object'
-    ? estData.result
-    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
+  // The authoritative container (estimate-result-container.js), the one the area add-on readers use.
+  const result = storedEstimateContainer(estData);
   if (!result) return { items: [], total: 0, quoteRequired: false, quoteRequiredItems: [] };
 
   const rows = [];

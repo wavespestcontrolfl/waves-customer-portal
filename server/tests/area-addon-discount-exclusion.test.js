@@ -72,7 +72,7 @@ describe('the sweep of every path that prices a visit or an add-on row by catalo
   });
 
   test('annual prepay never carries an add-on (the estimate is one-time only), and the catalog rule rows exclude the keys too', () => {
-    expect(read('services/annual-prepay-estimate-suggestion.js')).toContain('annualPrepayBlockingAddOnReason(estData)');
+    expect(read('services/annual-prepay-estimate-suggestion.js')).toContain('annualPrepayBlockingAddOnReason(estData, { pricingAuthority: estimate.pricing_authority })');
     const migration = require('../models/migrations/20261010100000_area_addon_discount_rules');
     expect(migration.SERVICE_KEYS).toEqual(KEYS);
   });

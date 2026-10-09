@@ -452,7 +452,7 @@ async function logManualAcceptance(database, {
 const AREA_ADDON_RECURRING_MARK_WON_MESSAGE = 'This estimate carries an area add-on treatment alongside a recurring plan. Marking it won would convert the plan and drop the add-on. Remove the add-on from this estimate and sell it on its own one-time estimate, then mark this one won.';
 function recurringAcceptWouldDropAreaAddOns(estimate = {}, billingTerm = 'standard') {
   const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
-  if (!require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estimateData)) return false;
+  if (!require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estimateData, { pricingAuthority: estimate.pricing_authority })) return false;
   return !EstimateConverter.shouldSuppressRecurringConversion({
     billingTerm,
     monthlyRate: parseFloat(estimate.monthly_total || 0),
@@ -468,7 +468,7 @@ function recurringAcceptWouldDropAreaAddOns(estimate = {}, billingTerm = 'standa
 // drop. { code, message } or null. The one rule for Mark Won and the schedule's booking preflight.
 function persistedAddOnRefusal(estimate = {}, { action, billingTerm = 'standard', checkRecurring = true } = {}) {
   const mapper = require('./pricing-engine/v1-legacy-mapper');
-  const gated = mapper.gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, action);
+  const gated = mapper.gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, action, { pricingAuthority: estimate.pricing_authority });
   if (gated) return gated;
   return checkRecurring && recurringAcceptWouldDropAreaAddOns(estimate, billingTerm)
     ? { code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE, message: AREA_ADDON_RECURRING_MARK_WON_MESSAGE } : null;

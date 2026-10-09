@@ -12,7 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
-const { authoritativeEstimateResult, proposalIsAuthoritative } = require('../estimate-result-container');
+const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -1585,16 +1585,20 @@ function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAutho
 // Same job as the Bermuda detector above and the same reason: a quote saved
 // gate-on serves its stored rows at send / accept / pay / schedule without
 // re-entering priceAreaAddOn, so the kill switch must be checked on the stored
-// shape. Every place an add-on can ride is read:
-//   - replayable inputs: engineInputs / engineInput / inputs `.services.areaAddOns`
-//     and engineRequest.options (`.services.areaAddOns` or `.areaAddOns`);
-//   - mapped rows (this module): result.oneTime.items, result.oneTime.specItems,
-//     result.specItems, result.quoteRequiredItems (the flat `oneTime` / `specItems`
-//     variant is read too, for a caller holding the bare mapped shape);
-//   - raw engine lines: engineResult.lineItems / result.lineItems.
-// Any non-empty areaAddOns value counts, even a malformed one: failing closed
-// beats reading a shape the engine would reject anyway.
-function estimateDataCarriesAreaAddOns(estimateDataRaw) {
+// shape. Two kinds of evidence, read differently on purpose:
+//   - replayable inputs (fail closed, like estimateDataCarriesBermudaSuppression's
+//     request options): engineInputs / engineInput / inputs `.services.areaAddOns`
+//     and engineRequest.options (`.services.areaAddOns` or `.areaAddOns`). A
+//     recompute or an input-only replay would price the add-on again;
+//   - stored rows: the add-on rows of the AUTHORITATIVE container only
+//     (storedAreaAddOnRows, estimate-result-container.js; the pick
+//     estimateResultCarriesBermudaSuppression uses), so the stale `engineResult`
+//     a revision leaves behind never keeps a clean revision gated.
+// Any non-empty areaAddOns input counts, even a malformed one: failing closed
+// beats reading a shape the engine would reject anyway. `pricingAuthority` is the
+// row's `pricing_authority` (a SERVER reprice makes `result` the authority even
+// when it prices nothing).
+function estimateDataCarriesAreaAddOns(estimateDataRaw, { pricingAuthority = null } = {}) {
   let d = estimateDataRaw;
   if (typeof d === 'string') {
     try { d = JSON.parse(d); } catch (_) { return false; }
@@ -1602,22 +1606,12 @@ function estimateDataCarriesAreaAddOns(estimateDataRaw) {
   if (!d || typeof d !== 'object') return false;
   const listed = (value) => value !== undefined && value !== null
     && !(Array.isArray(value) && value.length === 0);
-  const isAddOnRow = (row) => !!row && typeof row === 'object' && row.service === 'area_addon';
-  const rowsHaveAddOn = (rows) => Array.isArray(rows) && rows.some(isAddOnRow);
   const inputShapes = [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options];
   if (inputShapes.some((shape) => shape && typeof shape === 'object'
     && (listed(shape.services?.areaAddOns) || (shape === d.engineRequest?.options && listed(shape.areaAddOns))))) {
     return true;
   }
-  const mappedRoots = [d, d.result].filter((root) => root && typeof root === 'object');
-  if (mappedRoots.some((root) => rowsHaveAddOn(root.oneTime?.items)
-    || rowsHaveAddOn(root.oneTime?.specItems)
-    || rowsHaveAddOn(root.specItems)
-    || rowsHaveAddOn(root.quoteRequiredItems)
-    || rowsHaveAddOn(root.lineItems))) {
-    return true;
-  }
-  return rowsHaveAddOn(d.engineResult?.lineItems);
+  return storedAreaAddOnRows(d, { pricingAuthority }).length > 0;
 }
 
 // The persisted-boundary guard for area add-ons, shared by every route and
@@ -1626,8 +1620,8 @@ function estimateDataCarriesAreaAddOns(estimateDataRaw) {
 // kill). The caller fails closed with AREA_ADDONS_GATED in the status family
 // its Bermuda guard uses at that boundary.
 const AREA_ADDONS_GATED_CODE = 'AREA_ADDONS_GATED';
-function estimateAreaAddOnsGated(estimateDataRaw) {
-  return estimateDataCarriesAreaAddOns(estimateDataRaw)
+function estimateAreaAddOnsGated(estimateDataRaw, options) {
+  return estimateDataCarriesAreaAddOns(estimateDataRaw, options)
     && !require('../../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS');
 }
 // Staff-facing message ("sending", "accepting", "booking from it"...).
@@ -1637,7 +1631,7 @@ function areaAddOnsGatedStaffMessage(action) {
 // The staff-facing refusal for a stored estimate whose gated add-on is switched off: the
 // bermudagrass-suppression add-on first, then an area add-on. { code, message } or null; `action`
 // completes "...before <action>." ("sending", "accepting", "booking from it").
-function gatedAddOnStaffRefusal(estimateDataRaw, action) {
+function gatedAddOnStaffRefusal(estimateDataRaw, action, options) {
   if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
     && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
     return {
@@ -1645,26 +1639,26 @@ function gatedAddOnStaffRefusal(estimateDataRaw, action) {
       message: `This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before ${action}.`,
     };
   }
-  return estimateAreaAddOnsGated(estimateDataRaw)
+  return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { code: AREA_ADDONS_GATED_CODE, message: areaAddOnsGatedStaffMessage(action) } : null;
 }
 // Why a stored estimate is never suggested for annual prepay because of the add-ons it carries
 // ('estimate carries a gated add-on' | 'estimate carries an area add-on'), or null.
-function annualPrepayBlockingAddOnReason(estimateDataRaw) {
+function annualPrepayBlockingAddOnReason(estimateDataRaw, options) {
   if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
     && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) return 'estimate carries a gated add-on';
-  return estimateDataCarriesAreaAddOns(estimateDataRaw) ? 'estimate carries an area add-on' : null;
+  return estimateDataCarriesAreaAddOns(estimateDataRaw, options) ? 'estimate carries an area add-on' : null;
 }
 // Customer-facing message (same wording the Bermuda refusal uses).
 const AREA_ADDONS_GATED_CUSTOMER_MESSAGE = 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.';
 // The customer-facing refusal for a stored estimate whose gated add-on is switched off:
 // { error, code } (the 409 body) or null. The bermudagrass-suppression add-on first, then an area add-on.
-function gatedAddOnCustomerRefusal(estimateDataRaw) {
+function gatedAddOnCustomerRefusal(estimateDataRaw, options) {
   if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
     && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
     return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: 'BERMUDA_SUPPRESSION_GATED' };
   }
-  return estimateAreaAddOnsGated(estimateDataRaw)
+  return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE } : null;
 }
 

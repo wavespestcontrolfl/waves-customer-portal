@@ -135,7 +135,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     }
     // A suppression add-on whose gate is off, and any area add-on (a one-time job the recurring
     // accept refuses, AREA_ADDONS_ONE_TIME_ACCEPT_ONLY, gate on or off), are never suggested.
-    const blockingAddOn = require('./pricing-engine/v1-legacy-mapper').annualPrepayBlockingAddOnReason(estData);
+    const blockingAddOn = require('./pricing-engine/v1-legacy-mapper').annualPrepayBlockingAddOnReason(estData, { pricingAuthority: estimate.pricing_authority });
     if (blockingAddOn) return blocked(blockingAddOn);
   } catch {
     return blocked('estimate acceptance blockers could not be verified');

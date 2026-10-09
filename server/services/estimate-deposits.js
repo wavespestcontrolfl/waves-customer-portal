@@ -787,7 +787,7 @@ async function depositStillRecordable(estimateId) {
       return { recordable: false, reason: 'bermuda_suppression_gated' };
     }
     // Same kill-switch race for a persisted area add-on (GATE_AREA_ADDONS).
-    if (require('./pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estimate.estimate_data)) {
+    if (require('./pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) {
       return { recordable: false, reason: 'area_addons_gated' };
     }
   }

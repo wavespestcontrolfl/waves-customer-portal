@@ -163,7 +163,7 @@ const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void'])
 // code (AREA_ADDONS_GATED), and like the Bermuda shape it is never priced (its replay would throw).
 // The 409 body ({ error, code }) or null.
 function gatedAddOnRefusal(estimate = {}) {
-  return require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data);
+  return require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
 }
 function isSuppressionGatedEstimate(estimate = {}) {
   return !!gatedAddOnRefusal(estimate);
@@ -172,7 +172,7 @@ function isSuppressionGatedEstimate(estimate = {}) {
 // one holds nothing (the accept would refuse it). `serviceMode` is passed by the reserve route only.
 function recurringAreaAddOnRefusalBody(estimate = {}, serviceMode) {
   const mapper = require('../services/pricing-engine/v1-legacy-mapper');
-  return serviceMode && serviceMode !== 'one_time' && mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data)
+  return serviceMode && serviceMode !== 'one_time' && mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })
     ? { error: mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE } : null;
 }
 function rejectGatedSuppressionEstimate(res, estimate = {}, { serviceMode } = {}) {
