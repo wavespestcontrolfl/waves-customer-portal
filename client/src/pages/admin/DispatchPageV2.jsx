@@ -89,12 +89,15 @@ import {
   isETToday as isETTodayStr,
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { reportFlowFields } from "../../lib/pest-fast-complete";
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import {
   mergePostPaymentService,
   shouldOpenTreeShrubFastComplete,
   shouldOpenLawnFastComplete,
   shouldOpenPestFastComplete,
+  shouldOpenSpecialtyFastComplete,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
@@ -463,6 +466,10 @@ export default function DispatchPageV2({
   // one-screen report-flow sheet a regular pest visit opens here, as it does
   // on the technician home page.
   const [pestFastService, setPestFastService] = useState(null);
+  // The station map: a station visit opens the sheet only once the flag has
+  // loaded and is off (isTypedReportEligible), as on the technician home.
+  const stationMap = useFeatureFlagReady("station-map-v1");
+  const stationMapOff = stationMap.ready && !stationMap.enabled;
   const fastCompleteOperatorId = fastCompleteOperatorOf(useOutletContext());
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
@@ -924,8 +931,14 @@ export default function DispatchPageV2({
       setPestFastService(service);
       return;
     }
+    // Owner 2026-10-08: a specialty visit the technician home sends to the
+    // sheet (a lane visit, a typed visit the reader reads) opens it here too.
+    if (!fullForm && shouldOpenSpecialtyFastComplete(service, { stationMapOff })) {
+      setPestFastService(service);
+      return;
+    }
     setCompletingService(service);
-  }, [data?.visitCloseout]);
+  }, [data?.visitCloseout, stationMapOff]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -2051,10 +2064,11 @@ export default function DispatchPageV2({
             routedServiceKey: pestFastService.completionProfile?.serviceKey || null,
             // Only an exact true turns the customer recap on (see the sheet).
             recapEnabled: pestFastService.fastCompleteRecapEnabled === true,
-            // The report flow, with what its trace step needs from the row (a
-            // lane or typed visit never gets here: shouldOpenPestFastComplete).
+            // The report flow, with what the sheet reads of it from the row
+            // (a lane visit's lane, a typed visit's form, the trace step), as
+            // TechHomePage passes it. Every visit here is in the report flow.
+            ...reportFlowFields(pestFastService, { stationMapOff }),
             reportFlow: true,
-            traceEligible: pestFastService.traceEligible !== false,
             noteBoxPhotosEnabled: pestFastService.noteBoxPhotosEnabled === true,
             technicianName: pestFastService.technicianName || pestFastService.technician_name || null,
             lat: pestFastService.lat ?? null,

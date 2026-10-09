@@ -70,9 +70,9 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
-import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
-import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
-import { isFastCompleteReportEligible, isPestControlService } from '../../lib/pest-fast-complete';
+import {
+  closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
+} from '../../lib/pest-fast-complete';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
 import OnboardingCard from '../../components/staffDocuments/OnboardingCard';
@@ -119,83 +119,9 @@ function isReserviceFastCompleteEligible(service) {
 // Fast Complete report flow (GATE_FAST_COMPLETE_REPORT): isFastCompleteReportEligible
 // lives in lib/pest-fast-complete.js, shared with admin Dispatch (owner 2026-10-05).
 
-// Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
-// visit whose lane the reader reads (bed bug, fire ant, tick, bee & wasp,
-// mud dauber, mosquito; the schedule row's `laneVoiceFillEnabled`) opens the
-// one-screen sheet in the report flow, its own record read from the note,
-// while the report flow is on. Off, it opens the project editor as before,
-// and so does a visit that completes through a project (its profile says
-// so, a project is already linked, or the profile could not be read).
-function isLaneReportEligible(service) {
-  return service?.laneVoiceFillEnabled === true
-    && service?.fastCompleteReportEnabled === true
-    && completesOnOwnRecord(service);
-}
-// A visit the report-flow sheet may complete on its own record: open, its
-// profile and linked-project reads answered, and not completing through a
-// project.
-function completesOnOwnRecord(service) {
-  const profile = service?.completionProfile;
-  return service?.completionProfileLookupFailed !== true
-    && service?.linkedProjectLookupFailed !== true
-    && !profile?.projectBacked && !profile?.requiresProject && !service?.linkedProject?.id
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
-// Typed voice fill (GATE_TYPED_VOICE_FILL, Fast Complete step 3): a typed
-// visit whose form the reader reads (cockroach, the roach knockdowns, flea,
-// pest inspection, mosquito event, wildlife trapping, rodent exclusion,
-// sanitation and inspection; the schedule row's `typedReportFlowEnabled`)
-// opens the one-screen sheet in the report flow, its own record read from
-// the note, in place of the Dispatch typed form. Off, it opens the typed
-// form as before, and so does a visit closed out as a whole visit (its
-// packet completes every service on it), a visit that completes through a
-// project, a row whose profile or form could not be read, or a closed visit.
-// A station visit (termite or rodent bait stations, a trap check) opens the
-// sheet only once the tech's station map (station-map-v1) is known to be off:
-// with it on, the typed form records a check for every station and the sheet
-// carries no map (Codex P1 on #5638).
-function isTypedReportEligible(service, { stationMapOff = false } = {}) {
-  const type = service?.completionProfile?.findingsType;
-  return service?.typedReportFlowEnabled === true
-    && !!type && service?.findingsSchema?.type === type
-    && (stationMapOff || !Object.hasOwn(STATION_TYPE_PROGRAM, type))
-    && !service?.visitCloseoutPacket && !closesOutAsVisit(service)
-    && completesOnOwnRecord(service);
-}
-// The inspection credit a typed inspection visit offers on the sheet, as the
-// office form offers it (SchedulePage isInspectionVisit): an inspection
-// profile, or the typed rodent and termite inspection keys, while the
-// schedule row says a credit is available. The server re-checks.
-function offersInspectionCredit(service) {
-  const profile = service?.completionProfile;
-  return (profile?.category === 'inspection' || ['rodent_inspection', 'termite_inspection'].includes(profile?.serviceKey))
-    && service?.inspectionCreditAvailable === true;
-}
-const laneKeyOf = (service) => resolveSpecialtyServiceKey({
-  serviceKey: service?.completionProfile?.serviceKey,
-  serviceType: service?.serviceTypeRaw || service?.serviceType || service?.service_type,
-});
-
-// What the sheet reads of the report flow from the row: whether it runs, for
-// a lane visit its lane and for a typed visit its form (each read from the
-// note), and no trace on the sheet for either (a trace stays on the full
-// form).
-function reportFlowFields(service, { stationMapOff = false } = {}) {
-  const laneFlow = isLaneReportEligible(service);
-  const typedFlow = isTypedReportEligible(service, { stationMapOff });
-  return {
-    // A saved report-flow attempt reopens in the report flow whatever the
-    // row says now (useSavedFastCompletions).
-    reportFlow: service.fastCompletionRecoveryReportFlow === true || isFastCompleteReportEligible(service) || laneFlow || typedFlow,
-    laneFlow,
-    laneKey: laneFlow ? laneKeyOf(service) : null,
-    typedFlow,
-    typedType: typedFlow ? service.completionProfile.findingsType : null,
-    typedSchema: typedFlow ? service.findingsSchema : null,
-    inspectionCredit: typedFlow && offersInspectionCredit(service),
-    traceEligible: service.traceEligible !== false && !laneFlow && !typedFlow,
-  };
-}
+// The lane (GATE_LANE_VOICE_FILL) and typed (GATE_TYPED_VOICE_FILL) report-flow
+// rules, and the fields the sheet reads from the row, live in
+// lib/pest-fast-complete.js too, shared with admin Dispatch (owner 2026-10-08).
 
 // Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
 // `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
@@ -215,10 +141,6 @@ function isLawnReserviceFastCompleteEligible(service) {
 // 422s appointment-managed types) is the right surface.
 function usesDispatchCompletion(service) {
   return !!service?.completionProfile?.findingsType || closesOutAsVisit(service);
-}
-// A visit closed out as a whole (every service on it in one packet).
-function closesOutAsVisit(service) {
-  return !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
 }
 
 // C4 (universal one-time services, ratified Q9): instead of an alert telling

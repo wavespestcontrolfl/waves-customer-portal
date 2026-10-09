@@ -1,6 +1,6 @@
 import { isTreeShrubFastCompleteEligible } from "./tree-shrub-fast-complete";
 import { isLawnFastCompleteEligible } from "./lawn-fast-complete";
-import { isFastCompleteReportEligible } from "./pest-fast-complete";
+import { isFastCompleteReportEligible, isLaneReportEligible, isTypedReportEligible } from "./pest-fast-complete";
 
 export const TERMINAL_VISIT_STATUSES = new Set([
   "completed",
@@ -70,6 +70,24 @@ export function shouldOpenPestFastComplete(service) {
     && !profile?.findingsType
     && !(profile?.companions || []).length
     && service != null && "propertyId" in service
+    && !service?.completionInvoiceAlreadySent
+    && !service?.checkoutInvoiceId
+    && !service?.checkoutInvoiceToken;
+}
+
+// Admin Dispatch opens the same sheet, in its report flow, for the specialty
+// visits the technician home already sends there (owner 2026-10-08: the
+// Schedule screen sent every specialty visit to the long form): a lane visit
+// under the lane voice fill, or a typed visit the reader reads (a station
+// visit only once the station map is known to be off). The shared rules
+// already leave out a visit that completes through a project (a WDO
+// inspection, a pre-treat), a whole-visit closeout and a closed visit; this
+// page's guards go on top, as for the pest sheet above. The sheet's "Full
+// form" hands the visit to the Dispatch completion panel.
+export function shouldOpenSpecialtyFastComplete(service, { stationMapOff = false } = {}) {
+  return (isLaneReportEligible(service) || isTypedReportEligible(service, { stationMapOff }))
+    && !(service?.completionProfile?.companions || []).length
+    && "propertyId" in service
     && !service?.completionInvoiceAlreadySent
     && !service?.checkoutInvoiceId
     && !service?.checkoutInvoiceToken;

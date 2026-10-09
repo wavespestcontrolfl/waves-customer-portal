@@ -51,7 +51,7 @@ vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
 }));
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service }) => <div>Details sheet for {service.id}</div> }));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 
 const visit = (id, overrides = {}) => ({
   id,

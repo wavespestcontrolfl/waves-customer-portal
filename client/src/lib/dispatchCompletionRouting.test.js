@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   mergePostPaymentService,
   shouldOpenPestFastComplete,
+  shouldOpenSpecialtyFastComplete,
   shouldReopenCompletionAfterPayment,
 } from "./dispatchCompletionRouting";
 
@@ -68,5 +69,66 @@ describe("shouldOpenPestFastComplete (owner 2026-10-05)", () => {
     expect(shouldOpenPestFastComplete(pest({ completionInvoiceAlreadySent: true }))).toBe(false);
     expect(shouldOpenPestFastComplete(pest({ checkoutInvoiceId: "inv-fixture" }))).toBe(false);
     expect(shouldOpenPestFastComplete(pest({ checkoutInvoiceToken: "tok-fixture" }))).toBe(false);
+  });
+});
+
+describe("shouldOpenSpecialtyFastComplete (owner 2026-10-08)", () => {
+  const typed = (overrides = {}) => ({
+    id: "svc-typed",
+    status: "on_site",
+    propertyId: null,
+    typedReportFlowEnabled: true,
+    completionProfile: { category: "pest_control", serviceKey: "cockroach_control", findingsType: "cockroach" },
+    findingsSchema: { type: "cockroach" },
+    ...overrides,
+  });
+  const lane = (overrides = {}) => ({
+    id: "svc-lane",
+    status: "on_site",
+    propertyId: null,
+    laneVoiceFillEnabled: true,
+    fastCompleteReportEnabled: true,
+    completionProfile: { category: "pest_control", serviceKey: "bed_bug_treatment", findingsType: null },
+    ...overrides,
+  });
+
+  it("opens the sheet for a typed visit the reader reads and for a lane visit", () => {
+    expect(shouldOpenSpecialtyFastComplete(typed())).toBe(true);
+    expect(shouldOpenSpecialtyFastComplete(lane())).toBe(true);
+  });
+
+  it("stays off with the row's flag off, and for a plain pest visit", () => {
+    expect(shouldOpenSpecialtyFastComplete(typed({ typedReportFlowEnabled: false }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ findingsSchema: null }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(lane({ laneVoiceFillEnabled: false }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(lane({ fastCompleteReportEnabled: false }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete({ id: "svc-1", status: "on_site", propertyId: null, fastCompleteReportEnabled: true, completionProfile: { category: "pest_control", findingsType: null } })).toBe(false);
+  });
+
+  it("a visit that completes through a project (a WDO inspection, a pre-treat) keeps its own path", () => {
+    expect(shouldOpenSpecialtyFastComplete(typed({ completionProfile: { ...typed().completionProfile, projectBacked: true } }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ completionProfile: { ...typed().completionProfile, requiresProject: true } }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(lane({ linkedProject: { id: "proj-1" } }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ linkedProjectLookupFailed: true }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ completionProfileLookupFailed: true }))).toBe(false);
+  });
+
+  it("a station visit opens the sheet only once the station map is known to be off", () => {
+    const station = typed({ completionProfile: { category: "termite", serviceKey: "termite_bait_monitoring", findingsType: "termite_bait_station" }, findingsSchema: { type: "termite_bait_station" } });
+    expect(shouldOpenSpecialtyFastComplete(station)).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(station, { stationMapOff: true })).toBe(true);
+  });
+
+  it("keeps this page's guards: closed visits, whole-visit closeouts, combined visits, the payment return and rows with no propertyId key", () => {
+    for (const status of ["completed", "cancelled", "skipped", "no_show"]) {
+      expect(shouldOpenSpecialtyFastComplete(typed({ status }))).toBe(false);
+    }
+    expect(shouldOpenSpecialtyFastComplete(typed({ visitCloseoutPacket: { id: "pkt" } }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ visitId: "v1", visitCloseoutEnabled: true }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ completionProfile: { ...typed().completionProfile, companions: [{ type: "rodent_bait" }] } }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ completionInvoiceAlreadySent: true }))).toBe(false);
+    expect(shouldOpenSpecialtyFastComplete(typed({ checkoutInvoiceId: "inv-1" }))).toBe(false);
+    const { propertyId: _dropped, ...noKey } = typed();
+    expect(shouldOpenSpecialtyFastComplete(noKey)).toBe(false);
   });
 });
