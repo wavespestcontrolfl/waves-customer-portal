@@ -54,3 +54,30 @@ describe('refuseStepSprayOnRecap', () => {
     expect(trx).not.toHaveBeenCalled();
   });
 });
+
+// The bermuda removal rows belong to the lawns that asked for the step (codex #6035 r51 P1): every
+// reader of lawn_protocol_products that plans, attributes or describes a window leaves them out
+// through ONE predicate, unless it names a bermuda removal visit.
+describe('direct readers of the staged protocol rows', () => {
+  const { withoutBermudaRemovalRows } = require('../services/lawn-bermuda-removal');
+
+  test('the predicate narrows on the gates flag, on the table or alias given', () => {
+    const query = { whereRaw: jest.fn(function whereRaw() { return this; }) };
+    expect(withoutBermudaRemovalRows(query, 'lpp')).toBe(query);
+    expect(query.whereRaw).toHaveBeenCalledWith("COALESCE(lpp.gates->>'bermudaRemoval', 'false') <> 'true'");
+    withoutBermudaRemovalRows(query);
+    expect(query.whereRaw).toHaveBeenLastCalledWith("COALESCE(lawn_protocol_products.gates->>'bermudaRemoval', 'false') <> 'true'");
+  });
+
+  test.each([
+    ['lawn-protocol-operating-layer.js', /if \(!includeBermudaRemoval\) require\('\.\/lawn-bermuda-removal'\)\.withoutBermudaRemovalRows\(productsQuery, 'lpp'\)/],
+    ['lawn-protocol-completion.js', /const rows = bermudaStep \? query : require\('\.\/lawn-bermuda-removal'\)\.withoutBermudaRemovalRows\(query, 'lpp'\)/],
+    ['estimate-ai-context.js', /withoutBermudaRemovalRows\(db\('lawn_protocol_products'\)/],
+  ])('%s uses it', (file, pattern) => {
+    expect(read(file)).toMatch(pattern);
+  });
+
+  test('the completion ledger attributes to the step rows only when the visit plan carries the step', () => {
+    expect(read('lawn-protocol-completion.js')).toMatch(/bermudaStep: plan\?\.bermudaRemoval\?\.active === true/);
+  });
+});

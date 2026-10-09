@@ -950,7 +950,9 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3 }), entry(fus, { areaValue: 5000 })])).toBe(MESSAGE);
       // Area with the amount, or a rate with a valid unit, on each step product (the surfactant needs neither): allowed.
       expect(await check([entry(rec, { areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.3, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' }), entry(nis)])).toBeNull();
-      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { areaValue: 5000, totalAmount: 5.5 })])).toBeNull();
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { areaValue: 5000, totalAmount: 5.5, amountUnit: 'fl_oz' })])).toBeNull();
+      // An amount with no unit is not measured, for Fusilade II too (codex r51 P2).
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'oz' }), entry(fus, { areaValue: 5000, totalAmount: 5.5 })])).toBe(MESSAGE);
       // Recognition is counted by weight (codex r42 P1): a volume rate, or an amount the ledger cannot
       // read in ounces (no unit, a volume unit, an area that is not sq ft), would count as zero.
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'fl_oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);

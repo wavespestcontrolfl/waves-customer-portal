@@ -267,7 +267,7 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
   // The bermuda removal rows (migration 20261006190100) belong to the lawns that
   // asked for the step, never to the window as a whole: every reader leaves them
   // out unless it names the account as a bermuda removal lawn.
-  if (!includeBermudaRemoval) productsQuery.whereRaw("COALESCE(lpp.gates->>'bermudaRemoval', 'false') <> 'true'");
+  if (!includeBermudaRemoval) require('./lawn-bermuda-removal').withoutBermudaRemovalRows(productsQuery, 'lpp');
   const productsRead = savepointRead(knex, () => productsQuery);
   const products = strict ? await productsRead : await productsRead.catch(() => []);
 

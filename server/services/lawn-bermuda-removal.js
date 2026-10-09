@@ -202,6 +202,14 @@ async function stepForVisit(knex, visit, { trackKey, month, strict = false, prof
 // together.
 const BERMUDA_GROUP = 'bermuda_removal';
 
+// The bermuda removal rows (gates.bermudaRemoval = true) belong to the lawns that asked for the
+// step, never to a window as a whole. One definition for every reader of lawn_protocol_products
+// that is not naming a bermuda removal visit: it narrows the query to the other rows. `table` is
+// the name or alias the query reads the table as.
+function withoutBermudaRemovalRows(query, table = 'lawn_protocol_products') {
+  return query.whereRaw(`COALESCE(${table}.gates->>'bermudaRemoval', 'false') <> 'true'`);
+}
+
 // Completion check: on a visit that carries the bermuda removal step (the account's
 // staff switch or accepted estimate, an eligible grass, an April or June visit, v13
 // live, not an excluded cultivar), Recognition or Fusilade II recorded without the
@@ -397,20 +405,23 @@ async function bermudaAreaViolation(knex, submittedEntries, { serviceId } = {}) 
   if (!stepIds.length) return null;
   const positive = (value) => Number(value) > 0;
   const { isValidRateUnit } = require('./inventory-units');
-  const sized = (p) => (positive(p.areaValue) && positive(p.totalAmount)) || (positive(p.rate) && isValidRateUnit(p.rateUnit));
+  const { baseQuantityUnit } = require('./inventory-units');
+  // An amount is measured only with its unit (the unit the ledger will store with it).
+  const amountUnit = (p) => baseQuantityUnit(p.amountUnit || p.rateUnit || null);
+  const sized = (p) => (positive(p.areaValue) && positive(p.totalAmount) && !!amountUnit(p) && isValidRateUnit(amountUnit(p)))
+    || (positive(p.rate) && isValidRateUnit(p.rateUnit));
   // The product the label-rate cap counts (Recognition, by the tagged row's product) must also be
   // COUNTABLE: its history row, built here as the completion will write it, has to read as more
   // than zero in the cap's own unit. A weight product entered as 0.03 fl oz, or an amount with no
   // unit, is valid input but would count for nothing, so it is refused like a missing amount.
   const capRow = await knex('product_limits').where({ match_value: BERMUDA_GROUP, limit_type: 'annual_max_rate' }).first('product_id', 'limit_unit');
-  const { baseQuantityUnit } = require('./inventory-units');
   const countable = (p) => {
     if (!capRow || String(p.productId) !== String(capRow.product_id).toLowerCase()) return true;
     return require('./application-limits').bermudaRowRate({
       application_rate: p.rate,
       rate_unit: p.rateUnit || null,
       quantity_applied: positive(p.totalAmount) ? p.totalAmount : null,
-      quantity_unit: positive(p.totalAmount) ? baseQuantityUnit(p.amountUnit || p.rateUnit || null) : null,
+      quantity_unit: positive(p.totalAmount) ? amountUnit(p) : null,
       area_treated_sqft: String(p.areaUnit || '').toLowerCase() === 'sqft' ? p.areaValue : null,
     }, capRow) > 0;
   };
@@ -526,7 +537,8 @@ async function rateAdvisories(knex, serviceId, productIds = []) {
     const visit = await resolvedVisitOf(knex, serviceId, { strict: true });
     if (!visit) return [];
     const result = await savepointRead(knex, (k) => require('./application-limits').checkLimits(visit.customer_id, ids.recognition, visit.scheduled_date, k, {
-      program: BERMUDA_GROUP, propertyId: visit.effective_property_id || null,
+      // After the write: the whole calendar year, later sprays included (a backdated completion).
+      program: BERMUDA_GROUP, propertyId: visit.effective_property_id || null, wholeYear: true,
     }));
     return result.warnings.filter((warning) => warning.type === 'annual_max_rate').map((warning) => warning.message);
   } catch (err) {
@@ -859,6 +871,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
 module.exports = {
   bermudaAreaViolation, stepOffered, trackForVisit, once,
   openPlanStep,
+  withoutBermudaRemovalRows,
   refuseStepSprayOnRecap,
   visitMonthOf,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
