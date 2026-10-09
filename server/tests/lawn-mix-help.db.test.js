@@ -165,6 +165,21 @@ describeDb('mix help through PostgreSQL', () => {
       expect((await byGallons(svc, arenaRow({ totalAmount: 0.3, sprayedGallons: 16 }))).refusal).toBeNull();
     });
 
+    // Celsius is judged over a rolling 365 days (not the calendar year): the gallons path must give the verdict a typed area gives.
+    test.each([
+      ['two passes at the front inside the rolling year: the front is refused', [300, 200], { status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_apps' } }],
+      ['one of the two is older than 365 days: the front is open', [400, 200], null],
+    ])('Celsius over the rolling year, %s', async (_label, daysAgo, expected) => {
+      for (const days of daysAgo) await applied(CELSIUS, { place: 'front', daysAgo: days, rate: 0.085 });
+      const svc = await svcOf();
+      const row = (extra) => ({ productId: catalog[CELSIUS].id, name: CELSIUS, applicationMethod: 'spot_treatment', areaPlace: 'front', amountUnit: 'oz', totalAmount: 0.085, rate: 0.085, rateUnit: 'oz', ...extra });
+      const typed = await areas.preflightPlaces({ knex, svc, products: [row({ areaValue: 1000, areaUnit: 'sqft' })] });
+      const viaGallons = await byGallons(svc, row({ sprayedGallons: 1 }));
+      expect(viaGallons.row).toMatchObject({ areaValue: 1000, areaUnit: 'sqft' });
+      expect(viaGallons.refusal).toEqual(typed);
+      if (expected) expect(typed).toMatchObject(expected); else expect(typed).toBeNull();
+    });
+
     test('a product the staged rows give no carrier is refused (enter the area instead), and the gate off ignores the gallons', async () => {
       const svc = await svcOf();
       const noCarrier = (await byGallons(svc, { productId: catalog[NIS].id, name: NIS, applicationMethod: 'spot_treatment', areaPlace: 'front', sprayedGallons: 1 })).refusal;
