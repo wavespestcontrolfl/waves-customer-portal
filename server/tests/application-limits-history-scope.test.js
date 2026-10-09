@@ -133,7 +133,14 @@ describe('auditAnnualCount counts a visit\'s second row of the product as anothe
     expect(await applicationLimits.auditAnnualCount(others(0), product, '2026-10-09', 2, 1)).toBeNull();
   });
 
-  test('the visit\'s extra rows are counted from its own ledger rows, minus the first; no visit named, nothing extra', async () => {
+  test('the visit\'s extra rows are counted from its own ledger rows, minus the first; no visit named, nothing extra; gate off, no read at all', async () => {
+    const saved = process.env.GATE_AREA_ADDONS;
+    process.env.GATE_AREA_ADDONS = 'true';
+    const off = jest.fn(() => chain({ first: { n: '3' } }));
+    delete process.env.GATE_AREA_ADDONS;
+    expect(await applicationLimits.ownApplicationsBeyondFirst(off, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(0);
+    expect(off).not.toHaveBeenCalled();
+    process.env.GATE_AREA_ADDONS = 'true';
     const database = jest.fn(() => chain({ first: { n: '2' } }));
     expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(1);
     expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', {})).toBe(0);
@@ -142,5 +149,6 @@ describe('auditAnnualCount counts a visit\'s second row of the product as anothe
     expect(await applicationLimits.ownApplicationsBeyondFirst(one, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(0);
     const none = jest.fn(() => chain({ first: undefined }));
     expect(await applicationLimits.ownApplicationsBeyondFirst(none, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(0);
+    if (saved === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = saved;
   });
 });

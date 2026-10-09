@@ -521,7 +521,8 @@ class ApplicationLimitChecker {
   // (a Tree & Shrub host row and an area add-on row of the same product) made two applications, and the audit judges the
   // visit's FIRST as the one the others are compared with. 0 for a visit with one row, and when no visit is named.
   async ownApplicationsBeyondFirst(database, customerId, productId, opts = {}) {
-    if (!opts.excludeScheduledServiceId) return 0;
+    // Only the area add-ons put a product twice on one visit; with their gate off the audit is exactly what it was (no extra read).
+    if (!opts.excludeScheduledServiceId || !require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return 0;
     const row = await database('property_application_history')
       .where({ customer_id: customerId, product_id: productId }).whereNull('retracted_at')
       .whereIn('service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
