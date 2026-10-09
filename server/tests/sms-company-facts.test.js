@@ -120,14 +120,25 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
   test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
     const section = renderCompanyFactsSection();
     const aftercare = [
-      'After an inside treatment, clean as usual. On treated baseboards and edges use water only, no bleach or strong cleaners, so the treatment keeps working.',
-      'Seeing more bugs for one to two weeks after a treatment is normal. The treatment flushes them out and eggs keep hatching. If it has not slowed down after two weeks, tell us.',
-      'Small flies at sinks and drains are usually drain flies. They breed in the film inside the drain. Scrub the drain and use an enzyme drain cleaner. A spray does not reach where they breed.',
-      'On a lawn plan, chinch bugs and other lawn insects are part of the program. Tell us and we treat them at the next visit.',
+      'After an inside pest treatment, dry vacuuming and normal cleanup of counters and dishes are fine. Mopping, scrubbing or wiping down the treated baseboards and edges takes the treatment off, so leave those areas alone.',
+      'After a pest treatment it is normal to see some activity for up to two weeks as the treatment flushes pests out, and it fades as the products keep working. This is true of pest treatments only, not of other services. If it has not slowed down after two weeks, tell us.',
+      'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
+      'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
     ];
     for (const line of aftercare) expect(section).toContain(`\n- ${line}\n`);
     // a return visit is the FREE RE-SERVICE fact's job: no line may read as a come-back or coverage promise
     expect(aftercare.join(' ')).not.toMatch(/we(?:'ll| will)? come back|come back out|free|covered|no charge|damage/i);
+    // Codex #6197 r2: no wet cleaning of treated areas; the activity line is pest-only; drain flies are
+    // identified, not assumed; lawn treatment follows the technician's check.
+    expect(aftercare[0]).not.toMatch(/water only|clean as usual/i);
+    expect(aftercare[1]).toMatch(/pest treatments only, not of other services/);
+    expect(aftercare[2]).toMatch(/fuzzy, moth-shaped/);
+    expect(aftercare[2]).toMatch(/fungus gnats/);
+    expect(aftercare[3]).toMatch(/where the technician confirms them/);
+    // the whole section must stay inside the judge's cap for it, with room to spare, or its tail is cut
+    const { _test: judgeTest } = require('../services/sms-shadow-judge');
+    expect(judgeTest.COMPANY_FACTS_JUDGE_CAP).toBe(4000);
+    expect(section.length).toBeLessThan(judgeTest.COMPANY_FACTS_JUDGE_CAP - 100);
   });
   test('the two termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
     expect(COMPANY_FACTS.join(' ')).not.toMatch(/termite|WDO|warranty|guarantee/i);

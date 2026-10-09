@@ -43,13 +43,17 @@ const COMPANY_FACTS = Object.freeze([
   'Arrival windows are two hours and start on the hour.',
   'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
   // Aftercare and common pest answers (owner delegated the wording 2026-10-09, text agent
-  // fix plan; drawn from what staff told customers, 14-day audit to 10-08). Each line holds
+  // fix plan). Each line restates guidance the repo already carries, never a new claim
+  // (Codex #6197 r2): the prep guides (no wet cleaning or wiping of treated baseboards,
+  // 20260715000001), recap-visit-context LINE_EXPECTATIONS.pest (some activity for up to two
+  // weeks, pest only), the species catalog (drain fly traits and its fungus-gnat look-alike)
+  // and the lawn guide (chinch treatment only after the technician confirms it). Each holds
   // for every customer it can reach and promises no visit: a return visit is the FREE
   // RE-SERVICE fact's job, never a COMPANY FACTS line.
-  'After an inside treatment, clean as usual. On treated baseboards and edges use water only, no bleach or strong cleaners, so the treatment keeps working.',
-  'Seeing more bugs for one to two weeks after a treatment is normal. The treatment flushes them out and eggs keep hatching. If it has not slowed down after two weeks, tell us.',
-  'Small flies at sinks and drains are usually drain flies. They breed in the film inside the drain. Scrub the drain and use an enzyme drain cleaner. A spray does not reach where they breed.',
-  'On a lawn plan, chinch bugs and other lawn insects are part of the program. Tell us and we treat them at the next visit.',
+  'After an inside pest treatment, dry vacuuming and normal cleanup of counters and dishes are fine. Mopping, scrubbing or wiping down the treated baseboards and edges takes the treatment off, so leave those areas alone.',
+  'After a pest treatment it is normal to see some activity for up to two weeks as the treatment flushes pests out, and it fades as the products keep working. This is true of pest treatments only, not of other services. If it has not slowed down after two weeks, tell us.',
+  'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
+  'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
 ]);
 
 // The static section: fixed owner-approved policy, identical on every draft
