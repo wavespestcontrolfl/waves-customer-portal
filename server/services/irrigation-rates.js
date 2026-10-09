@@ -14,6 +14,14 @@
  * records the table it used in its snapshot's decisionInputs as `rateTable: 'owner'` (key written ONLY for the owner
  * table, so a gate-off snapshot is byte-identical to before). Replay and every renderer of a STORED plan take the table
  * from that key through storedRateTable(); a row without the key is the package table, whatever the gate reads now.
+ *
+ * WHO MAY READ THE LIVE GATE (Codex rounds 1 and 2 on #6236): irrigationOwnerRatesLive / irrigationRates /
+ * irrigationRateOptions / liveRateTable / resolveRateTable() answer "what table is in force today". Only these may call
+ * them: (a) the ONE read that opens a new week-plan decision (weeklyInputsForCustomer, once per decision, whose result
+ * feeds the move guard AND the decision), and (b) readers that show today's preferences and compare nothing with a stored
+ * plan (the report's water card, the portal flag, the completion-time longer-cycles answer that is frozen in its record).
+ * Everything else takes a table as an ARGUMENT: scheduleUnconfirmedAfterMove / sizingFieldsUnconfirmed REQUIRE one
+ * (they throw without it), and replay, the sweep's re-decide and the stored-plan renderers pass storedRateTable(...).
  */
 const { HEAD_PRECIP_RATE_IN_PER_HR, OWNER_HEAD_RATE_IN_PER_HR } = require('@waves/irrigation-runtime');
 

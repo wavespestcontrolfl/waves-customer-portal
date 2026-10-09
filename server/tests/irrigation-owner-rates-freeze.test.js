@@ -210,10 +210,14 @@ describe('replay is pinned to the stored table', () => {
     expect(replayWeekPlanForCustomer(stripped, customer)).toBeNull();
   });
 
-  test('the weekly inputs carry a pinned table only when one is given', () => {
+  test('the weekly inputs always carry the table the decision is pinned to: the given one, else today\'s gate read once', () => {
     const { customer } = decide();
     const args = { weekEnding: '2026-09-06', weekWeather: { rainInches: 0.6, et0Inches: 1.6 }, weekPlanEnabled: true, planWeekEnd: '2026-09-13', now };
-    expect(weeklyInputsForCustomer(customer, args)).not.toHaveProperty('rateTable');
+    expect(weeklyInputsForCustomer(customer, args).rateTable).toBe('package');
+    gateOn();
+    expect(weeklyInputsForCustomer(customer, args).rateTable).toBe('owner');
+    expect(weeklyInputsForCustomer(customer, { ...args, rateTable: 'package' }).rateTable).toBe('package');
+    gateOff();
     expect(weeklyInputsForCustomer(customer, { ...args, rateTable: 'package' }).rateTable).toBe('package');
   });
 
@@ -228,5 +232,53 @@ describe('replay is pinned to the stored table', () => {
     gateOff();
     expect(base('owner').weekPlan.rateInPerHr).toBe(1);
     expect(base('owner').decisionInputs.rateTable).toBe('owner');
+  });
+});
+
+// Codex round 2 on #6236: the move guard (does a confirmed runtime YIELD a figure?) derives inches, and the 5-inch
+// plausibility ceiling is crossed at different minutes under the two tables. It must use the decision's own table.
+// Spray 60 min x 4 days is 6.0 in on the package table (declined, so the stale tech reading wins and the plan is
+// events-only) and 4.0 in on the owner table (derives, so the confirmed schedule sizes the plan).
+describe('the move guard follows the decision\'s table (stale fallback, 60 min x 4 days on spray)', () => {
+  const MOVED_STALE = {
+    irrigation_run_minutes: 60,
+    watering_days: ['Mon', 'Tue', 'Thu', 'Fri'],
+    irrigation_system_type: ['spray'],
+    irrigation_home_changed_at: '2026-08-20T00:00:00Z',
+    irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'turf_county', 'turf_grass', 'rain_sensor'],
+    turf_irrigation_inches_per_week: 1,
+  };
+  const inputsArgs = { weekEnding: '2026-09-06', weekWeather: { rainInches: 0.6, et0Inches: 1.6 }, weekPlanEnabled: true, planWeekEnd: '2026-09-13', now };
+
+  test('a new decision pins ONE table for the guard and the decision', () => {
+    const { customer } = decide({ customerInputs: MOVED_STALE });
+    expect(weeklyInputsForCustomer(customer, inputsArgs)).toMatchObject({ scheduleUnconfirmed: true, rateTable: 'package' });
+    gateOn();
+    expect(weeklyInputsForCustomer(customer, inputsArgs)).toMatchObject({ scheduleUnconfirmed: false, rateTable: 'owner' });
+    // An explicit table wins over the gate in both directions, for the guard as well as the decision.
+    expect(weeklyInputsForCustomer(customer, { ...inputsArgs, rateTable: 'package' })).toMatchObject({ scheduleUnconfirmed: true, rateTable: 'package' });
+    gateOff();
+    expect(weeklyInputsForCustomer(customer, { ...inputsArgs, rateTable: 'owner' })).toMatchObject({ scheduleUnconfirmed: false, rateTable: 'owner' });
+  });
+
+  test.each([
+    { decidedOn: 'off', unconfirmed: true },
+    { decidedOn: 'on', unconfirmed: false },
+  ])('published with the gate $decidedOn, then the gate flips: replay equal, plan loads, pending email payload identical', async ({ decidedOn, unconfirmed }) => {
+    if (decidedOn === 'on') gateOn();
+    const { customer, snapshot, decision } = decide({ customerInputs: MOVED_STALE });
+    expect(snapshot.decisionInputs.scheduleUnconfirmed).toBe(unconfirmed);
+    expect(snapshot.decisionInputs.rateTable).toBe(decidedOn === 'on' ? 'owner' : undefined);
+    const before = await loadCustomerWateringPlan('fixture-customer', { now });
+    expect(before).not.toBeNull();
+    // The gate flips with the plan published and its email pending.
+    if (decidedOn === 'on') gateOff(); else gateOn();
+    const replay = replayWeekPlanForCustomer(snapshot, customer);
+    expect(replay).not.toBeNull();
+    expect(replay.payload).toEqual(decision.payload);
+    expect(replay.weekPlan).toEqual(snapshot.plan);
+    const after = await loadCustomerWateringPlan('fixture-customer', { now });
+    expect(after).not.toBeNull();
+    expect(after).toEqual(before);
   });
 });

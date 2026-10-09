@@ -155,7 +155,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     // gh-r20/r21: confirmation is PER sizing field since the move — never the row-wide updated_at.
     // gh-r25: ONE shared resolver (irrigation-schedule-confirmation) for the sweep and the report,
     // over the prefs row PLUS the tech fallback figures the sweep selects.
-    expect(sweep).toMatch(/const scheduleUnconfirmed = scheduleUnconfirmedAfterMove\(customer\);/);
+    expect(sweep).toMatch(/const scheduleUnconfirmed = scheduleUnconfirmedAfterMove\(customer, table\);/); // the decision's own table, never a second gate read
     expect(sweep).toMatch(/require\('\.\/irrigation-schedule-confirmation'\)/);
     expect(sweep).not.toMatch(/prefs_updated_at|irrigation_settings_saved_at/);
     // gh-r22: the raw inputs still ride (the decision must route to the PLAN

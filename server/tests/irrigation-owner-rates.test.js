@@ -14,7 +14,7 @@ const { decideWeekPlan, renderWeekPlanEmail, renderWeekPlanReport } = require('.
 const { buildIrrigationAdvice } = require('../services/service-report/irrigation-advice');
 const weeklyEmail = require('../services/irrigation-weekly-email');
 const { portalIrrigationInches } = require('../services/service-report/report-data');
-const { sizingFieldsUnconfirmed } = require('../services/irrigation-schedule-confirmation');
+const { sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove } = require('../services/irrigation-schedule-confirmation');
 
 const { buildWeekPlan, resolveApplicationRate, deriveIrrigationInchesPerWeek, defaultEventMinutes, HEAD_PRECIP_RATE_IN_PER_HR, OWNER_HEAD_RATE_IN_PER_HR } = pkg;
 
@@ -26,6 +26,7 @@ let saved;
 beforeEach(() => { saved = process.env.GATE_IRRIGATION_OWNER_RATES; delete process.env.GATE_IRRIGATION_OWNER_RATES; });
 afterEach(() => { if (saved === undefined) delete process.env.GATE_IRRIGATION_OWNER_RATES; else process.env.GATE_IRRIGATION_OWNER_RATES = saved; });
 const gateOn = () => { process.env.GATE_IRRIGATION_OWNER_RATES = 'true'; };
+const gateOff = () => { delete process.env.GATE_IRRIGATION_OWNER_RATES; };
 
 describe('rate table chooser', () => {
   test('off or anything but exactly "true" = the package table', () => {
@@ -168,9 +169,19 @@ describe('weekly email, report figure and schedule guard', () => {
       irrigation_system_type: ['spray'],
       irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'],
     };
-    expect(sizingFieldsUnconfirmed(row)).toBe(true);
+    // The table is an argument, not a gate read: the same row answers differently per table, whatever the gate says.
+    expect(sizingFieldsUnconfirmed(row, 'package')).toBe(true);
+    expect(sizingFieldsUnconfirmed(row, 'owner')).toBe(false);
     gateOn();
-    expect(sizingFieldsUnconfirmed(row)).toBe(false);
+    expect(sizingFieldsUnconfirmed(row, 'package')).toBe(true);
+    gateOff();
+    expect(sizingFieldsUnconfirmed(row, 'owner')).toBe(false);
+  });
+
+  test('schedule guard: the rate table is required (no silent read of the live gate)', () => {
+    expect(() => sizingFieldsUnconfirmed({})).toThrow(/rate table/);
+    expect(() => sizingFieldsUnconfirmed({}, 'live')).toThrow(/rate table/);
+    expect(() => scheduleUnconfirmedAfterMove({ irrigation_home_changed_at: '2026-10-01T00:00:00Z' })).toThrow(/rate table/);
   });
 });
 

@@ -1129,14 +1129,18 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
 
 // Shared customer/home normalization for the sender and saved-plan validation.
 // `rateTable` pins the head rate table ('owner' | 'package') the decision is built on: a replay passes the STORED table,
-// the sweep pins the live one once per customer. Omitted = decideWeeklyEmail reads the live gate (a new decision).
+// the sweep pins the live one once per customer. Omitted = a NEW decision: the live gate is read ONCE here, and that one
+// table feeds both the move guard below and (through the returned `rateTable`) the decision, so the two can never
+// disagree about a runtime near the plausibility ceiling.
 function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined }) {
+  const table = resolveRateTable(rateTable);
   // After a move, every NON-NULL sizing field must have been re-saved
   // (irrigation_confirmed_fields, reset by the move, accrues one field
   // per portal autosave) before any of them sizes an instruction — a
   // single re-saved field, a non-sizing irrigation edit, or the row-wide
   // updated_at never re-confirms the rest (codex gh-r20/r21).
-  const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
+  // The move guard derives with the decision's own table (a replay: the stored one), never a second read of the gate.
+  const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer, table);
   const priorWeekEvents = priorWeek ? priorWeek.events : null;
   const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
   return {
@@ -1181,7 +1185,7 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
     // The restriction must cover the WHOLE plan week (through this Sunday).
     planWeekEnd,
-    ...(rateTable ? { rateTable } : {}),
+    rateTable: table,
     now,
   };
 }
