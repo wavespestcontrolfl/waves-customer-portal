@@ -119,6 +119,8 @@ import {
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
+import SpotTargetControl from './LawnSpotTarget';
+import { spotTargetsOf, targetBodyFields } from '../../lib/lawn-spot-target';
 import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
@@ -354,6 +356,8 @@ function contextFrom(data, service) {
     // The methods a row may take (the server's list; the common three when it has none).
     methods: methodChoicesOf(data),
     ...optionalContextFields(data),
+    // The closed lists of a spot fungicide / insecticide row's target (lib/lawn-spot-target.js).
+    spotTargets: spotTargetsOf(data),
   };
 }
 
@@ -1102,7 +1106,8 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
         ...(row.spotRule && row.spotArea > 0 ? { areaValue: row.spotArea, areaUnit: 'sqft' } : {}),
         // GATE_LAWN_TROUBLE_AREAS: where the spot went, and what the row was opened for (the server writes the lawn's trouble area from it).
         ...(row.placeRule && row.place ? { areaPlace: row.place, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
-        targets: [],
+        // A spot fungicide / insecticide row's optional target (the server checks it against the row's type), and the chinch-find hint.
+        ...targetBodyFields(row),
       };
     }),
     ...(skipped.length ? { lawnProtocolCompletion: { skippedProducts: skipped } } : {}),
@@ -1680,6 +1685,7 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
             onRemove={() => removeRow(row.productId)}
           >
             {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(place) => updateRow(row.productId, { pickedPlace: place })} /> : null}
+            <SpotTargetControl row={row} config={ctx.spotTargets} chinch={chinch} takeAll={gov.takeAll} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
           </ProductEditor>
           {row === areaHost && (
             <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea}>

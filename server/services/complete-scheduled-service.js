@@ -7893,6 +7893,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const { isValidRateUnit } = require('../services/inventory-units');
           // GATE_LAWN_TROUBLE_AREAS: a visit whose property cannot be resolved records no place (the gate acts as off for that visit).
           const placesOn = !!(await savepointRead(trx, (k) => require('../services/lawn-trouble-areas').propertyOf(k, svc)).catch(() => null));
+          // Lawn Fast Complete: the target a spot fungicide / insecticide row is stored with (lawn-spot-target.js; the row's own tags for any other completion).
+          const spotTargets = await require('../services/lawn-spot-target').resolveForCompletion({
+            rows: products, lawnFast, catalog: completionCatalogRowsById, canonicalId: canonicalProductId, inferMethod: inferServiceReportApplicationMethod, serviceLine: reportServiceLine,
+            confirm: () => require('./lawn-fast-complete').troubleTypeIdsFor(svc),
+          });
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;
@@ -7973,7 +7978,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (serviceProductCols.application_area) serviceProductInsert.application_area = p.applicationArea || p.area || null;
             if (serviceProductCols.epa_reg_number) serviceProductInsert.epa_reg_number = product.epa_reg_number || product.epa_registration_number || null;
             if (serviceProductCols.zone_ids) serviceProductInsert.zone_ids = Array.isArray(p.zoneIds) ? p.zoneIds : [];
-            if (serviceProductCols.targets) serviceProductInsert.targets = Array.isArray(p.targets) ? p.targets : [];
+            if (serviceProductCols.targets) serviceProductInsert.targets = spotTargets.of(p);
             if (serviceProductCols.area_value) {
               serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
             }

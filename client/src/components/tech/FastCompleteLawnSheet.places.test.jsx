@@ -1320,3 +1320,92 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
   });
 });
 
+
+// ── a target on a spot fungicide / insecticide row (owner 2026-10-09) ───────────────────────────────────────────
+// The server sends the closed lists (context.spotTargets) and checks what is stored; the sheet shows one optional choice on a
+// spot fungicide / insecticide row, none on a whole-lawn row, and a line (no tap) on a row a chinch find opened.
+describe('a target on a spot fungicide or insecticide row', () => {
+  const SPOT_TARGETS = {
+    v: 1,
+    fungicide: ['Large patch', 'Dollar spot', 'Gray leaf spot', 'Take-all root rot', 'Fairy ring', 'Pythium root rot'],
+    insecticide: ['Southern chinch bugs', 'Fall armyworms', 'Tropical sod webworms', 'White grubs', 'Tawny mole crickets', 'Fire ants'],
+    chinch: 'Southern chinch bugs',
+    takeAll: 'Take-all root rot',
+  };
+  const withTargets = (ctx) => ({ ...ctx, spotTargets: SPOT_TARGETS });
+  const BIF_ADDON = addOn(P_BIF, 'Atticus Talak 7.9 F');
+  const targetGroup = (name) => within(placeGroup(name)).queryByRole('group', { name: `Treating, ${name}` });
+  const labels = (group) => within(group).getAllByRole('button').map((b) => b.textContent);
+
+  test('a spot fungicide offers the fungicide names, optional: one tap sets it, a second tap clears it, Complete never waits for it', async () => {
+    await open(withTargets(placeContext({ addOns: [...ADD_ONS, BIF_ADDON] })));
+    addFungicide();
+    const group = targetGroup('Spot Fungicide');
+    expect(labels(group)).toEqual(['Large patch', 'Dollar spot', 'Gray leaf spot', 'Fairy ring', 'Pythium root rot']);
+    expect(pressed(group)).toEqual([]);
+    fireEvent.click(chipOf(group, 'Dollar spot'));
+    expect(pressed(group)).toEqual(['Dollar spot']);
+    fireEvent.click(chipOf(group, 'Dollar spot'));
+    expect(pressed(group)).toEqual([]);
+    fireEvent.click(chipOf(group, 'Large patch'));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG).targets).toEqual(['Large patch']);
+  });
+
+  test('with nothing picked the row completes and sends no target', async () => {
+    await open(withTargets(placeContext()));
+    addFungicide();
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ targets: [] });
+    expect(sent(P_FUNG)).not.toHaveProperty('targetFind');
+  });
+
+  test('a spot insecticide added another way offers the insect names but never the chinch name (the chinch entry is that way)', async () => {
+    await open(withTargets(placeContext({ addOns: [...ADD_ONS, BIF_ADDON] })));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Atticus Talak 7.9 F' }));
+    expect(labels(targetGroup('Atticus Talak 7.9 F'))).toEqual(['Fall armyworms', 'Tropical sod webworms', 'White grubs', 'Tawny mole crickets', 'Fire ants']);
+  });
+
+  test('a whole-lawn row never asks', async () => {
+    const broadcast = { productId: P_FUNG, name: 'Spot Fungicide', applicationMethod: 'broadcast_spray', amount: 6, amountUnit: 'fl_oz', treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1, rateUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'No rule', mowHoldDays: null };
+    await open(withTargets(placeContext({ planned: [broadcast] })));
+    expect(screen.getByRole('group', { name: 'Spot Fungicide' })).toBeTruthy();
+    expect(screen.queryByText('Treating (optional)')).toBeNull();
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ targets: [] });
+  });
+
+  test('without the lists in the context (the guide is off, or an older server) there is no control and the body is as before', async () => {
+    await open(placeContext());
+    addFungicide();
+    expect(screen.queryByText('Treating (optional)')).toBeNull();
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    fireEvent.click(chipOf(within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG).targets).toEqual([]);
+  });
+
+  test('a row the chinch entry opened shows the recorded target as a line (no tap) and names the find to the server', async () => {
+    const BIF_ITEM = { productId: P_BIF, name: 'Atticus Talak 7.9 F', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, ratePer1000: null, rateUnit: null, gateNotes: [] };
+    const chinch = {
+      item: BIF_ITEM, note: null, rungIds: [P_ARENA, P_BIF], unreadableIds: [],
+      byPlace: { front: { item: BIF_ITEM, note: null, unreadableIds: [] } },
+    };
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [] };
+    await open(withTargets(placeContext({ treatmentGuide: true, chinch })));
+    await analyze();
+    await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment: Front' }));
+    const row = screen.getByRole('group', { name: 'Atticus Talak 7.9 F' });
+    expect(within(row).getByText('Recorded for: Southern chinch bugs.')).toBeTruthy();
+    expect(within(row).queryByText('Treating (optional)')).toBeNull();
+    typeArea(row, '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sent(P_BIF)).toMatchObject({ targets: [], targetFind: 'chinch' });
+  });
+});
