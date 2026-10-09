@@ -1,29 +1,43 @@
 /**
- * Lawn protocol v13, Topchoice as the fire ant add-on: a rolling-year interval (Codex round 1 on #6160). 20261009100000
- * is pushed and frozen; this one edits nothing in it.
+ * Lawn protocol v13, Topchoice as the fire ant add-on: two corrections (Codex round 1 on #6160). 20261009100000 is pushed
+ * and frozen; this one edits nothing in it.
  *
- * The gap. The Topchoice label allows "no more than 1 application per year". The annual_max_apps limit 20261009100000
- * inserted counts a calendar year (January 1 to December 31, application-limits.js getYearStart and auditAnnualCount), so
- * an October application followed by an April one the next spring passes: two applications in 6 months, one per
- * calendar year. This adds a hard min_interval_days limit of 365 for the Topchoice product id, next to the annual_max_apps
- * row (which stays). The plan's limit reader and the closeout audit both read min_interval_days across the new year, so
- * October then April is blocked, and an application 365 days after the last one is allowed.
+ * 1. A rolling-year interval. The Topchoice label allows "no more than 1 application per year". The annual_max_apps limit
+ *    20261009100000 inserted counts a calendar year (January 1 to December 31, application-limits.js getYearStart and
+ *    auditAnnualCount), so an October application followed by an April one the next spring passes: two applications in 6
+ *    months, one per calendar year. This adds a hard min_interval_days limit of 365 for the Topchoice product id, next to the
+ *    annual_max_apps row (which stays). The plan's limit reader and the closeout audit both read min_interval_days across the
+ *    new year, so October then April is blocked, and an application 365 days after the last one is allowed.
+ *      - inserted when the product has no min_interval_days row; a weaker row (under 365 days, not a hard block, not matched
+ *        on the product, another unit) is tightened; a row that already enforces 365 or more days as a hard block is left alone.
  *
- *   - inserted when the product has no min_interval_days row; a weaker row (under 365 days, not a hard block, not matched
- *     on the product, another unit) is tightened; a row that already enforces 365 or more days as a hard block is left alone;
- *   - nothing is written when there is no v13 protocol or no Topchoice row (as 20261009100000: the Advion rows stay then).
+ * 2. The own-pass rule in the staged rows. 20261009100000 copied the Advion row's gates onto the Topchoice rows it inserted, so
+ *    nothing in the plan or on the job card told a tech that the label forbids applying Topchoice in combination with other
+ *    materials. applyAlone is the wrong gate (it blocks the whole selection and withholds every amount, which forbids the
+ *    granule on the same visit as the month's fertilizer); ownPass is a note-only gate (waveguard-plan-engine.js
+ *    V13_GATE_NOTES, severity note: no block, no withheld amount) read by the plan item, the tank sheet and the tech sheet.
+ *    Each Topchoice row 20261009100000 inserted gets gates.ownPass = true, only while the row still matches that migration's
+ *    snapshot in every column (a row staff edited is left alone and logged). The note is internal: gate notes reach the
+ *    admin plan, the tank sheet and the tech sheet, never a customer page.
  *
- * Idempotent: a second run changes nothing. One 'v13_fire_ant_granule_followup' audit row records the limit written and, for
- * a tightened row, every field before.
+ * Nothing is written when there is no v13 protocol or no Topchoice row (as 20261009100000: the Advion rows stay then).
+ * Idempotent: a second run changes nothing. One 'v13_fire_ant_granule_followup' audit row records the limit written (for a
+ * tightened row, every field before) and, for each protocol row, its gates before and after.
  *
  * down(), exact-equality guarded. It runs BEFORE the frozen down of 20261009100000, so the two must agree on what a
- * rollback keeps: 20261009100000 leaves a protocol (and so the catalog changes, among them the annual_max_apps limit) when a
- * visit or completion references it or when staff edited its inserted Topchoice row or its retired Advion row. This down
- * asks the same questions of the same audit rows (mirrored below, the frozen file exports none of them) and keeps its limit,
- * and its audit row, whenever 20261009100000 will keep anything; the interval then stays beside the count limit that stays.
- * Otherwise the limit this inserted is deleted only while every field still reads as written, and a tightened row goes
- * back only while it still holds the written values. This writes no protocol row, so the frozen down finds the rows it
- * compares exactly as it left them: rolling back in order (this, then 20261009100000) restores everything.
+ * rollback keeps. In order:
+ *   a. each ownPass row goes back to its gates before, only while its gates still equal exactly what this wrote, and only on
+ *      a protocol no visit or completion references; a row staff edited since, or on a referenced protocol, is left as it is
+ *      (a row already back at its gates before needs nothing);
+ *   b. 20261009100000 leaves a protocol (and so the catalog changes, among them the annual_max_apps limit) when a visit or
+ *      completion references it or when staff edited its inserted Topchoice row or its retired Advion row. After step a the
+ *      rows this wrote are back at that migration's snapshot, so this asks the same questions of the same audit rows
+ *      (mirrored below, the frozen file exports none of them). When it will keep anything, or step a left a row, the limit and
+ *      this audit row stay beside the count limit that stays. Otherwise the limit this inserted is deleted only while every field
+ *      still reads as written, and a tightened row goes back only while it holds the written values.
+ * In order (this, then 20261009100000) every row, limit and audit row is restored. The frozen down alone, with this applied,
+ * finds ownPass in the gates of every Topchoice row, sees a row that no longer matches its snapshot and keeps the protocol whole.
+ * Knex rolls back newest first, so that order does not occur through a rollback.
  */
 
 const crypto = require('crypto');
@@ -42,6 +56,8 @@ const LIMIT = {
   match_type: 'product', limit_type: 'min_interval_days', limit_value: MIN_DAYS, limit_unit: 'days', severity: 'hard_block',
   description: `Topchoice Granular Insecticide: at least ${MIN_DAYS} days between applications, so one in any rolling year; the label allows no more than 1 application per year (${first.LABEL}).`,
 };
+
+const OWN_PASS = { ownPass: true };
 
 // Mirrors 20261009100000's OWNED_COLUMNS: the columns of an inserted protocol row it compares before deleting.
 const OWNED_COLUMNS = ['lawn_protocol_window_id', 'product_id', 'product_name', 'role', 'application_mode', 'rate_per_1000', 'rate_unit', 'carrier_gal_per_1000',
@@ -96,11 +112,40 @@ async function writeLimit(knex, productId) {
   return { inserted: [], updated: [{ id: row.id, before, after: LIMIT }] };
 }
 
-const REQUIRED_TABLES = ['products_catalog', 'product_limits', 'lawn_protocols', 'lawn_protocol_audit_log'];
+const REQUIRED_TABLES = ['products_catalog', 'product_limits', 'lawn_protocols', 'lawn_protocol_products', 'lawn_protocol_audit_log'];
 
 async function hasAll(knex) {
   for (const table of REQUIRED_TABLES) if (!(await knex.schema.hasTable(table))) return false;
   return true;
+}
+
+// The Topchoice protocol rows 20261009100000 inserted, with the snapshot it took: [{ made, protocolId }].
+async function insertedRows(knex) {
+  const logs = await knex('lawn_protocol_audit_log').where({ action: first.ACTION }).select('lawn_protocol_id', 'after_snapshot');
+  return logs.flatMap((log) => (asObject(log.after_snapshot).inserted || []).map((made) => ({ made, protocolId: log.lawn_protocol_id })));
+}
+
+// Whether a row holds the snapshot in every owned column; `gates` is compared with the gates given.
+function matchesSnapshot(row, made, gates) {
+  return OWNED_COLUMNS.every((column) => same(row[column], column === 'gates' ? gates : made.owned[column]));
+}
+
+async function writeOwnPass(knex) {
+  const written = [];
+  for (const { made, protocolId } of await insertedRows(knex)) {
+    const row = await knex('lawn_protocol_products').where({ id: made.id }).first(OWNED_COLUMNS);
+    if (!row || !made.owned) continue;
+    const before = asObject(made.owned.gates);
+    const after = { ...before, ...OWN_PASS };
+    if (matchesSnapshot(row, made, after)) continue;
+    if (!matchesSnapshot(row, made, before)) {
+      console.log(`[lawn-v13-fire-ant-granule-followup] the Topchoice row ${made.id} was edited after it was inserted: ownPass not written`);
+      continue;
+    }
+    await knex('lawn_protocol_products').where({ id: made.id }).update({ gates: JSON.stringify(after), updated_at: knex.fn.now() });
+    written.push({ rowId: made.id, protocolId, gatesBefore: before, gatesAfter: after });
+  }
+  return written;
 }
 
 exports.up = async function up(knex) {
@@ -112,16 +157,17 @@ exports.up = async function up(knex) {
     return;
   }
   const limits = await writeLimit(knex, productId);
-  if (!limits.inserted.length && !limits.updated.length) return;
+  const rows = await writeOwnPass(knex);
+  if (!limits.inserted.length && !limits.updated.length && !rows.length) return;
   await knex('lawn_protocol_audit_log').insert({
     lawn_protocol_id: null,
     actor_name: ACTOR,
     entity_type: 'catalog',
     entity_id: crypto.randomUUID(),
     action: ACTION,
-    changed_fields: JSON.stringify(['limits']),
+    changed_fields: JSON.stringify(['limits', 'gates']),
     before_snapshot: JSON.stringify({}),
-    after_snapshot: JSON.stringify({ productId, limits }),
+    after_snapshot: JSON.stringify({ productId, limits, rows }),
     metadata: JSON.stringify({ migration: MIGRATION }),
   });
 };
@@ -183,11 +229,29 @@ async function revertLimits(knex, limits) {
   }
 }
 
+// Step a: each ownPass row back to its gates before, only on an unreferenced protocol and only while the gates still equal
+// what this wrote. Returns true when a row was left.
+async function revertOwnPass(knex, rows) {
+  let left = false;
+  for (const entry of rows) {
+    const protocol = entry.protocolId ? await knex('lawn_protocols').where({ id: entry.protocolId }).first('id', 'protocol_key') : null;
+    if (protocol && await protocolReferenced(knex, protocol)) { left = true; continue; }
+    const row = await knex('lawn_protocol_products').where({ id: entry.rowId }).first('id', 'gates');
+    if (!row) continue;
+    if (same(row.gates, entry.gatesBefore)) continue;
+    if (!same(row.gates, entry.gatesAfter)) { left = true; continue; }
+    await knex('lawn_protocol_products').where({ id: row.id }).update({ gates: JSON.stringify(entry.gatesBefore), updated_at: knex.fn.now() });
+  }
+  return left;
+}
+
 exports.down = async function down(knex) {
   if (!(await hasAll(knex))) return;
   const logs = await knex('lawn_protocol_audit_log').where({ action: ACTION }).select('id', 'after_snapshot');
   if (!logs.length) return;
-  if (await frozenDownKeepsSomething(knex)) {
+  let left = false;
+  for (const log of logs) if (await revertOwnPass(knex, asObject(log.after_snapshot).rows || [])) left = true;
+  if (left || await frozenDownKeepsSomething(knex)) {
     console.log('[lawn-v13-fire-ant-granule-followup] a protocol still uses Topchoice as the fire ant add-on: the 365-day interval stays beside the count limit');
     return;
   }
@@ -200,3 +264,4 @@ exports.down = async function down(knex) {
 exports.ACTION = ACTION;
 exports.LIMIT = LIMIT;
 exports.MIN_DAYS = MIN_DAYS;
+exports.OWN_PASS = OWN_PASS;
