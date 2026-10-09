@@ -151,3 +151,48 @@ describe('20261010120000: the rows in the store', () => {
     expect(knex.tables.lawn_protocols).toEqual([]);
   });
 });
+
+describe('a protocol row\'s rate is the governed rate of that treatment; the catalog default stays the product\'s fallback', () => {
+  // The established mechanism (waveguard-plan-engine productRatePer1000): a rate stated by the protocol wins
+  // (source 'protocol_rate') and the catalog default is the fallback when the protocol states none. The area add-on
+  // rows use it: the catalog defaults (Arena 0.29 oz, Acelepryn 0.05 fl oz) belong to the lawn program and are not edited.
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  test('the plan engine reads a protocol rate before the catalog default', () => {
+    const src = read('services/waveguard-plan-engine.js');
+    const protocolFirst = src.indexOf("source: 'protocol_rate'");
+    const catalogFallback = src.indexOf("source: 'catalog_default_rate'");
+    expect(protocolFirst).toBeGreaterThan(-1);
+    expect(catalogFallback).toBeGreaterThan(protocolFirst);
+  });
+
+  // The catalog label range each governed rate must sit inside (products_catalog min / max label rate per 1,000 sq ft,
+  // prod 2026-10-08; null = the catalog states no bound). A governed rate outside the label range is never valid.
+  const CATALOG_LABEL_RANGE = {
+    'Snapshot 2.5TG': { min: 2.3, max: 4.6, unit: 'lb' },
+    'Arena 50 WDG': { min: null, max: 0.29, unit: 'oz' },
+    'Topchoice Granular Insecticide': { min: null, max: 2, unit: 'lb' },
+    'Acelepryn Insecticide': { min: 0.05, max: 0.37, unit: 'fl_oz' },
+    'Roundup QuikPro SC': { min: null, max: 16, unit: 'fl_oz' },
+  };
+
+  test('every add-on protocol rate is in the catalog unit and inside the catalog label range', () => {
+    const migration = require('../models/migrations/20261010120000_area_addon_protocol_rows');
+    expect(migration.ADDONS.map((a) => a.product).sort()).toEqual(Object.keys(CATALOG_LABEL_RANGE).sort());
+    for (const addOn of migration.ADDONS) {
+      const range = CATALOG_LABEL_RANGE[addOn.product];
+      expect(addOn.rateUnit).toBe(range.unit);
+      if (range.min !== null) expect(addOn.ratePer1000).toBeGreaterThanOrEqual(range.min);
+      expect(addOn.ratePer1000).toBeLessThanOrEqual(range.max);
+    }
+  });
+
+  test('no migration of this PR edits a catalog default rate', () => {
+    const dir = path.join(__dirname, '..', 'models', 'migrations');
+    const mine = fs.readdirSync(dir).filter((f) => /area_addon/.test(f));
+    expect(mine.length).toBeGreaterThanOrEqual(14);
+    for (const file of mine) expect(fs.readFileSync(path.join(dir, file), 'utf8')).not.toMatch(/default_rate_per_1000\s*:/);
+  });
+});
