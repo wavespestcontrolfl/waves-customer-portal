@@ -28,7 +28,7 @@ describe('the recipe text (no database)', () => {
       expect(track.notes.join('\n')).toContain('Florida 2(ee) recommendation for southern chinch bug (EPA Reg. No. 59639-152; expires December 31, 2028)');
       expect(track.notes.join('\n')).not.toContain('never treat the same area twice');
       const safety = track.safety_rules.join('\n');
-      expect(safety).toContain('Celsius, Certainty and Blindside: up to 2 applications per lawn per year each');
+      expect(safety).toContain('Celsius and Certainty: up to 2 applications per lawn per year each; Blindside: 1 application per lawn per year');
       expect(safety).not.toMatch(/per spot/);
     }
   });
@@ -493,15 +493,19 @@ describeDb('v13 count caps through PostgreSQL', () => {
         return applicationLimits.checkLimits(customerId, catalog[name].id, new Date('2026-06-10T16:00:00Z'), knex, {});
       };
 
-      test.each(NEW_CAPS)('%s: gate off, the 3rd application is allowed (nothing is stored); gate on, it is blocked at 2', async (name) => {
+      // Blindside is held to ONE application a year (effectiveCap 1, v13 final pass: the label's 0.23 oz yearly amount at the 0.149 oz program rate).
+      const countOf = (name) => (name === BLINDSIDE ? 1 : 2);
+      const countBlocks = (result) => result.blocks.filter((b) => b.type === 'annual_max_apps');
+
+      test.each(NEW_CAPS)('%s: gate off, the 3rd application is allowed (nothing is stored); gate on, it is blocked at the yearly count', async (name) => {
         const two = await history(name, ['2026-02-02', '2026-03-16']);
         const off = await check(two.customerId, name, false);
         expect(off.blocks).toEqual([]);
         const on = await check(two.customerId, name, true);
-        expect(on.blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', current: 2, max: 2 })]);
-        expect(on.blocks[0].description).toMatch(/v13 lawn program/);
+        expect(countBlocks(on)).toEqual([expect.objectContaining({ type: 'annual_max_apps', current: 2, max: countOf(name) })]);
+        expect(countBlocks(on)[0].description).toMatch(/v13 lawn program/);
         const one = await history(name, ['2026-02-02']);
-        expect((await check(one.customerId, name, true)).blocks).toEqual([]);
+        expect(countBlocks(await check(one.customerId, name, true))).toEqual(countOf(name) === 1 ? [expect.objectContaining({ current: 1, max: 1 })] : []);
       });
 
       test.each(NEW_CAPS)('%s: the closeout flags the 3rd application under the gate, and says nothing with it off', async (name) => {
@@ -509,8 +513,8 @@ describeDb('v13 count caps through PostgreSQL', () => {
         const visit = await f.visit(0, { scheduled_date: '2026-06-10', service_type: 'Every 6 Weeks Lawn Care Service' });
         for (const date of ['2026-02-02', '2026-03-16']) await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[name].id, application_date: date, application_rate: 0.1, rate_unit: 'oz' });
         process.env.GATE_LAWN_V13 = 'true';
-        expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[name].id], serviceDate: '2026-06-10', database: knex }))
-          .toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productName: name, limitType: 'annual_max_apps', current: 2, max: 2 })]);
+        const found = await submittedProductLimitFindings({ svc: visit, productIds: [catalog[name].id], serviceDate: '2026-06-10', database: knex });
+        expect(found.filter((f) => f.limitType === 'annual_max_apps')).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productName: name, limitType: 'annual_max_apps', current: 2, max: countOf(name) })]);
         delete process.env.GATE_LAWN_V13;
         expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[name].id], serviceDate: '2026-06-10', database: knex })).toEqual([]);
       });
@@ -596,14 +600,14 @@ describeDb('v13 count caps through PostgreSQL', () => {
       expect((await check(f.customerId, ARENA)).blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', max: 2 })]);
     });
 
-    test('a rename after the identity is cached keeps the cap; an exact alias carries it across a restart (Celsius, stored 3)', async () => {
+    test('a rename keeps the cap, cached or after a restart (the staged row holds the product id); an exact alias carries it too (Celsius, stored 3)', async () => {
       await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED });
       const f = await twoApplications(CELSIUS);
       expect((await check(f.customerId, CELSIUS)).blocks).toHaveLength(1); // caches the identity
       await knex('products_catalog').where({ id: catalog[CELSIUS].id }).update({ name: 'Celsius (renamed)' });
       expect((await check(f.customerId, CELSIUS)).blocks).toHaveLength(1); // cached id
-      resetV13CapIdentity(); // a restart: only the alias can carry it
-      expect((await check(f.customerId, CELSIUS)).blocks).toEqual([]);
+      resetV13CapIdentity(); // a restart: the staged protocol row still names Celsius WG and holds its product id
+      expect((await check(f.customerId, CELSIUS)).blocks).toEqual([expect.objectContaining({ max: 2 })]);
       await knex('product_aliases').insert({ product_id: catalog[CELSIUS].id, alias_name: CELSIUS });
       resetV13CapIdentity();
       expect((await check(f.customerId, CELSIUS)).blocks).toEqual([expect.objectContaining({ max: 2 })]);
@@ -784,8 +788,10 @@ describeDb('v13 count caps through PostgreSQL', () => {
         const capped = summary.products.filter((p) => NAMES.includes(p.protocolProductName));
         expect(capped.map((p) => p.protocolProductName).sort()).toEqual([...NAMES].sort());
         for (const product of capped) {
-          expect(product.gates.annualMaxApps).toBe(2);
-          expect(product.annualCounter.maxApplications).toBe(2);
+          // The plan and visit brief read these through withEntryCapMetadata: Blindside shows 1 (effectiveCap), the rest 2.
+          const shown = product.protocolProductName === BLINDSIDE ? 1 : 2;
+          expect(product.gates.annualMaxApps).toBe(shown);
+          expect(product.annualCounter.maxApplications).toBe(shown);
         }
       });
     });
@@ -1174,7 +1180,8 @@ describeDb('v13 count caps through PostgreSQL', () => {
 
     test.each([CELSIUS, CERTAINTY, BLINDSIDE, ARENA])('%s: a 3rd application in the year at the same property is flagged; at another property it is not', async (name) => {
       const { visitA, visitB } = await setup(name, ['2026-02-02', '2026-03-16']);
-      expect(await check(visitA, name)).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productId: catalog[name].id, productName: name, limitType: 'annual_max_apps', current: 2, max: 2 })]);
+      const countFindings = async (visit) => (await check(visit, name)).filter((f) => f.limitType === 'annual_max_apps');
+      expect(await countFindings(visitA)).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productId: catalog[name].id, productName: name, limitType: 'annual_max_apps', current: 2, max: name === BLINDSIDE ? 1 : 2 })]);
       expect(await check(visitB, name)).toEqual([]);
     });
 
@@ -1289,14 +1296,16 @@ describeDb('v13 count caps through PostgreSQL', () => {
     };
     const limitBlocks = (result) => result.propertyGate.blocks.filter((b) => b.code === 'lawn_v13_annual_limit');
     // The yearly COUNT block alone: Arena's staged dose (0.147) also makes a 3rd pass an amount block, which has its own tests.
-    const countBlocks = (result) => limitBlocks(result).filter((b) => /applications this year/.test(b.message));
+    // Celsius counts the last 365 days (yearWindow 'rolling365'); Arena the calendar year.
+    const yearWords = (name) => (name === CELSIUS ? 'in the last 365 days' : 'this year');
+    const countBlocks = (result) => limitBlocks(result).filter((b) => /applications (this year|in the last 365 days)/.test(b.message));
 
     test.each([CELSIUS, ARENA])('%s: a third application in the year at the same property is blocked; one at another property is not', async (name) => {
       const { visitA, visitB } = await twoProperties(name, ['2026-02-02', '2026-03-16']);
       const resultA = await plan(visitA, name);
       expect(countBlocks(resultA)).toHaveLength(1);
       expect(countBlocks(resultA)[0]).toMatchObject({ productName: name });
-      expect(countBlocks(resultA)[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+      expect(countBlocks(resultA)[0].message).toContain(`2/2 applications ${yearWords(name)} — LIMIT REACHED`);
       expect(resultA.status).toBe('blocked');
       const resultB = await plan(visitB, name);
       expect(limitBlocks(resultB)).toEqual([]);
@@ -1322,7 +1331,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
         const two = await twoProperties(name, ['2026-02-02', '2026-03-16']);
         const blocked = countBlocks(await plan(two.visitA, name));
         expect(blocked).toHaveLength(1);
-        expect(blocked[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+        expect(blocked[0].message).toContain(`2/2 applications ${yearWords(name)} — LIMIT REACHED`);
         expect(limitBlocks(await plan(two.visitB, name))).toEqual([]);
         delete process.env.GATE_LAWN_V13;
         const off = await buildPlanForService(two.visitA.id, { db: knex, selectedConditionalProductNames: [name] });
@@ -1395,9 +1404,9 @@ describeDb('v13 count caps through PostgreSQL', () => {
         await knex('product_limits').where({ product_id: catalog[ARENA].id, limit_type: 'min_interval_days' }).del();
       });
 
-      test('only Arena carries an interval: Celsius, Certainty and Blindside get none', async () => {
-        const { V13_COUNT_CAPS } = require('../config/lawn-v13-count-caps');
-        expect(V13_COUNT_CAPS.filter((entry) => entry.minIntervalDays).map((entry) => [entry.name, entry.minIntervalDays])).toEqual([[ARENA, 56]]);
+      test('only Arena (56 days) and Certainty (28 days, v13 final pass) carry an interval: Celsius and Blindside get none', async () => {
+        const { V13_LIMITS } = require('../config/lawn-v13-count-caps');
+        expect(V13_LIMITS.filter((entry) => entry.minIntervalDays).map((entry) => [entry.name, entry.minIntervalDays])).toEqual([[ARENA, 56], [CERTAINTY, 28]]);
       });
     });
 
@@ -1584,9 +1593,9 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(limitBlocks(off)).toEqual([]);
       });
 
-      test('only Arena carries an amount cap, and the synthetic row is a hard block in the product\'s own unit', async () => {
-        const { V13_COUNT_CAPS, applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
-        expect(V13_COUNT_CAPS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA]);
+      test('the amount caps are Arena, Blindside, Velista and Artavia, and the synthetic row is a hard block in the product\'s own unit', async () => {
+        const { V13_LIMITS, applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
+        expect(V13_LIMITS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA, BLINDSIDE, 'Velista', 'Artavia 2 SC (Azoxy)']);
         process.env.GATE_LAWN_V13 = 'true';
         const rows = await applyV13CountCaps(knex, { id: catalog[ARENA].id, name: ARENA }, [], catalog[ARENA].id);
         expect(rows.filter((r) => r.match_type === V13_AMOUNT).map((r) => [r.limit_type, Number(r.limit_value), r.limit_unit, r.severity])).toEqual([['annual_max_rate', 0.294, 'oz/1000sf/year', 'hard_block']]);

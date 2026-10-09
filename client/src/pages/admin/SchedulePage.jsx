@@ -160,6 +160,7 @@ import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
+import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
@@ -7512,6 +7513,11 @@ function JobCardTank({ tank, serviceId, D }) {
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
+            )}
+            {!busy && mix?.amount != null && mix.rotationWarnings?.length > 0 && (
+              <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
+                {mix.rotationWarnings.map((warning, i) => <div key={i}>Warning: {warning}</div>)}
+              </div>
             )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
@@ -18877,9 +18883,9 @@ export function CompletionPanel({
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
-      if (service?.completionInvoiceAlreadySent) {
-        body.invoiceAlreadySent = true;
-      }
+      // The invoice fields of the body: the Fast Complete sheets build theirs
+      // with the same helper (lib/completion-invoice-fields.js).
+      Object.assign(body, completionInvoiceFields(service));
       // Once the completion is KNOWN COMMITTED, every submit — automatic
       // retry or the manual one after give-up — replays the committed body
       // byte-for-byte through replayCommittedCompletion above; a fresh build

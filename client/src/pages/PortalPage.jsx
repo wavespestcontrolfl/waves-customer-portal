@@ -3234,7 +3234,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
                 sub: statsStatus === 'error'
                   ? 'Unavailable right now'
-                  : stats?.celsiusApplicationsThisYear != null ? `${stats.celsiusApplicationsThisYear} weed treatments` : 'completed visits',
+                  : weedTreatmentsLine(stats) || 'completed visits',
               },
               { label: 'Member since', value: customer.memberSince ? fmtDate(customer.memberSince, { month: 'short', year: 'numeric' }) : '—', sub: 'active customer' },
             ].map(item => (
@@ -9069,6 +9069,13 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
 // =========================================================================
 // KNOWLEDGE BASE TAB — SWFL-specific pest & lawn content
 // =========================================================================
+// The sub-line under "Services YTD": the Celsius count with the window the stats route says it counted (celsiusWindow). Only
+// 'rolling365' (the last 365 days) adds "in the last 12 months"; an older response without the field, or 'calendar_year', reads as before.
+export const weedTreatmentsLine = (stats) => {
+  if (stats?.celsiusApplicationsThisYear == null) return null;
+  return `${stats.celsiusApplicationsThisYear} weed treatments${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
+};
+
 // The Celsius tip follows the program: the stats route's celsiusMaxPerYear (2 under the v13 lawn
 // program, 3 before it), never a number written here.
 const buildArticles = ({ celsiusMaxPerYear = null } = {}) => [

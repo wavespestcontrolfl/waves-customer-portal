@@ -1726,3 +1726,67 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
     expect(staged.stored[0].caption).toBe('Counter edge');
   });
 });
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): Dispatch opens this
+// sheet for a visit already invoiced from the payment flow, and the completion
+// carries the invoice field the full form posts for it, so /complete sends no
+// second pay-link text and opens no second payment prompt.
+describe('a visit already invoiced from the payment flow', () => {
+  async function sendInvoiced(service) {
+    const request = makeRequest();
+    await openSheet(request, service);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')).toHaveLength(1);
+    return request.bodies('/complete')[0];
+  }
+
+  test('posts invoiceAlreadySent: true on the same /complete request, and nothing else about the invoice', async () => {
+    const body = await sendInvoiced({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    // The full form posts includePayLink true for a visit whose invoice is
+    // not one it will create; the server's invoiceAlreadySent holds the link.
+    expect(body).toMatchObject({ visitOutcome: 'completed', sendCompletionSms: true, includePayLink: true, requestReview: true });
+    for (const key of ['invoiceId', 'invoiceToken', 'createInvoice', 'checkoutInvoiceId', 'checkoutInvoiceToken']) {
+      expect(body).not.toHaveProperty(key);
+    }
+  }, 20000);
+
+  test('a visit that carries only a charge taken at the door posts no invoice field, as the full form does', async () => {
+    const body = await sendInvoiced({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture', checkoutInvoiceStatus: 'paid' });
+    expect(body).not.toHaveProperty('invoiceAlreadySent');
+    expect(body).not.toHaveProperty('checkoutInvoiceId');
+  }, 20000);
+
+  test('a visit with no invoice marker posts the body it always did', async () => {
+    const body = await sendInvoiced(SERVICE);
+    expect(body).not.toHaveProperty('invoiceAlreadySent');
+  }, 20000);
+
+  test('Next stop hands the completion response to the page, so admin Dispatch can stage the payment prompt', async () => {
+    const response = { success: true, invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoicePaymentActionRequired: true };
+    const onCompleted = vi.fn();
+    const request = makeRequest({ complete: [response] });
+    render(<FastCompleteSheet service={{ ...SERVICE, checkoutInvoiceId: 'inv-fixture' }} request={request} onClose={() => {}} onCompleted={onCompleted} />);
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
+    expect(onCompleted).toHaveBeenCalledWith(response);
+  }, 20000);
+
+  test('a retry after a lost answer resends the same body under the same key, so the server replays it', async () => {
+    const lost = Object.assign(new Error('Failed to fetch'), { status: 503 });
+    const request = makeRequest({ complete: [lost, { success: true }] });
+    await openSheet(request, { ...SERVICE, completionInvoiceAlreadySent: true });
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Retry/ }));
+    await screen.findByTestId('fast-complete-sent');
+    const [first, second] = request.bodies('/complete');
+    expect(second).toEqual(first);
+    expect(second.invoiceAlreadySent).toBe(true);
+  }, 20000);
+});

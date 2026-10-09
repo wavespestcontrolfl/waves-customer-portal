@@ -156,7 +156,10 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
   try { parsed = JSON.parse(file.content); } catch { return invalid('the file is not valid JSON'); }
   const problem = draftProblem(parsed, opportunityId, expectedBriefId);
   if (problem) return invalid(problem);
-  const draft = Object.fromEntries(DRAFT_FIELDS.filter((f) => parsed[f] != null).map((f) => [f, parsed[f]]));
+  // `type: 'draft'` is what the agent's emit_draft handler stamps on a captured
+  // draft (brief-driven-tools.js) and what the publisher's canPublishRefresh /
+  // canPublishDraftBrief require. Set here, never read from the file.
+  const draft = { type: 'draft', ...Object.fromEntries(DRAFT_FIELDS.filter((f) => parsed[f] != null).map((f) => [f, parsed[f]])) };
   return result({ ok: true, draft, brief_id: expectedBriefId, revision });
 }
 
