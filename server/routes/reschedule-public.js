@@ -195,8 +195,8 @@ function applyMoveLimit(limit, full, shown, range) {
   return moveLimits.applyLimit(limit, full, shown, { rangeTo: range.rangeTo });
 }
 
-// True when the visit is not on the date, start and status this request
-// loaded it with (another tab moved, rebooked or closed it), or cannot be
+// True when the visit is not on the date, start, status and plan cadence this
+// request loaded it with (another tab moved, rebooked or closed it), or cannot be
 // read again.
 async function visitChangedSince(svc, database = db) {
   let current = null;
@@ -204,7 +204,8 @@ async function visitChangedSince(svc, database = db) {
   return !current
     || apptDateStr(current.scheduled_date) !== apptDateStr(svc.scheduled_date)
     || hhmm(current.window_start) !== hhmm(svc.window_start)
-    || current.status !== svc.status;
+    || current.status !== svc.status
+    || cadenceChangedSince(svc, current);
 }
 
 // True, with the move-limit gate set, when the locked visit's plan cadence is

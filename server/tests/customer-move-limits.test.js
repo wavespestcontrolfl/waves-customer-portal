@@ -349,6 +349,8 @@ describe('reschedule-public wiring', () => {
     expect(await visitChangedSince(svc, database)).toBe(true);
     answer({ ...svc, status: 'cancelled' });
     expect(await visitChangedSince(svc, database)).toBe(true);
+    answer({ ...svc, recurring_pattern: 'monthly' });
+    expect(await visitChangedSince({ ...svc, recurring_pattern: 'quarterly' }, database)).toBe(true);
     answer(undefined);
     expect(await visitChangedSince(svc, database)).toBe(true);
     expect(await visitChangedSince(svc, () => { throw new Error('db down'); })).toBe(true);
