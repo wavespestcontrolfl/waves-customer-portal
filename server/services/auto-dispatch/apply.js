@@ -452,6 +452,51 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   };
 }
 
+// New reminder-sync bells in 24 hours. Same number as audit.NEW_NOTICES_PER_RUN:
+// the daily budget for rows that are not a customer reaching out
+// (docs/admin-notifications.md). A run can move 100 rows, so a reminder store
+// that fails for every one of them must not ring 100 times (Codex #6208 r6 P1).
+const REMINDER_SYNC_RINGS_PER_DAY = 10;
+const REMINDER_SYNC_KEY = 'auto-dispatch-reminder-sync:';
+
+// True when this visit's notice may ring: it already stands (a re-raise spends
+// nothing) or the 24-hour budget has room. An unreadable budget rings: a wrong
+// reminder time reaches a customer, a spare bell does not.
+async function reminderSyncMayRing(dedupeKey) {
+  try {
+    const rows = await db('notifications')
+      .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+      .whereRaw("metadata->>'dedupeKey' LIKE ? AND created_at >= now() - interval '24 hours'", [`${REMINDER_SYNC_KEY}%`])
+      .select(db.raw("metadata->>'dedupeKey' as dedupe_key"));
+    const keys = new Set(rows.map((r) => r.dedupe_key));
+    return keys.has(dedupeKey) || keys.size < REMINDER_SYNC_RINGS_PER_DAY;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder-sync budget read failed: ${err.message}`);
+    return true;
+  }
+}
+
+// Past the budget the failure is one standing notice for the day, not a bell
+// for each visit: the cause is the reminder store, and staff fix it once.
+async function flagReminderSyncOverflow(service, best) {
+  const today = etDateString(new Date());
+  logger.warn(`[auto-dispatch] reminder did not update for moved visit ${service.id} (${best.date}); over the daily notice budget`);
+  await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+    area: 'Schedule',
+    action: 'check the reminders on today\'s moved visits',
+    why: `More than ${REMINDER_SYNC_RINGS_PER_DAY} visits that auto-dispatch moved have a reminder that did not update.`,
+    severity: 'needs-you',
+    link: '/admin/dispatch?tab=schedule',
+    subject: { type: 'check', id: 'auto-dispatch-reminder-sync' },
+    doneWhen: 'reminder_times_checked',
+    who: 'person',
+  }, {
+    bell: true,
+    dedupeKey: `auto-dispatch-reminder-sync-overflow:${today}`,
+    metadata: { day: today },
+  });
+}
+
 // The move is committed but appointment_reminders still names the old slot, so
 // the 72h/24h reminder could go out for the wrong time. A log line nobody reads
 // is not enough: tell staff to check that visit's reminder. Best-effort — the
@@ -460,6 +505,10 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
 // sibling) and `best` its committed slot ({ date, start_time }).
 async function flagReminderSyncFailed(service, best) {
   try {
+    // One notice per failed slot: a later move of the visit to another time
+    // on the same date is a new failure, not the one staff already closed.
+    const dedupeKey = `${REMINDER_SYNC_KEY}${service.id}:${best.date}:${best.start_time || 'none'}`;
+    if (!(await reminderSyncMayRing(dedupeKey))) { await flagReminderSyncOverflow(service, best); return; }
     const { shortDateET } = require('../admin-alert-names');
     await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
       area: 'Schedule',
@@ -472,9 +521,7 @@ async function flagReminderSyncFailed(service, best) {
       who: 'person',
     }, {
       bell: true,
-      // One notice per failed slot: a later move of the visit to another time
-      // on the same date is a new failure, not the one staff already closed.
-      dedupeKey: `auto-dispatch-reminder-sync:${service.id}:${best.date}:${best.start_time || 'none'}`,
+      dedupeKey,
       metadata: { scheduledServiceId: service.id, customerId: service.customer_id, newDate: best.date },
     });
   } catch (err) {

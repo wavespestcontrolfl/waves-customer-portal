@@ -278,6 +278,20 @@ test('a lapsed plan raises no missing-geo notice', async () => {
   expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
 });
 
+// A stamped address that differs from the customer's skips the geocode
+// self-heal and its plan gate, so the notice's own plan check must put the
+// lapsed visit in the close list (Codex #6208 r6 P2).
+test('a lapsed plan on a visit with a divergent stamped address closes its standing pin notice', async () => {
+  servicesResult = [svc({ id: 's1', service_address_line1: '1 Test Rd', customer_address_line1: '9 Sample Ave' })];
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
 describe('missing-geo notice close at the end of a run', () => {
   beforeEach(() => {
     geocoder.ensureCustomerGeocoded.mockResolvedValue(null);

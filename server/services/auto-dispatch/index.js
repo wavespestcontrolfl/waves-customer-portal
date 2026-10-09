@@ -651,7 +651,11 @@ async function missingGeoNoticeWanted(service) {
 // Pass 1 only records the visit; nothing rings until the run ends, so a geocoder
 // outage cannot raise one bell per visit (raiseMissingGeoNotices).
 async function noticeMissingGeo(run, service) {
-  if (!(await missingGeoNoticeWanted(service))) return;
+  // A lapsed plan's visit is not placed, so nobody needs to fix its pin: a
+  // standing notice for it closes at the run's end. This is the path for a
+  // visit eligibility stopped before its own plan check (a stamped address
+  // that differs from the customer's; Codex #6208 r6 P2).
+  if (!(await missingGeoNoticeWanted(service))) { run.pinOkIds.add(String(service.id)); return; }
   const date = toDateStr(service.scheduled_date);
   run.missingGeoWanted.push({ id: service.id, customer_id: service.customer_id, scheduled_date: date, date });
 }

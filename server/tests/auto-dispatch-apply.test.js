@@ -184,6 +184,50 @@ describe('reminder sync failure after a committed move', () => {
     );
   });
 
+  // A run can move 100 rows. A reminder store that fails for all of them
+  // rings 10 visit notices in 24 hours, then one standing notice for the day
+  // (Codex #6208 r6 P1).
+  describe('reminder-sync bell budget', () => {
+    const rung = (keys) => ({
+      where() { return this; }, whereRaw() { return this; },
+      select: async () => keys.map((k) => ({ dedupe_key: k })),
+    });
+    const tenKeys = Array.from({ length: 10 }, (_, i) => `auto-dispatch-reminder-sync:v${i}:2026-08-11:08:00`);
+    const failWith = (keys) => {
+      AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+      movableQueue();
+      AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+      db.mockImplementation(tableReader({
+        appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
+        scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
+      }));
+      const read = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'notifications' ? rung(keys) : read(table)));
+      db.raw = jest.fn((x) => x);
+    };
+
+    test('past 10 notices in 24 hours, the visit gets no bell of its own: one standing notice for the day', async () => {
+      failWith(tenKeys);
+      await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+      expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+      const [, title, , opts] = notifications.notifyAdmin.mock.calls[0];
+      expect(title).toContain('check the reminders on today');
+      expect(opts.dedupeKey).toMatch(/^auto-dispatch-reminder-sync-overflow:\d{4}-\d{2}-\d{2}$/);
+    });
+
+    test('a visit whose notice already stands is re-raised and spends no budget', async () => {
+      failWith([...tenKeys.slice(0, 9), 'auto-dispatch-reminder-sync:s1:2026-08-11:08:00']);
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-reminder-sync:s1:2026-08-11:08:00');
+    });
+
+    test('nine notices leave room for one more visit notice', async () => {
+      failWith(tenKeys.slice(0, 9));
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-reminder-sync:s1:2026-08-11:08:00');
+    });
+  });
+
   test('a later failed move to another time on the same date is a new notice (Codex #6208 r1)', async () => {
     AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
     movableQueue();
