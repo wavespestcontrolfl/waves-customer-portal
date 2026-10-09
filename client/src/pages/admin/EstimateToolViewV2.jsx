@@ -757,8 +757,9 @@ const PROPERTY_FORM_FIELDS = [
   "trenchingConcretePct", "trenchingEstimateFromFootprint", "trenchingLabelConfirmed",
   "boracareSurfaceHeightFt", "preslabSqft", "preslabLabelConfirmed", "plugArea",
   "topDressArea", "fleaExteriorAreaSqFt", "fleaExteriorAreaSource", "fleaExteriorZones",
-  // Area add-on tiers follow the property's measurements, so they clear with it.
-  "areaAddOns",
+  // Area add-on tiers follow the property's measurements, so they clear with it,
+  // and so does the one visit choice for the group.
+  "areaAddOns", "areaAddOnVisit",
   "palmDiagnosisConfirmed", "palmLicensedApplicator", "palmHighDose", "palmLargeDiameter",
   "palmNonstandardProduct", "_termiteFootprintAuto", "_suiteSizedLookup", "_suiteStoriesVerified", "_trenchingPerimeterAuto",
   "_boracareSqftAuto", "_preslabSqftAuto", "_palmCountAuto",

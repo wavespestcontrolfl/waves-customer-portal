@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Checkbox, Field, Input, Select } from "../ui";
 import {
   LARGER_TIER,
@@ -7,6 +7,7 @@ import {
   countAreaAddOns,
   knownAreaFor,
   newAddOnEntry,
+  reseedAddOnEntries,
   tierSelectValue,
   withTierChoice,
 } from "../../lib/areaAddOns";
@@ -185,11 +186,24 @@ function UnavailableRow({ addOnKey, name, enabled, value, onChange }) {
   );
 }
 
+// The known areas change when a property lookup reruns: an entry still on the
+// tier it was pre-filled with follows the new area, so it never keeps the old
+// property's tier beside a hint that shows the new one.
+function useReseededEntries(selection, catalog, knownAreas, onChange) {
+  const bedKnown = knownAreas?.bed?.sqft ?? null;
+  const lawnKnown = knownAreas?.lawn?.sqft ?? null;
+  useEffect(() => {
+    const next = reseedAddOnEntries(selection, catalog, knownAreas);
+    if (next !== selection) onChange(next);
+  }, [bedKnown, lawnKnown]);
+}
+
 export default function AreaAddOnsGroup({
   catalog, value, onChange, visit = STANDALONE_VISIT, onVisitChange, knownAreas, grassChoices, pickedGrass = null, otherServiceSelected,
 }) {
   const [userOpen, setUserOpen] = useState(null);
   const selection = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  useReseededEntries(selection, catalog, knownAreas, onChange);
   const count = countAreaAddOns(selection);
   const offered = catalog?.enabled ? catalog.items : [];
   if (offered.length === 0 && count === 0) return null;

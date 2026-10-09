@@ -133,11 +133,41 @@ export function newAddOnEntry(item, known, pickedGrass = null) {
   };
   if (!item.tiers) return base;
   const knownSqFt = positiveNumber(known?.sqft);
-  if (knownSqFt === null) return { ...base, areaSqFt: String(item.tiers[0]), larger: false };
-  const tier = tierHolding(item.tiers, knownSqFt);
-  return tier === null
-    ? { ...base, areaSqFt: String(Math.ceil(knownSqFt)), larger: true }
-    : { ...base, areaSqFt: String(tier), larger: false };
+  const tier = knownSqFt === null ? item.tiers[0] : tierHolding(item.tiers, knownSqFt);
+  const seeded = tier === null
+    ? { areaSqFt: String(Math.ceil(knownSqFt)), larger: true }
+    : { areaSqFt: String(tier), larger: false };
+  // seedKnown / seedArea remember what the tier was seeded from, so a later
+  // change of the known area can re-seed an entry the rep never touched
+  // (reseedAddOnEntries). They are never sent: buildAreaAddOnRequest picks
+  // key, area and grass only.
+  return { ...base, ...seeded, seedKnown: knownSqFt === null ? null : Math.round(knownSqFt), seedArea: seeded.areaSqFt };
+}
+
+// The selection with every untouched, pre-filled entry re-seeded from the
+// known areas as they are now. A property lookup that reruns (or a scope
+// answer) replaces the measurements; an entry seeded from the old ones would
+// keep the old property's tier beside a hint that shows the new area. An entry
+// whose tier the rep changed is the rep's choice and stays. Returns the SAME
+// object when nothing changes.
+export function reseedAddOnEntries(selection, catalog, knownAreas) {
+  if (!isPlainObject(selection)) return selection;
+  const items = new Map((catalog?.items || []).map((item) => [item.key, item]));
+  let changed = false;
+  const next = {};
+  for (const [key, entry] of Object.entries(selection)) {
+    const item = items.get(key);
+    const known = knownAreaFor(key, knownAreas);
+    const nowKnown = positiveNumber(known?.sqft) === null ? null : Math.round(known.sqft);
+    const untouched = isPlainObject(entry) && item?.tiers && "seedArea" in entry && entry.areaSqFt === entry.seedArea;
+    if (!untouched || nowKnown === entry.seedKnown) {
+      next[key] = entry;
+    } else {
+      next[key] = { ...newAddOnEntry(item, known), ...("grassType" in entry ? { grassType: entry.grassType } : {}) };
+      changed = true;
+    }
+  }
+  return changed ? next : selection;
 }
 
 // The value the area select shows for an entry.
