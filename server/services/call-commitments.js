@@ -367,7 +367,13 @@ function callbackDueAt(value, callStartedAt) {
   if (value == null || value === '') return null;
   const text = String(value).trim();
   const time = TIME_ONLY_RE.exec(text);
-  if (!time) return realWallDate(text) ? isoOrNull(text) : null;
+  if (!time) {
+    if (!realWallDate(text)) return null;
+    // The schema allows fractional seconds. With an offset isoOrNull drops them;
+    // WITHOUT one the ET parser reads only 'YYYY-MM-DDTHH:MM[:SS]' and would fall
+    // through to a UTC reading, so they are dropped here (pre-push audit P1).
+    return isoOrNull(text.replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+$/, '$1'));
+  }
   const start = callStartedAt ? new Date(callStartedAt) : null;
   if (!start || Number.isNaN(start.getTime())) return null;
   const hhmm = `${time[1].padStart(2, '0')}:${time[2]}`;

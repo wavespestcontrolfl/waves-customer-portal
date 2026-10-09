@@ -238,6 +238,11 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
       expect(cbFor('2028-02-29T14:00', null).due_at).toBe(new Date('2028-02-29T14:00:00-05:00').toISOString());
     });
 
+    test('fractional seconds on an offset-free dated time are still the ET wall clock', () => {
+      expect(cbFor('2026-09-04T14:00:00.000', null).due_at).toBe(et('2026-09-04T14:00:00'));
+      expect(cbFor('2026-09-04T09:00', '2026-09-04T11:30:00.5').due_at).toBe(et('2026-09-04T11:30:00'));
+    });
+
     test('an unreadable end falls back to the start', () => {
       expect(cbFor('09:00', '11:00:00Z')).toMatchObject({ due_at: et('2026-09-02T09:00:00'), due_basis: 'suggested' });
     });
