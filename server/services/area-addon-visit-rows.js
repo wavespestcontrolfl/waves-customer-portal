@@ -59,6 +59,22 @@ function unresolvedError(row) {
   return err;
 }
 
+// What the estimate sold for one add-on, stored on the booked visit (`area_addon_scope` on
+// scheduled_services for the add-on that IS the visit, on scheduled_service_addons for each
+// row): the treated area the customer was quoted, the tier it priced at, and, for a
+// grass-bound add-on, the grass that authorized the rate. The job card reads it back.
+function soldScope(row) {
+  const num = (value) => (Number(value) > 0 ? Number(value) : null);
+  return {
+    v: 1,
+    addOnKey: row.addOnKey || null,
+    catalogServiceKey: row.catalogServiceKey || null,
+    areaSqFt: num(row.areaSqFt),
+    tierSqFt: num(row.tierSqFt),
+    grassType: row.grassType || null,
+  };
+}
+
 function addOnRowData(row, catalog, cols, scheduledServiceId, trx) {
   const price = Math.round(Number(row.addOnPrice) * 100) / 100;
   const data = {
@@ -74,9 +90,20 @@ function addOnRowData(row, catalog, cols, scheduledServiceId, trx) {
   // (admin-schedule lineDueOnRecurringDate), and a sold add-on is one application.
   if (cols.recurring_pattern) data.recurring_pattern = 'one_time';
   if (cols.service_key_snapshot) data.service_key_snapshot = row.catalogServiceKey;
+  if (cols.area_addon_scope) data.area_addon_scope = JSON.stringify(soldScope(row));
   if (cols.service_category_snapshot) data.service_category_snapshot = catalog?.category || null;
   if (cols.estimated_duration_minutes && Number(row.durationMinutes) > 0) data.estimated_duration_minutes = Math.ceil(Number(row.durationMinutes));
   return data;
+}
+
+// The add-on that IS the appointment (its own catalog key) has no row; its sold scope is
+// stamped on the appointment itself. No add-on in the profile, or the appointment is some
+// other service: no query.
+async function stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey }) {
+  const own = ownServiceKey ? areaAddOnProfileRows(serviceProfile).find((row) => row.catalogServiceKey === ownServiceKey) : null;
+  if (!scheduledServiceId || !own) return;
+  if (!(await trx.schema.hasColumn('scheduled_services', 'area_addon_scope'))) return;
+  await trx('scheduled_services').where({ id: scheduledServiceId }).update({ area_addon_scope: JSON.stringify(soldScope(own)) });
 }
 
 /**
@@ -86,6 +113,7 @@ function addOnRowData(row, catalog, cols, scheduledServiceId, trx) {
  * it throws, rolling the booking back, rather than dropping a sold add-on.
  */
 async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null }) {
+  await stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey });
   const wanted = secondaryAreaAddOns(serviceProfile, ownServiceKey);
   if (!scheduledServiceId || wanted.length === 0) return 0;
   for (const row of wanted) {

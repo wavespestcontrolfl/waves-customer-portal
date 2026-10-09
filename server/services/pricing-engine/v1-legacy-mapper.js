@@ -212,6 +212,8 @@ function areaAddOnFields(li = {}) {
     addOnCategory: li.addOnCategory ?? null,
     areaSqFt: li.areaSqFt ?? null,
     tierSqFt: li.tierSqFt ?? null,
+    // Only a grass-bound add-on (the Arena 2(ee) rate) carries its grass.
+    ...(li.grassType ? { grassType: li.grassType } : {}),
     visitContext: li.visitContext,
     // Billing-unit marker: the row's whole price is one application. Every customer
     // estimate surface that shows this price reads "$X per application" (AGENTS.md).

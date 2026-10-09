@@ -349,7 +349,12 @@ function protocolEntry(programKey, track, tags) {
   if (!track || typeof track !== 'object') return null;
   const lines = [`**${track.name || programKey}**\n`];
   if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
-  if (track.visits?.length) {
+  // A one-time program (area add-on treatments) is not a yearly cycle and carries no
+  // legacy costs or tiers: list its treatments, not "Visits/Year".
+  if (track.visits?.length && track.one_time === true) {
+    lines.push(`**${track.visits.length} one-time treatments (each sold on an estimate; not a yearly cycle):**\n`);
+    for (const v of track.visits) lines.push(`Treatment ${v.visit}: ${v.visit_type || v.primary?.split('\n')[0] || ''}`);
+  } else if (track.visits?.length) {
     lines.push(`**${track.visits.length} Visits/Year:**\n`);
     for (const v of track.visits) {
       const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
@@ -1108,4 +1113,4 @@ const KnowledgeBaseService = {
 };
 
 module.exports = KnowledgeBaseService;
-module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };
+module.exports._internals = { protocolEntry, auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };

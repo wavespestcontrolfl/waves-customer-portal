@@ -130,9 +130,12 @@ describe('C. the visit is sized to the sum of the add-ons (capacity gate off)', 
 
 // ── B. the writer, against an in-memory fake of the three tables it touches ──────
 function fakeTrx({ catalog = [], existing = [] } = {}) {
-  const state = { addons: [...existing], calls: [] };
+  const state = { addons: [...existing], calls: [], visitScope: {} };
   const trx = (table) => {
     state.calls.push(table);
+    if (table === 'scheduled_services') {
+      return { where: ({ id }) => ({ update: async (data) => { state.visitScope[id] = JSON.parse(data.area_addon_scope); } }) };
+    }
     if (table === 'scheduled_service_addons') {
       return {
         where: ({ scheduled_service_id: id }) => ({
@@ -140,7 +143,7 @@ function fakeTrx({ catalog = [], existing = [] } = {}) {
         }),
         columnInfo: async () => ({
           id: {}, scheduled_service_id: {}, service_id: {}, service_name: {}, estimated_price: {}, created_at: {},
-          base_price: {}, service_key_snapshot: {}, service_category_snapshot: {}, estimated_duration_minutes: {}, recurring_pattern: {},
+          base_price: {}, service_key_snapshot: {}, service_category_snapshot: {}, estimated_duration_minutes: {}, recurring_pattern: {}, area_addon_scope: {},
         }),
         insert: async (data) => { state.addons.push(data); },
       };
@@ -151,6 +154,7 @@ function fakeTrx({ catalog = [], existing = [] } = {}) {
     throw new Error(`unexpected table ${table}`);
   };
   trx.raw = (sql) => ({ raw: sql });
+  trx.schema = { hasColumn: async () => true };
   trx.state = state;
   return trx;
 }
@@ -199,8 +203,41 @@ describe('B. every add-on other than the visit\'s own becomes a structured row',
     const trx = fakeTrx();
     const serviceProfile = { serviceMode: 'one_time', services: [{ service: 'pest_control', label: 'One-Time Pest Control', engineKey: 'one_time_pest' }] };
     expect(await rows.writeAreaAddOnVisitRows(trx, { scheduledServiceId: 'visit-1', serviceProfile })).toBe(0);
-    expect(await rows.writeAreaAddOnVisitRows(trx, { scheduledServiceId: 'visit-1', serviceProfile: { services: [addOnRow(KEYS[0])] }, ownServiceKey: KEYS[0] })).toBe(0);
     expect(trx.state.calls).toEqual([]);
+    // The only add-on IS the appointment: no row, but its sold scope is stamped on the visit.
+    expect(await rows.writeAreaAddOnVisitRows(trx, { scheduledServiceId: 'visit-1', serviceProfile: { services: [addOnRow(KEYS[0])] }, ownServiceKey: KEYS[0] })).toBe(0);
+    expect(trx.state.calls).toEqual(['scheduled_services']);
+  });
+
+  // The sold scope (Codex round 6 P1): the treated area, the priced tier and the grass that
+  // authorized the rate ride onto the booked visit, for both shapes.
+  test('the sold scope is stamped on the appointment (its own add-on) and on each add-on row', async () => {
+    const trx = fakeTrx({ catalog: catalogFor([...KEYS, 'area_addon_lawn_insect_spot']) });
+    const SPOT = 'area_addon_lawn_insect_spot';
+    const serviceProfile = { serviceMode: 'one_time', services: [
+      addOnRow(SPOT, { addOnKey: 'lawn_insect_spot', areaSqFt: 1450, tierSqFt: 2000, grassType: 'st_augustine' }),
+      addOnRow(KEYS[0], { addOnKey: 'bed_pre_emergent', areaSqFt: 800, tierSqFt: 1000 }),
+    ] };
+    expect(await rows.writeAreaAddOnVisitRows(trx, { scheduledServiceId: 'visit-1', serviceProfile, ownServiceKey: SPOT })).toBe(1);
+    expect(trx.state.visitScope['visit-1']).toEqual({ v: 1, addOnKey: 'lawn_insect_spot', catalogServiceKey: SPOT, areaSqFt: 1450, tierSqFt: 2000, grassType: 'st_augustine' });
+    expect(JSON.parse(trx.state.addons[0].area_addon_scope)).toEqual({ v: 1, addOnKey: 'bed_pre_emergent', catalogServiceKey: KEYS[0], areaSqFt: 800, tierSqFt: 1000, grassType: null });
+  });
+
+  test('the public slot payload strips the sold scope with the other internal fields', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'estimate-slot-availability.js'), 'utf8');
+    for (const field of ['addOnPrice', 'addOnKey', 'areaSqFt', 'tierSqFt', 'grassType']) expect(src).toContain(`delete publicService.${field};`);
+  });
+
+  test('the slot profile row carries the sold scope from the priced line, grass included for the insect spot', () => {
+    const { estimate } = oneTimeEstimate([
+      { key: 'bed_pre_emergent', areaSqFt: 1450 }, { key: 'lawn_insect_spot', areaSqFt: 900, grassType: 'st_augustine' }, { key: 'web_sweep' },
+    ]);
+    const profile = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const byKey = Object.fromEntries(profile.services.map((svc) => [svc.catalogServiceKey, svc]));
+    expect(byKey.area_addon_bed_pre_emergent).toMatchObject({ addOnKey: 'bed_pre_emergent', areaSqFt: 1450, tierSqFt: 2000 });
+    expect(byKey.area_addon_bed_pre_emergent.grassType).toBeUndefined();
+    expect(byKey.area_addon_lawn_insect_spot).toMatchObject({ addOnKey: 'lawn_insect_spot', areaSqFt: 900, tierSqFt: 1000, grassType: 'st_augustine' });
+    expect(byKey.area_addon_web_sweep.areaSqFt).toBeUndefined();
   });
 
   test('a sold add-on that cannot be a structured row fails the booking instead of being dropped', async () => {

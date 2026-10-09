@@ -8592,6 +8592,9 @@ function priceAreaAddOn(addOnKey, options = {}) {
     price,
     areaSqFt,
     tierSqFt,
+    // The grass that authorized a grass-bound rate (the Arena 2(ee) rate is St. Augustine only):
+    // the booked visit carries it so the technician sees the evidence, not only the price.
+    ...(cfg.requiresGrassTrack ? { grassType: grassTrack } : {}),
     manualReviewReasons: [],
     detail: detailParts.join(' | '),
     costs: {

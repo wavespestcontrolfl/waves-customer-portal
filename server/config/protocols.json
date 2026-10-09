@@ -2441,5 +2441,143 @@
         "notes": "Renewal workflow protects liability and keeps the graph/current condition record clean."
       }
     ]
+  },
+  "area_addon": {
+    "name": "Area Add-On Treatments",
+    "one_time": true,
+    "notes": [
+      "One-time add-on treatments sold on an estimate, one application each. A visit here is routed by its catalog service key (area_addon_<key>), never by name: the recurring lawn and pest programs are not these jobs' work.",
+      "The label rate depends on the treated area, so the card shows the label rate and the area sold and computes no tank amount. Apply over the sold area only.",
+      "The web sweep applies no product and has no visit here."
+    ],
+    "safety_rules": [],
+    "visits": [
+      {
+        "visit": 1,
+        "month": "Any",
+        "visit_type": "Bed pre-emergent (one-time add-on)",
+        "main_goal": "One granular pre-emergent application to the landscape beds.",
+        "primary": "Granular pre-emergent on the beds, then water in.",
+        "secondary": "",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "Beds must be weed-free first.",
+        "lineMeta": {
+          "Granular pre-emergent on the beds, then water in.": {
+            "catalogProductHints": [
+              "Snapshot 2.5TG"
+            ]
+          }
+        },
+        "labelFacts": {
+          "soldAreaNoun": "of bed",
+          "rate": "3.45 lb per 1,000 sq ft of bed (label range 2.3 to 4.6). Granular; water in.",
+          "area": "Bed square feet treated.",
+          "limit": "Label limit 600 lb per acre (13.8 lb per 1,000 sq ft) in 12 months. At least 60 days between applications.",
+          "safety": "Beds must be weed-free first: it does not kill existing weeds."
+        }
+      },
+      {
+        "visit": 2,
+        "month": "Any",
+        "visit_type": "Lawn insect spot (one-time add-on)",
+        "main_goal": "One insect spot treatment of damaged St. Augustine turf and its green edge.",
+        "primary": "Spray the damaged area and the green edge into the thatch.",
+        "secondary": "",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "St. Augustine only. The grass on the estimate must be St. Augustine.",
+        "lineMeta": {
+          "Spray the damaged area and the green edge into the thatch.": {
+            "catalogProductHints": [
+              "Arena 50 WDG"
+            ]
+          }
+        },
+        "labelFacts": {
+          "soldAreaNoun": "of treated lawn",
+          "requiresGrass": "st_augustine",
+          "rate": "0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal of water per 1,000 sq ft. St. Augustine only.",
+          "area": "Treated square feet: the damaged area plus the green edge.",
+          "limit": "Repeat no sooner than 8 weeks. Season limit 12.8 oz per acre (0.29 oz per 1,000 sq ft): 2 applications.",
+          "safety": "Florida FIFRA 2(ee) sheet (expires 2028-12-31, on file in Staff documents): the applicator must carry it."
+        }
+      },
+      {
+        "visit": 3,
+        "month": "Any",
+        "visit_type": "Fire ant yard (one-time add-on)",
+        "main_goal": "One broadcast fire ant granule application across the lawn.",
+        "primary": "Broadcast the granules over the lawn.",
+        "secondary": "",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "Restricted-use product.",
+        "lineMeta": {
+          "Broadcast the granules over the lawn.": {
+            "catalogProductHints": [
+              "Topchoice Granular Insecticide"
+            ]
+          }
+        },
+        "labelFacts": {
+          "soldAreaNoun": "of lawn",
+          "rate": "2 lb per 1,000 sq ft (87 lb per acre), broadcast.",
+          "area": "Lawn square feet treated.",
+          "limit": "Once per 12 months.",
+          "safety": "Restricted-use product: certified applicator only."
+        }
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "visit_type": "Yearly lawn insect preventive (one-time add-on)",
+        "main_goal": "One yearly preventive insect spray across the lawn.",
+        "primary": "Yearly preventive spray over the lawn.",
+        "secondary": "",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "Once a year (April).",
+        "lineMeta": {
+          "Yearly preventive spray over the lawn.": {
+            "catalogProductHints": [
+              "Acelepryn Insecticide"
+            ]
+          }
+        },
+        "labelFacts": {
+          "soldAreaNoun": "of lawn",
+          "rate": "0.184 fl oz per 1,000 sq ft (8 fl oz per acre).",
+          "area": "Lawn square feet treated.",
+          "limit": "Once a year (April).",
+          "safety": null
+        }
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "visit_type": "Hard-surface weed control (one-time add-on)",
+        "main_goal": "One weed-kill spray on hard surfaces and bare ground.",
+        "primary": "Spray weeds on hard surfaces and bare ground.",
+        "secondary": "",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "Hard surfaces and bare ground only. Keep off lawn, planted beds and tree and shrub root zones.",
+        "lineMeta": {
+          "Spray weeds on hard surfaces and bare ground.": {
+            "catalogProductHints": [
+              "Roundup QuikPro SC"
+            ]
+          }
+        },
+        "labelFacts": {
+          "soldAreaNoun": "of hard surface and bare ground",
+          "rate": "16 fl oz in 1 gal of water per 1,000 sq ft.",
+          "area": "Hard-surface and bare-ground square feet treated.",
+          "limit": "Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.",
+          "safety": "Carries indaziflam, up to 6 months of soil residual. Hard surfaces and bare ground only: keep off lawn, planted beds and the root zones of trees and shrubs. Do not walk on it until dry."
+        }
+      }
+    ]
   }
 }

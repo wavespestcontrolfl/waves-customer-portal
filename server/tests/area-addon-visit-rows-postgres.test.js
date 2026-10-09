@@ -34,9 +34,9 @@ const mockProfile = () => ({
   durationMinutes: 90,
   serviceLabel: 'Web Sweep + Bed Pre-Emergent Weed Control + Fire Ant Yard Treatment',
   services: [
-    { service: 'lawn_care', label: 'Bed Pre-Emergent Weed Control', engineKey: 'area_addon', catalogServiceKey: 'area_addon_bed_pre_emergent', durationMinutes: 30, addOnPrice: 139 },
-    { service: 'pest_control', label: 'Web Sweep', engineKey: 'area_addon', catalogServiceKey: 'area_addon_web_sweep', durationMinutes: 25, addOnPrice: 59 },
-    { service: 'lawn_care', label: 'Fire Ant Yard Treatment', engineKey: 'area_addon', catalogServiceKey: 'area_addon_fire_ant_yard', durationMinutes: 26, addOnPrice: 69 },
+    { service: 'lawn_care', label: 'Bed Pre-Emergent Weed Control', engineKey: 'area_addon', catalogServiceKey: 'area_addon_bed_pre_emergent', durationMinutes: 30, addOnPrice: 139, addOnKey: 'bed_pre_emergent', areaSqFt: 1450, tierSqFt: 2000 },
+    { service: 'pest_control', label: 'Web Sweep', engineKey: 'area_addon', catalogServiceKey: 'area_addon_web_sweep', durationMinutes: 25, addOnPrice: 59, addOnKey: 'web_sweep' },
+    { service: 'lawn_care', label: 'Fire Ant Yard Treatment', engineKey: 'area_addon', catalogServiceKey: 'area_addon_fire_ant_yard', durationMinutes: 26, addOnPrice: 69, addOnKey: 'fire_ant_yard', areaSqFt: 4200, tierSqFt: 5000 },
   ],
 });
 jest.mock('../services/estimate-slot-availability', () => ({
@@ -191,6 +191,23 @@ postgres('area add-ons on the booked visit (real Postgres)', () => {
       await commit(trx, holdId, customerId);
       const lines = await require('../services/job-card')._test.loadAddons(trx, holdId);
       expect(lines.map((l) => l.serviceKey).sort()).toEqual(['area_addon_bed_pre_emergent', 'area_addon_fire_ant_yard']);
+    });
+  });
+
+  test('the sold scope is stored on the appointment (the web sweep) and on each add-on row, and the readers see it', async () => {
+    await withHold(async ({ trx, holdId, customerId }) => {
+      const visit = await commit(trx, holdId, customerId);
+      const own = await trx('scheduled_services').where({ id: holdId }).first('area_addon_scope');
+      expect(own.area_addon_scope).toEqual({ v: 1, addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', areaSqFt: null, tierSqFt: null, grassType: null });
+      const rows = await addons(trx, holdId);
+      expect(rows.map((r) => r.area_addon_scope)).toEqual([
+        { v: 1, addOnKey: 'bed_pre_emergent', catalogServiceKey: 'area_addon_bed_pre_emergent', areaSqFt: 1450, tierSqFt: 2000, grassType: null },
+        { v: 1, addOnKey: 'fire_ant_yard', catalogServiceKey: 'area_addon_fire_ant_yard', areaSqFt: 4200, tierSqFt: 5000, grassType: null },
+      ]);
+      const lines = await require('../services/job-card')._test.loadAddons(trx, holdId);
+      expect(lines.map((l) => l.areaAddOnScope.tierSqFt)).toEqual([2000, 5000]);
+      const keyed = await require('../services/area-addon-visit-rows').areaAddOnKeysByVisit(trx, [visit.id, 'combo']);
+      expect(keyed.get(visit.id).sort()).toEqual(['area_addon_bed_pre_emergent', 'area_addon_fire_ant_yard']);
     });
   });
 });

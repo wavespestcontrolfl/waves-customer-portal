@@ -49,7 +49,6 @@ const { isServingProtocol } = require('./lawn-program');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
-const { areaAddOnRecipe } = require('../config/area-addon-recipes');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -409,6 +408,16 @@ async function loadCallsSince(customerId, sinceInstant, deps = {}, untilInstant 
  * The visit's add-on lines (dispatch stores them per appointment). Fails
  * closed: a silently missing line would drop its products and precautions.
  */
+// The sold scope of an area add-on, as the booking stored it (scheduled_services /
+// scheduled_service_addons `area_addon_scope`, written by area-addon-visit-rows.js):
+// { areaSqFt, tierSqFt, grassType }. Null for any other row or a value that is not an object.
+function soldScopeOf(value) {
+  let scope = value;
+  if (typeof scope === 'string') { try { scope = JSON.parse(scope); } catch { return null; } }
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return null;
+  return scope;
+}
+
 async function loadAddons(dbh, serviceId) {
   const rows = await dbh('scheduled_service_addons as a')
     .leftJoin('services as s', 'a.service_id', 's.id')
@@ -419,9 +428,9 @@ async function loadAddons(dbh, serviceId) {
     // else the live catalog row's category. No identity → no protocol. The
     // service key (same rule) fixes the protocol visit where a matcher rule
     // claims it.
-    .select('a.service_name', dbh.raw('COALESCE(a.service_category_snapshot, s.category) as category'), dbh.raw('COALESCE(a.service_key_snapshot, s.service_key) as service_key'))
+    .select('a.service_name', 'a.area_addon_scope', dbh.raw('COALESCE(a.service_category_snapshot, s.category) as category'), dbh.raw('COALESCE(a.service_key_snapshot, s.service_key) as service_key'))
     .catch((err) => { throw unavailable('Add-on lines unavailable', err); });
-  return rows.map((r) => ({ name: clean(r.service_name, 80), category: r.category || null, serviceKey: r.service_key || null })).filter((a) => a.name);
+  return rows.map((r) => ({ name: clean(r.service_name, 80), category: r.category || null, serviceKey: r.service_key || null, ...(soldScopeOf(r.area_addon_scope) ? { areaAddOnScope: soldScopeOf(r.area_addon_scope) } : {}) })).filter((a) => a.name);
 }
 
 // Catalog category → the treatment programs it may resolve to (the
@@ -450,10 +459,21 @@ const ADDON_PROGRAMS = Object.freeze({
   // Area add-ons (migration 20261008200000): the category's recurring program
   // lines (the lawn visit's products, the pest visit's steps) are NOT their
   // work. The web sweep applies no product (nonChemical); the five chemical
-  // add-ons route to their own governed recipe by key, whatever their
-  // category (addonProgramKey; config/area-addon-recipes.js).
+  // add-ons route to the `area_addon` protocol program by key, whatever
+  // their category (lawn_care `keys` below; protocols.json area_addon).
   pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: ['area_addon_web_sweep'] },
-  lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
+  lawn_care: {
+    any: ['lawn'],
+    fallback: 'lawn',
+    nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'],
+    keys: {
+      area_addon_bed_pre_emergent: 'area_addon',
+      area_addon_lawn_insect_spot: 'area_addon',
+      area_addon_fire_ant_yard: 'area_addon',
+      area_addon_lawn_insect_preventive: 'area_addon',
+      area_addon_hardscape_weed: 'area_addon',
+    },
+  },
   // mosquito_misting_system (the misting SYSTEM's design-visit identity) is
   // suppressed by the shared isMistingDesignConsultation predicate in
   // addonProgramKey below — key-first, name only for a keyless row — so it
@@ -476,10 +496,6 @@ const ADDON_PROGRAMS = Object.freeze({
   specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });
 function addonProgramKey(category, name, protocols, serviceKey = null) {
-  // A chemical area add-on has a governed recipe (areaAddOnLines), not a
-  // dosing program: no protocols.json lines, and the tank search stays closed
-  // to it (the amount follows the treated area the tech measures).
-  if (areaAddOnRecipe(serviceKey)) return null;
   const rule = ADDON_PROGRAMS[category];
   if (!rule) return null;
   // The misting SYSTEM's design-visit identity is a consultation, not a
@@ -532,7 +548,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
       // irrigation.
       dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
       'c.waveguard_tier',
-      'ss.customer_request', 'ss.customer_request_source', 'ss.customer_request_pests',
+      'ss.customer_request', 'ss.customer_request_source', 'ss.customer_request_pests', 'ss.area_addon_scope',
     )
     .first();
   if (!svc) return null;
@@ -576,6 +592,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     serviceType: svc.service_type,
     serviceCategory: svc.service_category || null,
     serviceKey: svc.service_key || null,
+    // What the estimate sold for an area add-on that IS this visit (null for any other visit).
+    areaAddOnScope: soldScopeOf(svc.area_addon_scope),
     serviceLine,
     isLawn: serviceLine === 'lawn',
     addons,
@@ -1145,6 +1163,10 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   for (const line of linesFromProtocolText(visit, catalog)) {
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
+  // An area add-on visit (protocols.json area_addon) states the label facts the card
+  // shows beside its product: rate, area basis, yearly limit, safety line, and the
+  // grass its rate is bound to. The rate is a label text, never a tank amount.
+  if (visit.labelFacts) for (const line of lines) line.governed = visit.labelFacts;
   const fieldGuide = treeShrubFieldGuide(visit);
   return { visit, lines, procedure: {
     name: program.name,
@@ -1174,20 +1196,6 @@ function procedureLines(text) {
 }
 
 /**
- * The governed recipe of a chemical area add-on as a product line: the
- * catalog product with the label rate, area basis, yearly limit and safety
- * line riding along as `governed` text (see config/area-addon-recipes.js).
- * A product missing from the catalog yields no line and says so.
- */
-function areaAddOnLines(serviceKey, catalog) {
-  const recipe = areaAddOnRecipe(serviceKey);
-  const product = resolveCatalogProductForName(recipe.product, catalog);
-  if (!product) return { lines: [], note: `${recipe.product} is not in the product catalog — follow the label` };
-  const { rate, area, limit, safety } = recipe;
-  return { lines: [{ raw: recipe.step, role: 'base', selected: true, product, governed: { rate, area, limit, safety } }], note: null };
-}
-
-/**
  * The primary line plus every add-on line attached to the visit. Add-ons
  * resolve through the protocol path with their own seasonal pick; a product
  * already on the card from the primary line is not repeated. A lawn add-on
@@ -1195,21 +1203,11 @@ function areaAddOnLines(serviceKey, catalog) {
  * appointment's service type), so it is reported, never dosed.
  */
 async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
-  // A chemical area add-on booked as the visit itself: its governed recipe,
-  // never the recurring program (resolveVisitProducts would find none).
-  const recipePrimary = areaAddOnRecipe(facts.serviceKey) ? areaAddOnLines(facts.serviceKey, catalog) : null;
-  const primary = recipePrimary
-    ? { visit: null, lines: recipePrimary.lines, blocks: [], note: recipePrimary.note }
-    : await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
-  const lines = [...primary.lines];
+  const primary = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+  // The sold scope of an area add-on booked as the visit itself rides on its lines.
+  const lines = primary.lines.map((line) => (facts.areaAddOnScope ? { ...line, scope: facts.areaAddOnScope } : line));
   const addons = [];
-  for (const { name, category, serviceKey = null } of facts.addons || []) {
-    if (areaAddOnRecipe(serviceKey)) {
-      const recipe = areaAddOnLines(serviceKey, catalog);
-      for (const line of recipe.lines) lines.push({ ...line, source: name });
-      addons.push({ name, products: recipe.lines.length, visit: null, note: recipe.note });
-      continue;
-    }
+  for (const { name, category, serviceKey = null, areaAddOnScope = null } of facts.addons || []) {
     const programKey = addonProgramKey(category, name, protocols, serviceKey);
     if (!programKey) { addons.push({ name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` }); continue; }
     if (programKey === 'lawn') { addons.push({ name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' }); continue; }
@@ -1217,7 +1215,7 @@ async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {
     // Every add-on line rides through buildProductCards' per-product merger:
     // a product the primary lists as conditional and the add-on as selected
     // base work renders ONE card, and the selected line wins it.
-    for (const line of resolved.lines) lines.push({ ...line, source: name });
+    for (const line of resolved.lines) lines.push({ ...line, source: name, ...(areaAddOnScope ? { scope: areaAddOnScope } : {}) });
     addons.push({
       name,
       products: resolved.lines.length,
@@ -1396,27 +1394,53 @@ function mergeProductLines(lines) {
     const existing = byProduct.get(line.product.id);
     if (!existing) { byProduct.set(line.product.id, { ...line, extraLines: [] }); continue; }
     const governed = existing.governed || line.governed;
+    const scope = existing.scope || line.scope;
     const kept = line.selected && !existing.selected
       ? { ...line, extraLines: [existing.raw, ...existing.extraLines] }
       : { ...existing, extraLines: [...existing.extraLines, line.raw] };
-    byProduct.set(line.product.id, governed ? { ...kept, governed } : kept);
+    byProduct.set(line.product.id, { ...kept, ...(governed ? { governed } : {}), ...(scope ? { scope } : {}) });
   }
   return [...byProduct.values()];
 }
 
 /**
- * The label text of an area add-on's recipe for the card. The rate is a
- * dosing instruction, so a spray-check Hold withholds it exactly as it
- * withholds a planned amount; area basis, limit and safety stay.
+ * The label text of an area add-on for the card (protocols.json area_addon
+ * `labelFacts`) and what the estimate sold (`scope`, the booked
+ * area_addon_scope). The rate is a dosing instruction, so it is withheld, with
+ * the reason, while the spray check holds, until the catalog label is
+ * verified, and, for a rate bound to one grass (the Arena 2(ee) rate), unless
+ * the grass the estimate priced is on the visit and matches: the recipe never
+ * shows without that evidence. Area basis, limit and safety stay. `sold` and
+ * `grass` are the "Sold: up to 2,000 sq ft of bed" and "Grass on the estimate:
+ * St. Augustine" lines.
  */
-function governedForCard(governed, verdict, product = {}) {
+function soldLine(governed, scope) {
+  const tier = Number(scope?.tierSqFt);
+  if (Number.isFinite(tier) && tier > 0) return `Sold: up to ${tier.toLocaleString('en-US')} sq ft ${governed.soldAreaNoun || ''}`.trim();
+  const area = Number(scope?.areaSqFt);
+  return Number.isFinite(area) && area > 0 ? `Sold: about ${area.toLocaleString('en-US')} sq ft ${governed.soldAreaNoun || ''}`.trim() : null;
+}
+
+const GRASS_NAMES = { st_augustine: 'St. Augustine' };
+function governedForCard(governed, verdict, product = {}, scope = null) {
   if (!governed) return undefined;
+  const { soldAreaNoun, requiresGrass, ...facts } = governed;
+  const grass = requiresGrass ? (scope?.grassType || null) : null;
+  const grassName = requiresGrass ? GRASS_NAMES[requiresGrass] || requiresGrass : null;
   // Same contract as a planned amount: no actionable rate while the spray
   // check holds, or until the catalog product's label is verified.
   const withheldReason = (verdict.verdict === 'hold' && `Spray check: ${verdict.reason} — rate withheld`)
     || (!product.label_verified_at && 'Label rate not yet verified — rate withheld')
+    || (requiresGrass && grass !== requiresGrass
+      && (grass ? `Grass on the estimate is ${clean(grass, 40)}, not ${grassName} — rate withheld` : `Grass on the estimate is not on this visit (the rate is ${grassName} only) — rate withheld`))
     || null;
-  return { ...governed, rate: withheldReason ? null : governed.rate, rateNote: withheldReason };
+  return {
+    ...facts,
+    rate: withheldReason ? null : facts.rate,
+    rateNote: withheldReason,
+    sold: soldLine(governed, scope),
+    grass: requiresGrass && grass === requiresGrass ? `Grass on the estimate: ${grassName}` : null,
+  };
 }
 
 async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
@@ -1456,7 +1480,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       verdictReason: verdict.reason,
       planned,
       // A chemical area add-on's label text (rate, area, limit, safety).
-      governed: governedForCard(line.governed, verdict, p),
+      governed: governedForCard(line.governed, verdict, p, line.scope),
       // The plan's requirement for the shortage line — never an actionable
       // dose (it survives every withhold so "On hand X vs Y" stays whole).
       demand: demandMix ? { amount: Number(demandMix.amount), unit: demandMix.amountUnit || p.rate_unit || null } : null,
@@ -1800,6 +1824,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
     [Boolean(protocolLine?.labelHold), protocolLine?.labelHold],
+    // An area add-on dose follows the treated area sold, so it is the label rate on
+    // the card, never a tank amount off the catalog default rate.
+    [Boolean(protocolLine?.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
     // The protocol lists this product as "if needed": no dose until the
     // call is made, exactly as the card withholds its amount.
     [protocolLine?.selected === false, `Listed as "if needed" on ${protocolLine?.addon || "this visit's protocol"} — confirm the call before mixing`],
@@ -1881,7 +1908,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const { lines } = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null });
     const hit = lines.find((l) => l.product.id === product.id);
     if (!hit) continue;
-    if (hit.selected !== false) return found({ addon: c.addon, selected: true, rate: lineRate(hit.raw) });
+    if (hit.selected !== false) return found({ addon: c.addon, selected: true, rate: lineRate(hit.raw), governed: Boolean(hit.governed) });
     conditional = conditional || { addon: c.addon, selected: false, rate: null, ...(hit.labelHold ? { labelHold: hit.labelHold } : {}) };
   }
   return found(conditional);

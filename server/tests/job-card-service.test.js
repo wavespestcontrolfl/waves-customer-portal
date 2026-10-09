@@ -1625,6 +1625,29 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out).toMatchObject({ amount: 0.4, amountMax: null, rateSource: 'protocol' });
   });
 
+  test('an area add-on product is never dosed off the catalog default in the tank search: the label rate on the card governs (Codex round 6)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    // A per-gallon catalog default that would dose 110 gal x 2 fl oz if the search were open.
+    const product = { id: 'r', name: 'Roundup QuikPro SC', default_rate: '2', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' };
+    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], scheduled_service_addons: [{ service_name: 'Shell, Rock & Paver Weed Control', category: 'lawn_care', service_key: 'area_addon_hardscape_weed' }], product_aliases: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, area_addon: require('../config/protocols.json').area_addon };
+    const out = await jobCard.mixForProduct('r', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out.context).toEqual({ line: 'Shell, Rock & Paver Weed Control', conditional: false });
+    expect(out.amount).toBeNull();
+    expect(out.reason).toBe('Area add-on — apply the label rate on the card over the area sold; no tank amount');
+  });
+
   test('a product the add-on protocol lists as "if needed" is withheld in the tank search, not dosed off the catalog (r3 P1)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'h', name: 'Headway', default_rate: '0.5-1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
@@ -1880,11 +1903,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     ]);
   });
 
-  describe('area add-ons: the governed recipe, never the recurring program (Codex round 5 P1)', () => {
+  describe('area add-ons: the governed protocol program, never the recurring program (Codex round 5 P1, round 6 P1)', () => {
     const { AREA_ADDONS } = require('../services/pricing-engine/constants');
+    // The real area_addon program (protocols.json) beside stand-in pest and lawn programs.
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] },
       lawn: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] },
+      area_addon: require('../config/protocols.json').area_addon,
     };
     const PRODUCT_BY_KEY = {
       area_addon_bed_pre_emergent: 'Snapshot 2.5TG',
@@ -1898,6 +1923,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       ...Object.values(PRODUCT_BY_KEY).map((name, n) => ({ id: `gov${n}`, name, rate_unit: 'lb', label_verified_at: '2026-08-01' })),
     ];
     const chemical = Object.values(AREA_ADDONS.items).filter((cfg) => PRODUCT_BY_KEY[cfg.serviceKey]);
+    // A sold scope with the grass the estimate priced: the insect spot's rate needs it to show.
+    const SCOPE = { areaSqFt: 900, tierSqFt: 1000, grassType: 'st_augustine' };
     const cardsFor = (lines) => jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines, verdicts: [], packSizes: {} });
 
     test('the five chemical keys are exactly the catalog items that are not the web sweep', () => {
@@ -1908,7 +1935,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     test.each(Object.keys(PRODUCT_BY_KEY))('%s as the booked visit: only its governed product, rate, area, limit and safety line', async (key) => {
       const cfg = chemical.find((c) => c.serviceKey === key);
       const buildPlan = jest.fn();
-      const facts = { isLawn: true, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: key, scheduledDate: '2026-09-04', addons: [] };
+      const facts = { isLawn: true, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: key, areaAddOnScope: SCOPE, scheduledDate: '2026-09-04', addons: [] };
       const out = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
       expect(buildPlan).not.toHaveBeenCalled();
       expect(out.lines.map((l) => l.product.name)).toEqual([PRODUCT_BY_KEY[key]]);
@@ -1923,7 +1950,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     test('the text a technician reads for each chemical add-on', async () => {
       const text = {};
       for (const cfg of chemical) {
-        const out = await jobCard.resolveVisitLines({ facts: { serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+        const out = await jobCard.resolveVisitLines({ facts: { serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, areaAddOnScope: SCOPE, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
         const [card] = await cardsFor(out.lines);
         text[cfg.serviceKey] = [card.name, card.line, card.governed.rate, card.governed.area, card.governed.limit, card.governed.safety];
       }
@@ -1932,7 +1959,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
         area_addon_lawn_insect_spot: ['Arena 50 WDG', 'Spray the damaged area and the green edge into the thatch.', '0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal of water per 1,000 sq ft. St. Augustine only.', 'Treated square feet: the damaged area plus the green edge.', 'Repeat no sooner than 8 weeks. Season limit 12.8 oz per acre (0.29 oz per 1,000 sq ft): 2 applications.', 'Florida FIFRA 2(ee) sheet (expires 2028-12-31, on file in Staff documents): the applicator must carry it.'],
         area_addon_fire_ant_yard: ['Topchoice Granular Insecticide', 'Broadcast the granules over the lawn.', '2 lb per 1,000 sq ft (87 lb per acre), broadcast.', 'Lawn square feet treated.', 'Once per 12 months.', 'Restricted-use product: certified applicator only.'],
         area_addon_lawn_insect_preventive: ['Acelepryn Insecticide', 'Yearly preventive spray over the lawn.', '0.184 fl oz per 1,000 sq ft (8 fl oz per acre).', 'Lawn square feet treated.', 'Once a year (April).', null],
-        area_addon_hardscape_weed: ['Roundup QuikPro SC', 'Spray weeds on hard surfaces and bare ground only.', '16 fl oz in 1 gal of water per 1,000 sq ft.', 'Hard-surface and bare-ground square feet treated.', 'Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.', 'Carries indaziflam, up to 6 months of soil residual. Hard surfaces and bare ground only: keep off lawn, planted beds and the root zones of trees and shrubs. Do not walk on it until dry.'],
+        area_addon_hardscape_weed: ['Roundup QuikPro SC', 'Spray weeds on hard surfaces and bare ground.', '16 fl oz in 1 gal of water per 1,000 sq ft.', 'Hard-surface and bare-ground square feet treated.', 'Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.', 'Carries indaziflam, up to 6 months of soil residual. Hard surfaces and bare ground only: keep off lawn, planted beds and the root zones of trees and shrubs. Do not walk on it until dry.'],
       });
     });
 
@@ -1944,7 +1971,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       });
       expect(out.lines.filter((l) => l.source === cfg.name).map((l) => l.product.name)).toEqual([PRODUCT_BY_KEY[key]]);
       expect(out.lines.filter((l) => l.source !== cfg.name).map((l) => l.product.name)).toEqual(['Demand CS']);
-      expect(out.addons).toMatchObject([{ name: cfg.name, products: 1, visit: null, note: null }]);
+      expect(out.addons).toMatchObject([{ name: cfg.name, products: 1, visit: { month: 'Any' }, note: null }]);
     });
 
     test('a multi-add-on visit shows EVERY add-on\'s own recipe: the visit is a web sweep, the others are rows the accept wrote', async () => {
@@ -2009,10 +2036,52 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       expect(card.governed).toMatchObject({ rate: null, rateNote: 'Spray check: wind over 10 mph — rate withheld', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('indaziflam') });
     });
 
-    test('a recipe product missing from the catalog says so and adds no line', async () => {
+    test('a protocol product missing from the catalog adds no line (the card reports no products resolved)', async () => {
       const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: [{ id: 'd', name: 'Demand CS' }], dbh: () => ({}) });
       expect(out.lines).toEqual([]);
-      expect(out.note).toBe('Topchoice Granular Insecticide is not in the product catalog — follow the label');
+      expect(out.visit).toMatchObject({ visit: 3 });
+    });
+
+    // What the estimate sold rides on the visit (area_addon_scope) and shows on the card; the
+    // 2(ee) rate never shows without the grass evidence (Codex round 6 P1).
+    describe('the sold scope on the card', () => {
+      const spot = 'area_addon_lawn_insect_spot';
+      const cardFor = async (key, scope) => {
+        const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, areaAddOnScope: scope, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+        return (await cardsFor(out.lines))[0];
+      };
+
+      test('the card says what was sold and, for the insect spot, the grass on the estimate', async () => {
+        const bed = await cardFor('area_addon_bed_pre_emergent', { areaSqFt: 1450, tierSqFt: 2000, grassType: null });
+        expect(bed.governed).toMatchObject({ sold: 'Sold: up to 2,000 sq ft of bed', grass: null, rate: expect.stringMatching(/3\.45/) });
+        const stAug = await cardFor(spot, { areaSqFt: 800, tierSqFt: 1000, grassType: 'st_augustine' });
+        expect(stAug.governed).toMatchObject({ sold: 'Sold: up to 1,000 sq ft of treated lawn', grass: 'Grass on the estimate: St. Augustine', rate: expect.stringMatching(/0\.147/), rateNote: null });
+      });
+
+      test.each([
+        ['no grass on the visit', { tierSqFt: 1000 }, 'Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld'],
+        ['no scope at all', null, 'Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld'],
+        ['another grass', { tierSqFt: 1000, grassType: 'bermuda' }, 'Grass on the estimate is bermuda, not St. Augustine — rate withheld'],
+        ['an unknown grass', { tierSqFt: 1000, grassType: 'unknown' }, 'Grass on the estimate is unknown, not St. Augustine — rate withheld'],
+      ])('the insect spot withholds the 2(ee) rate: %s', async (_name, scope, reason) => {
+        const card = await cardFor(spot, scope);
+        expect(card.governed).toMatchObject({ rate: null, rateNote: reason, grass: null, area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('2(ee)') });
+      });
+
+      test('an add-on row carries its own scope onto the same card path', async () => {
+        const out = await jobCard.resolveVisitLines({
+          facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Fire Ant Yard Treatment', category: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', areaAddOnScope: { areaSqFt: 4200, tierSqFt: 5000 } }] },
+          protocols, catalog, dbh: () => ({}),
+        });
+        const fireAnt = (await cardsFor(out.lines)).find((card) => card.name === PRODUCT_BY_KEY.area_addon_fire_ant_yard);
+        expect(fireAnt.governed).toMatchObject({ sold: 'Sold: up to 5,000 sq ft of lawn', rate: expect.stringMatching(/2 lb/) });
+      });
+
+      test('a booked row stored as a JSON string reads the same (soldScopeOf)', async () => {
+        const ok = () => { const chain = {}; for (const m of ['leftJoin', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = async () => [{ service_name: 'Fire Ant Yard Treatment', category: 'lawn_care', service_key: 'area_addon_fire_ant_yard', area_addon_scope: '{"tierSqFt":3000}' }]; return chain; };
+        ok.raw = (sql) => sql;
+        expect((await jobCard._test.loadAddons(ok, 'svc1'))[0].areaAddOnScope).toEqual({ tierSqFt: 3000 });
+      });
     });
 
     test('a card for an ordinary product carries no governed field', async () => {

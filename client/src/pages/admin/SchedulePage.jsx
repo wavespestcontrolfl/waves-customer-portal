@@ -7313,12 +7313,15 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
   );
 }
 
-// A chemical area add-on's label text: rate, area basis, yearly limit and the
-// one safety line. A spray-check Hold sends the reason in place of the rate.
+// A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
+// basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
+// grass sends the reason in place of the rate.
 function JobCardGoverned({ governed, D }) {
   if (!governed) return null;
   return (
     <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
+      {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
+      {governed.grass && <div>{governed.grass}</div>}
       {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
       <div>Area: {governed.area}</div>
       <div>Limit: {governed.limit}</div>

@@ -547,9 +547,17 @@ function formatServiceProfileLabel(services) {
 function areaAddOnProfileFields(service, item, amount) {
   if (service !== AREA_ADDON_ENGINE_KEY) return {};
   const minutes = Math.ceil(Number(item.onSiteMinutes));
+  const area = Number(item.areaSqFt);
+  const tier = Number(item.tierSqFt);
   return {
     ...(minutes > 0 ? { durationMinutes: minutes } : {}),
     ...(amount > 0 ? { addOnPrice: Math.round(amount * 100) / 100 } : {}),
+    // The sold scope: the booking writes it onto the visit (area_addon_scope), so the job card
+    // can say how much was sold and which grass authorized the rate.
+    ...(item.addOnKey ? { addOnKey: String(item.addOnKey) } : {}),
+    ...(area > 0 ? { areaSqFt: area } : {}),
+    ...(tier > 0 ? { tierSqFt: tier } : {}),
+    ...(item.grassType ? { grassType: String(item.grassType) } : {}),
   };
 }
 
@@ -1895,6 +1903,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       delete publicService.catalogServiceKey;
       delete publicService.resolvedServiceKey;
       delete publicService.addOnPrice;
+      delete publicService.addOnKey;
+      delete publicService.areaSqFt;
+      delete publicService.tierSqFt;
+      delete publicService.grassType;
       return publicService;
     }),
   };
