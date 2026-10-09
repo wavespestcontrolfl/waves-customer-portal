@@ -1164,17 +1164,6 @@ async function reserveSlot({
         err.slotId = slotId;
         throw err;
       }
-      // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
-      // 2026-10-09): a NEW hold on a 17:00 offer signed before the gate
-      // flipped is refused here, like the offer side. No-op while unset. A
-      // hold that already exists is honored at commit: the customer was
-      // given that time.
-      if (pastCustomerLastStart(slotStartMinutes)) {
-        const err = new Error('slot starts after the last customer start');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = slotId;
-        throw err;
-      }
       // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23):
       // mirrors the offer-side filter (estimate-slot-availability.js
       // slotWindowFitsDay) so a slot the generator wouldn't offer under the
@@ -1399,6 +1388,19 @@ async function reserveSlot({
           expiresAt: refreshedExpiresAt instanceof Date ? refreshedExpiresAt.toISOString() : refreshedExpiresAt,
         });
         return { scheduledServiceId: refreshed?.id || sameSlotHold.id, expiresAt: refreshedExpiresAt };
+      }
+      // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+      // 2026-10-09): a NEW hold on a 17:00 offer signed before the gate
+      // flipped is refused, like the offer side. Checked only here, after
+      // the same-slot lookup above: a hold the customer already has on that
+      // time is honored (the page re-POSTs /reserve to recover it, and
+      // acceptance commits it). Refused before the estimate's other holds
+      // are dropped. No-op while unset.
+      if (pastCustomerLastStart(slotStartMinutes)) {
+        const err = new Error('slot starts after the last customer start');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
       }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();

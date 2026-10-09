@@ -131,6 +131,20 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
     });
   });
 
+  test('GATE_CUSTOMER_LAST_START_16=true refuses a signed 17:00 start at confirm and keeps 16:00 (owner ruling 2026-10-09; Codex #6220 r1)', () => {
+    const previous = process.env.GATE_CUSTOMER_LAST_START_16;
+    try {
+      delete process.env.GATE_CUSTOMER_LAST_START_16;
+      expect(ok('17:00')).toBeNull();
+      process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
+      expect(ok('17:00')).toMatch(/isn't available/);
+      expect(ok('16:00')).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env.GATE_CUSTOMER_LAST_START_16;
+      else process.env.GATE_CUSTOMER_LAST_START_16 = previous;
+    }
+  });
+
   test('respects a configured day window', () => {
     const config = { day_start: '09:00', day_end: '18:00' };
     expect(ok('08:00', 60, config)).toMatch(/working hours/i);

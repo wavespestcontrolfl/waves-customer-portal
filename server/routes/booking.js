@@ -164,7 +164,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
 }
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const {
-  CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
+  CUSTOMER_HOUR_GRID, lunchBlockEnabled, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
@@ -1462,6 +1462,12 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
   // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
   // unset by default). Off, noon is a normal bookable hour like any other.
   if (lunchBlockEnabled() && startMin < lunchEndMin && endMin > lunchStartMin) {
+    return 'That time isn\'t available — please pick another slot.';
+  }
+  // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+  // 2026-10-09): a signed 17:00 offer from before the gate flipped is
+  // refused here, as the builder (customerWindowAdmits) no longer offers it.
+  if (pastCustomerLastStart(startMin)) {
     return 'That time isn\'t available — please pick another slot.';
   }
   return null;
