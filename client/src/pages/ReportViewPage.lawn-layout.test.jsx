@@ -333,6 +333,19 @@ describe('gate on: the phone order', () => {
   });
 });
 
+// The banner clock (useBannerClock) is a setTimeout to the banner's expiry. Real timers raced the test's clock jump
+// on a slow runner (the timer fired before the jump and never fired again), so these tests fake setTimeout and Date
+// together and fire the timer explicitly. shouldAdvanceTime keeps React's own scheduler (which uses setTimeout in
+// jsdom) running; the banner expires 30 fake seconds after the pinned start, far beyond any real render time, so the
+// first assertions never see an expired banner, and advancing the fake clock past it fires the timer.
+const BANNER_EXPIRES_AT = '2026-10-09T15:10:30.000Z';
+function pinBannerClock() {
+  vi.useRealTimers();
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'], shouldAdvanceTime: true });
+  vi.setSystemTime(new Date('2026-10-09T15:10:00Z'));
+}
+const jumpPastExpiry = () => act(() => { vi.advanceTimersByTime(60000); });
+
 describe('gate on: nothing the standard page shows is lost', () => {
   const eventNames = () => globalThis.fetch.mock.calls
     .filter(([url]) => String(url).includes('/events'))
@@ -445,15 +458,31 @@ describe('gate on: nothing the standard page shows is lost', () => {
   it('re-evaluates the banner rules when the banner expires, with no refresh', async () => {
     const payload = clone(spotOn);
     const [line] = payload.reportV2.banner.lines;
-    payload.reportV2.banner.expiresAt = '2026-10-09T15:10:00.001Z';
+    payload.reportV2.banner.expiresAt = BANNER_EXPIRES_AT;
     payload.reportV2.insights[0].customerAction = line;
+    pinBannerClock();
     const { container } = renderReport(payload, '', 'tok-expiry');
     await waitForReport();
+    await act(async () => {}); // effects flushed: the banner timer is registered
     expect(container.querySelector('.lawn-layout-banner')).not.toBeNull();
     expect(text(container)).not.toContain(`Your next step: ${line}`);
-    act(() => { vi.setSystemTime(new Date('2026-10-09T15:12:00Z')); });
-    await waitFor(() => expect(container.querySelector('.lawn-layout-banner')).toBeNull(), { timeout: 3000 });
+    jumpPastExpiry();
+    await waitFor(() => expect(container.querySelector('.lawn-layout-banner')).toBeNull());
     expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
+    expect(text(container)).toContain(`Your next step: ${line}`);
+  });
+
+  it('a banner whose expiry passes between the first render and its effect is still re-evaluated (the clock is re-read once)', async () => {
+    const payload = clone(spotOn);
+    const [line] = payload.reportV2.banner.lines;
+    payload.reportV2.banner.expiresAt = BANNER_EXPIRES_AT;
+    payload.reportV2.insights[0].customerAction = line;
+    pinBannerClock();
+    const { container } = renderReport(payload, '', 'tok-expiry-early');
+    // jump before the page has rendered at all: the first render may read the old clock, the effect sees the new one
+    vi.setSystemTime(new Date('2026-10-09T15:12:00Z'));
+    await waitForReport();
+    await waitFor(() => expect(container.querySelector('.lawn-layout-banner')).toBeNull());
     expect(text(container)).toContain(`Your next step: ${line}`);
   });
 
@@ -588,13 +617,15 @@ describe('the banner dedupe follows what the banner prints, on screen and in pri
   it('after expiry the repeats come back; while the page is printing the banner prints its lines again and the dedupe returns', async () => {
     const payload = clone(spotOn);
     const [line] = payload.reportV2.banner.lines;
-    payload.reportV2.banner.expiresAt = '2026-10-09T15:10:00.001Z';
+    payload.reportV2.banner.expiresAt = BANNER_EXPIRES_AT;
     payload.reportV2.insights[0].customerAction = line;
+    pinBannerClock();
     const { container } = renderReport(payload, '', 'tok-print-expiry');
     await waitForReport();
+    await act(async () => {}); // effects flushed: the banner timer is registered
     expect(container.querySelector('.lawn-layout-banner')).not.toBeNull();
-    act(() => { vi.setSystemTime(new Date('2026-10-09T15:12:00Z')); });
-    await waitFor(() => expect(container.querySelector('.lawn-layout-banner')).toBeNull(), { timeout: 3000 });
+    jumpPastExpiry();
+    await waitFor(() => expect(container.querySelector('.lawn-layout-banner')).toBeNull());
     expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
     expect(text(container)).toContain(`Your next step: ${line}`);
     // the browser's print pass: the banner prints its lines (not the ended note) ...

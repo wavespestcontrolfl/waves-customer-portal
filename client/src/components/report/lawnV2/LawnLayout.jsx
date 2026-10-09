@@ -380,7 +380,10 @@ function useBannerClock(banner) {
   useEffect(() => {
     if (!Number.isFinite(expiresMs)) return undefined;
     const wait = expiresMs - Date.now() + 1000;
-    if (wait <= 0 || wait > 2147483647) return undefined;
+    // Already past expiry by the time this effect runs (a slow first paint): re-read the clock now, once, or the
+    // state keeps the value from the first render and the rules would never see the expiry.
+    if (wait <= 0) { setNowMs(Date.now()); return undefined; }
+    if (wait > 2147483647) return undefined;
     const timer = setTimeout(() => setNowMs(Date.now()), wait);
     return () => clearTimeout(timer);
   }, [expiresMs]);
