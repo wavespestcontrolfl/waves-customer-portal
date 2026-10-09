@@ -223,6 +223,7 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     // (visit-fees.js customerLateFeeFacts); the office dialog carries its own
     // visitFees block beside this impact.
     lateCancelFee: null,
+    lateCancelFeeVisits: 0,
     lateCancelFeeMayApply: false,
     openBalance,
     payUrl: null,

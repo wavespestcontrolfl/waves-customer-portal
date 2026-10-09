@@ -361,7 +361,7 @@ describe('scheduled-visit fee (a pulled visit already inside its late-cancellati
   };
 
   it('shows the server amount on the review facts AND in the confirm sentence, before the cancel button', async () => {
-    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ lateCancelFee: 75, lateCancelFeeMayApply: false }) });
+    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ lateCancelFee: 75, lateCancelFeeVisits: 1, lateCancelFeeMayApply: false }) });
     renderFlow();
     await openReview();
     expect(screen.getByText('Scheduled-visit fee')).toBeInTheDocument();
@@ -373,12 +373,21 @@ describe('scheduled-visit fee (a pulled visit already inside its late-cancellati
     expect(screen.getByRole('button', { name: 'Cancel my plan' })).toBeInTheDocument();
   });
 
-  it('says the fee may apply when the server cannot state the amount', async () => {
-    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ lateCancelFee: null, lateCancelFeeMayApply: true }) });
+  it('several visits: the total, the visit count, and "each" card — never one visit with one summed fee (Codex r1 P2)', async () => {
+    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ lateCancelFee: 125, lateCancelFeeVisits: 2, lateCancelFeeMayApply: false }) });
     await toConfirm();
-    expect(screen.getByText('May apply (a visit already inside its late-cancellation window)')).toBeInTheDocument();
-    expect(screen.getByText(/a visit already inside its late-cancellation window may keep its scheduled-visit fee\./)).toBeInTheDocument();
-    expect(screen.queryByText(/\$\d+\.\d\d scheduled-visit fee/)).not.toBeInTheDocument();
+    expect(screen.getByText("$125.00 in total for 2 visits already inside their late-cancellation window, each charged to that visit's card on file")).toBeInTheDocument();
+    expect(screen.getByText(/2 visits already inside their late-cancellation window keep their scheduled-visit fees: \$125\.00 in total, each charged to the card on file for that visit\./)).toBeInTheDocument();
+    expect(screen.queryByText(/keeps its \$125\.00/)).not.toBeInTheDocument();
+  });
+
+  it('may apply: neutral copy that never claims a visit IS inside the window (Codex r1 P1)', async () => {
+    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ lateCancelFee: null, lateCancelFeeVisits: 0, lateCancelFeeMayApply: true }) });
+    await toConfirm();
+    expect(screen.getByText('May apply. We could not confirm it for an upcoming visit right now.')).toBeInTheDocument();
+    expect(screen.getByText(/A scheduled-visit fee may apply to an upcoming visit: we could not confirm it right now\./)).toBeInTheDocument();
+    expect(screen.queryByText(/already inside/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d+\.\d\d/, { selector: 'div' })).not.toBeInTheDocument();
   });
 
   it('no fee: no fee row and the plain no-cancellation-fee sentence', async () => {

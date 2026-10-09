@@ -165,12 +165,12 @@ describe('impact carries the scheduled-visit fee the commit will charge', () => 
 
   test('the fee facts are computed from the visits THIS cancel pulls and returned on impact', async () => {
     mockBuildImpact.mockResolvedValue({ visitsCancelled: 2, pulledVisitKeys: ['v1:2026-10-09', 'v2:2026-11-09'], lateCancelFee: null, lateCancelFeeMayApply: false });
-    mockLateFeeFacts.mockResolvedValue({ lateCancelFee: 75, lateCancelFeeMayApply: false });
+    mockLateFeeFacts.mockResolvedValue({ lateCancelFee: 75, lateCancelFeeVisits: 1, lateCancelFeeMayApply: false });
     const res = await post({ families: ['pest_control'] });
     expect(res.status).toBe(200);
     expect(mockBuildImpact).toHaveBeenCalledWith('cust-1', ['pest_control']);
     expect(mockLateFeeFacts).toHaveBeenCalledWith(['v1:2026-10-09', 'v2:2026-11-09']);
-    expect(res.body.impact).toMatchObject({ visitsCancelled: 2, lateCancelFee: 75, lateCancelFeeMayApply: false });
+    expect(res.body.impact).toMatchObject({ visitsCancelled: 2, lateCancelFee: 75, lateCancelFeeVisits: 1, lateCancelFeeMayApply: false });
   });
 
   test('an unknown amount reaches the client as may-apply', async () => {
