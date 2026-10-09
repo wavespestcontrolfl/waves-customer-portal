@@ -350,3 +350,10 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }))).toMatchObject({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
   });
 });
+
+test('a visit the customer confirmed is never eligible, with or without a due date (owner 2026-10-09)', () => {
+  expect(isEligibleForAutoDispatch(svc({ status: 'confirmed', customer_confirmed: true }), CTX))
+    .toMatchObject({ eligible: false, reason_code: 'CUSTOMER_CONFIRMED' });
+  expect(isEligibleForAutoDispatch(svc({ status: 'confirmed', customer_confirmed: false }), CTX))
+    .toMatchObject({ eligible: true });
+});

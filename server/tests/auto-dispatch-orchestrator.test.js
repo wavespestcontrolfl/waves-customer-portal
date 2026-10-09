@@ -717,3 +717,100 @@ describe('shared-model apply path (Codex r1)', () => {
     }
   });
 });
+
+describe('day moves need a real drive saving (owner 2026-10-09)', () => {
+  const DEFAULT_WINDOW = { key: 'early_morning', startMin: 480, endMin: 600 };
+  const prefsWithDefaultWindow = {
+    preferred_day_indexes: [], effective_time_window: DEFAULT_WINDOW, preferred_time_window: null,
+    blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
+  };
+  const preferences = require('../services/auto-dispatch/preferences');
+  // Afternoon visit; the candidates save no drive and gain from the default
+  // window, a tighter cluster and a lighter day.
+  const AFTERNOON = { ...CURRENT, detour_minutes: 5, start_time: '14:00', same_area_share: 0, route_minutes: 600 };
+  const NO_SAVING_DAY_MOVE = { ...CAND_BIG, detour_minutes: 5, start_time: '08:00', same_area_share: 1, route_minutes: 300 };
+
+  afterEach(() => {
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue({
+      preferred_day_indexes: [], effective_time_window: null, preferred_time_window: null,
+      blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
+    });
+  });
+
+  test('a day move that saves no drive is not recommended, and the audit says why', async () => {
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue(prefsWithDefaultWindow);
+    servicesResult = [svc({ window_start: '14:00', window_end: '15:00' })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: AFTERNOON, candidates: [NO_SAVING_DAY_MOVE] });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ recommended: 0 });
+    const row = lastDecision('no_change');
+    expect(row.routeMetrics).toMatchObject({ day_move: true, drive_saving_minutes: 0 });
+    expect(['NO_DRIVE_SAVING', 'NO_SCORE_IMPROVEMENT']).toContain(row.reason_code);
+  });
+
+  test('the same gain as a same-day re-time is recommended', async () => {
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue(prefsWithDefaultWindow);
+    servicesResult = [svc({ window_start: '14:00', window_end: '15:00' })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: AFTERNOON, candidates: [{ ...NO_SAVING_DAY_MOVE, date: CURRENT.date }] });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('recommended').routeMetrics).toMatchObject({ day_move: false });
+  });
+
+  test('a day move over the score bar with under 6 minutes saved reads NO_DRIVE_SAVING', async () => {
+    const current = { ...CURRENT, detour_minutes: 5, same_area_share: 0, route_minutes: 600 };
+    const cand = { ...CAND_BIG, detour_minutes: 2, same_area_share: 1, route_minutes: 300, start_time: '09:00' };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+    const prevGate = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    try {
+      const res = await runAutoDispatch({ mode: 'dry_run' });
+      expect(res).toMatchObject({ recommended: 0 });
+      expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_DRIVE_SAVING' });
+    } finally {
+      if (prevGate === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = prevGate;
+    }
+  });
+});
+
+describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
+  const OVERLAP = { kind: 'overlap', date: CURRENT.date, with: ['other-1'] };
+
+  test('the gate reaches the candidate read as ctx.conflictMoves', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [CAND_SMALL] });
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(candidateSlots.findValidCandidateSlots.mock.calls[0][2].conflictMoves).toBe(false);
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(candidateSlots.findValidCandidateSlots.mock.calls[1][2].conflictMoves).toBe(true);
+  });
+
+  test('an overlapping visit moves on a gain far under the bar, and the audit names the conflict', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
+      const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ changed: 1 });
+      const changed = lastDecision('changed');
+      expect(changed.reason_description).toMatch(/^Moved off an overlapping stop/);
+      expect(changed.constraints.conflict).toEqual(OVERLAP);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
+  test('pass 2 applies a visit in conflict before a larger ordinary gain', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      servicesResult = [svc({ id: 'gain' }), svc({ id: 'overlap' })];
+      candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => (service.id === 'overlap'
+        ? { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] }
+        : { current: CURRENT, candidates: [CAND_BIG] }));
+      await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(apply.applyAutoDispatchMove.mock.calls.map((c) => c[0].id)).toEqual(['overlap', 'gain']);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+});

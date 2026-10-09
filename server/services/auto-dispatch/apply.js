@@ -75,8 +75,8 @@ async function revalidatePlacement(service) {
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
   }
-  if (fresh.recurring_dispatch_due_date && fresh.customer_confirmed === true) {
-    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this recurring occurrence after scoring' };
+  if (fresh.customer_confirmed === true) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -271,7 +271,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     trx, technicianId, service: movingRow, destination,
   }) => {
     const row = movingRow || service;
-    if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
+    if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
@@ -500,7 +500,9 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
     recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
-    ...(fresh.recurring_dispatch_due_date ? { customer_confirmed: fresh.customer_confirmed ?? null } : {}),
+    // Pinned for every visit (owner 2026-10-09): a confirmation that lands
+    // between the read above and the move fails the atomic match.
+    customer_confirmed: fresh.customer_confirmed ?? null,
     ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
   };
 

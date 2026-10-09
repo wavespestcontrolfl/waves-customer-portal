@@ -3481,6 +3481,18 @@ const gates = {
   // at call time. Kill switch: unset.
   autoDispatchRainPass: gateEnvValue('GATE_AUTO_DISPATCH_RAIN_PASS'),
 
+  // Auto-dispatch conflict moves (owner 2026-10-09, "it should be moving
+  // appointments that overlap"): a recurring visit whose arrival span
+  // overlaps another customer's stop on its date, or that sits on an owner
+  // blackout day, moves to the best legal slot in the 04:10 run without the
+  // score bar or the drive floor (a free hour on the same day first for an
+  // overlap). Every other guard still applies: the 73-hour and reminder
+  // freeze, person-placed, customer-confirmed, the flex window, preferences.
+  // OFF in every environment; auto-dispatch/config.js reads it through
+  // gateEnvValue() at call time (config.conflictMovesEnabled). Kill switch:
+  // unset.
+  autoDispatchConflictMoves: gateEnvValue('GATE_AUTO_DISPATCH_CONFLICT_MOVES'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a

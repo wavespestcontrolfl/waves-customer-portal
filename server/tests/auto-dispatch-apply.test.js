@@ -787,3 +787,21 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
   });
 
 });
+
+test('a confirmation after scoring stops the move of any visit, due date or not (owner 2026-10-09)', async () => {
+  const scored = { ...SERVICE, customer_confirmed: false };
+  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
+  await expect(applyAutoDispatchMove(scored, BEST, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('every move pins customer_confirmed in the atomic write and its guard refuses a confirmed row', async () => {
+  const scored = { ...SERVICE, customer_confirmed: false };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, BEST, 'run1');
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ customer_confirmed: false });
+  await expect(options.moveGuard({ trx: jest.fn(), service: { ...scored, customer_confirmed: true } }))
+    .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+});

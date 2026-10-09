@@ -47,6 +47,7 @@ const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable } = require('../technician-eligibility');
+const { currentConflict } = require('./current-conflict');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -613,7 +614,18 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     start_time: service.window_start ? String(service.window_start).slice(0, 5) : null,
     capability_level: ctx.capabilityFor(techId, category),
     ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr)),
+    ...(await currentConflictField(service, ctx)),
   };
+}
+
+// GATE_AUTO_DISPATCH_CONFLICT_MOVES (ctx.conflictMoves): `conflict` when the
+// visit overlaps another customer's stop or sits on a closed day
+// (current-conflict.js). Gate off: no read, no field.
+async function currentConflictField(service, ctx) {
+  if (!ctx.conflictMoves) return {};
+  const { excludeIds } = await groupContextFor(service, ctx);
+  const conflict = await currentConflict(service, ctx, excludeIds);
+  return conflict ? { conflict } : {};
 }
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL: the current placement's numbers from the

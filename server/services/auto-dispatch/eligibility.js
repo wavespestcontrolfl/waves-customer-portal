@@ -88,8 +88,11 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
   if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
   if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
 
-  if (service.recurring_dispatch_due_date && service.customer_confirmed === true) {
-    return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this recurring occurrence');
+  // Any visit the customer confirmed holds its day and time (owner
+  // 2026-10-09; before, only a due-date occurrence was held, and two
+  // confirmed visits moved silently in one week).
+  if (service.customer_confirmed === true) {
+    return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this visit');
   }
 
   const dateStr = toDateStr(service.scheduled_date) || '';
