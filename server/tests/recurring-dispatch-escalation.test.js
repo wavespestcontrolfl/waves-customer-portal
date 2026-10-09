@@ -312,14 +312,29 @@ describe('recurring visit with no arrival time and no due date', () => {
     const rows = Array.from({ length: 11 }, (_, i) => ({
       id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(10 + i).padStart(2, '0')}`,
     }));
-    // The LAST row by date already has a notice: it is refreshed besides the 10 new ones.
-    existingNoticeKeys = ['recurring-no-window:n10:2026-08-20'];
+    // The FIRST row by date already has a notice: its write is deduped and
+    // does not ring, so it spends nothing and the 10 others still ring.
+    existingNoticeKeys = ['recurring-no-window:n0:2026-08-10'];
     query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
-    notifications.notifyAdmin.mockResolvedValue({ id: 'noticeX' });
+    notifications.notifyAdmin.mockImplementation(async (_c, _t, _b, opts) => ({ id: 'noticeX', deduped: opts.dedupeKey === 'recurring-no-window:n0:2026-08-10' }));
     expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(11);
     const keys = notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
-    expect(keys).toContain('recurring-no-window:n10:2026-08-20');
-    expect(keys.filter((k) => k !== 'recurring-no-window:n10:2026-08-20')).toHaveLength(10);
+    expect(keys).toContain('recurring-no-window:n0:2026-08-10');
+    expect(keys.filter((k) => k !== 'recurring-no-window:n0:2026-08-10')).toHaveLength(10);
+  });
+
+  // A standing notice whose refresh RINGS (its text changed) spends a slot,
+  // and nothing is raised once the allowance is spent (Codex #6208 r16 P2).
+  test('a standing notice that re-rings spends a slot', async () => {
+    const rows = Array.from({ length: 11 }, (_, i) => ({
+      id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(10 + i).padStart(2, '0')}`,
+    }));
+    existingNoticeKeys = ['recurring-no-window:n0:2026-08-10'];
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
+    notifications.notifyAdmin.mockImplementation(async (_c, _t, _b, opts) => (opts.dedupeKey === 'recurring-no-window:n0:2026-08-10'
+      ? { id: 'noticeX', deduped: true, refreshed: true, rung: true } : { id: 'noticeX', deduped: false }));
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(10);
   });
 
   // One allowance for every auto-dispatch notice lane and every run in 24

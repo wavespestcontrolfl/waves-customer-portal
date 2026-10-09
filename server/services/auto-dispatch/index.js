@@ -636,7 +636,8 @@ async function flagMissingGeo(service) {
     });
     // notifyAdmin resolves null when the write fails and a row with no id
     // when it suppresses: neither recorded a notice (Codex #6208 r14 P2).
-    return !!(notice && notice.id);
+    // A deduped write rings only when its refresh says so (r16 P2).
+    return audit.noticeRang(notice);
   } catch (err) {
     logger.warn(`[auto-dispatch] missing-geo notice failed for ${service && service.id}: ${err.message}`);
     return false;
@@ -733,12 +734,11 @@ async function raiseMissingGeoNotices(run) {
     // plan is read again just before each notice: one that lapsed since pass 1
     // raises nothing, joins the close list and leaves its slot (r11 P2).
     for (const row of audit.withinRingBudget(waiting, standing, Infinity, audit.missingGeoKey)) {
-      const isStanding = standing.has(audit.missingGeoKey(row));
-      if (!isStanding && left <= 0) continue;
+      // Allowance spent: nothing more is raised, a standing notice included.
+      if (left <= 0) break;
       if (!(await missingGeoNoticeWanted(row))) { run.pinOkIds.add(String(row.id)); continue; }
-      // A failed write rang nothing and spends no slot (r13 P2).
-      const raised = await flagMissingGeo(row);
-      if (raised && !isStanding) left -= 1;
+      // Only a write that rang spends a slot (r13, r14, r16 P2).
+      if (await flagMissingGeo(row)) left -= 1;
     }
   } catch (err) {
     logger.error(`[auto-dispatch] missing-geo notices failed: ${err.message}`);

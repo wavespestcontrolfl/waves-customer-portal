@@ -231,6 +231,13 @@ async function combinedBookingEstimateIds(estimateIds) {
 
 // Recurring children that have neither an arrival window nor a due date, so
 // auto-dispatch cannot place them and nothing else would tell staff.
+// Did this write ring? A new row rings; a deduped row rings only when its
+// refresh says so (notification-service: deduped, refreshed, rung). A null
+// result or a suppressed one (no id) recorded nothing.
+function noticeRang(notice) {
+  return !!(notice && notice.id) && (notice.deduped !== true || notice.rung === true);
+}
+
 // ROUTING_HORIZON_DAYS of combined-booking-check.js.
 const SEASONAL_ROUTING_HORIZON_DAYS = 14;
 
@@ -253,7 +260,9 @@ function noWindowVisits(conn, from, to) {
     .whereIn('s.status', ['pending', 'confirmed'])
     .where('s.scheduled_date', '>=', from)
     .where('s.scheduled_date', '<=', to)
-    .where('c.active', true)
+    // Only an explicit false is inactive, as eligibility.js rules: `active`
+    // is nullable on legacy rows (Codex #6208 r16 P2).
+    .whereRaw('c.active IS NOT FALSE')
     .whereNull('c.deleted_at');
 }
 
@@ -387,8 +396,9 @@ async function flagNoWindowVisits(candidates, today, to) {
   let left = await ringsLeft();
   let flagged = 0;
   for (const row of withinRingBudget(candidates, standing, Infinity)) {
-    const isStanding = standing.has(noWindowKey(row));
-    if (!isStanding && left <= 0) continue;
+    // Allowance spent: nothing more is raised, a standing notice included (a
+    // refresh whose text changed would ring; Codex #6208 r16 P2).
+    if (left <= 0) break;
     const date = row.date;
     const notice = await db.transaction(async (trx) => {
       const current = await noWindowVisits(trx, today, to)
@@ -421,7 +431,7 @@ async function flagNoWindowVisits(candidates, today, to) {
       return inserted;
     });
     if (notice) flagged += 1;
-    if (notice && !isStanding) left -= 1;
+    if (noticeRang(notice)) left -= 1;
   }
   return flagged;
 }
@@ -525,4 +535,4 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
   return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, NEW_NOTICES_PER_RUN };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN };

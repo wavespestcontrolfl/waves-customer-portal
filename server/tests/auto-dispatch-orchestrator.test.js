@@ -281,12 +281,13 @@ describe('missing-geo notice budget (Codex #6208 r3)', () => {
 
   test('a visit with a standing notice is refreshed and spends no budget', async () => {
     visitsWithoutPin(12);
-    audit.standingMissingGeoKeys.mockResolvedValue(new Set(['auto-dispatch-missing-geo:g11:2026-08-21']));
+    // The soonest visit's notice stands: its write is deduped and does not ring.
+    audit.standingMissingGeoKeys.mockResolvedValue(new Set(['auto-dispatch-missing-geo:g0:2026-08-10']));
+    notifications.notifyAdmin.mockImplementation(async (_c, _t, _b, opts) => ({ id: 'n1', deduped: opts.dedupeKey === 'auto-dispatch-missing-geo:g0:2026-08-10' }));
     await runAutoDispatch({ mode: 'dry_run' });
-    expect(keysRung()).toHaveLength(11); // 10 new + the standing one
-    expect(keysRung()).toContain('auto-dispatch-missing-geo:g11:2026-08-21');
-    expect(keysRung()).toContain('auto-dispatch-missing-geo:g9:2026-08-19');
-    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+    expect(keysRung()).toHaveLength(11); // the standing one + 10 new
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g11:2026-08-21');
   });
 });
 
