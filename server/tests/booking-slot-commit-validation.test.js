@@ -131,14 +131,19 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
     });
   });
 
-  test('GATE_CUSTOMER_LAST_START_16=true refuses a signed 17:00 start at confirm and keeps 16:00 (owner ruling 2026-10-09; Codex #6220 r1)', () => {
+  // The last-start rule (GATE_CUSTOMER_LAST_START_16) is NOT a geometry rule:
+  // createSelfBooking applies it after its idempotent-replay lookup, so a
+  // 17:00 booking that committed before the flip still replays (Codex #6220 r2).
+  test('geometry admits 17:00 even with GATE_CUSTOMER_LAST_START_16 on; the rule sits after the replay lookup in createSelfBooking', () => {
     const previous = process.env.GATE_CUSTOMER_LAST_START_16;
     try {
-      delete process.env.GATE_CUSTOMER_LAST_START_16;
-      expect(ok('17:00')).toBeNull();
       process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
-      expect(ok('17:00')).toMatch(/isn't available/);
-      expect(ok('16:00')).toBeNull();
+      expect(ok('17:00')).toBeNull();
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
+      const replayAt = src.indexOf('// Idempotent replay: same customer, same day, same start time');
+      const ruleAt = src.indexOf('if (pastCustomerLastStart(timeToMin(slot_start)))');
+      expect(replayAt).toBeGreaterThan(-1);
+      expect(ruleAt).toBeGreaterThan(replayAt);
     } finally {
       if (previous === undefined) delete process.env.GATE_CUSTOMER_LAST_START_16;
       else process.env.GATE_CUSTOMER_LAST_START_16 = previous;
