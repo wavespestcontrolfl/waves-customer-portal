@@ -127,7 +127,7 @@ KPHITE are conditional secondary lines on every card that offers them (live find
 or root-rot history only), so neither is a Fast Complete suggestion any more.
 Mn Combo, Azatin O, the routine copper line and the routine ornamental fungicide
 line are gone from the T&S cards; manganese is the palm Mn sulfate secondary line
-only. The freeze policy and the joint mosquito account check live in the program
+only. The freeze policy (a loose spear is a photo, a note and an office call: no bud drench until a copper label is verified) and the joint mosquito account check live in the program
 notes. The palm chart divisor stays 105: one application stays under the 1 lb
 nitrogen per 1,000 sq ft limit in the Sarasota County fertilizer codes. The
 sold tiers are 6 and 9 visits a year.

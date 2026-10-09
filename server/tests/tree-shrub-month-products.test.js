@@ -148,7 +148,7 @@ describe('resolveMonthProducts', () => {
     }
     expect(JSON.stringify(program)).not.toMatch(/azatin|azamax/i);
     expect(JSON.stringify(program.visits)).not.toMatch(/Labeled ornamental fungicide|Copper: exact container label/);
-    expect(program.annual_rotation.fungicide_disease.join('\n')).toMatch(/Copper only for a diagnosed labeled bacterial or leaf disease, or a palm bud drench after a freeze when the spear pulls out; not a routine program line\./);
+    expect(program.annual_rotation.fungicide_disease.join('\n')).toMatch(/Copper only for a diagnosed labeled bacterial or leaf disease, after the exact container label is verified; not a routine program line/);
     expect(program.annual_rotation.fungicide_disease.join('\n')).toMatch(/7 to 28 day intervals; the 40 to 60 day visit cannot protect foliage\. No routine fungicide on the base program\./);
   });
 

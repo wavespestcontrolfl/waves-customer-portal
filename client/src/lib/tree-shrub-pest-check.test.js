@@ -87,4 +87,9 @@ describe('payload', () => {
       .toEqual({ watchItems: [{ key: 'scale' }], pestCheck: payload });
     expect(withPestCheck({}, payload).treeShrubReview).toEqual({ pestCheck: payload });
   });
+  test('notes TriTek on a No answer (live finds only since 2026-10-09)', () => {
+    const out = evaluatePestCheck({ found: false, types: [] }, [{ active: true, name: 'TriTek Spray Oil Emulsion' }]);
+    expect(out.blockMessage).toBe('');
+    expect(out.noteMessages).toEqual(['No live insects recorded. TriTek is for live finds only.']);
+  });
 });

@@ -109,9 +109,12 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
 
   test('freeze, joint-mosquito and tier text (owner 2026-10-09)', () => {
     const notes = protocols.tree_shrub.notes.join('\n');
-    expect(notes).toMatch(/After a freeze: no extra palm feeding and no foliar micronutrient spray\. Leave brown fronds until the cold season ends\. Tug each spear leaf\. Spear pulls out: remove it and drench the bud once with a labeled fixed copper fungicide, repeat once after about 10 days, never more than twice\. Spear firm: no copper\. Tell the customer the result shows in 4 to 7 months\./);
-    // No copper brand is named for the bud drench (the kit copper label is not verified for it).
-    expect(notes.match(/After a freeze:[^\n]*/)[0]).not.toMatch(/badge|southern ag|banner/i);
+    const freeze = notes.match(/After a freeze:[^\n]*/)[0];
+    expect(freeze).toMatch(/no extra palm feeding and no foliar micronutrient spray\. Leave brown fronds until the cold season ends\./);
+    // The kit copper label is not verified for a palm bud drench, so the rule
+    // is a hold and an office call, never a drench procedure (Codex r1 #6185).
+    expect(freeze).toMatch(/Spear pulls out: photo, note and call the office; do not drench the bud/);
+    expect(freeze).not.toMatch(/drench the bud once|repeat once|badge|southern ag|banner/i);
     expect(notes).toMatch(/Account that also has mosquito service: check for scale, sooty mold and mites at every visit; photo any find\./);
     expect(protocols.mosquito.notes.join('\n')).toMatch(/Account that also has tree and shrub service: barrier spray at most monthly, aimed at low shaded foliage; no spray on blooming plants or on sago, ficus, camellia, holly or magnolia\./);
     // The quarterly 4x tier is retired: sold tiers are 6 and 9 visits.

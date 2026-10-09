@@ -860,7 +860,7 @@
       "Palm scout every visit, and record only what you see (symptom + photo, never a disease name without a diagnosis): oldest fronds with translucent yellow-orange spots or dead tips (potassium) or a broad yellow band (magnesium); newest fronds small and frizzled (manganese, mainly queen, royal, pygmy date); a collapsed spear or bronzing from the oldest fronds up; a hard shelf/conk on the lower 4-5 ft of trunk; fronds dying down one side; royal palm bug, spiraling whitefly, scale, or sooty mold; over-pruning.",
       "Palm diagnosis-only issues: suspected lethal bronzing, Ganoderma butt rot, or Fusarium wilt gets a photo, a note, and a call to the owner that it needs a diagnosis; do not quote a treatment on symptoms, and never promise the fertilizer program prevents them. Lethal-bronzing injections are preventive only, for healthy palms, palms near an infected one, or palms that tested negative; a symptomatic, positive, or infected palm is handled outside the injection service. Do not cut off potassium-yellowed fronds (it speeds decline; old fronds never re-green, new growth recovers over 1-2+ years), and never prune above the 9-to-3 o'clock line.",
       "Visits start on the customer's signup date (6x about every 60 days, 9x about every 40). Each visit uses the card for its calendar month; the palm 3-month rule, Snapshot 60-day/quarter rule and the June 1–Sept 30 N/P blackout decide what is due.",
-      "After a freeze: no extra palm feeding and no foliar micronutrient spray. Leave brown fronds until the cold season ends. Tug each spear leaf. Spear pulls out: remove it and drench the bud once with a labeled fixed copper fungicide, repeat once after about 10 days, never more than twice. Spear firm: no copper. Tell the customer the result shows in 4 to 7 months.",
+      "After a freeze: no extra palm feeding and no foliar micronutrient spray. Leave brown fronds until the cold season ends. Tug each spear leaf. Spear pulls out: photo, note and call the office; do not drench the bud, because no copper label for a palm bud drench is verified yet. Spear firm: no treatment. Tell the customer the result shows in 4 to 7 months.",
       "Account that also has mosquito service: check for scale, sooty mold and mites at every visit; photo any find."
     ],
     "safety_rules": [
@@ -937,7 +937,7 @@
       ],
       "fungicide_disease": [
         "P07: KPHITE 7LP for root/oomycete/Phytophthora-type support where justified.",
-        "M01/M1: Copper only for a diagnosed labeled bacterial or leaf disease, or a palm bud drench after a freeze when the spear pulls out; not a routine program line.",
+        "M01/M1: Copper only for a diagnosed labeled bacterial or leaf disease, after the exact container label is verified; not a routine program line.",
         "3: Propizol only for labeled diagnosed tree diseases; not routine palm health.",
         "Leaf-spot and mildew fungicides need 7 to 28 day intervals; the 40 to 60 day visit cannot protect foliage. No routine fungicide on the base program."
       ]
