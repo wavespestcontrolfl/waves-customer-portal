@@ -212,17 +212,21 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     );
     // Owner 2026-10-08: a customer ending the PLAN hears about the portal's self-cancel, once;
     // a one-visit cancel is never pointed at it, and the draft never claims the cancellation.
-    expect(prompt).toContain('ONLY when the customer wants to end their recurring service plan altogether (not skip, move or cancel ONE visit) AND the FREE RE-SERVICE fact shows a recurring plan on file');
+    expect(prompt).toContain('ONLY when the customer wants to end their recurring service plan altogether (not skip, move or cancel ONE visit) AND the FREE RE-SERVICE fact shows a VERIFIED recurring plan on file');
     // Codex #6152 r1 P2: keyed on the plan state the facts already carry — never for a no-plan or unverified account.
-    expect(prompt).toContain('NEVER when it reads "no recurring plan on file" or "eligibility unavailable"), also tell them ONCE that they can cancel the plan on their own at any time in the customer portal, under Plan');
+    expect(prompt).toContain('NEVER when it reads "no recurring plan on file" or "eligibility unavailable", and NEVER when "already booked" is the only thing it says), also tell them ONCE that they can cancel the plan on their own at any time in the customer portal, under Plan');
     // every wording the rule names is one reserviceFactLine really renders
     const { reserviceFactLine } = require('../services/sms-shadow-drafter');
     expect(reserviceFactLine([], {}, 'none')).toContain('no recurring plan on file');
     expect(reserviceFactLine([], {}, 'unknown')).toContain('eligibility unavailable');
-    expect(reserviceFactLine([], {}, 'unsupported')).toContain('recurring plan on file');
-    expect(reserviceFactLine(['pest'], {}, 'unknown')).toContain('eligible for');
-    expect(reserviceFactLine([], {}, 'unknown', ['lawn'])).toContain('covered for');
-    expect(reserviceFactLine([], { pest: { date: '2026-10-12' } }, 'unknown')).toContain('already booked');
+    expect(reserviceFactLine([], {}, 'unsupported')).toBe('FREE RE-SERVICE: not eligible (recurring plan on file, no self-serve re-service lane)');
+    expect(reserviceFactLine(['pest'], {}, 'unknown')).toMatch(/^FREE RE-SERVICE: eligible for /);
+    expect(reserviceFactLine([], {}, 'unknown', ['lawn'])).toMatch(/^FREE RE-SERVICE: covered for /);
+    // Codex #6152 r2 P2: an inactive customer's open callback renders a booked-only line while the
+    // plan lookup is unverified — that line names none of the verified states the rule accepts.
+    const bookedOnly = reserviceFactLine([], { pest: { date: '2026-10-12' } }, 'unknown');
+    expect(bookedOnly).toMatch(/^FREE RE-SERVICE: pest already booked/);
+    expect(bookedOnly).not.toMatch(/eligible for|covered for|recurring plan on file/);
     expect(prompt).toContain('never say the plan is cancelled, and never point a one-visit request at the portal plan cancellation.');
   });
 
