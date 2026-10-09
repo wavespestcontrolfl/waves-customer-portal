@@ -487,22 +487,31 @@
       "summary": "Trees by tank · shrubs by area"
     },
     "zylam": {
-      "kind": "Insects · foliar spray",
+      "kind": "Insects · foliar spray or soil drench",
       "targetTitle": "Pest targets",
       "targets": "Listed soft and armored scales, whiteflies, mealybugs, lace bugs, and other ornamental insects. Aphids and certain thrips: suppression only.",
-      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Drench and bark applications have separate instructions.",
+      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height (see Label rates), never by the tank amount. The label directs soil applications early in the plant's growing cycle for best control: drench at the spring flush, and treat a later drench as a rescue. Pull back mulch, rock or gravel first so the mix pools at the base. Mix the dose in at least 1 quart of water per foot of plant height and pour it evenly on the soil around the base, on moist soil. With less water, irrigate 1/2 inch right after. Keep the soil moist for 7 days. Bark applications have separate instructions.",
       "rates": [
         [
           "7.25–16 fl oz / 100 gal",
           "Ornamental foliar application."
+        ],
+        [
+          "0.18–0.4 fl oz per ft of height",
+          "Soil drench, shrubs and sagos. Measure a sago from the soil to the frond tip."
         ]
       ],
       "limits": [
         "No application while bees forage or plants flower; wait until all petals have fallen.",
-        "Foliar limit: 78.9 fl oz/acre/season; no more than three applications per growing season.",
+        "No more than three applications per growing season, sprays and drenches together.",
+        "Rate a sago as a shrub by height. Never by trunk diameter: that is 3 to 5 times the dose.",
+        "Single plants only. Never drench a hedge with Zylam.",
+        "Drench only on moist soil: not dry, saturated or frozen.",
+        "After a soil drench, do not follow with a foliar Zylam spray or another neonicotinoid (label resistance direction).",
+        "Yearly limit: 78.9 fl oz per acre, which is 1.81 fl oz per 1,000 sq ft of bed area, sprays and drenches together.",
         "Follow Group 4A rotation restrictions and keep others out until dry."
       ],
-      "source": "PBI-Gordon · EPA 2217-937 · 08-2020 · pp. 2–3, 6",
+      "source": "PBI-Gordon · EPA 2217-937 · 08-2020 · pp. 2–6",
       "url": "https://labelsds.com/document.php?file=Zylam+Liquid+Label+8-1-20.pdf&product=503",
       "name": "Zylam Liquid",
       "equipment": [
@@ -514,7 +523,8 @@
         0.0725,
         0.16
       ],
-      "summary": ""
+      "summary": "",
+      "mixLabel": "Foliar spray only"
     },
     "tritek15": {
       "kind": "Insects, mites & diseases · contact oil",

@@ -51,6 +51,35 @@ test('Talus and Headway are not in the reference; TriStar carries the verified C
   }
 });
 
+test('Zylam carries the soil-drench dose by plant height, kept out of the per-gallon tank calculator', () => {
+  const { zylam } = require('../config/tree-shrub-field-guide.json').products;
+  expect(zylam.kind).toBe('Insects · foliar spray or soil drench');
+  expect(zylam.rates).toEqual([
+    ['7.25–16 fl oz / 100 gal', 'Ornamental foliar application.'],
+    ['0.18–0.4 fl oz per ft of height', 'Soil drench, shrubs and sagos. Measure a sago from the soil to the frond tip.'],
+  ]);
+  expect(zylam.limits).toEqual(expect.arrayContaining([
+    'Rate a sago as a shrub by height. Never by trunk diameter: that is 3 to 5 times the dose.',
+    'Single plants only. Never drench a hedge with Zylam.',
+    'Drench only on moist soil: not dry, saturated or frozen.',
+    // The label's three-application cap covers every method (Codex r1 #6200).
+    'No more than three applications per growing season, sprays and drenches together.',
+    'Yearly limit: 78.9 fl oz per acre, which is 1.81 fl oz per 1,000 sq ft of bed area, sprays and drenches together.',
+  ]));
+  // The label's drench carrier: 1 quart of mix per foot, or 1/2 inch of irrigation; moist soil for 7 days.
+  expect(zylam.apply).toMatch(/Pull back mulch, rock or gravel first so the mix pools at the base\./);
+  expect(zylam.apply).toMatch(/at least 1 quart of water per foot of plant height/);
+  expect(zylam.apply).toMatch(/irrigate 1\/2 inch right after\. Keep the soil moist for 7 days\./);
+  // The tank calculator keeps the foliar per-gallon range only.
+  expect(zylam.mix).toEqual([0.0725, 0.16]);
+  // Codex r5 #6200: the tank amount is named foliar-only, and the drench carries the label's timing.
+  expect(zylam.mixLabel).toBe('Foliar spray only');
+  expect(zylam.limits).toContain('After a soil drench, do not follow with a foliar Zylam spray or another neonicotinoid (label resistance direction).');
+  expect(zylam.source).toMatch(/pp\. 2–6$/);
+  expect(zylam.apply).toMatch(/never by the tank amount\. The label directs soil applications early in the plant's growing cycle/);
+  expect(zylam.mixes).toBeUndefined();
+});
+
 const application = (product_name, date, overrides = {}) => ({ product_name, application_date: date, property_id: 'property-a', rate_unit: 'lb', application_rate: 2.3, ...overrides });
 test('Snapshot respects property, recent applications, rolling limits and unknown history units', () => {
   const due = rows => treeShrubDueReason('snapshot', rows, '2028-07-01', 'property-a');
