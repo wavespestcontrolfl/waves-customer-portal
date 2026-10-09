@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
@@ -19,11 +19,11 @@ import tree from './__fixtures__/tree-shrub-report-v2.json';
 
 const clone = (value) => structuredClone(value);
 
-function renderReport(payload, search = '') {
-  window.history.pushState({}, '', `/report/tok${search}`);
+function renderReport(payload, search = '', token = 'tok') {
+  window.history.pushState({}, '', `/report/${token}${search}`);
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => payload })));
   return render(
-    <MemoryRouter initialEntries={['/report/tok']}>
+    <MemoryRouter initialEntries={[`/report/${token}`]}>
       <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
     </MemoryRouter>,
   );
@@ -264,6 +264,154 @@ describe('gate on: the phone order', () => {
     await waitForReport();
     expect(screen.getByTestId('lawn-your-part')).toHaveTextContent('Keep pets off treated turf until it is fully dry.');
     expect(screen.getByTestId('lawn-your-part')).not.toHaveTextContent('Nothing for you to do');
+  });
+});
+
+describe('gate on: nothing the standard page shows is lost', () => {
+  const eventNames = () => globalThis.fetch.mock.calls
+    .filter(([url]) => String(url).includes('/events'))
+    .map(([, init]) => JSON.parse(init.body).eventName);
+
+  it('keeps the screened four-section technician report in the Visit Summary, whole, beside the lead\'s applied sentence', async () => {
+    const payload = clone(spotOn);
+    const sections = [
+      { key: 'found', title: 'What we found', paragraphs: ['Thin turf along the driveway edge.'] },
+      { key: 'did', title: 'What we did and why', paragraphs: ['Today we applied azoxystrobin and propiconazole to the spot.'] },
+      { key: 'expect', title: 'What to expect', paragraphs: ['The edge should hold steady.'] },
+      { key: 'whatsNext', title: 'What\u2019s next', paragraphs: ['We will recheck the edge.'] },
+    ];
+    payload.summarySource = 'technician_report';
+    payload.reportSections = sections;
+    payload.summary = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+    expect(payload.reportV2.lead.applied).toBeTruthy();
+    const { container } = renderReport(payload);
+    await waitForReport();
+    const summary = container.querySelector('#visit-summary');
+    expect(summary).not.toBeNull();
+    expect(summary.querySelector('[data-report-sections]')).not.toBeNull();
+    ['What we found', 'What we did and why', 'What to expect', 'What\u2019s next'].forEach((title) => expect(summary).toHaveTextContent(title));
+    expect(summary).toHaveTextContent('Today we applied azoxystrobin and propiconazole to the spot.');
+  });
+
+  it('prints approved service highlights (technician photos, captions, locations) in the photos and findings group', async () => {
+    const payload = clone(spotOn);
+    payload.proofMoments = [{ id: 'm1', mediaUrl: 'https://example.test/edge.jpg', mediaType: 'image', tagLabel: 'Driveway edge', locationArea: 'Front yard', customerCaption: 'The thin strip before treatment.' }];
+    const { container } = renderReport(payload);
+    await waitForReport();
+    const highlights = container.querySelector('#service-highlights');
+    expect(highlights).not.toBeNull();
+    expect(highlights).toHaveTextContent('Driveway edge');
+    expect(highlights).toHaveTextContent('Front yard');
+    expect(highlights).toHaveTextContent('The thin strip before treatment.');
+    const at = (needle) => text(container).indexOf(needle);
+    expect(at('Priority findings')).toBeLessThan(at('Service Highlights'));
+    expect(at('Service Highlights')).toBeLessThan(at('Overall Lawn Status'));
+  });
+
+  it('records the re-entry timer view once for timed content, and not for a condition-only card', async () => {
+    renderReport(clone(spotOn), '', 'tok-timed');
+    await waitForReport();
+    await waitFor(() => expect(eventNames()).toContain('reentry_timer_viewed'));
+    expect(eventNames().filter((name) => name === 'reentry_timer_viewed')).toHaveLength(1);
+    cleanup();
+    renderReport(clone(granularOn), '', 'tok-condition');
+    await waitForReport();
+    await waitFor(() => expect(eventNames()).toContain('service_report_viewed'));
+    expect(eventNames()).not.toContain('reentry_timer_viewed');
+  });
+
+  it('keeps the Poison Control note outside the collapsed products block, and labels a poison-only slot as Poison Control', async () => {
+    const { container } = renderReport(clone(spotOn), '', 'tok-products');
+    await waitForReport();
+    const notes = [...container.querySelectorAll('[data-testid="poison-control-note"]')];
+    expect(notes.some((note) => !note.closest('details'))).toBe(true);
+    cleanup();
+    const poisonOnly = clone(spotOn);
+    poisonOnly.applications = [];
+    poisonOnly.applicationMade = true;
+    const second = renderReport(poisonOnly, '', 'tok-poison');
+    await waitForReport();
+    expect(second.container.querySelector('details.lawn-layout-products')).toBeNull();
+    const section = second.container.querySelector('#poison-control');
+    expect(section).not.toBeNull();
+    expect(section.closest('details')).toBeNull();
+    expect(section).toHaveTextContent('Poison Control');
+    expect(text(second.container)).not.toContain('Products Applied');
+  });
+
+  it('prints no products block at all when the standard page prints none', async () => {
+    const payload = clone(spotOn);
+    payload.applications = [];
+    payload.applicationMade = false;
+    const { container } = renderReport(payload, '', 'tok-none');
+    await waitForReport();
+    expect(container.querySelector('details.lawn-layout-products')).toBeNull();
+    expect(container.querySelector('#poison-control')).toBeNull();
+    expect(text(container)).not.toContain('Products Applied');
+  });
+
+  it('labels the moved comparison block with the prior visit\'s day, as the lead card does', async () => {
+    const payload = clone(spotOn);
+    payload.reportV2.lead.sinceLast = { priorDate: '2026-10-02', lines: ['Last visit we applied a feeding.'] };
+    renderReport(payload, '', 'tok-since');
+    await waitForReport();
+    expect(screen.getByTestId('lawn-since-last')).toHaveTextContent('Since your last visit, Oct 2');
+  });
+
+  it('drops the lead\'s date when the upcoming card (all service lines, no merge) lists that lawn visit, and keeps it when only a pest visit is listed', async () => {
+    const payload = clone(spotOn);
+    delete payload.planSummary;
+    payload.upcomingVisitsCard = { visits: [
+      { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-20' },
+      { serviceType: 'Lawn Care Treatment Program', scheduledDate: '2026-10-23' },
+    ] };
+    const { container } = renderReport(payload, '', 'tok-up1');
+    await waitForReport();
+    expect(text(container)).toContain('Your upcoming visits');
+    expect(text(container)).not.toContain('Friday, October 23');
+    cleanup();
+    payload.upcomingVisitsCard.visits.pop();
+    const second = renderReport(payload, '', 'tok-up2');
+    await waitForReport();
+    expect(text(second.container)).toContain('Friday, October 23');
+  });
+
+  it('re-evaluates the banner rules when the banner expires, with no refresh', async () => {
+    const payload = clone(spotOn);
+    const [line] = payload.reportV2.banner.lines;
+    payload.reportV2.banner.expiresAt = '2026-10-09T15:10:00.001Z';
+    payload.reportV2.insights[0].customerAction = line;
+    const { container } = renderReport(payload, '', 'tok-expiry');
+    await waitForReport();
+    expect(container.querySelector('.lawn-layout-banner')).not.toBeNull();
+    expect(text(container)).not.toContain(`Your next step: ${line}`);
+    act(() => { vi.setSystemTime(new Date('2026-10-09T15:12:00Z')); });
+    await waitFor(() => expect(container.querySelector('.lawn-layout-banner')).toBeNull(), { timeout: 3000 });
+    expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
+    expect(text(container)).toContain(`Your next step: ${line}`);
+  });
+
+  it('never claims "nothing to do" while a later section carries an instruction', async () => {
+    const quiet = clone(cleanOn);
+    quiet.reportV2.lead.yourPart = [];
+    const first = renderReport(quiet, '', 'tok-quiet');
+    await waitForReport();
+    expect(screen.getByTestId('lawn-your-part')).toHaveTextContent('Nothing for you to do after this visit.');
+    first.unmount();
+    const withRec = clone(quiet);
+    withRec.recommendations = ['Trim the hedge back from the sprinkler head by the driveway.'];
+    const second = renderReport(withRec, '', 'tok-rec');
+    await waitForReport();
+    expect(screen.queryByTestId('lawn-your-part')).toBeNull();
+    expect(text(second.container)).not.toContain('Nothing for you to do');
+    expect(text(second.container)).toContain('Trim the hedge back from the sprinkler head by the driveway.');
+    second.unmount();
+    const withStep = clone(quiet);
+    withStep.reportV2.insights = [{ priority: 1, status: 'watch', category: 'coverage', headline: 'Thin edge', whatWeSaw: 'x', customerAction: 'Check the zone by the fence.' }];
+    const third = renderReport(withStep, '', 'tok-step');
+    await waitForReport();
+    expect(screen.queryByTestId('lawn-your-part')).toBeNull();
+    expect(text(third.container)).toContain('Check the zone by the fence.');
   });
 });
 

@@ -6,6 +6,9 @@ import {
   bannerCarriesWatering,
   bannerShowsAnything,
   gaugePrintsRange,
+  LAYOUT_DECLINES,
+  layoutDeclines,
+  pageCarriesInstruction,
   insightsWithoutRepeats,
   lawnLayoutActive,
   lawnLayoutStatusData,
@@ -298,5 +301,89 @@ describe('whenToCallLines', () => {
     expect(lines).toHaveLength(LAYOUT_COPY.whenToCall.length);
     expect(lines[0]).toBe('Call or text us at (941) 297-5749 if the area we treated gets worse.');
     expect(lines.join(' ')).not.toMatch(/[{}]/);
+  });
+});
+
+describe('planShowsNextVisit with the upcoming card on and GATE_LAWN_REPORT_CLARITY off', () => {
+  // Without the clarity gate the card lists every service line (up to six visits), standalone or merged.
+  const lead = { reportV2: { snapshot: { nextVisit: { label: 'Friday, October 23', source: 'scheduled' } } } };
+  const mixed = [
+    { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-20' },
+    { serviceType: 'Lawn Care Treatment Program', scheduledDate: '2026-10-23' },
+    { serviceType: 'Mosquito Control', scheduledDate: '2026-10-23' },
+  ];
+
+  it('finds the lawn visit among other lines\' visits, merged or standalone', () => {
+    expect(planShowsNextVisit({ ...lead, upcomingVisitsCard: { visits: mixed } })).toBe(true);
+    expect(planShowsNextVisit({ ...lead, upcomingVisitsCard: { visits: mixed, merged: true } })).toBe(true);
+  });
+
+  it('keeps the lead\'s date when the list holds other lines only', () => {
+    expect(planShowsNextVisit({ ...lead, upcomingVisitsCard: { visits: [mixed[0], mixed[2]] } })).toBe(false);
+  });
+});
+
+describe('layoutDeclines', () => {
+  it('a plain lawn payload declines nothing', () => {
+    expect(layoutDeclines({ serviceLine: 'lawn', reportV2: {}, pestPressure: null, companionReports: [], dynamicContext: { reentry: {} } })).toEqual([]);
+    expect(layoutDeclines(undefined)).toEqual([]);
+  });
+
+  it('content the layout has no section for keeps the standard page: each one declines, and turns the layout off', () => {
+    const carried = {
+      pestReportV2: { x: 1 }, mosquitoReportV2: { x: 1 }, termiteReportV2: { x: 1 }, cockroachReportV2: { x: 1 },
+      customerConcernCard: { x: 1 }, typedReport: { x: 1 }, typedVisitTimeline: { x: 1 }, activity: { x: 1 },
+      pestPressure: { enabled: true }, companionReports: [{ type: 'x' }], stationMap: { stations: [{ id: 1 }] },
+    };
+    Object.entries(carried).forEach(([key, value]) => {
+      const data = { serviceLine: 'lawn', lawnLayout: { mowingRange: null }, reportV2: { lead: {} }, [key]: value };
+      expect(layoutDeclines(data)).toEqual([key]);
+      expect(lawnLayoutActive(data, 'live')).toBe(false);
+    });
+    const pressure = { serviceLine: 'lawn', lawnLayout: {}, reportV2: { lead: {} }, dynamicContext: { pressureTrend: { x: 1 } } };
+    expect(layoutDeclines(pressure)).toEqual(['pressureTrend']);
+    expect(Object.keys(LAYOUT_DECLINES)).toContain('pressureTrend');
+  });
+
+  it('a pest-pressure card the standard page would not print does not decline', () => {
+    expect(layoutDeclines({ pestPressure: { enabled: false } })).toEqual([]);
+    expect(layoutDeclines({ pestPressure: { showOnCustomerReport: false } })).toEqual([]);
+  });
+});
+
+describe('pageCarriesInstruction', () => {
+  const base = () => ({ reportV2: { lead: {}, insights: [{ priority: 1, status: 'healthy', category: 'overall', customerAction: null }], water: {}, aftercare: { neutral: true, watering: 'No special watering is needed.' } } });
+
+  it('a clean page carries none', () => {
+    expect(pageCarriesInstruction(base(), Date.now())).toBe(false);
+  });
+
+  it.each([
+    ['a technician recommendation', (d) => { d.recommendations = ['Trim the hedge back from the sprinkler head.']; }],
+    ['the lead\'s own step', (d) => { d.reportV2.lead.yourPart = ['Raise the mower one setting.']; }],
+    ['a finding\'s next step', (d) => { d.reportV2.insights = [{ priority: 1, status: 'watch', category: 'coverage', customerAction: 'Check the zone.' }]; }],
+    ['the weekly watering plan', (d) => { d.reportV2.water.weekPlan = { title: 'This week: about 30 minutes per zone' }; }],
+    ['a coverage-watch callout', (d) => { d.reportV2.water.coverageWatch = true; }],
+    ['the aftercare watering note', (d) => { d.reportV2.aftercare = { neutral: false, watering: 'Water in today\u2019s application.' }; }],
+    ['tips from your technician', (d) => { d.techNote = { tips: [{ id: 'x' }] }; }],
+  ])('carries one: %s', (_label, mutate) => {
+    const data = base();
+    mutate(data);
+    expect(pageCarriesInstruction(data, Date.now())).toBe(true);
+  });
+
+  it('a finding step that only repeats the banner is not an instruction of its own', () => {
+    const data = base();
+    const banner = { lines: ['Skip your turf watering until today\u2019s treatment has dried.'] };
+    data.reportV2.banner = banner;
+    data.reportV2.insights = [{ priority: 1, status: 'watch', category: 'water', customerAction: banner.lines[0] }];
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
+  });
+
+  it('a finding outside the three the page prints does not count', () => {
+    const data = base();
+    data.reportV2.insights = [1, 2, 3].map((n) => ({ priority: n, status: 'healthy', category: 'weeds', customerAction: null }))
+      .concat([{ priority: 4, status: 'watch', category: 'coverage', customerAction: 'Hidden fourth.' }]);
+    expect(pageCarriesInstruction(data, Date.now())).toBe(false);
   });
 });

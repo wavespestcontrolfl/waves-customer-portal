@@ -11,8 +11,8 @@
 // Hidden here, not deleted: the Visit Timeline, the Weather call block, "Your documents", the
 // re-entry card (its sentence moves into "Your part"). The PDF document never uses this file.
 
-import { Fragment } from 'react';
-import ReportText from '../ReportSections';
+import { Fragment, cloneElement, useEffect, useState } from 'react';
+import ReportText, { reportSectionsForText } from '../ReportSections';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import { usePrintRequested } from '../usePrintRequested';
@@ -36,6 +36,7 @@ import {
   WaterIntakeBar,
   nextVisitSentence,
   scoreStatus,
+  sinceLastLabel,
   statusMeta,
 } from './LawnReportV2';
 import {
@@ -45,6 +46,7 @@ import {
   insightsWithoutRepeats,
   lawnLayoutActive,
   mowingLine,
+  pageCarriesInstruction,
   planShowsNextVisit,
   watchingLine,
   whenToCallLines,
@@ -87,8 +89,11 @@ function Collapsible({ summary, className, children }) {
 // What the customer does after this visit, from data the report already has: the re-entry sentence
 // (the report's own, timed or condition), the watering banner (its water-in or hold lines and a label
 // mow hold, printed once, here), and the lead's own homeowner step. Nothing to do = one fixed sentence.
-export function LawnYourPartCard({ banner = null, reentry = null, lines = [], style = null }) {
+export function LawnYourPartCard({ banner = null, reentry = null, lines = [], othersCarryInstruction = false, style = null }) {
   const empty = yourPartIsEmpty({ banner, reentry, lines });
+  // Empty, but a later section carries a customer instruction (a recommendation, a finding's step, the weekly
+  // plan): the card says nothing, and is left out, rather than claim there is nothing to do.
+  if (empty && othersCarryInstruction) return null;
   return (
     <Card style={{ background: TAN, ...(style || {}) }}>
       <div data-testid="lawn-your-part">
@@ -147,14 +152,17 @@ function WhatWeDid({ data, slots }) {
   const tech = withoutRepeatedApplied(lead.techParagraph, lead.applied);
   // The Visit Summary paragraph stays (it carries the season, the photo read and the next-visit topics);
   // only an applied sentence the lead's own sentence already says in full is left out of it.
+  // The screened four-section technician report (summary.sections) prints as the standard page prints it,
+  // whole: the lead's applied sentence is not a substitute for its sections.
   const summary = slots.visitSummary;
-  const summaryText = summary ? withoutRepeatedApplied(summary.text, lead.applied) : null;
+  const sectioned = Boolean(summary) && Boolean(reportSectionsForText(summary.sections, summary.text));
+  const summaryText = summary && !sectioned ? withoutRepeatedApplied(summary.text, lead.applied) : (summary && summary.text) || null;
   return (
     <>
       {sinceLast.length || lead.applied || tech ? (
         <Card style={{ background: TAN, display: 'grid', gap: 10 }}>
           {sinceLast.length ? (
-            <LeadBox label="Since your last visit" testId="lawn-since-last">
+            <LeadBox label={sinceLastLabel(lead.sinceLast)} testId="lawn-since-last">
               {sinceLast.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}
             </LeadBox>
           ) : null}
@@ -174,17 +182,19 @@ function WhatWeDid({ data, slots }) {
 }
 
 // ── (d) photos + findings ───────────────────────────────────────────────────
-function PhotosAndFindings({ data, slots }) {
+function PhotosAndFindings({ data, slots, nowMs }) {
   const v2 = data.reportV2;
   const { lead } = v2;
   const hasPhotos = v2.photos?.length || v2.photoSet?.length || v2.photoSummary;
-  const insights = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare });
+  const insights = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare, nowMs });
   return (
     <>
       {hasPhotos ? <LawnPhotoStrip photos={v2.photos} photoSet={v2.photoSet} summary={v2.photoSummary} lead /> : null}
       {v2.photoSet?.length && v2.photoFindings?.length ? <LawnPhotoFindings findings={v2.photoFindings} /> : null}
       {v2.followUp?.scheduled && v2.followUp.reason && !lead.next ? <LawnFollowUpCard followUp={v2.followUp} showYourPart={false} /> : null}
       {insights.length ? <LawnInsightCards insights={insights} lead={lead} /> : null}
+      {slots.markedPhotos}
+      {slots.highlights}
       {slots.recordedFindings}
       {slots.recommendations}
     </>
@@ -261,11 +271,20 @@ function WaterAndMowing({ data }) {
 }
 
 // ── (i) products, collapsed ─────────────────────────────────────────────────
+// The wrapper follows the verdict AppliedProductsSection prints from (appliedProductsKind):
+//   products  the product cards in a collapsed block; the Poison Control note stays visible below it
+//   poison    the Poison Control section alone, visible under its own heading (never a "Products" label)
+//   none      nothing
 function Products({ slots }) {
+  if (slots.productsKind === 'none') return null;
+  if (slots.productsKind === 'poison') return slots.products;
   return (
-    <Collapsible summary={<span style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, color: TEXT }}>Products Applied <span aria-hidden="true" style={{ fontSize: 14 }}>▾</span></span>} className="lawn-layout-products">
-      {slots.products}
-    </Collapsible>
+    <>
+      <Collapsible summary={<span style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, color: TEXT }}>Products Applied <span aria-hidden="true" style={{ fontSize: 14 }}>▾</span></span>} className="lawn-layout-products">
+        {slots.products}
+      </Collapsible>
+      {slots.poisonNote}
+    </>
   );
 }
 
@@ -273,7 +292,7 @@ function Products({ slots }) {
 //   a  done + the next lawn visit    status, reservice, plan, upcoming, nextVisit
 //   b  Your part                     yourPart
 //   c  what we did + why now         whatWeDid
-//   d  photos + findings             photos, recap, treatmentMap
+//   d  photos + findings             photos (+ marked photos, service highlights, recommendations), recap, treatmentMap
 //   e  score (collapsed)             score
 //   f  what to expect + when to call expect, whenToCall, crossSell
 //   g  water this week (+ mowing)    water, techNote, nearYou
@@ -297,7 +316,7 @@ const SECTIONS = {
   plan: ({ slots }) => slots.plan,
   upcoming: ({ slots }) => slots.upcoming,
   nextVisit: (props) => <NextVisit {...props} />,
-  yourPart: ({ slots }) => slots.yourPart,
+  yourPart: ({ data, slots, nowMs }) => cloneElement(slots.yourPart, { othersCarryInstruction: pageCarriesInstruction(data, nowMs) }),
   whatWeDid: (props) => <WhatWeDid {...props} />,
   photos: (props) => <PhotosAndFindings {...props} />,
   recap: ({ slots }) => slots.recap,
@@ -324,16 +343,37 @@ const LAYOUT_CSS = `
   .lawn-layout-banner [data-testid="lawn-week-plan-condition"] > div { display: none; }
   /* The products section's own heading is the summary line above it. */
   .lawn-layout-products .applied-products-header { display: none; }
+  /* The Poison Control note is printed outside the collapsed block (safety content), so the copy inside
+     it is not shown a second time. */
+  .lawn-layout-products .poison-control-note { display: none; }
   .lawn-layout-collapse > summary::-webkit-details-marker { display: none; }
 `;
 
+// "Now" for every rule that depends on the watering banner. The banner ends at its expiresAt and then
+// prints one fine-print note instead of its lines (LawnWateringBanner re-renders itself at that moment);
+// this one timer makes the layout's own rules (the finding dedupe, the water card's hidden line, the
+// "nothing to do" test) re-evaluate at the same moment, with no refresh.
+function useBannerClock(banner) {
+  const expiresMs = banner?.expiresAt ? Date.parse(banner.expiresAt) : NaN;
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!Number.isFinite(expiresMs)) return undefined;
+    const wait = expiresMs - Date.now() + 1000;
+    if (wait <= 0 || wait > 2147483647) return undefined;
+    const timer = setTimeout(() => setNowMs(Date.now()), wait);
+    return () => clearTimeout(timer);
+  }, [expiresMs]);
+  return nowMs;
+}
+
 export function LawnLayoutBody({ data, slots }) {
-  const banner = bannerRepeatsAftercare(data.reportV2?.banner, data.reportV2?.aftercare) ? ' lawn-layout-banner' : '';
+  const nowMs = useBannerClock(data.reportV2?.banner);
+  const banner = bannerRepeatsAftercare(data.reportV2?.banner, data.reportV2?.aftercare, nowMs) ? ' lawn-layout-banner' : '';
   return (
     <PrintContext.Provider value={false}>
       <div className={`lawn-layout${banner}`} style={{ display: 'contents' }}>
         <style>{LAYOUT_CSS}</style>
-        {LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots })}</Fragment>)}
+        {LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots, nowMs })}</Fragment>)}
       </div>
     </PrintContext.Provider>
   );

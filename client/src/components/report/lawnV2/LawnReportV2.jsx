@@ -334,6 +334,13 @@ function shortDay(ymd) {
   return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+// "Since your last visit, Oct 2" (the prior visit's day when the lead carries it), else the bare label.
+// The lead card and the lawn layout print this one label.
+export function sinceLastLabel(sinceLast) {
+  const day = shortDay(sinceLast?.priorDate);
+  return day ? `Since your last visit, ${day}` : 'Since your last visit';
+}
+
 // ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
 // The above-the-fold block when the payload carries reportV2.lead (server:
 // lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
@@ -352,7 +359,6 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
   const visitDate = nextVisitSentence(snapshot.nextVisit);
   const nextVisit = [visitDate, lead.next].filter(Boolean).join(' — ');
   const sinceLastLines = Array.isArray(lead.sinceLast?.lines) ? lead.sinceLast.lines.filter(Boolean) : [];
-  const sinceLastDay = shortDay(lead.sinceLast?.priorDate);
   return (
     <div data-testid="lawn-lead-region">
       <Card style={{ background: TAN, ...(style || {}) }}>
@@ -374,7 +380,7 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
         {sinceLastLines.length ? (
           <div data-testid="lawn-since-last" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
             <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              {sinceLastDay ? `Since your last visit, ${sinceLastDay}` : 'Since your last visit'}
+              {sinceLastLabel(lead.sinceLast)}
             </div>
             <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>
               {sinceLastLines.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}

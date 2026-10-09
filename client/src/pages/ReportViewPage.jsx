@@ -2610,15 +2610,23 @@ function useReadinessNow(context, mode) {
 // GATE_LAWN_REPORT_LAYOUT: the "Your part" card. The re-entry sentence is the report's own (the
 // re-entry builder's customerSummary, a timed line or a condition, with its pet advisory); the
 // card prints the watering banner once and the lead's own homeowner step beside it.
-function LawnYourPart({ data, mode }) {
+function LawnYourPart({ data, mode, token, othersCarryInstruction = false }) {
   const context = data.dynamicContext?.reentry;
   const nowMs = useReadinessNow(context, mode);
   const reentry = context ? reentryRow(context, readinessSummary(context, mode, nowMs)) : null;
+  const timed = Array.isArray(context?.targets) && context.targets.length > 0;
+  // The re-entry card records that the customer saw its timer; this card replaces it, so a timed
+  // readiness view records the same event under the same conditions (only when timed targets exist).
+  useEffect(() => {
+    if (mode !== 'live' || !timed) return;
+    trackReportEvent(token, 'reentry_timer_viewed');
+  }, [context, mode, token, timed]);
   return (
     <LawnYourPartCard
       banner={data.reportV2?.banner}
       reentry={reentry}
       lines={alsoSteps(data.reportV2?.lead)}
+      othersCarryInstruction={othersCarryInstruction}
       style={{ marginTop: 16 }}
     />
   );
@@ -3953,13 +3961,77 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
   return actions.slice(0, 3);
 }
 
+// Service Highlights: the technician-approved photos, videos, captions and locations
+// (proofMoments). Its own section so the lawn layout (GATE_LAWN_REPORT_LAYOUT) can place it too.
+function ServiceHighlightsSection({ moments }) {
+  if (!moments.length) return null;
+  return (
+      <section data-glass="card" className="sr-section" id="service-highlights">
+        <h2>Service Highlights</h2>
+        <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
+          {visualProofMomentIntro(moments)}
+        </p>
+        <div className="sr-grid-3">
+          {moments.map((moment) => (
+            <div className="sr-cell" key={moment.id}>
+              {moment.mediaUrl && moment.mediaType === 'video' && (
+                <video
+                  src={moment.mediaUrl}
+                  controls
+                  style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
+                />
+              )}
+              {moment.mediaUrl && moment.mediaType !== 'video' && (
+                <img
+                  src={moment.mediaUrl}
+                  alt={moment.tagLabel || 'Service highlight'}
+                  style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
+                />
+              )}
+              <div className="sr-cell-label">{visualProofMomentStage(moment)}</div>
+              <div className="sr-cell-value">{moment.tagLabel || 'Service highlight'}</div>
+              {moment.locationArea && (
+                <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4 }}>
+                  {moment.locationArea}
+                </div>
+              )}
+              <div style={{ fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY, marginTop: 8 }}>
+                {moment.customerCaption || 'Service highlight documented by your technician.'}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+  );
+}
+
+// Treated-point marks on the tech's own photo (GATE_PHOTO_MARKS). Own component so the lawn
+// layout places the same marks the standard page prints.
+function MarkedPhotosSection({ data, mode }) {
+  return (data.markedPhotos || []).map((marked) => (
+    <MarkedPhotoCard key={marked.photoId} marked={marked} live={mode === 'live'} />
+  ));
+}
+
+// What AppliedProductsSection prints: 'products' (the product cards and the Poison Control note),
+// 'poison' (no product rows, but something went down: the Poison Control section alone) or 'none'.
+// One verdict for the section and for the lawn layout's wrapper around it.
+function appliedProductsKind(data) {
+  const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
+  if (applications.length) return 'products';
+  const something = data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data);
+  return something ? 'poison' : 'none';
+}
+
 function AppliedProductsSection({ data, mode = 'live' }) {
   // Shared product-identity rule (lib/product-application.js) on EVERY
   // line, matching the PDF document and the header count: termite / rodent
   // monitoring devices (stations, cartridges) are checks, not products
   // applied (codex P2 #3600 r23).
   const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
-  if (!applications.length) {
+  const kind = appliedProductsKind(data);
+  if (kind === 'none') return null;
+  if (kind === 'poison') {
     // No product rows, yet something went down: the server's applicationMade
     // verdict from typed / specialty treatment evidence (product rows are
     // optional there — Codex r1 #5032), an UNKNOWN verdict (null: the product
@@ -3968,7 +4040,6 @@ function AppliedProductsSection({ data, mode = 'live' }) {
     // (owner 2026-09-26). Poison Control prints on its own; this mount is the
     // one slot both layouts share. The applicator is named only on real
     // application evidence — a station check applied nothing (Codex r4).
-    if (data.applicationMade !== true && data.applicationMade !== null && !reportHasRodenticide(data)) return null;
     return (
       <section data-glass="card" className="sr-section applied-products-section" id="poison-control">
         <h2>Poison Control</h2>
@@ -9579,7 +9650,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,
                 upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
-                yourPart: <LawnYourPart data={data} mode={mode} />,
+                yourPart: <LawnYourPart data={data} mode={mode} token={token} />,
                 recap: <RecapVideoCard recap={data.recap} token={token} />,
                 recordedFindings: recordedFindingsList,
                 visitSummary: { text: visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary }), sections: reportSections, nextVisitLabel: nextSameServiceLabel },
@@ -9590,6 +9661,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 crossSell: <CrossSellCard data={data} token={token} mode={mode} />,
                 review: <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />,
                 referral: <ReferralCard data={data} token={token} mode={mode} />,
+                highlights: <ServiceHighlightsSection moments={orderedProofMoments} />,
+                markedPhotos: <MarkedPhotosSection data={data} mode={mode} />,
+                productsKind: appliedProductsKind(data),
+                poisonNote: <PoisonControlNote data={data} listsProducts showApplicator />,
                 products: <AppliedProductsSection data={data} mode={mode} />,
               }}
             />
@@ -10083,9 +10158,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             returns ServiceReportDocument before this tree ever renders, and
             that document draws its own marked-photo block. Both read their
             wording from components/report/markedPhotoCopy.js. */}
-        {(data.markedPhotos || []).map((marked) => (
-          <MarkedPhotoCard key={marked.photoId} marked={marked} live={mode === 'live'} />
-        ))}
+        <MarkedPhotosSection data={data} mode={mode} />
 
         {/* Bait station map (station-map-v1) — live web only; pdf/static have
             no satellite basemap to pin against (provider ToS). Rodent refresh
@@ -10143,44 +10216,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             the isV2LeadLayout mount above; mutually exclusive). */}
         {!isV2LeadLayout && <ReferralCard data={data} token={token} mode={mode} />}
 
-        {orderedProofMoments.length > 0 && (
-          <section data-glass="card" className="sr-section" id="service-highlights">
-            <h2>Service Highlights</h2>
-            <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
-              {visualProofMomentIntro(orderedProofMoments)}
-            </p>
-            <div className="sr-grid-3">
-              {orderedProofMoments.map((moment) => (
-                <div className="sr-cell" key={moment.id}>
-                  {moment.mediaUrl && moment.mediaType === 'video' && (
-                    <video
-                      src={moment.mediaUrl}
-                      controls
-                      style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
-                    />
-                  )}
-                  {moment.mediaUrl && moment.mediaType !== 'video' && (
-                    <img
-                      src={moment.mediaUrl}
-                      alt={moment.tagLabel || 'Service highlight'}
-                      style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
-                    />
-                  )}
-                  <div className="sr-cell-label">{visualProofMomentStage(moment)}</div>
-                  <div className="sr-cell-value">{moment.tagLabel || 'Service highlight'}</div>
-                  {moment.locationArea && (
-                    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4 }}>
-                      {moment.locationArea}
-                    </div>
-                  )}
-                  <div style={{ fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY, marginTop: 8 }}>
-                    {moment.customerCaption || 'Service highlight documented by your technician.'}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+        <ServiceHighlightsSection moments={orderedProofMoments} />
 
         {/* Legacy field photos render each photo with its per-photo vision caption
             (which can over-diagnose). When reportV2 is present, the V2 photo strip

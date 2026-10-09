@@ -13,13 +13,42 @@ const isText = (value) => typeof value === 'string' && value.trim().length > 0;
 const isNumber = (value) => value != null && value !== '' && Number.isFinite(Number(value));
 const fill = (template, values) => template.replace(/\{(\w+)\}/g, (_, key) => values[key]);
 
-/** The layout applies to a LIVE lawn report whose payload carries the layout key and a lead. */
+// Content the standard page body prints that the lawn layout has no section for. A lawn payload that
+// carries any of it keeps the standard page (the layout declines), so the layout can never drop it. Each
+// entry mirrors the standard mount's own condition. (A lawn visit carries none of these today; they belong to
+// the pest, mosquito, termite, rodent and cockroach lines and to typed specialty reports.)
+export const LAYOUT_DECLINES = Object.freeze({
+  pestReportV2: (data) => Boolean(data.pestReportV2),
+  mosquitoReportV2: (data) => Boolean(data.mosquitoReportV2),
+  termiteReportV2: (data) => Boolean(data.termiteReportV2),
+  cockroachReportV2: (data) => Boolean(data.cockroachReportV2),
+  customerConcernCard: (data) => Boolean(data.customerConcernCard),
+  typedReport: (data) => Boolean(data.typedReport),
+  typedVisitTimeline: (data) => Boolean(data.typedVisitTimeline),
+  activity: (data) => Boolean(data.activity),
+  // the Pest Pressure card renders under the same test the standard page uses for its gauge
+  pestPressure: (data) => Boolean(data.pestPressure) && data.pestPressure.enabled !== false && data.pestPressure.showOnCustomerReport !== false,
+  pressureTrend: (data) => Boolean(data.dynamicContext?.pressureTrend),
+  companionReports: (data) => Array.isArray(data.companionReports) && data.companionReports.length > 0,
+  stationMap: (data) => Array.isArray(data.stationMap?.stations) && data.stationMap.stations.length > 0,
+});
+
+/** The names in LAYOUT_DECLINES that this payload carries. */
+export function layoutDeclines(data) {
+  return Object.keys(LAYOUT_DECLINES).filter((key) => LAYOUT_DECLINES[key](data || {}));
+}
+
+/**
+ * The layout applies to a LIVE lawn report whose payload carries the layout key and a lead, and nothing the
+ * layout has no section for (LAYOUT_DECLINES).
+ */
 export function lawnLayoutActive(data, mode) {
   return mode === 'live'
     && data?.serviceLine === 'lawn'
     && Boolean(data.lawnLayout)
     && typeof data.lawnLayout === 'object'
-    && Boolean(data.reportV2?.lead);
+    && Boolean(data.reportV2?.lead)
+    && layoutDeclines(data).length === 0;
 }
 
 /** The status card's data: "Your documents" is not part of the lawn layout. */
@@ -71,6 +100,26 @@ export function alsoSteps(lead) {
 /** Nothing to print in the card: the one fixed "nothing to do" sentence stands in. */
 export function yourPartIsEmpty({ banner, reentry, lines }) {
   return !bannerShowsAnything(banner) && !reentry && !(lines && lines.length);
+}
+
+/**
+ * True when ANY section the layout prints carries a customer instruction: the lead's own step, a finding's
+ * next step (after the dedupe, among the cards the findings block prints), the technician recommendations, the
+ * weekly watering plan, a coverage-watch callout, the aftercare watering or re-entry note, the tips from your
+ * technician. The card then never says "nothing to do" (and is left out when it would be empty).
+ */
+export function pageCarriesInstruction(data, nowMs) {
+  const v2 = data?.reportV2 || {};
+  if (alsoSteps(v2.lead).length) return true;
+  if ((data?.recommendations || []).length > 0) return true;
+  if (v2.water?.weekPlan?.title || v2.water?.coverageWatch) return true;
+  const care = v2.aftercare || {};
+  if (isText(care.watering) && care.neutral !== true) return true;
+  if (data?.techNote?.tips?.length) return true;
+  const cards = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare, nowMs }).filter(Boolean);
+  const shown = [...cards].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)).slice(0, FINDING_CARD_LIMIT);
+  if (!shown.length || shown.every((card) => card.category === 'overall')) return false;
+  return shown.some((card) => isText(card.customerAction));
 }
 
 // ── Dedupe ──────────────────────────────────────────────────────────────────
