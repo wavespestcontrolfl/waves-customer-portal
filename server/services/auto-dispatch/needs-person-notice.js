@@ -11,18 +11,19 @@
  *                 config.conflictMaxAddedDriveMinutes (CONFLICT_NO_NEAR_SLOT);
  *   no_slot       in conflict, and no valid slot exists at all.
  *
- * One notice per visit and date (dedupe key below). Budget: at most
- * MAX_NOTICES_PER_RUN per run, soonest date first; the rest wait for the next
- * run. Raising is best effort: a failure is logged and never fails the run.
+ * One notice per visit and date (dedupe key below). The lane shares the
+ * auto-dispatch ring allowance of 24 hours (audit.ringsLeft: all lanes and
+ * runs together), soonest date first; a standing notice is refreshed free
+ * and the rest wait for the next run. Raising is best effort: a failure is
+ * logged and never fails the run.
  *
- * NOT built here: a path that closes a notice once the visit is fixed. The
- * shared dedupe key only stops a repeat; a card whose visit later moves or
- * clears stays open until staff mark it done.
+ * A notice closes when its visit is cancelled or leaves the date, or when a
+ * complete run loaded the visit and no longer collected it: closeResolved.
  */
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
 
-const MAX_NOTICES_PER_RUN = 10;
+const RESOLVED_TITLE = 'Visit placement alert resolved';
 const KEY_PREFIX = 'auto-dispatch-needs-person:';
 
 // evaluatePlacement reason codes that, on a visit in conflict, mean no move
@@ -53,7 +54,7 @@ function collect(bucket, service, kind, conflict) {
   const key = noticeKey(service.id, date);
   if (!date || bucket.has(key)) return;
   bucket.set(key, {
-    key, id: String(service.id), customerId: service.customer_id || null, date, kind, problem: problemOf(conflict),
+    key, id: String(service.id), customer_id: service.customer_id || null, date, kind, problem: problemOf(conflict),
   });
 }
 
@@ -70,15 +71,23 @@ function whyFor(item, spoken) {
   return `The ${spoken} visit ${now}, and ${reason}.`;
 }
 
+// [templates with the customer's name, generic wording] for the headline
+// (docs/admin-notifications.md "Say who and what").
 function actionFor(item) {
-  if (item.kind === 'move_limit') return 'move a visit auto-dispatch cannot move again';
-  return item.problem === 'closed_day' ? 'move a visit off a closed day' : 'place a visit that overlaps another stop';
+  if (item.kind === 'move_limit') {
+    return [[(who) => `move ${who}'s visit; auto-dispatch cannot`, (who) => `move ${who}'s visit`], 'move a visit auto-dispatch cannot move again'];
+  }
+  if (item.problem === 'closed_day') {
+    return [[(who) => `move ${who}'s visit off a closed day`, (who) => `move ${who}'s visit`], 'move a visit off a closed day'];
+  }
+  return [[(who) => `place ${who}'s visit; it overlaps a stop`, (who) => `place ${who}'s visit`], 'place a visit that overlaps another stop'];
 }
 
 async function raiseOne(item, raiseAdminAlert, shortDateET) {
-  await raiseAdminAlert('schedule_conflict', {
+  const [templates, generic] = actionFor(item);
+  return raiseAdminAlert('schedule_conflict', {
     area: 'Schedule',
-    action: actionFor(item),
+    action: await require('./audit').namedVisitAction(item.customer_id, templates, generic),
     why: whyFor(item, shortDateET(`${item.date}T12:00:00Z`)),
     severity: 'needs-you',
     link: `/admin/dispatch?tab=schedule&date=${item.date}&appointment=${encodeURIComponent(item.id)}`,
@@ -90,24 +99,57 @@ async function raiseOne(item, raiseAdminAlert, shortDateET) {
     dedupeKey: item.key,
     refreshOnDedupe: true,
     metadata: {
-      scheduledServiceId: item.id, customerId: item.customerId, scheduledDate: item.date, kind: item.kind,
+      scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, kind: item.kind,
     },
   });
 }
 
-// Raise the collected notices: soonest date first, at most the budget.
-// Returns how many were raised. Never throws.
-async function raiseNotices(bucket) {
-  if (!bucket || bucket.size === 0) return 0;
-  let raised = 0;
+// Close the notices that no longer apply. A notice stays open while its visit
+// is still live on the notice's date, unless this run LOADED the visit, looked
+// at every visit (`complete`) and did not collect it: then it moved off the
+// conflict or got a time. A visit the run did not load (inside the lock
+// window, or a run that failed part way) keeps its notice. Best effort.
+async function closeResolved(bucket, { nowDate, complete, loadedIds }) {
   try {
+    const audit = require('./audit');
+    const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
+    const cleared = complete
+      ? [...standing].filter((key) => !bucket.has(key)).map((key) => key.slice(KEY_PREFIX.length).split(':')[0]).filter((id) => loadedIds.has(id))
+      : [];
+    await audit.retireResolvedNotices({
+      keyPattern: `${KEY_PREFIX}%`,
+      stillOpen: (q) => {
+        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed']);
+        if (cleared.length) q.whereNotIn('s.id', cleared);
+      },
+      resolvedTitle: RESOLVED_TITLE,
+      resolution: 'The visit no longer needs a person to place it',
+      body: 'This visit moved, was fixed or is no longer on that date.',
+    }, nowDate);
+  } catch (err) {
+    logger.error(`[auto-dispatch] needs-a-person notice close failed: ${err.message}`);
+  }
+}
+
+// Raise the collected notices: soonest date first, inside the shared ring
+// allowance. Returns how many writes rang. Never throws.
+async function raiseNotices(bucket, { nowDate = new Date(), complete = false, loadedIds = new Set() } = {}) {
+  if (!bucket) return 0;
+  await closeResolved(bucket, { nowDate, complete, loadedIds });
+  if (bucket.size === 0) return 0;
+  let rang = 0;
+  try {
+    const audit = require('./audit');
     const { raiseAdminAlert } = require('../admin-alert-compose');
     const { shortDateET } = require('../admin-alert-names');
-    const soonest = [...bucket.values()].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
-    for (const item of soonest.slice(0, MAX_NOTICES_PER_RUN)) {
+    const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
+    let left = await audit.ringsLeft();
+    for (const item of audit.withinRingBudget([...bucket.values()], standing, Infinity, (row) => row.key)) {
+      // Allowance spent: nothing more is raised, a standing notice included.
+      if (left <= 0) break;
       try {
-        await raiseOne(item, raiseAdminAlert, shortDateET);
-        raised += 1;
+        // Only a write that rang spends a slot.
+        if (audit.noticeRang(await raiseOne(item, raiseAdminAlert, shortDateET))) { left -= 1; rang += 1; }
       } catch (err) {
         logger.error(`[auto-dispatch] needs-a-person notice failed for ${item.id}: ${err.message}`);
       }
@@ -115,9 +157,9 @@ async function raiseNotices(bucket) {
   } catch (err) {
     logger.error(`[auto-dispatch] needs-a-person notices failed: ${err.message}`);
   }
-  return raised;
+  return rang;
 }
 
 module.exports = {
-  MAX_NOTICES_PER_RUN, noticeKey, collect, collectFromEvaluation, raiseNotices,
+  RESOLVED_TITLE, noticeKey, collect, collectFromEvaluation, raiseNotices,
 };

@@ -7,8 +7,23 @@ jest.mock('../services/admin-alert-compose', () => ({
   raiseAdminAlert: jest.fn(async () => ({ id: 1 })),
 }));
 
+// The shared ring allowance and the notice store reads (audit.js) are faked;
+// the budget pick and the ring test are the real ones.
+jest.mock('../services/auto-dispatch/audit', () => {
+  const actual = jest.requireActual('../services/auto-dispatch/audit');
+  return {
+    withinRingBudget: actual.withinRingBudget,
+    noticeRang: actual.noticeRang,
+    ringsLeft: jest.fn(async () => 10),
+    standingNoticeKeys: jest.fn(async () => new Set()),
+    retireResolvedNotices: jest.fn(async () => {}),
+    namedVisitAction: jest.fn(async (_id, _templates, generic) => generic),
+  };
+});
+
 const moveLimit = require('../services/auto-dispatch/move-limit');
 const notice = require('../services/auto-dispatch/needs-person-notice');
+const audit = require('../services/auto-dispatch/audit');
 const { SLOT_CHANGED_SQL } = require('../services/auto-dispatch/eligibility');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
 const { getAutoDispatchConfig } = require('../services/auto-dispatch/config');
@@ -88,9 +103,14 @@ describe('the verdict', () => {
 
 describe('needs-a-person notice', () => {
   const visit = (id, date) => ({ id, customer_id: `c-${id}`, scheduled_date: date });
-  beforeEach(() => raiseAdminAlert.mockClear());
+  beforeEach(() => {
+    raiseAdminAlert.mockClear();
+    audit.ringsLeft.mockResolvedValue(10);
+    audit.standingNoticeKeys.mockResolvedValue(new Set());
+    audit.retireResolvedNotices.mockClear();
+  });
 
-  test('one notice per visit and date, soonest first, at most 10 per run', async () => {
+  test('one notice per visit and date, soonest first, inside the shared allowance of 10', async () => {
     const bucket = new Map();
     for (let day = 12; day >= 1; day--) notice.collect(bucket, visit(`s${day}`, `2026-11-${String(day).padStart(2, '0')}`), 'move_limit', { kind: 'overlap' });
     notice.collect(bucket, visit('s1', '2026-11-01'), 'move_limit', { kind: 'overlap' }); // the same visit and date again
@@ -103,6 +123,40 @@ describe('needs-a-person notice', () => {
     expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe('auto-dispatch-needs-person:s1:2026-11-01');
   });
 
+  // The lane shares the allowance with every auto-dispatch lane (#6208): a
+  // day another lane filled leaves nothing, and a standing notice is free.
+  test('the shared allowance: 3 left rings 3; a standing notice is refreshed free; a deduped write spends nothing', async () => {
+    const bucket = new Map();
+    for (let day = 1; day <= 5; day++) notice.collect(bucket, visit(`s${day}`, `2026-11-0${day}`), 'no_slot', { kind: 'overlap' });
+    audit.ringsLeft.mockResolvedValue(3);
+    audit.standingNoticeKeys.mockResolvedValue(new Set(['auto-dispatch-needs-person:s1:2026-11-01']));
+    raiseAdminAlert.mockResolvedValueOnce({ id: 9, deduped: true }); // s1: standing, refreshed, no ring
+    expect(await notice.raiseNotices(bucket)).toBe(3);
+    expect(raiseAdminAlert.mock.calls.map(([, , opts]) => opts.dedupeKey.split(':')[1])).toEqual(['s1', 's2', 's3', 's4']);
+    raiseAdminAlert.mockClear();
+    audit.ringsLeft.mockResolvedValue(0);
+    expect(await notice.raiseNotices(bucket)).toBe(0);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a complete run closes the notice of a loaded visit it no longer collects; any other notice stays', async () => {
+    const bucket = new Map();
+    notice.collect(bucket, visit('kept', '2026-11-01'), 'no_slot', { kind: 'overlap' });
+    audit.standingNoticeKeys.mockResolvedValue(new Set([
+      'auto-dispatch-needs-person:kept:2026-11-01', 'auto-dispatch-needs-person:fixed:2026-11-02', 'auto-dispatch-needs-person:notloaded:2026-11-03',
+    ]));
+    const clearedOf = () => {
+      const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+      audit.retireResolvedNotices.mock.calls[audit.retireResolvedNotices.mock.calls.length - 1][0].stillOpen(q);
+      return q.whereNotIn.mock.calls;
+    };
+    await notice.raiseNotices(bucket, { complete: true, loadedIds: new Set(['kept', 'fixed']) });
+    expect(clearedOf()).toEqual([['s.id', ['fixed']]]);
+    // A run that failed part way clears nothing by evaluation.
+    await notice.raiseNotices(bucket, { complete: false, loadedIds: new Set(['kept', 'fixed']) });
+    expect(clearedOf()).toEqual([]);
+  });
+
   test('a failed notice is logged, the rest still go, and nothing throws', async () => {
     const bucket = new Map();
     notice.collect(bucket, visit('a', '2026-11-01'), 'no_slot', { kind: 'overlap' });
@@ -111,7 +165,7 @@ describe('needs-a-person notice', () => {
     expect(await notice.raiseNotices(bucket)).toBe(1);
   });
 
-  test('every wording passes the admin-notification rules, and names no customer', async () => {
+  test('every wording passes the admin-notification rules, with and without a customer name', async () => {
     const bucket = new Map();
     const conflicts = [{ kind: 'overlap' }, { kind: 'closed_day' }, null];
     let n = 0;
@@ -127,8 +181,17 @@ describe('needs-a-person notice', () => {
     for (const [category, spec] of raiseAdminAlert.mock.calls) {
       expect(category).toBe('schedule_conflict');
       expect(() => composeAdminAlert(spec)).not.toThrow();
-      expect(JSON.stringify(spec)).not.toMatch(/Pat|Example/);
     }
+    // The named headline of each kind fits the composer's rules too.
+    const { fitAction } = jest.requireActual('../services/admin-alert-names');
+    audit.namedVisitAction.mockImplementation(async (_id, templates) => fitAction('Schedule', 'Sample Tester', templates));
+    raiseAdminAlert.mockClear();
+    await notice.raiseNotices(bucket);
+    for (const [, spec] of raiseAdminAlert.mock.calls) {
+      expect(spec.action).toContain('Sample Tester');
+      expect(() => composeAdminAlert(spec)).not.toThrow();
+    }
+    audit.namedVisitAction.mockImplementation(async (_id, _templates, generic) => generic);
   });
 
   test('only a conflict visit that auto-dispatch cannot fix is collected from an evaluation', () => {

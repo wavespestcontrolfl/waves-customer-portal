@@ -22,7 +22,12 @@ jest.mock('../services/auto-dispatch/candidate-slots', () => ({
   findValidCandidateSlots: jest.fn(),
   _internals: { readCurrentConflict: jest.fn(async () => null) },
 }));
-jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 1 })) }));
+// The real composer over the faked notification store, spied: the pin
+// notices assert the store call, the needs-a-person notices the composer call.
+jest.mock('../services/admin-alert-compose', () => {
+  const actual = jest.requireActual('../services/admin-alert-compose');
+  return { ...actual, raiseAdminAlert: jest.fn(actual.raiseAdminAlert) };
+});
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
@@ -31,6 +36,8 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   ...jest.requireActual('../services/auto-dispatch/audit'),
   standingMissingGeoKeys: jest.fn(async () => new Set()),
   ringsLeft: jest.fn(async () => 10),
+  standingNoticeKeys: jest.fn(async () => new Set()),
+  retireResolvedNotices: jest.fn(async () => {}),
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),

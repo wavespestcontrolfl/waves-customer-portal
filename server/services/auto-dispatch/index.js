@@ -1255,12 +1255,14 @@ async function runAutoDispatch(opts = {}) {
     pinOkIds: new Set(),
     missingGeoWanted: [], // visits to raise a missing-pin notice for at the run's end
     pass1Complete: false,
+    loadedIds: new Set(), // every visit this run loaded (needs-a-person notice close)
   };
 
   try {
     run.capabilityFor = makeCapabilityFn(await loadCapabilityMap());
     const loadBoundary = resolveLoadBoundary(run.guardMode, nowDate, lockBoundary, today);
     const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
+    for (const loaded of services) run.loadedIds.add(String(loaded.id));
 
     // Guard-mode bulk context: reminder-freeze + (tiers') drift anchors or
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
@@ -1305,7 +1307,7 @@ async function runAutoDispatch(opts = {}) {
   }
   await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
-  await needsPerson.raiseNotices(run.needsPerson);
+  await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, complete: run.pass1Complete, loadedIds: run.loadedIds });
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
