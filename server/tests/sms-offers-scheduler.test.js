@@ -195,6 +195,23 @@ describe('gate off — byte-identical to today', () => {
   });
 });
 
+describe('gate off — a recurring series stays ambiguous (Codex #6172 r1 P1)', () => {
+  test('several upcoming visits of one service: no next-of-series identity, no prompt line, nothing offered by either path', async () => {
+    const drafter = freshDrafter();
+    const context = baseContext([
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-oct'),
+      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-jan'),
+    ]);
+    expect(await drafter.serviceIdentityFor('can we move my appointment?', context)).toEqual({ serviceType: null, certain: false, reason: 'ambiguous_upcoming' });
+    expect(mockIdentity.prompts.join('\n')).not.toContain('it is about the NEXT one');
+    const client = makeClient(plainReply());
+    const r = await drafter.generateGroundedDraft(argsFor(client, context));
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(picker.loadById).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+});
+
 describe('gate on — an upcoming visit is offered through the reschedule link picker', () => {
   beforeEach(() => { process.env.GATE_SMS_OFFERS_SCHEDULER = 'true'; });
 

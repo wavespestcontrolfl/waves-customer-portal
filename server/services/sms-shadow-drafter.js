@@ -180,7 +180,13 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // VERSION_SUFFIX_FACT_MARKERS.m = COMPANY + LABEL + VISIT STATUS & OPEN LOOPS +
 // PAYMENT + the MISSED VISIT scope line). 'house_voice_v12_real_answers7_m': 31 chars,
 // 36 with all four category tags. A later revision mints the next number + its own key.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}7_m`;
+// NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
+// scheduling text from a customer with several upcoming visits of one service now gets
+// OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
+// section: the number moves to "8" (its own cohort, so graduation, exam and judge evidence
+// never pool with drafts from before it) and the cumulative fact key stays 'm' — the facts
+// block's sections are unchanged, so the fact contract is the same as '7_m'.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}8_m`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -3562,7 +3568,7 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
     ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
     ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
     ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
-    ...(visits.filter((v) => v.upcoming).length > 1 ? ['- When the text is about their appointment without saying which one, and their scheduled visits above are all the same service, it is about the NEXT one: answer "visit" with the id of the earliest scheduled date.'] : []),
+    ...(nextOfSeriesLive() && visits.filter((v) => v.upcoming).length > 1 ? ['- When the text is about their appointment without saying which one, and their scheduled visits above are all the same service, it is about the NEXT one: answer "visit" with the id of the earliest scheduled date.'] : []),
     '- "none": the text names no service and points at no particular visit.',
     '- "unclear": it could be more than one visit or service, or it asks about several at once.',
     'Choose only from the lists above. When unsure, answer "unclear".',
@@ -3618,11 +3624,18 @@ function nextVisitOfSeries(upcoming) {
   return formatEtDate(first.date) === formatEtDate(second.date) ? null : first;
 }
 
-function unnamedServiceIdentity(visits, openEstimate) {
+// The next-of-series rule sizes OPEN TIMES from ONE visit's own reschedule picker, so it
+// exists only while GATE_SMS_OFFERS_SCHEDULER is on (Codex #6172 r1): with the gate off the
+// identity ladder is exactly what it was, and the zone finder never gets a series visit.
+function nextOfSeriesLive() {
+  return gateEnvValue('GATE_SMS_OFFERS_SCHEDULER');
+}
+
+function unnamedServiceIdentity(visits, openEstimate, { nextOfSeries = nextOfSeriesLive() } = {}) {
   const upcoming = visits.filter((v) => v.upcoming);
   if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming', ...visitIdField(upcoming[0]) };
   if (upcoming.length > 1) {
-    const next = nextVisitOfSeries(upcoming);
+    const next = nextOfSeries ? nextVisitOfSeries(upcoming) : null;
     return next
       ? { serviceType: next.type, certain: true, reason: 'next_of_series', ...visitIdField(next, visits) }
       : { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
