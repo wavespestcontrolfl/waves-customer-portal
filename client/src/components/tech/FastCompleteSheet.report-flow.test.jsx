@@ -908,6 +908,16 @@ describe('complete and send', () => {
       return request;
     }
 
+    // The app runs under React.StrictMode, whose mount is setup, cleanup, setup:
+    // the read's answer must still land (pre-push P1).
+    test('the button shows under React.StrictMode', async () => {
+      const request = reusableRequest();
+      render(<React.StrictMode><FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} /></React.StrictMode>);
+      await screen.findByText(/Taurus SC 4 fl oz/);
+      await generate();
+      expect(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' })).toBeTruthy();
+    });
+
     test('one tap copies the last trace with the tracer\'s fence fields, the hold clears and the send goes', async () => {
       const request = reusableRequest();
       await openSheet(request);

@@ -420,19 +420,21 @@ function addressKey(parts) {
   return [line1, clean(parts.city), clean(parts.state), clean(parts.zip).slice(0, 5)].join('|');
 }
 
-// Stamped visit address over the customer's, as the geocode route reads it.
-const EFFECTIVE_ADDRESS_COLUMNS = (knex) => [
-  knex.raw('COALESCE(ss.service_address_line1, c.address_line1) as addr_line1'),
-  knex.raw('COALESCE(ss.service_address_city, c.city) as addr_city'),
-  knex.raw('COALESCE(ss.service_address_state, c.state) as addr_state'),
-  knex.raw('COALESCE(ss.service_address_zip, c.zip) as addr_zip'),
+// The address STAMPED on the visit only, never the customer's current one: a
+// customer who moved would otherwise pass an old home's trace to the new home
+// (both visits would read today's address). A visit with no property and no
+// stamped address has no fixed place, so it neither gives nor takes a trace.
+const EFFECTIVE_ADDRESS_COLUMNS = () => [
+  'ss.service_address_line1 as addr_line1',
+  'ss.service_address_city as addr_city',
+  'ss.service_address_state as addr_state',
+  'ss.service_address_zip as addr_zip',
 ];
 
 async function visitAddressKey(knex, scheduledServiceId) {
   const row = await knex('scheduled_services as ss')
-    .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.id', scheduledServiceId)
-    .first(...EFFECTIVE_ADDRESS_COLUMNS(knex));
+    .first(...EFFECTIVE_ADDRESS_COLUMNS());
   return row ? addressKey({ line1: row.addr_line1, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) : null;
 }
 
@@ -458,7 +460,6 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
 
   const rows = await knex('scheduled_services as ss')
     .join('treatment_zone_maps as tz', 'tz.scheduled_service_id', 'ss.id')
-    .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.customer_id', visit.customer_id)
     .where('ss.status', 'completed')
     .whereNot('ss.id', visit.id)
@@ -470,7 +471,7 @@ async function findReusableTreatmentZone(visit, { knex = db } = {}) {
     .limit(REUSE_CANDIDATE_LIMIT)
     .select('tz.*', 'ss.id as source_service_id', 'ss.customer_id as source_customer_id',
       'ss.property_id as source_property_id', 'ss.status as source_status',
-      'ss.scheduled_date as source_date', ...EFFECTIVE_ADDRESS_COLUMNS(knex));
+      'ss.scheduled_date as source_date', ...EFFECTIVE_ADDRESS_COLUMNS());
 
   const { traceCaptureBlockPayload } = require('./service-report/trace-eligibility');
   for (const row of rows) {

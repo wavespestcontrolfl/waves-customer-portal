@@ -50,7 +50,7 @@ const ZONE = {
 // A table-aware fake: the candidates query resolves to `candidates`, the
 // visit's own address to `here`, the visit's own trace to `own`.
 function makeKnex({ candidates = [ZONE], own = null, here = { addr_line1: '1 Example Ln', addr_city: 'Sampletown', addr_state: 'FL', addr_zip: '34200' }, lock = { property_id: 'prop-1', status: 'confirmed' } } = {}) {
-  const state = { inserted: null, wheres: [] };
+  const state = { inserted: null, wheres: [], columns: [] };
   const knex = jest.fn((table) => {
     const c = {
       _lock: false,
@@ -62,9 +62,10 @@ function makeKnex({ candidates = [ZONE], own = null, here = { addr_line1: '1 Exa
       modify: (fn) => { fn(c); return c; },
       orderBy: () => c,
       limit: () => c,
-      select: () => c,
+      select: (...columns) => { state.columns.push(...columns.map(String)); return c; },
       forUpdate: () => { c._lock = true; return c; },
-      first: () => {
+      first: (...columns) => {
+        state.columns.push(...columns.map(String));
         if (table === 'scheduled_services' && c._lock) return Promise.resolve(lock);
         if (table === 'scheduled_services as ss') return Promise.resolve(here);
         return Promise.resolve(own);
@@ -175,6 +176,22 @@ describe('findReusableTreatmentZone', () => {
 
     test('does not match a prior visit that has a property', async () => {
       expect(await findReusableTreatmentZone(NO_PROP, { knex: makeKnex({ candidates: [ZONE] }) })).toBeNull();
+    });
+
+    // Pre-push P1: the customer's current address is never the evidence. A
+    // customer who moved would otherwise pass the old home's trace to the new
+    // home, since both visits would read today's address.
+    test('reads only the address stamped on each visit, never the customer\'s', async () => {
+      const knex = makeKnex({ candidates: [sameAddress] });
+      await findReusableTreatmentZone(NO_PROP, { knex });
+      const columns = knex.state.columns.join(' ');
+      expect(columns).toContain('ss.service_address_line1');
+      expect(columns).not.toMatch(/c\.address_line1|c\.city|c\.zip|COALESCE/i);
+    });
+
+    test('a prior visit with no stamped address gives no trace, whatever the customer\'s address is', async () => {
+      const knex = makeKnex({ candidates: [{ ...sameAddress, addr_line1: null, addr_city: null, addr_state: null, addr_zip: null }] });
+      expect(await findReusableTreatmentZone(NO_PROP, { knex })).toBeNull();
     });
 
     test('a visit with no address on file is offered nothing', async () => {

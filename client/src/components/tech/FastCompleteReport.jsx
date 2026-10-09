@@ -460,7 +460,12 @@ function useLastTrace({ serviceId, request, wanted }) {
   const [last, setLast] = useState({ available: false, linearFt: null });
   const asked = useRef(false);
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  // Set on every setup: React.StrictMode runs setup, cleanup, setup, and a
+  // flag only cleared in cleanup would stay false and drop every answer.
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   useEffect(() => {
     if (!wanted || asked.current) return;
     asked.current = true;
