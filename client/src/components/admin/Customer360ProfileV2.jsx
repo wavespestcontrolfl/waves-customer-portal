@@ -7264,6 +7264,7 @@ function AccessPrefsLastPreEmergent({ info }) {
           {info.warning}
         </div>
       )}
+      {info.note && <div className="text-ui-label text-ink-secondary" data-testid="sod-pre-emergent-note">{info.note}</div>}
     </div>
   );
 }

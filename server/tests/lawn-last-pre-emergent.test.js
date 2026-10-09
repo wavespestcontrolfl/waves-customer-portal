@@ -11,6 +11,7 @@ const P_DIM = 'aaaaaaaa-0000-4000-8000-000000000001';
 const P_STONEWALL = 'aaaaaaaa-0000-4000-8000-000000000002';
 const P_FERT = 'aaaaaaaa-0000-4000-8000-000000000003';
 const P_CELSIUS = 'aaaaaaaa-0000-4000-8000-000000000004';
+const P_BAG = 'aaaaaaaa-0000-4000-8000-000000000005';
 
 const CATALOG = [
   { id: P_DIM, name: 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', display_name: 'Dimension 2EW', category: 'herbicide', active_ingredient: 'Dithiopyr', formulation: 'liquid' },
@@ -35,7 +36,11 @@ function fakeKnex(tables) {
     const data = tables[table];
     const chain = {};
     for (const m of ['where', 'whereIn', 'whereNotNull', 'leftJoin', 'join', 'orderBy', 'select']) {
-      chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
+      chain[m] = (...args) => {
+        if (m === 'where' && typeof args[0] === 'function') { args[0].call({ whereIn: (...a) => { calls.push([table, 'whereIn', ...a]); return { orWhereNull: (...b) => { calls.push([table, 'orWhereNull', ...b]); } }; } }); return chain; }
+        calls.push([table, m, ...args]);
+        return chain;
+      };
     }
     const fail = () => { if (data instanceof Error) throw data; };
     chain.first = async () => { fail(); return Array.isArray(data) ? data[0] : data; };
@@ -50,32 +55,60 @@ function fakeKnex(tables) {
   return knex;
 }
 
-async function block({ rows, sodLaidOn = null, todayEt = '2026-10-09', customer = CUSTOMER, extra = {}, catalog = CATALOG }) {
+async function block({ rows, sodLaidOn = null, sodRootedOn = null, todayEt = '2026-10-09', customer = CUSTOMER, extra = {}, catalog = CATALOG }) {
   const knex = fakeKnex({
     customers: customer, products_catalog: catalog, 'service_products as sp': rows, customer_properties: [], scheduled_services: [], ...extra,
   });
-  const result = await lastPreEmergentBlock({ knex, customerId: 'cust-1', sodLaidOn, todayEt });
+  const result = await lastPreEmergentBlock({ knex, customerId: 'cust-1', sodLaidOn, sodRootedOn, todayEt });
   return { result, knex };
 }
 
 beforeEach(() => jest.clearAllMocks());
 
 describe('the words', () => {
-  it('no sod date: counts days from today, and warns under 91 days', async () => {
+  it('no sod date: counts days from today, and warns with the matched product label wait (Dimension 2EW: 3 months)', async () => {
     const { result } = await block({ rows: [app({ service_date: '2026-08-01' })] });
     expect(result).toEqual({
       line: 'Last pre-emergent by Waves: Dimension 2EW, Aug 1, 2026 (69 days ago).',
-      warning: 'Its label delays seeding or sprigging 12 weeks (Dimension 2EW: 3 months) after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.',
+      warning: 'Its label delays seeding or sprigging 3 months after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.',
+      note: null,
     });
   });
 
-  it('a sod date: counts days before the sod date; 90 days warns, 91 days does not', async () => {
-    const at90 = await block({ rows: [app({ service_date: '2026-07-03' })], sodLaidOn: '2026-10-01' });
-    expect(at90.result.line).toBe('Last pre-emergent by Waves: Dimension 2EW, Jul 3, 2026 (90 days before the sod date).');
-    expect(at90.result.warning).toMatch(/^Its label delays seeding or sprigging 12 weeks/);
+  it('a sod date: counts days before the sod date; the liquid dithiopyr warns through day 91 and not on day 92', async () => {
     const at91 = await block({ rows: [app({ service_date: '2026-07-02' })], sodLaidOn: '2026-10-01' });
-    expect(at91.result.line).toContain('(91 days before the sod date).');
-    expect(at91.result.warning).toBeNull();
+    expect(at91.result.line).toBe('Last pre-emergent by Waves: Dimension 2EW, Jul 2, 2026 (91 days before the sod date).');
+    expect(at91.result.warning).toMatch(/^Its label delays seeding or sprigging 3 months/);
+    const at92 = await block({ rows: [app({ service_date: '2026-07-01' })], sodLaidOn: '2026-10-01' });
+    expect(at92.result.line).toContain('(92 days before the sod date).');
+    expect(at92.result.warning).toBeNull();
+  });
+
+  it('dithiopyr on fertilizer warns with its own 12 weeks: day 83 warns, day 84 does not', async () => {
+    const catalog = [...CATALOG, { id: P_BAG, name: 'Example Dimension 0.21% 18-0-10', display_name: null, category: 'fertilizer', active_ingredient: 'Dithiopyr 0.21%', formulation: 'granular', analysis_n: 18 }];
+    const at83 = await block({ catalog, rows: [app({ product_id: P_BAG, service_date: '2026-07-10' })], sodLaidOn: '2026-10-01' });
+    expect(at83.result.warning).toBe('Its label delays seeding or sprigging 12 weeks after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.');
+    const at84 = await block({ catalog, rows: [app({ product_id: P_BAG, service_date: '2026-07-09' })], sodLaidOn: '2026-10-01' });
+    expect(at84.result.warning).toBeNull();
+  });
+
+  it('a pre-emergent whose label wait the app does not hold (prodiamine): the line and a read-the-label note, never another product wait', async () => {
+    const { result } = await block({ rows: [app({ product_id: P_STONEWALL, service_date: '2026-09-20' })] });
+    expect(result.warning).toBeNull();
+    expect(result.note).toBe('The app does not hold this product\'s label wait for seeding or sod. Read the label.');
+  });
+
+  it('a legacy application with no catalog id is classified from its own name and ingredient snapshot', async () => {
+    const legacy = app({ product_id: null, product_name: 'Old Prodiamine 65 WDG', product_category: 'herbicide', active_ingredient: 'Prodiamine', service_date: '2026-09-01' });
+    const notPre = app({ product_id: null, product_name: 'Old Iron', product_category: 'fertilizer', active_ingredient: 'Iron', service_date: '2026-09-20' });
+    const { result } = await block({ rows: [notPre, legacy] });
+    expect(result.line).toBe('Last pre-emergent by Waves: Old Prodiamine 65 WDG, Sep 1, 2026 (38 days ago).');
+    expect(result.note).toMatch(/Read the label/);
+  });
+
+  it('the sod is confirmed rooted: the line stays, the warning and the note go', async () => {
+    const { result } = await block({ rows: [app({ service_date: '2026-09-01' })], sodLaidOn: '2026-10-01', sodRootedOn: '2026-11-05' });
+    expect(result).toEqual({ line: 'Last pre-emergent by Waves: Dimension 2EW, Sep 1, 2026 (30 days before the sod date).', warning: null, note: null });
   });
 
   it('says 1 day, not 1 days; never says the label forbids sod', async () => {
@@ -111,10 +144,10 @@ describe('what the query asks for', () => {
     expect(knex.calls).toContainEqual(['service_products as sp', 'where', 'sr.service_date', '<=', '2026-10-09']);
   });
 
-  it('no pre-emergent in the catalog: nothing, and the applications are not read', async () => {
+  it('no pre-emergent in the catalog: nothing (only a legacy row with a pre-emergent snapshot could count)', async () => {
     const { result, knex } = await block({ rows: [app()], catalog: [CATALOG[2], CATALOG[3]] });
     expect(result).toBeNull();
-    expect(knex.calls.some(([table]) => table === 'service_products as sp')).toBe(false);
+    expect(knex.calls).toContainEqual(['service_products as sp', 'orWhereNull', 'sp.product_id']);
   });
 
   it('nothing applied: no block', async () => {

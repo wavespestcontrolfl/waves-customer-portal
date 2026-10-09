@@ -5021,7 +5021,7 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
 // GET /api/admin/customers/:id/new-sod — the read-only hold lines beside the
 // new-sod fields in Customer 360 (office only; no write, no message to anyone):
 //   holdLines  the plain hold lines for the saved sod record ([] when none)
-//   lastPreEmergent  { line, warning } for the last pre-emergent Waves put on this home's lawn
+//   lastPreEmergent  { line, warning, note } for the last pre-emergent Waves put on this home's lawn
 //              (warning is null unless it was under 91 days before the sod date, or before today
 //              when no sod date is saved), or null when there is none or it cannot be proven
 // The form's render stamp for confirmedAsOf is the irrigation_home_changed_at
@@ -5033,7 +5033,7 @@ router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const prefsRow = await db('property_preferences').where({ customer_id: customerId }).first();
     const todayEt = etDateString();
-    const lastPreEmergent = await lastPreEmergentBlock({ knex: db, customerId, sodLaidOn: prefsRow?.sod_laid_on ?? null, todayEt });
+    const lastPreEmergent = await lastPreEmergentBlock({ knex: db, customerId, sodLaidOn: prefsRow?.sod_laid_on ?? null, sodRootedOn: prefsRow?.sod_rooted_on ?? null, todayEt });
     res.json({ newSod: { ...buildNewSodSummary({ prefsRow: prefsRow || null, todayEt }), lastPreEmergent } });
   } catch (err) { next(err); }
 });

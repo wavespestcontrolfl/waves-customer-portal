@@ -397,13 +397,21 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
 
   describe('last pre-emergent by Waves (the server builds both strings)', () => {
     const LINE = 'Last pre-emergent by Waves: Dimension 2EW, Aug 1, 2026 (61 days before the sod date).';
-    const WARNING = 'Its label delays seeding or sprigging 12 weeks (Dimension 2EW: 3 months) after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.';
+    const WARNING = 'Its label delays seeding or sprigging 3 months after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.';
 
     it('prints the line and the warning in the edit form, with no saved sod record needed', async () => {
       stubFetch({ newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: WARNING } }, onPut: () => response({}) });
       await openEditor();
       expect(await screen.findByText(LINE)).toBeInTheDocument();
       expect(screen.getByTestId('sod-pre-emergent-warning')).toHaveTextContent(WARNING);
+    });
+
+    it('prints the read-the-label note for a product whose label wait the app does not hold', async () => {
+      const NOTE = "The app does not hold this product's label wait for seeding or sod. Read the label.";
+      stubFetch({ newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: null, note: NOTE } }, onPut: () => response({}) });
+      await openEditor();
+      expect(await screen.findByTestId('sod-pre-emergent-note')).toHaveTextContent(NOTE);
+      expect(screen.queryByTestId('sod-pre-emergent-warning')).not.toBeInTheDocument();
     });
 
     it('prints only the line when the server sends no warning', async () => {
