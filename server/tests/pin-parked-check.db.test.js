@@ -261,6 +261,22 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     expect(await open(customerId)).toHaveLength(0);
   });
 
+  test("a neighbour visit at a SECONDARY property (its own stamp, a different primary pin) still explains the stop", async () => {
+    const techId = await technician();
+    const customerId = await customer();
+    const rentalPin = north(520);
+    const neighbourId = await customer(north(3000)); // the neighbour's primary pin is elsewhere
+    await completedVisit(customerId, techId);
+    await completedVisit(neighbourId, techId, {
+      lat: rentalPin.lat, lng: rentalPin.lng, completed_at: new Date('2026-10-08T14:40:00Z'),
+      service_address_line1: '9 Rental Way', service_address_city: 'Fixture City', service_address_state: 'FL', service_address_zip: '34201',
+    });
+    await truckStopsAt(north(540), 30);
+    const result = await run();
+    expect(result).toMatchObject({ visits: 2, created: 0, neighbour_visit: 1, no_pin_or_other_property: 1 });
+    expect(await all(customerId)).toHaveLength(0);
+  });
+
   test('a business fence explains the stop; an inactive one does not', async () => {
     const techId = await technician();
     const customerId = await customer();

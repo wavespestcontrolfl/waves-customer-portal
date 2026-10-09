@@ -153,6 +153,38 @@ describe('days, grouped visits and neighbours', () => {
   });
 });
 
+describe("the neighbours' pins (a deliberately generous exclusion)", () => {
+  const mine = visit({ id: 'mine', customer_id: 'c-mine' });
+  const other = (extra) => visit({ id: 'other', customer_id: 'c-other', ...extra });
+
+  test('a neighbour visit at a secondary property counts at its own stamped coordinates', () => {
+    const secondary = other({
+      service_lat: at(520).lat, service_lng: at(520).lng, service_address_line1: '9 Other Way', service_address_city: 'Fixture City',
+      service_address_zip: '34201', property_id: 'p2', primary_property_id: 'p1',
+      customer_latitude: at(3000).lat, customer_longitude: at(3000).lng,
+    });
+    expect(p.destinationOf(secondary)).toBeNull(); // the visit itself is not about the primary pin
+    const pins = p.neighbourPins(mine, [mine, secondary]);
+    expect(pins).toHaveLength(2);
+    expect(pins.some((pin) => distanceMeters(pin.lat, pin.lng, at(520).lat, at(520).lng) < 1)).toBe(true);
+  });
+
+  test('a stop near EITHER the stamp or the primary pin is excluded', () => {
+    const both = other({ service_lat: at(520).lat, service_lng: at(520).lng, customer_latitude: at(3000).lat, customer_longitude: at(3000).lng });
+    const neighbours = p.neighbourPins(mine, [mine, both]);
+    const context = { ...NO_EXCLUSIONS, neighbours };
+    expect(judge([stop(540)], {}, context).reason).toBe('neighbour_visit');
+    expect(p.excludedStopReason(stop(3000), { radius: RADIUS, ...context })).toBe('neighbour_visit');
+  });
+
+  test('with no stamp only the effective primary pin is used; same-customer and other-technician visits are not neighbours', () => {
+    const unstamped = other({ service_lat: null, service_lng: null });
+    expect(p.neighbourPins(mine, [mine, unstamped])).toHaveLength(1);
+    expect(p.neighbourPins(mine, [mine, other({ customer_id: 'c-mine' })])).toEqual([]);
+    expect(p.neighbourPins(mine, [mine, other({ technician_id: 'tech-2' })])).toEqual([]);
+  });
+});
+
 describe('home base', () => {
   const day = (n, lat, lng) => ({ trip_date: `2026-09-${10 + n}`, start_lat: lat, start_lng: lng });
 

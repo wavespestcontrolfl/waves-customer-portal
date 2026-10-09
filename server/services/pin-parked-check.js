@@ -392,10 +392,19 @@ async function stopsFor(conn, imei, { fromMs, toMs, radius, now }) {
   }
 }
 
+/**
+ * Where the same technician's OTHER customers' visits that day were. Deliberately generous, because it only ever
+ * prevents a suggestion: a truck stop at another customer's job is that customer's, not ours. For each such visit
+ * both its own stamped coordinates (whatever property it was at, a secondary one included) and the customer's
+ * effective primary pin count; a stop near either is excluded.
+ */
 const neighbourPins = (visit, visits) => visits
   .filter((other) => other.technician_id === visit.technician_id && other.customer_id !== visit.customer_id
     && visitDays(other).some((day) => visitDays(visit).includes(day)))
-  .map((other) => destinationOf(other) || usablePin(other.customer_latitude, other.customer_longitude))
+  .flatMap((other) => [
+    usablePin(other.service_lat, other.service_lng),
+    usablePin(other.customer_latitude, other.customer_longitude),
+  ])
   .filter(Boolean);
 
 const tallyKey = (tally, key) => { tally[key] = (tally[key] || 0) + 1; };
@@ -487,7 +496,7 @@ module.exports = {
   runPinParkedCheck,
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
-    alertDetail, settledReason, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    alertDetail, settledReason, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };
