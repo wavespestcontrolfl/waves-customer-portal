@@ -357,8 +357,14 @@ export function buildAreaAddOnRequest(selection, catalog = null) {
   const entries = Object.entries(selection);
   if (entries.length === 0) return undefined;
   const grassBound = new Set((catalog?.items || []).filter((item) => item.requiresGrassTrack).map((item) => item.key));
+  const largestTier = new Map((catalog?.items || []).map((item) => [item.key, Math.max(0, ...(Array.isArray(item.tiers) ? item.tiers : []))]));
   return entries.map(([key, entry]) => {
-    const area = positiveNumber(entry?.areaSqFt);
+    const typed = positiveNumber(entry?.areaSqFt);
+    // "Larger: manual quote" is the operator's choice, and the request carries only the area: an area typed at or below
+    // the largest tier would price a normal tier instead. It goes out as the first value above the table, so the server
+    // returns the manual-quote line that was chosen.
+    const top = largestTier.get(key) || 0;
+    const area = entry?.larger === true && top > 0 && (typed === null || typed <= top) ? top + 1 : typed;
     const chosenGrass = typeof entry?.grassType === "string" ? entry.grassType.trim() : "";
     return {
       key,

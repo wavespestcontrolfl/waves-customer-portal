@@ -317,3 +317,17 @@ describe("addOnRecordMissingProblem", () => {
     expect(addOnRecordMissingProblem({ completionProfile: { serviceKey: "area_addon_web_sweep" } }, [])).toBeNull();
   });
 });
+
+// Codex round 47: "Larger: manual quote" always reaches the server as an area above the table.
+describe("buildAreaAddOnRequest: the larger-area choice", () => {
+  const catalog = { items: [{ key: "bed_pre_emergent", tiers: [1000, 2000, 3500] }, { key: "web_sweep", tiers: null }] };
+  it("an area typed at or below the largest tier, or left empty, goes out as the first value above it; a real larger area is kept", () => {
+    expect(buildAreaAddOnRequest({ bed_pre_emergent: { areaSqFt: "500", larger: true } }, catalog)).toEqual([{ key: "bed_pre_emergent", areaSqFt: 3501 }]);
+    expect(buildAreaAddOnRequest({ bed_pre_emergent: { areaSqFt: "", larger: true } }, catalog)).toEqual([{ key: "bed_pre_emergent", areaSqFt: 3501 }]);
+    expect(buildAreaAddOnRequest({ bed_pre_emergent: { areaSqFt: "5200", larger: true } }, catalog)).toEqual([{ key: "bed_pre_emergent", areaSqFt: 5200 }]);
+  });
+  it("a tier choice and an add-on with no tiers are unchanged", () => {
+    expect(buildAreaAddOnRequest({ bed_pre_emergent: { areaSqFt: "2000", larger: false } }, catalog)).toEqual([{ key: "bed_pre_emergent", areaSqFt: 2000 }]);
+    expect(buildAreaAddOnRequest({ web_sweep: { areaSqFt: "", larger: false } }, catalog)).toEqual([{ key: "web_sweep" }]);
+  });
+});

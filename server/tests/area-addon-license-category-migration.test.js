@@ -69,4 +69,37 @@ describe('area add-on license category migration', () => {
     await migration.up(fakeKnex(db));
     expect(db.system_settings).toEqual([{ key: migration.STATE_KEY, value: JSON.stringify({ services: [] }) }]);
   });
+
+  // Codex round 47: the catalog rollback keeps a service a visit references; its license requirement must stay too.
+  describe('rollback guard 20261010230000', () => {
+    const guard = require('../models/migrations/20261010230000_area_addon_license_rollback_guard');
+    const rollBack = async (db) => { const knex = fakeKnex(db); await guard.down(knex); await migration.down(knex); };
+
+    test('a chemical add-on service a visit or an add-on row references keeps its license requirement; the unused ones are reset', async () => {
+      const db = { ...seeded(), scheduled_services: [], scheduled_service_addons: [] };
+      await migration.up(fakeKnex(db));
+      const [own, row, unused] = migration.CHEMICAL_SERVICE_KEYS;
+      db.scheduled_services.push({ id: 'v-1', service_id: byKey(db, own).id });
+      db.scheduled_service_addons.push({ id: 'a-1', service_id: byKey(db, row).id });
+      await rollBack(db);
+      expect(byKey(db, own)).toMatchObject({ requires_license: true, license_category: 'L&O' });
+      expect(byKey(db, row)).toMatchObject({ requires_license: true, license_category: 'L&O' });
+      expect(byKey(db, unused)).toMatchObject({ requires_license: false, license_category: null });
+    });
+
+    test('nothing referenced: the rollback is exactly what it was; up changes nothing', async () => {
+      const db = { ...seeded(), scheduled_services: [], scheduled_service_addons: [] };
+      await migration.up(fakeKnex(db));
+      await guard.up(fakeKnex(db));
+      await rollBack(db);
+      for (const key of migration.CHEMICAL_SERVICE_KEYS) expect(byKey(db, key)).toMatchObject({ requires_license: false, license_category: null });
+      expect(db.system_settings).toEqual([]);
+    });
+
+    test('a reference read that fails keeps the requirement', async () => {
+      const broken = () => { throw new Error('down'); };
+      broken.schema = { hasTable: async () => true };
+      await expect(guard.referenced(broken, 'svc-1')).resolves.toBe(true);
+    });
+  });
 });

@@ -69,7 +69,7 @@ function AreaFields({ item, entry, known, onEntry }) {
           help={`Enter the real area. Over ${largest.toLocaleString("en-US")} sq ft is a manual quote.`}
           className="mb-4"
         >
-          <Input type="number" min="1" value={entry.areaSqFt ?? ""} onChange={(e) => onEntry({ ...entry, areaSqFt: e.target.value })} />
+          <Input type="number" min={String(largest + 1)} value={entry.areaSqFt ?? ""} onChange={(e) => onEntry({ ...entry, areaSqFt: e.target.value })} />
         </Field>
       )}
     </>
@@ -194,10 +194,13 @@ function UnavailableRow({ addOnKey, name, enabled, value, onChange }) {
 function useReseededEntries(selection, catalog, knownAreas, onChange) {
   const bedKnown = knownAreas?.bed?.sqft ?? null;
   const lawnKnown = knownAreas?.lawn?.sqft ?? null;
+  // The catalog arrives after the form can already hold a selection (an edited estimate, a property lookup): the reseed
+  // needs the items' tiers, so it runs again when they arrive.
+  const catalogReady = (catalog?.items || []).length > 0;
   useEffect(() => {
     const next = reseedAddOnEntries(selection, catalog, knownAreas);
     if (next !== selection) onChange(next);
-  }, [bedKnown, lawnKnown]);
+  }, [bedKnown, lawnKnown, catalogReady]);
 }
 
 export default function AreaAddOnsGroup({
