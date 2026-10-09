@@ -3407,6 +3407,19 @@ class RelayConversation {
    * streamState, timedOut }` — `_runModelRound` decides what a failure
    * becomes.
    */
+  /**
+   * Cost ledger: one row per model round the provider finished (owner
+   * 2026-10-08: the voice agent's spend was invisible). Not awaited. A round
+   * that is aborted or times out has no response and records nothing. An
+   * eval-harness session records nothing either: that replay refuses every
+   * database write while a conversation runs, by construction, and its
+   * rounds are not production traffic.
+   */
+  _ledgerRound(message, modelStartAt, errorCode = null) {
+    if (this._evalHarness) return;
+    recordStreamedMessage({ provider: this._provider, requestedModel: this.model, message, latencyMs: Math.round(now() - modelStartAt), laneId: 'voice_relay', errorCode });
+  }
+
   async _modelAttempt(stat) {
     const client = clientFor(this._provider);
     this._controller = new AbortController();
@@ -3470,12 +3483,13 @@ class RelayConversation {
       // the block path below is otherwise untouched.
       if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
       const msg = await stream.finalMessage();
-      // Cost ledger: one row per finished model round (owner 2026-10-08: the
-      // voice agent's spend was invisible). Not awaited; a round that is
-      // aborted or times out resolves no Message and records nothing.
-      recordStreamedMessage({ provider: this._provider, requestedModel: this.model, message: msg, latencyMs: Math.round(now() - modelStartAt), laneId: 'voice_relay' });
+      this._ledgerRound(msg, modelStartAt);
       return { msg, streamState };
     } catch (err) {
+      // A response OpenAI finished and billed but the relay could not use
+      // (relay-openai-client attaches what was billed) is a failed round on
+      // the ledger, not a missing one.
+      if (err?.billedRound) this._ledgerRound(err.billedRound, modelStartAt, 'openai_unusable_response');
       return { err, streamState, timedOut };
     } finally {
       clearTimeout(streamTimer);

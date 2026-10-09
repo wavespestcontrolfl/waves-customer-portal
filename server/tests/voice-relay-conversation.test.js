@@ -638,9 +638,9 @@ describe('RelayConversation — explicit end after capture', () => {
 
   // Cost ledger: each model round that finishes is recorded once, with the
   // provider and model that served it; a round that throws records nothing.
-  test('a finished model round is recorded on the cost ledger; a failed one is not', async () => {
+  test('the cost ledger gets each round the provider finished: usable, billed-but-unusable; not a plain failure, not an eval session', async () => {
     const recordStreamedMessage = jest.fn();
-    const build = (finalMessage) => {
+    const build = (finalMessage, opts = {}) => {
       let Convo;
       jest.isolateModules(() => {
         jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream: () => ({ finalMessage }) } }; });
@@ -650,18 +650,30 @@ describe('RelayConversation — explicit end after capture', () => {
         jest.doMock('../services/llm-dispatch-metrics', () => ({ ...jest.requireActual('../services/llm-dispatch-metrics'), recordStreamedMessage }));
         Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
       });
-      return new Convo({ callSid: 'CA-ledger', from: '+19415551234', send: jest.fn() });
+      return new Convo({ callSid: 'CA-ledger', from: '+19415551234', send: jest.fn(), ...opts });
     };
     const message = { id: 'msg_v', model: 'served', content: [{ type: 'text', text: 'Hi there!' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 4 } };
 
     const ok = build(async () => message);
     await ok._runLoop('hi').catch(() => {});
     expect(recordStreamedMessage).toHaveBeenCalledTimes(1);
-    expect(recordStreamedMessage).toHaveBeenCalledWith({ provider: ok._provider, requestedModel: ok.model, message, latencyMs: expect.any(Number), laneId: 'voice_relay' });
+    expect(recordStreamedMessage).toHaveBeenCalledWith({ provider: ok._provider, requestedModel: ok.model, message, latencyMs: expect.any(Number), laneId: 'voice_relay', errorCode: null });
 
     recordStreamedMessage.mockClear();
     const failed = build(async () => { throw new Error('boom'); });
     await failed._runLoop('hi').catch(() => {});
+    expect(recordStreamedMessage).not.toHaveBeenCalled();
+
+    // the provider finished and billed the response, but it held nothing usable
+    const billedRound = { id: 'resp_x', model: 'served', usage: { input_tokens: 500, output_tokens: 256 } };
+    const billed = build(async () => { throw Object.assign(new Error('no usable output'), { billedRound }); });
+    await billed._runLoop('hi').catch(() => {});
+    expect(recordStreamedMessage).toHaveBeenCalledWith(expect.objectContaining({ message: billedRound, errorCode: 'openai_unusable_response', laneId: 'voice_relay' }));
+
+    // the eval replay refuses database writes while a conversation runs: nothing is recorded
+    recordStreamedMessage.mockClear();
+    const evalRun = build(async () => message, { evalHarness: true });
+    await evalRun._runLoop('hi').catch(() => {});
     expect(recordStreamedMessage).not.toHaveBeenCalled();
   });
 

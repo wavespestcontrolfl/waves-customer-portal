@@ -309,11 +309,17 @@ function mapUsage(usage) {
       output_tokens: null,
     };
   }
+  // Not an Anthropic field: OpenAI's own reasoning count, carried for the
+  // cost ledger (recordStreamedMessage).
+  const reasoning = usage.output_tokens_details?.reasoning_tokens;
   return {
     input_tokens: usage.input_tokens - cached,
     cache_read_input_tokens: cached,
     cache_creation_input_tokens: 0,
     output_tokens: usage.output_tokens,
+    // present only when OpenAI reported it, so a round with no reasoning
+    // keeps the exact four-field shape its other readers expect
+    ...(validCount(reasoning) ? { reasoning_tokens: reasoning } : {}),
   };
 }
 
@@ -650,7 +656,16 @@ class OpenAIRelayStream {
     }
     if (failure) throw new Error(`OpenAI Responses API error: ${failure}`);
     if (!finalResponse) throw new Error('OpenAI Responses API stream ended without a completed response');
-    return mapResponseToMessage(withDoneReasoning(finalResponse, doneItems), params.model);
+    const response = withDoneReasoning(finalResponse, doneItems);
+    try {
+      return mapResponseToMessage(response, params.model);
+    } catch (err) {
+      // OpenAI finished this response and billed it; the relay cannot use
+      // it (a refusal, reasoning only, a cut-off tool call). The error keeps
+      // what was billed so the caller can put the round on the cost ledger.
+      err.billedRound = { id: response.id || null, model: response.model || params.model, usage: mapUsage(response.usage) };
+      throw err;
+    }
   }
 }
 

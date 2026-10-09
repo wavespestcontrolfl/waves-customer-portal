@@ -434,24 +434,29 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
  * voice turn streams, is aborted by barge-in as a matter of course, and must
  * not wait on the ledger, so the voice relay records each round it finished
  * here instead. Fire-and-forget like recordCall: never throws, never awaited.
+ * With `errorCode` the round is recorded as a failed call with its usage.
  *
  * `provider` is the provider that served the round. The OpenAI relay client
  * maps its usage to the Anthropic shape (input_tokens excludes cached reads);
  * the ledger stores OpenAI rows with cached reads INSIDE input_tokens
  * (extractUsage, and llm-cost's pricing), so that is restored here.
  */
-function recordStreamedMessage({ provider, requestedModel, message, latencyMs = null, laneId }) {
+function recordStreamedMessage({ provider, requestedModel, message, latencyMs = null, laneId, errorCode = null }) {
   try {
     const usage = extractUsage('anthropic', message);
-    if (provider === 'openai' && usage.input_tokens != null) {
-      usage.input_tokens += usage.cached_input_tokens || 0;
+    if (provider === 'openai') {
+      if (usage.input_tokens != null) usage.input_tokens += usage.cached_input_tokens || 0;
       usage.cache_write_tokens = null;
+      // the relay client carries OpenAI's reasoning count beside the mapped fields
+      usage.reasoning_tokens = toCount(message?.usage?.reasoning_tokens);
     }
     void recordCall({
       provider,
       requestedModel,
       servedModel: message?.model,
-      ok: true,
+      // errorCode: a round the provider finished and billed but the caller could not use
+      ok: !errorCode,
+      errorCode,
       usage,
       latencyMs,
       providerRef: message?.id,

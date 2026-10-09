@@ -355,10 +355,18 @@ describe('llm call ledger', () => {
     it('stores an OpenAI round the way OpenAI rows are priced: cached reads inside input, no cache-write count', async () => {
       const { metrics } = load();
       // what relay-openai-client's mapUsage returns for input 900 with 600 cached
-      const message = { id: 'resp_1', model: 'gpt-served', usage: { input_tokens: 300, cache_read_input_tokens: 600, cache_creation_input_tokens: 0, output_tokens: 70 } };
+      const message = { id: 'resp_1', model: 'gpt-served', usage: { input_tokens: 300, cache_read_input_tokens: 600, cache_creation_input_tokens: 0, output_tokens: 70, reasoning_tokens: 32 } };
       metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message, laneId: 'voice_relay' });
       await flush();
-      expect(callRows()[0]).toMatchObject({ provider: 'openai', input_tokens: 900, cached_input_tokens: 600, cache_write_tokens: null, output_tokens: 70 });
+      expect(callRows()[0]).toMatchObject({ ok: true, provider: 'openai', input_tokens: 900, cached_input_tokens: 600, cache_write_tokens: null, output_tokens: 70, reasoning_tokens: 32 });
+    });
+
+    it('a round the provider billed but the caller could not use is a failed call with its usage', async () => {
+      const { metrics } = load();
+      const billed = { id: 'resp_3', model: 'gpt-served', usage: { input_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 256, reasoning_tokens: 256 } };
+      metrics.recordStreamedMessage({ provider: 'openai', requestedModel: 'gpt-voice', message: billed, laneId: 'voice_relay', errorCode: 'openai_unusable_response' });
+      await flush();
+      expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'openai_unusable_response', input_tokens: 500, output_tokens: 256, reasoning_tokens: 256 });
     });
 
     it('a round with unreadable usage is recorded with null counts, not as free', async () => {

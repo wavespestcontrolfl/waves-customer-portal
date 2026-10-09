@@ -349,6 +349,20 @@ describe('OpenAIRelayClient.messages.stream — full SSE round trips', () => {
     expect(msg.usage).toEqual({ input_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 5 });
   });
 
+  test('a completed response the relay cannot use rejects with what OpenAI billed for it', async () => {
+    const fetchImpl = fetchStub([
+      { type: 'response.completed', response: { id: 'r9', model: 'gpt-6-sol', status: 'completed', output: [{ type: 'reasoning', summary: [] }], usage: { input_tokens: 500, input_tokens_details: { cached_tokens: 100 }, output_tokens: 256, output_tokens_details: { reasoning_tokens: 256 } } } },
+    ]);
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const stream = client.messages.stream({ model: 'gpt-6-sol', max_tokens: 100, system: [], tools: [], messages: [{ role: 'user', content: 'hi' }] }, {});
+    const err = await stream.finalMessage().catch((e) => e);
+    expect(err.message).toMatch(/no usable output/);
+    expect(err.billedRound).toEqual({
+      id: 'r9', model: 'gpt-6-sol',
+      usage: { input_tokens: 400, cache_read_input_tokens: 100, cache_creation_input_tokens: 0, output_tokens: 256, reasoning_tokens: 256 },
+    });
+  });
+
   test('a tool_use round: content_block_start fires with type tool_use, finalMessage resolves the tool_use block', async () => {
     const fetchImpl = fetchStub([
       { type: 'response.output_item.added', item: { type: 'function_call' } },
