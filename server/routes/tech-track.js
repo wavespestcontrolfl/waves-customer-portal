@@ -1834,11 +1834,16 @@ router.post('/:id/treatment-zone/reuse', async (req, res, next) => {
         code: 'visit_property_changed',
       });
     }
+    // The write guards are the server's, never the caller's: the copy is bound
+    // to the property this request read (so a visit that moves during the
+    // image copy is refused under the lock) and to an open visit, whatever
+    // the body says or leaves out. The body's own property is only the stale-
+    // sheet check above (pre-push P1).
     const row = await reuseLastTreatmentZone({
       visit: svc,
       technicianId: req.technicianId,
-      ...(fenced ? { expectedPropertyId: body.expectedPropertyId ?? null } : {}),
-      openVisitOnly: body.openVisitOnly === true,
+      expectedPropertyId: svc.property_id ?? null,
+      openVisitOnly: true,
     }).catch((err) => {
       if (TRACE_REUSE_REFUSALS[err?.code]) return { refused: err };
       throw err;

@@ -146,15 +146,20 @@ describe('treatment-zone reuse routes', () => {
         await postReuse(baseUrl, { zoneId: 'zone-other', sourceServiceId: 'svc-other', scheduledServiceId: 'svc-other', pathPoints: [] });
       });
       const args = mockReuse.mock.calls[0][0];
-      expect(Object.keys(args).sort()).toEqual(['openVisitOnly', 'technicianId', 'visit']);
+      expect(Object.keys(args).sort()).toEqual(['expectedPropertyId', 'openVisitOnly', 'technicianId', 'visit']);
       expect(args.visit.id).toBe('svc-1');
     });
 
-    test('a caller that sends no expectedPropertyId sends none to the write', async () => {
-      await withServer(async (baseUrl) => { await postReuse(baseUrl); });
-      const args = mockReuse.mock.calls[0][0];
-      expect(Object.prototype.hasOwnProperty.call(args, 'expectedPropertyId')).toBe(false);
-      expect(args.openVisitOnly).toBe(false);
+    // Pre-push P1: the write guards are the server's. An empty body, or one
+    // that says the visit need not be open, changes nothing.
+    test('the copy is always bound to the property the request read and to an open visit', async () => {
+      for (const body of [undefined, {}, { openVisitOnly: false }, { expectedPropertyId: 'prop-1', openVisitOnly: false }]) {
+        mockReuse.mockClear();
+        await withServer(async (baseUrl) => { await postReuse(baseUrl, body); });
+        const args = mockReuse.mock.calls[0][0];
+        expect(args.expectedPropertyId).toBe('prop-1');
+        expect(args.openVisitOnly).toBe(true);
+      }
     });
 
     test('a visit moved to another property since the sheet loaded is refused before any copy', async () => {
