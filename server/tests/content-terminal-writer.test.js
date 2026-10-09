@@ -4,6 +4,9 @@
 // waiting rows. The seam in the runner is covered in autonomous-runner.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The editorial-evidence gate, switched per test.
+let mockEditorialOn = false;
+jest.mock('../services/content/editorial-evidence', () => ({ enabled: () => mockEditorialOn }));
 
 const tw = require('../services/content/terminal-writer');
 
@@ -31,6 +34,27 @@ describe('terminal writer gate', () => {
     process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
     expect(tw.writesInTerminal({ action_type: 'new_supporting_blog', page_type: 'blog' })).toBe(true);
     expect(tw.writesInTerminal({ action_type: 'rewrite_title_meta', page_type: 'metadata' })).toBe(false);
+  });
+});
+
+describe('with the editorial-evidence gate on, briefs that need an approved answer plan stay on the agent', () => {
+  const saved = { ...process.env };
+  beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; mockEditorialOn = true; });
+  afterEach(() => { process.env = { ...saved }; mockEditorialOn = false; });
+
+  test.each([
+    ['a supporting blog', { action_type: 'new_supporting_blog', page_type: 'supporting-blog' }, false],
+    ['a customer question page', { action_type: 'create_customer_question_page', page_type: 'customer-question' }, false],
+    ['a refresh', { action_type: 'refresh_existing_page', page_type: 'refresh' }, false],
+    ['a city service page (no answer plan)', { action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' }, true],
+  ])('%s', (_label, brief, inTerminal) => {
+    expect(tw.writesInTerminal(brief)).toBe(inTerminal);
+    expect(tw.draftSourceFor(ID, { id: BRIEF, ...brief }, { handed: true }) !== null).toBe(inTerminal);
+  });
+
+  test('with that gate off, the same briefs are written in the terminal', () => {
+    mockEditorialOn = false;
+    expect(tw.writesInTerminal({ action_type: 'new_supporting_blog', page_type: 'supporting-blog' })).toBe(true);
   });
 });
 

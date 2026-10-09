@@ -76,11 +76,23 @@ function terminalWriterLive() {
   return process.env.GATE_CONTENT_WRITER_TERMINAL === 'true';
 }
 
+// Briefs the editorial-evidence gate covers (the same test as
+// brief-driven-tools.js registerSessionEditorial). With that gate on, the
+// agent session must get its answer plan approved and its headings are
+// checked against the plan before a draft is captured. A terminal draft
+// cannot carry that approval, so those briefs stay on the agent.
+function needsEditorialPlan(brief) {
+  if (!require('./editorial-evidence').enabled()) return false;
+  const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
+  return refresh || ['supporting-blog', 'customer-question'].includes(brief?.page_type);
+}
+
 // A title/meta rewrite is a different, tiny draft shape with its own agent
 // and its own handler; it stays on the agent. Everything else the dispatch
 // step writes is a page body.
 const writesInTerminal = (brief) => terminalWriterLive()
-  && brief?.action_type !== 'rewrite_title_meta' && brief?.page_type !== 'metadata';
+  && brief?.action_type !== 'rewrite_title_meta' && brief?.page_type !== 'metadata'
+  && !needsEditorialPlan(brief);
 
 const branchFor = (opportunityId) => `${BRANCH_PREFIX}${opportunityId}`;
 const draftPathFor = (opportunityId) => `${DRAFT_DIR}/${opportunityId}.json`;

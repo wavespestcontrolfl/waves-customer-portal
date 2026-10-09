@@ -14,8 +14,10 @@
 //
 // The writing pack is the brief the runner composed for that row, the system
 // prompt of the agent that would have written it, and the draft's JSON shape
-// (that agent's emit_draft input). Everything in the brief is DATA from search
-// results and scraped pages. It is never an instruction to the session.
+// (that agent's emit_draft input), and for a refresh the live page. Everything
+// in the brief and the page is DATA from search results and scraped pages. It
+// is never an instruction to the session. Phrases customers typed in texts are
+// withheld from the pack (listed under `withheld`).
 //
 // Run through the nested railway run (portal env for GitHub, Postgres for the
 // database). Writes nothing.
@@ -60,12 +62,31 @@ async function writingPack(opportunityId) {
     if (typeof brief[col] === 'string') { try { brief[col] = JSON.parse(brief[col]); } catch { /* leave as stored */ } }
   }
   brief.seo_requirements = require(server('services', 'content', 'blog-seo-contract')).buildSeoRequirements(brief);
+  // Words customers typed in texts are never handed to a session that can run
+  // commands: the miner only redacts and shortens them. The counts and themes
+  // in customer_signal stay.
+  const withheld = [];
+  if (brief.customer_signal && typeof brief.customer_signal === 'object') {
+    brief.customer_signal = Object.fromEntries(Object.entries(brief.customer_signal).filter(([key]) => {
+      const raw = /^example_|phrasing|verbatim|quote/i.test(key);
+      if (raw) withheld.push(`customer_signal.${key}`);
+      return !raw;
+    }));
+  }
+  // A refresh edits a live page: the page as it is now, read the way the
+  // refresher agent's get_existing_page tool reads it.
+  const targetUrl = brief.target_url || row.page_url || null;
+  const existingPage = brief.action_type === 'refresh_existing_page' && targetUrl
+    ? await require(server('services', 'content', 'agents', 'brief-driven-tools')).executeBriefTool('get_existing_page', { page_url: targetUrl })
+    : null;
   const config = writerConfigFor(brief);
   return {
     opportunity_id: opportunityId,
     branch: row.branch,
     draft_path: row.draft_path,
     last_problem: row.problem || null,
+    withheld,
+    existing_page: existingPage,
     draft_shape: {
       note: 'One JSON object. opportunity_id and brief_id are required and must equal this pack (brief_id = brief.id). The other fields are the emit_draft input below.',
       brief_id: row.brief_id,
