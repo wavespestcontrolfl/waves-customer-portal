@@ -64,13 +64,22 @@ function visitStartInstant(row) {
 async function reminderStateKey(database, rowIds) {
   const reminders = await database('appointment_reminders')
     .whereIn('scheduled_service_id', rowIds)
-    .select('scheduled_service_id', 'reminder_72h_sent', 'reminder_24h_sent');
+    .select('scheduled_service_id', 'reminder_72h_sent', 'reminder_24h_sent', 'suppressed_by_sibling');
   const byRow = new Map(reminders.map((r) => [String(r.scheduled_service_id), r]));
   // A missing reminder row arms fresh (unsent) later, so it reads as unsent.
-  return rowIds.map((id) => {
-    const r = byRow.get(String(id));
-    return `${r && r.reminder_72h_sent ? 1 : 0}${r && r.reminder_24h_sent ? 1 : 0}`;
-  });
+  // A row suppressed by its same-slot sibling (appointment-reminders.js: two
+  // services booked at one time share ONE reminder, and the second row is
+  // stored with every tier pre-closed) never sent and never will, so it has
+  // no state of its own to compare: the sibling that owns the slot decides.
+  // Without this, every same-time pair read as "one reminded, one not" and
+  // the sweep left all of them loose (owner 2026-10-08: existing same-day
+  // pest + lawn pairs become one stop).
+  return rowIds
+    .filter((id) => !byRow.get(String(id))?.suppressed_by_sibling)
+    .map((id) => {
+      const r = byRow.get(String(id));
+      return `${r && r.reminder_72h_sent ? 1 : 0}${r && r.reminder_24h_sent ? 1 : 0}`;
+    });
 }
 
 // Every member the eligibility path picked must itself be untouched and
