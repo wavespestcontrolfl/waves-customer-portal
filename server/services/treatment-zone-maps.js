@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const db = require('../models/db');
 const config = require('../config');
 const logger = require('./logger');
@@ -75,6 +75,13 @@ function propertyChangedError() {
   );
 }
 
+function traceExistsError() {
+  return Object.assign(
+    operationalError('This visit already has a trace. Remove it first to use the last visit\'s.', 409),
+    { code: 'trace_exists' },
+  );
+}
+
 // Every save takes the visit row's lock, the one a completion holds while
 // it judges the trace (complete-scheduled-service.js, traceSeen), so a save
 // either lands before that read or waits for the completion (Codex #5538).
@@ -134,6 +141,9 @@ async function saveTreatmentZoneMap({
   // The report flow's trace is judged with the report: also refused once the
   // visit is completed.
   openVisitOnly = false,
+  // Reusing the last visit's trace never replaces a trace this visit already
+  // has (a hand trace is the tech's claim for today): refused under the lock.
+  createOnly = false,
   knex = db,
 }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
@@ -220,6 +230,9 @@ async function saveTreatmentZoneMap({
   });
   const persist = async (conn) => {
     await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
+    if (createOnly && await conn('treatment_zone_maps').where({ scheduled_service_id: scheduledServiceId }).first('id')) {
+      throw traceExistsError();
+    }
     return upsertZoneRow(conn, scheduledServiceId, buildRecord);
   };
 
@@ -228,7 +241,7 @@ async function saveTreatmentZoneMap({
     saved = await knex.transaction(persist);
   } catch (err) {
     // A refused save leaves no orphaned upload behind (best effort).
-    if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') {
+    if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed' || err?.code === 'trace_exists') {
       for (const key of [snapshotKey, maskKey].filter(Boolean)) {
         try {
           await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
@@ -386,11 +399,182 @@ async function treatmentZonePdfSignature(service, knex = db) {
   }
 }
 
+// ── "Same as last visit" (GATE_TRACE_REUSE) ─────────────────────────────────
+// A recurring visit re-traces the same house every quarter. The tech can copy
+// the property's last saved spray trace onto the open visit with one tap. The
+// server finds the source itself; a client never names a zone.
+//
+// Only a 'perimeter' trace is offered. 'interior' (building footprint + the
+// inside wash) is a per-visit fact, not a standing outline; the lawn, lawn
+// highlight and yard modes are area claims for other services; a row with no
+// mode is a legacy or downgraded open trace we cannot vouch for. The offered
+// mode must also pass the same capture check the save route runs for THIS
+// visit, so a lawn or bait visit is never offered a spray outline.
+const REUSE_CAPTURE_MODE = 'perimeter';
+const REUSE_CANDIDATE_LIMIT = 10;
+
+function addressKey(parts) {
+  const clean = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const line1 = clean(parts.line1);
+  if (!line1) return null;
+  return [line1, clean(parts.city), clean(parts.state), clean(parts.zip).slice(0, 5)].join('|');
+}
+
+// Stamped visit address over the customer's, as the geocode route reads it.
+const EFFECTIVE_ADDRESS_COLUMNS = (knex) => [
+  knex.raw('COALESCE(ss.service_address_line1, c.address_line1) as addr_line1'),
+  knex.raw('COALESCE(ss.service_address_city, c.city) as addr_city'),
+  knex.raw('COALESCE(ss.service_address_state, c.state) as addr_state'),
+  knex.raw('COALESCE(ss.service_address_zip, c.zip) as addr_zip'),
+];
+
+async function visitAddressKey(knex, scheduledServiceId) {
+  const row = await knex('scheduled_services as ss')
+    .leftJoin('customers as c', 'c.id', 'ss.customer_id')
+    .where('ss.id', scheduledServiceId)
+    .first(...EFFECTIVE_ADDRESS_COLUMNS(knex));
+  return row ? addressKey({ line1: row.addr_line1, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) : null;
+}
+
+// The newest offerable trace for `visit` (a scheduled_services row with id,
+// customer_id, property_id, scheduled_date, service_id, service_type), or
+// null. The SQL narrows to the same customer's earlier COMPLETED visits at
+// the same property; the checks below judge each row again, so a wrong row
+// can never pass on the query alone.
+async function findReusableTreatmentZone(visit, { knex = db } = {}) {
+  if (!visit?.id || !visit.customer_id) return null;
+  const visitDate = dateOnlyOrNull(visit.scheduled_date);
+  if (!visitDate) return null;
+  if (await knex('treatment_zone_maps').where({ scheduled_service_id: visit.id }).first('id')) return null;
+
+  const propertyId = visit.property_id || null;
+  // No property on this visit: only an equal, non-empty service address
+  // stands in for "same property".
+  let hereAddress = null;
+  if (!propertyId) {
+    hereAddress = await visitAddressKey(knex, visit.id);
+    if (!hereAddress) return null;
+  }
+
+  const rows = await knex('scheduled_services as ss')
+    .join('treatment_zone_maps as tz', 'tz.scheduled_service_id', 'ss.id')
+    .leftJoin('customers as c', 'c.id', 'ss.customer_id')
+    .where('ss.customer_id', visit.customer_id)
+    .where('ss.status', 'completed')
+    .whereNot('ss.id', visit.id)
+    .where('ss.scheduled_date', '<', visitDate)
+    .where('tz.capture_mode', REUSE_CAPTURE_MODE)
+    .modify((q) => (propertyId ? q.where('ss.property_id', propertyId) : q.whereNull('ss.property_id')))
+    .orderBy('ss.scheduled_date', 'desc')
+    .orderBy('tz.updated_at', 'desc')
+    .limit(REUSE_CANDIDATE_LIMIT)
+    .select('tz.*', 'ss.id as source_service_id', 'ss.customer_id as source_customer_id',
+      'ss.property_id as source_property_id', 'ss.status as source_status',
+      'ss.scheduled_date as source_date', ...EFFECTIVE_ADDRESS_COLUMNS(knex));
+
+  const { traceCaptureBlockPayload } = require('./service-report/trace-eligibility');
+  for (const row of rows) {
+    if (!reuseRowMatches(row, visit, visitDate, hereAddress)) continue;
+    if (await traceCaptureBlockPayload(visit, knex, { captureMode: row.capture_mode })) continue;
+    return { zone: row, sourceServiceId: row.source_service_id, capturedOn: dateOnlyOrNull(row.source_date) };
+  }
+  return null;
+}
+
+// One candidate row against this visit: same customer, an earlier COMPLETED
+// visit that is not this one, perimeter mode with a length, and the same property (or, for
+// a property-less visit, a property-less one at an equal address).
+function reuseRowMatches(row, visit, visitDate, hereAddress) {
+  const sourceDate = dateOnlyOrNull(row.source_date);
+  if (row.source_service_id === visit.id
+    || String(row.source_customer_id) !== String(visit.customer_id)
+    || row.source_status !== 'completed'
+    || !sourceDate || sourceDate >= visitDate
+    || row.capture_mode !== REUSE_CAPTURE_MODE
+    // The sheet's hold clears on a length, so a trace with none is no help.
+    || !(Number(row.linear_ft) > 0)) return false;
+  if (visit.property_id) return String(row.source_property_id ?? '') === String(visit.property_id);
+  return !row.source_property_id
+    && addressKey({ line1: row.addr_line1, city: row.addr_city, state: row.addr_state, zip: row.addr_zip }) === hereAddress;
+}
+
+function dateOnlyOrNull(value) {
+  return require('./visit-groups').dateOnly(value);
+}
+
+// What the sheet shows before the tap: no path points, just the size and day.
+async function describeReusableTreatmentZone(visit, { knex = db } = {}) {
+  const found = await findReusableTreatmentZone(visit, { knex });
+  if (!found) return { available: false };
+  return {
+    available: true,
+    linearFt: found.zone.linear_ft ?? null,
+    capturedOn: found.capturedOn,
+    captureMode: found.zone.capture_mode,
+  };
+}
+
+async function readStoredImage(key) {
+  if (!config.s3?.bucket) throw operationalError('S3 not configured', 500);
+  try {
+    const out = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+    const bytes = Buffer.from(await out.Body.transformToByteArray());
+    if (!bytes.length) throw new Error('empty object');
+    return bytes;
+  } catch (err) {
+    logger.warn(`[treatment-zone] reuse picture read failed key=${key}: ${err.message}`);
+    throw Object.assign(
+      operationalError('Could not copy the last visit\'s trace picture. Trace it by hand.', 502),
+      { code: 'trace_image_copy_failed' },
+    );
+  }
+}
+
+// Copies the trace onto `visit` through the normal save, so the property
+// fence, the completed-visit refusal and the one-row-per-visit lock all run.
+// The pictures are read BEFORE the save: a picture that cannot be copied
+// fails the request instead of saving a zone with a missing picture.
+async function reuseLastTreatmentZone({ visit, technicianId = null, expectedPropertyId, openVisitOnly = false, knex = db }) {
+  const found = await findReusableTreatmentZone(visit, { knex });
+  if (!found) {
+    throw Object.assign(operationalError('There is no earlier trace for this property to reuse.', 409), { code: 'no_reusable_trace' });
+  }
+  const { zone, sourceServiceId } = found;
+  const snapshotPngBuffer = zone.snapshot_s3_key ? await readStoredImage(zone.snapshot_s3_key) : null;
+  const maskPngBuffer = zone.mask_s3_key ? await readStoredImage(zone.mask_s3_key) : null;
+  const pathPoints = typeof zone.path_points === 'string' ? JSON.parse(zone.path_points) : zone.path_points;
+  const row = await saveTreatmentZoneMap({
+    scheduledServiceId: visit.id,
+    customerId: visit.customer_id,
+    technicianId,
+    pathPoints,
+    closedLoop: zone.closed_loop,
+    linearFt: zone.linear_ft,
+    centerLat: zone.center_lat,
+    centerLng: zone.center_lng,
+    zoom: zone.zoom,
+    address: zone.address,
+    snapshotPngBuffer,
+    maskPngBuffer,
+    captureMode: zone.capture_mode,
+    ...(expectedPropertyId !== undefined ? { expectedPropertyId } : {}),
+    openVisitOnly,
+    createOnly: true,
+    knex,
+  });
+  // No column records where a copy came from; the log line does.
+  logger.info(`[treatment-zone] reused service=${visit.id} from=${sourceServiceId} linearFt=${row?.linear_ft ?? 'n/a'}`);
+  return row;
+}
+
 module.exports = {
   traceJudgedAllows,
   saveTreatmentZoneMap,
   deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
+  findReusableTreatmentZone,
+  describeReusableTreatmentZone,
+  reuseLastTreatmentZone,
   treatmentZonePdfSignature,
   normalizePathPoints,
   TREATMENT_ZONE_PREFIX,

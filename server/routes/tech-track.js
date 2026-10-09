@@ -1585,6 +1585,8 @@ const {
   saveTreatmentZoneMap,
   deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
+  describeReusableTreatmentZone,
+  reuseLastTreatmentZone,
 } = require('../services/treatment-zone-maps');
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
 const { traceCaptureBlockPayload } = require('../services/service-report/trace-eligibility');
@@ -1780,6 +1782,82 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
     return res.json({ suggestion });
   } catch (err) {
     logger.error(`[tech-track] treatment zone suggest failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+// "Same as last visit" (GATE_TRACE_REUSE, dark): the Fast Complete report flow
+// copies the property's last saved spray trace onto the open visit with one
+// tap. The server picks the source trace itself (treatment-zone-maps.js,
+// findReusableTreatmentZone); a client never names a zone.
+const TRACE_REUSE_SVC_COLUMNS = ['id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type', 'property_id'];
+const TRACE_REUSE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, trace_exists: 409, no_reusable_trace: 409, trace_image_copy_failed: 502 };
+
+// GET /api/tech/services/:id/treatment-zone/last — is there a trace to reuse,
+// and how big? No path points: the sheet only needs the size and the day.
+router.get('/:id/treatment-zone/last', async (req, res, next) => {
+  try {
+    if (!featureGates.traceReuseLive() || !featureGates.isEnabled('treatmentZoneMap')) {
+      return res.json({ available: false });
+    }
+    const svc = await db('scheduled_services').where({ id: req.params.id }).first(...TRACE_REUSE_SVC_COLUMNS);
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    return res.json(await describeReusableTreatmentZone(svc));
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone last fetch failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+// POST /api/tech/services/:id/treatment-zone/reuse — body { expectedPropertyId?,
+// openVisitOnly? }, the save route's own fence fields. Saves a copy of the
+// last trace onto this visit through saveTreatmentZoneMap, so the property
+// fence, the completed-visit refusal and the capture check all apply.
+router.post('/:id/treatment-zone/reuse', async (req, res, next) => {
+  try {
+    if (!featureGates.traceReuseLive() || !featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const svc = await db('scheduled_services').where({ id: req.params.id }).first(...TRACE_REUSE_SVC_COLUMNS);
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const fenced = Object.prototype.hasOwnProperty.call(body, 'expectedPropertyId');
+    if (fenced && String(body.expectedPropertyId ?? '') !== String(svc.property_id ?? '')) {
+      return res.status(409).json({
+        error: 'This visit moved to another property. Close it and reopen it from the schedule.',
+        code: 'visit_property_changed',
+      });
+    }
+    const row = await reuseLastTreatmentZone({
+      visit: svc,
+      technicianId: req.technicianId,
+      ...(fenced ? { expectedPropertyId: body.expectedPropertyId ?? null } : {}),
+      openVisitOnly: body.openVisitOnly === true,
+    }).catch((err) => {
+      if (TRACE_REUSE_REFUSALS[err?.code]) return { refused: err };
+      throw err;
+    });
+    if (row?.refused) {
+      return res.status(TRACE_REUSE_REFUSALS[row.refused.code]).json({ error: row.refused.message, code: row.refused.code });
+    }
+
+    // The reused map renders on the report like a hand trace: same stale-PDF
+    // rule as the save route.
+    const completedRecord = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first('id');
+    if (completedRecord) await invalidateServiceReportPdfCache(completedRecord.id);
+
+    return res.json({ treatmentZone: row });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone reuse failed: ${err.message}`);
     return next(err);
   }
 });

@@ -451,6 +451,59 @@ export function useVisitTrace({ serviceId, request }) {
   return { ...state, saved, reload };
 }
 
+// "Same as last visit" (GATE_TRACE_REUSE): is there an earlier trace of this
+// property to copy? Asked once per sheet, and only once the visit is known to
+// have no trace of its own (`wanted`). A read that fails, or the gate being
+// off, is "not available": it never holds the sheet. Nothing is applied by
+// the read; the tech's tap on the button is the confirmation.
+function useLastTrace({ serviceId, request, wanted }) {
+  const [last, setLast] = useState({ available: false, linearFt: null });
+  const asked = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    if (!wanted || asked.current) return;
+    asked.current = true;
+    request(`/tech/services/${serviceId}/treatment-zone/last`)
+      .then((data) => {
+        if (!mounted.current || data?.available !== true) return;
+        const feet = Math.round(Number(data.linearFt));
+        setLast({ available: true, linearFt: Number.isFinite(feet) && feet > 0 ? feet : null });
+      })
+      .catch(() => {});
+  }, [wanted, request, serviceId]);
+  return last;
+}
+
+// The copy itself: one tap saves the last trace onto this visit and reads the
+// visit's trace again, so the hold clears as after a hand trace. The server
+// picks the trace and runs the tracer's own save checks (the property this
+// sheet loaded, a visit still open); a refusal goes to `setError` and the
+// Trace button stays usable. `plain` is a plain pest visit that can be traced
+// (a lane or typed visit is left out). `offer` is null when nothing is offered.
+export function useTraceReuse({ serviceId, request, propertyId, trace, plain, setError }) {
+  const last = useLastTrace({ serviceId, request, wanted: plain && trace.loaded && !trace.failed && !trace.zone });
+  const [reusing, setReusing] = useState(false);
+  const reuse = async () => {
+    setReusing(true);
+    setError('');
+    try {
+      await request(`/tech/services/${serviceId}/treatment-zone/reuse`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...(propertyId !== undefined ? { expectedPropertyId: propertyId ?? null } : {}),
+          openVisitOnly: true,
+        }),
+      });
+      trace.reload();
+    } catch (err) {
+      setError(err?.message || 'Couldn’t copy the last trace. Trace it by hand.');
+    }
+    setReusing(false);
+  };
+  return { feet: last.linearFt, reusing, offer: plain && !trace.zone && last.available ? reuse : null };
+}
+
 // The traced perimeter's length, when the saved trace is a perimeter (with
 // or without "Interior spray too", which keeps the perimeter's length): that
 // length is the perimeter spray's linear feet on the record. A lawn or yard

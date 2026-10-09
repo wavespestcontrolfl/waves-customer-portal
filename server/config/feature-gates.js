@@ -3971,6 +3971,10 @@ const gates = {
   // wording a nothing-found report keeps; read at call time via
   // standardWordingPreviewLive().
   standardWordingPreview: process.env.GATE_STANDARD_WORDING_PREVIEW === 'true',
+  // GATE_TRACE_REUSE — "Same as last visit" on the Fast Complete report flow
+  // copies the property's last saved spray trace onto the open visit; read at
+  // call time via traceReuseLive().
+  traceReuse: process.env.GATE_TRACE_REUSE === 'true',
   // GATE_BLOG_SEARCH_SUGGEST — a search no post covers suggested as a new
   // post for the autonomous blog queue; read at call time via
   // blogSearchSuggestLive().
@@ -4868,6 +4872,14 @@ function lawnReportClarityLive() {
 // in every environment. Off, the preview route answers { available: false }.
 function standardWordingPreviewLive() {
   return process.env.GATE_STANDARD_WORDING_PREVIEW === 'true';
+}
+
+// GATE_TRACE_REUSE read at CALL time — strict `=== 'true'`, dark in every
+// environment. Off, GET .../treatment-zone/last answers { available: false },
+// POST .../treatment-zone/reuse answers 404, and the Fast Complete sheet
+// shows no "Same as last visit" button.
+function traceReuseLive() {
+  return process.env.GATE_TRACE_REUSE === 'true';
 }
 
 // GATE_BLOG_SEARCH_SUGGEST read at CALL time — strict `=== 'true'`, dark in
@@ -6177,3 +6189,5 @@ module.exports.staffOnboardingDocsLive = staffOnboardingDocsLive;
 module.exports.callLastNameLookupLive = callLastNameLookupLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportClarityLive = lawnReportClarityLive;
+// GATE_TRACE_REUSE reader, on its own line so gate PRs never conflict.
+module.exports.traceReuseLive = traceReuseLive;

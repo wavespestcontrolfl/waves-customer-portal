@@ -87,7 +87,7 @@ import {
   TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
   typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
-  useVisitPhotos, useVisitPromises, useVisitTrace,
+  useTraceReuse, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
@@ -1757,6 +1757,10 @@ function ReportFlowForm({
   // completed elsewhere) is shown and the hold stays.
   const [removingTrace, setRemovingTrace] = useState(false);
   const [traceError, setTraceError] = useState('');
+  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
+  const reuse = useTraceReuse({
+    serviceId: service.id, request, propertyId: loadedPropertyId, trace, plain: !mode && traceAvailable && !writing, setError: setTraceError,
+  });
   const removeTrace = async () => {
     setRemovingTrace(true);
     setTraceError('');
@@ -1808,6 +1812,7 @@ function ReportFlowForm({
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
+        reuse={stepTrace ? reuse : NO_REUSE}
         traceError={traceError}
         sources={writerSources({
           productCount: active.length,
@@ -1872,13 +1877,36 @@ function ReportFlowForm({
   );
 }
 
+// The report footer's trace buttons: read the trace again, remove it, or
+// "Same as last visit" (a one-tap copy of the property's last trace).
+// No copy offered (a lane or typed visit, a spot visit, a trace already saved).
+const NO_REUSE = { offer: null, reusing: false, feet: null };
+
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse }) {
+  return (
+    <>
+      {onRetryTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
+      )}
+      {onRemoveTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
+      )}
+      {reuse.offer && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={reuse.reusing} disabled={locked} onClick={reuse.offer}>
+          {reuse.feet ? `Same as last visit · ${reuse.feet} ft` : 'Same as last visit'}
+        </Button>
+      )}
+    </>
+  );
+}
+
 // The report step: the report being written, or the report to read (edit,
 // write again), the trace, and the footer that fits: answer a completion
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, sweep = null,
+  onBackFromPrompt, sweep = null, reuse = NO_REUSE,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1886,12 +1914,13 @@ function ReportStep({
   let footer = (
     <CompleteFooter submission={submission} missingReason={completeMissing.reason} warn={!!completeMissing.stockRow} label="Complete & send" onSubmit={onSubmit}>
       {stockButton}
-      {onRetryTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
-      )}
-      {onRemoveTrace && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
-      )}
+      <TraceFooterButtons
+        locked={locked}
+        onRetryTrace={onRetryTrace}
+        onRemoveTrace={onRemoveTrace}
+        removingTrace={removingTrace}
+        reuse={reuse}
+      />
     </CompleteFooter>
   );
   if (submission.prompt) {
@@ -1933,7 +1962,7 @@ function ReportStep({
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
         {showDraft && laneCard}
-        {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
+        {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       {footer}
