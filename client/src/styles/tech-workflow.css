@@ -143,6 +143,8 @@
 /* Fast Complete: the visit note leads the sheet, mic beside a multi-line box. */
 .tech-visit-note-row { display: flex; align-items: flex-start; gap: 10px; }
 .tech-visit-note-row .ui-control.tech-visit-control { flex: 1; min-width: 0; }
+/* The tip's own line: the same mic beside a one-line box. */
+.tech-visit-tip-own-row { align-items: center; }
 /* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the words and the photos
    share one box. */
 .tech-visit-note-box { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 0.5px solid var(--tech-border-strong); border-radius: 4px; background: var(--tech-card); }
