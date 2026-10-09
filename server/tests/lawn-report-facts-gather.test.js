@@ -81,14 +81,15 @@ describe('gatherAndFreezeReportFacts', () => {
       productRow(3, 3, 'spot_treatment', { area_value: 500, area_unit: 'sqft' }),
       productRow(4, 4, 'spot_treatment', { area_value: 100, area_unit: 'sqft' }),
     ]));
-    const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
+    const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] }, lawnSpotAreaRecorded: { v: 1, productIds: [UUID(1), UUID(3)] } };
     const out = await facts.gatherAndFreezeReportFacts({ record: record(notes), knex, withTies: true, now: new Date('2026-10-08T20:00:00Z') });
     expect(out).toEqual(state.notes.lawnReportFacts);
     expect(out).toMatchObject({
       v: 1,
       frozenAt: '2026-10-08T20:00:00.000Z',
       reentry: { rule: 'watered_in_and_dry', source: 'facts' },
-      productUse: { 'sp-2': { sqft: 250 }, 'sp-3': { sqft: 500 }, 'sp-4': { sqft: 100 } },
+      // Only the rows the technician recorded a spot area for state one; sp-4 was sized another way (a typed amount).
+      productUse: { 'sp-2': { sqft: 250 }, 'sp-3': { sqft: 500 }, 'sp-4': { sqft: null } },
       ties: {
         assessmentId: 'as-1',
         items: [
@@ -107,11 +108,17 @@ describe('gatherAndFreezeReportFacts', () => {
 
   test('the freeze is read back by every reader from the record alone', async () => {
     const { knex, state } = fakeKnex(tables([productRow(1, 1, 'spot_treatment', { area_value: 250, area_unit: 'sqft' })]));
-    await facts.gatherAndFreezeReportFacts({ record: record(), knex });
+    await facts.gatherAndFreezeReportFacts({ record: record({ lawnSpotAreaRecorded: { v: 1, productIds: [UUID(1)] } }), knex });
     const stored = JSON.stringify(state.notes);
     expect(facts.frozenReentryRule(stored)).toMatchObject({ rule: 'dry' });
     expect(facts.frozenProductUseTexts(stored)).toEqual({ 'sp-1': 'Spot treatment, about 250 sq ft' });
     expect(facts.frozenReportFactsStamp(stored)).toMatch(/^:rf=/);
+  });
+
+  test('a spot row whose area is only the fallback (no recorded-area marker on the record) freezes plain "Spot treatment"', async () => {
+    const { knex, state } = fakeKnex(tables([productRow(1, 1, 'spot_treatment', { area_value: 5000, area_unit: 'sqft' })]));
+    await facts.gatherAndFreezeReportFacts({ record: record(), knex });
+    expect(facts.frozenProductUseTexts(JSON.stringify(state.notes))).toEqual({ 'sp-1': 'Spot treatment' });
   });
 
   test('a spray-only visit is dry; a product with no usable fact marks the visit default', async () => {

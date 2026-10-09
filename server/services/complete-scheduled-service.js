@@ -6740,6 +6740,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
             ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast),
+            // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
+            // is not an area), so the card never states a whole-lawn fallback as the spot.
+            ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)

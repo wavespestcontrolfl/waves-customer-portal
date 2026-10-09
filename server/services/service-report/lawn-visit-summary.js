@@ -150,10 +150,10 @@ const MAX_FINDINGS = 3;
 
 // Ties (v4). What was applied, in the words a customer hears; what the technician found.
 const TIE_PRODUCT_PHRASES = Object.freeze({
-  fungicide: 'a fungicide',
-  herbicide: 'a weed control product',
-  insecticide: 'an insect control product',
-  wetting_agent: 'a wetting agent',
+  fungicide: 'a fungicide treatment',
+  herbicide: 'a spot treatment for weeds',
+  insecticide: 'a spot treatment for insects',
+  wetting_agent: 'a wetting agent treatment',
 });
 const TECH_FOUND_PHRASES = Object.freeze({ chinch: 'chinch bugs', caterpillars: 'caterpillars', fungus: 'signs of fungus' });
 const MAX_TIES = 2;
@@ -190,8 +190,10 @@ const SENTENCE = Object.freeze({
   photoRead: (list) => `Our photo read shows ${list}.`,
   photoReadMixed: (good, concerns) => `Our photo read shows ${good}, along with ${concerns}.`,
   findings: (list) => `In the photos we noticed ${list}.`,
-  tieSure: (label, product) => `Today’s photos showed ${label} in one area. We treated that spot with ${product} today.`,
-  tieHedged: (label, product) => `Today’s photos showed what may be ${label} in one area, so we treated that spot with ${product} today.`,
+  // A photo tie states what the photos showed and what the visit included, never that THAT spot was treated: no place is
+  // recorded for a spot row yet, so the finding and the treatment may be in different parts of the lawn.
+  tieSure: (label, product) => `Today’s photos showed ${label} in one area. Today’s visit included ${product}.`,
+  tieHedged: (label, product) => `Today’s photos showed what may be ${label} in one area, and today’s visit included ${product}.`,
   tieCheck: (label) => `Today’s photos showed what may be ${label} in one area. We will check it by hand at the next visit.`,
   tieTech: (found) => `Your technician found ${found} and treated that spot today.`,
   results: 'Results from treatments like these build gradually, and each visit adds to the last one.',

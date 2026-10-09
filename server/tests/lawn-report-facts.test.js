@@ -11,6 +11,7 @@ const UNTIL_DRY = 'Keep people and pets off treated areas until dry.';
 const approved = (wateringRule, extra = {}) => ({ wateringRule, reentryHours: 0, reentrySummary: UNTIL_DRY, ...extra });
 const row = (id, method, product = {}) => ({
   id,
+  product_id: product.productId === undefined ? `pid-${id}` : product.productId,
   product_name: product.name || `Product ${id}`,
   product_category: product.category || '',
   application_method: method,
@@ -371,10 +372,44 @@ describe('the customer wording is fixed and chosen by code', () => {
 });
 
 describe('a spot product says where it was used', () => {
-  test('only spot rows are described; whole-lawn rows are not', () => {
-    expect(facts.productUseEntries([SPRAY, GRANULE, SPOT_HERBICIDE, FUNGICIDE])).toEqual({
+  const RECORDED = new Set(['pid-p-spot', 'pid-p-fung']);
+
+  test('only spot rows are described; whole-lawn rows are not; an area is stated only for a row the technician recorded one for', () => {
+    expect(facts.productUseEntries([SPRAY, GRANULE, SPOT_HERBICIDE, FUNGICIDE], RECORDED)).toEqual({
       'p-spot': { sqft: 250 },
       'p-fung': { sqft: 500 },
+    });
+  });
+
+  test('a spot row sized by a typed amount (its areaValue is the planned / whole-lawn fallback) is NOT stated as an area', () => {
+    const fallback = row('p-typed', 'spot_treatment', { category: 'herbicide', areaValue: 5000, areaUnit: 'sqft' });
+    expect(facts.productUseEntries([fallback], RECORDED)).toEqual({ 'p-typed': { sqft: null } });
+    expect(facts.productUseEntries([fallback])).toEqual({ 'p-typed': { sqft: null } });
+    expect(facts.productUseText(facts.productUseEntries([fallback], RECORDED)['p-typed'])).toBe('Spot treatment');
+    // Recorded for one row only: the other spot row stays plain.
+    expect(facts.productUseEntries([SPOT_HERBICIDE, fallback], new Set(['pid-p-spot']))).toEqual({ 'p-spot': { sqft: 250 }, 'p-typed': { sqft: null } });
+  });
+
+  describe('spotAreaFreeze: the completion record of which rows had a recorded spot area', () => {
+    const U1 = '00000000-0000-4000-8000-0000000000a1';
+    afterEach(() => { delete process.env.GATE_LAWN_REPORT_FACTS; });
+
+    test('gate off: nothing is written (the record is exactly what it was)', () => {
+      expect(facts.spotAreaFreeze({ spotAreas: { v: 1, productIds: [U1] } })).toEqual({});
+    });
+
+    test('gate on: version 1, uuids only, lower-cased, each once, bounded', () => {
+      process.env.GATE_LAWN_REPORT_FACTS = 'true';
+      expect(facts.spotAreaFreeze({ spotAreas: { v: 1, productIds: [U1.toUpperCase(), U1, 'nope', 7] } })).toEqual({ lawnSpotAreaRecorded: { v: 1, productIds: [U1] } });
+      const many = Array.from({ length: 80 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+      expect(facts.spotAreaFreeze({ spotAreas: { v: 1, productIds: many } }).lawnSpotAreaRecorded.productIds).toHaveLength(50);
+    });
+
+    test('gate on: no block, a wrong version or a malformed block write nothing', () => {
+      process.env.GATE_LAWN_REPORT_FACTS = 'true';
+      for (const bad of [undefined, null, { visitType: 'recurring' }, { spotAreas: { v: 2, productIds: [U1] } }, { spotAreas: [U1] }, { spotAreas: { v: 1, productIds: 'x' } }]) {
+        expect(facts.spotAreaFreeze(bad)).toEqual({});
+      }
     });
   });
 
@@ -786,6 +821,7 @@ describe('the freeze is first writer wins and never throws', () => {
       run: null,
       assessment: { id: 'as-1' },
       techFindings: [],
+      recordedSpotAreas: new Set(['pid-p-spot']),
       now: new Date('2026-10-08T20:00:00Z'),
     });
     expect(block).toMatchObject({

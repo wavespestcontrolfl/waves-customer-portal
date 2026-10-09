@@ -182,20 +182,47 @@ function cleanReentry(raw) {
 
 // ── 2. Product use: a spot row says where it went ───────────────────────────
 
-function spotSqft(row) {
-  const value = row && row.area_value != null && row.area_value !== '' ? Number(row.area_value) : NaN;
-  const unit = String((row && row.area_unit) || '').toLowerCase();
+// The area a spot row's card may state: only one the technician recorded AS the spot's extent. The sheet's
+// areaValue is also the planned / whole-lawn fallback when the technician typed an amount instead of an area, and
+// service_products cannot tell the two apart, so the sheet names the rows whose spot area it recorded
+// (lawnFast.spotAreas, frozen by spotAreaFreeze into structured_notes.lawnSpotAreaRecorded). An unnamed row prints
+// plain "Spot treatment".
+function spotSqft(row, recorded) {
+  const productId = String((row && row.product_id) || '').toLowerCase();
+  if (!productId || !(recorded instanceof Set) || !recorded.has(productId)) return null;
+  const value = row.area_value != null && row.area_value !== '' ? Number(row.area_value) : NaN;
+  const unit = String(row.area_unit || '').toLowerCase();
   return Number.isFinite(value) && value > 0 && (unit === 'sqft' || unit === 'sq_ft') ? value : null;
 }
 
 // Only a spot treatment row is described; every whole-lawn row keeps its card text.
-function productUseEntries(rows) {
+function productUseEntries(rows, recorded = new Set()) {
   const out = {};
   for (const row of Array.isArray(rows) ? rows : []) {
     if (methodOf(row) !== 'spot_treatment' || !row.id) continue;
-    out[String(row.id)] = { sqft: spotSqft(row) };
+    out[String(row.id)] = { sqft: spotSqft(row, recorded) };
   }
   return out;
+}
+
+/**
+ * The completion record of which products' spot area the technician recorded (GATE_LAWN_REPORT_FACTS):
+ * `{ lawnSpotAreaRecorded: { v: 1, productIds } }` to spread into structured_notes, or `{}`. Built from the
+ * `spotAreas` block of the submit's `lawnFast` echo, checked here: only while the gate is live, only version 1,
+ * uuid product ids, each once, bounded. Read by nobody but the facts freeze.
+ */
+function spotAreaFreeze(lawnFast) {
+  if (!require('../../config/feature-gates').lawnReportFactsLive()) return {};
+  const block = lawnFast && typeof lawnFast === 'object' ? lawnFast.spotAreas : null;
+  if (!isPlain(block) || block.v !== 1 || !Array.isArray(block.productIds)) return {};
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const productIds = [...new Set(block.productIds.filter((id) => typeof id === 'string' && uuid.test(id)).map((id) => id.toLowerCase()))].slice(0, 50);
+  return { lawnSpotAreaRecorded: { v: 1, productIds } };
+}
+
+function recordedSpotAreas(structuredNotes) {
+  const block = parseJsonObject(structuredNotes).lawnSpotAreaRecorded;
+  return new Set(isPlain(block) && block.v === 1 && Array.isArray(block.productIds) ? block.productIds.map((id) => String(id).toLowerCase()) : []);
 }
 
 function cleanProductUse(raw) {
@@ -382,13 +409,13 @@ function cleanTies(raw) {
 // ── The frozen block: build, read, key ──────────────────────────────────────
 
 // `withTies` is false while the tie part is not live (feature-gates.js lawnReportTiesLive): no tie is read or stored.
-function buildReportFacts({ rows, run, assessment, techFindings, withTies = true, now = new Date() }) {
+function buildReportFacts({ rows, run, assessment, techFindings, withTies = true, recordedSpotAreas: recorded = new Set(), now = new Date() }) {
   const reentry = visitReentry(rows);
   return {
     v: FREEZE_VERSION,
     frozenAt: now.toISOString(),
     ...(reentry ? { reentry } : {}),
-    productUse: productUseEntries(rows),
+    productUse: productUseEntries(rows, recorded),
     ...(withTies ? { ties: { assessmentId: assessment && assessment.id != null ? String(assessment.id) : null, items: buildTies({ rows, run, assessment, techFindings }) } } : {}),
   };
 }
@@ -536,7 +563,7 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now 
     const { assessment, run } = withTies ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
     const taps = withTies ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
     const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
-    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies, now });
+    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
     return await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
   } catch (err) {
     logger.warn(`[lawn-report-facts] gather failed for service_record ${record && record.id}: ${err.message}`);
@@ -556,6 +583,7 @@ module.exports = {
   productReentry,
   visitReentry,
   productUseEntries,
+  spotAreaFreeze,
   productUseText,
   buildTies,
   buildReportFacts,

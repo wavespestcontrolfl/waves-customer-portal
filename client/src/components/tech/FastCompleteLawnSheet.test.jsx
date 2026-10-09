@@ -2291,6 +2291,44 @@ describe('weed spots and the spot area', () => {
     expect(sentProduct(P_IRON).areaValue).toBeUndefined();
   });
 
+  describe('the spot rows whose area the technician recorded are named on the submit (GATE_LAWN_REPORT_FACTS)', () => {
+    const sentSpotAreas = () => completeCalls()[0].body.lawnFast.spotAreas;
+    const spotContext = (extra = {}) => weedContext(MIX(), extra);
+
+    test('a recorded spot area names its rows (the weed entry\'s rows share one area); the key is the live report-facts flag', async () => {
+      await open(spotContext({ lawnReportFacts: true }));
+      addWeedSpots();
+      await analyze();
+      fireEvent.click(within(weedArea()).getByRole('button', { name: '250 sq ft' }));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      expect(sentSpotAreas().v).toBe(1);
+      expect(sentSpotAreas().productIds).toEqual(expect.arrayContaining([P_LEAD, P_CERT]));
+      expect(sentSpotAreas().productIds.every((id) => id === id.toLowerCase())).toBe(true);
+    });
+
+    test('a spot row sized by a typed amount is not named (its card says plain "Spot treatment"); nothing is sent when no row has an area', async () => {
+      await open(weedContext(MIX({ mode: 'none', productIds: [], note: null, surfactant: null }), { lawnReportFacts: true, plannedProducts: { source: 'plan', items: [{ ...PLANNED[1], amount: null }], addOns: [], month: 10 } }));
+      await analyze();
+      fireEvent.change(within(editorFor('Iron Plus')).getByLabelText('Iron Plus'), { target: { value: '3' } });
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      expect(sentProduct(P_IRON)).toMatchObject({ applicationMethod: 'spot_treatment', totalAmount: 3 });
+      expect(completeCalls()[0].body.lawnFast).not.toHaveProperty('spotAreas');
+    });
+
+    test('the flag absent: the request carries no spotAreas at all, as before', async () => {
+      await open(spotContext());
+      addWeedSpots();
+      await analyze();
+      fireEvent.click(within(weedArea()).getByRole('button', { name: '250 sq ft' }));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      expect(completeCalls()[0].body.lawnFast).not.toHaveProperty('spotAreas');
+      expect(sentProduct(P_LEAD)).toMatchObject({ areaValue: 250, areaUnit: 'sqft' });
+    });
+  });
+
   test('a spot row that is not in the weed entry has its own area control, which figures only that row', async () => {
     await open(weedContext(MIX({ mode: 'none', productIds: [], note: null, surfactant: null }), { plannedProducts: { source: 'plan', items: [{ ...PLANNED[1], amount: null }], addOns: [], month: 10 } }));
     const iron = editorFor('Iron Plus');

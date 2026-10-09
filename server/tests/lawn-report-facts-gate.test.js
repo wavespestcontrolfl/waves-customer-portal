@@ -205,4 +205,16 @@ describe('the completion path folds the freeze back in', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
     expect(source).toContain('tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes, lawnAssessment.assessmentId)');
   });
+
+  test('an incomplete closeout never reaches the lawn write gate (it returns before the report path), so no facts are frozen for it', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const earlyReturn = source.indexOf('if (isIncompleteVisit) {\n      // Recurring plan refill');
+    const gateCall = source.indexOf("finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate')");
+    const delivery = require('../services/service-report/delivery');
+    expect(earlyReturn).toBeGreaterThan(0);
+    expect(gateCall).toBeGreaterThan(earlyReturn);
+    expect(delivery.shouldSendServiceReportV1Delivery({ report_template_version: 'service_report_v1', status: 'incomplete' })).toBe(false);
+  });
 });

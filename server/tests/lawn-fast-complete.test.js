@@ -633,6 +633,17 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       }
     });
 
+    test('lawnReportFacts (the sheet names the spot rows whose area it recorded) exists only while GATE_LAWN_REPORT_FACTS is live', async () => {
+      try {
+        live();
+        expect('lawnReportFacts' in (await context(tablesFor()))).toBe(false);
+        process.env.GATE_LAWN_REPORT_FACTS = 'true';
+        expect((await context(tablesFor())).lawnReportFacts).toBe(true);
+      } finally {
+        delete process.env.GATE_LAWN_REPORT_FACTS;
+      }
+    });
+
     test('the staged row\'s gate notes ride an off-plan chinch product', async () => {
       live();
       v13GateNotes.mockReturnValue([{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }]);

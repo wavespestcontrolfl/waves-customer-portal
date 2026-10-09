@@ -211,7 +211,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, chinch: null, guidedProductIds: [],
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [],
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -277,6 +277,8 @@ const optionalContextFields = (data) => ({
   treatmentGuide: data?.treatmentGuide === true,
   // The report ties are live (GATE_LAWN_REPORT_FACTS): the standing chinch tap is recorded as a find.
   lawnReportTies: data?.lawnReportTies === true,
+  // The report facts are live: the spot rows whose area the technician recorded are named on the submit.
+  lawnReportFacts: data?.lawnReportFacts === true,
   chinch: chinchOf(data),
   // The add-ons a guide card may own: their taps wait for the fresh guide.
   guidedProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.guidedProductIds) ? data.plannedProducts.guidedProductIds : [],
@@ -960,6 +962,10 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
     }))
     .filter((item) => item.productName && UUID_RE.test(item.productId));
   const recordCards = guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap });
+  // The spot rows whose area the technician recorded as the spot's extent (the same rows that send it as areaValue
+  // below); a row sized by a typed amount is not named, and its card says plain "Spot treatment".
+  const recordedSpots = ctx.lawnReportFacts ? rows.filter((row) => row.spotRule && row.spotArea > 0).map((row) => String(row.productId).toLowerCase()) : [];
+  const spotAreas = recordedSpots.length ? { v: 1, productIds: [...new Set(recordedSpots)] } : null;
   return {
     visitOutcome: 'completed',
     // The context's service object, every key, nulls included.
@@ -969,6 +975,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
     lawnFast: {
       visitType: ctx.visitType,
       ...(recordCards ? { treatmentGuide: { v: 1, cards: recordCards } } : {}),
+      ...(spotAreas ? { spotAreas } : {}),
     },
     lawnAssessmentId: assessmentId,
     products: rows.map((row) => {

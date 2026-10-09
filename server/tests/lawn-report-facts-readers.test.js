@@ -174,6 +174,48 @@ describe('every surface reads the condition', () => {
       data: { serviceLine: 'lawn', pressureIndex: null, applications: [], advisory: { pet_advisory: 'old text' }, dynamicContext: dynamicContext(frozenCtx(WET)) },
     });
     expect(answer).toContain(TODAY.wet);
+    // The fixed answer skips the model on purpose, so the keep-off precaution is IN the answer.
+    expect(answer).toContain(TODAY.pets);
+  });
+
+  test('the re-entry answer states the precaution once, for the spray rule too', () => {
+    const answer = answerServiceReportQuestion({
+      question: 'When can I re-enter the treated areas?',
+      data: { serviceLine: 'lawn', pressureIndex: null, applications: [], advisory: {}, dynamicContext: dynamicContext(frozenCtx(DRY)) },
+    });
+    expect(answer).toContain(TODAY.dry);
+    expect(answer.split(TODAY.pets)).toHaveLength(2);
+  });
+
+  test('the next-steps answer that appends the re-entry line carries the precaution too', () => {
+    const answer = answerServiceReportQuestion({
+      question: 'What should I do next?',
+      data: { serviceLine: 'lawn', pressureIndex: null, applications: [], advisory: {}, dynamicContext: dynamicContext(frozenCtx(DRY)) },
+    });
+    expect(answer).toContain(`Re-entry: ${TODAY.dry} ${TODAY.pets}`);
+  });
+
+  test('a record with no condition: the re-entry answer is the summary alone, as before', () => {
+    const clock = buildReentryContextFromRecord(lawnRecord('{}'), NOW);
+    const answer = answerServiceReportQuestion({
+      question: 'When can I re-enter the treated areas?',
+      data: { serviceLine: 'lawn', pressureIndex: null, applications: [], advisory: {}, dynamicContext: dynamicContext(clock) },
+    });
+    expect(answer).toContain(clock.customerSummary);
+    expect(answer).not.toContain(TODAY.pets);
+  });
+
+  test('the "what was applied" answer states a spot product\'s frozen area, as its card does, not the zone text', () => {
+    const app = (extra) => ({ product: { name: 'Spot Herbicide' }, method: 'spot_treatment', methodLabel: 'Spot treatment', applicationArea: 'Lawn A-D', targets: [], ...extra });
+    const ask = (applications) => answerServiceReportQuestion({
+      question: 'What was applied today?',
+      data: { serviceLine: 'lawn', pressureIndex: null, applications, dynamicContext: {} },
+    });
+    const withUse = ask([app({ areaUse: 'Spot treatment, about 250 sq ft' })]);
+    expect(withUse).toContain('area: Spot treatment, about 250 sq ft');
+    expect(withUse).not.toContain('Lawn A-D');
+    // No areaUse (an older record, a whole-lawn row): the zone text, exactly as before.
+    expect(ask([app({})])).toContain('area: Lawn A-D');
   });
 
   test('the AI summary facts carry the same context object', () => {

@@ -913,18 +913,8 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   if (reserviceIncomplete) {
     // Partial application possible: the standalone re-entry warning stays
     // (safety), everything else yields to the claim-nothing callback copy.
-    // A frozen condition (lawn) is that warning, with no clock.
-    if (conditionLine) {
-      return {
-        heading: reservice.heading || 'about your visit',
-        // The same pending status the timed incomplete branch uses, with the condition's word in place of a clock.
-        status: condition.statusLabel || 'Once dry',
-        statusTone: 'pending',
-        result: condition.text,
-        completedLine: reservice.completedFallback || 'The visit was not completed.',
-        detail: [condition.pets, reservice.expectation || null, reservice.billingLine || null].filter(Boolean).join(' '),
-      };
-    }
+    // (No frozen lawn condition can exist here: an incomplete closeout returns before the report path, so it mints no
+    // customer report and the lawn write gate never freezes re-entry facts for it. This branch keeps the timed warning.)
     if (pendingTarget && !allReady) {
       return {
         heading: reservice.heading || 'about your visit',

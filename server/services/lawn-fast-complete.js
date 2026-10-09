@@ -809,6 +809,8 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // while the report ties are live, so gate off persists nothing new. The key exists only while they are live
     // (off = byte-identical).
     ...(featureGates.lawnReportTiesLive() ? { lawnReportTies: true } : {}),
+    // GATE_LAWN_REPORT_FACTS: the sheet names the spot rows whose area it recorded (lawnFast.spotAreas); key only while live.
+    ...(featureGates.lawnReportFactsLive() ? { lawnReportFacts: true } : {}),
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,
