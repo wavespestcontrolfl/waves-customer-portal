@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  invoicedSheetResponse,
   mergePostPaymentService,
   fastCompleteSheetFor,
   shouldOpenLawnReserviceFastComplete,
@@ -283,5 +284,61 @@ describe("the invoiced-visit gate on every sheet rule", () => {
       expect(fastCompleteSheetFor({ ...invoiced, status: "completed" }), name).toBeNull();
     }
     expect(fastCompleteSheetFor({ ...FIXTURES.lawn_reservice, completionInvoiceAlreadySent: true, invoicedVisitFastCompleteEnabled: true, visitId: "v1" })).toBeNull();
+  });
+});
+
+// Codex round 1 on #6196: the refetch owns the routing flags, so a gate turned
+// off while the payment sheet was open reaches the reopened completion.
+describe("mergePostPaymentService and the routing flags", () => {
+  const pest = { id: "svc", status: "on_site", propertyId: null, fastCompleteReportEnabled: true, completionProfile: { category: "pest_control", serviceKey: "pest_control_quarterly", findingsType: null } };
+  const snapshot = { ...pest, checkoutInvoiceId: "inv-fixture", completionInvoiceAlreadySent: true, invoicedVisitFastCompleteEnabled: true };
+
+  it("fresh row false + stale snapshot true = the full form", () => {
+    const fresh = { ...pest, invoicedVisitFastCompleteEnabled: false };
+    expect(fastCompleteSheetFor(snapshot)).toBe("pest");
+    const merged = mergePostPaymentService(fresh, snapshot);
+    expect(merged.invoicedVisitFastCompleteEnabled).toBe(false);
+    expect(merged.completionInvoiceAlreadySent).toBe(true);
+    expect(fastCompleteSheetFor(merged)).toBeNull();
+  });
+
+  it("a fresh row that no longer sends the flag drops it", () => {
+    const merged = mergePostPaymentService({ ...pest }, snapshot);
+    expect(merged.invoicedVisitFastCompleteEnabled).toBeUndefined();
+    expect(fastCompleteSheetFor(merged)).toBeNull();
+  });
+
+  it("the fresh row owns every *Enabled routing flag, not only this one", () => {
+    const merged = mergePostPaymentService(
+      { ...pest, fastCompleteReportEnabled: false, lawnFastCompleteEnabled: false },
+      { ...snapshot, fastCompleteReportEnabled: true, lawnFastCompleteEnabled: true, treeShrubFastCompleteEnabled: true },
+    );
+    expect(merged).toMatchObject({ fastCompleteReportEnabled: false, lawnFastCompleteEnabled: false });
+    expect(merged.treeShrubFastCompleteEnabled).toBeUndefined();
+  });
+
+  it("the gate still on in the fresh row opens the sheet, and the snapshot's invoice fields still ride in", () => {
+    const merged = mergePostPaymentService({ ...pest, invoicedVisitFastCompleteEnabled: true }, { ...snapshot, invoicedVisitFastCompleteEnabled: false });
+    expect(merged.invoicedVisitFastCompleteEnabled).toBe(true);
+    expect(fastCompleteSheetFor(merged)).toBe("pest");
+  });
+
+  it("no fresh row: the snapshot is used as it is", () => {
+    expect(mergePostPaymentService(null, snapshot)).toBe(snapshot);
+  });
+});
+
+describe("invoicedSheetResponse", () => {
+  const response = { invoiceId: "inv-fixture", invoicePaymentActionRequired: true };
+  it("passes the response on for a visit the gate admitted for its invoice", () => {
+    for (const marker of [{ checkoutInvoiceId: "inv" }, { checkoutInvoiceToken: "tok" }, { completionInvoiceAlreadySent: true }]) {
+      expect(invoicedSheetResponse({ ...marker, invoicedVisitFastCompleteEnabled: true }, response)).toBe(response);
+    }
+  });
+  it("drops it with the gate off or for a visit with no invoice marker, as before", () => {
+    expect(invoicedSheetResponse({ checkoutInvoiceId: "inv" }, response)).toBeNull();
+    expect(invoicedSheetResponse({ checkoutInvoiceId: "inv", invoicedVisitFastCompleteEnabled: false }, response)).toBeNull();
+    expect(invoicedSheetResponse({ invoicedVisitFastCompleteEnabled: true }, response)).toBeNull();
+    expect(invoicedSheetResponse(null, response)).toBeNull();
   });
 });

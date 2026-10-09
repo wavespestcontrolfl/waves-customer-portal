@@ -22,7 +22,7 @@ vi.mock('./SchedulePage', () => ({
   ProtocolPanel: () => null,
   completionResumeOwed: () => false,
 }));
-const UNPAID_RESPONSE = { invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoiceStatus: 'sent' };
+const UNPAID_RESPONSE = { invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoiceStatus: 'sent', invoicePaymentActionRequired: true };
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
   default: ({ service, onCompleted }) => (
     <div>
@@ -40,10 +40,20 @@ vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
   ),
 }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
-  default: ({ service }) => <div>Lawn re-service sheet for {service.id} (invoice sent {String(service.completionInvoiceAlreadySent)})</div>,
+  default: ({ service, onCompleted }) => (
+    <div>
+      Lawn re-service sheet for {service.id} (invoice sent {String(service.completionInvoiceAlreadySent)})
+      <button type="button" onClick={() => onCompleted(UNPAID_RESPONSE)}>Sheet completed</button>
+    </div>
+  ),
 }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service }) => <div>Pest sheet for {service.id} (invoice sent {String(service.completionInvoiceAlreadySent)})</div>,
+  default: ({ service, onCompleted }) => (
+    <div>
+      Pest sheet for {service.id} (invoice sent {String(service.completionInvoiceAlreadySent)})
+      <button type="button" onClick={() => onCompleted(UNPAID_RESPONSE)}>Sheet completed</button>
+    </div>
+  ),
 }));
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ services = [], onEdit }) => <div>
   {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.id}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
@@ -118,24 +128,47 @@ describe('a visit already invoiced, on admin Dispatch', () => {
 });
 
 describe('completing an invoiced visit on a sheet', () => {
-  for (const kind of ['lawn', 'tree_shrub']) {
+  const loads = () => vi.mocked(adminFetch).mock.calls.filter(([url]) => String(url).startsWith('/admin/schedule?date=')).length;
+
+  for (const kind of Object.keys(FIXTURES)) {
+    it(`${kind}: an unpaid invoice from checkout (collectible, no sent marker) opens the payment prompt the full form would`, async () => {
+      mount([visit(kind, { checkoutInvoiceId: 'inv-fixture', invoicedVisitFastCompleteEnabled: true })]);
+      await open();
+      await screen.findByText(SHEET_TEXT[kind]);
+      fireEvent.click(screen.getByRole('button', { name: 'Sheet completed' }));
+      expect(await screen.findByText('Payment sheet for inv-fixture')).toBeInTheDocument();
+    });
+
     it(`${kind}: an invoice the visit already sent opens no second payment prompt`, async () => {
       mount([visit(kind, { completionInvoiceAlreadySent: true, invoicedVisitFastCompleteEnabled: true })]);
       await open();
       await screen.findByText(SHEET_TEXT[kind]);
-      const loads = () => vi.mocked(adminFetch).mock.calls.filter(([url]) => String(url).startsWith('/admin/schedule?date=')).length;
       const before = loads();
       fireEvent.click(screen.getByRole('button', { name: 'Sheet completed' }));
       await waitFor(() => expect(loads()).toBe(before + 1));
       expect(screen.queryByText(/Payment sheet for/)).not.toBeInTheDocument();
     });
+  }
 
+  for (const kind of ['lawn', 'tree_shrub']) {
     it(`${kind}: the same response for a visit with no sent invoice still opens the payment prompt (control)`, async () => {
       mount([visit(kind, { invoicedVisitFastCompleteEnabled: true })]);
       await open();
       await screen.findByText(SHEET_TEXT[kind]);
       fireEvent.click(screen.getByRole('button', { name: 'Sheet completed' }));
       expect(await screen.findByText('Payment sheet for inv-fixture')).toBeInTheDocument();
+    });
+  }
+
+  for (const kind of ['pest', 'lawn_reservice']) {
+    it(`${kind}: a visit with no invoice marker completes as it always did (no payment prompt from the sheet)`, async () => {
+      mount([visit(kind, { invoicedVisitFastCompleteEnabled: true })]);
+      await open();
+      await screen.findByText(SHEET_TEXT[kind]);
+      const before = loads();
+      fireEvent.click(screen.getByRole('button', { name: 'Sheet completed' }));
+      await waitFor(() => expect(loads()).toBe(before + 1));
+      expect(screen.queryByText(/Payment sheet for/)).not.toBeInTheDocument();
     });
   }
 });

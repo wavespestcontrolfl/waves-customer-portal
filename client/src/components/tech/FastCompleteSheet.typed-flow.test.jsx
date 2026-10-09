@@ -725,4 +725,18 @@ describe('a typed visit already invoiced from the payment flow', () => {
     cleanup();
     expect(await send(SERVICE)).not.toHaveProperty('invoiceAlreadySent');
   }, 30000);
+
+  test('Next stop hands the completion response to the page, so admin Dispatch can stage the payment prompt', async () => {
+    const response = { success: true, invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoicePaymentActionRequired: true };
+    const onCompleted = vi.fn();
+    const request = makeRequest({ complete: response, typedFacts: { ...READ, values: { species: 'German', activity_level: 'Low' } } });
+    render(<FastCompleteSheet service={{ ...SERVICE, checkoutInvoiceId: 'inv-fixture' }} request={request} onClose={() => {}} onCompleted={onCompleted} />);
+    await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 10000 });
+    await generate('German roaches, low. Inspected and talked with the customer about sanitation.');
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
+    expect(onCompleted).toHaveBeenCalledWith(response);
+  }, 20000);
 });

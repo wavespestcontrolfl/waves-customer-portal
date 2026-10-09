@@ -15,6 +15,15 @@ export function shouldReopenCompletionAfterPayment(service) {
   );
 }
 
+// Every key the schedule row carries as a gate: `...Enabled`. The value comes
+// from the fresh row alone: a flag the fresh row no longer sends is dropped from
+// the merged service too (undefined, off), not restored from the snapshot.
+const ROUTING_FLAG = /Enabled$/;
+function routingFlagsOf(freshService, paymentService) {
+  const keys = new Set([...Object.keys(freshService), ...Object.keys(paymentService || {})].filter((key) => ROUTING_FLAG.test(key)));
+  return Object.fromEntries([...keys].map((key) => [key, freshService[key]]));
+}
+
 export function mergePostPaymentService(freshService, paymentService) {
   if (!freshService) return paymentService;
   return {
@@ -24,7 +33,24 @@ export function mergePostPaymentService(freshService, paymentService) {
     // stale (for example, checkout opened before another actor completed the
     // visit), but its invoice fields still need to ride into completion.
     status: freshService.status || paymentService?.status,
+    // The refetch owns every routing flag (`*Enabled`: the gates the schedule
+    // row carries). A gate turned off while the payment sheet was open must
+    // reach the routing of the reopened completion; the stale snapshot would
+    // otherwise restore the old true. One rule for all of them.
+    ...routingFlagsOf(freshService, paymentService),
   };
+}
+
+// The completion response a pest or lawn re-service sheet hands to
+// applyCompletionResult. Those two sheets have always discarded it; only a visit
+// GATE_FAST_COMPLETE_INVOICED_VISITS admitted for its invoice passes it on, so
+// an unpaid invoice (a draft or sent one from checkout, whose marker is the
+// invoice id) still opens the mobile payment prompt the full form would. With the
+// gate off, or for a visit with no invoice marker, nothing changes.
+export function invoicedSheetResponse(service, response) {
+  return returningFromPayment(service) && service?.invoicedVisitFastCompleteEnabled === true
+    ? (response || null)
+    : null;
 }
 
 // Admin Dispatch opens the Tree & Shrub Fast Complete sheet for a visit the

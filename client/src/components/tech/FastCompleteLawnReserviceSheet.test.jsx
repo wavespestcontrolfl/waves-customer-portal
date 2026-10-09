@@ -63,7 +63,7 @@ const CONTEXT = {
   },
 };
 
-function makeRequest({ context = CONTEXT, completeError = null } = {}) {
+function makeRequest({ context = CONTEXT, completeError = null, completeResponse = { success: true } } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
@@ -75,7 +75,7 @@ function makeRequest({ context = CONTEXT, completeError = null } = {}) {
     }
     if (path.endsWith('/complete')) {
       if (completeError) throw completeError;
-      return { success: true };
+      return completeResponse;
     }
     return {};
   });
@@ -927,5 +927,22 @@ describe('a visit already invoiced from the payment flow', () => {
   test('a visit with only a door-charge marker posts no invoice field, as the full form does', async () => {
     const body = await complete({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' });
     expect(body).not.toHaveProperty('invoiceAlreadySent');
+  }, 20000);
+
+  test('Next stop hands the completion response to the page, so admin Dispatch can stage the payment prompt', async () => {
+    const response = { success: true, invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoicePaymentActionRequired: true };
+    const onCompleted = vi.fn();
+    const request = makeRequest({ completeResponse: response });
+    render(<FastCompleteLawnReserviceSheet service={{ ...SERVICE, checkoutInvoiceId: 'inv-fixture' }} request={request} onClose={() => {}} onCompleted={onCompleted} />);
+    await screen.findByRole('button', { name: /^Celsius WG/ });
+    fireEvent.click(tile('Celsius WG'));
+    fireEvent.click(issue('Dollarweed'));
+    forTarget('Celsius WG', 'Dollarweed');
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    where('Celsius WG');
+    await completeBody(request);
+    fireEvent.click(await screen.findByRole('button', { name: 'Next stop' }));
+    expect(onCompleted).toHaveBeenCalledWith(response);
   }, 20000);
 });
