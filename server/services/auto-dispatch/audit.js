@@ -231,6 +231,18 @@ async function combinedBookingEstimateIds(estimateIds) {
 
 // Recurring children that have neither an arrival window nor a due date, so
 // auto-dispatch cannot place them and nothing else would tell staff.
+// ROUTING_HORIZON_DAYS of combined-booking-check.js.
+const SEASONAL_ROUTING_HORIZON_DAYS = 14;
+
+// The action half of a visit notice's headline, with the customer's name when
+// one can be read (docs/admin-notifications.md "Say who and what"; Codex
+// #6208 r15 P2). No name: the generic wording. Never fails the notice.
+async function namedVisitAction(customerId, templates, generic, conn = db) {
+  const { lookupCustomerName, fitAction } = require('../admin-alert-names');
+  const name = await lookupCustomerName(conn, customerId);
+  return name ? fitAction('Schedule', name, templates) : generic;
+}
+
 function noWindowVisits(conn, from, to) {
   return conn('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
@@ -251,13 +263,21 @@ async function actionableNoWindowRows(today, to) {
   const { isRecurringPlanActive } = require('./eligibility');
   const rows = await noWindowVisits(db, today, to)
     .select('s.id', 's.customer_id', 's.scheduled_date', 's.recurring_parent_id', 's.source_estimate_id',
-      db.raw('(select p.source_estimate_id from scheduled_services as p where p.id = s.recurring_parent_id) as parent_estimate_id'));
+      db.raw('(select p.source_estimate_id from scheduled_services as p where p.id = s.recurring_parent_id) as parent_estimate_id'),
+      db.raw('(select coalesce(p.catalog_service_key, p.service_key_snapshot) from scheduled_services as p where p.id = s.recurring_parent_id) as root_service_key'));
+  // A seasonal mosquito series is booked with no time on purpose until the
+  // office routes that season; it must have a time once inside the routing
+  // horizon (combined-booking-check.js checkTimeAndTech, the same exemption;
+  // Codex #6208 r15 P2).
+  const routingHorizon = require('../../utils/datetime-et').etDateString(
+    require('../../utils/datetime-et').addETDays(new Date(`${today}T12:00:00Z`), SEASONAL_ROUTING_HORIZON_DAYS));
+  const notRoutableYet = (row) => row.root_service_key === 'mosquito_seasonal' && toDateStr(row.scheduled_date) > routingHorizon;
   const estimateOf = (row) => row.source_estimate_id || row.parent_estimate_id || null;
   const covered = await combinedBookingEstimateIds(rows.map(estimateOf));
   const plans = new Map();
   const actionable = [];
   for (const row of rows) {
-    if (covered.has(String(estimateOf(row)))) continue;
+    if (covered.has(String(estimateOf(row))) || notRoutableYet(row)) continue;
     const planKey = `${row.customer_id}:${row.recurring_parent_id}`;
     if (!plans.has(planKey)) plans.set(planKey, (await isRecurringPlanActive(row, db)).active);
     if (plans.get(planKey)) actionable.push({ ...row, date: toDateStr(row.scheduled_date) });
@@ -381,7 +401,9 @@ async function flagNoWindowVisits(candidates, today, to) {
       if (!(await require('./eligibility').isRecurringPlanActive(row, trx)).active) return null;
       const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
         area: 'Schedule',
-        action: 'set an arrival time for a recurring visit',
+        action: await namedVisitAction(row.customer_id,
+          [(who) => `set an arrival time for ${who}'s visit`, (who) => `set a time for ${who}'s visit`],
+          'set an arrival time for a recurring visit', trx),
         why: `The ${shortDateET(`${date}T12:00:00Z`)} visit has no arrival time; set one in dispatch so it can be placed.`,
         severity: 'needs-you',
         link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(row.id)}`,
@@ -503,4 +525,4 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
   return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, NEW_NOTICES_PER_RUN };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, NEW_NOTICES_PER_RUN };

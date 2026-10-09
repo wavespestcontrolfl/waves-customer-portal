@@ -616,7 +616,9 @@ async function flagMissingGeo(service) {
     const { shortDateET } = require('../admin-alert-names');
     const notice = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
       area: 'Schedule',
-      action: 'fix the address pin on a visit',
+      action: await audit.namedVisitAction(service.customer_id,
+        [(who) => `fix the address pin for ${who}'s visit`, (who) => `fix ${who}'s address pin`],
+        'fix the address pin on a visit'),
       why: `Auto-dispatch skips the ${shortDateET(`${date}T12:00:00Z`)} visit until its address pin is fixed.`,
       severity: 'needs-you',
       link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(service.id)}`,

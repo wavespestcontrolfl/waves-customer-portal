@@ -270,6 +270,30 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['recurring-dispatch:d1:2026-08-03']);
   });
 
+  // The bell is read before anything is opened: the headline names the
+  // customer (docs/admin-notifications.md; Codex #6208 r15 P2).
+  test('the headline names the customer when the name can be read', async () => {
+    query.select = jest.fn().mockResolvedValueOnce([{ id: 'n1', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20' }]).mockResolvedValue([]);
+    query.first = jest.fn(async () => ({ id: 'n1', first_name: 'Sample', last_name: 'Tester' }));
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'));
+    expect(notifications.notifyAdmin.mock.calls[0][1]).toBe("Schedule — set an arrival time for Sample Tester's visit");
+  });
+
+  // A seasonal mosquito series has no time on purpose until the office routes
+  // the season; it needs one once inside 14 days (Codex #6208 r15 P2).
+  test('a seasonal mosquito visit beyond the 14-day routing horizon raises nothing; inside it, it does', async () => {
+    const now = new Date('2026-08-01T16:00:00Z');
+    const rows = [
+      { id: 'far', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20', root_service_key: 'mosquito_seasonal' },
+      { id: 'near', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-10', root_service_key: 'mosquito_seasonal' },
+    ];
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    expect(notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['recurring-no-window:near:2026-08-10']);
+  });
+
   test('rings at most 10 new notices a run, soonest date first; the rest wait for the next run', async () => {
     const rows = Array.from({ length: 11 }, (_, i) => ({
       id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(30 - i).padStart(2, '0')}`,

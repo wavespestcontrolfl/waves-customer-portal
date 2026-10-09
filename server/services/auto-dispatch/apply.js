@@ -511,7 +511,9 @@ async function flagReminderSyncFailed(service, best) {
     const { shortDateET } = require('../admin-alert-names');
     await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
       area: 'Schedule',
-      action: 'check the reminder time on a moved visit',
+      action: await require('./audit').namedVisitAction(service.customer_id,
+        [(who) => `check ${who}'s reminder time after a move`, (who) => `check ${who}'s reminder time`],
+        'check the reminder time on a moved visit'),
       why: `Auto-dispatch moved the visit to ${shortDateET(`${best.date}T12:00:00Z`)} but its reminder did not update.`,
       severity: 'needs-you',
       link: `/admin/dispatch?tab=schedule&date=${best.date}&appointment=${encodeURIComponent(service.id)}`,
