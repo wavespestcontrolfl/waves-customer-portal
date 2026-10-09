@@ -265,7 +265,7 @@ function resolveSodRecord(current, input) {
   const storedLaid = ymdOrNull(row.sod_laid_on);
 
   const laid = ymdOrNull(pick('sod_laid_on'));
-  if (!laid) return resolveWithoutDate(input || {});
+  if (!laid) return resolveWithoutDate(input || {}, storedLaid);
 
   const covers = pick('sod_covers') || 'whole';
   if (covers !== 'whole' && covers !== 'part') {
@@ -279,11 +279,13 @@ function resolveSodRecord(current, input) {
   return { ok: true, columns: { sod_laid_on: laid, sod_covers: covers, sod_area: area.value, sod_rooted_on: rooted } };
 }
 
-// No sod date after the write: the whole record clears, unless the caller sent
-// covers or an area with nothing to attach them to.
-function resolveWithoutDate(input) {
+// No sod date after the write. A caller that cleared a stored date (a full-form
+// save sends covers beside the cleared date) clears the whole record. Covers or
+// an area sent when there was never a date has nothing to attach to: rejected.
+function resolveWithoutDate(input, storedLaid) {
   const hasText = (value) => String(value ?? '').trim() !== '';
-  if (hasText(input.sod_covers) || hasText(input.sod_area)) {
+  const strayDetail = !storedLaid && (hasText(input.sod_covers) || hasText(input.sod_area));
+  if (strayDetail) {
     return { ok: false, field: 'sodLaidOn', message: 'Set the sod date before saying how much of the lawn it covers.' };
   }
   return { ok: true, columns: clearedNewSodColumns() };

@@ -4773,6 +4773,59 @@ const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
 };
 const SOD_PREFS_INPUT_FIELDS = NEW_SOD_COLUMNS.filter((c) => c !== 'sod_rooted_on');
 const SOD_PREFS_INPUT_CAMEL = ['sodLaidOn', 'sodCovers', 'sodArea'];
+
+// The render-time home stamp a prefs request carries (the portal's token, codex
+// gh-r43): { sent, ms }. The admin form echoes the row's
+// irrigation_home_changed_at back as confirmedAsOf.
+function prefsRenderStamp(body) {
+  const raw = body || {};
+  const sent = 'confirmed_as_of' in raw || 'confirmedAsOf' in raw;
+  const value = raw.confirmed_as_of ?? raw.confirmedAsOf ?? null;
+  const ms = value ? new Date(value).getTime() : null;
+  return { sent, ms: Number.isFinite(ms) ? ms : null };
+}
+
+// A sod record is a fact about one home. A move clears it under the same
+// advisory lock this write takes, so a form rendered BEFORE the move that waits
+// out the lock would re-read the cleared row and write the old home's sod onto
+// the new one: the lock orders the writes but says nothing about when the form
+// was rendered. Setting a sod date after a move on record therefore needs the
+// matching render stamp (an absent one fails closed). Clearing is always allowed.
+const SOD_STALE_HOME = Object.freeze({
+  ok: false,
+  field: 'sodLaidOn',
+  message: 'The home on this customer changed. Reload the customer, then enter the sod record again.',
+});
+function sodWriteIsFresh(current, sodInput, renderStamp) {
+  const clears = 'sod_laid_on' in sodInput && sodInput.sod_laid_on == null;
+  if (clears) return true;
+  const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
+  if (movedAt == null) return true;
+  return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;
+}
+
+// The sod record saves whole or not at all: one rejected sod field drops the
+// other sod fields of the batch too (a valid date with a bad covers value must
+// not persist as a whole-lawn record). Other fields still save.
+// A sod record the stored row could not accept joins `rejected`; true when it
+// was the only thing in the batch (nothing was written).
+function sodRejectedWithNothingSaved(outcome, rejected) {
+  if (!outcome.sodRejected) return false;
+  rejected.push(outcome.sodRejected);
+  return !outcome.written.length;
+}
+
+// The field names a prefs write saved, for the audit trail (names only, sorted).
+function savedPrefFieldNames(updates, outcome) {
+  return Object.keys(updates)
+    .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
+    .sort();
+}
+
+function dropSodFieldsWhenOneIsRejected(updates, rejected) {
+  if (!rejected.some((r) => SOD_PREFS_INPUT_CAMEL.includes(r.field))) return;
+  SOD_PREFS_INPUT_FIELDS.forEach((f) => delete updates[f]);
+}
 const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details', ...SOD_PREFS_INPUT_FIELDS];
 const ADMIN_PREFS_FIELD_SCHEMAS = { ...PREFS_FIELD_SCHEMAS, ...ADMIN_ONLY_PREFS_FIELD_SCHEMAS };
 const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS_ALLOWED_FIELDS];
@@ -4805,7 +4858,7 @@ function blackoutPairError(updates) {
 // (resolveSodRecord): a record the stored row cannot accept is dropped from the
 // write and its message reported through `outcome.sodRejected` ({ field, message }); `outcome.written`
 // lists the columns that were written.
-async function writeAdminPreferences(customerId, updates, outcome = {}) {
+async function writeAdminPreferences(customerId, updates, outcome = {}, { renderStamp = null } = {}) {
   return db.transaction(async (trx) => {
     // Same advisory-lock key/order the portal PUT and the customer-edit
     // route's address sync already take on this customer — one shared lock
@@ -4840,7 +4893,7 @@ async function writeAdminPreferences(customerId, updates, outcome = {}) {
         if (f in updates) sodInput[f] = updates[f];
         delete row[f];
       }
-      const sod = resolveSodRecord(current, sodInput);
+      const sod = sodWriteIsFresh(current, sodInput, renderStamp) ? resolveSodRecord(current, sodInput) : SOD_STALE_HOME;
       if (sod.ok) Object.assign(row, sod.columns);
       else outcome.sodRejected = { field: sod.field, message: sod.message };
     }
@@ -4883,12 +4936,7 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
       BLACKOUT_FIELDS.forEach((f) => delete updates[f]);
     }
 
-    // The sod record saves whole or not at all: one rejected sod field drops the
-    // other sod fields of the batch too (a valid date with a bad covers value
-    // must not persist as a whole-lawn record). Other fields still save.
-    if (rejected.some((r) => SOD_PREFS_INPUT_CAMEL.includes(r.field))) {
-      SOD_PREFS_INPUT_FIELDS.forEach((f) => delete updates[f]);
-    }
+    dropSodFieldsWhenOneIsRejected(updates, rejected);
 
     // Same Weekly-Inches eligibility gate as the portal write: never persist
     // a NEW irrigation_inches_per_week value for a customer who wouldn't
@@ -4936,23 +4984,18 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     // A missing or archived customer is a 404, not a foreign-key 500 on
     // the insert, and a stale tab must not edit a soft-deleted customer.
     const outcome = {};
-    if (!(await writeAdminPreferences(customerId, updates, outcome))) {
+    if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body) }))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    if (outcome.sodRejected) {
-      rejected.push(outcome.sodRejected);
-      if (!outcome.written.length) {
-        return res.status(400).json({ error: outcome.sodRejected.message, rejected });
-      }
+    if (sodRejectedWithNothingSaved(outcome, rejected)) {
+      return res.status(400).json({ error: outcome.sodRejected.message, rejected });
     }
 
     const preferences = await db('property_preferences')
       .where({ customer_id: customerId })
       .first();
 
-    const loggedFields = Object.keys(updates)
-      .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
-      .sort();
+    const loggedFields = savedPrefFieldNames(updates, outcome);
     await recordAuditEvent({
       actor_type: 'technician',
       actor_id: req.technicianId || null,

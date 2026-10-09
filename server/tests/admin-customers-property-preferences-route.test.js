@@ -460,6 +460,50 @@ describe('the new-sod record — staff-only sodLaidOn / sodCovers / sodArea', ()
     expect(mockState.prefsRow.sod_area).toHaveLength(120);
   });
 
+  it('a full-form save that clears the date beside its covers value clears the whole record', async () => {
+    await putPrefs({ sodLaidOn: daysAgo(3), sodCovers: 'part', sodArea: 'front strip' });
+    expect(mockState.prefsRow.sod_covers).toBe('part');
+    const res = await putPrefs({ sodLaidOn: null, sodCovers: 'whole' });
+    expect(res.status).toBe(200);
+    expect(mockState.prefsRow).toMatchObject({ sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null });
+  });
+
+  describe('a sod write after a home change needs the render stamp of the current home', () => {
+    const MOVED_AT = '2026-10-08T15:00:00.000Z';
+    beforeEach(() => {
+      mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', irrigation_home_changed_at: MOVED_AT, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };
+    });
+
+    it('rejects a sod date with no stamp (a form rendered before the move), and writes nothing', async () => {
+      const res = await putPrefs({ sodLaidOn: daysAgo(3) });
+      expect(res.status).toBe(400);
+      expect(res.body.rejected[0]).toMatchObject({ field: 'sodLaidOn', message: expect.stringMatching(/home on this customer changed/) });
+      expect(mockState.prefsRow.sod_laid_on).toBeNull();
+    });
+
+    it('rejects a stamp from before the move, but still saves the other fields of the batch', async () => {
+      const res = await putPrefs({ sodLaidOn: daysAgo(3), chemicalSensitivities: true, confirmedAsOf: '2026-09-01T00:00:00.000Z' });
+      expect(res.status).toBe(200);
+      expect(res.body.rejected[0].field).toBe('sodLaidOn');
+      expect(mockState.prefsRow.chemical_sensitivities).toBe(true);
+      expect(mockState.prefsRow.sod_laid_on).toBeNull();
+    });
+
+    it('accepts the matching stamp', async () => {
+      const res = await putPrefs({ sodLaidOn: daysAgo(3), confirmedAsOf: MOVED_AT });
+      expect(res.status).toBe(200);
+      expect(mockState.prefsRow.sod_laid_on).toBe(daysAgo(3));
+    });
+
+    it('a clear needs no stamp', async () => {
+      mockState.prefsRow.sod_laid_on = daysAgo(10);
+      mockState.prefsRow.sod_covers = 'whole';
+      const res = await putPrefs({ sodLaidOn: null });
+      expect(res.status).toBe(200);
+      expect(mockState.prefsRow.sod_laid_on).toBeNull();
+    });
+  });
+
   it('the customer portal does not know any of the new-sod fields (staff only)', () => {
     const { PREFS_FIELD_SCHEMAS, ALLOWED_FIELDS, validatePrefsBody } = require('../services/property-preferences-schema');
     const body = { sodLaidOn: daysAgo(3), sodCovers: 'whole', sodArea: 'x', sodRootedOn: daysAgo(1), accessNotes: 'kept' };
