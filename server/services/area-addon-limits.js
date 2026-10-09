@@ -246,6 +246,18 @@ function limitError(status, code, message, extra = {}) {
   return Object.assign(new Error(message), { status, statusCode: status, code, isOperational: true, ...extra });
 }
 
+/**
+ * The booking fence of one customer: the transaction-scoped customer-comms advisory lock every staff booking, Mark Won and
+ * public accept of that customer already takes, so two bookings of one customer read and write the add-on history one at a
+ * time. NON-BLOCKING on purpose: the callers already hold the estimate row, and a merge-undo locks the customer and then the
+ * estimate, so a blocking take could deadlock; a busy account is the caller's own retryable 409 `CUSTOMER_BUSY_RETRY` and
+ * nothing is written. Reentrant: a customer this transaction already locked passes. Held to the end of the transaction.
+ */
+async function fenceCustomerBookings(trx, customerId) {
+  if (await require('../utils/customer-comms-lock').tryLockCustomerComms(trx, customerId)) return;
+  throw limitError(409, 'CUSTOMER_BUSY_RETRY', 'This account is being updated right now — please retry your acceptance in a moment.');
+}
+
 // What the recheck applies to: the limited add-ons the estimate sold (priced rows only), while the gate
 // is on. [] otherwise - nothing to read.
 function recheckKeys(estimate) {
@@ -327,7 +339,7 @@ const HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not
  */
 // The booking customer and day, then the history for them: { day, history }. Everything that can fail on the way is one read
 // (the caller turns a failure into the fail-closed 409).
-async function readLimitHistory(database, { estimate, keys, customerId, property, resolveCustomer, fenceCustomer, appliedOn, excludeVisitIds }) {
+async function readLimitHistory(database, { estimate, keys, customerId, property, resolveCustomer, fenceCustomer, fenceNamed = false, appliedOn, excludeVisitIds }) {
   // The caller named the visits it is committing but no day: the day is theirs (the earliest).
   const day = appliedOn || await visitsFirstDay(database, excludeVisitIds);
   const named = [customerId, estimate.customer_id];
@@ -337,8 +349,10 @@ async function readLimitHistory(database, { estimate, keys, customerId, property
   if (!named.some(isUuid)) await lockProspectIdentity(database, estimate);
   const subject = await limitSubject(database, estimate, { customerId, propertyId: property && property.property_id, resolveCustomer });
   // A customer this check found for itself (the group's owner, a linked appointment's, the phone match) is not one the caller
-  // has locked: the caller's own fence takes the lock that serializes that customer's bookings before the read.
-  if (fenceCustomer && subject.customerId && !named.includes(subject.customerId)) await fenceCustomer(subject.customerId);
+  // has locked: the caller's own fence takes the lock that serializes that customer's bookings before the read. A caller
+  // that locks nobody up front (the customer's reserve: it holds the estimate row only) says so with `fenceNamed`, and the
+  // customer the estimate names is fenced too.
+  if (fenceCustomer && subject.customerId && (fenceNamed || !named.includes(subject.customerId))) await fenceCustomer(subject.customerId);
   // In a savepoint: a failed read must not poison the transaction it runs inside (the 409 is the answer).
   const history = await savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
     customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeVisitIds, prospect: prospectOf(estimate),
@@ -424,6 +438,7 @@ module.exports = {
   soldAddOnKeys,
   assertAreaAddOnLimitsOpen,
   areaAddOnLimitRefusal,
+  fenceCustomerBookings,
   attachLimitUse,
   productIdsByKey,
   limitSubject,

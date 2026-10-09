@@ -555,6 +555,40 @@ describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_AD
   });
 });
 
+// Codex round 11 P1 on #6135: the reserve read a customer's add-on history without that customer's booking fence.
+describe('the reserve fences the customer before it reads the add-on history', () => {
+  const limits = require('../services/area-addon-limits');
+  const { lockedAreaAddOnLimitRefusal } = require('../routes/estimate-slots-public')._internals;
+  const ROW = { id: 'est-1', customer_id: 'cust-1', customer_phone: null };
+  afterEach(() => jest.restoreAllMocks());
+
+  test('the recheck is asked to fence the named customer and the found one, with the transaction\'s own non-blocking take', async () => {
+    const refusal = jest.spyOn(limits, 'areaAddOnLimitRefusal').mockResolvedValue(null);
+    const fence = jest.spyOn(limits, 'fenceCustomerBookings').mockResolvedValue(undefined);
+    const trx = { isTransaction: true };
+    expect(await lockedAreaAddOnLimitRefusal(ROW, trx, '2030-01-01')).toBeNull();
+    const options = refusal.mock.calls[0][1];
+    expect(refusal.mock.calls[0][0]).toBe(trx);
+    expect(options).toMatchObject({ estimate: ROW, appliedOn: '2030-01-01', fenceNamed: true });
+    await options.fenceCustomer('cust-1');
+    expect(fence).toHaveBeenCalledWith(trx, 'cust-1');
+  });
+
+  test('a busy account is the existing retryable 409 with nothing reserved; a limit refusal passes through; any other failure is thrown', async () => {
+    const busy = Object.assign(new Error('busy'), { status: 409, code: 'CUSTOMER_BUSY_RETRY' });
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockRejectedValueOnce(busy);
+    expect(await lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).toEqual({
+      status: 409,
+      body: { error: 'This account is being updated right now \u2014 please retry your acceptance in a moment.', code: 'CUSTOMER_BUSY_RETRY' },
+    });
+    const limitRefusal = { status: 409, body: { error: 'x', code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' } };
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockResolvedValueOnce(limitRefusal);
+    expect(await lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).toBe(limitRefusal);
+    jest.spyOn(limits, 'areaAddOnLimitRefusal').mockRejectedValueOnce(new Error('boom'));
+    await expect(lockedAreaAddOnLimitRefusal(ROW, {}, '2030-01-01')).rejects.toThrow('boom');
+  });
+});
+
 describe('B18 park: a parked estimate (its phone belongs to another customer) cannot browse, reserve, extend or capture a card', () => {
   const { estimatePublicBlockingState } = require('../routes/estimate-public');
   const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');

@@ -651,14 +651,6 @@ async function resolveAcceptLimitCustomer(trx, estimate) {
   return match ? match.id : null;
 }
 
-// A customer the recheck found for itself (the phone match, the group's owner, a linked appointment's) is fenced by the same
-// non-blocking take the account step makes (a blocking one could deadlock against a merge-undo, which locks the customer and
-// then the estimate this transaction holds); a busy account is the accept's own retryable 409.
-async function fenceAcceptLimitCustomer(trx, customerId, preLockedCustomerId) {
-  if (customerId === preLockedCustomerId || await tryLockCustomerComms(trx, customerId)) return;
-  throw Object.assign(new Error('This account is being updated right now — please retry your acceptance in a moment.'), { status: 409, isOperational: true, code: 'CUSTOMER_BUSY_RETRY' });
-}
-
 // B18 park: the accept cannot complete self-serve when the estimate's phone belongs to another customer, so
 // nothing is created, taken or captured; the office is told and the person sees the page's EXISTING
 // review-before-booking state ("A Waves specialist reviews this quote with you ..."), whose sentence is reused
@@ -12060,7 +12052,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         appliedOn: acceptPreLockedDate,
         excludeVisitIds: rowIds(capacityHold, existingAppointmentRow),
         resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate),
-        fenceCustomer: (id) => fenceAcceptLimitCustomer(trx, id, acceptPreLockedCommsId),
+        fenceCustomer: (id) => require('../services/area-addon-limits').fenceCustomerBookings(trx, id),
       });
       // Bind the accept to the SetupIntent it verified (Codex #3723 r2 P1):
       // the setup_intent.succeeded backstop enrolls ONLY this intent — a

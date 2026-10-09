@@ -574,7 +574,12 @@ async function markEstimateManuallyAccepted({
     // An add-on whose yearly limit is now reached (or whose history cannot be read) is not marked won either.
     // The visits this call books (the staff booking's own rows) ARE this acceptance: left out of the count, and their day is the
     // day judged. Any other booking of the estimate counts.
-    await require('./area-addon-limits').assertAreaAddOnLimitsOpen(trx, { estimate, staff: true, excludeVisitIds: bookedAppointmentIds });
+    // A customer the check finds for itself (an unowned estimate's group owner or linked appointment) is fenced like the public
+    // accept's: the estimate's own customer is already locked above.
+    const addOnLimits = require('./area-addon-limits');
+    await addOnLimits.assertAreaAddOnLimitsOpen(trx, {
+      estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer: (id) => addOnLimits.fenceCustomerBookings(trx, id),
+    });
     if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }

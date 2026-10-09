@@ -379,6 +379,26 @@ async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {})
 async function phoneMatchedCustomerId(row, trx) {
   return (await matchAcceptCustomerByPhone(row, trx)).match?.id || null;
 }
+// The add-ons' yearly limits on the LOCKED estimate row, for the reserve. The transaction holds the estimate row and nothing else,
+// while every staff booking, Mark Won and accept of a customer serializes on that customer's booking fence, so the customer
+// whose history is read (the estimate's own, or the phone match of an unowned one) is fenced here BEFORE the read and to the end of
+// the reservation: a reserve and a booking of one customer cannot both pass the same allowance. The take is non-blocking
+// (the estimate row is held): a busy account is the existing retryable 409, with nothing reserved.
+async function lockedAreaAddOnLimitRefusal(row, trx, date) {
+  const limits = require('../services/area-addon-limits');
+  try {
+    return await limits.areaAddOnLimitRefusal(trx, {
+      estimate: row,
+      appliedOn: date,
+      resolveCustomer: () => phoneMatchedCustomerId(row, trx),
+      fenceCustomer: (id) => limits.fenceCustomerBookings(trx, id),
+      fenceNamed: true,
+    });
+  } catch (err) {
+    if (err?.code === 'CUSTOMER_BUSY_RETRY') return CUSTOMER_BUSY_REFUSAL;
+    throw err;
+  }
+}
 // Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release).
 async function respondNoBookingRefusal(res, estimate, refusal) {
   if (refusal.park) await refuseParkedWrite(estimate, refusal.park.rejectedCustomerId);
@@ -744,7 +764,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // The add-on yearly limits are judged on the SELECTED slot's day (`date`), not on today.
         revalidateEstimate: async (row, trx, { date } = {}) => {
           return (await lockedContactReviewRefusal(row, trx))
-            || require('../services/area-addon-limits').areaAddOnLimitRefusal(trx, { estimate: row, appliedOn: date, resolveCustomer: () => phoneMatchedCustomerId(row, trx) });
+            || lockedAreaAddOnLimitRefusal(row, trx, date);
         },
       });
       return res.status(201).json({
@@ -1434,4 +1454,4 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, slotBlockingRefusal, postMintRefusal };
+module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, slotBlockingRefusal, postMintRefusal };

@@ -590,7 +590,8 @@ describe('booking time: an estimate with no customer_id of its own is checked fo
     await service.areaAddOnLimitRefusal(fakeDb(world()), { estimate: unowned(['bed_pre_emergent'], { customer_id: CUSTOMER }), resolveCustomer: named });
     expect(named).not.toHaveBeenCalled();
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
-    expect(src).toContain('areaAddOnLimitRefusal(trx, { estimate: row, appliedOn: date, resolveCustomer: () => phoneMatchedCustomerId(row, trx) })');
+    expect(src).toContain('lockedAreaAddOnLimitRefusal(row, trx, date)');
+    expect(src).toContain('resolveCustomer: () => phoneMatchedCustomerId(row, trx),');
     expect(src).toMatch(/async function phoneMatchedCustomerId\(row, trx\) \{\s+return \(await matchAcceptCustomerByPhone\(row, trx\)\)\.match\?\.id \|\| null;/);
   });
 
@@ -606,13 +607,12 @@ describe('booking time: an estimate with no customer_id of its own is checked fo
     expect(call).toContain('appliedOn: acceptPreLockedDate,');
     expect(call).toContain('excludeVisitIds: rowIds(capacityHold, existingAppointmentRow),');
     expect(call).toContain('resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate),');
-    expect(call).toContain('fenceCustomer: (id) => fenceAcceptLimitCustomer(trx, id, acceptPreLockedCommsId),');
+    expect(call).toContain("fenceCustomer: (id) => require('../services/area-addon-limits').fenceCustomerBookings(trx, id),");
     expect(call).not.toContain('excludeEstimateId');
-    // the resolver: the account step's own authoritative phone match; the fence: its non-blocking customer take
+    // the resolver: the account step's own authoritative phone match; the fence is the shared non-blocking take (below)
     const resolver = src.slice(src.indexOf('async function resolveAcceptLimitCustomer'), src.indexOf('// B18 park: the accept cannot complete self-serve when the estimate'));
     expect(resolver).toContain('matchAcceptCustomerByPhone(estimate, trx, { authoritative: true, afterSiblingResolution: true })');
-    expect(resolver).toContain('tryLockCustomerComms(trx, customerId)');
-    expect(resolver).toContain("code: 'CUSTOMER_BUSY_RETRY'");
+    expect(src).not.toContain('fenceAcceptLimitCustomer');
   });
 
   test('the calculate step reads the history of the customer the staff picked, under either field the estimator route accepts', async () => {
@@ -750,7 +750,7 @@ describe('the day of the visit is judged on every path (Codex round 9)', () => {
     expect(read('routes/admin-schedule.js')).toContain('appliedOn: scheduledDate, staff: true');
     // no day named, visits named: the day of the committed visits (an adopted appointment, the staff booking's rows)
     expect(read('services/area-addon-limits.js')).toContain('day = appliedOn || await visitsFirstDay(database, excludeVisitIds);');
-    expect(read('services/estimate-manual-acceptance.js')).toContain('{ estimate, staff: true, excludeVisitIds: bookedAppointmentIds }');
+    expect(read('services/estimate-manual-acceptance.js')).toContain('estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer');
   });
 });
 
@@ -798,7 +798,7 @@ describe('where the recheck runs (source order)', () => {
   });
 
   test('the reserve rechecks inside the reserve transaction on the selected slot day; the staff booking before AND inside its transaction (after the customer lock, before the visit insert); Mark Won in its transaction', () => {
-    expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx, \{ date \} = \{\}\) => \{[\s\S]{0,300}areaAddOnLimitRefusal\(trx, \{ estimate: row, appliedOn: date, resolveCustomer/);
+    expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx, \{ date \} = \{\}\) => \{[\s\S]{0,300}lockedAreaAddOnLimitRefusal\(row, trx, date\)/);
     expect(read('services/slot-reservation.js')).toContain('await revalidateEstimate(estimate, trx, { date });');
     const schedule = read('routes/admin-schedule.js');
     const book = schedule.indexOf('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
@@ -811,7 +811,7 @@ describe('where the recheck runs (source order)', () => {
     expect(again).toBeGreaterThan(customerLock);
     expect(insert).toBeGreaterThan(again);
     const won = read('services/estimate-manual-acceptance.js');
-    expect(won).toContain('{ estimate, staff: true, excludeVisitIds: bookedAppointmentIds }');
+    expect(won).toContain('estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer');
     expect(won.indexOf('await lockCustomerComms(trx, estimate.customer_id);')).toBeLessThan(won.indexOf('assertAreaAddOnLimitsOpen(trx, {'));
   });
 
@@ -826,5 +826,72 @@ describe('where the recheck runs (source order)', () => {
   test('no product_limits row and no migration carries an add-on limit (add-on-only limits)', () => {
     const migrations = fs.readdirSync(path.join(__dirname, '..', 'models', 'migrations')).filter((f) => f.startsWith('2026100824') || f.startsWith('2026100825'));
     for (const f of migrations) expect(read(`models/migrations/${f}`)).not.toMatch(/product_limits/);
+  });
+});
+
+// Codex round 11 P1 on #6135: the reserve read a matched customer's history under the prospect identity lock only, while staff
+// bookings serialize on the customer-row lock (lockCustomerComms), so a concurrent reserve and staff booking could both pass a
+// one-per-year limit. Every limit-check caller now holds that customer's booking fence when it reads.
+describe('the booking fence: every reader of a customer\'s add-on history holds that customer\'s fence (Codex round 11)', () => {
+  const lead = (keys, over = {}) => ({ id: ESTIMATE, customer_id: null, property_id: null, customer_phone: '+19415550142', address: '1 Test Way, Bradenton, FL 34202', estimate_data: storedWith(keys), ...over });
+
+  test('fenceNamed fences the customer the estimate names too (the reserve locks nobody up front); without it a named customer is the caller\'s own', async () => {
+    const fence = jest.fn(async () => {});
+    await service.assertAreaAddOnLimitsOpen(fakeDb(world()), { estimate: lead(['bed_pre_emergent'], { customer_id: CUSTOMER }), fenceCustomer: fence, fenceNamed: true });
+    expect(fence).toHaveBeenCalledWith(CUSTOMER);
+    fence.mockClear();
+    await service.assertAreaAddOnLimitsOpen(fakeDb(world()), { estimate: lead(['bed_pre_emergent']), customerId: CUSTOMER, fenceCustomer: fence, fenceNamed: true });
+    expect(fence).toHaveBeenCalledWith(CUSTOMER);
+    // the fence comes BEFORE the history read
+    const order = [];
+    const wrapped = (table) => { order.push(`read:${table}`); return fakeDb(world())(table); };
+    await service.assertAreaAddOnLimitsOpen(wrapped, { estimate: lead(['bed_pre_emergent'], { customer_id: CUSTOMER }), fenceNamed: true, fenceCustomer: async () => { order.push('fence'); } });
+    expect(order.indexOf('fence')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('fence')).toBeLessThan(order.indexOf('read:property_application_history'));
+    // no add-on sold: no customer, no fence, no read
+    fence.mockClear();
+    await service.assertAreaAddOnLimitsOpen(fakeDb(world()), { estimate: lead([], { customer_id: CUSTOMER }), fenceCustomer: fence, fenceNamed: true });
+    expect(fence).not.toHaveBeenCalled();
+  });
+
+  test('fenceCustomerBookings takes the customer-comms lock without blocking; a busy account is the retryable 409 and nothing is read', async () => {
+    const trx = (locked) => ({ raw: jest.fn(async () => ({ rows: [{ locked }] })) });
+    const free = trx(true);
+    await expect(service.fenceCustomerBookings(free, CUSTOMER)).resolves.toBeUndefined();
+    expect(free.raw.mock.calls[0][0]).toContain('pg_try_advisory_xact_lock');
+    expect(free.raw.mock.calls[0][1]).toEqual([`customer-comms:${CUSTOMER}`]);
+    await expect(service.fenceCustomerBookings(trx(false), CUSTOMER)).rejects.toMatchObject({ status: 409, code: 'CUSTOMER_BUSY_RETRY', message: expect.stringContaining('being updated right now') });
+  });
+
+  test('a busy account stops the recheck before any history is read, for the reserve\'s own answer', async () => {
+    const reads = [];
+    const wrapped = (table) => { reads.push(table); return fakeDb(world())(table); };
+    const busy = Object.assign(new Error('busy'), { status: 409, code: 'CUSTOMER_BUSY_RETRY' });
+    await expect(service.assertAreaAddOnLimitsOpen(wrapped, { estimate: lead(['bed_pre_emergent'], { customer_id: CUSTOMER }), fenceNamed: true, fenceCustomer: async () => { throw busy; } })).rejects.toBe(busy);
+    expect(reads.filter((table) => table === 'property_application_history')).toEqual([]);
+  });
+
+  test('the reserve fences the customer on the locked row, answers a busy account with the existing retryable refusal, and every other caller keeps its own lock', () => {
+    const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const reserve = read('routes/estimate-slots-public.js');
+    const fn = reserve.slice(reserve.indexOf('async function lockedAreaAddOnLimitRefusal'), reserve.indexOf('// Answer a no-booking refusal'));
+    expect(fn).toContain('fenceCustomer: (id) => limits.fenceCustomerBookings(trx, id),');
+    expect(fn).toContain('fenceNamed: true,');
+    expect(fn).toContain("if (err?.code === 'CUSTOMER_BUSY_RETRY') return CUSTOMER_BUSY_REFUSAL;");
+    // Mark Won: the estimate's own customer is locked at the top; a customer the check finds is fenced
+    const markWon = read('services/estimate-manual-acceptance.js');
+    expect(markWon).toContain('fenceCustomer: (id) => addOnLimits.fenceCustomerBookings(trx, id),');
+    expect(markWon.indexOf('await lockCustomerComms(trx, estimate.customer_id);')).toBeLessThan(markWon.indexOf('addOnLimits.assertAreaAddOnLimitsOpen(trx'));
+    // Staff booking: the limits are read AFTER lockCustomerComms(trx, customerId) of the booking's customer
+    const schedule = read('routes/admin-schedule.js');
+    const lockAt = schedule.indexOf('await lockCustomerComms(trx, customerId);', schedule.indexOf('Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the'));
+    const recheckAt = schedule.indexOf("require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {");
+    expect(lockAt).toBeGreaterThan(0);
+    expect(recheckAt).toBeGreaterThan(lockAt);
+    // The extend commits no application and runs no recheck; the card intents mint a SetupIntent and read no history
+    const slots = read('routes/estimate-slots-public.js');
+    const extend = slots.slice(slots.indexOf("router.post('/:token/reserve/:scheduledServiceId/extend'"));
+    expect(extend).not.toContain('area-addon-limits');
+    expect(slots.slice(slots.indexOf("router.post('/:token/card-hold-intent'"), slots.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"))).not.toContain('area-addon-limits');
   });
 });
