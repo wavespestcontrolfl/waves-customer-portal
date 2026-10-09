@@ -16,7 +16,10 @@ import {
 // dressing blocks beside it. The catalog (names, tiers, limits) comes from the
 // server; this component never names a price. Selections live in the estimate
 // form (`value`, see lib/areaAddOns.js) and every change goes out through
-// `onChange`, so the screen's own invalidation runs.
+// `onChange`, so the screen's own invalidation runs. A grass-bound add-on
+// (catalog `requiresGrassTrack`) carries its own required grass choice with no
+// default; `grassChoices` is the grass list the screen already offers and
+// `pickedGrass` a grass the rep chose on the screen (null while untouched).
 
 const PANEL = "ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200";
 const NOTE = "text-14 text-ink-secondary";
@@ -27,11 +30,12 @@ function areaFieldLabel(item) {
   return `${label} area`;
 }
 
-function rowNotes(item, grassType) {
+function rowNotes(item, entry) {
   const notes = [];
   if (item.tiers && item.maxPerYear) notes.push(`Label limit: ${item.maxPerYear} a year`);
-  if (item.requiresGrassTrack && grassType !== item.requiresGrassTrack) {
+  if (item.requiresGrassTrack) {
     notes.push(`${GRASS_NAMES[item.requiresGrassTrack] || "One grass"} only. Other grass becomes a manual quote.`);
+    if (!entry.grassType) notes.push("Choose the grass to price this. Until then it is a manual quote.");
   }
   if (item.key === "hardscape_weed") {
     notes.push("Hard surfaces and bare ground only. Keep off lawn, beds and root zones.");
@@ -68,6 +72,27 @@ function AreaFields({ item, entry, known, onEntry }) {
   );
 }
 
+// A grass-bound add-on's own grass: no default, required. The estimate's grass
+// is never used for it; a grass the rep already chose on this screen can start
+// the row, and the help line says so.
+function GrassField({ item, entry, grassChoices, pickedGrass, onEntry }) {
+  const chosen = entry.grassType || "";
+  return (
+    <Field
+      label="Grass"
+      id={`estimate-areaAddOn-${item.key}-grass`}
+      required
+      help={chosen && chosen === pickedGrass ? "From the Grass Type / Track box on this screen. Change it here if the grass differs." : undefined}
+      className="mb-4"
+    >
+      <Select value={chosen} onChange={(e) => onEntry({ ...entry, grassType: e.target.value })}>
+        {chosen === "" && <option value="">Choose the grass</option>}
+        {grassChoices.map((grass) => <option key={grass.value} value={grass.value}>{grass.label}</option>)}
+      </Select>
+    </Field>
+  );
+}
+
 function VisitField({ item, entry, hostAvailable, onEntry }) {
   const same = entry.visitContext === SAME_VISIT;
   return (
@@ -85,20 +110,21 @@ function VisitField({ item, entry, hostAvailable, onEntry }) {
   );
 }
 
-function SelectedPanel({ item, entry, known, grassType, hostAvailable, onEntry }) {
+function SelectedPanel({ item, entry, known, grassChoices, pickedGrass, hostAvailable, onEntry }) {
   return (
     <div className={PANEL}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {item.tiers && <AreaFields item={item} entry={entry} known={known} onEntry={onEntry} />}
+        {item.requiresGrassTrack && <GrassField item={item} entry={entry} grassChoices={grassChoices} pickedGrass={pickedGrass} onEntry={onEntry} />}
         <VisitField item={item} entry={entry} hostAvailable={hostAvailable} onEntry={onEntry} />
       </div>
       {known && <div className={NOTE}>{known.source}: about {known.sqft.toLocaleString("en-US")} sq ft {known.noun}. {known.advice}</div>}
-      {rowNotes(item, grassType).map((note) => <div key={note} className={NOTE}>{note}</div>)}
+      {rowNotes(item, entry).map((note) => <div key={note} className={NOTE}>{note}</div>)}
     </div>
   );
 }
 
-function OfferedRow({ item, entry, knownAreas, grassType, otherServiceSelected, value, onChange }) {
+function OfferedRow({ item, entry, knownAreas, grassChoices, pickedGrass, otherServiceSelected, value, onChange }) {
   const known = knownAreaFor(item.key, knownAreas);
   const hostAvailable = otherServiceSelected
     || Object.entries(value).some(([key, other]) => key !== item.key && other?.visitContext !== SAME_VISIT);
@@ -111,7 +137,7 @@ function OfferedRow({ item, entry, knownAreas, grassType, otherServiceSelected, 
           checked={!!entry}
           onChange={(e) => {
             const next = { ...value };
-            if (e.target.checked) next[item.key] = newAddOnEntry(item, known);
+            if (e.target.checked) next[item.key] = newAddOnEntry(item, known, pickedGrass);
             else delete next[item.key];
             onChange(next);
           }}
@@ -122,7 +148,8 @@ function OfferedRow({ item, entry, knownAreas, grassType, otherServiceSelected, 
           item={item}
           entry={entry}
           known={known}
-          grassType={grassType}
+          grassChoices={grassChoices}
+          pickedGrass={pickedGrass}
           hostAvailable={hostAvailable}
           onEntry={(nextEntry) => onChange({ ...value, [item.key]: nextEntry })}
         />
@@ -158,7 +185,7 @@ function UnavailableRow({ addOnKey, name, enabled, value, onChange }) {
   );
 }
 
-export default function AreaAddOnsGroup({ catalog, value, onChange, knownAreas, grassType, otherServiceSelected }) {
+export default function AreaAddOnsGroup({ catalog, value, onChange, knownAreas, grassChoices, pickedGrass = null, otherServiceSelected }) {
   const [userOpen, setUserOpen] = useState(null);
   const selection = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const count = countAreaAddOns(selection);
@@ -192,7 +219,8 @@ export default function AreaAddOnsGroup({ catalog, value, onChange, knownAreas, 
               item={item}
               entry={selection[item.key]}
               knownAreas={knownAreas}
-              grassType={grassType}
+              grassChoices={grassChoices}
+              pickedGrass={pickedGrass}
               otherServiceSelected={otherServiceSelected}
               value={selection}
               onChange={onChange}

@@ -104,6 +104,25 @@ describe('estimator translator: options.areaAddOns -> services.areaAddOns', () =
     expect(estimate([{ key: 'fire_ant_yard', areaSqFt: 3000 }], { options: { grassType: 'C1' } }).v1Input.services.areaAddOns[0]).not.toHaveProperty('grassType');
   });
 
+  test('an entry\'s own grass wins over the estimate\'s: unchosen or unknown quotes as custom, never the form default (Codex round 5 P1)', () => {
+    const spot = (grassType) => [{ key: 'lawn_insect_spot', areaSqFt: 1000, ...(grassType === undefined ? {} : { grassType }) }];
+    const sent = (grassType, options = { grassType: 'A' }) => estimate(spot(grassType), { options });
+    const custom = { price: null, customQuoteReason: 'area_addon_grass_not_covered_by_label_rate' };
+    // The form's default grass (A = St. Augustine) is on the estimate; the row's explicit unknown still quotes custom.
+    for (const unchosen of ['unknown', '', '  ']) {
+      expect(sent(unchosen).v1Input.services.areaAddOns[0].grassType).toBe(unchosen.trim() || 'unknown');
+      expect(sent(unchosen).mapped.oneTime.specItems[0]).toMatchObject({ addOnKey: 'lawn_insect_spot', ...custom });
+      expect(sent(unchosen).mapped.oneTime.items).toEqual([]);
+    }
+    // A chosen grass prices by itself, whatever the estimate's grass is.
+    expect(sent('st_augustine', { grassType: 'C1' }).mapped.oneTime.items[0]).toMatchObject({ addOnKey: 'lawn_insect_spot', price: 79 });
+    expect(sent('bermuda', { grassType: 'A' }).mapped.oneTime.specItems[0]).toMatchObject(custom);
+    // No entry grass (an API caller): the estimate's grass applies, as before.
+    expect(sent(undefined, { grassType: 'A' }).mapped.oneTime.items[0].price).toBe(79);
+    // A grass-free add-on never takes an entry grass.
+    expect(estimate([{ key: 'fire_ant_yard', areaSqFt: 3000, grassType: 'unknown' }]).v1Input.services.areaAddOns[0]).not.toHaveProperty('grassType');
+  });
+
   test('a same-visit add-on is host-checked by the engine behind the same door', () => {
     const same = [{ key: 'web_sweep', visitContext: 'sameTripAddOn' }];
     expect(() => estimate(same)).toThrow(/same-visit area add-on needs a priced service/);

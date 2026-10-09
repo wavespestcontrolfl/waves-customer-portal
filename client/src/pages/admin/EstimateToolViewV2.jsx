@@ -50,6 +50,7 @@ import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import AreaAddOnsGroup from "../../components/admin/AreaAddOnsGroup";
 import {
   areaAddOnOption,
+  pickedGrass,
   areaAddOnRowLabel,
   buildKnownAreas,
   countAreaAddOns,
@@ -64,6 +65,15 @@ import { computeProvisionalState, provisionalSummary } from "../../utils/estimat
 
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+
+// The grass list the screen offers (the Dethatching select adds "Unknown -
+// review"; a grass-bound area add-on row takes this list as it stands).
+const GRASS_CHOICES = [
+  { value: "st_augustine", label: "St. Augustine / Floratam" },
+  { value: "bermuda", label: "Bermuda" },
+  { value: "zoysia", label: "Zoysia" },
+  { value: "bahia", label: "Bahia" },
+];
 
 const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
@@ -4094,7 +4104,7 @@ export default function EstimateToolViewV2({
         // Area add-ons: omitted when nothing is selected. A selection is always
         // forwarded, like the Bermuda option, so a gate turned off mid-session
         // is refused loudly by the server rather than dropped here.
-        ...areaAddOnOption(form.areaAddOns),
+        ...areaAddOnOption(form.areaAddOns, areaAddOnCatalog),
         dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
         dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
         dethatchingAccess: form.dethatchingAccess || "easy",
@@ -4954,6 +4964,9 @@ export default function EstimateToolViewV2({
     lawnSqFt: effectiveTurfSqFt,
     turfSource: turfDisplaySource,
   });
+  // A grass the rep chose on this screen (the form records every field the rep
+  // edits); the untouched default grass never starts an add-on row.
+  const pickedGrassForAddOns = pickedGrass(form, GRASS_CHOICES);
   const isDethatchingStAugustine = String(form.grassType || "")
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "")
@@ -6814,13 +6827,7 @@ export default function EstimateToolViewV2({
                     <Field label="Grass Type / Track" id="estimate-grassType" className="mb-4">
                       <SelectV2
                         k="grassType"
-                        options={[
-                          { value: "st_augustine", label: "St. Augustine / Floratam" },
-                          { value: "bermuda", label: "Bermuda" },
-                          { value: "zoysia", label: "Zoysia" },
-                          { value: "bahia", label: "Bahia" },
-                          { value: "unknown", label: "Unknown - review" },
-                        ]}
+                        options={[...GRASS_CHOICES, { value: "unknown", label: "Unknown - review" }]}
                       />
                     </Field>
                     <Field label="Cleanup Level" id="estimate-dethatchingCleanupLevel" className="mb-4">
@@ -6898,7 +6905,8 @@ export default function EstimateToolViewV2({
                 value={form.areaAddOns}
                 onChange={(next) => set("areaAddOns", next)}
                 knownAreas={areaAddOnKnownAreas}
-                grassType={form.grassType}
+                grassChoices={GRASS_CHOICES}
+                pickedGrass={pickedGrassForAddOns}
                 otherServiceSelected={livePreview.hasBaseService}
               />
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}

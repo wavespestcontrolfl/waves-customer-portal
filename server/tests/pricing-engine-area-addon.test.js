@@ -126,6 +126,13 @@ describe('area add-on treatment pricing', () => {
     expect(zoysia.lineItems.find((l) => l.service === 'area_addon')).toMatchObject({ price: null, requiresCustomQuote: true });
     const unknown = generateEstimate({ services: { areaAddOns: [{ key: 'lawn_insect_spot', areaSqFt: 1000 }] } });
     expect(unknown.lineItems.find((l) => l.service === 'area_addon').price).toBeNull();
+    // An entry's own grass wins, an explicit unknown included: it never falls back to the estimate's grass.
+    const entryUnknown = generateEstimate({ grassType: 'st_augustine', services: { areaAddOns: [{ key: 'lawn_insect_spot', areaSqFt: 1000, grassType: 'unknown' }] } });
+    expect(entryUnknown.lineItems.find((l) => l.service === 'area_addon')).toMatchObject({ price: null, requiresCustomQuote: true, customQuoteReason: 'area_addon_grass_not_covered_by_label_rate' });
+    const entryEmpty = generateEstimate({ grassType: 'st_augustine', services: { areaAddOns: [{ key: 'lawn_insect_spot', areaSqFt: 1000, grassType: '' }] } });
+    expect(entryEmpty.lineItems.find((l) => l.service === 'area_addon').price).toBeNull();
+    const entryChosen = generateEstimate({ grassType: 'zoysia', services: { areaAddOns: [{ key: 'lawn_insect_spot', areaSqFt: 1000, grassType: 'st_augustine' }] } });
+    expect(entryChosen.lineItems.find((l) => l.service === 'area_addon').price).toBe(79);
     // A grass-free add-on is unaffected.
     expect(priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000, grassType: 'bahia' }).price).toBe(99);
   });

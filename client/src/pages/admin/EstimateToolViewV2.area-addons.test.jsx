@@ -262,18 +262,88 @@ describe("tier pre-fill", () => {
 });
 
 describe("notes and the grass track", () => {
-  it("shows the label limit, the grass note for a non-St. Augustine lawn, and the hard-surface note", async () => {
+  it("shows the label limit, the grass-only note and the hard-surface note", async () => {
     renderNew();
     await openGroup();
     fireEvent.click(box("Lawn Insect Spot Treatment"));
     fireEvent.click(box("Shell, Rock & Paver Weed Control"));
     expect(screen.getAllByText("Label limit: 2 a year").length).toBeGreaterThan(0);
     expect(screen.getByText("Hard surfaces and bare ground only. Keep off lawn, beds and root zones.")).toBeInTheDocument();
-    // St. Augustine is the screen's default grass: no grass note yet.
-    expect(screen.queryByText(/Other grass becomes a manual quote/)).not.toBeInTheDocument();
+    expect(screen.getByText("St. Augustine only. Other grass becomes a manual quote.")).toBeInTheDocument();
+    expect(screen.getByText("Choose the grass to price this. Until then it is a manual quote.")).toBeInTheDocument();
+  });
+});
+
+describe("a grass-bound add-on takes its own grass (Codex round 5 P1)", () => {
+  const GRASS_ROW = "#estimate-areaAddOn-lawn_insect_spot-grass";
+  const grassSelect = () => document.querySelector(GRASS_ROW);
+  const spotEntry = (body) => body.options.areaAddOns.find((entry) => entry.key === "lawn_insect_spot");
+
+  it("shows a required Grass select with no default, only on the row whose price is bound to a grass", async () => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(box("Lawn Insect Spot Treatment"));
+    fireEvent.click(box("Fire Ant Yard Treatment"));
+    expect(grassSelect()).toBeRequired();
+    expect(grassSelect()).toHaveValue("");
+    expect(within(grassSelect()).getAllByRole("option").map((o) => o.textContent))
+      .toEqual(["Choose the grass", "St. Augustine / Floratam", "Bermuda", "Zoysia", "Bahia"]);
+    expect(document.getElementById("estimate-areaAddOn-fire_ant_yard-grass")).toBeNull();
+  });
+
+  it("sends an explicit unknown grass until the rep chooses, even with Lawn Care and its default grass selected", async () => {
+    renderNew();
+    await openGroup();
     fireEvent.click(screen.getByRole("checkbox", { name: "Lawn Care", exact: true }));
+    await lookUp();
+    fireEvent.click(box("Lawn Insect Spot Treatment"));
+    const body = await generate();
+    // The estimate's own grass is the untouched default; the add-on never takes it.
+    expect(body.options.grassType).toBe("st_augustine");
+    expect(spotEntry(body)).toEqual({ key: "lawn_insect_spot", areaSqFt: 1000, visitContext: "standalone", grassType: "unknown" });
+    expect(grassSelect()).toHaveValue("");
+  });
+
+  it("sends the grass the rep chose on the row and keeps it", async () => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Pest Control", exact: true }));
+    await lookUp();
+    fireEvent.click(box("Lawn Insect Spot Treatment"));
+    fireEvent.change(grassSelect(), { target: { value: "bermuda" } });
+    expect(grassSelect()).toHaveValue("bermuda");
+    expect(within(grassSelect()).queryByRole("option", { name: "Choose the grass" })).toBeNull();
+    expect(spotEntry(await generate()).grassType).toBe("bermuda");
+    fireEvent.change(grassSelect(), { target: { value: "st_augustine" } });
+    expect(spotEntry(await generate()).grassType).toBe("st_augustine");
+  });
+
+  it("starts the row on a grass the rep chose elsewhere on the screen and says where it came from; the untouched default never does", async () => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Lawn Care", exact: true }));
+    fireEvent.click(box("Lawn Insect Spot Treatment"));
+    expect(grassSelect()).toHaveValue("");
+    fireEvent.click(box("Lawn Insect Spot Treatment"));
     fireEvent.change(await screen.findByLabelText("Grass Type / Track"), { target: { value: "bermuda" } });
-    expect(await screen.findByText("St. Augustine only. Other grass becomes a manual quote.")).toBeInTheDocument();
+    fireEvent.click(box("Lawn Insect Spot Treatment"));
+    expect(grassSelect()).toHaveValue("bermuda");
+    expect(screen.getByText("From the Grass Type / Track box on this screen. Change it here if the grass differs.")).toBeInTheDocument();
+    fireEvent.change(grassSelect(), { target: { value: "zoysia" } });
+    expect(screen.queryByText(/From the Grass Type \/ Track box/)).not.toBeInTheDocument();
+  });
+
+  it("reloads a saved estimate with its chosen grass, and an unchosen one as not chosen", async () => {
+    editSource = {
+      id: "qa-grass-estimate", status: "draft", editable: true, editVersion: "qa-version",
+      customerName: "QA Contact", address: ADDRESS, result: RESULT,
+      inputs: { svcPest: true, homeSqFt: "2000", lotSqFt: "9000", stories: "1" },
+      engineRequest: { profile: {}, selectedServices: ["PEST"], options: { areaAddOns: [{ key: "lawn_insect_spot", areaSqFt: 1000, visitContext: "standalone", grassType: "unknown" }] } },
+    };
+    render(<MemoryRouter><EstimateToolViewV2 editEstimateId="qa-grass-estimate" /></MemoryRouter>);
+    await screen.findByTestId("area-addons-group");
+    expect(grassSelect()).toHaveValue("");
+    expect(spotEntry(await generate()).grassType).toBe("unknown");
   });
 });
 

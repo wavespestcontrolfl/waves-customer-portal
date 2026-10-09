@@ -7,8 +7,10 @@
 // treated area the estimator already knows (the pre-fill rule, owner 2026-10-08).
 //
 // The form keeps one field, `areaAddOns`: a map of add-on key to
-// { areaSqFt: string, larger: boolean, visitContext }. A key that is present is
-// a key that is selected. `buildAreaAddOnRequest` turns it into the
+// { areaSqFt: string, larger: boolean, visitContext, grassType? }. A key that is
+// present is a key that is selected. `grassType` exists only on an add-on whose
+// price is bound to a grass (catalog `requiresGrassTrack`): "" until the rep
+// chooses, never the form's default grass. `buildAreaAddOnRequest` turns it into the
 // `options.areaAddOns` list the calculate and save requests carry.
 
 export const STANDALONE_VISIT = "standalone";
@@ -79,9 +81,28 @@ export function knownAreaFor(key, knownAreas) {
   return source ? knownAreas?.[source] ?? null : null;
 }
 
-// The entry created when a row is first checked.
-export function newAddOnEntry(item, known) {
-  const base = { visitContext: STANDALONE_VISIT };
+// The value a grass-bound add-on sends until the rep chooses a grass: the
+// server prices a missing or unknown grass as a custom quote, never as the
+// estimate's default grass.
+export const UNKNOWN_GRASS = "unknown";
+
+// The grass the rep chose on the screen: the form's grass once the rep has
+// edited that field (`_manualFields` records every edit), else null. The
+// untouched default grass is never a choice.
+export function pickedGrass(form, grassChoices) {
+  return form?._manualFields?.includes("grassType") && grassChoices.some((grass) => grass.value === form.grassType)
+    ? form.grassType
+    : null;
+}
+
+// The entry created when a row is first checked. `pickedGrass` is a grass the
+// rep chose elsewhere on the screen (never the untouched default); a
+// grass-bound add-on starts on it, else with no grass.
+export function newAddOnEntry(item, known, pickedGrass = null) {
+  const base = {
+    visitContext: STANDALONE_VISIT,
+    ...(item.requiresGrassTrack ? { grassType: pickedGrass || "" } : {}),
+  };
   if (!item.tiers) return base;
   const knownSqFt = positiveNumber(known?.sqft);
   if (knownSqFt === null) return { ...base, areaSqFt: String(item.tiers[0]), larger: false };
@@ -114,24 +135,29 @@ export function withTierChoice(item, entry, choice, known) {
 
 // The `options.areaAddOns` list, or undefined when nothing is selected (the
 // field is then left out of the request). One entry per key. An entry with no
-// usable area sends none; the server then answers with its own message.
-export function buildAreaAddOnRequest(selection) {
+// usable area sends none; the server then answers with its own message. A
+// grass-bound add-on (the catalog says so, or its entry carries a grass) always
+// sends its own grass: the rep's choice, else "unknown".
+export function buildAreaAddOnRequest(selection, catalog = null) {
   if (!isPlainObject(selection)) return undefined;
   const entries = Object.entries(selection);
   if (entries.length === 0) return undefined;
+  const grassBound = new Set((catalog?.items || []).filter((item) => item.requiresGrassTrack).map((item) => item.key));
   return entries.map(([key, entry]) => {
     const area = positiveNumber(entry?.areaSqFt);
+    const chosenGrass = typeof entry?.grassType === "string" ? entry.grassType.trim() : "";
     return {
       key,
       ...(area === null ? {} : { areaSqFt: area }),
       visitContext: entry?.visitContext === SAME_VISIT ? SAME_VISIT : STANDALONE_VISIT,
+      ...(grassBound.has(key) || (isPlainObject(entry) && "grassType" in entry) ? { grassType: chosenGrass || UNKNOWN_GRASS } : {}),
     };
   });
 }
 
 // Spread into the request options: `{}` when nothing is selected.
-export function areaAddOnOption(selection) {
-  const areaAddOns = buildAreaAddOnRequest(selection);
+export function areaAddOnOption(selection, catalog = null) {
+  const areaAddOns = buildAreaAddOnRequest(selection, catalog);
   return areaAddOns ? { areaAddOns } : {};
 }
 
@@ -146,6 +172,8 @@ export function selectionFromRequest(list) {
       ...(area === null ? {} : { areaSqFt: String(area) }),
       larger: false,
       visitContext: entry.visitContext === SAME_VISIT ? SAME_VISIT : STANDALONE_VISIT,
+      // The sent "unknown" reads back as "not chosen yet".
+      ...("grassType" in entry ? { grassType: entry.grassType === UNKNOWN_GRASS ? "" : String(entry.grassType ?? "") } : {}),
     };
   }
   return selection;

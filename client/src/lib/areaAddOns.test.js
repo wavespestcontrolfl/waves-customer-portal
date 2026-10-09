@@ -3,6 +3,7 @@ import {
   buildAreaAddOnRequest,
   buildKnownAreas,
   newAddOnEntry,
+  pickedGrass,
   readAreaAddOnCatalog,
   savedAreaAddOns,
   tierSelectValue,
@@ -12,6 +13,7 @@ import { calculateEstimate } from "./estimateEngine";
 import { humanizeQuoteReason } from "./quoteDisplay";
 
 const item = { key: "k", name: "K", areaLabel: "bed", tiers: [1000, 2000, 3500], maxPerYear: 2, requiresGrassTrack: null };
+const grassItem = { ...item, key: "g", requiresGrassTrack: "st_augustine" };
 
 describe("area add-on catalog read", () => {
   it("fails closed on a missing, disabled or malformed block", () => {
@@ -49,6 +51,37 @@ describe("area add-on entries", () => {
   });
 });
 
+describe("grass-bound add-on entries", () => {
+  it("start with no grass unless the rep already chose one; other add-ons carry no grass field", () => {
+    expect(newAddOnEntry(grassItem, null)).toMatchObject({ grassType: "" });
+    expect(newAddOnEntry(grassItem, null, "bermuda")).toMatchObject({ grassType: "bermuda" });
+    expect(newAddOnEntry(item, null, "bermuda")).not.toHaveProperty("grassType");
+  });
+
+  it("pick up a grass only after the rep edited the grass field, never the untouched default", () => {
+    const choices = [{ value: "st_augustine" }, { value: "bermuda" }];
+    expect(pickedGrass({ grassType: "st_augustine", _manualFields: [] }, choices)).toBeNull();
+    expect(pickedGrass({ grassType: "st_augustine" }, choices)).toBeNull();
+    expect(pickedGrass({ grassType: "bermuda", _manualFields: ["bedArea", "grassType"] }, choices)).toBe("bermuda");
+    expect(pickedGrass({ grassType: "unknown", _manualFields: ["grassType"] }, choices)).toBeNull();
+    expect(pickedGrass(null, choices)).toBeNull();
+  });
+
+  it("send the entry's own grass, else an explicit unknown, whether the catalog or the entry says it is grass-bound", () => {
+    const catalog = { enabled: true, items: [grassItem, item] };
+    expect(buildAreaAddOnRequest({ g: { areaSqFt: "1000", grassType: "zoysia" }, k: { areaSqFt: "1000" } }, catalog)).toEqual([
+      { key: "g", areaSqFt: 1000, visitContext: "standalone", grassType: "zoysia" },
+      { key: "k", areaSqFt: 1000, visitContext: "standalone" },
+    ]);
+    for (const entry of [{ areaSqFt: "1000" }, { areaSqFt: "1000", grassType: "" }, { areaSqFt: "1000", grassType: "  " }]) {
+      expect(buildAreaAddOnRequest({ g: entry }, catalog)[0].grassType).toBe("unknown");
+    }
+    // No catalog (not loaded): an entry that carries a grass field still sends one.
+    expect(buildAreaAddOnRequest({ g: { areaSqFt: "1000", grassType: "" } })[0].grassType).toBe("unknown");
+    expect(buildAreaAddOnRequest({ g: { areaSqFt: "1000", grassType: "bahia" } })[0].grassType).toBe("bahia");
+  });
+});
+
 describe("request and saved estimates", () => {
   it("sends nothing for an empty selection, one entry per key otherwise, never applications", () => {
     expect(buildAreaAddOnRequest({})).toBeUndefined();
@@ -71,6 +104,15 @@ describe("request and saved estimates", () => {
     expect(savedAreaAddOns({ inputs: {}, engineRequest: { options: { areaAddOns: [{ key: "z", areaSqFt: 700, visitContext: "sameTripAddOn" }, { areaSqFt: 5 }] } } }))
       .toEqual({ z: { areaSqFt: "700", larger: false, visitContext: "sameTripAddOn" } });
     expect(savedAreaAddOns({})).toEqual({});
+  });
+
+  it("reads a saved grass back, and the sent unknown as not chosen", () => {
+    const list = [{ key: "g", areaSqFt: 1000, grassType: "zoysia" }, { key: "h", areaSqFt: 1000, grassType: "unknown" }, { key: "k", areaSqFt: 1000 }];
+    expect(savedAreaAddOns({ inputs: {}, engineRequest: { options: { areaAddOns: list } } })).toEqual({
+      g: { areaSqFt: "1000", larger: false, visitContext: "standalone", grassType: "zoysia" },
+      h: { areaSqFt: "1000", larger: false, visitContext: "standalone", grassType: "" },
+      k: { areaSqFt: "1000", larger: false, visitContext: "standalone" },
+    });
   });
 });
 

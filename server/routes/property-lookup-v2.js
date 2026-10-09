@@ -5219,6 +5219,9 @@ function requireAreaAddOnsGate() {
 // `track` is the estimate's grass track; `grassChosen` says the operator
 // picked it (the translator defaults an unpicked grass to St. Augustine, which
 // must never price a label-bound add-on: that add-on then quotes as custom).
+// A label-bound entry's OWN grass (the estimator row's required Grass select)
+// wins over the estimate's: a chosen grass prices by itself, and an empty or
+// "unknown" one quotes as custom even when the estimate names a grass.
 function areaAddOnsFromOptions(options, { track, grassChosen }) {
   const raw = options.areaAddOns;
   if (raw === undefined || raw === null) return undefined;
@@ -5239,7 +5242,7 @@ function areaAddOnsFromOptions(options, { track, grassChosen }) {
       key: entry.key,
       ...(entry.areaSqFt !== undefined ? { areaSqFt: entry.areaSqFt } : {}),
       ...(entry.visitContext !== undefined ? { visitContext: entry.visitContext } : {}),
-      ...(cfg?.requiresGrassTrack ? { grassType: grassChosen ? track : 'unknown' } : {}),
+      ...(cfg?.requiresGrassTrack ? { grassType: typeof entry.grassType === 'string' ? entry.grassType.trim() || 'unknown' : (grassChosen ? track : 'unknown') } : {}),
     };
   });
 }
