@@ -3009,6 +3009,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // the check. Re-checked under the visit row lock, which a description
       // change takes too (service-photos.js lockStagedPhotoForChange).
       photoCaptionsSeen,
+      // The station ids the Fast Complete station sheet checked (GATE_STATION_FAST_COMPLETE) —
+      // OPTIONAL. Undefined (the full form, every other caller) skips the check.
+      // Re-checked under the visit row lock against the registry's active stations.
+      stationRosterSeen,
     } = completionInput.body;
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
@@ -4785,6 +4789,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           expectedVisit,
           lawnFast,
           products,
+          technicianNotes,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(
@@ -6133,6 +6138,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // this visit either commits first — and the caller's locked guard
           // sees it — or waits until this completion has committed (Codex r5
           // P1 #5903).
+          // GATE_LAWN_NEW_SOD_NOTE: a lawn sheet completing with NO product because the new sod holds every planned product
+          // has that claim re-judged below, under the sod record's own advisory lock. The lock is taken FIRST, ahead of every
+          // other lock here, as the sod record's writers (writeAdminPreferences, the rooted tick) take it before their customer
+          // and visit locks. False (nothing taken) for every other completion.
+          const sodNoProductClaim = await require('./lawn-sod-sheet').lockSodRecordForNoProduct(trx, {
+            customerId: svc.customer_id, lawnFast, isIncompleteVisit, products, technicianNotes,
+          });
           if (systemQuietCloseout) {
             await require('../services/scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, svc.id);
           }
@@ -6242,6 +6254,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
           if (lawnFast != null && !isIncompleteVisit) {
             await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
+            // The new-sod no-product claim, re-judged with the advisory lock, the customer and the visit all held.
+            if (sodNoProductClaim) await require('./lawn-sod-sheet').assertNoProductUnderLock(trx, { svc, technicianNotes });
           }
           // The assessment sheet's read of the visit, written under this lock so it
           // commits or rolls back with the completion.
@@ -6267,6 +6281,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
             }
           }
+          // The stations the station sheet checked, against the registry now (one
+          // roster rule: visit-station-facts.js stationRosterMatches).
+          await require('./visit-station-facts').assertStationRosterUnderLock(trx, {
+            customerId: svc.customer_id, profile: completionProfile, stationRosterSeen, termiteStations,
+          });
           // The photo descriptions the report was written from (Codex P2 on
           // #5701): one changed, added or removed from another device after
           // Write would send the old report beside the new description.
@@ -7694,6 +7713,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+        // The station sheet's checks, in this transaction under the roster lock
+        // (visit-station-facts.js); the full form's sync stays post-commit.
+        await require('./visit-station-facts').writeSheetStationChecksInCompletion(trx, {
+          customerId: svc.customer_id, profile: completionProfile, serviceRecordId: record.id, visitOutcome, stationRosterSeen, termiteStations,
+        });
         // Invoice-issued closeout: the issued invoice's record link lands in
         // THIS transaction, beside the record it names (GitHub r3 P1 #4127).
         // The post-commit suppressor lookup is best-effort by contract, so a
@@ -8165,6 +8189,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
+            // GATE_LAWN_NEW_SOD_NOTE: the new-sod bag swap as a substitution, so the ledger ties the swap bag to the bag it replaced.
+            visitSubstitutions: await require('./lawn-sod-sheet').sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts: insertedServiceProducts }),
             completionInput: {
               ...(lawnProtocolCompletion || {}),
               // Under a consumer gate the writer receives the validated visit
@@ -8580,7 +8606,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 400, body: { error: err.message, code: err.code } });
         }
-        const outcomeRefusal = require('./completion-consultation-outcome').consultationOutcomeRefusalResponse(err);
+        const outcomeRefusal = require('./completion-consultation-outcome').consultationOutcomeRefusalResponse(err)
+          || require('./visit-station-facts').stationRosterRefusalResponse(err);
         if (outcomeRefusal) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return outcomeRefusal;
@@ -8599,6 +8626,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             code: 'visit_identity_changed',
             ...(err.reason ? { reason: err.reason } : {}),
           } });
+        }
+        if (err && err.code === 'lawn_sod_no_product_stale') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: require('./lawn-sod-sheet').NO_PRODUCT_STALE.payload });
         }
         if (err && err.code === 'lawn_fast_visit_type_unavailable') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);

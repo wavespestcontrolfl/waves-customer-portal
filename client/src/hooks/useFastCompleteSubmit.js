@@ -94,6 +94,12 @@ export function outcomeMessage(outcome, err) {
   return err?.message || 'Completion failed';
 }
 
+// What a failed send shows: a correctable one sits in the form (no failure state),
+// the server's message, and its code.
+function failureView(outcome, err) {
+  return { failure: outcome === 'correctable' ? null : outcome, error: outcomeMessage(outcome, err), code: String(err?.code || '') };
+}
+
 export function genIdempotencyKey() {
   try {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -135,6 +141,9 @@ export default function useFastCompleteSubmit({
   const [restored, setRestored] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  // The server's code for the last refusal (cleared as a send starts), for a sheet
+  // that must act on one (the station sheet reloads its stations).
+  const [errorCode, setErrorCode] = useState('');
   const [failure, setFailure] = useState(null);
   const [done, setDone] = useState(null);
   const [prompt, setPrompt] = useState(null);
@@ -334,8 +343,10 @@ export default function useFastCompleteSubmit({
       setPrompt({ code: err.code, message: err?.message || '' });
       return;
     }
-    setFailure(outcome === 'correctable' ? null : outcome);
-    setError(outcomeMessage(outcome, err));
+    const shown = failureView(outcome, err);
+    setFailure(shown.failure);
+    setError(shown.error);
+    setErrorCode(shown.code);
   }, [settleCopy, confirmable]);
 
   const submit = useCallback(async (buildBody, summary) => {
@@ -349,6 +360,7 @@ export default function useFastCompleteSubmit({
     inFlight.current = true;
     setSubmitting(true);
     setError('');
+    setErrorCode('');
     setPrompt(null);
     // The row this send stands on (none when nothing was persisted): fixed
     // again once its body is persisted.
@@ -455,7 +467,7 @@ export default function useFastCompleteSubmit({
   }, [clearStored, failure]);
 
   return {
-    recovering, restored, submitting, error, failure, done, prompt, storageWarning,
+    recovering, restored, submitting, error, errorCode, failure, done, prompt, storageWarning,
     submit, retry, confirm, discard, dismissPrompt: discard,
     recheck: () => setReadTick((tick) => tick + 1),
     pendingSummary: pendingSummaryRef.current,

@@ -5291,6 +5291,13 @@ async function loadProjectCompletionContextByServiceId(services) {
         && require('../config/feature-gates').typedVoiceFillLive()
         && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
         && !(completionProfile?.companions || []).length,
+      // GATE_STATION_FAST_COMPLETE (with the two gates above): a termite or
+      // rodent bait station visit may open the Fast Complete sheet even while
+      // the station map is on, the sheet carrying the station checks. Only the
+      // two bait station forms (a trap check keeps the full form) and never a
+      // combined visit. The client also needs the map known on
+      // (pest-fast-complete.js isTypedReportEligible).
+      stationFastCompleteEnabled: require('../services/visit-station-facts').stationFastCompleteEnabled(completionProfile),
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6494,6 +6501,8 @@ router.get('/', async (req, res, next) => {
         laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
         typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
         typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
+        // GATE_STATION_FAST_COMPLETE — see loadProjectCompletionContextByServiceId.
+        stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -7138,6 +7147,7 @@ router.get('/week', async (req, res, next) => {
           laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
           typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
           typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
+          stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -25788,6 +25798,10 @@ router.post('/generate-report', async (req, res) => {
       // The Fast Complete sweep chip (owner 2026-10-08): an exact true means
       // the technician tapped the sweep OFF, over whatever the note says.
       sweepNotDone,
+      // GATE_STATION_FAST_COMPLETE: the technician's per-station statuses from
+      // the Fast Complete sheet, [{ number, status }]; they stand over the note
+      // (visit-station-facts.js stationChecksWriterLine).
+      stationChecks,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -25808,6 +25822,10 @@ router.post('/generate-report', async (req, res) => {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
 
+    // The technician's station statuses (gate on, a bait station form): a serviced
+    // station under the completed work, the rest under what the technician
+    // observed (visit-station-facts.js stationChecksWriterLines).
+    const stationLines = await require('../services/visit-station-facts').stationChecksWriterLinesForVisit(db, { scheduledServiceId, structuredFindings, stationChecks });
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
     const areas = asArray(areasServiced);
     const actions = asArray(actionsCompleted);
@@ -26725,14 +26743,14 @@ Arrival Time: ${arrivalTime || 'Not specified'}
 ${writerRulesOn
     ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}${stationLines.completed}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
 ${writerRulesOn
     ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)
     : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
 
 [OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
+Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}${stationLines.observed}
 Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
 
 [REPORTED BY CUSTOMER]
@@ -26936,13 +26954,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       const report = buildDeterministicReportCopy({
         serviceType: fallbackServiceType,
         areas: rulesItems(promptAreas),
-        actions: rulesItems([...promptActions, ...typedFallbackActions]),
+        // The technician's station checks lead (visit-station-facts.js; empty with
+        // the gate off or on any other visit): the fallback keeps the first items.
+        actions: rulesItems([...stationLines.fallbackActions, ...promptActions, ...typedFallbackActions]),
         // Typed structured findings ride the fallback as technician work /
         // observations / next steps (profile-confirmed above; product
         // application fields excluded) — a typed-only request must not 503
         // when the free-text fields are empty. All free-text inputs arrive
         // pre-redacted (codex r34).
-        observations: rulesItems([...promptObs, ...typedFallbackObservations]),
+        observations: rulesItems([...stationLines.fallbackObservations, ...promptObs, ...typedFallbackObservations]),
         recommendations: writerRulesOn ? [] : [...promptRecs, ...typedFallbackNextSteps],
         // A zero rating ("Recorded pest activity was none.") names no place
         // checked, a property-wide absence the writer rules refuse (rule 4):

@@ -1,6 +1,7 @@
 const { lawnScoreValue, resolveStressDamage, calculateLawnOverallScore } = require('../../../shared/lawn-scores.cjs');
 const crypto = require('crypto');
 const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
+const { irrigationRateOptions, storedRateTable, liveRateTable } = require('../irrigation-rates');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
@@ -626,17 +627,19 @@ function portalIrrigationInches(propertyPrefs) {
     runMinutes: propertyPrefs.irrigation_run_minutes,
     wateringDays: propertyPrefs.watering_days,
     systemType: propertyPrefs.irrigation_system_type,
-  }).inchesPerWeek;
+  }, irrigationRateOptions()).inchesPerWeek;
 }
 
 // Every irrigation source the card would size from, checked against the
-// move guard the weekly email applies (one shared resolver).
+// move guard the weekly email applies (one shared resolver). LIVE by design: the report's water card derives its own
+// figure from today's preferences with today's table (irrigationRateOptions above), so the guard asks the same table.
+// Nothing here is compared with a stored plan; the stored week-plan card renders from the snapshot's own table.
 function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
   return scheduleUnconfirmedAfterMove({
     ...(propertyPrefs || {}),
     turf_irrigation_inches_per_week: turfProfile?.irrigation_inches_per_week ?? null,
     assessment_irrigation_inches_per_week: assessment?.irrigation_inches_per_week ?? null,
-  });
+  }, liveRateTable());
 }
 
 // The week-plan card the report renders from the current week's snapshot: ONE
@@ -645,7 +648,9 @@ function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
 // plan renders no card.
 function buildReportWeekPlan(snapshot, assessmentServiceDate) {
   // Compare against the runtime Monday's decision saw, never today's prefs.
-  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+  // The head rate table is the one the snapshot was decided on (decisionInputs.rateTable), never today's gate.
+  const rateTable = storedRateTable(snapshot.decisionInputs);
+  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null, rateTable });
   // The card credits a REQUIRED watering-in against the plan only when
   // this visit sits inside the plan week — a reopened older report
   // loads the current week's snapshot and must not count a treatment
@@ -660,7 +665,7 @@ function buildReportWeekPlan(snapshot, assessmentServiceDate) {
   // force. The literal token is filled (or the key dropped) by
   // applyAfterHoldOverlay once the visit's instruction is known.
   const afterHold = featureGates.lawnWateringRuleLive()
-    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null, rateTable })
     : null;
   return rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessmentServiceDate), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
 }
