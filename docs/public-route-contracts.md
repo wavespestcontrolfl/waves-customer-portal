@@ -839,10 +839,12 @@ date (a time-only move does not shift the plan). `POST .../find-slots` and
 the commit route's `SLOT_TAKEN` refresh carry the same key for the days they
 return, and the client replaces the dates it holds with that answer (no key =
 no date named); a date with no entry shows no line. Confirm pin: the commit body carries
-`disclosed_next_visit_date` (the date the line named for the picked slot, or
-null when it named none). While the gate is on, a series commit projects the
-date again on the mover's locked transaction, before its first write
-(`moveGuard`); when the answer differs (the next visit became
+`disclosed_next_visit_date` and `disclosed_next_visit_current_date` (the new
+date and the current date the line named for the picked slot, or null when it
+named none). While the gate is on, the series mover hands its own verdict for
+the next visit (the date it is on and the date the move writes on it, null
+when the move keeps it in place) to `moveGuard` on its locked transaction,
+before its first write; when the page said something else (the next visit became
 customer-confirmed, dispatch-locked, reminded, shared or frozen after the page
 loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
 page reloads. A page loaded before the gate was set sends no field and gets

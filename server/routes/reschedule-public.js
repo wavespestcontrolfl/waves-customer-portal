@@ -136,19 +136,20 @@ async function loadNextVisitShift(svc, availability) {
   }
 }
 
-// The next-visit date this commit would write for `date`, read on `conn`
-// (the mover's locked transaction at Confirm). Null = no date to name.
-// Same conditions as loadNextVisitShift, so GET and Confirm cannot differ.
-async function projectedNextVisitDate(svc, date, conn) {
-  if (!nextVisitDateActive() || !isSeriesVisit(svc) || !collectiveAnchorActive()) return null;
-  // On the mover's transaction the reads run in a savepoint: a failed read
-  // rolls back to it, and the caller's catch leaves the transaction usable.
-  const project = (c) => SmartRebooker.projectNextVisitDates(svc.id, [date], { conn: c });
-  const shift = conn?.isTransaction && typeof conn.transaction === 'function'
-    ? await conn.transaction((sp) => project(sp))
-    : await project(conn);
-  const to = shift?.byDate?.[date] || null;
-  return to && shift.currentDate && to !== shift.currentDate ? to : null;
+// The next-visit line the page showed must match what the series move does
+// (GATE_RESCHEDULE_NEXT_VISIT_DATE). `nextVisit` is the mover's own verdict
+// from inside its locked transaction ({ currentDate, newDate } of the first
+// later movable visit; newDate null = kept in place), so this compares the
+// page to the write itself and reads nothing. True = mismatch.
+// Same conditions as loadNextVisitShift: outside them the page named nothing.
+function nextVisitDisclosureMismatch(svc, body, nextVisit) {
+  if (!nextVisitDateActive() || !isSeriesVisit(svc) || !collectiveAnchorActive()) return false;
+  const day = (value) => String(value || '').slice(0, 10) || null;
+  const moves = !!(nextVisit?.newDate && nextVisit.currentDate && nextVisit.newDate !== nextVisit.currentDate);
+  const expectedTo = moves ? nextVisit.newDate : null;
+  const expectedFrom = moves ? nextVisit.currentDate : null;
+  return day(body?.disclosed_next_visit_date) !== expectedTo
+    || day(body?.disclosed_next_visit_current_date) !== expectedFrom;
 }
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
@@ -917,24 +918,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // one while the expect fence still matches. The rebooker calls
     // moveGuard inside its transaction right before this row's own lock
     // and CAS, so the lock here holds the row steady until the write.
-    // Next-visit date pin (GATE_RESCHEDULE_NEXT_VISIT_DATE; Codex r2 P1):
-    // the page named a new date for the next plan visit, or named none. The
-    // series mover re-reads that visit under its locks and can keep it in
-    // place (customer-confirmed, dispatch-locked, reminder sent, shared or
-    // frozen stop). The date is projected again here, on the locked series
-    // before its first write; a different answer refuses with SCOPE_CHANGED
-    // and the page reloads. No-op while the gate is unset.
-    const nextVisitPin = async ({ trx }) => {
-      if (!nextVisitDateActive()) return;
-      const disclosed = String(req.body?.disclosed_next_visit_date || '').slice(0, 10) || null;
-      let expected = null;
-      try {
-        expected = await projectedNextVisitDate(svc, date, trx);
-      } catch (err) {
-        // GET names no date when the projection fails; hold Confirm to the same.
-        logger.warn(`[reschedule-public] next-visit pin projection failed for ${svc.id}: ${err.message}`);
-      }
-      if (disclosed !== expected) {
+    // Next-visit date pin (GATE_RESCHEDULE_NEXT_VISIT_DATE; Codex r2 P1, r3
+    // P1/P2): the page named the next plan visit's date today and its new
+    // date, or named none. The series mover decides under its locks whether
+    // that visit moves (it keeps a customer-confirmed, dispatch-locked,
+    // reminded, shared or frozen one in place, and every later visit when
+    // its reminder read fails). It hands that verdict to moveGuard before
+    // its first write; a page that said something else is refused with
+    // SCOPE_CHANGED and reloads. No-op while the gate is unset.
+    const nextVisitPin = async ({ nextVisit }) => {
+      if (nextVisitDisclosureMismatch(svc, req.body, nextVisit)) {
         throw Object.assign(new Error('The scheduling details for your plan just updated — please review the latest options.'), {
           statusCode: 409, isOperational: true, code: 'SCOPE_CHANGED',
         });
@@ -1178,7 +1171,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 });
 
 router._test = {
-  projectedNextVisitDate,
+  nextVisitDisclosureMismatch,
   eligibility,
   eligibilityAsync,
   withSelfServeNotice,

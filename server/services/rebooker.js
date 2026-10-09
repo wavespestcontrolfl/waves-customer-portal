@@ -3399,7 +3399,23 @@ class SmartRebooker {
       // The call/proposal guard runs on the locked series before its first write.
       if (typeof options.moveGuard === 'function') {
         const guardedService = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first();
-        await options.moveGuard({ trx, technicianId: siblings[droppedIdx].technician_id, service: guardedService });
+        // What THIS move does to the next plan visit, from the decisions it
+        // has already made under its locks (preservedFutureIds, the memoized
+        // projection): the first later movable visit, the date it is on, and
+        // the date the loop below writes on it (null = kept in place). A
+        // guard that pins a date a page named reads this, never a second
+        // read of its own, so the guard and the write cannot differ.
+        let nextVisit = null;
+        for (let i = startIdx + 1; i < siblings.length && !nextVisit; i++) {
+          const sib = siblings[i];
+          if (!RESCHEDULABLE.has(sib.status)) continue;
+          nextVisit = {
+            id: sib.id,
+            currentDate: dateOnly(sib.scheduled_date),
+            newDate: preservedFutureIds.has(String(sib.id)) ? null : dateOnly(projectOccurrenceDate(i - startIdx, sib)),
+          };
+        }
+        await options.moveGuard({ trx, technicianId: siblings[droppedIdx].technician_id, service: guardedService, nextVisit });
       }
       // First recurring-config write, after every reviewed destination was
       // re-probed and accepted under its occupancy lock.

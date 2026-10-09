@@ -719,6 +719,7 @@ describe('ReschedulePage collective anchoring', () => {
     await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
     let post = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
     expect(JSON.parse(post[1].body).disclosed_next_visit_date).toBe('2026-10-17');
+    expect(JSON.parse(post[1].body).disclosed_next_visit_current_date).toBe('2026-10-10');
     unmount();
 
     fetchMock = stubFetch({ get: jsonResponse(payload), post: ok() });
@@ -728,6 +729,7 @@ describe('ReschedulePage collective anchoring', () => {
     await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
     post = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
     expect(JSON.parse(post[1].body).disclosed_next_visit_date).toBeNull();
+    expect(JSON.parse(post[1].body).disclosed_next_visit_current_date).toBeNull();
   });
 
   it('a slot-taken refresh that names no next-visit date clears the line', async () => {

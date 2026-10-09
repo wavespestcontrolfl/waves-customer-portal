@@ -1413,6 +1413,7 @@ const FLOWS = {
       // (null = none named). The server projects it again under its locks
       // and answers SCOPE_CHANGED when the plan no longer matches.
       disclosed_next_visit_date: data?.collectiveAnchor ? (nextVisitShiftFor(data, slot.date)?.to ?? null) : null,
+      disclosed_next_visit_current_date: data?.collectiveAnchor ? (nextVisitShiftFor(data, slot.date)?.from ?? null) : null,
     }),
     // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.
     // SELF_SERVE_NOTICE (owner ruling 2026-09-23): the visit slid inside the

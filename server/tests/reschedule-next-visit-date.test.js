@@ -39,7 +39,7 @@ jest.mock('../services/visit-groups', () => ({
 const SmartRebooker = require('../services/rebooker');
 const router = require('../routes/reschedule-public');
 
-const { loadNextVisitShift, nextVisitDateActive, projectedNextVisitDate } = router._test;
+const { loadNextVisitShift, nextVisitDateActive, nextVisitDisclosureMismatch } = router._test;
 
 // A quarterly plan: the parent is the visit being moved, with two later rows.
 function plan(overrides = {}) {
@@ -236,55 +236,68 @@ describe('reschedule-public loadNextVisitShift', () => {
   });
 });
 
-describe('reschedule-public projectedNextVisitDate (the Confirm pin, Codex r2 P1)', () => {
+describe('reschedule-public nextVisitDisclosureMismatch (the Confirm pin, Codex r2 P1 + r3)', () => {
   const series = { id: 'svc-1', is_recurring: true, scheduled_date: '2026-10-15' };
-  const trx = { marker: 'locked transaction' };
-  let spy;
+  const moved = { id: 'svc-2', currentDate: '2027-01-15', newDate: '2027-01-22' };
+  const named = { disclosed_next_visit_date: '2027-01-22', disclosed_next_visit_current_date: '2027-01-15' };
   beforeEach(() => {
     process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE = 'true';
     process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
-    spy = jest.spyOn(SmartRebooker, 'projectNextVisitDates')
-      .mockResolvedValue({ currentDate: '2027-01-15', byDate: { '2026-10-22': '2027-01-22' } });
-  });
-  afterEach(() => spy.mockRestore());
-
-  test('projects the one picked date on the connection it is given', async () => {
-    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBe('2027-01-22');
-    expect(spy).toHaveBeenCalledWith('svc-1', ['2026-10-22'], { conn: trx });
   });
 
-  test('null when the mover would keep the next visit, the date has no entry, or the date does not change', async () => {
-    spy.mockResolvedValueOnce(null);
-    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
-    expect(await projectedNextVisitDate(series, '2026-10-29', trx)).toBeNull();
-    spy.mockResolvedValueOnce({ currentDate: '2027-01-22', byDate: { '2026-10-22': '2027-01-22' } });
-    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
+  test('the page named what the mover writes: no mismatch', () => {
+    expect(nextVisitDisclosureMismatch(series, named, moved)).toBe(false);
   });
 
-  test('gate off, no collective anchoring or a one-time visit: null without a read', async () => {
+  test('the mover keeps the visit in place (newDate null) but the page named a date: mismatch', () => {
+    expect(nextVisitDisclosureMismatch(series, named, { ...moved, newDate: null })).toBe(true);
+  });
+
+  test('the mover writes another date, or the visit is on another date now: mismatch', () => {
+    expect(nextVisitDisclosureMismatch(series, named, { ...moved, newDate: '2027-01-25' })).toBe(true);
+    expect(nextVisitDisclosureMismatch(series, named, { ...moved, currentDate: '2027-01-16' })).toBe(true);
+  });
+
+  test('the page named nothing: fine when nothing moves, a mismatch when the mover moves the visit', () => {
+    expect(nextVisitDisclosureMismatch(series, {}, null)).toBe(false);
+    expect(nextVisitDisclosureMismatch(series, {}, { ...moved, newDate: null })).toBe(false);
+    expect(nextVisitDisclosureMismatch(series, {}, { ...moved, newDate: '2027-01-15' })).toBe(false);
+    expect(nextVisitDisclosureMismatch(series, {}, moved)).toBe(true);
+  });
+
+  test('gate off, no collective anchoring or a one-time visit: never a mismatch', () => {
     delete process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE;
-    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
+    expect(nextVisitDisclosureMismatch(series, {}, moved)).toBe(false);
     process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE = 'true';
     delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
-    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
+    expect(nextVisitDisclosureMismatch(series, {}, moved)).toBe(false);
     process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
-    expect(await projectedNextVisitDate({ ...series, is_recurring: false }, '2026-10-22', trx)).toBeNull();
-    expect(spy).not.toHaveBeenCalled();
+    expect(nextVisitDisclosureMismatch({ ...series, is_recurring: false }, {}, moved)).toBe(false);
   });
 
-  test('the series commit runs the pin inside the mover\'s locked guard and refuses SCOPE_CHANGED', () => {
+  test('the series commit pins on the mover\'s own verdict and reads nothing itself', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/reschedule-public'), 'utf8');
-    const pin = src.slice(src.indexOf('const nextVisitPin = async ({ trx }) => {'));
+    const pin = src.slice(src.indexOf('const nextVisitPin = async ({ nextVisit }) => {'));
     const body = pin.slice(0, pin.indexOf('const officeApprovalRecheck'));
-    expect(body).toMatch(/projectedNextVisitDate\(svc, date, trx\)/);
-    expect(body).toMatch(/req\.body\?\.disclosed_next_visit_date/);
-    expect(body).toMatch(/if \(disclosed !== expected\)[\s\S]*code: 'SCOPE_CHANGED'/);
-    const series = src.slice(src.indexOf('await SmartRebooker.rescheduleSeries('), src.indexOf(': await SmartRebooker.reschedule('));
-    expect(series).toMatch(/moveGuard: async \(ctx\) => \{\s*await officeApprovalRecheck\(ctx\);\s*await nextVisitPin\(ctx\);/);
+    expect(body).toMatch(/nextVisitDisclosureMismatch\(svc, req\.body, nextVisit\)/);
+    expect(body).toMatch(/code: 'SCOPE_CHANGED'/);
+    expect(body).not.toMatch(/projectNextVisitDates|trx\(/);
+    const call = src.slice(src.indexOf('await SmartRebooker.rescheduleSeries('), src.indexOf(': await SmartRebooker.reschedule('));
+    expect(call).toMatch(/moveGuard: async \(ctx\) => \{\s*await officeApprovalRecheck\(ctx\);\s*await nextVisitPin\(ctx\);/);
+  });
+
+  test('the mover hands the guard the verdict it writes from: kept ids and its own projection', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/rebooker'), 'utf8');
+    const guard = src.slice(src.indexOf('What THIS move does to the next plan visit'));
+    const body = guard.slice(0, guard.indexOf('// First recurring-config write'));
+    expect(body).toMatch(/for \(let i = startIdx \+ 1; i < siblings\.length && !nextVisit; i\+\+\)/);
+    expect(body).toMatch(/if \(!RESCHEDULABLE\.has\(sib\.status\)\) continue;/);
+    expect(body).toMatch(/newDate: preservedFutureIds\.has\(String\(sib\.id\)\) \? null : dateOnly\(projectOccurrenceDate\(i - startIdx, sib\)\)/);
+    expect(body).toMatch(/options\.moveGuard\(\{ trx, technicianId: siblings\[droppedIdx\]\.technician_id, service: guardedService, nextVisit \}\)/);
   });
 });
 
-describe('reads on the mover\'s transaction run in savepoints (pre-push audit P1)', () => {
+describe('reads on a caller\'s transaction run in savepoints', () => {
   // A transaction handle: .transaction(fn) runs fn on a savepoint handle and
   // counts a rollback when fn throws.
   function trxFor(planned) {
@@ -312,17 +325,6 @@ describe('reads on the mover\'s transaction run in savepoints (pre-push audit P1
     expect(shift.byDate['2026-10-22']).toBeTruthy();
     expect(state.savepoints).toBeGreaterThanOrEqual(1);
     expect(state.rollbacks).toBe(0);
-  });
-
-  test('the Confirm pin projects inside a savepoint; a thrown read rolls back and rethrows', async () => {
-    process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE = 'true';
-    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
-    const spy = jest.spyOn(SmartRebooker, 'projectNextVisitDates').mockRejectedValue(new Error('boom'));
-    const { handle, state } = trxFor(plan());
-    await expect(projectedNextVisitDate({ id: 'svc-1', is_recurring: true }, '2026-10-22', handle)).rejects.toThrow('boom');
-    expect(state.savepoints).toBe(1);
-    expect(state.rollbacks).toBe(1);
-    spy.mockRestore();
   });
 });
 
