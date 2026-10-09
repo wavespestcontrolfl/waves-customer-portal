@@ -848,6 +848,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const reserviceNoApplication = Boolean(reservice && ['inspection_only', 'customer_declined'].includes(reservice.outcome));
   const reserviceIncomplete = Boolean(reservice && reservice.outcome === 'incomplete');
   const reserviceNotPerformed = reserviceNoApplication || reserviceIncomplete;
+  // A frozen re-entry condition (lawn) rides every branch that used to carry the timed warning, except a callback that
+  // applied nothing: the dry / water-in condition and the keep-off line, or '' when there is none.
+  const conditionLine = condition && !reserviceNoApplication ? [condition.text, condition.pets].filter(Boolean).join(' ') : '';
   const reserviceStatus = () => ({
     heading: reservice.heading || 'we came back and took care of it!',
     status: allReady ? 'Ready now' : 'Service complete',
@@ -884,7 +887,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
           : (noTreatmentVisit ? 'No application was made today.' : 'Service areas completed today.')),
       detail: pendingText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
-        : (reserviceNotPerformed
+        : (conditionLine
+          ? `${conditionLine} We also included the recommended next step below.`
+          : reserviceNotPerformed
           // 'incomplete' can include a PARTIAL application — only the two
           // genuinely non-performed outcomes may claim none (codex r10 P1).
           ? (reservice.outcome === 'incomplete'
@@ -908,6 +913,17 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   if (reserviceIncomplete) {
     // Partial application possible: the standalone re-entry warning stays
     // (safety), everything else yields to the claim-nothing callback copy.
+    // A frozen condition (lawn) is that warning, with no clock.
+    if (conditionLine) {
+      return {
+        heading: reservice.heading || 'about your visit',
+        status: 'Service complete',
+        statusTone: 'neutral',
+        result: condition.text,
+        completedLine: reservice.completedFallback || 'The visit was not completed.',
+        detail: [condition.pets, reservice.expectation || null, reservice.billingLine || null].filter(Boolean).join(' '),
+      };
+    }
     if (pendingTarget && !allReady) {
       return {
         heading: reservice.heading || 'about your visit',
@@ -935,7 +951,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Accessible areas were serviced.',
       detail: pendingReadyText
         ? 'Keep pets and people away from treated zones until they are ready. Review the recommended next step below.'
-        : (inaccessible
+        : (conditionLine
+          ? `${conditionLine} Review the recommended next step below.`
+          : inaccessible
           ? 'You can contact Waves if you want us to return for the inaccessible area.'
           : (item.customerDescription || 'Review the recommended next step below.')),
     };
@@ -3148,7 +3166,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   const timezone = context?.displayTimezone || SERVICE_REPORT_TIME_ZONE;
 
   useEffect(() => {
-    if (mode !== 'live' || !context) return;
+    // A frozen condition has no timer, so there is no timer view to count.
+    if (mode !== 'live' || !context || reentryCondition(context)) return;
     trackReportEvent(token, 'reentry_timer_viewed');
   }, [context, mode, token]);
 

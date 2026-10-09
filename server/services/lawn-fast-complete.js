@@ -805,6 +805,10 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // A visit whose program rows could not be read has no guide at all (the read failure is named), rather
     // than a guide that claims a clean "no chinch rows staged".
     ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true } : {}),
+    // GATE_LAWN_REPORT_FACTS tie part (lawnReportTiesLive): the sheet records the standing chinch tap as a find only
+    // while the report ties are live, so gate off persists nothing new. The key exists only while they are live
+    // (off = byte-identical).
+    ...(featureGates.lawnReportTiesLive() ? { lawnReportTies: true } : {}),
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,

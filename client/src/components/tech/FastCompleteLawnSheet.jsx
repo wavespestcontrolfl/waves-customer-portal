@@ -211,7 +211,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, chinch: null, guidedProductIds: [],
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, chinch: null, guidedProductIds: [],
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -275,6 +275,8 @@ const optionalContextFields = (data) => ({
   weedMix: weedMixOf(data),
   // The treatment guide: the server says the cards are on, and offers the chinch tap.
   treatmentGuide: data?.treatmentGuide === true,
+  // The report ties are live (GATE_LAWN_REPORT_FACTS): the standing chinch tap is recorded as a find.
+  lawnReportTies: data?.lawnReportTies === true,
   chinch: chinchOf(data),
   // The add-ons a guide card may own: their taps wait for the fresh guide.
   guidedProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.guidedProductIds) ? data.plannedProducts.guidedProductIds : [],
@@ -924,7 +926,7 @@ function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHe
 // The guide's record: one entry per card the guide showed, plus the standing "Chinch bugs found at the edge of
 // damage" tap. That entry has no card, but adding its product IS the technician's find, so the record says
 // chinch: found, taken (the report ties it to the product in one sentence, GATE_LAWN_REPORT_FACTS). Null when
-// the guide recorded nothing.
+// the guide recorded nothing. Only while the server says the report ties are live: with that gate off the record is exactly what it was.
 function guideRecordCards({ guideCards, guideChecks, rows, on, ctx }) {
   const cards = (guideCards || []).map((card) => ({
     kind: card.kind,
@@ -933,7 +935,7 @@ function guideRecordCards({ guideCards, guideChecks, rows, on, ctx }) {
     taken: cardOnSheet(card, on),
     productIds: card.productIds,
   }));
-  const standing = ctx.treatmentGuide ? rows.find((row) => row.guided === 'chinch') : null;
+  const standing = ctx.treatmentGuide && ctx.lawnReportTies ? rows.find((row) => row.guided === 'chinch') : null;
   if (!standing) return guideCards ? cards : null;
   const own = cards.find((card) => card.kind === 'chinch');
   const chinch = { kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: own ? own.productIds : [String(standing.productId).toLowerCase()] };

@@ -316,7 +316,7 @@ describe('the customer wording is fixed and chosen by code', () => {
   test('spray only', () => {
     expect(facts.reentryCondition(dry)).toEqual({
       rule: 'dry',
-      text: 'Ready to walk on once the spray has dried.',
+      text: 'Ready to walk on once the application has dried.',
       pets: 'Keep people and pets off the lawn until then.',
       statusLabel: 'Once dry',
     });
@@ -507,7 +507,7 @@ describe('the frozen block is read strictly, and only from the record', () => {
     expect(facts.frozenReentryRule('{}')).toBeNull();
     expect(facts.frozenReportFactsStamp('{}')).toBe('');
     expect(facts.frozenTies('{}', '77')).toEqual([]);
-    expect(facts.frozenTiedFamilies('{}')).toEqual([]);
+    expect(facts.frozenTiedFamilies('{}', '77')).toEqual([]);
   });
 
   test('a real rule is read; the marked default is not a decision', () => {
@@ -555,8 +555,17 @@ describe('the frozen block is read strictly, and only from the record', () => {
       { source: 'technician', kind: 'chinch', product: 'insecticide' },
       { source: 'photo', kind: 'insects', label: 'chinch bug activity', sure: true, product: null },
     ] } });
-    expect(facts.frozenTiedFamilies(notes(b)).sort()).toEqual(['fungicide', 'insecticide']);
-    expect(facts.frozenTiedFamilies(notes(block({ ties: { assessmentId: '77', items: [] } })))).toEqual([]);
+    expect(facts.frozenTiedFamilies(notes(b), '77').sort()).toEqual(['fungicide', 'insecticide']);
+    expect(facts.frozenTiedFamilies(notes(block({ ties: { assessmentId: '77', items: [] } })), '77')).toEqual([]);
+  });
+
+  test('tied families are those of the render\'s own assessment: another assessment (after a retake), or none, gives none', () => {
+    const b = block({ ties: { assessmentId: '77', items: [{ source: 'photo', kind: 'fungus', label: 'gray leaf spot', sure: true, product: 'fungicide' }] } });
+    expect(facts.frozenTiedFamilies(notes(b), '77')).toEqual(['fungicide']);
+    expect(facts.frozenTiedFamilies(notes(b), 77)).toEqual(['fungicide']);
+    expect(facts.frozenTiedFamilies(notes(b), '78')).toEqual([]);
+    expect(facts.frozenTiedFamilies(notes(b), null)).toEqual([]);
+    expect(facts.frozenTiedFamilies(notes(b))).toEqual([]);
   });
 
   test('an ADMIN correction of the re-entry minutes (structured_notes.reentryAdjusted) keeps the clock; a technician stepper never overrides the condition', () => {

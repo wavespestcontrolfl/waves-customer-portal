@@ -9,7 +9,7 @@ import ServiceReportDocument from './ServiceReportDocument';
 
 afterEach(() => cleanup());
 
-const SPRAY = 'Ready to walk on once the spray has dried.';
+const SPRAY = 'Ready to walk on once the application has dried.';
 const PETS = 'Keep people and pets off the lawn until then.';
 
 const app = (id, name, over = {}) => ({

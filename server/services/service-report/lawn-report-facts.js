@@ -59,7 +59,7 @@ const RANK = Object.freeze({ dry: 1, watered_in_and_dry: 2 });
 const SOURCES = Object.freeze(['facts', 'default']);
 
 const REENTRY_TEXT = Object.freeze({
-  dry: 'Ready to walk on once the spray has dried.',
+  dry: 'Ready to walk on once the application has dried.',
   watered_in_and_dry: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.',
 });
 const REENTRY_PETS = 'Keep people and pets off the lawn until then.';
@@ -342,14 +342,15 @@ function cleanTies(raw) {
 
 // ── The frozen block: build, read, key ──────────────────────────────────────
 
-function buildReportFacts({ rows, run, assessment, techFindings, now = new Date() }) {
+// `withTies` is false while the tie part is not live (feature-gates.js lawnReportTiesLive): no tie is read or stored.
+function buildReportFacts({ rows, run, assessment, techFindings, withTies = true, now = new Date() }) {
   const reentry = visitReentry(rows);
   return {
     v: FREEZE_VERSION,
     frozenAt: now.toISOString(),
     ...(reentry ? { reentry } : {}),
     productUse: productUseEntries(rows),
-    ties: { assessmentId: assessment && assessment.id != null ? String(assessment.id) : null, items: buildTies({ rows, run, assessment, techFindings }) },
+    ...(withTies ? { ties: { assessmentId: assessment && assessment.id != null ? String(assessment.id) : null, items: buildTies({ rows, run, assessment, techFindings }) } } : {}),
   };
 }
 
@@ -396,10 +397,9 @@ function frozenTies(structuredNotes, assessmentId) {
   return facts.ties.items;
 }
 
-/** The expectation families a frozen tie makes curative: the product treated a finding. */
-function frozenTiedFamilies(structuredNotes) {
-  const facts = readFrozenReportFacts(structuredNotes);
-  const items = facts && facts.ties ? facts.ties.items : [];
+/** The expectation families a frozen tie of THIS assessment makes curative (none for another assessment, after a retake). */
+function frozenTiedFamilies(structuredNotes, assessmentId) {
+  const items = frozenTies(structuredNotes, assessmentId);
   return [...new Set(items.filter((t) => t.product && FAMILY_FOR_PRODUCT[t.product]).map((t) => FAMILY_FOR_PRODUCT[t.product]))];
 }
 
@@ -485,16 +485,16 @@ async function loadAssessmentAndRun(record, knex) {
  * decide, freeze. Never throws; a failed read freezes nothing and the report renders as it always did.
  * Returns the frozen block (for the caller's in-memory notes) or null.
  */
-async function gatherAndFreezeReportFacts({ record, knex, now = new Date() }) {
+async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now = new Date() }) {
   try {
     if (!record || !record.id || !knex) return null;
     // Cheap exit: a block already on the row (a resumed completion, a second run) is never rebuilt.
     if (readFrozenReportFacts(record.structured_notes)) return null;
     const rows = await loadRows(record, knex);
     if (!rows || !rows.length) return null;
-    const { assessment, run } = await loadAssessmentAndRun(record, knex);
-    const techFindings = require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes);
-    const facts = buildReportFacts({ rows, run, assessment, techFindings, now });
+    const { assessment, run } = withTies ? await loadAssessmentAndRun(record, knex) : { assessment: null, run: null };
+    const techFindings = withTies ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
+    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies, now });
     return await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
   } catch (err) {
     logger.warn(`[lawn-report-facts] gather failed for service_record ${record && record.id}: ${err.message}`);

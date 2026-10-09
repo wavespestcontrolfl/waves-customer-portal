@@ -75,7 +75,7 @@ describe('gatherAndFreezeReportFacts', () => {
       productRow(4, 4, 'spot_treatment', { area_value: 100, area_unit: 'sqft' }),
     ]));
     const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
-    const out = await facts.gatherAndFreezeReportFacts({ record: record(notes), knex, now: new Date('2026-10-08T20:00:00Z') });
+    const out = await facts.gatherAndFreezeReportFacts({ record: record(notes), knex, withTies: true, now: new Date('2026-10-08T20:00:00Z') });
     expect(out).toEqual(state.notes.lawnReportFacts);
     expect(out).toMatchObject({
       v: 1,
@@ -141,15 +141,26 @@ describe('gatherAndFreezeReportFacts', () => {
 
   test.each(['service_products', 'products_catalog', 'lawn_assessments', 'lawn_assessment_runs'])('a failed %s read freezes nothing', async (failTable) => {
     const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')]), { failTable });
-    expect(await facts.gatherAndFreezeReportFacts({ record: record(), knex })).toBeNull();
+    expect(await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true })).toBeNull();
     expect(state.writes).toBe(0);
   });
 
   test('a visit with no assessment still freezes its re-entry rule, with no photo ties', async () => {
     const { knex } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray')], { lawn_assessments: [], lawn_assessment_runs: [] }));
-    const out = await facts.gatherAndFreezeReportFacts({ record: record(), knex });
+    const out = await facts.gatherAndFreezeReportFacts({ record: record(), knex, withTies: true });
     expect(out.reentry.rule).toBe('dry');
     expect(out.ties).toEqual({ assessmentId: null, items: [] });
+  });
+
+  test('the tie part not live (the default): no assessment or run is read, no tie key is stored, the key is unchanged by a tie', async () => {
+    const notes = { lawnTreatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: [UUID(4)] }] } };
+    const { knex, state } = fakeKnex(tables([productRow(1, 1, 'broadcast_spray'), productRow(3, 2, 'spot_treatment'), productRow(4, 3, 'spot_treatment')]), { failTable: 'lawn_assessments' });
+    const out = await facts.gatherAndFreezeReportFacts({ record: record(notes), knex });
+    expect(out).toMatchObject({ v: 1, reentry: { rule: 'dry' } });
+    expect(out).not.toHaveProperty('ties');
+    expect(state.notes.lawnReportFacts).not.toHaveProperty('ties');
+    expect(facts.frozenTies(JSON.stringify(state.notes), 'as-1')).toEqual([]);
+    expect(facts.frozenTiedFamilies(JSON.stringify(state.notes), 'as-1')).toEqual([]);
   });
 
   test('a record with no id, or no knex, does nothing and never throws', async () => {

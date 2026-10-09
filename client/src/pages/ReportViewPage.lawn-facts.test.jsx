@@ -11,7 +11,7 @@ import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 // and a spot product says where it was used. The client renders what the server sends; a payload without the new
 // fields renders exactly as before.
 
-const SPRAY = 'Ready to walk on once the spray has dried.';
+const SPRAY = 'Ready to walk on once the application has dried.';
 const GRANULAR = 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.';
 const PETS = 'Keep people and pets off the lawn until then.';
 
@@ -25,10 +25,10 @@ const frozenReentry = (c = condition()) => ({
   petAdvisory: c.pets,
 });
 
-function renderReport(payload) {
+function renderReport(payload, token = 'test-lawn-facts') {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => payload })));
   return render(
-    <MemoryRouter initialEntries={['/report/test-lawn-facts']}>
+    <MemoryRouter initialEntries={[`/report/${token}`]}>
       <Routes>
         <Route path="/report/:token" element={<ReportViewPage />} />
       </Routes>
@@ -159,5 +159,70 @@ describe('the product card: where it was used', () => {
 
   it('a blank areaUse is no areaUse', async () => {
     expect(await usedIn(productsFrom('   '))).toEqual(await usedIn(productsFrom(undefined)));
+  });
+});
+
+describe('the condition rides every branch that used to carry the timed warning', () => {
+  const lawn = (extra = {}) => ({ serviceLine: 'lawn', dynamicContext: { reentry: frozenReentry() }, applications: [], ...extra });
+  const NOW = Date.parse('2026-10-08T21:00:00Z');
+  const FINDING = { severity: 'high', title: 'Chinch bug activity', recommendation: 'We will recheck the edge.' };
+
+  it('a high-priority finding: the finding stays the result, the condition and the keep-off line are in the detail', () => {
+    const summary = smartStatusSummary(lawn({ findings: [FINDING] }), 'live', NOW);
+    expect(summary.heading).toBe('we found activity that needs attention!');
+    expect(summary.result).toContain('Chinch bug activity');
+    expect(summary.detail).toContain(SPRAY);
+    expect(summary.detail).toContain(PETS);
+    expect(JSON.stringify(summary)).not.toMatch(/still drying|Ready in|Ready after/);
+  });
+
+  it('an area that needs attention (inaccessible): the condition is in the detail', () => {
+    const summary = smartStatusSummary(lawn({ serviceCoverage: { enabled: true, items: [{ areaName: 'Garage', status: 'inaccessible' }] } }), 'live', NOW);
+    expect(summary.heading).toBe('one area could not be serviced!');
+    expect(summary.detail).toContain(SPRAY);
+    expect(summary.detail).toContain(PETS);
+  });
+
+  it('an incomplete re-service: the condition is the warning, with the callback copy kept', () => {
+    const reservice = { outcome: 'incomplete', heading: 'we came back', completedFallback: 'The visit was not completed.', expectation: 'We will finish soon.' };
+    const summary = smartStatusSummary(lawn({ reserviceReport: reservice }), 'live', NOW);
+    expect(summary.result).toBe(SPRAY);
+    expect(summary.detail).toContain(PETS);
+    expect(summary.detail).toContain('We will finish soon.');
+    expect(summary.completedLine).toBe('The visit was not completed.');
+  });
+
+  it('a re-service that applied nothing never shows the condition, finding or not', () => {
+    const reservice = { outcome: 'inspection_only', heading: 'we came back', completedFallback: 'No application was made today.' };
+    for (const extra of [{}, { findings: [FINDING] }]) {
+      const summary = smartStatusSummary(lawn({ reserviceReport: reservice, ...extra }), 'live', NOW);
+      expect(JSON.stringify(summary)).not.toContain(SPRAY);
+      expect(JSON.stringify(summary)).not.toContain(PETS);
+    }
+  });
+
+  it('the older timed path still merges its warning into those branches (no condition: unchanged)', () => {
+    const reentry = { displayTimezone: 'America/New_York', targets: [{ key: 'exterior', label: 'Exterior', readyAt: '2026-10-08T21:30:00.000Z' }] };
+    const summary = smartStatusSummary({ serviceLine: 'lawn', dynamicContext: { reentry }, findings: [FINDING], coverage: {}, applications: [] }, 'live', NOW);
+    expect(summary.result).toContain('Exterior areas are still drying.');
+    expect(summary.detail).toContain('Keep pets and people away');
+  });
+});
+
+describe('the reentry timer view event', () => {
+  const eventNames = () => fetch.mock.calls
+    .filter(([url]) => String(url).endsWith('/events'))
+    .map(([, init]) => JSON.parse(init.body).eventName);
+
+  it('a condition-only card sends no timer-viewed event', async () => {
+    renderReport(withReentry(frozenReentry()), 'tok-condition-event');
+    await screen.findByText('Ready to Re-enter');
+    expect(eventNames()).not.toContain('reentry_timer_viewed');
+  });
+
+  it('a timed card still sends it', async () => {
+    renderReport(structuredClone(lawnReportV2), 'tok-timer-event');
+    await screen.findByText('Ready to Re-enter');
+    await vi.waitFor(() => expect(eventNames()).toContain('reentry_timer_viewed'));
   });
 });

@@ -38,7 +38,7 @@ const lawnRecord = (notes, extra = {}) => ({
 });
 
 const TODAY = {
-  dry: 'Ready to walk on once the spray has dried.',
+  dry: 'Ready to walk on once the application has dried.',
   wet: 'Ready to walk on once today’s treatment has dried and, after you water it in, the grass is dry again.',
   pets: 'Keep people and pets off the lawn until then.',
 };

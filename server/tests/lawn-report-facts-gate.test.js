@@ -21,7 +21,8 @@ const { gatherVisitSummaryFacts } = require('../services/service-report/lawn-vis
 const reportFacts = require('../services/service-report/lawn-report-facts');
 const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
 
-const KEYS = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2'];
+const KEYS = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2', 'GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+const tiesPrerequisites = () => { process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true'; process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
 const TIE = { source: 'photo', kind: 'fungus', label: 'gray leaf spot', sure: true, product: 'fungicide' };
 const BLOCK = {
   v: 1,
@@ -112,16 +113,47 @@ describe('gate on', () => {
     expect(out.persisted).toBe(true);
   });
 
-  test('the Visit Summary freezes version 4 with the ties frozen at completion, for its own assessment', async () => {
-    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+  test('the Visit Summary freezes version 4 with the ties frozen at completion, for its own assessment (all prerequisite gates live)', async () => {
+    tiesPrerequisites();
     const { knex, state } = fakeKnex();
     await run(knex);
+    expect(reportFacts.gatherAndFreezeReportFacts.mock.calls[0][0].withTies).toBe(true);
     expect(gatherVisitSummaryFacts.mock.calls[0][0].ties).toEqual([TIE]);
     expect(state.notes.lawnVisitSummary['77'].v).toBe(4);
   });
 
+  describe('the tie part needs the Visit Summary AND the v6 copy gates (lawnReportTiesLive)', () => {
+    test.each([
+      ['the Visit Summary dark', { GATE_LAWN_REPORT_COPY_V6: 'true', GATE_LAWN_REPORT_LEAD: 'true' }],
+      ['the v6 copy dark', { GATE_LAWN_VISIT_SUMMARY_V2: 'true' }],
+      ['the lead dark (the v6 copy needs it)', { GATE_LAWN_VISIT_SUMMARY_V2: 'true', GATE_LAWN_REPORT_COPY_V6: 'true' }],
+      ['both dark', {}],
+    ])('%s: no tie is read, the summary stays v3 where it is written, and the re-entry freeze still runs', async (_label, env) => {
+      Object.assign(process.env, env);
+      const { knex, state } = fakeKnex();
+      const out = await run(knex);
+      expect(reportFacts.gatherAndFreezeReportFacts.mock.calls[0][0].withTies).toBe(false);
+      expect(out.reportFactsFreeze).toEqual(BLOCK);
+      if (state.notes.lawnVisitSummary) {
+        expect(gatherVisitSummaryFacts.mock.calls[0][0].ties).toEqual([]);
+        expect(state.notes.lawnVisitSummary['77'].v).toBe(3);
+      }
+    });
+
+    test('the helper is the one place the dependency lives', () => {
+      const gates = require('../config/feature-gates');
+      const set = (env) => { for (const key of KEYS) delete process.env[key]; Object.assign(process.env, env); };
+      set({}); expect(gates.lawnReportTiesLive()).toBe(false);
+      set({ GATE_LAWN_REPORT_FACTS: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
+      set({ GATE_LAWN_REPORT_FACTS: 'true', GATE_LAWN_VISIT_SUMMARY_V2: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
+      set({ GATE_LAWN_REPORT_FACTS: 'true', GATE_LAWN_REPORT_COPY_V6: 'true', GATE_LAWN_REPORT_LEAD: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
+      set({ GATE_LAWN_REPORT_FACTS: 'true', GATE_LAWN_VISIT_SUMMARY_V2: 'true', GATE_LAWN_REPORT_COPY_V6: 'true', GATE_LAWN_REPORT_LEAD: 'true' }); expect(gates.lawnReportTiesLive()).toBe(true);
+      set({ GATE_LAWN_VISIT_SUMMARY_V2: 'true', GATE_LAWN_REPORT_COPY_V6: 'true', GATE_LAWN_REPORT_LEAD: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
+    });
+  });
+
   test('ties frozen for another assessment are not used', async () => {
-    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    tiesPrerequisites();
     reportFacts.gatherAndFreezeReportFacts.mockResolvedValue({ ...BLOCK, ties: { assessmentId: '99', items: [TIE] } });
     const { knex } = fakeKnex();
     await run(knex);
@@ -171,6 +203,6 @@ describe('the completion path folds the freeze back in', () => {
     const fs = require('fs');
     const path = require('path');
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
-    expect(source).toContain('tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes)');
+    expect(source).toContain('tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes, lawnAssessment.assessmentId)');
   });
 });

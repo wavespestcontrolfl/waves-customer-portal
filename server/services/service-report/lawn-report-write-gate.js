@@ -71,8 +71,9 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, programVisi
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
     if (assessmentId == null || instructionOut.productsLoadFailed) return null;
     // GATE_LAWN_REPORT_FACTS: a new entry is v4 and carries the finding-to-product ties frozen at completion
-    // (lawn-report-facts.js); gate off writes the v3 entry exactly as before.
-    const tiesLive = featureGates.lawnReportFactsLive();
+    // (lawn-report-facts.js) while the tie part is live (needs this gate and the v6 copy gate too, feature-gates.js
+    // lawnReportTiesLive); otherwise the v3 entry exactly as before.
+    const tiesLive = featureGates.lawnReportTiesLive();
     const ties = tiesLive ? reportFacts.frozenTies(record.structured_notes, assessmentId) : [];
     const outcome = await summary.createAndFreezeVisitSummary({
       serviceRecordId: service.id,
@@ -148,7 +149,7 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     // decided and frozen NOW, before the first report build, so that build (and the v6 copy it freezes) already
     // reads them. The gate controls only this freeze; a render never reads it. Gate off: no read, no write.
     if (featureGates.lawnReportFactsLive()) {
-      reportFactsFreeze = await reportFacts.gatherAndFreezeReportFacts({ record, knex });
+      reportFactsFreeze = await reportFacts.gatherAndFreezeReportFacts({ record, knex, withTies: featureGates.lawnReportTiesLive() });
       record = withReportFacts(record, reportFactsFreeze);
     }
     const token = await ensureReportToken(service.id, knex);
