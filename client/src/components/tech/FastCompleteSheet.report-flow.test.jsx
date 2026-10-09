@@ -114,7 +114,7 @@ describe('a report-flow sheet routed from a stale schedule row', () => {
     expect(await screen.findByText('This visit needs the full form.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Generate AI report' })).toBeNull();
     // A visit the sheet can't open offers the full form in the header.
-    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
+    expect((await screen.findByRole('button', { name: 'Full form' })).disabled).toBe(false);
   });
 
   test('an answer without the field is not a yes: the visit is sent to the full form', async () => {
@@ -342,7 +342,8 @@ describe('generate and read', () => {
     fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
     await screen.findByText('Writer is busy. Try again.');
-    fireEvent.click(screen.getByRole('button', { name: 'Full form' }));
+    // The form tells the header one render later.
+    fireEvent.click(await screen.findByRole('button', { name: 'Full form' }));
     expect(onFullForm).toHaveBeenCalledTimes(1);
   });
 
@@ -355,7 +356,7 @@ describe('generate and read', () => {
     // The footer says why; the report card shows no heard line.
     expect(screen.getByText('Couldn’t read where you treated from your note. Write it again to retry.')).toBeTruthy();
     // A read that failed is not the tech's to fix: the header offers the full form.
-    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
+    expect((await screen.findByRole('button', { name: 'Full form' })).disabled).toBe(false);
     expect(screen.queryByTestId('fast-complete-heard')).toBeNull();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Write again' }));
@@ -1053,7 +1054,7 @@ describe('complete and send', () => {
     expect(screen.getByText('Taurus SC is a perimeter spray and this visit can’t be traced here. Use the Full form.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     // The hold names the full form, so the header offers it.
-    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
+    expect((await screen.findByRole('button', { name: 'Full form' })).disabled).toBe(false);
   });
 
   test('the trace step is left out when the map is off or the visit takes no trace', async () => {
