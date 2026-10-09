@@ -399,6 +399,8 @@ describe('SiteOne invoices in the sweep', () => {
     ['a title that names one bag', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent Granular Herbicide Plus Fertilizer 50 LB. BAG', undefined],
     ['a title that names no bag', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent Granular Herbicide Plus Fertilizer 50 LB.', 'unverified'],
     ['a title that names several bags', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 4 Bags 50 LB. BAG', 'unverified'],
+    ['a number right before a singular bag', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 2 BAG 50 LB BAG', 'unverified'],
+    ['a hyphenated bag count', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 2-Bag 50 LB BAG', 'unverified'],
     ['a title with a pack marker', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 2-Pack 50 LB. BAG', 'unverified'],
     ['a title with count wording', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 50 LB. BAG (2)', 'unverified'],
     ['a description that also says UOM:BG', 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent 50 LB. BAG UOM:BG', undefined],

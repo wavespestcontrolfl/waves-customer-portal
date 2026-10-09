@@ -322,7 +322,10 @@ function siteOneHold(problem, quantity, uom, title) {
 function countsContainers(uom, title) {
   if (uom === 'EA') return true;
   const text = String(title || '');
-  return uom === 'BG' && /\bbag\b/i.test(text) && !/\bbags\b/i.test(text) && !parseMultipack(text) && !PACK_CLAIM_RE.test(text);
+  // A number right before the word ("2 BAG 50 LB BAG") is a bag count in a
+  // form no parser here reads, singular or not.
+  if (/\bbags\b/i.test(text) || /\d[\s-]*bag\b/i.test(text)) return false;
+  return uom === 'BG' && /\bbag\b/i.test(text) && !parseMultipack(text) && !PACK_CLAIM_RE.test(text);
 }
 
 async function processSiteOneInvoices({ floor, since, now, notifyAdmin, totals }) {
