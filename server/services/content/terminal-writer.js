@@ -106,21 +106,26 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
   return result({ ok: true, draft });
 }
 
-/** Delete the draft branch once the runner holds the draft. Never throws. */
+/**
+ * Delete the draft branch once the runner holds the draft. Returns true only
+ * when the branch is confirmed gone; never throws. The runner uses a draft
+ * only after a confirmed delete: a file that survives would be read again by
+ * a gate retry, which must get a new draft.
+ */
 async function retireTerminalDraft(opportunityId, { gh = require('../content-astro/github-client') } = {}) {
   try {
-    await gh.retireBranch(branchFor(opportunityId));
+    return (await gh.retireBranch(branchFor(opportunityId))) === true;
   } catch (err) {
     logger.warn(`[terminal-writer] could not delete ${branchFor(opportunityId)}: ${err.message}`);
+    return false;
   }
 }
 
 /**
  * Rows that wait for a terminal draft: pending rows whose LATEST run ended
- * `deferred_terminal_draft`, best score first. `written` = the draft branch
- * already exists (the next run takes it); `due` = nothing usable is there.
- * An invalid draft stays due, with the reason, until a new file replaces it:
- * its branch still exists, so the reason decides, not the branch.
+ * `deferred_terminal_draft`, best score first. `written` = a usable draft
+ * file is on the branch (the next run takes it); `due` = nothing usable is
+ * there, which includes a file the run would reject.
  */
 async function awaitingTerminalDrafts({ deps = {} } = {}) {
   const conn = deps.db || db;
@@ -142,12 +147,10 @@ async function awaitingTerminalDrafts({ deps = {} } = {}) {
   const written = [];
   for (const row of rows) {
     const item = { ...row, branch: branchFor(row.opportunity_id), draft_path: draftPathFor(row.opportunity_id) };
-    const hasBranch = Boolean(await gh.getBranchSha(item.branch));
-    // Pushed after the run that found nothing (or found a bad file): written.
-    const replaced = hasBranch && row.skip_reason === INVALID
-      ? (await fetchTerminalDraft(row.opportunity_id, { gh })).ok
-      : hasBranch;
-    (replaced ? written : due).push(item);
+    // Written = the file the next run will read is usable now. A branch with
+    // no file, or with a file the run would reject, is still due.
+    const usable = (await fetchTerminalDraft(row.opportunity_id, { gh })).ok;
+    (usable ? written : due).push(item);
   }
   return { due, written };
 }

@@ -670,7 +670,12 @@ class AutonomousRunner {
     }
     // The runner holds the draft now. Delete its branch so the file is read
     // once: a gate retry must get a draft written against the retry brief.
-    if (viaTerminal && dispatchResult.ok) await terminalWriter.retireTerminalDraft(opp.id);
+    // No confirmed delete = the draft is not used; the claim is released and
+    // the next attempt reads the same file and deletes again.
+    if (viaTerminal && dispatchResult.ok && !(await terminalWriter.retireTerminalDraft(opp.id))) {
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      return finalize(run, t0, { outcome: 'failed', failure_message: 'terminal_draft_retire_failed' });
+    }
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {

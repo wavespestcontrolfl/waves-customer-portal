@@ -64,12 +64,14 @@ describe('fetchTerminalDraft', () => {
   });
 });
 
-test('retireTerminalDraft deletes the row\'s branch and never throws', async () => {
+test('retireTerminalDraft is true only for a confirmed delete and never throws', async () => {
   const gh = ghWith(async () => null);
-  await tw.retireTerminalDraft(ID, { gh });
+  expect(await tw.retireTerminalDraft(ID, { gh })).toBe(true);
   expect(gh.retireBranch).toHaveBeenCalledWith(`terminal-writer/${ID}`);
+  gh.retireBranch.mockResolvedValue(false);
+  expect(await tw.retireTerminalDraft(ID, { gh })).toBe(false);
   gh.retireBranch.mockRejectedValue(new Error('boom'));
-  await expect(tw.retireTerminalDraft(ID, { gh })).resolves.toBeUndefined();
+  expect(await tw.retireTerminalDraft(ID, { gh })).toBe(false);
 });
 
 describe('waiting rows and the admin item', () => {
@@ -79,8 +81,7 @@ describe('waiting rows and the admin item', () => {
   // branches: opportunity id -> the file on its branch (absent = no branch)
   function deps({ rows, branches = {}, openKeys = [] }) {
     const gh = {
-      getBranchSha: jest.fn(async (branch) => (branches[branch.split('/')[1]] !== undefined ? 'sha' : null)),
-      getFile: jest.fn(async (path, branch) => file(branches[branch.split('/')[1]])),
+      getFile: jest.fn(async (path, branch) => (branches[branch.split('/')[1]] === undefined ? null : file(branches[branch.split('/')[1]]))),
     };
     return {
       gh,
@@ -90,11 +91,10 @@ describe('waiting rows and the admin item', () => {
     };
   }
 
-  test('no branch = due; a branch = written; a rejected file stays due until a good file replaces it', async () => {
-    const d = deps({
-      rows: [waiting(ID), waiting(B), waiting(C, { skip_reason: tw.INVALID })],
-      branches: { [B]: { opportunity_id: B, frontmatter: {}, body }, [C]: '{still bad' },
-    });
+  test('no file = due; a usable file = written; a file the run would reject stays due until a good one replaces it', async () => {
+    const branches = { [B]: { opportunity_id: B, frontmatter: {}, body }, [C]: '{still bad' };
+    // C's last run found nothing; a bad file was pushed since
+    const d = deps({ rows: [waiting(ID), waiting(B), waiting(C)], branches });
     const out = await tw.awaitingTerminalDrafts({ deps: d });
     expect(out.due.map((r) => r.opportunity_id)).toEqual([ID, C]);
     expect(out.written.map((r) => r.opportunity_id)).toEqual([B]);
@@ -102,7 +102,7 @@ describe('waiting rows and the admin item', () => {
     // the query asks for the latest run of each pending row and keeps the waiting ones
     expect(d.db.raw.mock.calls[0][1]).toEqual([7, tw.AWAITING_OUTCOME]);
 
-    d.gh.getFile.mockImplementation(async () => file({ opportunity_id: C, frontmatter: {}, body }));
+    branches[C] = { opportunity_id: C, frontmatter: {}, body };
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
   });
 

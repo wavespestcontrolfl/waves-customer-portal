@@ -5283,7 +5283,7 @@ describe('citability backfill retry feedback — every gate\'s one redraft hears
 describe('terminal writer: the draft step asks the terminal instead of an agent (GATE_CONTENT_WRITER_TERMINAL)', () => {
   const claimedAt = new Date('2026-10-09T13:00:00Z');
   const draft = { frontmatter: { title: 'Ant Control in Venice' }, body: 'Body text. '.repeat(40) };
-  function setup({ fetched, brief = { id: 'brief_tw', action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' } }) {
+  function setup({ fetched, retired = true, brief = { id: 'brief_tw', action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' } }) {
     const queue = {
       claimNext: jest.fn().mockResolvedValue({ id: 'opp_tw', action_type: brief.action_type, claimed_at: claimedAt }),
       defer: jest.fn().mockResolvedValue(true), release: jest.fn().mockResolvedValue(true),
@@ -5296,7 +5296,7 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
       ...real,
       writesInTerminal: (b) => b.page_type !== 'metadata',
       fetchTerminalDraft: jest.fn().mockResolvedValue(fetched),
-      retireTerminalDraft: jest.fn().mockResolvedValue(undefined),
+      retireTerminalDraft: jest.fn().mockResolvedValue(retired),
     };
     jest.doMock('../services/content/terminal-writer', () => terminalWriter);
     return { queue, dispatcher, runner, terminalWriter };
@@ -5331,6 +5331,13 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(terminalWriter.retireTerminalDraft).toHaveBeenCalledWith('opp_tw');
     expect(onward.mock.calls[0][2].draft_payload).toEqual(draft);
     expect(onward.mock.calls[0][2].agent_id).toBe('terminal-writer');
+  });
+
+  test('a draft whose branch could not be deleted is not used: the claim is released for another attempt', async () => {
+    const { queue, runner } = setup({ fetched: { ok: true, draft }, retired: false });
+    const result = await runner.runNext();
+    expect(result).toMatchObject({ outcome: 'failed', failure_message: 'terminal_draft_retire_failed' });
+    expect(queue.release).toHaveBeenCalledWith('opp_tw', { claimToken: claimedAt });
   });
 
   test('a title/meta rewrite stays on the agent', async () => {
