@@ -365,9 +365,11 @@ describe('meta.is_spam: a wrong number is not spam (schema 1.26.0)', () => {
   test.each([
     'call-extraction.model-output.schema.json',
     'call-extraction.persisted.schema.json',
-  ])('%s limits spam to a caller soliciting the business', (file) => {
+  ])('%s keeps a wrong number out of spam and lists no spam kinds beyond the old two', (file) => {
     const description = describedIn(file);
-    expect(description).toMatch(/soliciting the business/);
+    expect(description).toMatch(/^Solicitation or robocall\. /);
+    // A longer list (vendor cold call, collections…) raised false spam on a reviewed call.
+    expect(description).not.toMatch(/vendor|collections|scam|sales pitch/i);
     expect(description).toMatch(/A wrong number is not spam: set false/);
     expect(description).toMatch(/lead_quality "wrong_number"/);
   });
@@ -422,18 +424,6 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
     expect(prompt).toMatch(/callback_window_start \/ callback_window_end: set ONLY when a time for a CALLBACK was stated/);
     expect(prompt).toMatch(/24-hour form with NO offset and NO "Z"/);
     expect(prompt).toMatch(/A part of day with no hour \("this afternoon"\) is NOT a time/);
-  });
-});
-
-// Every model in the 2026-10-08 test called a ready-to-buy caller outside the
-// service area "hot": the rule listed the values with no order between them.
-describe('lead_quality: the disposition values win (prompt v26)', () => {
-  test('the prompt states the order and the out-of-area example', () => {
-    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
-    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
-    expect(prompt).toMatch(/lead_quality order: "wrong_number", "spam_or_solicitation" and "out_of_service_area"/);
-    expect(prompt).toMatch(/they win over the interest values/);
-    expect(prompt).toMatch(/ready to buy today is "out_of_service_area", not "hot"/);
   });
 });
 

@@ -137,12 +137,9 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // v25: customer_history.competitor_name gets a schema description (a pest or lawn provider
 // only). A realtor's call named a home inspector, and the profile note read "Switching from"
 // that inspector. Schema text changes the output contract: a new cohort.
-// v26: two rule gaps the reviewed-call replay found on every model (2026-10-08 test).
-// (1) scheduling.callback_window_start/_end had no rule and a schema form the model missed
-// on most callback calls (schema 1.27.0): the rule now gives the form. (2) lead_quality had
-// no order between its values: a caller outside the service area who was ready to buy came
-// back "hot". The three disposition values now win over the interest values. New
-// instructions: a new cohort.
+// v26: scheduling.callback_window_start/_end had no rule and a schema form the model
+// missed on most callback calls (schema 1.27.0; found by the reviewed-call replay,
+// 2026-10-09). The rule now gives the form. New instruction: a new cohort.
 const PROMPT_VERSION = 'v26';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
@@ -438,7 +435,6 @@ exact mistakes lost real leads; apply them literally):
 SENTIMENT & LEAD:
 - sentiment: Match caller's emotional state.
 - lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte counties and not one of the served south-Hillsborough towns (DeSoto/Arcadia is out).
-- lead_quality order: "wrong_number", "spam_or_solicitation" and "out_of_service_area" say why the call cannot become a job, and they win over the interest values. Choose "hot", "warm", "cold" or "tire_kicker" only when none of those three applies. A caller outside the service area who is ready to buy today is "out_of_service_area", not "hot".
 
 EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fields:
 - property.service_address (any component)
