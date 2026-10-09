@@ -5622,8 +5622,11 @@ router.patch('/:id', async (req, res, next) => {
     const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
     if (changesDeliveryOptions) {
       updateQuery = updateQuery.whereNot({ status: 'sending' }).whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
-      updates.updated_at = db.fn.now();
     }
+    // Every staff edit stamps updated_at (priority and disposition too): the
+    // draft-retire sweep reads it to keep a draft someone touched after a
+    // newer estimate was delivered.
+    if (Object.keys(updates).length) updates.updated_at = db.fn.now();
     // Turning invoice mode OFF is predicated on the stored proposal STILL
     // having no structured payment term at write time — the pre-read guard
     // above can race a concurrent proposal PUT that saves one (the PUT's

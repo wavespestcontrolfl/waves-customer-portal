@@ -153,7 +153,9 @@ const SENT_TIME_SQL = (alias) => `(CASE
   WHEN ${SENT_CHANNELS_SQL(alias)} THEN ${alias}.viewed_at
   ELSE ${alias}.sent_at END)`;
 
-// A real send by staff or a verified flow. A row WITH delivery tracking
+// A real send by staff or a verified flow. sent_at is not required when a
+// delivery witness exists: an accept or decline during the first in-flight
+// send leaves sent_at null beside a real lastDeliveredAt. A row WITH delivery tracking
 // (deliveryState) must carry a delivery witness: a suppressed send stamps
 // sent_at and status with nothing delivered. Only legacy rows with no
 // delivery tracking at all are taken on sent_at. Website quote rows (quote_wizard)
@@ -164,7 +166,7 @@ const SENT_TIME_SQL = (alias) => `(CASE
 // at mint time with nothing delivered (publish-without-delivery), so they
 // count only once deliveryState records a delivery — the same witness the
 // unworked-comms watcher uses for these two sources.
-const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
+const SENT_EVIDENCE_SQL = (alias) => `(${alias}.sent_at IS NOT NULL OR COALESCE(${DELIVERED_AT_SQL(alias)}, false))
   AND ${alias}.status <> 'draft'
   AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}
   AND COALESCE(${alias}.source, '') <> 'quote_wizard'

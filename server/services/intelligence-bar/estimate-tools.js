@@ -3621,7 +3621,8 @@ async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_fl
   const updated = await db('estimates')
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(use_v2_view, false) = ?', [expected]); })
-    .update({ use_v2_view: next });
+    // updated_at marks the staff edit (the draft-retire sweep keeps a draft touched after a newer delivery).
+    .update({ use_v2_view: next, updated_at: db.fn.now() });
   if (!updated) {
     return { error: 'This estimate\'s view flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }
@@ -3666,7 +3667,7 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
   const updated = await db('estimates')
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(show_one_time_option, false) = ?', [expected]); })
-    .update({ show_one_time_option: next });
+    .update({ show_one_time_option: next, updated_at: db.fn.now() });
   if (!updated) {
     return { error: 'This estimate\'s one-time-option flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }

@@ -402,6 +402,15 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(replaced)).archived_at).not.toBeNull();
   });
 
+  test('a delivered estimate with no sent_at (accepted during its first send) still retires the draft', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(200) });
+    const delivered = minutesAgo(60).toISOString();
+    const accepted = await estimate(c, { status: 'accepted', createdAt: minutesAgo(100), sentAt: null, data: { deliveryState: { firstDeliveredAt: delivered, lastDeliveredAt: delivered } } });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(accepted);
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
