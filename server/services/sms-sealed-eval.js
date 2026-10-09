@@ -45,6 +45,7 @@ const {
 } = require('./sms-company-facts');
 const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
+const { PORTAL_CANCEL_FACT_LABEL } = require('./sms-portal-cancel-fact');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -189,6 +190,11 @@ const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
   // read existed may hide an open miss behind "- none", so it lacks the scope line and
   // never grades '7_m' (Codex #5610 r1 P1); a '7_m' item never grades an older identity.
   m: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER, MISSED_VISIT_SCOPE_LINE],
+  // PORTAL SELF-CANCEL (2026-10-09): the next cumulative key — everything 'm' requires plus
+  // the PORTAL SELF-CANCEL label. The line renders on EVERY gate-on block ("available" or
+  // "not available"), so its absence always means "frozen before the fact existed": such an
+  // item never grades an 'n' identity, and an 'n' item never grades an older one.
+  n: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER, MISSED_VISIT_SCOPE_LINE, PORTAL_CANCEL_FACT_LABEL],
 });
 // the markers one suffix token requires (a list)
 function suffixTokenMarkers(token) {
