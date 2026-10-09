@@ -166,11 +166,20 @@ describe('days, grouped visits and neighbours', () => {
     const NOW = new Date('2026-10-09T12:00:00Z');
     test('a visit done on Oct 7 and closed out on Oct 8 needs both days', () => {
       const r = p.requiredDays(visit({ scheduled_day: '2026-10-07', completed_at: new Date('2026-10-08T15:30:00Z') }), NOW);
-      expect(r).toEqual({ days: ['2026-10-07', '2026-10-08'], tooOld: false });
+      expect(r).toMatchObject({ days: ['2026-10-07', '2026-10-08'], tooOld: false, unloadable: false });
     });
     test('7 days back is still loaded; 8 is not, and the visit is not judged', () => {
       expect(p.requiredDays(visit({ scheduled_day: '2026-10-02' }), NOW).tooOld).toBe(false);
       expect(p.requiredDays(visit({ scheduled_day: '2026-10-01' }), NOW).tooOld).toBe(true);
+    });
+    test('days that start before the current tracker mapping began cannot be judged (NULL = always mapped)', () => {
+      const remapped = (iso) => p.requiredDays(visit({ scheduled_day: '2026-10-07', completed_at: new Date('2026-10-08T15:30:00Z'), mapping_changed_at: iso }), NOW);
+      expect(remapped(null)).toMatchObject({ beforeMapping: false, unloadable: false });
+      expect(remapped(undefined).unloadable).toBe(false);
+      expect(remapped('2026-10-06T12:00:00Z')).toMatchObject({ beforeMapping: false, unloadable: false }); // both days after the remap
+      expect(remapped('2026-10-07T20:00:00Z')).toMatchObject({ beforeMapping: true, unloadable: true }); // Oct 7 is partly the old vehicle
+      expect(remapped('2026-10-08T04:00:00Z').beforeMapping).toBe(true); // Oct 8 starts exactly at the change: Oct 7 is old
+      expect(remapped('2026-10-09T01:00:00Z').unloadable).toBe(true);
     });
     test('a day still ahead has no truck data to read and is not required', () => {
       expect(p.requiredDays(visit({ scheduled_day: '2026-10-12' }), NOW).days).toEqual(['2026-10-08']);

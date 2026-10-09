@@ -50,6 +50,7 @@ describe('closing', () => {
       const state = { where: null, set: null };
       const b = {
         where(w) { state.where = w; return b; },
+        forShare() { order.push(`row-share:${table}`); return b; },
         first: async () => (open && (!state.where.status || state.where.status === 'open') && (!state.where.id || state.where.id === open.id) ? open : undefined),
         update(set) { state.set = set; updates.push({ table, where: state.where, set }); order.push('update'); return b; },
         returning: async () => (open && state.where.id === open.id && state.where.status === 'open' ? [{ ...open, status: state.set.status }] : []),
@@ -71,8 +72,8 @@ describe('closing', () => {
     expect(closed.status).toBe('dismissed');
     expect(c.updates[0].set).toMatchObject({ status: 'dismissed', resolved_by: 'actor-1' });
     expect(closeAdminAlertKeys).toHaveBeenCalledWith(c, [`pin-suggestion:${row.id}`], 'dismissed', expect.any(Object));
-    // The customer's lock comes before the close, so it cannot interleave with the bell being posted.
-    expect(c.order).toEqual(['lock:c1', 'update']);
+    // The customer's locks (row, then advisory) come before the close, so it cannot interleave with the bell being posted.
+    expect(c.order).toEqual(['row-share:customers', 'lock:c1', 'update']); // the customer row first, then the advisory lock
     expect(await store.dismiss('c1', 'another-id', 'actor-1', conn())).toBeNull();
     expect(await store.dismiss('c1', row.id, 'actor-1', conn({ open: null }))).toBeNull();
   });

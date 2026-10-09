@@ -71,11 +71,20 @@ function visibleSuggestion(detail, row) {
 }
 
 /**
- * The per-customer lock that serializes everything that creates, rings or closes this customer's suggestion:
- * the daily run's insert, the bell post, and apply / dismiss / supersede. Transaction-scoped, so it is released
- * at commit and is re-entrant for a caller that already holds it. `trx` must be a transaction.
+ * The per-customer lock that serializes everything that creates, rings or closes this customer's suggestion: the
+ * daily run's insert, the bell post, apply / dismiss / supersede, the gate-off sweep and the merge retire.
+ *
+ * ONE ORDER, everywhere in this feature: the customer ROW first (FOR SHARE), then the advisory lock. A customer
+ * merge (executeMerge) and verify_pin both hold the customer row FOR UPDATE, so a path that took the advisory lock
+ * first and then waited for the row could deadlock against them. Taking the row first makes us queue behind them
+ * before holding anything they could need. verify_pin takes 'property-preferences' and the row/visit locks inside
+ * its own transaction and commits before the route calls closeAfterVerify, so it never holds a lock when this
+ * runs and never takes the 'pin-parked-check' advisory lock. Our share lock blocks its FOR UPDATE until we commit,
+ * so a suggestion is never created or rung across a pin being verified. Transaction-scoped, re-entrant for a
+ * caller (a merge) that already holds the row. `trx` must be a transaction.
  */
 async function lockCustomer(trx, customerId) {
+  await trx('customers').where({ id: customerId }).forShare().first('id');
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['pin-parked-check', String(customerId)]);
 }
 

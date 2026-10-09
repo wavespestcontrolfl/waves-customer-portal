@@ -63,9 +63,9 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
   });
 
   // ---- fixtures ----
-  async function technician(imei = IMEI) {
+  async function technician(imei = IMEI, changedAt = null) {
     const id = randomUUID();
-    await mockPg('technicians').insert({ id, name: `Fixture Tech ${id.slice(0, 4)}`, bouncie_imei: imei });
+    await mockPg('technicians').insert({ id, name: `Fixture Tech ${id.slice(0, 4)}`, bouncie_imei: imei, bouncie_imei_changed_at: changedAt });
     return id;
   }
   async function customer(pin = PIN, extra = {}) {
@@ -720,6 +720,106 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect(await lockCount()).toBe(afterBell);
       await store.dismiss(second.customerId, second.made.id, null);
       expect(await lockCount()).toBe(afterBell + 1);
+    });
+  });
+
+  describe('a tracker remap: the current device says nothing about visits before the mapping began', () => {
+    test('a visit on a day before the remap is not judged: no suggestion, nothing closed', async () => {
+      const techId = await technician(IMEI, new Date('2026-10-08T20:00:00Z')); // pointed at this device mid-day Oct 8
+      const customerId = await customer();
+      await completedVisit(customerId, techId); // Oct 8
+      await truckStopsAt(north(540), 30, { at: '2026-10-08T21:20:00Z' }); // even a clean off-pin stop after the remap
+      const [made] = await mockPg('customer_pin_suggestions').insert({
+        customer_id: customerId, visit_date: '2026-10-08', pin_lat: PIN.lat, pin_lng: PIN.lng, parked_lat: 1, parked_lng: 1, distance_m: 1, stop_minutes: 1,
+      }).returning('id');
+      expect(await run()).toMatchObject({ created: 0, days_not_loaded: 1 });
+      expect((await mockPg('customer_pin_suggestions').where({ id: made.id }).first()).status).toBe('open');
+    });
+
+    test('a remap before every day the visit uses changes nothing; so does a NULL changed_at', async () => {
+      const techId = await technician(IMEI, new Date('2026-09-20T12:00:00Z'));
+      const customerId = await customer();
+      await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      expect((await run()).created).toBe(1);
+    });
+  });
+
+  describe('lock order: the customer row first, then the advisory lock (no deadlock with a merge)', () => {
+    // Two REAL connections on committed rows of the private database, removed afterwards.
+    async function committedCustomer() {
+      const id = randomUUID();
+      await database('customers').insert({ id, first_name: 'Fixture', last_name: 'Lock', phone: `+1202555${String(Math.floor(Math.random() * 9000) + 1000)}`, address_line1: '1 Lock St', city: 'Fixture City', state: 'FL', zip: '34201' });
+      const [made] = await database('customer_pin_suggestions').insert({
+        customer_id: id, visit_date: '2026-10-08', pin_lat: 1, pin_lng: 1, parked_lat: 1, parked_lng: 1, distance_m: 1, stop_minutes: 1,
+      }).returning('id');
+      return { id, suggestionId: made.id };
+    }
+    const cleanup = async (id) => { await database('customer_pin_suggestions').where({ customer_id: id }).del(); await database('customers').where({ id }).del(); };
+
+    test('a merge holding the customer row, while a suggestion path waits, cannot deadlock', async () => {
+      const { id } = await committedCustomer();
+      try {
+        const merge = await database.transaction(); // what executeMerge does first: the row FOR UPDATE
+        await merge('customers').where({ id }).forUpdate().first('id');
+
+        const settled = [];
+        const creator = database.transaction(async (trx) => { // recordSuggestion / notifyOne / closeSuggestion all begin here
+          await store.lockCustomer(trx, id);
+          settled.push('creator');
+        });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(settled).toEqual([]); // queued behind the merge on the ROW, holding no advisory lock yet
+
+        // The merge now needs the advisory lock (retireOnMerge). With the old order the creator would hold it.
+        await store.retireOnMerge(merge, id);
+        await merge.commit();
+        await creator;
+        expect(settled).toEqual(['creator']);
+        expect((await database('customer_pin_suggestions').where({ customer_id: id }).first()).status).toBe('superseded');
+      } finally { await cleanup(id); }
+    });
+
+    test('a verify_pin style FOR UPDATE waits for a suggestion transaction and does not deadlock with it', async () => {
+      const { id, suggestionId } = await committedCustomer();
+      try {
+        const events = [];
+        const holder = await database.transaction();
+        await store.lockCustomer(holder, id);
+        const verify = database.transaction(async (trx) => {
+          await trx('customers').where({ id }).forUpdate().first('id');
+          events.push('verify');
+        });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(events).toEqual([]);
+        await holder('customer_pin_suggestions').where({ id: suggestionId }).update({ notified_at: new Date() });
+        await holder.commit();
+        await verify;
+        expect(events).toEqual(['verify']);
+      } finally { await cleanup(id); }
+    });
+  });
+
+  describe('the stored day is the day the truck stood there', () => {
+    test('a visit done Oct 7 and closed Oct 8 is dated Oct 7 when the off-pin stop was Oct 7', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, { scheduled_date: '2026-10-07', completed_at: new Date('2026-10-08T15:30:00Z') });
+      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
+      expect((await run()).created).toBe(1);
+      const [row] = await open(customerId);
+      expect(store.dayText(row.visit_date)).toBe('2026-10-07');
+      expect(store.evidenceText(row)).toContain('Oct 7, 2026');
+      expect(store.publicShape(row).visit_date).toBe('2026-10-07');
+    });
+
+    test('a stop late in the evening ET is dated by its ET day, not the UTC one', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, { completed_at: new Date('2026-10-09T03:00:00Z') }); // 11 PM ET Oct 8
+      await truckStopsAt(north(540), 20, { at: '2026-10-09T01:40:00Z' }); // 9:40 PM ET Oct 8, 01:40 UTC Oct 9
+      expect((await run()).created).toBe(1);
+      expect(store.dayText((await open(customerId))[0].visit_date)).toBe('2026-10-08');
     });
   });
 

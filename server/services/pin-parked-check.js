@@ -84,7 +84,7 @@ async function loadCompletedVisits(conn, { fromMs, toMs }) {
     .whereRaw("NULLIF(btrim(t.bouncie_imei), '') IS NOT NULL")
     .orderBy('s.completed_at', 'desc').orderBy('s.id')
     .select(
-      's.id', 's.customer_id', 's.technician_id', 's.visit_id', 's.property_id', 's.completed_at', 's.en_route_at', 's.arrived_at',
+      's.id', 's.customer_id', 's.technician_id', 's.visit_id', 's.property_id', 's.completed_at', 's.en_route_at', 's.arrived_at', 't.bouncie_imei_changed_at as mapping_changed_at',
       conn.raw('s.scheduled_date::text as scheduled_day'),
       's.lat as service_lat', 's.lng as service_lng',
       's.service_address_line1', 's.service_address_city', 's.service_address_zip',
@@ -180,7 +180,13 @@ function requiredDays(visit, now) {
   const today = etDateString(now);
   const cap = etDateString(addETDays(now, -MAX_LOOKBACK_DAYS));
   const days = visitDays(visit).filter((day) => day <= today);
-  return { days, tooOld: days.some((day) => day < cap) };
+  // The log is keyed by device, and the technician's CURRENT device is what the visit query joins. A day that
+  // starts before the mapping changed (technicians.bouncie_imei_changed_at; NULL = never remapped) may belong to
+  // another vehicle, so it cannot be judged. The day of the change itself is partly before it: not judged either.
+  const changedMs = visit.mapping_changed_at ? new Date(visit.mapping_changed_at).getTime() : null;
+  const beforeMapping = changedMs != null && Number.isFinite(changedMs) && days.some((day) => etDayBounds(day).startMs < changedMs);
+  const tooOld = days.some((day) => day < cap);
+  return { days, tooOld, beforeMapping, unloadable: tooOld || beforeMapping };
 }
 
 /** Where the visit was supposed to be: its own pin, else the customer's. Null for another property or no pin. */
@@ -244,9 +250,9 @@ async function recordSuggestion(conn, visit, verdict) {
   try {
     return await conn.transaction(async (trx) => {
       await store.lockCustomer(trx, visit.customer_id);
-      // Share lock: a verify_pin on this customer waits for this transaction, so its own "close the
-      // suggestion" step always runs after the insert below, never before it.
-      const customer = await trx('customers').where({ id: visit.customer_id }).whereNull('deleted_at').forShare().first();
+      // lockCustomer took the row FOR SHARE first: a verify_pin or merge on this customer waits for this
+      // transaction, so its own "close the suggestion" step runs after the insert below, never before it.
+      const customer = await trx('customers').where({ id: visit.customer_id }).whereNull('deleted_at').first();
       if (!customer) return { skipped: 'customer_gone' };
       const [review, primary] = await Promise.all([
         trx('customer_geocode_reviews').where({ customer_id: customer.id }).first(),
@@ -284,7 +290,8 @@ async function insertSuggestion(trx, visit, verdict, pin) {
     customer_id: visit.customer_id,
     scheduled_service_id: visit.id,
     technician_id: visit.technician_id,
-    visit_date: etDateString(new Date(visit.completed_at)),
+    // The ET day the truck stood there (not the day the visit was closed out): it is shown as exactly that.
+    visit_date: etDateString(verdict.stopStartedAt),
     pin_lat: pin.lat.toFixed(7),
     pin_lng: pin.lng.toFixed(7),
     parked_lat: verdict.parked.lat.toFixed(7),
@@ -464,7 +471,7 @@ async function loadVehicles(conn, visits, window) {
   const vehicles = new Map();
   for (const imei of new Set(visits.map((visit) => visit.bouncie_imei))) {
     const needed = visits.filter((visit) => visit.bouncie_imei === imei)
-      .map((visit) => requiredDays(visit, window.now)).filter((r) => !r.tooOld).flatMap((r) => r.days).sort();
+      .map((visit) => requiredDays(visit, window.now)).filter((r) => !r.unloadable).flatMap((r) => r.days).sort();
     if (!needed.length) { vehicles.set(imei, { stops: [], home: null }); continue; }
     const stops = await stopsFor(conn, imei, { ...window, fromMs: etDayBounds(needed[0]).startMs });
     vehicles.set(imei, stops ? await withHomeBase(conn, imei, stops, window.now) : null);
@@ -480,7 +487,7 @@ function judgeVisits(visits, vehicles, { radius, fences, now }) {
   return visits.map((visit) => {
     const vehicle = vehicles.get(visit.bouncie_imei);
     const required = requiredDays(visit, now);
-    if (required.tooOld) return { visit, verdict: { flag: false, reason: 'days_not_loaded', unknown: true } };
+    if (required.unloadable) return { visit, verdict: { flag: false, reason: 'days_not_loaded', unknown: true } };
     if (!vehicle) return { visit, verdict: { flag: false, reason: 'stops_unreadable', unknown: true } };
     const stops = vehicle.stops.filter((stop) => required.days.includes(etDateString(new Date(stop.startMs))));
     const context = { home: vehicle.home, fences, neighbours: neighbourPins(visit, visits) };
