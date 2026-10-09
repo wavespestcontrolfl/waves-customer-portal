@@ -47,10 +47,16 @@ const NEONIC_CAPS = Object.freeze([
     key: 'imidacloprid',
     label: 'Imidacloprid',
     activeIngredientPrefix: 'imidacloprid',
+    // Trunk injection: dosed per tree by trunk diameter on its own label, never spread over the
+    // beds. It is not a share of the bed amount, so the sheet says so and does not hold it. Its
+    // rows are left out of the bed ledger for the same reason.
+    injectionPatterns: Object.freeze([/^arborjet\s+ima-jet\b/i]),
     products: Object.freeze([
       {
         shortName: 'Merit',
-        namePattern: /^merit\b/i,
+        // The 2F liquid only: Merit 75 WSP or a granule is another strength and unit, so it has no
+        // entry and the sheet holds it.
+        namePattern: /^merit\s*2\s*f\b/i,
         unit: 'fl_oz',
         // 1.6 pints = 25.6 fl oz of product (0.4 lb ai) per acre per year = 0.588 fl oz per 1,000 sq ft.
         perAcreYear: 25.6,

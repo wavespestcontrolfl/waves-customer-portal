@@ -153,4 +153,12 @@ describe('Codex r5 #6204: the count limit and products with no limit on file', (
     const noArea = withZylam(0); noArea.ingredients[0].reason = 'bed_area_needed';
     expect(evaluateNeonicCap(noArea, [row('alpine', 1, 'oz')]).holds).toHaveLength(1);
   });
+
+  test('a trunk-injection product gets a line and no hold', () => {
+    const ctx = withZylam(0);
+    ctx.ingredients[0].uncapped = [{ productId: 'ima', name: 'Arborjet Ima-Jet 10', injection: true }];
+    expect(evaluateNeonicCap(ctx, [row('ima', 40, 'ml')])).toEqual({
+      lines: { ima: 'Arborjet Ima-Jet 10: trunk injection, dosed per tree. Not counted in the bed limit.' }, holds: [], blockMessage: '',
+    });
+  });
 });

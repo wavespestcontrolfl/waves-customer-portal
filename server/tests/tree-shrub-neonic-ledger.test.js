@@ -82,6 +82,21 @@ describe('Codex r5 #6204: the count limit and products with no limit on file', (
     expect(entryOf(computeNeonicLedger({ rows: [], bedSqft: null, catalog: [GENERIC] }), 'imidacloprid').uncapped).toHaveLength(1);
   });
 
+  test('only Merit 2F takes the 2F amount; another Merit formulation is uncapped (pre-push audit)', () => {
+    const wsp = { id: 'cat-wsp', name: 'Merit 75 WSP', active_ingredient: 'Imidacloprid 75%' };
+    const imi = entryOf(computeNeonicLedger({ rows: [row(wsp, 1.6, 'oz')], bedSqft: BED, catalog: [MERIT, wsp] }), 'imidacloprid');
+    expect(imi).toMatchObject({ usedShare: 0, unsized: 1 });
+    expect(imi.capByProduct.map((p) => p.productId)).toEqual(['cat-merit']);
+    expect(imi.uncapped).toEqual([{ productId: 'cat-wsp', name: 'Merit 75 WSP' }]);
+  });
+
+  test('a trunk-injection product is named as injection, and its rows are not bed applications', () => {
+    const ima = { id: 'cat-ima', name: 'Arborjet Ima-Jet 10', active_ingredient: 'Imidacloprid 10%' };
+    const imi = entryOf(computeNeonicLedger({ rows: [row(ima, 40, 'ml')], bedSqft: BED, catalog: [MERIT, ima] }), 'imidacloprid');
+    expect(imi).toMatchObject({ usedShare: 0, unsized: 0 });
+    expect(imi.uncapped).toEqual([{ productId: 'cat-ima', name: 'Arborjet Ima-Jet 10', injection: true }]);
+  });
+
   test('the ledger query reads the application date', async () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/tree-shrub-neonic-ledger.js'), 'utf8');
     expect(src).toMatch(/'pah\.quantity_applied', 'pah\.quantity_unit', 'pah\.application_date'/);

@@ -67,6 +67,10 @@ function uncappedResult(ingredient, rows, lines, holds) {
     if (!row?.active) continue;
     const product = (ingredient.uncapped || []).find((entry) => String(entry.productId) === String(row.productId));
     if (!product) continue;
+    if (product.injection) {
+      lines[row.productId] = `${product.name}: trunk injection, dosed per tree. Not counted in the bed limit.`;
+      continue;
+    }
     lines[row.productId] = `${product.name}: no yearly limit on file.`;
     holds.push(`${product.name} has no yearly limit on file, so it cannot be checked. Remove it or call the office.`);
   }

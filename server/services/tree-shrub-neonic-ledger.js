@@ -42,7 +42,8 @@ function capFor(name, activeIngredient) {
   const cap = ai ? NEONIC_CAPS.find((c) => ai.startsWith(c.activeIngredientPrefix)) : null;
   if (!cap) return null;
   const label = String(name || '').trim();
-  return { cap, entry: cap.products.find((p) => p.namePattern.test(label)) || null };
+  const injection = (cap.injectionPatterns || []).some((pattern) => pattern.test(label));
+  return { cap, entry: cap.products.find((p) => p.namePattern.test(label)) || null, injection };
 }
 
 const yearlyAmountFor = (entry, bedSqft) => round4((entry.perAcreYear * bedSqft) / SQFT_PER_ACRE);
@@ -77,7 +78,8 @@ function productCap(product, entry, area, usedShare, applicationDays) {
  * { key, label, usedShare, capByProduct: [{ productId, name, unit, yearlyAmount, remainingAmount,
  *   maxApplications, applicationsUsed }], uncapped: [{ productId, name }], unsized, reason }.
  * usedShare and the amounts are null with reason 'bed_area_needed'. `uncapped` names the catalog
- * products of this ingredient with no strength in the config: the sheet holds them. A product with
+ * products of this ingredient with no strength in the config: the sheet holds them, except a
+ * trunk-injection product (`injection: true`), which is dosed per tree and only gets a line. A product with
  * a label limit on the NUMBER of applications carries maxApplications and applicationsUsed (the
  * days it was applied this year, sized or not); the others carry null.
  */
@@ -89,7 +91,7 @@ function computeNeonicLedger({ rows = [], bedSqft = null, catalog = [] } = {}) {
     const applicationDays = new Map();
     for (const row of rows) {
       const found = capFor(row.product_name, row.active_ingredient);
-      if (!found || found.cap !== cap) continue;
+      if (!found || found.cap !== cap || found.injection) continue;
       noteApplicationDay(applicationDays, found.entry, row);
       const quantity = found.entry && convertInventoryQuantity(row.quantity_applied, row.quantity_unit, found.entry.unit);
       if (!quantity) { unsized += 1; continue; }
@@ -100,7 +102,10 @@ function computeNeonicLedger({ rows = [], bedSqft = null, catalog = [] } = {}) {
     for (const product of catalog) {
       const found = capFor(product.name, product.active_ingredient);
       if (!found || found.cap !== cap) continue;
-      if (!found.entry) { uncapped.push({ productId: product.id, name: String(product.name || '').trim() }); continue; }
+      if (!found.entry) {
+        uncapped.push({ productId: product.id, name: String(product.name || '').trim(), ...(found.injection ? { injection: true } : {}) });
+        continue;
+      }
       capByProduct.push(productCap(product, found.entry, area, usedShare, applicationDays));
     }
     return {
