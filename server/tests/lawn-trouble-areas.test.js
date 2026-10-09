@@ -71,7 +71,8 @@ describe('troubleTypeFor: the sheet\'s hint when it is on the list, else the cat
     [{ category: 'Fungicide' }, 'fungus'],
     [{ category: 'insecticide' }, 'other_insect'],
     [{ category: 'insecticide', hint: 'chinch' }, 'chinch'],
-    [{ category: 'fungicide', hint: 'take_all' }, 'take_all'],
+    [{ category: 'fungicide', hint: 'take_all' }, 'fungus'],
+    [{ category: 'fungicide', hint: 'take_all', takeAll: true }, 'take_all'],
     [{ category: 'adjuvant', hint: 'weeds' }, 'weeds'],
     [{ category: 'insecticide', hint: 'moss' }, 'other_insect'],
     [{ category: 'adjuvant' }, null],
@@ -79,6 +80,25 @@ describe('troubleTypeFor: the sheet\'s hint when it is on the list, else the cat
     [{}, null],
   ])('%j is %s', (input, expected) => {
     expect(areas.troubleTypeFor(input)).toBe(expected);
+  });
+});
+
+describe('take_all is never created by the hint alone', () => {
+  test('troubleTypeFor: a take_all hint stands only for a product the server confirms; else the category type', () => {
+    expect(areas.troubleTypeFor({ category: 'fungicide', hint: 'take_all', takeAll: true })).toBe('take_all');
+    expect(areas.troubleTypeFor({ category: 'fungicide', hint: 'take_all' })).toBe('fungus');
+    expect(areas.troubleTypeFor({ category: 'herbicide', hint: 'take_all' })).toBe('weeds');
+    expect(areas.troubleTypeFor({ category: 'adjuvant', hint: 'take_all' })).toBeNull();
+    // The other hints are unchanged.
+    expect(areas.troubleTypeFor({ category: 'insecticide', hint: 'chinch' })).toBe('chinch');
+  });
+
+  test('areaRowsOf: confirmed against the take-all ids; a claim on another product, or with no ids, falls back', () => {
+    const catalog = new Map([[P_CEL, { category: 'fungicide' }], [uuid(2), { category: 'fungicide' }]]);
+    const inserted = [{ product_id: P_CEL, treated_place: 'front', application_method: 'spot_treatment' }, { product_id: uuid(2), treated_place: 'back', application_method: 'spot_treatment' }];
+    const request = [{ productId: P_CEL, troubleType: 'take_all' }, { productId: uuid(2), troubleType: 'take_all' }];
+    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog, takeAllIds: new Set([P_CEL]) }).map((r) => r.type)).toEqual(['take_all', 'fungus']);
+    expect(areas.areaRowsOf({ requestRows: request, inserted, catalog }).map((r) => r.type)).toEqual(['fungus', 'fungus']);
   });
 });
 

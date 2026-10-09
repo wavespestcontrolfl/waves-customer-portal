@@ -75,8 +75,8 @@ jest.setTimeout(90000);
 const LAWN_TYPE = 'Every 6 Weeks Lawn Care Service';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TROUBLE_AREAS'];
 
-async function seedLawnVisit() {
-  const today = etDateString();
+async function seedLawnVisit({ daysAgo = 0 } = {}) {
+  const today = etDateString(new Date(Date.now() - daysAgo * 86400000));
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), serviceKey: `fixture_lawn_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Places', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
     email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false });
@@ -205,6 +205,36 @@ postgres('closeout: the place of a spot treatment', () => {
     } finally { await cleanup(h); }
   });
 
+  // A take-all fungicide is added through Search and cataloged as a fungicide: the sheet says take_all, the server confirms it.
+  test.each([
+    ['the server confirms it is a take-all row', (id) => new Set([id.toLowerCase()]), 'take_all'],
+    ['the server does not (a claim on any other fungicide)', () => new Set(), 'fungus'],
+    ['the take-all lookup fails', null, 'fungus'],
+  ])('a take_all claim on a placed spot row: %s', async (_label, resolve, type) => {
+    const f = await seedLawnVisit();
+    const [fungicide] = await mockPg('products_catalog').insert({ name: `Take-all fixture ${randomUUID().slice(0, 6)}`, category: 'fungicide', default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*');
+    try {
+      const lookup = jest.spyOn(require('../services/lawn-fast-complete'), 'takeAllProductIdsFor')
+        .mockImplementation(async () => { if (!resolve) throw new Error('plan unavailable'); return resolve(fungicide.id); });
+      const out = await complete(f, { products: [spot(f, { productId: fungicide.id, areaPlace: 'front', troubleType: 'take_all' })] });
+      expect(out.status).toBe(200);
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect((await areasOf(f)).map((a) => [a.place, a.type])).toEqual([['front', type]]);
+    } finally {
+      await cleanup(f);
+      await mockPg('products_catalog').where({ id: fungicide.id }).del().catch(() => {});
+    }
+  });
+
+  test('no take_all claim: the take-all lookup is not made', async () => {
+    const f = await seedLawnVisit();
+    try {
+      const lookup = jest.spyOn(require('../services/lawn-fast-complete'), 'takeAllProductIdsFor').mockResolvedValue(new Set());
+      await complete(f, { products: [spot(f, { areaPlace: 'front' })] });
+      expect(lookup).not.toHaveBeenCalled();
+    } finally { await cleanup(f); }
+  });
+
   test('a failed store write never fails the completion: the visit and the ledger are saved', async () => {
     const f = await seedLawnVisit();
     try {
@@ -273,6 +303,42 @@ postgres('closeout: the place of a spot treatment', () => {
       const columns = Object.keys(await mockPg('service_products').columnInfo()).filter((c) => c !== 'treated_place').sort();
       expect(Object.keys(res.body.products[0]).sort()).toEqual(columns);
     } finally { await cleanup(f); }
+  });
+
+  // The rule for a backdated completion: recorded and flagged, never refused, because the application already happened. The history the
+  // preflight reads stops at the visit's own day; the closeout audit judges both sides of the date.
+  describe('a visit completed late, after a later application at the same place', () => {
+    const lateArena = async (priorPlace) => {
+      const f = await seedLawnVisit({ daysAgo: 40 });
+      const arena = await mockPg('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      const later = etDateString(new Date(Date.now() - 10 * 86400000));
+      const [past] = await mockPg('scheduled_services').insert({ customer_id: f.customerId, property_id: f.propertyId, scheduled_date: later, service_type: 'Lawn fixture', status: 'completed' }).returning('*');
+      const [prior] = await mockPg('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: later, service_type: 'Lawn fixture' }).returning('*');
+      await mockPg('property_application_history').insert({ customer_id: f.customerId, property_id: f.propertyId, product_id: arena.id, application_date: later, application_rate: 0.147, rate_unit: 'oz', service_record_id: prior.id, treated_place: priorPlace });
+      return { f, arena, row: spot(f, { productId: arena.id, areaPlace: 'front', rate: 0.147, rateUnit: 'oz' }) };
+    };
+
+    test('October Arena at the front first, then the September front visit completed late: /complete accepts, the row keeps its place, the audit flags it', async () => {
+      const { f, row } = await lateArena('front');
+      try {
+        const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+        expect(await require('../services/lawn-trouble-areas').preflightPlaces({ knex: mockPg, svc, products: [row] })).toBeNull();
+        const out = await complete(f, { products: [row] });
+        expect(out.status).toBe(200);
+        expect(await ledgerOf(f, (await recordOf(f)).id)).toMatchObject({ treated_place: 'front' });
+        // 30 days from the other application, inside Arena's 56: the closeout audit reads both sides of the date and flags it.
+        expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Arena 50 WDG is over its minimum days between applications\.$/)]);
+      } finally { await cleanup(f); }
+    });
+
+    test('the same late visit when the later application was at ANOTHER place: nothing to flag (the audit is judged at the place)', async () => {
+      const { f, row } = await lateArena('back');
+      try {
+        const out = await complete(f, { products: [row] });
+        expect(out.status).toBe(200);
+        expect(out.body.completionAdvisories).toEqual([]);
+      } finally { await cleanup(f); }
+    });
   });
 
   test('gate off: the place is not stored anywhere, no area is written, and the lawn-wide flag is raised as before', async () => {

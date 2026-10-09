@@ -42,6 +42,24 @@ describe('troubleTypeOfRow', () => {
   ])('%j is %s', (input, expected) => expect(troubleTypeOfRow(input)).toBe(expected));
 });
 
+describe('a take-all product added through Search', () => {
+  const areas = troubleAreasOf(data({ known: [{ id: 'a', place: 'back', type: 'take_all' }, { id: 'b', place: 'front', type: 'fungus' }] }));
+  test('is a take_all trouble type when the guide\'s take-all set holds it, plain fungus otherwise', () => {
+    const fungicide = row({ productId: 'T1' });
+    expect(troubleTypeOfRow(fungicide)).toBe('fungus');
+    expect(troubleTypeOfRow({ ...fungicide, takeAllRow: true })).toBe('take_all');
+    expect(withPlace(fungicide, { areas, chosen: 'back', takeAll: new Set(['t1']) }).takeAllRow).toBe(true);
+    expect(withPlace(fungicide, { areas, chosen: 'back', takeAll: new Set(['other']) }).takeAllRow).toBeUndefined();
+    expect(withPlace(fungicide, { areas, chosen: 'back' }).takeAllRow).toBeUndefined();
+  });
+
+  test('its default place is the lawn\'s known take-all area, not the fungus one', () => {
+    const fungicide = row({ productId: 'T1' });
+    expect(withPlace(fungicide, { areas, chosen: '', takeAll: new Set(['t1']) }).place).toBe('back');
+    expect(withPlace(fungicide, { areas, chosen: '' }).place).toBe('front');
+  });
+});
+
 describe('placeProblems', () => {
   const areas = (extra) => troubleAreasOf(data(extra));
   test('a plain row follows the products a limit closes at a place', () => {

@@ -24,6 +24,7 @@ const {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
+  takeAllProductIdsFor,
   preflightLawnFastCompletion,
   assertLawnFastVisitTypeUnderLock,
 } = require('../services/lawn-fast-complete');
@@ -887,6 +888,22 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       buildPlanForService.mockResolvedValue(takeAllPlan);
       v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
       expect((await guide(tablesFor())).takeAllProductIds).toEqual([P_ART]);
+    });
+
+    test('takeAllProductIdsFor: the visit\'s take-all fungicide ids by the staged-row rule (what the completion confirms a take_all claim against)', async () => {
+      live();
+      const takeAllPlan = plan(addOns());
+      takeAllPlan.completionDefaults.addOns[2].raw = 'Test Artavia — mapped take-all areas, second spring application';
+      buildPlanForService.mockResolvedValue(takeAllPlan);
+      v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }]]));
+      const knex = fakeKnex(tablesFor());
+      expect([...(await takeAllProductIdsFor(visit({ scheduled_date: '2026-07-14' }), knex))]).toEqual([P_ART]);
+      // Large patch is not take-all; a lawn with no plan has none.
+      v13ProtocolRows.mockReturnValue(PROGRAM);
+      buildPlanForService.mockResolvedValue(plan(addOns()));
+      expect((await takeAllProductIdsFor(visit({ scheduled_date: '2026-07-14' }), knex)).size).toBe(0);
+      buildPlanForService.mockResolvedValue(plan(addOns(), false));
+      expect((await takeAllProductIdsFor(visit({ scheduled_date: '2026-07-14' }), knex)).size).toBe(0);
     });
 
     test('the fresh chinch decision rides the answer: the product, then the fallback, then nothing', async () => {

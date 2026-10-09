@@ -32,6 +32,8 @@ export function troubleAreasOf(data) {
 const GUIDED_TYPE = { weeds: 'weeds', fungus: 'fungus', chinch: 'chinch', caterpillars: 'other_insect', dry_spots: 'dry_spot' };
 const CATEGORY_TYPE = { herbicide: 'weeds', fungicide: 'fungus', insecticide: 'other_insect' };
 export function troubleTypeOfRow(row) {
+  // A take-all fungicide is added through Search (no guide tag) and is cataloged as a fungicide: the guide's take-all set says it.
+  if (row?.takeAllRow) return 'take_all';
   return GUIDED_TYPE[row?.guided] || CATEGORY_TYPE[String(row?.product?.category || '').trim().toLowerCase()] || null;
 }
 
@@ -127,7 +129,13 @@ export const knownPlacesOfType = (areas, type) => new Set(areas.known.filter((ar
  * What a row's place is, given the tech's own tap (`chosen`, '' when none): the tap, else the default. The row's
  * `placeRule` says the server asks for one; `place` is '' while it is missing.
  */
-export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows }) {
+export function withPlace(row, { areas, chosen, weedMix, chinch, weedRows, takeAll = null }) {
+  // `takeAll`: the guide's take-all product ids (a Set of lower-case ids); the row stands for a take-all area, not plain fungus.
+  const tagged = takeAll?.has(String(row.productId).toLowerCase()) ? { ...row, takeAllRow: true } : row;
+  return placed(tagged, { areas, chosen, weedMix, chinch, weedRows });
+}
+
+function placed(row, { areas, chosen, weedMix, chinch, weedRows }) {
   const problems = placeProblems(row, { areas, weedMix, chinch, weedRows });
   const picked = chosen && areas.places.some((place) => place.id === chosen) ? chosen : '';
   const place = picked || defaultPlaceFor(row, { areas, problems });

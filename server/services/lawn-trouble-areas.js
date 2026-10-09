@@ -69,7 +69,10 @@ const sourceOf = (value) => (value === 'guide_card' ? 'guide_card' : 'tech_tap')
  * alone, a fertilizer). The sheet's `troubleType` hint wins when it is on the closed list; else the catalog
  * category decides. Pure.
  */
-function troubleTypeFor({ category, hint = null }) {
+function troubleTypeFor({ category, hint = null, takeAll = false }) {
+  // The hint is not trusted for take-all: only a product the server itself identifies as a take-all row (the staged-row rule the
+  // guide uses) may create a take_all area; any other row falls back to the category type.
+  if (hint === 'take_all' && !takeAll) return CATEGORY_TYPE[String(category || '').trim().toLowerCase()] || null;
   if (TYPE_IDS.includes(hint)) return hint;
   return CATEGORY_TYPE[String(category || '').trim().toLowerCase()] || null;
 }
@@ -166,14 +169,15 @@ async function clearArea(knex, { areaId, propertyId, technicianId = null }) {
  * `inserted` the service_products rows just written (treated_place, product_id, application_method) and `catalog`
  * a Map of catalog rows by product id.
  */
-function areaRowsOf({ requestRows, inserted, catalog }) {
+function areaRowsOf({ requestRows, inserted, catalog, takeAllIds = null }) {
   const byProduct = new Map((requestRows || []).filter((row) => row?.productId).map((row) => [String(row.productId).toLowerCase(), row]));
   const out = [];
   for (const sp of inserted || []) {
     if (!isPlace(sp.treated_place) || sp.application_method !== 'spot_treatment') continue;
     const request = byProduct.get(String(sp.product_id || '').toLowerCase()) || {};
     const product = catalog?.get?.(String(sp.product_id).toLowerCase()) || null;
-    const type = troubleTypeFor({ category: product?.category || sp.product_category, hint: request.troubleType });
+    const takeAll = !!takeAllIds?.has(String(sp.product_id).toLowerCase());
+    const type = troubleTypeFor({ category: product?.category || sp.product_category, hint: request.troubleType, takeAll });
     if (type) out.push({ place: sp.treated_place, type, source: request.troubleSource });
   }
   return out;
@@ -200,11 +204,13 @@ const ledgerPlace = (serviceProduct) => (serviceProduct?.treated_place ? { treat
  * Secondary to the completion: nothing happens while the gate is off or no row carries a place, and a failed write is logged and never
  * fails the visit (savepointScope keeps the transaction usable).
  */
-async function recordStore(trx, { svc, record, products, inserted, catalog }) {
+async function recordStore(trx, { svc, record, products, inserted, catalog, takeAllIds = null }) {
   if (!live() || !inserted.some((sp) => sp.treated_place)) return;
   const { savepointScope } = require('../utils/savepoint-read');
   try {
-    await savepointScope(trx, (k) => module.exports.recordFromCompletion(k, { svc, record, rows: areaRowsOf({ requestRows: products, inserted, catalog }) }));
+    // The take-all set is read only when a row claims take_all (rare); a read that fails leaves the claim unconfirmed (category type).
+    const confirmed = products?.some((row) => row?.troubleType === 'take_all') && takeAllIds ? await takeAllIds().catch(() => null) : null;
+    await savepointScope(trx, (k) => module.exports.recordFromCompletion(k, { svc, record, rows: areaRowsOf({ requestRows: products, inserted, catalog, takeAllIds: confirmed }) }));
   } catch (err) {
     logger.warn(`[dispatch] trouble-area store write failed (non-blocking) for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
   }
@@ -347,6 +353,10 @@ async function preflightPlaces({ knex = db, svc, products }) {
     seen.add(`${productId}:${row.areaPlace}`);
     let result;
     try {
+      // The rule for a backdated completion: it is RECORDED and FLAGGED, never refused, because the application already happened.
+      // checkLimits reads the history up to the visit's own day (application-limits.js, priorApplications), so an application recorded
+      // LATER than this visit (a September visit completed after an October one at the same place) is not held against it here; the
+      // closeout audit (auditHardCountLimits) judges both sides of the date and raises the office alert after the commit.
       result = await limits.checkLimits(svc.customer_id, productId, day, knex, {
         propertyId: svc.property_id || null,
         place: row.areaPlace.trim(),

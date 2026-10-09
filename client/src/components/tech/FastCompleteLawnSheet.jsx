@@ -853,10 +853,10 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
 // GATE_LAWN_TROUBLE_AREAS: every spot row (the ones withSpotArea marked) also carries its place: the tech's tap (the weed
 // entry's rows share `weedPlace`), else the lawn's single known trouble area of its type, with the places the yearly limits
 // close for it. See lib/lawn-trouble-places.js.
-function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlace }) {
+function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlace, takeAll }) {
   const weedRows = rows.filter((row) => row.spotRule && row.weedGroup);
   return rows.map((row) => (row.spotRule
-    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlace : row.pickedPlace, weedMix, chinch, weedRows })
+    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlace : row.pickedPlace, weedMix, chinch, weedRows, takeAll })
     : row));
 }
 
@@ -1344,10 +1344,10 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const rows = useMemo(
     () => {
       const spotted = products.rows.map((row) => withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }));
-      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace }) : spotted;
+      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace, takeAll: gov.takeAll }) : spotted;
       return placed.map((row) => withDerivedAmount(row, lawnSqft));
     },
-    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, areas, chinchDecision, weedPlace],
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, areas, chinchDecision, weedPlace, gov.takeAll],
   );
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or

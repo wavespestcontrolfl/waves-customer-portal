@@ -8004,7 +8004,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
           // GATE_LAWN_TROUBLE_AREAS: the lawn's trouble-area store, from the spot rows that carry a place (secondary; never fails the visit).
-          await require('../services/lawn-trouble-areas').recordStore(trx, { svc, record, products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById });
+          await require('../services/lawn-trouble-areas').recordStore(trx, { svc, record, products, inserted: insertedServiceProducts, catalog: completionCatalogRowsById, takeAllIds: () => require('./lawn-fast-complete').takeAllProductIdsFor(svc) });
         }
 
         // Ledger row: legacy = completed WaveGuard visits with a structured

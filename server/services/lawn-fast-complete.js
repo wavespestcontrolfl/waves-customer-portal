@@ -555,6 +555,21 @@ function guidedProductIds(loaded, sheet) {
   };
 }
 
+/**
+ * The month's take-all fungicide product ids for a visit, as a Set of lower-case ids (empty when the visit has no plan): the same
+ * staged-row rule the guide answer's `takeAllProductIds` uses (`takeAllAddOns`). The completion asks it before it records a
+ * `take_all` trouble area, so the sheet's hint alone never creates one.
+ */
+async function takeAllProductIdsFor(svc, knex = db) {
+  const loaded = await loadPlan(svc, knex);
+  if (!loaded?.eligible) return new Set();
+  const guide = require('./lawn-treatment-guide');
+  const sheet = await sheetPlanned(loaded, knex);
+  const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
+  const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
+  return new Set(guide.takeAllAddOns(candidates, rows).map((candidate) => String(candidate.item.productId).toLowerCase()));
+}
+
 async function chinchOffer({ svc, structured, sheetAddOns, knex, places = null }) {
   const guide = require('./lawn-treatment-guide');
   const found = await guide.resolveChinch({ svc, structured, knex, places });
@@ -1172,6 +1187,7 @@ module.exports = {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
+  takeAllProductIdsFor,
   preflightLawnFastCompletion,
   assertLawnFastVisitTypeUnderLock,
 };
