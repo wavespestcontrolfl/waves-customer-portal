@@ -620,7 +620,10 @@ async function closeReminderSyncNotices(serviceId) {
   try {
     await db('notifications')
       .where({ recipient_type: 'admin', category: 'schedule_conflict' })
-      .whereNull('done_at')
+      // Not "open only": a notice staff marked Done is rewritten too (its
+      // Done state kept), so a new failure on the same slot is a changed
+      // refresh and reopens it (r26 P2). An already resolved row is left.
+      .whereNot('title', REMINDER_SYNC_RESOLVED_TITLE)
       .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${REMINDER_SYNC_KEY}${serviceId}:%`])
       .update({
         ...require('../notification-service')._private.doneColumns({

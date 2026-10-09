@@ -303,7 +303,7 @@ describe('reminder sync failure after a committed move', () => {
   describe('closing a reminder-sync notice', () => {
     const closer = () => {
       const calls = { like: [], update: jest.fn().mockResolvedValue(1) };
-      const q = { where() { return this; }, whereNull() { return this; }, whereRaw(sql, b) { calls.like.push(b); return this; }, update: calls.update };
+      const q = { where() { return this; }, whereNot(...a) { calls.not = a; return this; }, whereRaw(sql, b) { calls.like.push(b); return this; }, update: calls.update };
       return { calls, q };
     };
     const withNotifications = (q) => { const read = db.getMockImplementation(); db.mockImplementation((table) => (table === 'notifications' ? q : read(table))); };
@@ -315,6 +315,9 @@ describe('reminder sync failure after a committed move', () => {
       withNotifications(q);
       await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
       expect(calls.like).toEqual([['auto-dispatch-reminder-sync:s1:%']]);
+      // Done rows are rewritten too (no done_at filter); only resolved rows are skipped (r26 P2).
+      expect(calls.not).toEqual(['title', 'Reminder time alert resolved']);
+      expect(notifications._private.doneColumns).toHaveBeenCalledWith(expect.objectContaining({ keepExisting: true }));
       expect(calls.update).toHaveBeenCalledWith(expect.objectContaining({ title: 'Reminder time alert resolved', done_by: 'auto-dispatch' }));
       expect(notifications.notifyAdmin).not.toHaveBeenCalled();
     });
