@@ -12,15 +12,22 @@ jest.mock('../services/assessment-estimate-closeout', () => ({
   estimateForAssessment: (...args) => mockPaired(...args),
 }));
 
-const { assessmentEstimateSummary } = require('../services/assessment-estimate-summary');
+const { assessmentEstimateSummary: readSummary } = require('../services/assessment-estimate-summary');
+
+// Every read is judged at one fixed instant, never the real clock, and the
+// fixture's dates are built from it, so the suite does not age.
+const NOW = new Date('2026-10-09T15:00:00.000Z');
+const DAY = 86400000;
+const at = (days) => new Date(NOW.getTime() + days * DAY).toISOString();
+const assessmentEstimateSummary = (visit, opts = {}) => readSummary(visit, { now: NOW, ...opts });
 
 const VISIT = { id: 'visit-1', customer_id: 'cust-1', source_estimate_id: null };
 const row = (over = {}) => ({
-  id: 'est-1', customer_id: 'cust-1', status: 'sent', archived_at: null, sent_at: '2026-10-03T14:00:00.000Z',
+  id: 'est-1', customer_id: 'cust-1', status: 'sent', archived_at: null, sent_at: at(-6),
   // A real delivery (HANDOFF_COLS): the sent date comes from here, not sent_at.
-  handed_off_at: '2026-10-03T14:05:00.000Z', first_handed_off_at: null, delivered_at_history: [],
-  anchor_handed_off_at: null, accept_witness_at: null, expires_at: '2026-12-01T00:00:00.000Z', estimate_data: {},
-  created_at: '2026-10-02T14:00:00.000Z', estimate_slug: 'EST-2026-0001', token: 'secret-token',
+  handed_off_at: at(-5), first_handed_off_at: null, delivered_at_history: [],
+  anchor_handed_off_at: null, accept_witness_at: null, expires_at: at(30), estimate_data: {},
+  created_at: at(-7), estimate_slug: 'EST-2026-0001', token: 'secret-token',
   monthly_total: '59.00', annual_total: '708.00', onetime_total: '0.00', service_interest: 'Pest', ...over,
 });
 
@@ -63,8 +70,8 @@ describe('assessmentEstimateSummary', () => {
     const out = await assessmentEstimateSummary(VISIT, { conn });
     expect(out.state).toBe('found');
     expect(out.estimate).toEqual({
-      id: 'est-1', slug: 'EST-2026-0001', status: 'sent', sentAt: '2026-10-03T14:05:00.000Z',
-      createdAt: '2026-10-02T14:00:00.000Z', monthlyTotal: 59, annualTotal: 708, onetimeTotal: 0,
+      id: 'est-1', slug: 'EST-2026-0001', status: 'sent', sentAt: at(-5),
+      createdAt: at(-7), monthlyTotal: 59, annualTotal: 708, onetimeTotal: 0,
     });
     expect(JSON.stringify(out)).not.toMatch(/secret-token|token/);
     // The link is read for THIS visit and customer.
@@ -100,50 +107,48 @@ describe('assessmentEstimateSummary', () => {
     expect(out).toEqual({ state: 'retired', status });
   });
 
-  const NOW = new Date('2026-10-09T15:00:00.000Z');
-
   test('a sent estimate past expires_at is not live before the sweep flips it, and is not counted toward "ambiguous"', async () => {
-    const elapsed = row({ id: 'est-1', expires_at: '2026-10-08T00:00:00.000Z' });
-    expect(await assessmentEstimateSummary(VISIT, { conn: makeConn({ linked: ['est-1'], rows: [elapsed] }), now: NOW }))
+    const elapsed = row({ id: 'est-1', expires_at: at(-1) });
+    expect(await assessmentEstimateSummary(VISIT, { conn: makeConn({ linked: ['est-1'], rows: [elapsed] }) }))
       .toEqual({ state: 'retired', status: 'expired' });
     const conn = makeConn({ linked: ['est-1', 'est-2'], rows: [elapsed, row({ id: 'est-2' })] });
-    const out = await assessmentEstimateSummary(VISIT, { conn, now: NOW });
+    const out = await assessmentEstimateSummary(VISIT, { conn });
     expect(out.state).toBe('found');
     expect(out.estimate.id).toBe('est-2');
   });
 
   test('an accepted estimate past expires_at is still the price', async () => {
-    const conn = makeConn({ linked: ['est-1'], rows: [row({ status: 'accepted', expires_at: '2026-10-08T00:00:00.000Z', accept_witness_at: '2026-10-07T12:00:00.000Z' })] });
-    const out = await assessmentEstimateSummary(VISIT, { conn, now: NOW });
+    const conn = makeConn({ linked: ['est-1'], rows: [row({ status: 'accepted', expires_at: at(-1), accept_witness_at: at(-2) })] });
+    const out = await assessmentEstimateSummary(VISIT, { conn });
     expect(out.estimate.status).toBe('accepted');
   });
 
   test('a suppressed send (sent_at stamped, status sent, no delivery) has no sent date', async () => {
     const conn = makeConn({ linked: ['est-1'], rows: [row({ handed_off_at: null })] });
-    const out = await assessmentEstimateSummary(VISIT, { conn, now: NOW });
+    const out = await assessmentEstimateSummary(VISIT, { conn });
     expect(out.state).toBe('found');
     expect(out.estimate.sentAt).toBeNull();
   });
 
   test('a real delivery gives the newest delivery date, not sent_at', async () => {
-    const conn = makeConn({ linked: ['est-1'], rows: [row({ delivered_at_history: ['2026-10-05T16:00:00.000Z'] })] });
-    const out = await assessmentEstimateSummary(VISIT, { conn, now: NOW });
-    expect(out.estimate.sentAt).toBe('2026-10-05T16:00:00.000Z');
+    const conn = makeConn({ linked: ['est-1'], rows: [row({ delivered_at_history: [at(-4)] })] });
+    const out = await assessmentEstimateSummary(VISIT, { conn });
+    expect(out.estimate.sentAt).toBe(at(-4));
   });
 
   test('an estimate held off the customer surface is not the price', async () => {
-    const conn = makeConn({ linked: ['est-1'], rows: [row({ estimate_data: { estimatorEngine: { linkage_invalidated_at: '2026-10-04T00:00:00.000Z' } } })] });
-    expect(await assessmentEstimateSummary(VISIT, { conn, now: NOW })).toEqual({ state: 'retired', status: 'withdrawn' });
+    const conn = makeConn({ linked: ['est-1'], rows: [row({ estimate_data: { estimatorEngine: { linkage_invalidated_at: at(-5) } } })] });
+    expect(await assessmentEstimateSummary(VISIT, { conn })).toEqual({ state: 'retired', status: 'withdrawn' });
   });
 
   test('a failed send is still the staff price, unsent', async () => {
     const conn = makeConn({ linked: ['est-1'], rows: [row({ status: 'send_failed', handed_off_at: null })] });
-    const out = await assessmentEstimateSummary(VISIT, { conn, now: NOW });
+    const out = await assessmentEstimateSummary(VISIT, { conn });
     expect(out.estimate).toMatchObject({ status: 'send_failed', sentAt: null });
   });
 
   test('an archived estimate is not the live price', async () => {
-    const conn = makeConn({ linked: ['est-1'], rows: [row({ archived_at: '2026-10-05T00:00:00.000Z' })] });
+    const conn = makeConn({ linked: ['est-1'], rows: [row({ archived_at: at(-4) })] });
     expect(await assessmentEstimateSummary(VISIT, { conn })).toEqual({ state: 'retired', status: 'archived' });
   });
 
