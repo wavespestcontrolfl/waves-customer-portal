@@ -184,22 +184,31 @@ const NO_WINDOW_HORIZON_DAYS = 45;
 // day cannot ring more bells than the sibling check would.
 const NO_WINDOW_RING_BUDGET = 10;
 
-// A row linked to an accepted estimate, directly or through its plan parent,
-// belongs to the combined-booking check (its missing_time_tech bell covers
-// the untimed visit). Same link rule as linkedToEstimate in
-// combined-booking-check.js, so the two never ring for the same visit.
-function excludeEstimateLinked(query) {
-  return query.whereNull('s.source_estimate_id').whereNotExists(function parentLinked() {
-    this.select('p.id').from('scheduled_services as p')
-      .whereRaw('p.id = s.recurring_parent_id')
-      .whereNotNull('p.source_estimate_id');
-  });
+// Estimates the combined-booking check covers: accepted, not archived, and
+// two or more accepted service families (its own acceptedFamilies rule,
+// combined-booking-check.js runCombinedBookingCheck). Its missing_time_tech
+// bell already tells staff about an untimed visit of such a booking, so this
+// lane leaves those visits to it. A single-service estimate is NOT covered
+// there and stays here (Codex #6208 pre-push P1). An estimate that cannot be
+// read counts as not covered: one extra notice beats none.
+async function combinedBookingEstimateIds(estimateIds) {
+  const ids = [...new Set(estimateIds.filter(Boolean).map(String))];
+  if (!ids.length) return new Set();
+  const { acceptedFamilies } = require('../combined-booking-check');
+  const estimates = await db('estimates').whereIn('id', ids).where('status', 'accepted').whereNull('archived_at').select('*');
+  const covered = new Set();
+  for (const estimate of estimates) {
+    try {
+      if ((acceptedFamilies(estimate)?.size || 0) >= 2) covered.add(String(estimate.id));
+    } catch (_) { /* unreadable: not covered */ }
+  }
+  return covered;
 }
 
 // Recurring children that have neither an arrival window nor a due date, so
 // auto-dispatch cannot place them and nothing else would tell staff.
 function noWindowVisits(conn, from, to) {
-  return excludeEstimateLinked(conn('scheduled_services as s')
+  return conn('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
     .where('s.is_recurring', true)
     .whereNotNull('s.recurring_parent_id')
@@ -209,7 +218,7 @@ function noWindowVisits(conn, from, to) {
     .where('s.scheduled_date', '>=', from)
     .where('s.scheduled_date', '<=', to)
     .where('c.active', true)
-    .whereNull('c.deleted_at'));
+    .whereNull('c.deleted_at');
 }
 
 // The windowless visits staff can act on now: plan not lapsed (a lapsed plan's
@@ -217,10 +226,14 @@ function noWindowVisits(conn, from, to) {
 async function actionableNoWindowRows(today, to) {
   const { isRecurringPlanActive } = require('./eligibility');
   const rows = await noWindowVisits(db, today, to)
-    .select('s.id', 's.customer_id', 's.scheduled_date', 's.recurring_parent_id');
+    .select('s.id', 's.customer_id', 's.scheduled_date', 's.recurring_parent_id', 's.source_estimate_id',
+      db.raw('(select p.source_estimate_id from scheduled_services as p where p.id = s.recurring_parent_id) as parent_estimate_id'));
+  const estimateOf = (row) => row.source_estimate_id || row.parent_estimate_id || null;
+  const covered = await combinedBookingEstimateIds(rows.map(estimateOf));
   const plans = new Map();
   const actionable = [];
   for (const row of rows) {
+    if (covered.has(String(estimateOf(row)))) continue;
     const planKey = `${row.customer_id}:${row.recurring_parent_id}`;
     if (!plans.has(planKey)) plans.set(planKey, (await isRecurringPlanActive(row, db)).active);
     if (plans.get(planKey)) actionable.push({ ...row, date: toDateStr(row.scheduled_date) });
@@ -231,7 +244,7 @@ async function actionableNoWindowRows(today, to) {
 async function retireNoWindowNotices(nowDate, today, actionableIds) {
   await retireResolvedNotices({
     keyPattern: 'recurring-no-window:%',
-    stillOpen: (sub) => excludeEstimateLinked(sub
+    stillOpen: (sub) => sub
       .whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'")
       .whereIn('s.id', actionableIds)
       .where('s.is_recurring', true)
@@ -239,7 +252,7 @@ async function retireNoWindowNotices(nowDate, today, actionableIds) {
       .whereNull('s.window_start')
       .whereNull('s.recurring_dispatch_due_date')
       .where('s.scheduled_date', '>=', today)
-      .whereIn('s.status', ['pending', 'confirmed'])),
+      .whereIn('s.status', ['pending', 'confirmed']),
     resolvedTitle: 'Recurring visit time alert resolved',
     resolution: 'The visit now has an arrival time, is no longer waiting on one for that date, or its plan has lapsed',
     body: 'This visit no longer needs an arrival time set.',
@@ -320,18 +333,23 @@ async function flagNoWindowVisits(candidates, today, to) {
   return flagged;
 }
 
-// Close missing-pin notices the run no longer raised: the emitter owns the
-// close, because a visit that left the skip list is not otherwise visible here.
-// `flaggedIds` are the visits this run skipped for a missing pin on an active
-// plan; call only after a pass 1 that finished.
-async function retireMissingGeoNotices(flaggedIds, nowDate = new Date()) {
+// Close a missing-pin notice when its visit no longer needs it: the visit is
+// gone from that date or no longer live, or THIS run found a usable pin for it
+// (`pinOkIds`: the visits that passed eligibility, so their pin resolved). A
+// visit the run did not look at (inside the date boundary, locked, excluded,
+// skipped earlier for another reason) keeps its notice: absence from a run
+// proves nothing about its pin (Codex #6208 pre-push P1).
+async function retireMissingGeoNotices(pinOkIds, nowDate = new Date()) {
+  const { etDateString } = require('../../utils/datetime-et');
   await retireResolvedNotices({
     keyPattern: 'auto-dispatch-missing-geo:%',
     stillOpen: (sub) => sub
       .whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'")
-      .whereIn('s.id', [...flaggedIds]),
+      .where('s.scheduled_date', '>=', etDateString(nowDate))
+      .whereIn('s.status', ['pending', 'confirmed'])
+      .whereNotIn('s.id', [...pinOkIds]),
     resolvedTitle: 'Address pin alert resolved',
-    resolution: 'Auto-dispatch no longer skips the visit for a missing address pin on that date',
+    resolution: 'The visit has a usable address pin, or is no longer waiting on that date',
     body: 'This visit no longer needs its address pin fixed.',
   }, nowDate);
 }

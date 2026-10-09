@@ -160,22 +160,29 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(sql).toContain("s.scheduled_date::text = notifications.metadata->>'scheduledDate'");
     expect(sql).toContain('"s"."window_start" is null');
     expect(sql).toContain('"s"."recurring_dispatch_due_date" is null');
-    expect(sql).toContain('"s"."source_estimate_id" is null');
     expect(bindings).toEqual(expect.arrayContaining(['recurring-no-window:%', 'pending', 'confirmed', '2026-08-05']));
     // The due-date family keeps its own retire, untouched.
     expect(retireStatements[0].bindings).toContain('recurring-dispatch:%');
   });
 
-  test('leaves an estimate-linked visit to the combined-booking check, in the scan and in the retire', async () => {
-    scanFindsOnlyWindowless();
+  test('a visit of a combined booking (two accepted families) is left to the combined-booking check; a single-service estimate still gets the notice', async () => {
+    const combined = require('../services/combined-booking-check');
+    const families = jest.spyOn(combined, 'acceptedFamilies')
+      .mockImplementation((estimate) => new Set(estimate.id === 'e2' ? ['pest_control', 'lawn_care'] : ['pest_control']));
+    const rows = [
+      { id: 'one', customer_id: 'c1', recurring_parent_id: 'p1', scheduled_date: '2026-08-20', source_estimate_id: 'e1' },
+      { id: 'two', customer_id: 'c2', recurring_parent_id: 'p2', scheduled_date: '2026-08-21', source_estimate_id: null, parent_estimate_id: 'e2' },
+    ];
+    // Scan rows, then the estimates read, then the due-date scan.
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValueOnce([{ id: 'e1' }, { id: 'e2' }]).mockResolvedValue([]);
     notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
-    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
-    // The scan excludes a row linked to an estimate directly or through its plan parent.
-    expect(query.whereNull).toHaveBeenCalledWith('s.source_estimate_id');
-    expect(query.whereNotExists).toHaveBeenCalledTimes(2); // raise-time re-check shares the scan's rule
-    const { sql } = retireStatements[1];
-    expect(sql).toContain('"s"."source_estimate_id" is null');
-    expect(sql).toMatch(/not exists \(select "p"\."id" from "scheduled_services" as "p" where p\.id = s\.recurring_parent_id and "p"\."source_estimate_id" is not null\)/);
+    try {
+      await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    } finally {
+      families.mockRestore();
+    }
+    const keys = notifications.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey);
+    expect(keys).toEqual(['recurring-no-window:one:2026-08-20']);
   });
 
   test('rings at most 10 new notices a run, soonest date first; the rest wait for the next run', async () => {
@@ -229,20 +236,22 @@ describe('missing-geo notice close', () => {
   const { retireMissingGeoNotices } = require('../services/auto-dispatch/audit');
   const now = new Date('2026-08-05T16:00:00Z');
 
-  test('closes every missing-geo notice whose visit this run did not skip, matching the date', async () => {
+  test('closes a notice whose visit has a usable pin or is no longer live on that date; an unexamined visit keeps it', async () => {
     await retireMissingGeoNotices(new Set(['v1', 'v2']), now);
     expect(retire).toHaveBeenCalledWith(expect.objectContaining({
       done_at: now, done_by: 'auto-dispatch', title: 'Address pin alert resolved',
     }));
     const { sql, bindings } = retireStatements[0];
     expect(sql).toContain("s.scheduled_date::text = notifications.metadata->>'scheduledDate'");
-    expect(sql).toContain('"s"."id" in (?, ?)');
-    expect(bindings).toEqual(expect.arrayContaining(['auto-dispatch-missing-geo:%', 'v1', 'v2']));
+    expect(sql).toContain('"s"."scheduled_date" >= ?');
+    expect(sql).toContain('"s"."status" in (?, ?)');
+    // Still open unless the run found the pin usable: NOT IN, never IN.
+    expect(sql).toContain('"s"."id" not in (?, ?)');
+    expect(bindings).toEqual(expect.arrayContaining(['auto-dispatch-missing-geo:%', '2026-08-05', 'pending', 'confirmed', 'v1', 'v2']));
   });
 
-  test('with no flagged visit every standing missing-geo notice closes', async () => {
+  test('with no usable pin found this run, a live visit keeps its notice', async () => {
     await retireMissingGeoNotices(new Set(), now);
-    expect(retireStatements[0].sql).toContain('and 1 = ?');
-    expect(retireStatements[0].bindings).toContain(0);
+    expect(retireStatements[0].sql).not.toContain('"s"."id" in');
   });
 });

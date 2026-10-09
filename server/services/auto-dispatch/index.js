@@ -646,12 +646,14 @@ async function missingGeoNoticeWanted(service) {
   }
 }
 
-// Raise the notice and remember the visit, so the run's end closes the notices
-// of every visit that was not skipped for a missing pin this time.
 async function noticeMissingGeo(run, service) {
-  if (!(await missingGeoNoticeWanted(service))) return;
-  run.missingGeoIds.add(String(service.id));
-  await flagMissingGeo(service);
+  if (await missingGeoNoticeWanted(service)) await flagMissingGeo(service);
+}
+
+// A visit that passed eligibility has a usable pin: the run's end closes a
+// standing missing-pin notice for it. Nothing else closes one early.
+function notePinOk(run, service, elig) {
+  if (elig.eligible) run.pinOkIds.add(String(service.id));
 }
 
 // An ineligible visit's skip: logged, plus the missing-map-point notice.
@@ -660,13 +662,13 @@ async function logIneligible(run, service, elig) {
   if (elig.reason_code === 'MISSING_GEO') await noticeMissingGeo(run, service);
 }
 
-// Close the missing-pin notices this run did not raise again. Only after a
-// pass 1 that finished with no failed visit: a run that stopped early did not
-// look at every visit, so silence proves nothing. Best-effort.
+// Close the missing-pin notices of visits whose pin this run found usable (and
+// of visits no longer live on that date). Only after a pass 1 that finished
+// with no failed visit. Best-effort.
 async function closeMissingGeoNotices(run) {
   if (!run.pass1Complete) return;
   try {
-    await audit.retireMissingGeoNotices(run.missingGeoIds, run.nowDate);
+    await audit.retireMissingGeoNotices(run.pinOkIds, run.nowDate);
   } catch (err) {
     logger.error(`[auto-dispatch] missing-geo notice close failed: ${err.message}`);
   }
@@ -709,6 +711,7 @@ async function evaluateServiceForRun(service, run) {
   const eligCtx = buildEligCtx(guardMode, run.today, run.lockBoundary, config.lockWindowDays);
   const gate = await eligibilityWithGeoHeal(service, eligCtx, run);
   if (gate.skip) return logSkip(run, service, gate.skip);
+  notePinOk(run, service, gate.elig);
   if (!gate.elig.eligible) return logIneligible(run, service, gate.elig);
 
   // ── Day-move guard (only when a guard mode is active) ──
@@ -970,7 +973,7 @@ async function runAutoDispatch(opts = {}) {
     guardReadDegraded: false, // a failed guard read must not report a green run
     // Visits skipped for a missing pin on a live plan this run, and whether
     // pass 1 looked at every visit (their notices close only then).
-    missingGeoIds: new Set(),
+    pinOkIds: new Set(),
     pass1Complete: false,
   };
 

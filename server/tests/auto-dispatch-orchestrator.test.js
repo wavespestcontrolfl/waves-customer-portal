@@ -241,9 +241,15 @@ describe('missing-geo notice close at the end of a run', () => {
     eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
   });
 
-  test('closes with the visits that raised the notice this run', async () => {
+  test('a visit still skipped for a missing pin is not in the close list', async () => {
     await runAutoDispatch({ mode: 'dry_run' });
     expect(audit.retireMissingGeoNotices).toHaveBeenCalledTimes(1);
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(), expect.any(Date));
+  });
+
+  test('a visit that passed eligibility has a usable pin, so its standing notice may close', async () => {
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
+    await runAutoDispatch({ mode: 'dry_run' });
     expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
   });
 
