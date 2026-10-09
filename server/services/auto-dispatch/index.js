@@ -607,7 +607,8 @@ function guardSkipReason(skip) {
 
 // One admin notice per visit that stays without a usable map point after the
 // geocode self-heal, so a visit skipped every night is not left to nobody.
-// Best-effort: a notice failure is logged and never fails the visit or the run.
+// Raised at the run's end under a per-run budget (raiseMissingGeoNotices).
+// Best-effort: a notice failure is logged and never fails the run.
 async function flagMissingGeo(service) {
   try {
     const date = toDateStr(service.scheduled_date);
@@ -626,7 +627,7 @@ async function flagMissingGeo(service) {
       // no row at all. One notice per visit and date (dedupeKey), so it rings
       // once; a recurrence after the run closed it reopens (refreshOnDedupe).
       bell: true,
-      dedupeKey: `auto-dispatch-missing-geo:${service.id}:${date}`,
+      dedupeKey: audit.missingGeoKey({ id: service.id, date }),
       refreshOnDedupe: true,
       metadata: { scheduledServiceId: service.id, customerId: service.customer_id, scheduledDate: date },
     });
@@ -646,8 +647,12 @@ async function missingGeoNoticeWanted(service) {
   }
 }
 
+// Pass 1 only records the visit; nothing rings until the run ends, so a geocoder
+// outage cannot raise one bell per visit (raiseMissingGeoNotices).
 async function noticeMissingGeo(run, service) {
-  if (await missingGeoNoticeWanted(service)) await flagMissingGeo(service);
+  if (!(await missingGeoNoticeWanted(service))) return;
+  const date = toDateStr(service.scheduled_date);
+  run.missingGeoWanted.push({ id: service.id, customer_id: service.customer_id, scheduled_date: date, date });
 }
 
 // A visit that passed eligibility has a usable pin: the run's end closes a
@@ -660,6 +665,19 @@ function notePinOk(run, service, elig) {
 async function logIneligible(run, service, elig) {
   await logSkip(run, service, elig);
   if (elig.reason_code === 'MISSING_GEO') await noticeMissingGeo(run, service);
+}
+
+// Raise the missing-pin notices pass 1 collected: a visit with a standing
+// notice is refreshed free, at most NEW_NOTICES_PER_RUN new ones ring, soonest
+// date first. The rest wait for the next run. Best-effort.
+async function raiseMissingGeoNotices(run) {
+  if (!run.missingGeoWanted.length) return;
+  try {
+    const picked = audit.withinRingBudget(run.missingGeoWanted, await audit.standingMissingGeoKeys(), audit.NEW_NOTICES_PER_RUN, audit.missingGeoKey);
+    for (const row of picked) await flagMissingGeo(row);
+  } catch (err) {
+    logger.error(`[auto-dispatch] missing-geo notices failed: ${err.message}`);
+  }
 }
 
 // Close the missing-pin notices of visits whose pin this run found usable (and
@@ -974,6 +992,7 @@ async function runAutoDispatch(opts = {}) {
     // Visits skipped for a missing pin on a live plan this run, and whether
     // pass 1 looked at every visit (their notices close only then).
     pinOkIds: new Set(),
+    missingGeoWanted: [], // visits to raise a missing-pin notice for at the run's end
     pass1Complete: false,
   };
 
@@ -1021,6 +1040,7 @@ async function runAutoDispatch(opts = {}) {
     if (runStatus === 'completed') runStatus = 'completed_with_errors';
     logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
   }
+  await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });

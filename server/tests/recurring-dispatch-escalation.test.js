@@ -20,11 +20,14 @@ const retire = jest.fn();
 const retireStatements = [];
 // dedupe keys of no-window notices that already exist in the notification store
 let existingNoticeKeys = [];
+// the same, but already closed: the retire rewrote their title to the resolved one
+let resolvedNoticeKeys = [];
 const query = {};
 beforeEach(() => {
   jest.clearAllMocks();
   retireStatements.length = 0;
   existingNoticeKeys = [];
+  resolvedNoticeKeys = [];
   retire.mockResolvedValue(1);
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   db.raw = jest.fn((sql) => sql);
@@ -44,7 +47,14 @@ beforeEach(() => {
       retireStatements.push(update(values).toSQL());
       return retire(values);
     };
-    cleanup.select = jest.fn(async () => existingNoticeKeys.map((dedupe_key) => ({ dedupe_key })));
+    // The standing-key read excludes rows by title, like the real query.
+    let excludedTitle = null;
+    const whereNot = cleanup.whereNot.bind(cleanup);
+    cleanup.whereNot = (column, value) => { if (column === 'title') excludedTitle = value; return whereNot(column, value); };
+    cleanup.select = jest.fn(async () => [
+      ...existingNoticeKeys.map((dedupe_key) => ({ dedupe_key })),
+      ...(excludedTitle === 'Recurring visit time alert resolved' ? [] : resolvedNoticeKeys.map((dedupe_key) => ({ dedupe_key }))),
+    ]);
     return cleanup;
   });
 });
@@ -211,6 +221,20 @@ describe('recurring visit with no arrival time and no due date', () => {
     const keys = notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
     expect(keys).toContain('recurring-no-window:n10:2026-08-20');
     expect(keys.filter((k) => k !== 'recurring-no-window:n10:2026-08-20')).toHaveLength(10);
+  });
+
+  test('a resolved notice is not standing: reopening it spends budget (Codex #6208 r3)', async () => {
+    const rows = Array.from({ length: 11 }, (_, i) => ({
+      id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(10 + i).padStart(2, '0')}`,
+    }));
+    // n10 (the latest date) has a closed notice; refreshOnDedupe would reopen and ring it.
+    resolvedNoticeKeys = ['recurring-no-window:n10:2026-08-20'];
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'noticeX' });
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(10);
+    const keys = notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
+    expect(keys).toHaveLength(10);
+    expect(keys).not.toContain('recurring-no-window:n10:2026-08-20'); // counted as new, so it waits
   });
 
   test('a lapsed plan raises nothing, spends no budget, and its standing notice closes', async () => {

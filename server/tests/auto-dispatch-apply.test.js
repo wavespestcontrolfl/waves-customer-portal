@@ -248,6 +248,64 @@ describe('reminder sync failure after a committed move', () => {
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  // The throw can come from the separate confirmation re-arm update, after
+  // handleReschedule already wrote the new time (Codex #6208 r3).
+  test('a failed confirmation re-arm with the reminder already on the new slot raises nothing', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    movableQueue();
+    movableRows.push({ where() { return this; }, update: jest.fn().mockRejectedValue(new Error('re-arm write failed')) });
+    db.mockImplementation(tableReader({
+      appointment_reminders: { appointment_time: '2026-08-11T12:00:00Z' },
+      scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
+    }));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a failed re-arm with the reminder still on the old time tells staff', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    movableQueue();
+    movableRows.push({ where() { return this; }, update: jest.fn().mockRejectedValue(new Error('re-arm write failed')) });
+    db.mockImplementation(tableReader({
+      appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
+      scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
+    }));
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a grouped sibling whose reminder is off its committed slot gets its own notice (Codex #6208 r3)', async () => {
+    SmartRebooker.reschedule.mockResolvedValueOnce({
+      success: true,
+      visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
+        { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+        { id: 's2', isPrimary: false, previousStatus: 'confirmed', landed: { scheduled_date: '2026-08-11', window_start: '09:30', window_end: '10:30' } },
+      ] },
+    });
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: true });
+    // The tapped row's sync resolved a reminder row (nothing to inspect); the
+    // sibling's reminder row still names the old slot.
+    AppointmentReminders.composeScheduledApptTime = jest.fn(({ window_start: t }) => new Date(`2026-08-11T${t}:00Z`));
+    movableQueue();
+    movableRows.push({ where() { return this; }, update: jest.fn().mockResolvedValue(1) }); // sibling stamp
+    db.mockImplementation(tableReader({
+      appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
+      scheduled_services: { id: 's2', scheduled_date: '2026-08-11', window_start: '09:30' },
+    }));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+      'schedule_conflict', 'Schedule — check the reminder time on a moved visit', expect.stringContaining('Aug 11'),
+      expect.objectContaining({
+        link: '/admin/dispatch?tab=schedule&date=2026-08-11&appointment=s2',
+        dedupeKey: 'auto-dispatch-reminder-sync:s2:2026-08-11:09:30',
+        metadata: expect.objectContaining({ scheduledServiceId: 's2' }),
+      }),
+    );
+  });
+
   test('a clean reminder sync raises no notice', async () => {
     movableQueue();
     await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});

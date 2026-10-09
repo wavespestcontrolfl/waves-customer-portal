@@ -456,6 +456,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
 // the 72h/24h reminder could go out for the wrong time. A log line nobody reads
 // is not enough: tell staff to check that visit's reminder. Best-effort — the
 // notice is raised after the move and must never fail it.
+// `service` is the moved row ({ id, customer_id }: the tapped visit or a grouped
+// sibling) and `best` its committed slot ({ date, start_time }).
 async function flagReminderSyncFailed(service, best) {
   try {
     const { shortDateET } = require('../admin-alert-names');
@@ -502,8 +504,9 @@ async function committedReminderTime(AppointmentReminders, service) {
 // After a sync that returned nothing: whether a reminder row exists for the
 // visit and still names a time other than the one the committed visit holds.
 // No row is not a failure (nothing can go out for the old slot).
-// An unreadable row is logged, not alerted: nothing is known either way.
-async function reminderOffNewSlot(AppointmentReminders, service) {
+// An unreadable row is logged, not alerted: nothing is known either way —
+// unless the caller already knows the sync threw (`alertWhenUnreadable`).
+async function reminderOffNewSlot(AppointmentReminders, service, alertWhenUnreadable = false) {
   try {
     const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time');
     if (!row) return false;
@@ -512,7 +515,68 @@ async function reminderOffNewSlot(AppointmentReminders, service) {
     return !expected || Number.isNaN(actual) || actual !== expected.getTime();
   } catch (err) {
     logger.warn(`[auto-dispatch] reminder row could not be read after the move of ${service.id}: ${err.message}`);
-    return false;
+    return alertWhenUnreadable;
+  }
+}
+
+// A grouped move also moves sibling rows, and their reminder sync runs inside
+// the unit move, where a quiet failure is only logged. Compare each moved
+// sibling's persisted reminder with its committed slot, like the tapped row's.
+function siblingSlot(sib, best) {
+  const landed = sib.landed || {};
+  return { date: landed.scheduled_date ? toDateStr(landed.scheduled_date) : best.date, start_time: landed.window_start || best.start_time };
+}
+
+async function flagSiblingReminders(AppointmentReminders, service, best, siblingMembers) {
+  for (const sib of siblingMembers) {
+    try {
+      const row = { id: sib.id, customer_id: sib.customer_id || service.customer_id };
+      if (await reminderOffNewSlot(AppointmentReminders, row)) await flagReminderSyncFailed(row, siblingSlot(sib, best));
+    } catch (err) {
+      logger.warn(`[auto-dispatch] reminder check for grouped sibling ${sib && sib.id} failed: ${err.message}`);
+    }
+  }
+}
+
+// Keep appointment_reminders aligned with the new date/time — otherwise the
+// 72h/24h reminder cron can still fire for the OLD slot. Non-notifying sync
+// (same as the dispatch reschedule path); best-effort, then the same check for
+// every moved sibling.
+async function syncMovedReminders(service, best, moveResult, siblingMembers) {
+  const partialFailed = Array.isArray(moveResult?.visitMove?.failed) ? moveResult.visitMove.failed : [];
+  const AppointmentReminders = require('../appointment-reminders');
+  try {
+    const reminderRecord = await AppointmentReminders.handleReschedule(
+      service.id,
+      `${best.date}T${best.start_time || '08:00'}`,
+      // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
+      // round): a full success no longer releases inside the mover — this
+      // sync is the fenced finalizer and its repair-release clears the
+      // cohort; a partial/failed-retarget move keeps the hold for staff.
+      { sendNotification: false, preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true },
+    );
+    await rearmPendingConfirmation(reminderRecord);
+    await flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best);
+  } catch (remErr) {
+    logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
+    // The throw may come from the re-arm update, after the time was written:
+    // tell staff only when the persisted reminder is really off the new slot
+    // (an unreadable row counts as off: the sync itself threw).
+    if (await reminderOffNewSlot(AppointmentReminders, service, true)) await flagReminderSyncFailed(service, best);
+  }
+  await flagSiblingReminders(AppointmentReminders, service, best, siblingMembers);
+}
+
+// handleReschedule flips confirmation_sent→true assuming a reschedule notice
+// will follow; auto-dispatch sends none. If a creation confirmation was still
+// pending, re-arm it (mirrors the admin silent-reschedule path) so the
+// deferred sendConfirmation isn't suppressed — otherwise the customer gets
+// neither the confirmation nor a reschedule notice.
+async function rearmPendingConfirmation(reminderRecord) {
+  if (reminderRecord && reminderRecord.confirmation_sent === false) {
+    await db('appointment_reminders')
+      .where({ id: reminderRecord.id })
+      .update({ confirmation_sent: false, confirmation_sent_at: null });
   }
 }
 
@@ -666,35 +730,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     }
   }
 
-  // Keep appointment_reminders aligned with the new date/time — otherwise the
-  // 72h/24h reminder cron can still fire for the OLD slot. Non-notifying sync
-  // (same as the dispatch reschedule path); best-effort.
-  try {
-    const AppointmentReminders = require('../appointment-reminders');
-    const reminderRecord = await AppointmentReminders.handleReschedule(
-      service.id,
-      `${best.date}T${best.start_time || '08:00'}`,
-      // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
-      // round): a full success no longer releases inside the mover — this
-      // sync is the fenced finalizer and its repair-release clears the
-      // cohort; a partial/failed-retarget move keeps the hold for staff.
-      { sendNotification: false, preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true },
-    );
-    // handleReschedule flips confirmation_sent→true assuming a reschedule notice
-    // will follow; auto-dispatch sends none. If a creation confirmation was still
-    // pending, re-arm it (mirrors the admin silent-reschedule path) so the
-    // deferred sendConfirmation isn't suppressed — otherwise the customer gets
-    // neither the confirmation nor a reschedule notice.
-    if (reminderRecord && reminderRecord.confirmation_sent === false) {
-      await db('appointment_reminders')
-        .where({ id: reminderRecord.id })
-        .update({ confirmation_sent: false, confirmation_sent_at: null });
-    }
-    await flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best);
-  } catch (remErr) {
-    logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
-    await flagReminderSyncFailed(service, best);
-  }
+  await syncMovedReminders(service, best, moveResult, siblingMembers);
 
   const movedCount = 1 + siblingMembers.length;
   if (partialFailed.length) {

@@ -179,10 +179,13 @@ async function retireResolvedNotices({ keyPattern, stillOpen, resolvedTitle, res
 // How far ahead a recurring visit with no arrival time and no due date raises
 // a notice: far enough to set a time in dispatch before the lock window.
 const NO_WINDOW_HORIZON_DAYS = 45;
-// New no-window notices rung per run. Same number as DEFAULT_RING_BUDGET in
-// combined-booking-check.js (the daily budget the watchdog keeps), so one bad
-// day cannot ring more bells than the sibling check would.
-const NO_WINDOW_RING_BUDGET = 10;
+// New notices rung per run and lane (no-window, missing pin). Same number as
+// DEFAULT_RING_BUDGET in combined-booking-check.js (the daily budget the
+// watchdog keeps), so one bad day cannot ring more bells than the sibling check.
+const NEW_NOTICES_PER_RUN = 10;
+// Titles a retired notice is rewritten to; the budget read must skip them.
+const NO_WINDOW_RESOLVED_TITLE = 'Recurring visit time alert resolved';
+const MISSING_GEO_RESOLVED_TITLE = 'Address pin alert resolved';
 
 // Estimates the combined-booking check covers: accepted, not archived, and
 // two or more accepted service families (its own acceptedFamilies rule,
@@ -253,7 +256,7 @@ async function retireNoWindowNotices(nowDate, today, actionableIds) {
       .whereNull('s.recurring_dispatch_due_date')
       .where('s.scheduled_date', '>=', today)
       .whereIn('s.status', ['pending', 'confirmed']),
-    resolvedTitle: 'Recurring visit time alert resolved',
+    resolvedTitle: NO_WINDOW_RESOLVED_TITLE,
     resolution: 'The visit now has an arrival time, is no longer waiting on one for that date, or its plan has lapsed',
     body: 'This visit no longer needs an arrival time set.',
   }, nowDate);
@@ -263,26 +266,37 @@ function noWindowKey(row) {
   return `recurring-no-window:${row.id}:${row.date}`;
 }
 
-// Rows to raise or refresh this run: every row that already has a notice
-// (refresh only, no bell spent) plus at most `budget` new ones, soonest first.
-// Rows past the budget wait for the next run.
-function withinRingBudget(rows, existingKeys, budget) {
+function missingGeoKey(row) {
+  return `auto-dispatch-missing-geo:${row.id}:${row.date}`;
+}
+
+// Rows to raise or refresh this run: every row that already has a standing
+// notice (refresh only, no bell spent) plus at most `budget` new ones, soonest
+// first. Rows past the budget wait for the next run. `keyOf` names the lane.
+function withinRingBudget(rows, existingKeys, budget, keyOf = noWindowKey) {
   const picked = [];
   let fresh = 0;
   const soonestFirst = [...rows].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
   for (const row of soonestFirst) {
-    if (existingKeys.has(noWindowKey(row))) picked.push(row);
+    if (existingKeys.has(keyOf(row))) picked.push(row);
     else if (fresh < budget) { fresh += 1; picked.push(row); }
   }
   return picked;
 }
 
-async function existingNoWindowKeys() {
+// Dedupe keys of a lane's STANDING notices. A resolved one is not standing:
+// refreshOnDedupe reopens and rings it, so a reopening spends budget.
+async function standingNoticeKeys(keyPattern, resolvedTitle) {
   const rows = await db('notifications')
     .where({ recipient_type: 'admin', category: 'schedule_conflict' })
-    .whereRaw("metadata->>'dedupeKey' LIKE ?", ['recurring-no-window:%'])
+    .whereNot('title', resolvedTitle)
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [keyPattern])
     .select(db.raw("metadata->>'dedupeKey' as dedupe_key"));
   return new Set(rows.map((r) => r.dedupe_key));
+}
+
+function standingMissingGeoKeys() {
+  return standingNoticeKeys('auto-dispatch-missing-geo:%', MISSING_GEO_RESOLVED_TITLE);
 }
 
 // Retire standing notices that no longer apply, then return the visits to
@@ -298,7 +312,7 @@ async function prepareNoWindowNotices(nowDate, today, to) {
 async function flagNoWindowVisits(candidates, today, to) {
   const { shortDateET } = require('../admin-alert-names');
   const rows = candidates.length
-    ? withinRingBudget(candidates, await existingNoWindowKeys(), NO_WINDOW_RING_BUDGET)
+    ? withinRingBudget(candidates, await standingNoticeKeys('recurring-no-window:%', NO_WINDOW_RESOLVED_TITLE), NEW_NOTICES_PER_RUN)
     : [];
   let flagged = 0;
   for (const row of rows) {
@@ -348,7 +362,7 @@ async function retireMissingGeoNotices(pinOkIds, nowDate = new Date()) {
       .where('s.scheduled_date', '>=', etDateString(nowDate))
       .whereIn('s.status', ['pending', 'confirmed'])
       .whereNotIn('s.id', [...pinOkIds]),
-    resolvedTitle: 'Address pin alert resolved',
+    resolvedTitle: MISSING_GEO_RESOLVED_TITLE,
     resolution: 'The visit has a usable address pin, or is no longer waiting on that date',
     body: 'This visit no longer needs its address pin fixed.',
   }, nowDate);
@@ -422,4 +436,4 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
   return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireMissingGeoNotices, standingMissingGeoKeys, withinRingBudget, missingGeoKey, NEW_NOTICES_PER_RUN };
