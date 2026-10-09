@@ -618,11 +618,11 @@ async function committedReminderTime(AppointmentReminders, service) {
 
 function timeOf(date) { return date ? date.getTime() : null; }
 
-// The reminder job's own terminal list (appointment-reminders.js).
-const REMINDER_TERMINAL_STATUSES = ['cancelled', 'canceled', 'completed', 'skipped', 'no_show'];
-async function visitStillOpen(service) {
+// The reminder send loop's own skip list (terminal statuses and the pending
+// 'rescheduled' marker), read from that module, not copied (r23 P2).
+async function visitStillOpen(AppointmentReminders, service) {
   const visit = await db('scheduled_services').where({ id: service.id }).first('status');
-  return !visit || !REMINDER_TERMINAL_STATUSES.includes(String(visit.status));
+  return !visit || !AppointmentReminders.REMINDER_BLOCKING_STATUSES.has(String(visit.status || '').toLowerCase());
 }
 
 // After a sync that returned nothing: whether a reminder row exists for the
@@ -641,7 +641,7 @@ async function reminderOffNewSlot(AppointmentReminders, service) {
     const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time', 'cancelled');
     // A cancelled reminder cannot go out, and neither can one for a visit
     // that is no longer open: its stale time needs no check (r22 P2).
-    if (!row || row.cancelled === true || !(await visitStillOpen(service))) return false;
+    if (!row || row.cancelled === true || !(await visitStillOpen(AppointmentReminders, service))) return false;
     const expected = await committedReminderTime(AppointmentReminders, service);
     if (timeOf(before) !== timeOf(expected)) return false;
     const actual = new Date(row.appointment_time).getTime();

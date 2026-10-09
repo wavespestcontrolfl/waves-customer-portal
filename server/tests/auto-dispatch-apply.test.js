@@ -9,7 +9,10 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
-jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue() }));
+jest.mock('../services/appointment-reminders', () => ({
+  handleReschedule: jest.fn().mockResolvedValue(),
+  REMINDER_BLOCKING_STATUSES: new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show', 'rescheduled']),
+}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
@@ -296,6 +299,7 @@ describe('reminder sync failure after a committed move', () => {
   test.each([
     ['the reminder is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
     ['the visit is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: false }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'cancelled' }],
+    ['the visit waits for a new slot (rescheduled)', { appointment_time: '2026-08-04T13:00:00Z', cancelled: false }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'rescheduled' }],
   ])('a stale reminder time raises nothing when %s', async (_label, reminder, visit) => {
     AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
     AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);

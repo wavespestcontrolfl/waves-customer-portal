@@ -6033,4 +6033,8 @@ AppointmentReminders.callbackNumberHoldActiveForVisit = callbackNumberHoldActive
 // boolean is wrong there.
 AppointmentReminders.callbackNumberHoldConfirmedForVisit = callbackNumberHoldConfirmedForVisit;
 
+// The statuses the send loop skips: auto-dispatch's post-move reminder check
+// reads the same list (Codex #6208 r23 P2).
+AppointmentReminders.REMINDER_BLOCKING_STATUSES = REMINDER_BLOCKING_STATUSES;
+
 module.exports = AppointmentReminders;
