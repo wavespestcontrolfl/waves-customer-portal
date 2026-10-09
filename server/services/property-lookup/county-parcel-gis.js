@@ -434,6 +434,11 @@ const COUNTY_LAYERS = {
       // hardscape" (live probe: a just-sold 2024 build carried 0) → null.
       imperviousAreaSf: positiveOrNull(g('FEATS_SQFT_IMPERV')),
     }),
+    // Owner fields are requested ONLY for an `includeOwners` lookup (the call
+    // last-name fill) — never part of outFields, so every other lookup path
+    // asks for, receives and caches exactly what it did before.
+    ownerFields: ['PAR_OWNER_NAME1', 'PAR_OWNER_NAME2'],
+    parseOwners: (g) => [g('PAR_OWNER_NAME1'), g('PAR_OWNER_NAME2')],
   },
   Sarasota: {
     url: 'https://ags3.scgov.net/server/rest/services/Hosted/Parcels/FeatureServer/0/query',
@@ -462,6 +467,10 @@ const COUNTY_LAYERS = {
       rollYear: null,
       imperviousAreaSf: null, // not in the Sarasota layer
     }),
+    // name_add2 is sometimes a second owner and sometimes an address line; the
+    // owner-name parser rejects anything that is not a plain personal name.
+    ownerFields: ['name1', 'name_add2'],
+    parseOwners: (g) => [g('name1'), g('name_add2')],
   },
   Charlotte: {
     url: 'https://agis3.charlottecountyfl.gov/arcgis/rest/services/Essentials/CCGISLayers/MapServer/27/query',
@@ -489,12 +498,34 @@ const COUNTY_LAYERS = {
       rollYear: null,
       imperviousAreaSf: null, // not in the Charlotte ownership layer
     }),
+    ownerFields: ['ownersname'],
+    parseOwners: (g) => [g('ownersname')],
   },
 };
 
 function cleanStr(value) {
   const text = String(value ?? '').trim();
   return text || null;
+}
+
+// Raw owner strings off a layer row: trimmed, whitespace collapsed, de-duplicated.
+function ownerNamesFrom(values) {
+  const names = (values || []).map((v) => String(v ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  return [...new Set(names)];
+}
+
+// Owner columns ride along ONLY for an includeOwners lookup (the call
+// last-name fill): the default request and result stay exactly as they were,
+// so no owner name can reach a lookup cache or log.
+function layerOutFields(layer, includeOwners) {
+  return includeOwners ? [...layer.outFields, ...layer.ownerFields] : layer.outFields;
+}
+
+// `{ ownerNames }` for an includeOwners lookup, else nothing. A stacked
+// association (attrs null) shares one polygon among many units: no single owner.
+function ownerNamesPatch(includeOwners, layer, attrs) {
+  if (!includeOwners) return {};
+  return { ownerNames: attrs ? ownerNamesFrom(layer.parseOwners(attrs)) : [] };
 }
 
 function positiveOrNull(value) {
@@ -595,7 +626,7 @@ function recordGisDiagError(diag, county, err, aborted) {
 // the same as "no parcel at this point", so without it a replay cannot tell a
 // county outage / WAF rejection from a genuine roll miss. Never read by the
 // live lookup.
-async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null) {
+async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null, includeOwners) {
   const layer = COUNTY_LAYERS[county];
   if (!layer) return null;
 
@@ -605,7 +636,7 @@ async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null) {
     geometryType: 'esriGeometryPoint',
     inSR: '4326',
     spatialRel: 'esriSpatialRelIntersects',
-    outFields: layer.outFields.join(','),
+    outFields: layerOutFields(layer, includeOwners).join(','),
     returnGeometry: 'true',
     outSR: '4326',
   });
@@ -648,6 +679,7 @@ async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null) {
           assessmentYear: aggregate.rollYear || null,
           sourceUrl: layer.url.replace(/\/query\/?$/, ''),
           gisProvider: `${county.toLowerCase()}_gis`,
+          ...ownerNamesPatch(includeOwners, layer, null),
         };
         delete parcel._masterRings;
         delete parcel._polyArea;
@@ -670,7 +702,8 @@ async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null) {
     const polygon = Array.isArray(feature?.geometry?.rings) && feature.geometry.rings.length
       ? feature.geometry.rings
       : null;
-    const parsed = layer.parse(ciAttr(feature.attributes || {}));
+    const attrs = ciAttr(feature.attributes || {});
+    const parsed = layer.parse(attrs);
     if (!parsed.parcelId) return null;
 
     const polyArea = polygonAreaSqft(polygon);
@@ -686,6 +719,7 @@ async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null) {
       assessmentYear: parsed.rollYear || null, // attachParcelMeta reads `vintage`
       sourceUrl: layer.url.replace(/\/query\/?$/, ''),
       gisProvider: `${county.toLowerCase()}_gis`,
+      ...ownerNamesPatch(includeOwners, layer, attrs),
     };
 
     logger.info('[county-parcel-gis] matched parcel', {
@@ -764,6 +798,9 @@ const MIN_COUNTY_GIS_QUERY_MS = 500;
 // serviced counties are tried in order until one matches — but the WHOLE loop
 // shares a single deadline (timeoutMs total, not per county) so a missing
 // county hint can't spend 3x the GIS budget and starve the FDOR/PAO fallbacks.
+// `options.includeOwners: true` also asks the layer for the owner fields and adds
+// `ownerNames: string[]` (raw strings; [] for a stacked association) — used only
+// by the call last-name fill, never cached or logged.
 async function lookupCountyParcelByPoint(lat, lng, options = {}) {
   if (isDisabled()) {
     logger.info('[county-parcel-gis] skipped — COUNTY_PARCEL_GIS_DISABLED');
@@ -786,7 +823,7 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
       recordGisDiagError(options.diag, county, new Error('point query budget exhausted before this county'), true);
       break;
     }
-    const parcel = await queryCountyLayer(county, lat, lng, remainingMs, options.diag).catch(() => null);
+    const parcel = await queryCountyLayer(county, lat, lng, remainingMs, options.diag, options.includeOwners === true).catch(() => null);
     if (parcel) return parcel;
   }
   return null;
