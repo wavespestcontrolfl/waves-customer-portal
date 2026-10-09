@@ -543,13 +543,14 @@ describe('isBlackoutDate is savepoint-isolated when given a transaction', () => 
   test('the optional read goes through readOptional, not the bare conn', () => {
     expect(fn).toContain("readOptional(conn, (dbh) => dbh('schedule_blackout_dates')");
     expect(fn).not.toMatch(/await conn\('schedule_blackout_dates'\)/);
-    // Still fails open, and the weekly lookup shares the connection.
+    // Still fails open by default (strict, the auto-dispatch option, rethrows),
+    // and the weekly lookup shares the connection.
     expect(fn).toContain('return false;');
-    expect(fn).toContain('getWeeklyDaysOff(conn)');
+    expect(fn).toContain('getWeeklyDaysOff(conn, { strict })');
   });
 
   test('the default keeps every pre-existing caller on the pool connection', () => {
-    expect(src).toContain('async function isBlackoutDate(dateVal, conn = db) {');
+    expect(src).toContain('async function isBlackoutDate(dateVal, conn = db, { strict = false } = {}) {');
   });
 });
 

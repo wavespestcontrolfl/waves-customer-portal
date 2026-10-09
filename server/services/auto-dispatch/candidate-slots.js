@@ -47,6 +47,7 @@ const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable } = require('../technician-eligibility');
+const { currentConflict } = require('./current-conflict');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -501,14 +502,47 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   return kept;
 }
 
+// The legacy pre-score cap. For a visit in conflict, same-day slots that sit
+// past the cap are ADDED to the capped set (marked `past_cap`), so a same-day
+// repair is never cut behind cheaper other-day slots before move-rules.js
+// ranks same-day first (pre-push P1). The capped set itself is untouched:
+// it is what the visit is ranked on once its conflict is gone, and past_cap
+// slots take no part in that ordinary ranking (Codex #6207 r8, r11 P2).
+// Any other visit, or gate off: the capped set only.
+function legacyCap(service, candidates, ctx) {
+  const cap = ctx.scoreCap || SCORE_CAP;
+  const capped = candidates.slice(0, cap);
+  if (!ctx.evalConflict) return capped;
+  const own = toDateStr(service.scheduled_date);
+  return [...capped, ...candidates.slice(cap).filter((c) => c.date === own).map((c) => ({ ...c, past_cap: true }))];
+}
+
 // Single entry point findValidCandidateSlots calls unconditionally, so the
 // gate adds no branch there. Gate off: find-time's order trimmed to the
 // SCORE_CAP survivors that get scored, exactly as before. Gate on: every
 // survivor, ordered by the shared model's detour — index.js scores ALL of
 // them and caps by total score instead (Codex r1: a pre-score cap on a
 // detour proxy could drop the best-scoring candidate unscored).
+// Legacy model, grouped visit in a conflict (an overlap or a closed day;
+// Codex #6207 r15 P1): find-time sized each opening for the tapped row
+// only. The unit mover shifts every member, so a slot the members' predicted windows do not fit
+// (the writer's SLOT_TAKEN) is dropped before the ranking; legacy apply
+// makes one attempt (Codex #6207 r14 P1). Any other visit: unchanged.
+async function dropSlotsTheUnitCannotTake(service, candidates, ctx, drops) {
+  if (!ctx.evalConflict) return candidates;
+  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
+  if (!siblings.length) return candidates;
+  const group = { members: unitMembers(service, siblings), visitWindowStart };
+  const occupiedByDate = await loadOccupiedSpansByDate(ctx.db, candidates.map((c) => c.date), excludeIds);
+  return candidates.filter((cand) => {
+    const taken = slotTaken(planUnitPlacement(service, group, cand), occupiedByDate.get(cand.date) || []);
+    if (taken && drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
+    return !taken;
+  });
+}
+
 async function rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops) {
-  if (!autoDispatchSharedModelLive()) return candidates.slice(0, ctx.scoreCap || SCORE_CAP);
+  if (!autoDispatchSharedModelLive()) return legacyCap(service, await dropSlotsTheUnitCannotTake(service, candidates, ctx, drops), ctx);
   const survivors = await filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops);
   return survivors.slice().sort((a, b) => (a.detour_minutes || 0) - (b.detour_minutes || 0));
 }
@@ -612,8 +646,42 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     date: dateStr,
     start_time: service.window_start ? String(service.window_start).slice(0, 5) : null,
     capability_level: ctx.capabilityFor(techId, category),
+    // The legacy neighbors above exclude only this row, so a grouped visit's
+    // detour is measured against its own siblings (move-rules.js drive floor).
+    ...(await legacyGroupBlindField(service, ctx)),
     ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr)),
+    ...(await currentConflictField(service, ctx)),
   };
+}
+
+// Legacy model only: `detour_group_blind` when the visit has a live grouped
+// sibling. A visit_id alone is not enough — a group whose other members are
+// all terminal has a valid detour (Codex #6207 r7 P2).
+async function legacyGroupBlindField(service, ctx) {
+  if (!service.visit_id || autoDispatchSharedModelLive()) return {};
+  const { siblings } = await groupContextFor(service, ctx);
+  return siblings.length ? { detour_group_blind: true } : {};
+}
+
+// GATE_AUTO_DISPATCH_CONFLICT_MOVES (ctx.conflictMoves): `conflict` when the
+// visit overlaps another customer's stop or sits on a closed day
+// (current-conflict.js). Gate off: no read, no field.
+async function currentConflictField(service, ctx) {
+  // findValidCandidateSlots reads it once for the evaluation (evalConflict).
+  const conflict = ctx.evalConflict !== undefined ? ctx.evalConflict : await readCurrentConflict(service, ctx);
+  if (!conflict) return {};
+  // Every row that moves with this visit: the dry run counts the whole unit
+  // as moved when it recommends one member (Codex #6207 r9 P2).
+  const { excludeIds } = await groupContextFor(service, ctx);
+  return { conflict, conflict_unit_ids: [...new Set([String(service.id), ...[...(excludeIds || [])].map(String)])] };
+}
+
+// Also the apply-time re-read (apply.js makeMoveGuard, on the move
+// transaction): the group is read on the same connection as the conflict.
+async function readCurrentConflict(service, ctx) {
+  if (!ctx.conflictMoves) return null;
+  const { excludeIds } = await groupContextFor(service, ctx);
+  return currentConflict(service, ctx, excludeIds);
 }
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL: the current placement's numbers from the
@@ -640,12 +708,26 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   };
 }
 
+// Rows find-time ignores when it looks for free slots. A visit that overlaps
+// another stop may be repaired by a same-day shift, and its group moves with
+// it: a sibling's old window must not hide the 11:00 start of a 10:00 unit,
+// so the whole moving unit is excluded, as the destination writer does
+// (Codex #6207 r8 P1). Any other visit: itself only, as before.
+async function movingUnitIds(service, ctx) {
+  if (!ctx.evalConflict || ctx.evalConflict.kind !== 'overlap') return [service.id];
+  const { excludeIds } = await groupContextFor(service, ctx);
+  return [...new Set([String(service.id), ...[...(excludeIds || [])].map(String)])];
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
   // The visit group is read ONCE for this evaluation and shared by the
   // current placement and every candidate (see withGroupContext).
-  const ctx = await withGroupContext(service, baseCtx);
+  const grouped = await withGroupContext(service, baseCtx);
+  // Read once: candidate generation, the cap and the current placement all
+  // use the same answer. Gate off: null, no read.
+  const ctx = { ...grouped, evalConflict: await readCurrentConflict(service, grouped) };
 
   // Search within ± tolerance days of the visit's CURRENT date (clamped to the
   // lock floor and lookahead horizon) so optimization tightens the route without
@@ -720,7 +802,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     durationMinutes: duration,
     dateFrom,
     dateTo,
-    excludeServiceIds: [service.id],
+    excludeServiceIds: await movingUnitIds(service, ctx),
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
     // HARD time preference must enter slot GENERATION, not just post-filtering:
     // find-time emits only each gap's earliest-feasible start, so an empty day
@@ -828,6 +910,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
