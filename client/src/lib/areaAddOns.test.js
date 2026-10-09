@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  areaAddOnOption,
+  areaAddOnRowLabel,
   buildAreaAddOnRequest,
   buildKnownAreas,
   isAreaAddOnOnly,
   newAddOnEntry,
   pickedGrass,
   readAreaAddOnCatalog,
+  savedAreaAddOnVisit,
   savedAreaAddOns,
   tierSelectValue,
   withTierChoice,
@@ -39,7 +42,7 @@ describe("area add-on entries", () => {
     expect(newAddOnEntry(item, { sqft: 1001 }).areaSqFt).toBe("2000");
     expect(newAddOnEntry(item, null).areaSqFt).toBe("1000");
     expect(newAddOnEntry(item, { sqft: 3500.4 })).toMatchObject({ areaSqFt: "3501", larger: true });
-    expect(newAddOnEntry({ ...item, tiers: null }, { sqft: 900 })).toEqual({ visitContext: "standalone" });
+    expect(newAddOnEntry({ ...item, tiers: null }, { sqft: 900 })).toEqual({});
   });
 
   it("shows the manual-quote choice for an area above the largest tier and keeps a real area with it", () => {
@@ -71,10 +74,11 @@ describe("grass-bound add-on entries", () => {
   it("send the entry's own grass, else an explicit unknown, whether the catalog or the entry says it is grass-bound", () => {
     const catalog = { enabled: true, items: [grassItem, item] };
     expect(buildAreaAddOnRequest({ g: { areaSqFt: "1000", grassType: "zoysia" }, k: { areaSqFt: "1000" } }, catalog)).toEqual([
-      { key: "g", areaSqFt: 1000, visitContext: "standalone", grassType: "zoysia" },
-      { key: "k", areaSqFt: 1000, visitContext: "standalone" },
+      { key: "g", areaSqFt: 1000, grassType: "zoysia" },
+      { key: "k", areaSqFt: 1000 },
     ]);
-    for (const entry of [{ areaSqFt: "1000" }, { areaSqFt: "1000", grassType: "" }, { areaSqFt: "1000", grassType: "  " }]) {
+    // A null grass is "not chosen", like the empty one: the server prices it as unknown too, never as the form's grass.
+    for (const entry of [{ areaSqFt: "1000" }, { areaSqFt: "1000", grassType: "" }, { areaSqFt: "1000", grassType: "  " }, { areaSqFt: "1000", grassType: null }]) {
       expect(buildAreaAddOnRequest({ g: entry }, catalog)[0].grassType).toBe("unknown");
     }
     // No catalog (not loaded): an entry that carries a grass field still sends one.
@@ -89,30 +93,56 @@ describe("request and saved estimates", () => {
     expect(buildAreaAddOnRequest(undefined)).toBeUndefined();
     const list = buildAreaAddOnRequest({
       a: { areaSqFt: "2000", larger: false, visitContext: "sameTripAddOn", applications: 2 },
-      b: { visitContext: "standalone" },
+      b: {},
       c: { areaSqFt: "", larger: true },
     });
-    expect(list).toEqual([
-      { key: "a", areaSqFt: 2000, visitContext: "sameTripAddOn" },
-      { key: "b", visitContext: "standalone" },
-      { key: "c", visitContext: "standalone" },
-    ]);
+    // The visit is never inside an entry, even one saved by an older build.
+    expect(list).toEqual([{ key: "a", areaSqFt: 2000 }, { key: "b" }, { key: "c" }]);
+  });
+
+  it("sends the group visit once beside the list, and nothing when no add-on is selected", () => {
+    expect(areaAddOnOption({ a: {} })).toEqual({ areaAddOns: [{ key: "a" }], areaAddOnVisit: "standalone" });
+    expect(areaAddOnOption({ a: {} }, null, "sameTripAddOn").areaAddOnVisit).toBe("sameTripAddOn");
+    expect(areaAddOnOption({ a: {} }, null, "builderBatch").areaAddOnVisit).toBe("standalone");
+    expect(areaAddOnOption({}, null, "sameTripAddOn")).toEqual({});
   });
 
   it("reads a saved estimate from its form snapshot first, then from the stored request", () => {
-    const snapshot = { a: { areaSqFt: "1000", larger: false, visitContext: "standalone" } };
-    expect(savedAreaAddOns({ inputs: { areaAddOns: snapshot }, engineRequest: { options: { areaAddOns: [{ key: "z" }] } } })).toBe(snapshot);
-    expect(savedAreaAddOns({ inputs: {}, engineRequest: { options: { areaAddOns: [{ key: "z", areaSqFt: 700, visitContext: "sameTripAddOn" }, { areaSqFt: 5 }] } } }))
-      .toEqual({ z: { areaSqFt: "700", larger: false, visitContext: "sameTripAddOn" } });
+    const snapshot = { a: { areaSqFt: "1000", larger: false } };
+    expect(savedAreaAddOns({ inputs: { areaAddOns: snapshot }, engineRequest: { options: { areaAddOns: [{ key: "z" }] } } })).toEqual(snapshot);
+    expect(savedAreaAddOns({ inputs: {}, engineRequest: { options: { areaAddOns: [{ key: "z", areaSqFt: 700 }, { areaSqFt: 5 }] } } }))
+      .toEqual({ z: { areaSqFt: "700", larger: false } });
     expect(savedAreaAddOns({})).toEqual({});
+    // An entry saved with its own visit (older build) loses it.
+    expect(savedAreaAddOns({ inputs: { areaAddOns: { a: { areaSqFt: "1000", visitContext: "sameTripAddOn" } } } })).toEqual({ a: { areaSqFt: "1000" } });
+  });
+
+  it("reads the saved group visit: the form field, the stored request, else same visit only if every old entry had it", () => {
+    expect(savedAreaAddOnVisit({ inputs: { areaAddOnVisit: "sameTripAddOn" } })).toBe("sameTripAddOn");
+    expect(savedAreaAddOnVisit({ engineRequest: { options: { areaAddOnVisit: "sameTripAddOn" } } })).toBe("sameTripAddOn");
+    expect(savedAreaAddOnVisit({ inputs: { areaAddOnVisit: "bogus" } })).toBe("standalone");
+    expect(savedAreaAddOnVisit({})).toBe("standalone");
+    const same = { visitContext: "sameTripAddOn" };
+    expect(savedAreaAddOnVisit({ inputs: { areaAddOns: { a: same, b: same } } })).toBe("sameTripAddOn");
+    expect(savedAreaAddOnVisit({ inputs: { areaAddOns: { a: same, b: { visitContext: "standalone" } } } })).toBe("standalone");
+    expect(savedAreaAddOnVisit({ engineRequest: { options: { areaAddOns: [{ key: "a", ...same }] } } })).toBe("sameTripAddOn");
+  });
+
+  it("labels a preview row by what it was priced as", () => {
+    const row = (extra) => areaAddOnRowLabel({ service: "area_addon", ...extra }, "fallback");
+    expect(row({ visitContext: "standalone", carriesVisitDrive: true })).toBe("Own visit");
+    expect(row({ visitContext: "standalone" })).toBe("Own visit");
+    expect(row({ visitContext: "standalone", carriesVisitDrive: false })).toBe("Own visit, with the other add-ons");
+    expect(row({ visitContext: "sameTripAddOn", carriesVisitDrive: false })).toBe("Same visit");
+    expect(areaAddOnRowLabel({ service: "dethatching" }, "fallback")).toBe("fallback");
   });
 
   it("reads a saved grass back, and the sent unknown as not chosen", () => {
     const list = [{ key: "g", areaSqFt: 1000, grassType: "zoysia" }, { key: "h", areaSqFt: 1000, grassType: "unknown" }, { key: "k", areaSqFt: 1000 }];
     expect(savedAreaAddOns({ inputs: {}, engineRequest: { options: { areaAddOns: list } } })).toEqual({
-      g: { areaSqFt: "1000", larger: false, visitContext: "standalone", grassType: "zoysia" },
-      h: { areaSqFt: "1000", larger: false, visitContext: "standalone", grassType: "" },
-      k: { areaSqFt: "1000", larger: false, visitContext: "standalone" },
+      g: { areaSqFt: "1000", larger: false, grassType: "zoysia" },
+      h: { areaSqFt: "1000", larger: false, grassType: "" },
+      k: { areaSqFt: "1000", larger: false },
     });
   });
 });

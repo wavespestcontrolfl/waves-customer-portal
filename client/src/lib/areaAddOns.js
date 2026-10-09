@@ -6,12 +6,34 @@
 // display name. The only add-on keys named in this file are the three whose
 // treated area the estimator already knows (the pre-fill rule, owner 2026-10-08).
 //
-// The form keeps one field, `areaAddOns`: a map of add-on key to
-// { areaSqFt: string, larger: boolean, visitContext, grassType? }. A key that is
-// present is a key that is selected. `grassType` exists only on an add-on whose
-// price is bound to a grass (catalog `requiresGrassTrack`): "" until the rep
-// chooses, never the form's default grass. `buildAreaAddOnRequest` turns it into the
-// `options.areaAddOns` list the calculate and save requests carry.
+// The form keeps two fields. `areaAddOns` is a map of add-on key to
+// { areaSqFt: string, larger: boolean, grassType? }. A key that is present is a
+// key that is selected. `grassType` exists only on an add-on whose price is
+// bound to a grass (catalog `requiresGrassTrack`): "" until the rep chooses,
+// never the form's default grass. `areaAddOnVisit` is the ONE visit choice for
+// the whole group ("standalone" or "sameTripAddOn"): several add-ons are a
+// single visit and the server charges one drive for it, so the visit is never
+// chosen per add-on. `buildAreaAddOnRequest` and `areaAddOnOption` turn them
+// into the `options.areaAddOns` list and `options.areaAddOnVisit` the
+// calculate and save requests carry.
+
+// An area add-on visit is generic one-time work (GATE_AREA_ADDONS). The tech
+// completion screens decide that by the visit's catalog service key
+// (`area_addon_<key>`), never by its name: "Lawn Insect Spot Treatment" reads as
+// a lawn visit and "Fire Ant Yard Treatment" as a pest one, and neither takes the
+// recurring lawn or pest completion form.
+export const AREA_ADDON_KEY_PREFIX = "area_addon_";
+
+export function isAreaAddOnServiceKey(serviceKey) {
+  return typeof serviceKey === "string" && serviceKey.startsWith(AREA_ADDON_KEY_PREFIX);
+}
+
+// The visit's own catalog key: the completion profile's, else the schedule row's.
+export function isAreaAddOnVisit(service) {
+  return isAreaAddOnServiceKey(service?.completionProfile?.serviceKey)
+    || isAreaAddOnServiceKey(service?.serviceKey)
+    || isAreaAddOnServiceKey(service?.service_key_snapshot);
+}
 
 export const STANDALONE_VISIT = "standalone";
 export const SAME_VISIT = "sameTripAddOn";
@@ -107,7 +129,6 @@ export function pickedGrass(form, grassChoices) {
 // grass-bound add-on starts on it, else with no grass.
 export function newAddOnEntry(item, known, pickedGrass = null) {
   const base = {
-    visitContext: STANDALONE_VISIT,
     ...(item.requiresGrassTrack ? { grassType: pickedGrass || "" } : {}),
   };
   if (!item.tiers) return base;
@@ -156,16 +177,22 @@ export function buildAreaAddOnRequest(selection, catalog = null) {
     return {
       key,
       ...(area === null ? {} : { areaSqFt: area }),
-      visitContext: entry?.visitContext === SAME_VISIT ? SAME_VISIT : STANDALONE_VISIT,
       ...(grassBound.has(key) || (isPlainObject(entry) && "grassType" in entry) ? { grassType: chosenGrass || UNKNOWN_GRASS } : {}),
     };
   });
 }
 
-// Spread into the request options: `{}` when nothing is selected.
-export function areaAddOnOption(selection, catalog = null) {
+// The group's visit as the request carries it: anything but the same-visit
+// choice is the add-ons' own visit.
+export function normalizeAreaAddOnVisit(visit) {
+  return visit === SAME_VISIT ? SAME_VISIT : STANDALONE_VISIT;
+}
+
+// Spread into the request options: `{}` when nothing is selected. The visit
+// goes out once, beside the list, never inside an entry.
+export function areaAddOnOption(selection, catalog = null, visit = STANDALONE_VISIT) {
   const areaAddOns = buildAreaAddOnRequest(selection, catalog);
-  return areaAddOns ? { areaAddOns } : {};
+  return areaAddOns ? { areaAddOns, areaAddOnVisit: normalizeAreaAddOnVisit(visit) } : {};
 }
 
 // A saved estimate's request list back into the form map.
@@ -178,7 +205,6 @@ export function selectionFromRequest(list) {
     selection[entry.key] = {
       ...(area === null ? {} : { areaSqFt: String(area) }),
       larger: false,
-      visitContext: entry.visitContext === SAME_VISIT ? SAME_VISIT : STANDALONE_VISIT,
       // The sent "unknown" reads back as "not chosen yet".
       ...("grassType" in entry ? { grassType: entry.grassType === UNKNOWN_GRASS ? "" : String(entry.grassType ?? "") } : {}),
     };
@@ -187,11 +213,32 @@ export function selectionFromRequest(list) {
 }
 
 // What a reopened estimate shows: the form snapshot it saved, else the list
-// its stored engine request carried.
+// its stored engine request carried. A per-add-on visitContext (written before
+// the visit became one group choice) is dropped from the entries here; the
+// group visit is read by savedAreaAddOnVisit.
 export function savedAreaAddOns(editSource) {
   const fromInputs = editSource?.inputs?.areaAddOns;
-  if (isPlainObject(fromInputs) && Object.keys(fromInputs).length > 0) return fromInputs;
+  if (isPlainObject(fromInputs) && Object.keys(fromInputs).length > 0) {
+    return Object.fromEntries(Object.entries(fromInputs).map(([key, entry]) => {
+      if (!isPlainObject(entry)) return [key, entry];
+      const { visitContext: _legacyVisit, ...rest } = entry;
+      return [key, rest];
+    }));
+  }
   return selectionFromRequest(editSource?.engineRequest?.options?.areaAddOns);
+}
+
+// The group visit a reopened estimate shows: the saved form field, else the
+// stored request's, else (an estimate saved with a visit on each add-on) the
+// same-visit choice only when every add-on had it.
+export function savedAreaAddOnVisit(editSource) {
+  const saved = editSource?.inputs?.areaAddOnVisit ?? editSource?.engineRequest?.options?.areaAddOnVisit;
+  if (saved !== undefined && saved !== null) return normalizeAreaAddOnVisit(saved);
+  const entries = [
+    ...Object.values(isPlainObject(editSource?.inputs?.areaAddOns) ? editSource.inputs.areaAddOns : {}),
+    ...(Array.isArray(editSource?.engineRequest?.options?.areaAddOns) ? editSource.engineRequest.options.areaAddOns : []),
+  ].filter(isPlainObject);
+  return entries.length > 0 && entries.every((entry) => entry.visitContext === SAME_VISIT) ? SAME_VISIT : STANDALONE_VISIT;
 }
 
 // The known areas for the pre-fill, from what the form already uses.
@@ -221,10 +268,12 @@ export function buildKnownAreas({ bedSqFt, manualFields, lawnSqFt, turfSource })
 }
 
 // The one-time card on the estimate preview: an add-on row says which visit it
-// rides on; every other row keeps its own label.
+// rides on; every other row keeps its own label. On an own visit the add-ons
+// share one trip: only the row that carries the drive is plain "Own visit".
 export function areaAddOnRowLabel(item, fallback) {
   if (item?.service !== "area_addon") return fallback;
-  return item.visitContext === SAME_VISIT ? "Same visit" : "Own visit";
+  if (item.visitContext === SAME_VISIT) return "Same visit";
+  return item.carriesVisitDrive === false ? "Own visit, with the other add-ons" : "Own visit";
 }
 
 // Add-ons carry no recurring-customer perk (the line says discountable: false).

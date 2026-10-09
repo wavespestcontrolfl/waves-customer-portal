@@ -91,6 +91,7 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import { isAreaAddOnVisit } from "../../lib/areaAddOns";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -941,6 +942,17 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
   mosquito: "mosquito",
   termite: "termite",
 };
+
+// An area add-on visit (GATE_AREA_ADDONS) is generic one-time work. The name
+// reads "lawn" for "Lawn Insect Spot Treatment" and "pest" for "Web Sweep", and
+// neither takes that line's completion form: the visit's catalog key decides.
+const AREA_ADDON_LINE = "general";
+function visitServiceCategory(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
+}
+function visitServiceLine(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
+}
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
@@ -7773,7 +7785,7 @@ export function ProtocolPanel({ service, onClose }) {
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
   // classified from the raw value — the panel must agree with them.
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
-  const serviceCategory = detectServiceCategory(panelServiceType);
+  const serviceCategory = visitServiceCategory(service, panelServiceType);
   const isLawn = serviceCategory === "lawn";
   // Fail closed: only an affirmative { enabled: true } opens the gated tab and
   // ask bar. A failed request is shown as a notice under the header instead.
@@ -10380,6 +10392,7 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
 // covers two areas, so it records no single shared coverage (null) and its
 // products and findings keep their own areas.
 function propertyAreaLineFor(service) {
+  if (isAreaAddOnVisit(service)) return null;
   const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
   const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
   return raw === normalized ? normalized : null;
@@ -12648,7 +12661,7 @@ export function CompletionPanel({
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
-  const lawnDefaultAreas = completionImprovements && serviceLineFromType(service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
+  const lawnDefaultAreas = completionImprovements && visitServiceLine(service, service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
   const [areasServiced, setAreasServiced] = useState(() => [...lawnDefaultAreas]);
   const lawnAreasInitializedRef = useRef(completionImprovements);
@@ -13545,7 +13558,7 @@ export function CompletionPanel({
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
   // (soil readings, treatment plan/calibration, tank cleanout) never apply.
   const isLawn =
-    !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
+    !isTypedFindings && visitServiceCategory(service, service.serviceType) === "lawn";
   // The tracer's capture mode follows the SERVER's eligibility variant
   // when the feed carries one (codex P2 r3): typed lawn visits
   // (aeration/fungicide/insect control) set isTypedFindings, which forces
@@ -13591,7 +13604,7 @@ export function CompletionPanel({
     }
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
-  const serviceCategory = detectServiceCategory(service.serviceType);
+  const serviceCategory = visitServiceCategory(service, service.serviceType);
   // Bed bug closeouts get interior-specific treated-area chips, skip the
   // satellite spray-trace (a perimeter trace has no meaning for an interior
   // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
@@ -13621,7 +13634,7 @@ export function CompletionPanel({
   // pest visit keeps the tracer, because that visit really did spray.
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
-  const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  const serviceLineForCloseout = visitServiceLine(service, serviceTypeForArea);
   // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
   // flag): the visit's photos and their descriptions sit inside the notes
   // box and the separate photo section goes away. Never on lawn or tree,

@@ -2751,7 +2751,7 @@ function areaAddOnCategoryForItem(item = {}) {
 // The add-on identity fields every re-shaping of a one-time row must keep, so
 // the key and tier survive normalize, render, choice and acceptance copies
 // (a copy that drops addOnKey loses the family and the catalog service).
-const AREA_ADDON_ROW_FIELDS = ['addOnKey', 'catalogServiceKey', 'addOnCategory', 'areaSqFt', 'tierSqFt', 'visitContext', 'onSiteMinutes'];
+const AREA_ADDON_ROW_FIELDS = ['addOnKey', 'catalogServiceKey', 'addOnCategory', 'areaSqFt', 'tierSqFt', 'visitContext', 'carriesVisitDrive', 'onSiteMinutes'];
 function areaAddOnRowFields(item = {}) {
   if (!isAreaAddOnItem(item)) return {};
   return Object.fromEntries(AREA_ADDON_ROW_FIELDS
@@ -12970,6 +12970,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             .update(updates);
           assertExistingAppointmentUpdateApplied(updatedCount);
           reservationCommitted = true;
+          await writeAdoptedAreaAddOnRows(trx, {
+            treatAsOneTime, appointmentId: existingAppointmentRow.id, estimate: acceptedEstimateForScheduling, updates, lockedAdoptRow,
+          });
           // The adopted appointment is a REAL booking committed by THIS
           // accept — record the inspection-credit evidence in the same trx
           // (Codex #3178 r25 P1). The post-commit redeemer and the sweep
@@ -19881,6 +19884,18 @@ function oneTimeItemLooksPestSpecialty(item = {}) {
   }
   return service === 'pest_initial_roach'
     || /\b(roach|cockroach|ant|spider|flea|wasp|bee|hornet|stinging|bed\s*bug|bedbug)\b/.test(text);
+}
+
+// Sold area add-ons an adopted (already booked) visit does not carry become its
+// add-on rows, in the accept transaction: a one-time accept only, and no add-on
+// on the estimate means no query. The visit's own identity is whatever it is.
+async function writeAdoptedAreaAddOnRows(trx, { treatAsOneTime, appointmentId, estimate, updates, lockedAdoptRow }) {
+  if (!treatAsOneTime) return 0;
+  return require('../services/area-addon-visit-rows').writeAdoptedAreaAddOns(trx, {
+    scheduledServiceId: appointmentId,
+    estimate,
+    ownServiceKey: updates.service_key_snapshot || lockedAdoptRow.service_key_snapshot || lockedAdoptRow.catalog_service_key || null,
+  });
 }
 
 function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {

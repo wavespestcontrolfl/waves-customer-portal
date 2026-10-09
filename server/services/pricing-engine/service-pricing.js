@@ -8441,6 +8441,14 @@ function priceDethatching(lawnSqFt, options = {}) {
 // ============================================================
 const AREA_ADDON_VISIT_CONTEXTS = ['standalone', 'sameTripAddOn'];
 
+// What a line says about its visit. One own visit carries ONE drive allowance
+// for every add-on on it (priceAreaAddOnList): the line that carries it says
+// "Own visit", the others say they ride on that same visit.
+function areaAddOnVisitDetail(visitContext, carriesDrive) {
+  if (visitContext === 'sameTripAddOn') return 'Same visit as a booked service';
+  return carriesDrive ? 'Own visit' : 'Own visit, shared with the other add-ons';
+}
+
 // Gate enforcement lives here, the deepest chokepoint, like
 // GATE_BERMUDA_SUPPRESSION in priceLawnCare: the estimate engine, persisted
 // engineInputs replays and direct callers all hit the same wall. Read at call
@@ -8520,17 +8528,25 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
 // estimate (services.areaAddOns block), and a direct caller owns that check.
 // Selling a same-visit add-on to an EXISTING customer against an already
 // booked visit is not supported yet (it needs scheduling evidence).
+// `carriesDrive: false` prices an own-visit add-on that rides the drive of
+// another add-on on the same visit (the visit is chosen once for the whole
+// group, see priceAreaAddOnList).
 function priceAreaAddOn(addOnKey, options = {}) {
   assertAreaAddOnsEnabled();
   const {
     cfg, visitContext, areaSqFt, tierSqFt, grassTrack,
   } = normalizeAreaAddOnInput(addOnKey, options);
+  // The visit's one drive allowance. A direct caller prices a group of one, so
+  // it carries the drive; priceAreaAddOnList hands it to the first PRICED
+  // add-on only (a custom quote never carries it).
+  const carriesDrive = options.carriesDrive !== false;
 
   const base = {
     service: 'area_addon',
     addOnKey,
     name: cfg.name,
     visitContext,
+    carriesVisitDrive: false,
     // The add-on's own catalog identity and family travel on the line so
     // nothing downstream guesses a service from the display name.
     catalogServiceKey: cfg.serviceKey,
@@ -8561,17 +8577,18 @@ function priceAreaAddOn(addOnKey, options = {}) {
   const tierK = (tierSqFt || 0) / 1000;
   const materialCost = tierK * cfg.materialPer1000;
   const onSiteMin = cfg.setupMin + cfg.minPer1000 * tierK;
-  const driveMin = visitContext === 'standalone' ? GLOBAL.DRIVE_TIME : 0;
+  const driveMin = visitContext === 'standalone' && carriesDrive ? GLOBAL.DRIVE_TIME : 0;
   const laborCost = (onSiteMin + driveMin) * GLOBAL.LABOR_RATE / 60;
   const cost = materialCost + laborCost + AREA_ADDONS.adminPerJob;
   const price = roundUpToNine(cost / (1 - AREA_ADDONS.targetMargin));
 
   const detailParts = [];
   if (tierSqFt) detailParts.push(`Up to ${tierSqFt.toLocaleString()} sq ft ${cfg.areaLabel} area`);
-  detailParts.push(visitContext === 'sameTripAddOn' ? 'Same visit as a booked service' : 'Own visit');
+  detailParts.push(areaAddOnVisitDetail(visitContext, driveMin > 0));
 
   return {
     ...base,
+    carriesVisitDrive: driveMin > 0,
     price,
     areaSqFt,
     tierSqFt,
@@ -8589,6 +8606,34 @@ function priceAreaAddOn(addOnKey, options = {}) {
   };
 }
 
+// The estimate's grass for an entry that does not carry one. An explicit null
+// on the entry (or its `track` alias) means "the rep has not chosen a grass":
+// it prices exactly like the client's 'unknown' (a label-bound add-on quotes as
+// custom). Only an ABSENT field falls back to the estimate's grass, which is
+// the engine-door convenience for callers that never send one.
+function areaAddOnEntryGrass(entry, estimateGrass) {
+  for (const field of ['grassType', 'track']) {
+    if (entry[field] === null) return 'unknown';
+    if (entry[field] !== undefined) return entry[field];
+  }
+  return estimateGrass;
+}
+
+// The visit is a property of the add-on GROUP: a per-entry visitContext would
+// let an old client double-charge the drive, so it is refused, not honored.
+function assertGroupVisitOnly(entry, index) {
+  if (entry.visitContext === undefined) return;
+  throw buildPricingError('visitContext is set once for all area add-ons (services.areaAddOnVisit), not on each add-on - update the estimator and send areaAddOnVisit', { field: 'visitContext', index, reason: 'AREA_ADDON_VISIT_PER_ENTRY' });
+}
+
+// The group's visit: 'standalone' (default, the add-ons are their own visit)
+// or 'sameTripAddOn' (they ride a priced service on the same estimate).
+function normalizeAreaAddOnVisit(visit) {
+  const value = visit ?? 'standalone';
+  assertEnum(value, AREA_ADDON_VISIT_CONTEXTS, 'areaAddOnVisit');
+  return value;
+}
+
 // Prices a whole services.areaAddOns list for the estimate engine: every
 // entry is validated in full FIRST (so a commercial property cannot turn an
 // unknown key or a bad value into a manual-quote line), a key may appear once
@@ -8596,16 +8641,24 @@ function priceAreaAddOn(addOnKey, options = {}) {
 // then each entry is priced unless `isCommercialManualQuote(entry, family)`
 // claims it (web sweep = pest control family, the rest = lawn care).
 // `grassSources` name the estimate's grass for entries that do not carry one.
-// Returns the priced lines and the normalized requests (for the host check).
-function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote } = {}) {
+//
+// ONE visit for the group (owner ruling 2026-10-08): `visit` ('standalone' |
+// 'sameTripAddOn') applies to every add-on. On their own visit the add-ons
+// share ONE drive allowance, carried by the FIRST listed add-on that is
+// actually priced (a custom quote or a commercial manual quote never carries
+// it); every other add-on prices with no drive. On a same visit no add-on
+// carries a drive.
+// Returns the priced lines, the normalized requests and the visit (for the host check).
+function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote, visit } = {}) {
   // The estimate's grass: the first source (lawn service, request, property)
   // that names one, by `track` then `grassType`.
   const grassType = grassSources
     .flatMap((source) => [source?.track, source?.grassType])
     .find((value) => value !== undefined && value !== null && value !== '');
-  if (entries === undefined) return { lines: [], requests: [] };
+  if (entries === undefined) return { lines: [], requests: [], visit: 'standalone' };
+  const visitContext = normalizeAreaAddOnVisit(visit);
   if (!Array.isArray(entries)) {
-    throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt, visitContext }', { field: 'areaAddOns' });
+    throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt }', { field: 'areaAddOns' });
   }
   if (entries.length > 0) assertAreaAddOnsEnabled();
   const seenKeys = new Set();
@@ -8613,7 +8666,8 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
     if (!isPlainAreaAddOnObject(entry)) {
       throw buildPricingError('Each services.areaAddOns entry must be an object', { field: 'areaAddOns', index });
     }
-    const options = { ...entry, grassType: entry.grassType ?? entry.track ?? grassType };
+    assertGroupVisitOnly(entry, index);
+    const options = { ...entry, grassType: areaAddOnEntryGrass(entry, grassType), visitContext };
     const normalized = normalizeAreaAddOnInput(entry.key, options);
     if (seenKeys.has(normalized.addOnKey)) {
       throw buildPricingError(`services.areaAddOns lists ${normalized.addOnKey} more than once - each add-on is sold once per estimate (a second application is a new estimate)`, { field: 'areaAddOns', index, key: normalized.addOnKey });
@@ -8621,10 +8675,15 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
     seenKeys.add(normalized.addOnKey);
     return { entry, options, normalized };
   });
+  let driveCarried = false;
   const lines = requests
     .filter(({ entry, normalized }) => !isCommercialManualQuote?.(entry, normalized.addOnKey === 'web_sweep' ? 'pest_control' : 'lawn_care'))
-    .map(({ options, normalized }) => priceAreaAddOn(normalized.addOnKey, options));
-  return { lines, requests };
+    .map(({ options, normalized }) => {
+      const line = priceAreaAddOn(normalized.addOnKey, { ...options, carriesDrive: !driveCarried });
+      driveCarried = driveCarried || line.carriesVisitDrive === true;
+      return line;
+    });
+  return { lines, requests, visit: visitContext };
 }
 
 // The estimator screen's add-on catalog, built from AREA_ADDONS so the screen
@@ -8643,19 +8702,20 @@ function areaAddOnCatalog() {
 }
 
 // Same-visit area add-ons ride a host visit: the price drops the drive
-// minutes, which is only true when a priced service shares the estimate. The
-// host is another PRICED line that is not an area add-on, or a PRICED add-on
-// that is standalone (it has its own visit). An unpriced line (custom quote,
-// commercial manual quote) is never a host. Call it on the FINAL line list.
-function assertAreaAddOnHostVisit(requests, lineItems) {
-  if (!requests.some(({ normalized }) => normalized.visitContext === 'sameTripAddOn')) return;
-  const isPriced = (line) => !!line
+// minutes, which is only true when a priced SERVICE shares the estimate. The
+// host is another PRICED line that is not an area add-on (a recurring service
+// or another one-time service): an add-on never hosts add-ons that claim a
+// same visit, because the group is chosen once. An unpriced line (custom
+// quote, commercial manual quote) is never a host. Call it on the FINAL line list.
+function assertAreaAddOnHostVisit({ visit, requests }, lineItems) {
+  if (visit !== 'sameTripAddOn' || requests.length === 0) return;
+  const isHost = (line) => !!line
+    && line.service !== 'area_addon'
     && line.quoteRequired !== true
     && line.requiresCustomQuote !== true
     && [line.annual, line.price, line.total].some((amount) => Number(amount) > 0);
-  const isHost = (line) => isPriced(line) && (line.service !== 'area_addon' || line.visitContext === 'standalone');
   if (!lineItems.some(isHost)) {
-    throw buildPricingError('A same-visit area add-on needs a priced service on the same estimate (a recurring service, another one-time service, or a standalone add-on); price it as standalone or add the service it rides with', { field: 'areaAddOns', visitContext: 'sameTripAddOn' });
+    throw buildPricingError('Add-ons on the same visit need a priced service on the same estimate (a recurring service or another one-time service); price them as their own visit or add the service they ride with', { field: 'areaAddOnVisit', visitContext: 'sameTripAddOn', reason: 'AREA_ADDON_HOST_MISSING' });
   }
 }
 

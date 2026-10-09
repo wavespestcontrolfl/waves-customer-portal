@@ -9,13 +9,17 @@
 // rides the schedule row, true only while the gate is live and the visit is not a
 // combined service or a typed one (server/routes/admin-schedule.js). Off, pest
 // visits route exactly as before.
+import { isAreaAddOnVisit } from './areaAddOns';
+
 const TERMINAL_SERVICE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 
 // Pest control services get the lightweight ServiceRecapModal instead of the
 // heavy CreateProjectModal. completionProfile.category is the services-table
 // backed signal (the schedule API attaches it).
 export function isPestControlService(service) {
-  return service?.completionProfile?.category === 'pest_control';
+  return service?.completionProfile?.category === 'pest_control'
+    // An area add-on (the web sweep is pest control by family) is generic work.
+    && !isAreaAddOnVisit(service);
 }
 
 // With `fastCompleteReportEnabled` on the schedule row, every open untyped pest

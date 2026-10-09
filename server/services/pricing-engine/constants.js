@@ -1647,6 +1647,15 @@ function areaAddOnConfig(row) {
   return key && Object.prototype.hasOwnProperty.call(AREA_ADDONS.items, key) ? AREA_ADDONS.items[key] : null;
 }
 
+// Is this catalog service_key one of the area add-on rows (area_addon_<key>)?
+// The completion routes (lawn / pest fast complete, the pest recap) decide
+// by this key, never by the add-on's name or its lawn / pest category: an add-on
+// is generic one-time work, whatever its name says.
+function isAreaAddOnCatalogKey(serviceKey) {
+  return typeof serviceKey === 'string'
+    && Object.values(AREA_ADDONS.items).some((cfg) => cfg.serviceKey === serviceKey);
+}
+
 // ============================================================
 // SPECIALTY SERVICES
 // ============================================================
@@ -2516,7 +2525,7 @@ module.exports = {
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
-  ONE_TIME, AREA_ADDONS, areaAddOnConfig, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
+  ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,

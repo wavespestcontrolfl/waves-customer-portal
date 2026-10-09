@@ -1301,6 +1301,8 @@ const { gateEnvValue: gateEnvOn, termiteAnnualPlanSelectionEnabled } = require('
 function areaAddOnsAvailability() {
   return {
     enabled: gateEnvOn('GATE_AREA_ADDONS'),
+    // The values of the ONE group-level options.areaAddOnVisit (the visit is
+    // chosen once for all selected add-ons, never per add-on).
     visitContexts: ['standalone', 'sameTripAddOn'],
     items: require('../services/pricing-engine/service-pricing').areaAddOnCatalog(),
   };

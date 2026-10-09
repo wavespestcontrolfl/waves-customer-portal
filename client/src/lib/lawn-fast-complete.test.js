@@ -31,3 +31,16 @@ describe('isLawnFastCompleteEligible', () => {
     expect(isLawnFastCompleteEligible(lawn({ completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub' } }))).toBe(false);
   });
 });
+
+describe('an area add-on is never a lawn visit', () => {
+  it('stays out of the lawn sheet by its catalog key, whatever its lawn category or name says', () => {
+    const keys = ['area_addon_lawn_insect_spot', 'area_addon_lawn_insect_preventive', 'area_addon_bed_pre_emergent', 'area_addon_hardscape_weed', 'area_addon_fire_ant_yard'];
+    for (const serviceKey of keys) {
+      expect(isLawnFastCompleteEligible(lawn({ completionProfile: { category: 'lawn_care', serviceKey, findingsType: null } }))).toBe(false);
+    }
+    // The key can ride the schedule row instead of the profile.
+    expect(isLawnFastCompleteEligible(lawn({ serviceKey: 'area_addon_lawn_insect_spot' }))).toBe(false);
+    // An ordinary lawn visit with a look-alike key is unaffected.
+    expect(isLawnFastCompleteEligible(lawn({ completionProfile: { category: 'lawn_care', serviceKey: 'lawn_insect_control', findingsType: null } }))).toBe(true);
+  });
+});

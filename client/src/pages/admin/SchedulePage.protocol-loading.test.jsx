@@ -253,6 +253,39 @@ describe("ProtocolPanel independent request failures", () => {
   });
 });
 
+describe("area add-on visits are generic work, whatever their name says", () => {
+  const addOn = (serviceType, serviceKey, category) => ({
+    id: "visit-addon-a", customerId: "customer-fixture-a", serviceType, customerName: "Fixture account",
+    lawnType: "St. Augustine", lawnSqft: 10000, completionProfile: { serviceKey, category, findingsType: null },
+  });
+  const paths = () => fetch.mock.calls.map(([url]) => new URL(url, "http://localhost").pathname);
+
+  it.each([
+    ["Lawn Insect Spot Treatment", "area_addon_lawn_insect_spot", "lawn_care"],
+    ["Yearly Lawn Insect Preventive", "area_addon_lawn_insect_preventive", "lawn_care"],
+    ["Bed Pre-Emergent Weed Control", "area_addon_bed_pre_emergent", "lawn_care"],
+    ["Shell, Rock & Paver Weed Control", "area_addon_hardscape_weed", "lawn_care"],
+    ["Fire Ant Yard Treatment", "area_addon_fire_ant_yard", "lawn_care"],
+    ["Web Sweep", "area_addon_web_sweep", "pest_control"],
+  ])("%s loads neither the lawn program nor the pest program", async (serviceType, serviceKey, category) => {
+    await act(async () => { render(<ProtocolPanel service={addOn(serviceType, serviceKey, category)} onClose={() => {}} />); });
+    await waitFor(() => expect(paths().some((path) => path.endsWith("/scripts"))).toBe(true));
+    const called = paths();
+    for (const lawnOrPestOnly of ["/turf-profile", "/programs", "/lawn-mix", "/protocols/match"]) {
+      expect(called.filter((path) => path.endsWith(lawnOrPestOnly))).toEqual([]);
+    }
+    // The guidance lookups ask for the neutral line, not "lawn" or "pest".
+    const lines = fetch.mock.calls.map(([url]) => new URL(url, "http://localhost").searchParams.get("service_line")).filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(new Set(lines)).toEqual(new Set(["general"]));
+  });
+
+  it("the same lawn name on an ordinary lawn visit still loads the lawn program", async () => {
+    await act(async () => { render(<ProtocolPanel service={{ ...service, serviceType: "Lawn Insect Control" }} onClose={() => {}} />); });
+    await waitFor(() => expect(paths().some((path) => path.endsWith("/turf-profile"))).toBe(true));
+  });
+});
+
 describe("Job card chemical area add-on", () => {
   const governed = {
     rate: "16 fl oz in 1 gal of water per 1,000 sq ft.", area: "Hard-surface and bare-ground square feet treated.",

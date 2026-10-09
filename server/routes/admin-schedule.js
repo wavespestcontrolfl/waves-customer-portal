@@ -33,6 +33,22 @@ const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { seriesCustomerSkipReason } = require('../services/series-customer-eligibility');
 const MODELS = require('../config/models');
+const { isAreaAddOnCatalogKey } = require('../services/pricing-engine/constants');
+
+// An area add-on (GATE_AREA_ADDONS) is generic one-time work: its completion
+// profile is lawn care or pest control by family, but it is never the lawn
+// Fast Complete sheet or the pest report flow.
+function lawnFastCompleteOffered(completionProfile) {
+  return lawnFastCompleteLive() && !isAreaAddOnCatalogKey(completionProfile?.serviceKey);
+}
+// The report flow needs a plain untyped, uncombined profile (the typed forms and
+// companion sections are required at completion and the flow has none).
+function fastCompleteReportOffered(completionProfile) {
+  return require('../config/feature-gates').fastCompleteReportLive()
+    && !(completionProfile?.companions || []).length
+    && !completionProfile?.findingsType
+    && !isAreaAddOnCatalogKey(completionProfile?.serviceKey);
+}
 const trackTransitions = require('../services/track-transitions');
 const {
   normalizeServiceType, detectServiceCategory, serviceIcon, serviceColor,
@@ -5178,7 +5194,7 @@ async function loadProjectCompletionContextByServiceId(services) {
       // GATE_LAWN_FAST_COMPLETE: the admin Dispatch/Schedule surfaces open the
       // regular lawn Fast Complete sheet for an eligible lawn visit when on.
       // Read at call time; the context route is the eligibility authority.
-      lawnFastCompleteEnabled: lawnFastCompleteLive(),
+      lawnFastCompleteEnabled: lawnFastCompleteOffered(completionProfile),
       // GATE_FAST_COMPLETE_VOICE_FILL: the pest re-service sheet shows its
       // "Tell me what you did" mic, Check chips and office note when on. Read
       // at call time; no per-tech flag.
@@ -5195,9 +5211,7 @@ async function loadProjectCompletionContextByServiceId(services) {
       // flow has none, so it keeps the full form (Codex #5538). Nor a
       // service with its own typed findings (cockroach, German roach
       // knockdowns): /complete requires them and the report flow has none.
-      fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive()
-        && !(completionProfile?.companions || []).length
-        && !completionProfile?.findingsType,
+      fastCompleteReportEnabled: fastCompleteReportOffered(completionProfile),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.

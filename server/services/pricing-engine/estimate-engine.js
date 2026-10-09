@@ -1675,6 +1675,7 @@ function generateEstimate(input) {
   const areaAddOns = priceAreaAddOnList(services.areaAddOns, {
     grassSources: [services.lawn, input, property],
     isCommercialManualQuote: useCommercialManualQuote,
+    visit: services.areaAddOnVisit,
   });
   areaAddOns.lines.forEach((line) => {
     line.manualReviewReasons.forEach(addManualReviewReason);
@@ -2044,7 +2045,7 @@ function generateEstimate(input) {
 
   // Prior services the customer already holds are not a host: that case
   // needs scheduling evidence and is not supported yet.
-  assertAreaAddOnHostVisit(areaAddOns.requests, lineItems);
+  assertAreaAddOnHostVisit(areaAddOns, lineItems);
 
   assertFinitePriceFields(lineItems);
 

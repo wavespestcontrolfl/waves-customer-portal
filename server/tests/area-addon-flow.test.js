@@ -52,15 +52,30 @@ describe('estimator translator: options.areaAddOns -> services.areaAddOns', () =
     }
   });
 
-  test('entries become engine entries carrying only key, area and visit context', () => {
+  test('entries become engine entries carrying only key and area; the visit rides once beside the list', () => {
     const { v1Input } = estimate([
-      { key: 'bed_pre_emergent', areaSqFt: 1500, visitContext: 'standalone', note: 'dropped', price: 1 },
+      { key: 'bed_pre_emergent', areaSqFt: 1500, note: 'dropped', price: 1 },
       { key: 'web_sweep' },
     ]);
     expect(v1Input.services.areaAddOns).toEqual([
-      { key: 'bed_pre_emergent', areaSqFt: 1500, visitContext: 'standalone' },
+      { key: 'bed_pre_emergent', areaSqFt: 1500 },
       { key: 'web_sweep' },
     ]);
+    expect(v1Input.services.areaAddOnVisit).toBe('standalone');
+    expect(estimate([{ key: 'web_sweep' }], { selected: ['PEST'], options: { areaAddOnVisit: 'sameTripAddOn' } }).v1Input.services.areaAddOnVisit).toBe('sameTripAddOn');
+    // No add-ons: no visit field either (byte-identical to before).
+    expect(translateV2CallToV1Input(PROFILE, ['PEST'], { areaAddOnVisit: 'sameTripAddOn' }).services).not.toHaveProperty('areaAddOnVisit');
+  });
+
+  test('a visitContext on an add-on is refused (an old client would double-charge the drive); a bad group visit is refused', () => {
+    for (const visitContext of ['standalone', 'sameTripAddOn', 'builderBatch', null]) {
+      expect(() => estimate([{ key: 'web_sweep', visitContext }]))
+        .toThrow(expect.objectContaining({ statusCode: 400, code: 'AREA_ADDON_VISIT_PER_ENTRY', failClosed: true, message: expect.stringMatching(/set once for all area add-ons/) }));
+    }
+    for (const areaAddOnVisit of ['builderBatch', '', 7]) {
+      expect(() => estimate([{ key: 'web_sweep' }], { options: { areaAddOnVisit } }))
+        .toThrow(expect.objectContaining({ statusCode: 400, code: 'AREA_ADDON_VISIT_INVALID', failClosed: true }));
+    }
   });
 
   test('gate off: a non-empty list fails closed with a 400 the save replay rethrows', () => {
@@ -81,8 +96,8 @@ describe('estimator translator: options.areaAddOns -> services.areaAddOns', () =
       .toThrow(expect.objectContaining({ statusCode: 400, code: 'AREA_ADDON_INPUT_INVALID', failClosed: true }));
   });
 
-  test('an unknown key, a missing area or a bad visit context is the engine validator\'s fail-closed 400', () => {
-    for (const bad of [{ key: 'aeration', areaSqFt: 1000 }, { key: 'fire_ant_yard' }, { key: 'web_sweep', visitContext: 'builderBatch' }]) {
+  test('an unknown key or a missing area is the engine validator\'s fail-closed 400', () => {
+    for (const bad of [{ key: 'aeration', areaSqFt: 1000 }, { key: 'fire_ant_yard' }]) {
       expect(() => estimate([bad])).toThrow(expect.objectContaining({ statusCode: 400, failClosed: true }));
     }
   });
@@ -123,10 +138,17 @@ describe('estimator translator: options.areaAddOns -> services.areaAddOns', () =
     expect(estimate([{ key: 'fire_ant_yard', areaSqFt: 3000, grassType: 'unknown' }]).v1Input.services.areaAddOns[0]).not.toHaveProperty('grassType');
   });
 
-  test('a same-visit add-on is host-checked by the engine behind the same door', () => {
-    const same = [{ key: 'web_sweep', visitContext: 'sameTripAddOn' }];
-    expect(() => estimate(same)).toThrow(/same-visit area add-on needs a priced service/);
-    expect(estimate(same, { selected: ['PEST'] }).mapped.oneTime.items[0]).toMatchObject({ addOnKey: 'web_sweep', price: 59, visitContext: 'sameTripAddOn' });
+  test('a same-visit group is host-checked by the engine behind the same door', () => {
+    const same = [{ key: 'web_sweep' }];
+    const options = { areaAddOnVisit: 'sameTripAddOn' };
+    expect(() => estimate(same, { options })).toThrow(/Add-ons on the same visit need a priced service/);
+    expect(estimate(same, { selected: ['PEST'], options }).mapped.oneTime.items[0]).toMatchObject({ addOnKey: 'web_sweep', price: 59, visitContext: 'sameTripAddOn', carriesVisitDrive: false });
+  });
+
+  test('null grass on a label-bound add-on is "not chosen": it never borrows the form grass (client sends unknown)', () => {
+    const spot = [{ key: 'lawn_insect_spot', areaSqFt: 1000, grassType: null }];
+    expect(estimate(spot, { options: { grassType: 'A' } }).v1Input.services.areaAddOns[0].grassType).toBe('unknown');
+    expect(estimate(spot, { options: { grassType: 'A' } }).mapped.oneTime.specItems[0]).toMatchObject({ addOnKey: 'lawn_insect_spot', price: null });
   });
 });
 
@@ -221,14 +243,14 @@ describe('the estimate page classifies an add-on row by its key, not its name', 
     ])('%s keeps every add-on row at the engine price and out of the discount base', (_label, manualDiscount) => {
       const { estData, mapped } = engineWith(manualDiscount);
       const enginePrices = Object.fromEntries(mapped.oneTime.items.filter((r) => r.service === 'area_addon').map((r) => [r.addOnKey, r.price]));
-      expect(enginePrices).toEqual({ web_sweep: 89, fire_ant_yard: 99 });
+      expect(enginePrices).toEqual({ web_sweep: 89, fire_ant_yard: 69 });
       // The engine took nothing from the add-ons: their rows sum to the full price.
-      expect(Object.values(enginePrices).reduce((a, b) => a + b, 0)).toBe(188);
+      expect(Object.values(enginePrices).reduce((a, b) => a + b, 0)).toBe(158);
       const { amount, list } = choice(estData);
       expect(addOnPrices(list)).toEqual(enginePrices);
       expect(list.filter((r) => r.service === 'area_addon').every((r) => r.grossPrice === undefined && r.manualDiscountApplied === undefined)).toBe(true);
       const pestRow = list.find((r) => r.service === 'one_time_pest');
-      expect(amount).toBe(Math.round((pestRow.price + 89 + 99) * 100) / 100);
+      expect(amount).toBe(Math.round((pestRow.price + 89 + 69) * 100) / 100);
     });
 
     test('rows mixed with a discountable specialty: only the specialty is cut, and the cut is the whole slice', () => {
@@ -257,8 +279,8 @@ describe('the estimate page classifies an add-on row by its key, not its name', 
     test('an add-on-only estimate with a manual discount keeps the engine\'s price and total', () => {
       for (const manualDiscount of [{ type: 'PERCENT', value: 25 }, { type: 'FIXED', value: 40 }]) {
         const { mapped } = estimate([{ key: 'web_sweep' }, { key: 'fire_ant_yard', areaSqFt: 3000 }], { options: { manualDiscount } });
-        expect(mapped.oneTime.items.map((r) => r.price)).toEqual([89, 99]);
-        expect(mapped.oneTime.total).toBe(188);
+        expect(mapped.oneTime.items.map((r) => r.price)).toEqual([89, 69]);
+        expect(mapped.oneTime.total).toBe(158);
       }
     });
   });
@@ -303,7 +325,8 @@ describe('customer copy for each add-on', () => {
       const resolved = copyOf(key);
       expect(resolved.key).toBe(`area_addon_${key}`);
       expect(resolved.includes.join(' ')).not.toMatch(/\{Area\}|\{Visit\}/);
-      expect(resolved.includes).toContain('Priced as its own visit');
+      // Several add-ons share one own visit: the line that carries the drive is "its own visit", the rest ride on it.
+      expect(resolved.includes).toContain(key === ADDON_KEYS[0] ? 'Priced as its own visit' : 'Done on the same visit as your other add-on treatments');
       expect(resolved.assurance).toBeNull();
       expect(resolved.terms).toBe('One application. Pay on service day. No recurring schedule, no tier discount.');
       const tier = AREA_ADDONS.items[key].tiers;
@@ -311,6 +334,9 @@ describe('customer copy for each add-on', () => {
     }
     const sameVisit = copy.resolveOneTimeServiceCopy({ ...rows.find((r) => r.addOnKey === 'web_sweep'), visitContext: 'sameTripAddOn' });
     expect(sameVisit.includes).toContain('Priced for the same visit as your other booked service');
+    // A row stored before the drive flag existed keeps the own-visit wording.
+    const { carriesVisitDrive: _flag, ...legacy } = rows.find((r) => r.addOnKey === 'web_sweep');
+    expect(copy.resolveOneTimeServiceCopy(legacy).includes).toContain('Priced as its own visit');
   });
 
   test('copy makes no result, warranty, guarantee or brand claim', () => {
@@ -502,7 +528,7 @@ describe('the admin save replays the estimator request and the stored engine inp
   });
 
   test('the save recompute prices the add-ons from engineRequest.options and stores replayable engine inputs', async () => {
-    const out = await serverRecomputeFromEstimateData(request([{ key: 'fire_ant_yard', areaSqFt: 5000 }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }]), deps);
+    const out = await serverRecomputeFromEstimateData(request([{ key: 'fire_ant_yard', areaSqFt: 5000 }, { key: 'web_sweep' }]), deps);
     expect(out.recomputed).toBe(true);
     const rows = out.serverResult.oneTime.items.filter((i) => i.service === 'area_addon');
     expect(rows.map((r) => [r.addOnKey, r.price, r.catalogServiceKey])).toEqual([
@@ -522,7 +548,7 @@ describe('the admin save replays the estimator request and the stored engine inp
     const cases = [
       [[{ key: 'web_sweep' }], [['web_sweep', 89]]],
       [[{ key: 'fire_ant_yard', areaSqFt: 3000 }], [['fire_ant_yard', 99]]],
-      [[{ key: 'web_sweep' }, { key: 'bed_pre_emergent', areaSqFt: 1000 }], [['web_sweep', 89], ['bed_pre_emergent', 99]]],
+      [[{ key: 'web_sweep' }, { key: 'bed_pre_emergent', areaSqFt: 1000 }], [['web_sweep', 89], ['bed_pre_emergent', 69]]],
     ];
     for (const [areaAddOns, expected] of cases) {
       const options = { grassType: 'st_augustine', areaAddOns };

@@ -20,6 +20,8 @@ import {
 // (catalog `requiresGrassTrack`) carries its own required grass choice with no
 // default; `grassChoices` is the grass list the screen already offers and
 // `pickedGrass` a grass the rep chose on the screen (null while untouched).
+// The visit is ONE choice for the whole group (`visit` / `onVisitChange`):
+// several add-ons are a single visit and carry one drive.
 
 const PANEL = "ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200";
 const NOTE = "text-14 text-ink-secondary";
@@ -93,16 +95,18 @@ function GrassField({ item, entry, grassChoices, pickedGrass, onEntry }) {
   );
 }
 
-function VisitField({ item, entry, hostAvailable, onEntry }) {
-  const same = entry.visitContext === SAME_VISIT;
+// The one visit choice for every selected add-on. Same visit needs another
+// service on this estimate to ride with; an add-on is never that service.
+function VisitField({ visit, otherServiceSelected, onVisitChange }) {
+  const same = visit === SAME_VISIT;
   return (
     <Field
       label="Visit"
-      id={`estimate-areaAddOn-${item.key}-visit`}
-      help={same && !hostAvailable ? "Needs another service on this estimate" : undefined}
+      id="estimate-areaAddOns-visit"
+      help={same && !otherServiceSelected ? "Needs another service on this estimate" : "All selected add-ons share this visit."}
       className="mb-4"
     >
-      <Select value={same ? SAME_VISIT : STANDALONE_VISIT} onChange={(e) => onEntry({ ...entry, visitContext: e.target.value })}>
+      <Select value={same ? SAME_VISIT : STANDALONE_VISIT} onChange={(e) => onVisitChange(e.target.value)}>
         <option value={STANDALONE_VISIT}>Own visit</option>
         <option value={SAME_VISIT}>Same visit as another service on this estimate</option>
       </Select>
@@ -110,13 +114,12 @@ function VisitField({ item, entry, hostAvailable, onEntry }) {
   );
 }
 
-function SelectedPanel({ item, entry, known, grassChoices, pickedGrass, hostAvailable, onEntry }) {
+function SelectedPanel({ item, entry, known, grassChoices, pickedGrass, onEntry }) {
   return (
     <div className={PANEL}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {item.tiers && <AreaFields item={item} entry={entry} known={known} onEntry={onEntry} />}
         {item.requiresGrassTrack && <GrassField item={item} entry={entry} grassChoices={grassChoices} pickedGrass={pickedGrass} onEntry={onEntry} />}
-        <VisitField item={item} entry={entry} hostAvailable={hostAvailable} onEntry={onEntry} />
       </div>
       {known && <div className={NOTE}>{known.source}: about {known.sqft.toLocaleString("en-US")} sq ft {known.noun}. {known.advice}</div>}
       {rowNotes(item, entry).map((note) => <div key={note} className={NOTE}>{note}</div>)}
@@ -124,10 +127,8 @@ function SelectedPanel({ item, entry, known, grassChoices, pickedGrass, hostAvai
   );
 }
 
-function OfferedRow({ item, entry, knownAreas, grassChoices, pickedGrass, otherServiceSelected, value, onChange }) {
+function OfferedRow({ item, entry, knownAreas, grassChoices, pickedGrass, value, onChange }) {
   const known = knownAreaFor(item.key, knownAreas);
-  const hostAvailable = otherServiceSelected
-    || Object.entries(value).some(([key, other]) => key !== item.key && other?.visitContext !== SAME_VISIT);
   return (
     <div>
       <div className="mb-1">
@@ -150,7 +151,6 @@ function OfferedRow({ item, entry, knownAreas, grassChoices, pickedGrass, otherS
           known={known}
           grassChoices={grassChoices}
           pickedGrass={pickedGrass}
-          hostAvailable={hostAvailable}
           onEntry={(nextEntry) => onChange({ ...value, [item.key]: nextEntry })}
         />
       )}
@@ -185,7 +185,9 @@ function UnavailableRow({ addOnKey, name, enabled, value, onChange }) {
   );
 }
 
-export default function AreaAddOnsGroup({ catalog, value, onChange, knownAreas, grassChoices, pickedGrass = null, otherServiceSelected }) {
+export default function AreaAddOnsGroup({
+  catalog, value, onChange, visit = STANDALONE_VISIT, onVisitChange, knownAreas, grassChoices, pickedGrass = null, otherServiceSelected,
+}) {
   const [userOpen, setUserOpen] = useState(null);
   const selection = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const count = countAreaAddOns(selection);
@@ -221,11 +223,11 @@ export default function AreaAddOnsGroup({ catalog, value, onChange, knownAreas, 
               knownAreas={knownAreas}
               grassChoices={grassChoices}
               pickedGrass={pickedGrass}
-              otherServiceSelected={otherServiceSelected}
               value={selection}
               onChange={onChange}
             />
           ))}
+          {count > 0 && offered.length > 0 && <VisitField visit={visit} otherServiceSelected={otherServiceSelected} onVisitChange={onVisitChange} />}
           {unavailableKeys.map((key) => (
             <UnavailableRow
               key={key}

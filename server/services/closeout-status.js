@@ -185,6 +185,25 @@ function canonicalLicenseCategory(value) {
   return LICENSE_CATEGORY_ALIASES[key] || LICENSE_CATEGORY_ALIASES[key.replace(/and/g, '')] || key;
 }
 
+// Every category the visit needs: the single catalog category, or the list the
+// folded requirements carry when add-ons on the visit need another one.
+function requiredLicenseCategories(requirements, single) {
+  const listed = Array.isArray(requirements.licenseCategories)
+    ? requirements.licenseCategories.map(canonicalLicenseCategory).filter(Boolean) : [];
+  const all = [...new Set([...(single ? [single] : []), ...listed])];
+  return all;
+}
+
+// What is wrong with the technician's categories against the ones the visit
+// needs, or null: a missing one fails the visit, none recorded cannot be judged.
+function licenseCategoryProblem(requiredAll, categories) {
+  if (!requiredAll.length) return null;
+  if (!categories.length) return { state: 'unknown', reason: 'technician_license_categories_unrecorded' };
+  return requiredAll.every((category) => categories.includes(category))
+    ? null : { state: 'failed', reason: 'technician_license_category_mismatch' };
+}
+const multiCategoryEvidence = (requiredAll) => (requiredAll.length > 1 ? { requiredCategories: requiredAll } : {});
+
 function fact(state, reason, extra = {}) {
   if (!FACT_STATES.includes(state)) throw new Error(`closeout-status: bad fact state ${state}`);
   return { state, reason, ...extra };
@@ -1129,6 +1148,10 @@ function deriveCloseoutFacts(inputs) {
     if (typeof cats === 'string') { try { cats = JSON.parse(cats); } catch { cats = null; } }
     const categories = Array.isArray(cats) ? cats.map(canonicalLicenseCategory).filter(Boolean) : [];
     const required = canonicalLicenseCategory(requirements.licenseCategory);
+    // A visit that also carries area add-ons can need more than one category;
+    // the technician must hold every one (service-closeout-requirements.js).
+    const requiredAll = requiredLicenseCategories(requirements, required);
+    const categoryProblem = licenseCategoryProblem(requiredAll, categories);
     // Judge expiry at the day the work was RECORDED (service_records.service_date);
     // the scheduled day is only a fallback for records without one.
     const visitDay = (record?.service_date ? String(record.service_date).slice(0, 10) : null)
@@ -1136,6 +1159,7 @@ function deriveCloseoutFacts(inputs) {
     const expiry = tech.license_expiry ? String(tech.license_expiry).slice(0, 10) : null;
     const evidence = {
       technicianId: tech.id, hasLicense: Boolean(tech.fl_applicator_license), licenseExpiry: expiry, requiredCategory: required,
+      ...multiCategoryEvidence(requiredAll),
       categories, judgedAt: visitDay, asOf: 'current_technician_row', identity: inputs.licenseTechSource || 'scheduled_technician',
     };
     if (!tech.fl_applicator_license) license = fact('pending', 'technician_license_missing', evidence);
@@ -1144,8 +1168,7 @@ function deriveCloseoutFacts(inputs) {
     // one (seed 20260703000004); surfaced, not failed.
     else if (!expiry) license = fact('done', 'technician_licensed', { ...evidence, expiryUnrecorded: true });
     else if (expiry && visitDay && expiry < visitDay) license = fact('failed', 'technician_license_expired_at_visit', evidence);
-    else if (required && categories.length && !categories.includes(required)) license = fact('failed', 'technician_license_category_mismatch', evidence);
-    else if (required && !categories.length) license = fact('unknown', 'technician_license_categories_unrecorded', evidence);
+    else if (categoryProblem) license = fact(categoryProblem.state, categoryProblem.reason, evidence);
     else license = fact('done', 'technician_licensed', evidence);
   }
 

@@ -56,6 +56,7 @@ import {
   buildKnownAreas,
   countAreaAddOns,
   readAreaAddOnCatalog,
+  savedAreaAddOnVisit,
   recurringDiscountApplies,
   savedAreaAddOns,
 } from "../../lib/areaAddOns";
@@ -1506,8 +1507,10 @@ export default function EstimateToolViewV2({
     plugArea: "",
     plugSpacing: "12",
     topDressArea: "",
-    // Area add-on treatments (GATE_AREA_ADDONS): key -> { areaSqFt, larger, visitContext }.
+    // Area add-on treatments (GATE_AREA_ADDONS): key -> { areaSqFt, larger, grassType? },
+    // and the ONE visit for the whole group ("standalone" | "sameTripAddOn").
     areaAddOns: {},
+    areaAddOnVisit: "standalone",
     dethatchingCleanupLevel: "none",
     dethatchingDebrisRemovalIncluded: false,
     dethatchingAccess: "easy",
@@ -2003,6 +2006,7 @@ export default function EstimateToolViewV2({
           notes: d.notes || "",
           // The saved form snapshot, else the add-on list the stored request carried.
           areaAddOns: savedAreaAddOns(d),
+          areaAddOnVisit: savedAreaAddOnVisit(d),
         };
   }
 
@@ -4105,7 +4109,7 @@ export default function EstimateToolViewV2({
         // Area add-ons: omitted when nothing is selected. A selection is always
         // forwarded, like the Bermuda option, so a gate turned off mid-session
         // is refused loudly by the server rather than dropped here.
-        ...areaAddOnOption(form.areaAddOns, areaAddOnCatalog),
+        ...areaAddOnOption(form.areaAddOns, areaAddOnCatalog, form.areaAddOnVisit),
         dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
         dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
         dethatchingAccess: form.dethatchingAccess || "easy",
@@ -6902,6 +6906,8 @@ export default function EstimateToolViewV2({
                 catalog={areaAddOnCatalog}
                 value={form.areaAddOns}
                 onChange={(next) => set("areaAddOns", next)}
+                visit={form.areaAddOnVisit}
+                onVisitChange={(next) => set("areaAddOnVisit", next)}
                 knownAreas={areaAddOnKnownAreas}
                 grassChoices={GRASS_CHOICES}
                 pickedGrass={pickedGrassForAddOns}

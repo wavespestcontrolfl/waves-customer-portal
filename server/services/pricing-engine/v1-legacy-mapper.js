@@ -212,6 +212,8 @@ function areaAddOnFields(li = {}) {
     areaSqFt: li.areaSqFt ?? null,
     tierSqFt: li.tierSqFt ?? null,
     visitContext: li.visitContext,
+    // True on the ONE line of an own visit that carries the visit's drive allowance.
+    carriesVisitDrive: li.carriesVisitDrive === true,
     // Engine on-site minutes (no drive): the booked visit's duration floor.
     onSiteMinutes: li.costs?.onSiteMin ?? null,
     discountable: false,

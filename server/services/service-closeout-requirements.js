@@ -82,6 +82,80 @@ function normalizeRequirements(row = {}, serviceType = null) {
   };
 }
 
+const REQUIREMENT_COLUMNS = [
+  'id',
+  'name',
+  'category',
+  'requires_service_report',
+  'requires_application_log',
+  'required_photo_count',
+  'requires_customer_signature',
+  'requires_customer_notice',
+  'requires_license',
+  'license_category',
+  'closeout_requirements_source',
+];
+
+// Area add-ons (GATE_AREA_ADDONS): several add-ons are one visit, and every
+// add-on past the first is a scheduled_service_addons row, not the visit's own
+// service. The visit's own catalog row alone would call a web sweep with a
+// chemical add-on "no license required", so the closeout requirements of the
+// area add-on rows ride the visit: a requirement any of them has, the visit
+// has. Scoped to the area add-on catalog keys (area_addon_*) on purpose: an
+// admin-built visit's other add-on rows keep resolving exactly as before.
+const AREA_ADDON_KEY_PREFIX = 'area_addon_';
+
+async function areaAddOnCatalogRowsByVisit(jobs, { knex, strict }) {
+  const byVisit = new Map();
+  const visitIds = [...new Set(jobs.map((job) => job.id).filter(Boolean).map(String))];
+  if (!visitIds.length) return byVisit;
+  const read = async () => {
+    const lines = await knex('scheduled_service_addons as a')
+      .leftJoin('services as s', 's.id', 'a.service_id')
+      .whereIn('a.scheduled_service_id', visitIds)
+      .select('a.scheduled_service_id', knex.raw('COALESCE(a.service_key_snapshot, s.service_key) as service_key'))
+      .then((rows) => rows.filter((row) => String(row.service_key || '').startsWith(AREA_ADDON_KEY_PREFIX)));
+    if (!lines.length) return;
+    const catalog = await knex('services').whereIn('service_key', [...new Set(lines.map((row) => row.service_key))])
+      .select(...REQUIREMENT_COLUMNS, 'service_key');
+    const byKey = new Map(catalog.map((row) => [row.service_key, row]));
+    for (const line of lines) {
+      const row = byKey.get(line.service_key);
+      // An add-on whose catalog row cannot be read is not "no requirement": the
+      // strict reader (closeout status) must say unavailable, never green.
+      if (!row) throw new Error(`area add-on catalog row ${line.service_key} not found`);
+      const id = String(line.scheduled_service_id);
+      byVisit.set(id, [...(byVisit.get(id) || []), row]);
+    }
+  };
+  if (strict) await read();
+  else await read().catch(() => {});
+  return byVisit;
+}
+
+function uniqueCategories(list) {
+  return [...new Set(list.filter(Boolean))];
+}
+
+// The visit's requirements with its area add-on rows folded in: a flag any row
+// sets is set; photos take the largest; a license needs every row's category.
+function foldAddOnRequirements(own, extra) {
+  const all = [own, ...extra];
+  const licensed = all.filter((req) => req.requiresLicense);
+  const categories = uniqueCategories(licensed.map((req) => req.licenseCategory));
+  return {
+    ...own,
+    requiresServiceReport: all.some((req) => req.requiresServiceReport),
+    requiresApplicationLog: all.some((req) => req.requiresApplicationLog),
+    requiredPhotoCount: Math.max(...all.map((req) => req.requiredPhotoCount || 0)),
+    requiresCustomerSignature: all.some((req) => req.requiresCustomerSignature),
+    requiresCustomerNotice: all.some((req) => req.requiresCustomerNotice),
+    requiresLicense: licensed.length > 0,
+    licenseCategory: categories[0] || null,
+    ...(categories.length > 1 ? { licenseCategories: categories } : {}),
+  };
+}
+
 function parseJsonObject(value) {
   if (value == null) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -117,6 +191,7 @@ function buildCloseoutRequirementsSnapshot(requirements, { now = new Date() } = 
     requiresCustomerNotice: requirements.requiresCustomerNotice === true,
     requiresLicense: requirements.requiresLicense === true,
     licenseCategory: requirements.licenseCategory || null,
+    ...frozenLicenseCategories(requirements),
   };
 }
 
@@ -133,6 +208,13 @@ const FROZEN_BOOLEAN_FIELDS = Object.freeze([
   'requiresCustomerNotice',
   'requiresLicense',
 ]);
+
+// The several categories a visit with area add-ons needs, when the snapshot has them.
+function frozenLicenseCategories(snap) {
+  const list = snap.licenseCategories;
+  return Array.isArray(list) && list.length > 1 && list.every((c) => typeof c === 'string')
+    ? { licenseCategories: list } : {};
+}
 
 function frozenCloseoutRequirements(structuredNotes) {
   const snap = parseJsonObject(structuredNotes).closeoutRequirements;
@@ -160,6 +242,7 @@ function frozenCloseoutRequirements(structuredNotes) {
     requiresCustomerNotice: snap.requiresCustomerNotice,
     requiresLicense: snap.requiresLicense,
     licenseCategory: snap.licenseCategory || null,
+    ...frozenLicenseCategories(snap),
     source: snap.source,
     // Backfilled snapshots record the original verdict's provenance here
     // (migration 20260831000080) — passed through so status classification
@@ -220,19 +303,7 @@ async function resolveCloseoutRequirementsForJobs(jobs = [], { knex = db, strict
   const byId = new Map();
   const byName = new Map();
   if (serviceIds.length || serviceNames.length) {
-    const q = knex('services').select(
-      'id',
-      'name',
-      'category',
-      'requires_service_report',
-      'requires_application_log',
-      'required_photo_count',
-      'requires_customer_signature',
-      'requires_customer_notice',
-      'requires_license',
-      'license_category',
-      'closeout_requirements_source',
-    );
+    const q = knex('services').select(...REQUIREMENT_COLUMNS);
     q.where((qb) => {
       if (serviceIds.length) qb.whereIn('id', serviceIds);
       if (serviceNames.length) {
@@ -247,10 +318,13 @@ async function resolveCloseoutRequirementsForJobs(jobs = [], { knex = db, strict
     }
   }
 
+  const addOnRows = await areaAddOnCatalogRowsByVisit(jobs, { knex, strict });
   for (const job of jobs) {
     const serviceType = job.service_type || job.metadata?.serviceType || null;
     const catalogRow = byId.get(job.service_id) || byName.get(String(serviceType || '').trim().toLowerCase());
-    result.set(job.id || job.sourceRecordId, normalizeRequirements(catalogRow || {}, serviceType));
+    const own = normalizeRequirements(catalogRow || {}, serviceType);
+    const extra = (addOnRows.get(String(job.id)) || []).map((row) => normalizeRequirements(row));
+    result.set(job.id || job.sourceRecordId, extra.length ? foldAddOnRequirements(own, extra) : own);
   }
   return result;
 }

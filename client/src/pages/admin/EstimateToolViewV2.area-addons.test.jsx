@@ -2,7 +2,7 @@
 // Area add-on treatments (GATE_AREA_ADDONS) on the staff estimator. The group
 // is dark: it renders only when the lawn_pricing_v2 read says `areaAddOns.enabled`,
 // takes its rows from that catalog (never from a table in the client), and sends
-// `options.areaAddOns = [{ key, areaSqFt, visitContext }]` — or nothing — on the
+// `options.areaAddOns = [{ key, areaSqFt }]` plus one `options.areaAddOnVisit` — or nothing — on the
 // calculate request. Pre-fill picks the smallest tier that holds the area the
 // estimator already knows and never overwrites a tier the rep chose.
 import React from "react";
@@ -139,7 +139,9 @@ describe("add-on treatments group: availability and catalog", () => {
     // A flat job takes no area and shows no area select.
     fireEvent.click(box("Server-Named Sweep"));
     expect(document.getElementById("estimate-areaAddOn-web_sweep-tier")).toBeNull();
-    expect(document.getElementById("estimate-areaAddOn-web_sweep-visit")).not.toBeNull();
+    // The visit is one select for the group, not one per row.
+    expect(document.getElementById("estimate-areaAddOn-web_sweep-visit")).toBeNull();
+    expect(document.getElementById("estimate-areaAddOns-visit")).not.toBeNull();
   });
 });
 
@@ -153,7 +155,7 @@ describe("what a checked row sends", () => {
     expect("areaAddOns" in body.options).toBe(false);
   });
 
-  it("sends one entry per key: tier ceiling as the area, no area for a flat job, the visit choice", async () => {
+  it("sends one entry per key: tier ceiling as the area, no area for a flat job, and ONE group visit", async () => {
     lookupEnriched = { ...lookupEnriched, estimatedBedAreaSf: 450 };
     renderNew();
     await openGroup();
@@ -161,13 +163,16 @@ describe("what a checked row sends", () => {
     await lookUp();
     fireEvent.click(box("Bed Pre-Emergent Weed Control"));
     fireEvent.click(box("Web Sweep"));
-    fireEvent.change(screen.getByLabelText("Visit", { selector: "#estimate-areaAddOn-web_sweep-visit" }), { target: { value: "sameTripAddOn" } });
+    // One Visit select for the whole group, not one per row.
+    expect(screen.getAllByLabelText("Visit")).toHaveLength(1);
+    fireEvent.change(screen.getByLabelText("Visit"), { target: { value: "sameTripAddOn" } });
     const body = await generate();
     expect(body.options.areaAddOns).toEqual([
-      { key: "bed_pre_emergent", areaSqFt: 1000, visitContext: "standalone" },
-      { key: "web_sweep", visitContext: "sameTripAddOn" },
+      { key: "bed_pre_emergent", areaSqFt: 1000 },
+      { key: "web_sweep" },
     ]);
-    expect(JSON.stringify(body.options.areaAddOns)).not.toMatch(/applications/);
+    expect(body.options.areaAddOnVisit).toBe("sameTripAddOn");
+    expect(JSON.stringify(body.options.areaAddOns)).not.toMatch(/applications|visitContext/);
   });
 
   it("makes an add-on count as a selected service, so Generate works with only an add-on", async () => {
@@ -179,7 +184,7 @@ describe("what a checked row sends", () => {
   });
 
   it("shows the server's message when the calculate call is refused", async () => {
-    const message = "A same-visit area add-on needs a priced service on the same estimate (a recurring service, another one-time service, or a standalone add-on); price it as standalone or add the service it rides with";
+    const message = "Add-ons on the same visit need a priced service on the same estimate (a recurring service or another one-time service); price them as their own visit or add the service they ride with";
     calculateReply = () => Promise.resolve(jsonResponse({ error: message }, 400));
     renderNew();
     await openGroup();
@@ -194,8 +199,8 @@ describe("what a checked row sends", () => {
 
 describe("add-on-only quotes need no property data (Codex round 5 P2)", () => {
   it.each([
-    ["a web sweep", "Web Sweep", { key: "web_sweep", visitContext: "standalone" }],
-    ["a tiered add-on", "Fire Ant Yard Treatment", { key: "fire_ant_yard", areaSqFt: 3000, visitContext: "standalone" }],
+    ["a web sweep", "Web Sweep", { key: "web_sweep" }],
+    ["a tiered add-on", "Fire Ant Yard Treatment", { key: "fire_ant_yard", areaSqFt: 3000 }],
   ])("generates %s alone with no property lookup, home size or lot size", async (_label, name, entry) => {
     renderNew();
     await openGroup();
@@ -205,6 +210,7 @@ describe("add-on-only quotes need no property data (Codex round 5 P2)", () => {
     expect(body.selectedServices).toEqual([]);
     expect(body.profile).toMatchObject({ homeSqFt: 0, lotSqFt: 0 });
     expect(body.options.areaAddOns).toEqual([entry]);
+    expect(body.options.areaAddOnVisit).toBe("standalone");
   });
 
   it("still asks for a home or lot size when a footprint-priced service is selected beside the add-on", async () => {
@@ -229,6 +235,28 @@ describe("add-on-only quotes need no property data (Codex round 5 P2)", () => {
 });
 
 describe("same-visit choice", () => {
+  it("appears once, only while an add-on is selected, and applies to every add-on", async () => {
+    renderNew();
+    await openGroup();
+    expect(screen.queryByLabelText("Visit")).not.toBeInTheDocument();
+    fireEvent.click(box("Web Sweep"));
+    fireEvent.click(box("Fire Ant Yard Treatment"));
+    expect(screen.getAllByLabelText("Visit")).toHaveLength(1);
+    expect(screen.getByText("All selected add-ons share this visit.")).toBeInTheDocument();
+    fireEvent.click(box("Web Sweep"));
+    fireEvent.click(box("Fire Ant Yard Treatment"));
+    expect(screen.queryByLabelText("Visit")).not.toBeInTheDocument();
+  });
+
+  it("an add-on is never the service the group rides with: two add-ons and no service still show the hint", async () => {
+    renderNew();
+    await openGroup();
+    fireEvent.click(box("Web Sweep"));
+    fireEvent.click(box("Fire Ant Yard Treatment"));
+    fireEvent.change(screen.getByLabelText("Visit"), { target: { value: "sameTripAddOn" } });
+    expect(screen.getByText("Needs another service on this estimate")).toBeInTheDocument();
+  });
+
   it("stays selectable with no other service, shows a hint, and drops it once a service is picked", async () => {
     renderNew();
     await openGroup();
@@ -279,7 +307,7 @@ describe("tier pre-fill", () => {
     expect(screen.getByLabelText("Bed area")).toHaveValue("larger");
     expect(screen.getByLabelText("Bed area (sq ft)")).toHaveValue(5200);
     const body = await generate();
-    expect(body.options.areaAddOns).toEqual([{ key: "bed_pre_emergent", areaSqFt: 5200, visitContext: "standalone" }]);
+    expect(body.options.areaAddOns).toEqual([{ key: "bed_pre_emergent", areaSqFt: 5200 }]);
   });
 
   it("never overwrites a tier the rep chose", async () => {
@@ -336,7 +364,7 @@ describe("a grass-bound add-on takes its own grass (Codex round 5 P1)", () => {
     const body = await generate();
     // The estimate's own grass is the untouched default; the add-on never takes it.
     expect(body.options.grassType).toBe("st_augustine");
-    expect(spotEntry(body)).toEqual({ key: "lawn_insect_spot", areaSqFt: 1000, visitContext: "standalone", grassType: "unknown" });
+    expect(spotEntry(body)).toEqual({ key: "lawn_insect_spot", areaSqFt: 1000, grassType: "unknown" });
     expect(grassSelect()).toHaveValue("");
   });
 
@@ -374,7 +402,7 @@ describe("a grass-bound add-on takes its own grass (Codex round 5 P1)", () => {
       id: "qa-grass-estimate", status: "draft", editable: true, editVersion: "qa-version",
       customerName: "QA Contact", address: ADDRESS, result: RESULT,
       inputs: { svcPest: true, homeSqFt: "2000", lotSqFt: "9000", stories: "1" },
-      engineRequest: { profile: {}, selectedServices: ["PEST"], options: { areaAddOns: [{ key: "lawn_insect_spot", areaSqFt: 1000, visitContext: "standalone", grassType: "unknown" }] } },
+      engineRequest: { profile: {}, selectedServices: ["PEST"], options: { areaAddOns: [{ key: "lawn_insect_spot", areaSqFt: 1000, grassType: "unknown" }], areaAddOnVisit: "standalone" } },
     };
     render(<MemoryRouter><EstimateToolViewV2 editEstimateId="qa-grass-estimate" /></MemoryRouter>);
     await screen.findByTestId("area-addons-group");
@@ -385,8 +413,8 @@ describe("a grass-bound add-on takes its own grass (Codex round 5 P1)", () => {
 
 describe("saved estimates", () => {
   const SAVED_LIST = [
-    { key: "fire_ant_yard", areaSqFt: 5000, visitContext: "sameTripAddOn" },
-    { key: "web_sweep", visitContext: "standalone" },
+    { key: "fire_ant_yard", areaSqFt: 5000 },
+    { key: "web_sweep" },
   ];
   function reopen(editFields) {
     editSource = {
@@ -399,28 +427,41 @@ describe("saved estimates", () => {
   it("reloads the add-ons from the stored engine request when the form snapshot has none", async () => {
     reopen({
       inputs: { svcPest: true, homeSqFt: "2000", lotSqFt: "9000", stories: "1" },
-      engineRequest: { profile: {}, selectedServices: ["PEST"], options: { areaAddOns: SAVED_LIST } },
+      engineRequest: { profile: {}, selectedServices: ["PEST"], options: { areaAddOns: SAVED_LIST, areaAddOnVisit: "sameTripAddOn" } },
     });
     const group = await screen.findByTestId("area-addons-group");
     expect(within(group).getByText("2 selected")).toBeInTheDocument();
     expect(box("Fire Ant Yard Treatment")).toBeChecked();
     expect(box("Web Sweep")).toBeChecked();
     expect(screen.getByLabelText("Lawn area")).toHaveValue("5000");
-    expect(screen.getByLabelText("Visit", { selector: "#estimate-areaAddOn-fire_ant_yard-visit" })).toHaveValue("sameTripAddOn");
+    expect(screen.getByLabelText("Visit")).toHaveValue("sameTripAddOn");
     const body = await generate();
     expect(body.options.areaAddOns).toEqual(SAVED_LIST);
+    expect(body.options.areaAddOnVisit).toBe("sameTripAddOn");
+  });
+
+  it("reloads an estimate saved with a visit on each add-on: same visit only when every add-on had it", async () => {
+    reopen({
+      inputs: { svcPest: true, homeSqFt: "2000", lotSqFt: "9000", stories: "1" },
+      engineRequest: { profile: {}, selectedServices: ["PEST"], options: { areaAddOns: [{ key: "fire_ant_yard", areaSqFt: 5000, visitContext: "sameTripAddOn" }, { key: "web_sweep", visitContext: "standalone" }] } },
+    });
+    await screen.findByTestId("area-addons-group");
+    expect(screen.getByLabelText("Visit")).toHaveValue("standalone");
+    expect(JSON.stringify((await generate()).options.areaAddOns)).not.toMatch(/visitContext/);
   });
 
   it("reloads the form snapshot the builder saved", async () => {
     reopen({
       inputs: {
         svcPest: true, homeSqFt: "2000", lotSqFt: "9000", stories: "1",
-        areaAddOns: { bed_pre_emergent: { areaSqFt: "2000", larger: false, visitContext: "standalone" } },
+        areaAddOns: { bed_pre_emergent: { areaSqFt: "2000", larger: false } },
+        areaAddOnVisit: "sameTripAddOn",
       },
     });
     await screen.findByTestId("area-addons-group");
     expect(box("Bed Pre-Emergent Weed Control")).toBeChecked();
     expect(screen.getByLabelText("Bed area")).toHaveValue("2000");
+    expect(screen.getByLabelText("Visit")).toHaveValue("sameTripAddOn");
   });
 
   it("keeps a saved add-on visible with a note while the add-ons are off, and lets the rep uncheck it", async () => {
@@ -431,7 +472,7 @@ describe("saved estimates", () => {
     });
     const group = await screen.findByTestId("area-addons-group");
     expect(await within(group).findAllByText("Add-on treatments are currently unavailable. Uncheck this one to calculate.")).toHaveLength(2);
-    expect(within(group).queryByLabelText("Own visit")).not.toBeInTheDocument();
+    expect(within(group).queryByLabelText("Visit")).not.toBeInTheDocument();
     // The selection is still forwarded: the server's gate refuses it loudly.
     const body = await generate();
     expect(body.options.areaAddOns).toHaveLength(2);

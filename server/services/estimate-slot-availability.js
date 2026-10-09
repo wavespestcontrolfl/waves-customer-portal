@@ -84,6 +84,8 @@ const SERVICE_LABELS = {
 };
 
 const MAX_ESTIMATE_SLOT_DURATION_MINUTES = 180;
+// Engine key of an area add-on row (GATE_AREA_ADDONS) in a one-time profile.
+const AREA_ADDON_ENGINE_KEY = 'area_addon';
 // Working-day start for customer-facing slots — mirrors DAY_START_HOUR (8:00)
 // in scheduling/find-time.js, which generates every route-derived offer.
 // Keep the two in sync.
@@ -540,6 +542,17 @@ function formatServiceProfileLabel(services) {
   return parts.join(' + ');
 }
 
+// An area add-on row's profile fields: its engine on-site minutes and its price
+// (only the positive ones). Any other service has none.
+function areaAddOnProfileFields(service, item, amount) {
+  if (service !== AREA_ADDON_ENGINE_KEY) return {};
+  const minutes = Math.ceil(Number(item.onSiteMinutes));
+  return {
+    ...(minutes > 0 ? { durationMinutes: minutes } : {}),
+    ...(amount > 0 ? { addOnPrice: Math.round(amount * 100) / 100 } : {}),
+  };
+}
+
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
@@ -559,7 +572,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   const seen = new Set();
   const seenEngineKeys = new Map();
   // `service` is the category (used for the row's service field + label dedup).
-  const add = (service, label, engineKey = null, catalogServiceKey = null, durationMinutes = null) => {
+  const add = (service, label, engineKey = null, catalogServiceKey = null, extraFields = {}) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
@@ -600,8 +613,11 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // (cockroach_control / pest_initial_roach; codex #3842 r3 P1).
     const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null, catalogServiceKey: catalogServiceKey || null };
     // An area add-on carries the engine's on-site minutes as a duration
-    // floor: the capacity pass books max(catalog default, these minutes).
-    if (durationMinutes) row.durationMinutes = durationMinutes;
+    // floor (the capacity pass books max(catalog default, these minutes)) and
+    // its price, which becomes the visit's add-on row at accept
+    // (area-addon-visit-rows.js). The price is internal: the public profile
+    // drops it.
+    Object.assign(row, extraFields);
     rows.push(row);
     if (engineKey && !seenEngineKeys.has(engineKey)) seenEngineKeys.set(engineKey, row);
   };
@@ -673,8 +689,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    const onSiteMinutes = service === 'area_addon' ? Math.ceil(Number(item.onSiteMinutes)) : 0;
-    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null, onSiteMinutes > 0 ? onSiteMinutes : null);
+    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null, areaAddOnProfileFields(service, item, amount));
   }
   return rows;
 }
@@ -782,6 +797,24 @@ function seasonalDateSegments(dateFrom, dateTo, seasonal) {
   return segments.length ? segments : [[from, to]];
 }
 
+// A one-time visit that carries area add-ons reserves at least the sum of their
+// engine on-site minutes, whatever the capacity gate says (the default 60 would
+// book a three-add-on visit into one hour). The add-ons ride the visit's
+// primary service: when a non-add-on service is also sold it keeps the minutes
+// today's rule gives it (`base`) and the add-ons come on top; add-ons alone are
+// sized by the larger of `base` and their sum. No add-on, no change. The result
+// is not capped at MAX_ESTIMATE_SLOT_DURATION_MINUTES: a floor the cap lowered
+// would not be a floor. With the capacity gate on the catalog pass sums the same
+// minutes per service (resolveCatalogSlotProfile).
+function oneTimeVisitDurationMinutes(base, services, serviceMode) {
+  if (serviceMode !== 'one_time') return base;
+  const addOns = services.filter((row) => row.engineKey === AREA_ADDON_ENGINE_KEY);
+  const addOnMinutes = addOns.reduce((sum, row) => sum + (Number(row.durationMinutes) || 0), 0);
+  if (!(addOnMinutes > 0)) return base;
+  const floor = addOns.length < services.length ? base + addOnMinutes : Math.max(base, addOnMinutes);
+  return capacityEnabled() ? Math.ceil(floor) : Math.ceil(floor / 15) * 15;
+}
+
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
@@ -864,7 +897,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   }
   const durationMinutes = reservationServiceMix
     ? reservationServiceMix.durationMinutes
-    : clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);
+    : oneTimeVisitDurationMinutes(clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes), services, serviceMode);
   const serviceLabel = formatServiceProfileLabel(services)
     || estimate.service_interest
     || (serviceMode === 'one_time' ? 'One-time service' : 'Estimate service');
@@ -1861,6 +1894,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       delete publicService.engineKey;
       delete publicService.catalogServiceKey;
       delete publicService.resolvedServiceKey;
+      delete publicService.addOnPrice;
       return publicService;
     }),
   };

@@ -69,6 +69,27 @@ describe('fastCompleteReportEnabled', () => {
     }
   });
 
+  test('an area add-on (the web sweep is pest control by family) keeps the generic form, never the report flow or the lawn sheet', async () => {
+    process.env.GATE_FAST_COMPLETE_REPORT = 'true';
+    const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+    resolveCompletionProfileForScheduledService.mockImplementation(async (svc) => (svc.id === 'svc-1'
+      ? { serviceKey: 'area_addon_web_sweep', category: 'pest_control', findingsType: null, companions: [] }
+      : { serviceKey: 'pest_general_quarterly', category: 'pest_control', findingsType: null, companions: [] }));
+    const saved = process.env.GATE_LAWN_FAST_COMPLETE;
+    process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+    try {
+      expect(await flags()).toEqual([false, true]);
+      resolveCompletionProfileForScheduledService.mockImplementation(async (svc) => (svc.id === 'svc-1'
+        ? { serviceKey: 'area_addon_lawn_insect_spot', category: 'lawn_care', companions: [] }
+        : { serviceKey: 'lawn_care_recurring', category: 'lawn_care', companions: [] }));
+      const map = await loadProjectCompletionContextByServiceId(services);
+      expect([map.get('svc-1').lawnFastCompleteEnabled, map.get('svc-2').lawnFastCompleteEnabled]).toEqual([false, true]);
+    } finally {
+      resolveCompletionProfileForScheduledService.mockImplementation(async () => null);
+      if (saved === undefined) delete process.env.GATE_LAWN_FAST_COMPLETE; else process.env.GATE_LAWN_FAST_COMPLETE = saved;
+    }
+  });
+
   test('read at call time: a flip needs no reload', async () => {
     delete process.env.GATE_FAST_COMPLETE_REPORT;
     expect(await flags()).toEqual([false, false]);
@@ -83,6 +104,6 @@ describe('fastCompleteReportEnabled', () => {
     const count = (re) => (src.match(re) || []).length;
     expect(count(/fastCompleteReportEnabled: projectCompletionContext\.fastCompleteReportEnabled === true/g))
       .toBe(count(/fastCompleteRecapEnabled: projectCompletionContext\.fastCompleteRecapEnabled === true/g));
-    expect(src).toContain("fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive()");
+    expect(src).toContain('fastCompleteReportEnabled: fastCompleteReportOffered(completionProfile)');
   });
 });

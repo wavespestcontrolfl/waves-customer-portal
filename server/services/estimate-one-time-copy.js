@@ -131,14 +131,23 @@ function areaAddOnCopyKey(item = {}) {
   return key && PACK[key] ? key : null;
 }
 
+// One own visit holds every add-on on the estimate: only the line that carries
+// the visit's drive is "its own visit"; the others are done on that same visit.
+// A row stored before carriesVisitDrive existed has no flag and keeps the
+// own-visit wording.
+function areaAddOnVisitCopy(item = {}) {
+  if (item.visitContext === 'sameTripAddOn') return 'Priced for the same visit as your other booked service';
+  return item.carriesVisitDrive === false
+    ? 'Done on the same visit as your other add-on treatments'
+    : 'Priced as its own visit';
+}
+
 // Fills the tier and the visit context into an area add-on's bullets. A row
 // with no tier drops the bullet that names the area rather than print a blank.
 function fillAreaAddOnLines(lines = [], item = {}) {
   const tier = Number(item.tierSqFt);
   const area = tier > 0 ? `${tier.toLocaleString('en-US')} sq ft` : null;
-  const visit = item.visitContext === 'sameTripAddOn'
-    ? 'Priced for the same visit as your other booked service'
-    : 'Priced as its own visit';
+  const visit = areaAddOnVisitCopy(item);
   return lines
     .filter((line) => area || !line.includes('{Area}'))
     .map((line) => line.replace('{Area}', area || '').replace('{Visit}', visit));

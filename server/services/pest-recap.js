@@ -25,6 +25,7 @@ const db = require('../models/db');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const logger = require('./logger');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -115,11 +116,17 @@ async function resolveEligibility(serviceId, knex = db, { strict = false } = {})
   // profiles (project_required / special_project) are likewise excluded:
   // those services must close through their project, and the recap would
   // skip that billing/artifact path entirely.
-  const eligible = profile?.category === PEST_CONTROL_CATEGORY
+  return { ok: true, svc, profile, eligible: recapEligibleProfile(profile) };
+}
+
+// An area add-on (the web sweep is pest control by family) is generic one-time
+// work: it keeps the generic completion form, never the pest recap.
+function recapEligibleProfile(profile) {
+  return profile?.category === PEST_CONTROL_CATEGORY
     && !profile?.findingsType
     && !profile?.projectBacked
-    && !profile?.requiresProject;
-  return { ok: true, svc, profile, eligible };
+    && !profile?.requiresProject
+    && !isAreaAddOnCatalogKey(profile?.serviceKey);
 }
 
 // "Used most on <line> visits" in the Fast Complete product picker: the
@@ -1733,6 +1740,7 @@ async function submitRecap({
 module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
+  recapEligibleProfile,
   sheetRecordFor,
   loadServiceWithCustomer,
   RECAP_COMPARED_IDENTITY_KEYS,

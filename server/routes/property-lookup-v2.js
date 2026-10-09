@@ -5197,8 +5197,10 @@ function requireBermudaSuppressionGate() {
 }
 
 // Area add-on treatments (GATE_AREA_ADDONS, owner rulings 2026-10-08). The
-// estimator posts options.areaAddOns = [{ key, areaSqFt, visitContext }] and
-// this is the ONE place it becomes engine services.areaAddOns. Same posture as
+// estimator posts options.areaAddOns = [{ key, areaSqFt, grassType? }] plus ONE
+// options.areaAddOnVisit ('standalone' | 'sameTripAddOn', default standalone)
+// for the whole group, and this is the ONE place it becomes engine
+// services.areaAddOns / services.areaAddOnVisit. Same posture as
 // the Bermuda gate: requested-while-dark fails CLOSED with a 400 the builder
 // surfaces verbatim, and the save-replay rethrows it (failClosed). Anything the
 // engine owns (known key, positive area, visit context, the host service for a
@@ -5225,7 +5227,7 @@ function requireAreaAddOnsGate() {
 function areaAddOnsFromOptions(options, { track, grassChosen }) {
   const raw = options.areaAddOns;
   if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) throw areaAddOnInputError('areaAddOns must be a list of { key, areaSqFt, visitContext }.');
+  if (!Array.isArray(raw)) throw areaAddOnInputError('areaAddOns must be a list of { key, areaSqFt }.');
   if (raw.length === 0) return undefined;
   requireAreaAddOnsGate();
   const { AREA_ADDONS } = require('../services/pricing-engine/constants');
@@ -5236,15 +5238,37 @@ function areaAddOnsFromOptions(options, { track, grassChosen }) {
     if (entry.applications !== undefined) {
       throw areaAddOnInputError('applications is not supported: each area add-on is one application per estimate, and a second application is a new estimate.');
     }
+    // The visit is chosen once for the whole group. A per-add-on visitContext
+    // from an older client is refused: honoring it would charge the drive twice.
+    if (entry.visitContext !== undefined) {
+      throw areaAddOnInputError('visitContext is set once for all area add-ons (options.areaAddOnVisit), not on each add-on - update the estimator and send areaAddOnVisit.', 'AREA_ADDON_VISIT_PER_ENTRY');
+    }
     const cfg = typeof entry.key === 'string' && Object.prototype.hasOwnProperty.call(AREA_ADDONS.items, entry.key)
       ? AREA_ADDONS.items[entry.key] : null;
     return {
       key: entry.key,
       ...(entry.areaSqFt !== undefined ? { areaSqFt: entry.areaSqFt } : {}),
-      ...(entry.visitContext !== undefined ? { visitContext: entry.visitContext } : {}),
-      ...(cfg?.requiresGrassTrack ? { grassType: typeof entry.grassType === 'string' ? entry.grassType.trim() || 'unknown' : (grassChosen ? track : 'unknown') } : {}),
+      ...(cfg?.requiresGrassTrack ? { grassType: areaAddOnGrass(entry.grassType, { track, grassChosen }) } : {}),
     };
   });
+}
+// A label-bound add-on's grass. A string is the rep's choice ('' = not chosen yet
+// = unknown). An explicit null is also "not chosen" (the client contract sends
+// 'unknown'), so it never borrows the estimate's grass. Only an ABSENT field
+// takes the estimate's grass, and only when the rep chose one on the form.
+function areaAddOnGrass(value, { track, grassChosen }) {
+  if (typeof value === 'string') return value.trim() || 'unknown';
+  if (value === null) return 'unknown';
+  return grassChosen ? track : 'unknown';
+}
+// The group's visit: absent = their own visit; anything else must be a known context.
+function areaAddOnVisitFromOptions(options) {
+  const visit = options.areaAddOnVisit;
+  if (visit === undefined || visit === null) return 'standalone';
+  if (visit !== 'standalone' && visit !== 'sameTripAddOn') {
+    throw areaAddOnInputError("areaAddOnVisit must be 'standalone' or 'sameTripAddOn'.", 'AREA_ADDON_VISIT_INVALID');
+  }
+  return visit;
 }
 
 // An association's common-area job (HOA / multifamily), by the operator's
@@ -5947,7 +5971,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }
   const areaAddOns = areaAddOnsFromOptions(o, { track, grassChosen: !!o.grassType });
-  if (areaAddOns) services.areaAddOns = areaAddOns;
+  if (areaAddOns) {
+    services.areaAddOns = areaAddOns;
+    services.areaAddOnVisit = areaAddOnVisitFromOptions(o);
+  }
   if (sel.has('RODENT_SANITATION')) {
     services.sanitation = {
       tier: o.sanitationTier || 'standard',

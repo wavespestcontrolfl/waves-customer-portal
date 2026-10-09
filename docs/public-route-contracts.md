@@ -1888,15 +1888,23 @@ write) and `POST /:token/reserve` (so no recurring slot is held that accept woul
 `{ "error": "This estimate includes add-on treatments that our office schedules with you directly. Please contact our
 office to finish booking.", "code": "AREA_ADDONS_ONE_TIME_ACCEPT_ONLY" }`. The one-time accept (and its reserve) is
 unchanged in shape: one held appointment carries the one-time service mix, its catalog id is stamped by the exact
-`catalogServiceKey` on the add-on row (never by name), and the one-time total is its price. Browse routes
+`catalogServiceKey` on the add-on row (never by name), and the one-time total is its price. Every sold area add-on
+other than the one the appointment is stamped with becomes a structured `scheduled_service_addons` row on that same
+appointment (catalog id and key snapshot, name, its own price, its engine minutes), written in the accept
+transaction when the held slot graduates (or when the accept adopts an existing booked appointment): nothing is
+written on the hold, so a released or expired hold leaves no row, and a replayed accept writes none twice. The
+appointment price stays the whole one-time total (no add-on is counted twice). The held slot is sized to at least the
+sum of the add-ons' on-site minutes (plus the primary service's usual allowance), with the capacity gate on or off, on
+the slot offers, reserve, extend and commit. No request, response or status code of these routes changes; the
+`serviceProfile.services[]` of the slot payload carries no add-on price (stripped like the engine key). Browse routes
 (`available-slots`, `find-slots`) answer as before. With no add-on on the estimate, every body and status is unchanged.
 `GET /:token/data` one-time rows (`pricing.oneTimeBreakdown.items[]`, and the render rows behind the page) for an
 add-on carry, beside the existing fields: `addOnKey`, `catalogServiceKey` (`area_addon_<addOnKey>`), `addOnCategory`
 (`pest_control` for the web sweep, `lawn_care` for the rest), `areaSqFt` and `tierSqFt` (null on the web sweep) and
-`visitContext` (`standalone` | `sameTripAddOn`), plus a `copy` object from the static pack
+`visitContext` (`standalone` | `sameTripAddOn`; one value for the whole add-on group) and `carriesVisitDrive` (true on the one add-on of an own visit that carries the visit's drive allowance, false on the others), plus a `copy` object from the static pack
 (`server/services/estimate-one-time-copy.json`, `area_addon_*`); the row has no `applications`, `perApplication` or
 `maxPerYear` (one application per estimate). The engine's `onSiteMinutes` is internal and stripped from the public rows
-(`sanitizePublicOneTimeBreakdown`). An add-on row never unlocks a service-details packet
+(`sanitizePublicOneTimeBreakdown`). Several add-ons on one estimate are ONE visit: the `copy` visit bullet reads "Priced as its own visit" on the add-on that carries the drive, "Done on the same visit as your other add-on treatments" on the others of an own visit, and "Priced for the same visit as your other booked service" when the group rides a service; a row stored before `carriesVisitDrive` existed keeps "Priced as its own visit". An add-on row never unlocks a service-details packet
 (`GET/POST /:token/service-details/...`): the lawn guide still needs a recurring lawn line or a listed one-time lawn row.
 
 On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,

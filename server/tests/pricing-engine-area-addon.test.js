@@ -155,7 +155,7 @@ describe('area add-on treatment pricing', () => {
 const HOME = { homeSqFt: 2000, lotSqFt: 7500 };
 const TWO_ADDONS = [
   { key: 'bed_pre_emergent', areaSqFt: 1500 },
-  { key: 'web_sweep', visitContext: 'sameTripAddOn' },
+  { key: 'web_sweep' },
 ];
 const addOnLines = (estimate) => estimate.lineItems.filter((l) => l.service === 'area_addon');
 
@@ -285,14 +285,15 @@ describe('area add-on input rules in the estimate engine', () => {
       { key: 'hardscape_weed', areaSqFt: 1000 },
       { key: 'hardscape_weed', areaSqFt: 1000 },
     ]), /more than once/);
-    throwsFailClosed(() => run([{ key: 'web_sweep' }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }]), /more than once/);
+    throwsFailClosed(() => run([{ key: 'web_sweep' }, { key: 'web_sweep' }]), /more than once/);
   });
 
   test('a commercial property validates the entry first: unknown key or bad value throws, never a manual-quote line', () => {
     const commercial = { propertyType: 'commercial' };
     throwsFailClosed(() => run([{ key: 'aeration', areaSqFt: 1000 }], commercial), /addOnKey must be one of/);
     throwsFailClosed(() => run([{ key: 'fire_ant_yard' }], commercial), /areaSqFt is required/);
-    throwsFailClosed(() => run([{ key: 'web_sweep', visitContext: 'builderBatch' }], commercial), /visitContext must be one of/);
+    throwsFailClosed(() => run([{ key: 'web_sweep' }], { ...commercial, services: { areaAddOnVisit: 'builderBatch' } }), /areaAddOnVisit must be one of/);
+    throwsFailClosed(() => run([{ key: 'web_sweep', visitContext: 'standalone' }], commercial), /visitContext is set once for all area add-ons/);
     throwsFailClosed(() => run([{ key: 'web_sweep' }, 'web_sweep'], commercial), /must be an object/);
     // A valid entry is still the commercial manual-quote line.
     expect(run([{ key: 'fire_ant_yard', areaSqFt: 3000 }], commercial).lineItems.map((l) => l.service)).toEqual(['commercial_lawn']);
@@ -318,60 +319,160 @@ describe('area add-on input rules in the estimate engine', () => {
 });
 
 describe('same-visit area add-ons need a host visit on the same estimate', () => {
+  const SAME = { areaAddOnVisit: 'sameTripAddOn' };
   const run = (areaAddOns, services = {}, extra = {}) => generateEstimate({ ...HOME, ...extra, services: { ...services, areaAddOns } });
   const HOST_ERROR = expect.objectContaining({
-    name: 'PricingError', statusCode: 400, failClosed: true, message: expect.stringMatching(/same-visit area add-on needs a priced service on the same estimate/),
+    name: 'PricingError', statusCode: 400, failClosed: true, message: expect.stringMatching(/Add-ons on the same visit need a priced service on the same estimate/),
+    metadata: expect.objectContaining({ reason: 'AREA_ADDON_HOST_MISSING' }),
   });
-  const SAME_TRIP_SWEEP = { key: 'web_sweep', visitContext: 'sameTripAddOn' };
+  const SWEEP = [{ key: 'web_sweep' }];
 
-  test('a same-trip web sweep alone throws; it is never silently repriced as standalone', () => {
-    expect(() => run([SAME_TRIP_SWEEP])).toThrow(HOST_ERROR);
+  test('a same-visit web sweep alone throws; it is never silently repriced as its own visit', () => {
+    expect(() => run(SWEEP, SAME)).toThrow(HOST_ERROR);
   });
 
   test('with recurring pest on the estimate it prices $59', () => {
-    const estimate = run([SAME_TRIP_SWEEP], { pest: { frequency: 'quarterly' } });
-    expect(addOnLines(estimate).map((l) => [l.visitContext, l.price])).toEqual([['sameTripAddOn', 59]]);
+    const estimate = run(SWEEP, { pest: { frequency: 'quarterly' }, ...SAME });
+    expect(addOnLines(estimate).map((l) => [l.visitContext, l.price, l.carriesVisitDrive])).toEqual([['sameTripAddOn', 59, false]]);
   });
 
   test('another one-time service is a host', () => {
-    const estimate = run([SAME_TRIP_SWEEP], { oneTimePest: true });
+    const estimate = run(SWEEP, { oneTimePest: true, ...SAME });
     expect(estimate.lineItems.some((l) => l.service === 'one_time_pest' && l.price > 0)).toBe(true);
     expect(addOnLines(estimate)[0].price).toBe(59);
   });
 
-  test('one standalone add-on hosts a same-trip add-on, in either list order', () => {
-    const standalone = { key: 'bed_pre_emergent', areaSqFt: 1500 };
-    for (const list of [[standalone, SAME_TRIP_SWEEP], [SAME_TRIP_SWEEP, standalone]]) {
-      const lines = addOnLines(run(list));
-      expect(lines.map((l) => [l.addOnKey, l.visitContext, l.price]).sort()).toEqual([
-        ['bed_pre_emergent', 'standalone', 139],
-        ['web_sweep', 'sameTripAddOn', 59],
-      ]);
-    }
-  });
-
-  test('two same-trip add-ons with no other line throw', () => {
-    expect(() => run([SAME_TRIP_SWEEP, { key: 'fire_ant_yard', areaSqFt: 3000, visitContext: 'sameTripAddOn' }])).toThrow(HOST_ERROR);
+  test('an add-on never hosts the group: several same-visit add-ons with no other service throw', () => {
+    expect(() => run([...SWEEP, { key: 'fire_ant_yard', areaSqFt: 3000 }], SAME)).toThrow(HOST_ERROR);
   });
 
   test('an unpriced line is never a host: a custom-quote add-on, a commercial manual quote, or a priced-nothing estimate', () => {
-    // standalone add-on over the top tier = custom quote, no price
-    expect(() => run([{ key: 'fire_ant_yard', areaSqFt: 9000 }, SAME_TRIP_SWEEP])).toThrow(HOST_ERROR);
-    expect(() => run([{ key: 'bed_pre_emergent', areaSqFt: 9000 }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }])).toThrow(HOST_ERROR);
-    // commercial: the add-on lines are manual quotes, so even a standalone one hosts nothing
-    expect(() => run([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, SAME_TRIP_SWEEP], {}, { propertyType: 'commercial' })).toThrow(HOST_ERROR);
+    expect(() => run([{ key: 'fire_ant_yard', areaSqFt: 9000 }], SAME)).toThrow(HOST_ERROR);
+    expect(() => run([{ key: 'bed_pre_emergent', areaSqFt: 9000 }, ...SWEEP], SAME)).toThrow(HOST_ERROR);
+    // commercial: the add-on lines are manual quotes, so nothing hosts the same-visit group
+    expect(() => run([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, ...SWEEP], SAME, { propertyType: 'commercial' })).toThrow(HOST_ERROR);
   });
 
   test('prior services the customer already holds are not a host (an existing visit is not supported yet)', () => {
-    expect(() => run([SAME_TRIP_SWEEP], {}, { recurringCustomer: true, priorQualifyingServices: ['pest_control', 'lawn_care'] })).toThrow(HOST_ERROR);
+    expect(() => run(SWEEP, SAME, { recurringCustomer: true, priorQualifyingServices: ['pest_control', 'lawn_care'] })).toThrow(HOST_ERROR);
   });
 
-  test('a standalone add-on never needs a host', () => {
-    expect(addOnLines(run([{ key: 'web_sweep' }])).map((l) => l.price)).toEqual([89]);
+  test('an own visit never needs a host', () => {
+    expect(addOnLines(run(SWEEP)).map((l) => l.price)).toEqual([89]);
+    expect(addOnLines(run(SWEEP, { areaAddOnVisit: 'standalone' })).map((l) => l.price)).toEqual([89]);
   });
 
   test('a direct priceAreaAddOn call still prices same-trip (the engine owns the host check)', () => {
     expect(priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn' }).price).toBe(59);
+  });
+});
+
+// One drive allowance per visit (owner ruling 2026-10-08): the visit is chosen once for the group.
+describe('several area add-ons are one visit with one drive', () => {
+  const DRIVE = 20; // GLOBAL.DRIVE_TIME minutes, the constant the formula charges
+  const run = (areaAddOns, services = {}, extra = {}) => generateEstimate({ ...HOME, ...extra, services: { ...services, areaAddOns } });
+  const refused = (fn, message, reason) => expect(fn).toThrow(expect.objectContaining({
+    name: 'PricingError', statusCode: 400, failClosed: true, message: expect.stringMatching(message),
+    ...(reason ? { metadata: expect.objectContaining({ reason }) } : {}),
+  }));
+  const three = [
+    { key: 'bed_pre_emergent', areaSqFt: 1500 },
+    { key: 'fire_ant_yard', areaSqFt: 3000 },
+    { key: 'web_sweep' },
+  ];
+
+  test('on their own visit two and three add-ons charge exactly one drive, on the first listed', () => {
+    for (const list of [three.slice(0, 2), three]) {
+      const lines = addOnLines(run(list));
+      expect(lines.map((l) => l.costs.driveMin)).toEqual(list.map((_, i) => (i === 0 ? DRIVE : 0)));
+      expect(lines.map((l) => l.carriesVisitDrive)).toEqual(list.map((_, i) => i === 0));
+      expect(lines.every((l) => l.visitContext === 'standalone')).toBe(true);
+    }
+    // The follower prices at its same-trip price: the drive is not charged twice.
+    const sameTrip = (key, areaSqFt) => priceAreaAddOn(key, { areaSqFt, visitContext: 'sameTripAddOn' }).price;
+    expect(addOnLines(run(three)).map((l) => l.price)).toEqual([
+      priceAreaAddOn('bed_pre_emergent', { areaSqFt: 1500 }).price,
+      sameTrip('fire_ant_yard', 3000),
+      sameTrip('web_sweep'),
+    ]);
+  });
+
+  test('the group is cheaper than the same add-ons each paying their own drive', () => {
+    const eachOwn = three.map((e) => priceAreaAddOn(e.key, { areaSqFt: e.areaSqFt }).price).reduce((a, b) => a + b, 0);
+    expect(run(three).summary.oneTimeTotal).toBeLessThan(eachOwn);
+  });
+
+  test('on the same visit as a service no add-on carries a drive', () => {
+    const lines = addOnLines(run(three, { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' }));
+    expect(lines.map((l) => [l.visitContext, l.costs.driveMin, l.carriesVisitDrive])).toEqual(three.map(() => ['sameTripAddOn', 0, false]));
+  });
+
+  test('a custom-quote or commercial first entry never carries the drive: the first PRICED add-on does', () => {
+    const lines = addOnLines(run([{ key: 'bed_pre_emergent', areaSqFt: 9000 }, { key: 'fire_ant_yard', areaSqFt: 3000 }, { key: 'web_sweep' }]));
+    expect(lines.map((l) => [l.addOnKey, l.carriesVisitDrive, l.price])).toEqual([
+      ['bed_pre_emergent', false, null],
+      ['fire_ant_yard', true, priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000 }).price],
+      ['web_sweep', false, priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn' }).price],
+    ]);
+    // A label-bound add-on with an unverified grass quotes as custom: the next priced one carries.
+    const grass = addOnLines(run([{ key: 'lawn_insect_spot', areaSqFt: 1000, grassType: 'unknown' }, { key: 'web_sweep' }]));
+    expect(grass.map((l) => [l.addOnKey, l.carriesVisitDrive])).toEqual([['lawn_insect_spot', false], ['web_sweep', true]]);
+    // A commercial property: every add-on is a manual quote, so there is no add-on line and no drive.
+    expect(addOnLines(run(three, {}, { propertyType: 'commercial' }))).toEqual([]);
+  });
+
+  test('every line keeps at least the target margin, carrier or not, on either visit', () => {
+    const lines = [
+      ...addOnLines(run(three)),
+      ...addOnLines(run(three, { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' })),
+    ];
+    expect(lines).toHaveLength(6);
+    for (const line of lines) expect(line.margin).toBeGreaterThanOrEqual(0.6);
+  });
+
+  test('the visit text says what the line was priced as', () => {
+    const own = addOnLines(run(three));
+    expect(own.map((l) => l.detail.split(' | ').pop())).toEqual([
+      'Own visit',
+      'Own visit, shared with the other add-ons',
+      'Own visit, shared with the other add-ons',
+    ]);
+    const same = addOnLines(run(three, { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' }));
+    expect(same.every((l) => l.detail.endsWith('Same visit as a booked service'))).toBe(true);
+  });
+
+  test('the old per-add-on visitContext is refused, never honored or ignored (an old client must not double-charge)', () => {
+    for (const visitContext of ['standalone', 'sameTripAddOn', 'builderBatch', null]) {
+      refused(() => run([{ key: 'web_sweep', visitContext }]), /visitContext is set once for all area add-ons/, 'AREA_ADDON_VISIT_PER_ENTRY');
+    }
+    refused(() => run([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }], { pest: { frequency: 'quarterly' } }),
+      /visitContext is set once/, 'AREA_ADDON_VISIT_PER_ENTRY');
+  });
+
+  test('a bad group visit is refused', () => {
+    refused(() => run([{ key: 'web_sweep' }], { areaAddOnVisit: 'builderBatch' }), /areaAddOnVisit must be one of/);
+    refused(() => run([{ key: 'web_sweep' }], { areaAddOnVisit: '' }), /areaAddOnVisit must be one of/);
+  });
+
+  test('a group visit with no add-ons changes nothing, gate on or off', () => {
+    expect(addOnLines(run(undefined, { areaAddOnVisit: 'bogus' }))).toEqual([]);
+    delete process.env.GATE_AREA_ADDONS;
+    expect(addOnLines(run([], { areaAddOnVisit: 'sameTripAddOn' }))).toEqual([]);
+  });
+});
+
+describe('a grass of null on a label-bound add-on is "not chosen", like the client\'s unknown', () => {
+  const run = (entry, extra = {}) => addOnLines(generateEstimate({ ...HOME, ...extra, services: { lawn: { track: 'st_augustine', tier: 'enhanced' }, areaAddOns: [entry] } }))[0];
+  const spot = { key: 'lawn_insect_spot', areaSqFt: 1000 };
+
+  test('only an absent grass borrows the estimate\'s grass; null, "unknown" and "" quote as custom', () => {
+    expect(run(spot)).toMatchObject({ price: expect.any(Number) });
+    expect(run(spot).requiresCustomQuote).toBeUndefined();
+    for (const grassType of [null, 'unknown', '']) {
+      expect(run({ ...spot, grassType })).toMatchObject({ requiresCustomQuote: true, price: null });
+    }
+    expect(run({ ...spot, track: null })).toMatchObject({ requiresCustomQuote: true, price: null });
+    expect(run({ ...spot, grassType: 'st_augustine' }).price).toEqual(expect.any(Number));
   });
 });
 
@@ -389,9 +490,10 @@ describe('area add-ons through the legacy mapper', () => {
       catalogServiceKey: 'area_addon_bed_pre_emergent',
       addOnCategory: 'lawn_care',
       visitContext: 'standalone',
+      carriesVisitDrive: true,
     });
     expect(mapped.oneTime.items[0].onSiteMinutes).toBeCloseTo(6 + 8 * 2, 5);
-    expect(mapped.oneTime.items[1]).toMatchObject({ catalogServiceKey: 'area_addon_web_sweep', addOnCategory: 'pest_control' });
+    expect(mapped.oneTime.items[1]).toMatchObject({ catalogServiceKey: 'area_addon_web_sweep', addOnCategory: 'pest_control', visitContext: 'standalone', carriesVisitDrive: false });
     expect(mapped.oneTime.specItems).toEqual([]);
     expect(mapped.oneTime.total).toBe(198);
     expect(mapped.oneTime.otSubtotal).toBe(198);

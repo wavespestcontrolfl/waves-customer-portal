@@ -1924,6 +1924,29 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       expect(out.addons).toMatchObject([{ name: cfg.name, products: 1, visit: null, note: null }]);
     });
 
+    test('a multi-add-on visit shows EVERY add-on\'s own recipe: the visit is a web sweep, the others are rows the accept wrote', async () => {
+      const keys = ['area_addon_bed_pre_emergent', 'area_addon_fire_ant_yard', 'area_addon_hardscape_weed'];
+      const rows = keys.map((key) => {
+        const cfg = chemical.find((c) => c.serviceKey === key);
+        return { service_name: cfg.name, category: cfg.category, service_key: key };
+      });
+      const ok = () => { const chain = {}; for (const m of ['leftJoin', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = async () => rows; return chain; };
+      ok.raw = (sql) => sql;
+      const addons = await jobCard._test.loadAddons(ok, 'svc1');
+      expect(addons.map((a) => a.serviceKey)).toEqual(keys);
+      const webSweep = AREA_ADDONS.items.web_sweep;
+      const out = await jobCard.resolveVisitLines({
+        facts: { isLawn: false, serviceId: 'svc1', serviceType: webSweep.name, serviceCategory: webSweep.category, serviceKey: webSweep.serviceKey, scheduledDate: '2026-09-04', addons },
+        protocols, catalog, dbh: () => ({}),
+      });
+      // One recipe product per add-on row, none from the pest or lawn programs.
+      expect(out.lines.map((l) => l.product.name).sort()).toEqual([PRODUCT_BY_KEY.area_addon_bed_pre_emergent, PRODUCT_BY_KEY.area_addon_fire_ant_yard, PRODUCT_BY_KEY.area_addon_hardscape_weed].sort());
+      expect(out.addons.map((a) => [a.name, a.products, a.note])).toEqual(addons.map((a) => [a.name, 1, null]));
+      const cards = await cardsFor(out.lines);
+      expect(cards).toHaveLength(3);
+      for (const card of cards) expect(card.governed).toMatchObject({ rate: expect.stringMatching(/\d/), area: expect.any(String), limit: expect.any(String) });
+    });
+
     test('the web sweep applies no product: no program lines, no recipe, as primary or add-on', async () => {
       const cfg = AREA_ADDONS.items.web_sweep;
       const buildPlan = jest.fn();

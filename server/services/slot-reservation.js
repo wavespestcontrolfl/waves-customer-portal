@@ -52,6 +52,7 @@ const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArr
 const { serviceDurationMinutes } = require('./service-library');
 const { expectedServiceMinutes, expectedMinutesForServices, ensureCatalogLoaded } = require('./scheduling/expected-service-minutes');
 const { violatesTravelGap } = require('./scheduling/travel-gap');
+const { primaryProfileService, writeAreaAddOnVisitRows } = require('./area-addon-visit-rows');
 
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
@@ -459,8 +460,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   const lockCatalogTable = async (sp) => { if (lockCatalog) await require('./scheduling/catalog-lock').lockCatalogIdentity(sp); };
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
-  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
-  const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  const primary = primaryProfileService(serviceProfile);
   const validatedLink = (link) => {
     // A missing match locks no row: activation/mapping can happen after the
     // duration read. Validate the actual identity before stamping it, while
@@ -620,6 +620,19 @@ function notesWithServiceMix(existingNotes, serviceProfile = {}, fallback = '') 
     return current.replace(/^Accepted service mix:.*$/m, line);
   }
   return `${current}\n${line}`;
+}
+
+// Every sold area add-on other than the visit's own service (the catalog key
+// the commit just stamped on it) becomes an add-on row on the graduated
+// appointment, in the commit's transaction. No add-on in the profile = no
+// query. area-addon-visit-rows.js owns the contract.
+async function writeAcceptedAreaAddOns(client, appointment, serviceProfile) {
+  if (!appointment?.id || serviceProfile?.serviceMode !== 'one_time') return 0;
+  return writeAreaAddOnVisitRows(client, {
+    scheduledServiceId: appointment.id,
+    serviceProfile,
+    ownServiceKey: appointment.service_key_snapshot || null,
+  });
 }
 
 async function resolveReservationServiceProfile(client, row, opts = {}) {
@@ -2094,6 +2107,7 @@ async function commitReservation({
       .where({ id: scheduledServiceId })
       .update(updates)
       .returning('*');
+    await writeAcceptedAreaAddOns(client, updated, serviceProfile);
     if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
     // Two-treatment package (cockroach / flea): graduating the hold IS the
     // booking, so visit 2 books here for both estimate-accept branches and

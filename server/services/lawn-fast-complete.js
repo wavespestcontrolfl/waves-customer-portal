@@ -23,6 +23,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
@@ -94,9 +95,16 @@ function lawnFastVisitType(profile, billingMode, isCallback = false) {
  * `allowStatuses` lists visit statuses NOT treated as terminal (the submit
  * preflight passes ['completed'], see preflightLawnFastCompletion).
  */
+// A lawn visit by its completion profile. An area add-on (lawn care by family)
+// is generic one-time work with its own governed recipe: never the lawn
+// program's sheet, whatever its name says.
+function isLawnProgramProfile(profile) {
+  return profile.category === LAWN_CATEGORY && !isAreaAddOnCatalogKey(profile.serviceKey);
+}
+
 function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
   if (!profile) return 'profile_unavailable';
-  if (profile.category !== LAWN_CATEGORY) return 'not_lawn';
+  if (!isLawnProgramProfile(profile)) return 'not_lawn';
   // The three lawn_care sheets partition the visits: the lawn re-service and Tree & Shrub
   // (which shares the lawn_care category) are decided by their OWN sheets' predicates, and
   // the Waves Assessment visit is its own diagnostic lane. Derived from the completion

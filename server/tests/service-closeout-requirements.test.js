@@ -12,11 +12,15 @@ const {
 function stubKnex(rowsOrError) {
   const k = (table) => {
     k.calls.push(table);
-    const outcome = () => (rowsOrError instanceof Error
-      ? Promise.reject(rowsOrError)
-      : Promise.resolve(rowsOrError));
+    // The visit's add-on rows (area add-ons fold into the requirements): none here.
+    const outcome = () => (String(table).startsWith('scheduled_service_addons')
+      ? Promise.resolve([])
+      : rowsOrError instanceof Error
+        ? Promise.reject(rowsOrError)
+        : Promise.resolve(rowsOrError));
     const qb = {
       select: () => qb,
+      leftJoin: () => qb,
       where: () => qb,
       whereIn: () => qb,
       orWhereIn: () => qb,
@@ -26,6 +30,7 @@ function stubKnex(rowsOrError) {
     return qb;
   };
   k.calls = [];
+  k.raw = (sql) => sql;
   k.transaction = (fn) => Promise.resolve(fn(k));
   return k;
 }
