@@ -4828,7 +4828,8 @@ describe('_countPublishedSince counts publishes IN FLIGHT (audit regression — 
         return q;
       }),
       count: jest.fn(() => q),
-      first: jest.fn(() => Promise.resolve({ count: 4 })),
+      // first query: the runs; second: queue rows the terminal writer settled
+      first: jest.fn().mockResolvedValueOnce({ count: 4 }).mockResolvedValueOnce({ count: 1 }),
     };
     jest.doMock('../models/db', () => jest.fn(() => q));
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -4836,7 +4837,9 @@ describe('_countPublishedSince counts publishes IN FLIGHT (audit regression — 
 
     const n = await runner._countPublishedSince('new_supporting_blog', new Date('2026-07-02T04:00:00Z'));
 
-    expect(n).toBe(4);
+    // 4 runs + 1 post the terminal writer published: both writers spend one budget.
+    expect(n).toBe(5);
+    expect(captured.where).toEqual(expect.arrayContaining([['skip_reason', 'terminal_writer_merged']]));
     // The blog lane never produces completed_published directly — a parked
     // open PR must consume the cap at PR-open time or one batch can open
     // batchLimit PRs the same day and auto-merge them all.

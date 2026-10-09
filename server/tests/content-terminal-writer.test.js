@@ -5,31 +5,29 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { terminalWriterWork, handOffToTerminal, terminalWriterLive, branchFor } = require('../services/content/terminal-writer');
+const { terminalWriterWork, handOffToTerminal, terminalWriterLive, branchFor, SETTLED_REASON } = require('../services/content/terminal-writer');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
 // Queue ids are UUIDs; the tests name them by one letter.
 const uid = (c) => `00000000-0000-4000-8000-0000000000${c.charCodeAt(0).toString(16).padStart(2, '0')}`;
 const row = (c, over = {}) => ({ id: uid(c), status: 'pending', action_type: 'new_supporting_blog', query: `ants in the kitchen ${c}`, score: 80, ...over });
 
-const pr = (c, over = {}) => ({ head: { ref: `terminal-writer/${uid(c)}` }, html_url: `u/${c}`, state: 'open', merged_at: null, ...over });
+const pr = (c, over = {}) => ({ head: { ref: `terminal-writer/${uid(c)}` }, base: { ref: 'main' }, html_url: `u/${c}`, state: 'open', merged_at: null, ...over });
 const mergedPr = (c) => pr(c, { state: 'closed', merged_at: '2026-10-08T12:00:00Z' });
 
 // open / closed: the GitHub pull lists. peek answers per action type, as the queue does.
 function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }) {
   const updates = [];
-  // the module counts the week first, then the day
-  const counts = [doneThisWeek, doneToday];
+  // the module asks the engine's publish counter for the day first, then the week
+  const counts = [doneToday, doneThisWeek];
   let counted = 0;
   const query = (calls) => {
     const q = {
       where: (...a) => { calls.push(a); return q; },
-      whereIn: () => q,
+      whereIn: (...a) => { calls.push(['in', ...a]); return q; },
       // pending rows among the merged PR ids, whatever their score
       select: async () => closed.filter((p) => p.merged_at).map((p) => ({ id: p.head.ref.split('/')[1] })).filter((m) => rows.some((r) => r.id === m.id && r.status === 'pending')),
       update: async (patch) => { updates.push({ where: calls, patch }); return 1; },
-      count: () => q,
-      first: async () => ({ n: counts[counted++ % 2] }),
     };
     return q;
   };
@@ -38,10 +36,11 @@ function fakes({ rows, open = [], closed = [], doneThisWeek = 0, doneToday = 0 }
     deps: {
       queue: { peek: jest.fn(async ({ actionType, minScore }) => rows.filter((r) => r.action_type === actionType && r.score >= minScore)) },
       gh: {
-        env: () => ({ owner: 'acme', repo: 'site' }),
-        ghFetchPaginated: jest.fn(async (path) => (path.includes('state=open') ? [...open, { head: { ref: 'content/other-pr' }, state: 'open' }, { head: { ref: 'terminal-writer/not-an-id' }, state: 'open' }] : closed)),
+        env: () => ({ owner: 'acme', repo: 'site', defaultBranch: 'main' }),
+        ghFetchPaginated: jest.fn(async (path) => (path.includes('state=open') ? [...open, { head: { ref: 'content/other-pr' }, base: { ref: 'main' }, state: 'open' }, { head: { ref: 'terminal-writer/not-an-id' }, base: { ref: 'main' }, state: 'open' }] : closed)),
       },
       db: () => query([]),
+      countPublishedSince: jest.fn(async (action) => (action === 'new_supporting_blog' ? counts[counted++ % 2] : 0)),
       raiseAdminAlert: jest.fn(async (category, spec) => { composeAdminAlert(spec); return { id: 'n1' }; }),
     },
   };
@@ -100,6 +99,8 @@ describe('terminal writer hand-off', () => {
     // the daily run settles that merge by id
     await terminalWriterWork({ complete: true, now, deps: merged.deps });
     expect(merged.updates.map((u) => u.where[0])).toEqual([['id', uid('z')]]);
+    // the engine's counter now holds that merge; the read-only pass did not add it twice
+    expect(merged.deps.countPublishedSince).toHaveBeenCalledWith('new_supporting_blog', expect.any(Date));
   });
 
   test('a post merged today uses a daily slot; one merged on an earlier day does not', async () => {
@@ -132,6 +133,24 @@ describe('terminal writer hand-off', () => {
     expect((await terminalWriterWork({ deps: f.deps })).due.map((r) => r.action_type)).toEqual(['refresh_existing_page']);
   });
 
+  test('a merge into a branch other than the site default is not a published post', async () => {
+    const f = fakes({ rows: [row('a')], closed: [pr('a', { state: 'closed', merged_at: '2026-10-08T12:00:00Z', base: { ref: 'release' } })] });
+    const work = await terminalWriterWork({ complete: true, deps: f.deps });
+    expect(work.due.map((r) => r.id)).toEqual([uid('a')]);
+    expect(f.updates).toEqual([]);
+  });
+
+  test('the daily run fences a row with an open PR out of the claimable window; the read-only pass does not', async () => {
+    const now = new Date('2026-10-09T13:00:00Z');
+    const f = fakes({ rows: [row('a'), row('b')], open: [pr('a')] });
+    await terminalWriterWork({ now, deps: f.deps });
+    expect(f.updates).toEqual([]);
+    await terminalWriterWork({ complete: true, now, deps: f.deps });
+    expect(f.updates).toHaveLength(1);
+    expect(f.updates[0].where).toEqual([['in', 'id', [uid('a')]], ['status', 'pending']]);
+    expect(f.updates[0].patch.available_at).toEqual(new Date('2026-10-12T13:00:00Z'));
+  });
+
   test('other queue rows cannot hide a writing row: each writing action is read on its own', async () => {
     const f = fakes({ rows: [row('a', { action_type: 'refresh_existing_page' })] });
     expect((await terminalWriterWork({ deps: f.deps })).due.map((r) => r.id)).toEqual([uid('a')]);
@@ -150,7 +169,7 @@ describe('terminal writer hand-off', () => {
     const out = await handOffToTerminal({ now: new Date('2026-10-09T13:00:00Z'), deps: f.deps });
     expect(out).toMatchObject({ outcome: 'handed_to_terminal', due: 1, merged: 1 });
     expect(f.updates).toHaveLength(1);
-    expect(f.updates[0].patch).toMatchObject({ status: 'done', completed_at: new Date('2026-10-08T12:00:00Z') });
+    expect(f.updates[0].patch).toMatchObject({ status: 'done', skip_reason: SETTLED_REASON, completed_at: new Date('2026-10-08T12:00:00Z') });
     expect(f.updates[0].where).toEqual(expect.arrayContaining([['id', uid('a')], ['status', 'pending']]));
     expect(f.deps.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = f.deps.raiseAdminAlert.mock.calls[0];
@@ -165,5 +184,32 @@ describe('terminal writer hand-off', () => {
     const out = await handOffToTerminal({ deps: f.deps });
     expect(out.due).toBe(0);
     expect(f.deps.raiseAdminAlert).not.toHaveBeenCalled();
+  });
+});
+
+// The gate makes the terminal the only writer: every API drafting entry goes
+// through runNext, and the 1pm catch-up retries the hand-off instead of drafting.
+describe('terminal writer gate in the runner', () => {
+  const saved = { ...process.env };
+  afterEach(() => { process.env = { ...saved }; jest.restoreAllMocks(); });
+
+  test('runNext refuses to draft and claims nothing', async () => {
+    process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
+    const queue = require('../services/content/opportunity-queue');
+    const claim = jest.spyOn(queue, 'claimNext');
+    const runner = require('../services/content/autonomous-runner');
+    const out = await runner.runNext({});
+    expect(out).toMatchObject({ outcome: 'skipped_terminal_writer', skip_reason: 'terminal_writer' });
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  test('the catch-up runs the hand-off again', async () => {
+    process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
+    const terminalWriter = require('../services/content/terminal-writer');
+    const handOff = jest.spyOn(terminalWriter, 'handOffToTerminal').mockResolvedValue({ outcome: 'handed_to_terminal' });
+    const runner = require('../services/content/autonomous-runner');
+    jest.spyOn(runner, '_withEngineLock').mockImplementation((label, fn) => fn());
+    expect(await runner.runCatchUp()).toEqual({ outcome: 'handed_to_terminal' });
+    expect(handOff).toHaveBeenCalledTimes(1);
   });
 });

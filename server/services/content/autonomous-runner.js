@@ -246,6 +246,12 @@ class AutonomousRunner {
     const queue = getQueue();
     if (!queue) return finalize(run, t0, { outcome: 'failed', failure_message: 'opportunity-queue unavailable' });
     if (dryRun) return this._previewNext({ queue, minScore, t0 });
+    // GATE_CONTENT_WRITER_TERMINAL: one writer at a time. Every drafting
+    // entry (the daily batch, the admin Run now button, the --live script)
+    // comes through here, so none can claim a row the terminal is working.
+    if (require('./terminal-writer').terminalWriterLive()) {
+      return { ...run, outcome: 'skipped_terminal_writer', skip_reason: 'terminal_writer' };
+    }
 
     await this._verifyMergedInternalLinkPrs(run);
 
@@ -1590,10 +1596,13 @@ class AutonomousRunner {
     if (!envBool('AUTONOMOUS_CONTENT_CATCHUP', true)) {
       return { outcome: 'skipped_disabled', skipped: true, reason: 'catchup_disabled', count: 0, runs: [] };
     }
-    // The catch-up exists to rescue a drafting batch that died. With the
-    // terminal writer on there is no batch, and the 9am admin item stands.
-    if (require('./terminal-writer').terminalWriterLive()) {
-      return { outcome: 'skipped_terminal_writer', skipped: true, reason: 'terminal_writer', count: 0, runs: [] };
+    // With the terminal writer on there is no drafting batch to rescue, but
+    // the 9am hand-off itself can have failed (GitHub, the database). Run it
+    // again: settling is by state and the admin item is keyed by ET date, so
+    // a second pass after a good morning changes nothing.
+    const terminalWriter = require('./terminal-writer');
+    if (terminalWriter.terminalWriterLive()) {
+      return this._withEngineLock('runCatchUp', () => terminalWriter.handOffToTerminal());
     }
     // Everything below runs under the engine lock (Codex r2): stale-claim
     // recovery inside the probe MUTATES queue state, and recovering while a
@@ -3604,7 +3613,17 @@ class AutonomousRunner {
       })
       .count('id as count')
       .first();
-    return Number(row?.count || 0);
+    // Posts the terminal writer published (terminal-writer.js settles the
+    // queue row; there is no run row). Counted here so both writers spend
+    // the same day and week budget.
+    const settled = await db('opportunity_queue')
+      .where('status', 'done')
+      .where('skip_reason', require('./terminal-writer').SETTLED_REASON)
+      .where('action_type', actionType)
+      .where('completed_at', '>=', since)
+      .count('id as count')
+      .first();
+    return Number(row?.count || 0) + Number(settled?.count || 0);
   }
 
   // ── Approve-then-publish for named-competitor comparisons ──

@@ -16,9 +16,13 @@
  *   open PR on the branch    → in progress; not due, holds one daily slot
  *   no PR, or closed unmerged → due
  *
- * Caps are the engine's own: AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY bounds
- * due + in progress + posts merged today (ET), AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK bounds due +
- * in progress + rows completed this ET week.
+ * One writer at a time: with the gate on, runNext() refuses to draft, so the
+ * admin Run now button and the --live script cannot work a row beside the
+ * terminal. Caps are the engine's own and are counted across all writing
+ * actions together: AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY bounds due + open
+ * terminal PRs + what the engine counts as published today (which includes
+ * rows settled here), AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK the same for
+ * the ET week.
  *
  * Not done for a terminal-written post: the PR poller's post-merge chain
  * (IndexNow, post-merge link planning, the immediate social share). The 10:30
@@ -31,6 +35,10 @@ const { etDateString, etWeekStart, parseETDateTime } = require('../../utils/date
 const { THRESHOLDS } = require('./scoring-config');
 
 const BRANCH_PREFIX = 'terminal-writer/';
+// opportunity_queue.skip_reason on a row this module completed. The engine's
+// publish counter reads it (autonomous-runner.js _countPublishedSince).
+const SETTLED_REASON = 'terminal_writer_merged';
+const OPEN_PR_FENCE_DAYS = 3;
 // The action types a writing session can do. Everything else the queue holds
 // (link-only tasks, GBP posts) is left for its own lane.
 const WRITER_ACTIONS = Object.freeze([
@@ -72,99 +80,105 @@ const opportunityIdOf = (pr) => {
  * Every terminal-writer PR GitHub knows about, by opportunity id: all open
  * ones, and the merged ones among the most recently closed. Read from the PR
  * list, not per queue row, so a PR counts whatever its row's score is now.
+ * Only a PR into the site's default branch counts: a merge into any other
+ * branch has `merged_at` too and never reached the live site.
  */
 async function terminalPrs(gh) {
-  const { owner, repo } = gh.env();
+  const { owner, repo, defaultBranch } = gh.env();
   const base = `/repos/${owner}/${repo}/pulls`;
-  const open = new Map();
-  const merged = new Map();
-  for (const pr of await gh.ghFetchPaginated(`${base}?state=open`)) {
-    const id = opportunityIdOf(pr);
-    if (id) open.set(id, pr.html_url);
-  }
-  for (const pr of await gh.ghFetchPaginated(`${base}?state=closed&sort=updated&direction=desc`, { maxPages: CLOSED_PR_PAGES })) {
-    const id = opportunityIdOf(pr);
-    if (id && pr.merged_at) merged.set(id, { url: pr.html_url, mergedAt: new Date(pr.merged_at) });
-  }
+  const ours = (prs) => prs
+    .filter((pr) => pr.base?.ref === defaultBranch)
+    .map((pr) => [opportunityIdOf(pr), pr])
+    .filter(([id]) => id);
+  const open = new Map(ours(await gh.ghFetchPaginated(`${base}?state=open`)).map(([id, pr]) => [id, pr.html_url]));
+  const closed = await gh.ghFetchPaginated(`${base}?state=closed&sort=updated&direction=desc`, { maxPages: CLOSED_PR_PAGES });
+  const merged = new Map(ours(closed.filter((pr) => pr.merged_at)).map(([id, pr]) => [id, { url: pr.html_url, mergedAt: new Date(pr.merged_at) }]));
   return { open, merged };
 }
 
-/**
- * Sort the writing rows of the queue into due / in progress / merged.
- * `complete: true` also marks merged rows done (the daily run); the read-only
- * list script passes false and writes nothing.
- */
-async function terminalWriterWork({ complete = false, now = new Date(), deps = {} } = {}) {
-  const queue = deps.queue || require('./opportunity-queue');
-  const gh = deps.gh || require('../content-astro/github-client');
-  const conn = deps.db || db;
-
-  const perDay = capFromEnv('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY', 3);
-  const perWeek = capFromEnv('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK', 10);
-  const prs = await terminalPrs(gh);
-
+/** Pending rows of every writing action, best score first. */
+async function pendingWritingRows(queue) {
   const byId = new Map();
   for (const actionType of WRITER_ACTIONS) {
     const rows = await queue.peek({ limit: PEEK_LIMIT, minScore: THRESHOLDS.minScoreToAct, actionType });
     // peek matches on the queue's EFFECTIVE action (a row can be retargeted
     // by its metadata); carry that one, it is what the writer must do.
-    for (const r of rows) if (r.status === 'pending') byId.set(r.id, { ...r, action_type: actionType });
+    for (const r of rows.filter((x) => x.status === 'pending')) byId.set(r.id, { ...r, action_type: actionType });
   }
-  const pending = [...byId.values()].sort((x, y) => y.score - x.score);
+  return [...byId.values()].sort((x, y) => y.score - x.score);
+}
 
-  // A merged PR whose row is still pending has not been settled yet.
+/**
+ * Queue writes of the daily run, both by PR id and not by the rows read
+ * above (a row can have dropped out of the claimable window since):
+ *   merged PR → the row is done, at the PR's merge time, and carries
+ *     SETTLED_REASON so the engine's own publish count includes it
+ *   open PR   → the row stays pending but is pushed out of the claimable
+ *     window for OPEN_PR_FENCE_DAYS, renewed each day. claimNext honors
+ *     available_at, so the API engine cannot claim a row a terminal PR is
+ *     working, also in the days after the gate is turned off.
+ */
+async function settleAndFence(conn, prs, unsettled, now) {
+  for (const id of unsettled) {
+    const updated = await conn('opportunity_queue').where('id', id).where('status', 'pending')
+      .update({ status: 'done', skip_reason: SETTLED_REASON, completed_at: prs.merged.get(id).mergedAt, updated_at: now });
+    if (updated) logger.info(`[terminal-writer] done ${id}: merged ${prs.merged.get(id).url}`);
+  }
+  const openIds = [...prs.open.keys()];
+  if (openIds.length) {
+    await conn('opportunity_queue').whereIn('id', openIds).where('status', 'pending')
+      .update({ available_at: new Date(now.getTime() + OPEN_PR_FENCE_DAYS * 86400000), updated_at: now });
+  }
+}
+
+/**
+ * Published since `since`, all writing actions together. One counter for
+ * both writers: the engine's own _countPublishedSince (API publishes and API
+ * PRs in flight, plus rows this module settled).
+ */
+async function publishedSince(countPublishedSince, since) {
+  let n = 0;
+  for (const actionType of WRITER_ACTIONS) n += await countPublishedSince(actionType, since);
+  return n;
+}
+
+/**
+ * Sort the writing rows of the queue into due / in progress / merged.
+ * `complete: true` also settles merged rows and fences open ones (the daily
+ * run); the read-only list script passes false and writes nothing.
+ */
+async function terminalWriterWork({ complete = false, now = new Date(), deps = {} } = {}) {
+  const queue = deps.queue || require('./opportunity-queue');
+  const gh = deps.gh || require('../content-astro/github-client');
+  const conn = deps.db || db;
+  const countPublishedSince = deps.countPublishedSince || ((a, since) => require('./autonomous-runner')._countPublishedSince(a, since));
+
+  const prs = await terminalPrs(gh);
+  const pending = await pendingWritingRows(queue);
   const merged = pending.filter((r) => prs.merged.has(r.id)).map((r) => ({ ...r, pr_url: prs.merged.get(r.id).url }));
   const inProgress = pending.filter((r) => !prs.merged.has(r.id) && prs.open.has(r.id)).map((r) => ({ ...r, pr_url: prs.open.get(r.id) }));
   const candidates = pending.filter((r) => !prs.merged.has(r.id) && !prs.open.has(r.id));
 
-  // Merged PRs whose row is still pending, read by id and not from the rows
-  // above: a merged post uses a weekly slot even when its row has since
-  // dropped out of the claimable window.
+  // Merged PRs whose row is still pending: read by id, see settleAndFence.
   const mergedIds = [...prs.merged.keys()];
   const unsettled = mergedIds.length
     ? (await conn('opportunity_queue').whereIn('id', mergedIds).where('status', 'pending').select('id')).map((r) => r.id)
     : [];
-  if (complete) {
-    for (const id of unsettled) {
-      const updated = await conn('opportunity_queue')
-        .where('id', id)
-        .where('status', 'pending')
-        // the merge time, so a post merged yesterday counts in yesterday's week
-        .update({ status: 'done', completed_at: prs.merged.get(id).mergedAt, updated_at: now });
-      if (updated) logger.info(`[terminal-writer] done ${id}: merged ${prs.merged.get(id).url}`);
-    }
-  }
+  if (complete) await settleAndFence(conn, prs, unsettled, now);
 
-  const weekStart = parseETDateTime(`${etWeekStart(now)}T00:00`);
-  const doneRow = await conn('opportunity_queue')
-    .where('status', 'done')
-    .whereIn('action_type', WRITER_ACTIONS)
-    .where('completed_at', '>=', weekStart)
-    .count({ n: '*' })
-    .first();
-  // Merged rows this pass did not mark done (read-only) still used a slot.
-  // Only this week's: a Sunday merge read before Monday's run belongs to last week.
-  const unsettledThisWeek = unsettled.filter((id) => prs.merged.get(id).mergedAt >= weekStart).length;
-  const doneThisWeek = Number(doneRow?.n || 0) + (complete ? 0 : unsettledThisWeek);
-  // Every open terminal PR holds a slot, whether or not its row was read above,
-  // and so does every post merged today: a second pass on the same day must
-  // not hand out the day's slots again.
-  const openCount = prs.open.size;
-  // Rows completed today cover both writers: a settled terminal merge (its
-  // completed_at is the merge time) and a post the API engine published from
-  // the Run now button. Unsettled merges from today are added on top.
-  const dayStart = parseETDateTime(`${etDateString(now)}T00:00`);
-  const doneTodayRow = await conn('opportunity_queue')
-    .where('status', 'done')
-    .whereIn('action_type', WRITER_ACTIONS)
-    .where('completed_at', '>=', dayStart)
-    .count({ n: '*' })
-    .first();
-  const unsettledToday = complete ? 0 : unsettled.filter((id) => prs.merged.get(id).mergedAt >= dayStart).length;
-  const doneToday = Number(doneTodayRow?.n || 0) + unsettledToday;
-  const room = Math.max(0, Math.min(perDay - openCount - doneToday, perWeek - doneThisWeek - openCount));
+  // A merge this pass did not settle (read-only) still used its slot, in
+  // the day and week it merged.
+  const stillUnsettled = complete ? [] : unsettled;
+  const usedSince = async (since) => (await publishedSince(countPublishedSince, since))
+    + stillUnsettled.filter((id) => prs.merged.get(id).mergedAt >= since).length;
+  const perDay = capFromEnv('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY', 3);
+  const perWeek = capFromEnv('AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK', 10);
+  const doneToday = await usedSince(parseETDateTime(`${etDateString(now)}T00:00`));
+  const doneThisWeek = await usedSince(parseETDateTime(`${etWeekStart(now)}T00:00`));
+  // Every open terminal PR holds a slot, whether or not its row was read above.
+  const room = Math.max(0, Math.min(perDay - doneToday, perWeek - doneThisWeek) - prs.open.size);
   const due = candidates.slice(0, room).map((r) => ({ ...r, branch: branchFor(r.id) }));
-  return { due, inProgress, merged, caps: { perDay, perWeek, doneThisWeek, doneToday } };
+  return { due, inProgress, merged, caps: { perDay, perWeek, doneThisWeek, doneToday, openPrs: prs.open.size } };
 }
 
 const describe = (r) => `${r.action_type.replace(/_/g, ' ')}: ${r.query || r.page_url || [r.service, r.city].filter(Boolean).join(' in ') || 'untitled'}`;
@@ -204,4 +218,4 @@ async function handOffToTerminal({ now = new Date(), deps = {} } = {}) {
   return result;
 }
 
-module.exports = { terminalWriterLive, terminalWriterWork, handOffToTerminal, branchFor, BRANCH_PREFIX, WRITER_ACTIONS };
+module.exports = { terminalWriterLive, terminalWriterWork, handOffToTerminal, branchFor, BRANCH_PREFIX, WRITER_ACTIONS, SETTLED_REASON };
