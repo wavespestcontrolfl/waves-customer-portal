@@ -669,7 +669,7 @@ describe('a customer who does not exist yet: the holds of the same person count,
   const lapsed = new Date(Date.now() - 3600000).toISOString();
   const lead = (keys, over = {}) => ({ id: ESTIMATE, customer_id: null, property_id: null, customer_phone: '+19415550142', address: '1 Test Way, Bradenton, FL 34202', estimate_data: storedWith(keys), ...over });
   const hold = (extra = {}) => ({ 's.customer_id': null, 's.source_estimate_id': OTHER_ESTIMATE, 's.reservation_expires_at': soon, 's.status': 'pending', 's.id': HOLD_ID, 's.scheduled_date': limits.addDays(TODAY, 5), 's.property_id': null, ...extra });
-  const theirs = (over = {}) => ({ id: OTHER_ESTIMATE, customer_phone: '(941) 555-0142', address: '9 Other St', customer_id: null, estimate_data: storedWith(['bed_pre_emergent']), ...over });
+  const theirs = (over = {}) => ({ id: OTHER_ESTIMATE, customer_phone: '(941) 555-0142', address: '1 test way, bradenton, fl 34202', customer_id: null, estimate_data: storedWith(['bed_pre_emergent']), ...over });
   const refusal = { code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' };
   const check = (tables, estimate = lead(['bed_pre_emergent']), extra = {}) => service.assertAreaAddOnLimitsOpen(fakeDb(world(tables)), { estimate, resolveCustomer: async () => null, ...extra });
 
@@ -693,9 +693,59 @@ describe('a customer who does not exist yet: the holds of the same person count,
     await expect(check({ scheduled_services: [hold()], estimates: [theirs({ customer_phone: null, address: '2 Test Way, Bradenton, FL 34202' })] }, noPhone)).resolves.toBeUndefined();
   });
 
-  test('a known customer also counts the holds of that customer\'s other estimates', async () => {
+  test('a known customer also counts the holds of that customer\'s other estimates at the same address', async () => {
     const db = fakeDb(world({ scheduled_services: [hold()], estimates: [theirs({ customer_phone: '941-555-0199', customer_id: CUSTOMER })] }));
     await expect(service.assertAreaAddOnLimitsOpen(db, { estimate: lead(['bed_pre_emergent'], { customer_id: CUSTOMER, customer_phone: '+19415550150' }) })).rejects.toMatchObject(refusal);
+    // ... and not those at the customer's other property
+    const other = fakeDb(world({ scheduled_services: [hold()], estimates: [theirs({ customer_phone: '941-555-0199', customer_id: CUSTOMER, address: '9 Other St' })] }));
+    await expect(service.assertAreaAddOnLimitsOpen(other, { estimate: lead(['bed_pre_emergent'], { customer_id: CUSTOMER, customer_phone: '+19415550150' }) })).resolves.toBeUndefined();
+  });
+
+  // Codex round 17 on #6135: a hold matched by phone alone counted at another property of the same phone.
+  describe('an unowned hold counts at THIS property only (the treatment address, or the property ids)', () => {
+    const P1 = PROPERTY;
+    test('same phone + different address: not counted; same phone + same address: counted; no phone + same address: counted', async () => {
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ address: '9 Other St, Bradenton, FL 34202' })] })).resolves.toBeUndefined();
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs()] })).rejects.toMatchObject(refusal);
+      const noPhone = lead(['bed_pre_emergent'], { customer_phone: null });
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ customer_phone: null })] }, noPhone)).rejects.toMatchObject(refusal);
+    });
+
+    test('a phone alone never places a hold: neither estimate names an address, no property id', async () => {
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ address: null })] }, lead(['bed_pre_emergent'], { address: null }))).resolves.toBeUndefined();
+    });
+
+    test('property ids on both sides decide: different ids are not counted, whatever the phone and the address say', async () => {
+      const mine = lead(['bed_pre_emergent'], { property_id: P1 });
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ property_id: OTHER_PROPERTY })] }, mine)).resolves.toBeUndefined();
+      await expect(check({ scheduled_services: [hold({ 's.property_id': OTHER_PROPERTY })], estimates: [theirs()] }, mine)).resolves.toBeUndefined();
+    });
+
+    test('the same property id is counted even when the address text differs (the id decides)', async () => {
+      const mine = lead(['bed_pre_emergent'], { property_id: P1 });
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ property_id: P1, address: '1 Test Wy' })] }, mine)).rejects.toMatchObject(refusal);
+      await expect(check({ scheduled_services: [hold({ 's.property_id': P1 })], estimates: [theirs({ address: '1 Test Wy' })] }, mine)).rejects.toMatchObject(refusal);
+    });
+
+    test('a property id on one side only: the address decides', async () => {
+      // the hold's estimate has an id, the lead has none
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ property_id: P1 })] })).rejects.toMatchObject(refusal);
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ property_id: P1, address: '9 Other St' })] })).resolves.toBeUndefined();
+      // the lead has an id, the hold's estimate has none
+      const mine = lead(['bed_pre_emergent'], { property_id: P1 });
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs()] }, mine)).rejects.toMatchObject(refusal);
+      await expect(check({ scheduled_services: [hold()], estimates: [theirs({ address: '9 Other St' })] }, mine)).resolves.toBeUndefined();
+    });
+
+    test('the identity lock keeps one phone serialized across addresses, and adds the property', async () => {
+      const order = [];
+      const trx = fakeDb(world());
+      trx.isTransaction = true;
+      trx.raw = jest.fn(async (sql, bindings) => { order.push([String(sql), bindings && bindings[0]]); return {}; });
+      const wrapped = Object.assign((table) => trx(table), { isTransaction: true, raw: trx.raw });
+      await service.assertAreaAddOnLimitsOpen(wrapped, { estimate: lead(['bed_pre_emergent'], { property_id: P1 }), resolveCustomer: async () => null });
+      expect(order.slice(0, 3).map(([, key]) => key)).toEqual(['phone:9415550142', 'address:1testwaybradentonfl34202', `property:${P1}`]);
+    });
   });
 
   test('the same-phone lock is taken inside the transaction before anything is read, and not for a named customer or outside a transaction', async () => {

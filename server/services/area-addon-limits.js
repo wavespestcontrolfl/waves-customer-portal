@@ -13,7 +13,9 @@
  * both land there) PLUS the add-on visits already booked and not yet done (a visit whose own
  * service is the add-on, or a `scheduled_service_addons` row for it, on a visit that is not
  * completed or cancelled), PLUS the live holds of other estimates that share the customer, the phone or (no phone) the
- * address (a hold is unowned until its accept, so it names no customer of its own). Only the visit rows the caller names
+ * address AND sit at this property (a hold is unowned until its accept, so it names no customer of its own; one phone can
+ * have estimates at several properties, so a hold counts here only when the property ids agree, or, with no property id on
+ * both sides, the treatment address agrees: holdIsHere). Only the visit rows the caller names
  * (the hold being graduated, the appointment being adopted, the rows a staff booking just made) and the estimate's own
  * unowned hold are left out: an accepted estimate booked a second time counts its first booking.
  *
@@ -109,7 +111,7 @@ async function bookedDates(database, { customerId, propertyId, keys, excludeVisi
     isUuid(customerId) ? scope(database('scheduled_services as s').whereIn('s.service_key_snapshot', serviceKeys)).select('s.service_key_snapshot as service_key', 's.scheduled_date') : [],
     isUuid(customerId) ? scope(database('scheduled_service_addons as a').join('scheduled_services as s', 's.id', 'a.scheduled_service_id').whereIn('a.service_key_snapshot', serviceKeys))
       .select('a.service_key_snapshot as service_key', 's.scheduled_date') : [],
-    heldDates(database, { customerId, keys, place, prospect }),
+    heldDates(database, { customerId, propertyId, keys, place, prospect }),
   ]);
   const out = new Map();
   for (const row of [...own, ...rows]) {
@@ -124,13 +126,37 @@ async function bookedDates(database, { customerId, propertyId, keys, excludeVisi
 // the phone, and the address with everything but letters and digits dropped.
 const phoneKey = (value) => { const digits = String(value || '').replace(/\D/g, ''); return digits.length >= 10 ? digits.slice(-10) : ''; };
 const addressKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-const prospectOf = (estimate) => ({ estimateId: estimate && estimate.id, phone: phoneKey(estimate && estimate.customer_phone), address: addressKey(estimate && estimate.address) });
+const prospectOf = (estimate) => ({
+  estimateId: estimate && estimate.id,
+  phone: phoneKey(estimate && estimate.customer_phone),
+  address: addressKey(estimate && estimate.address),
+  propertyId: estimate && isUuid(estimate.property_id) ? estimate.property_id : null,
+});
 
-// Live holds (customer-less rows with an expiry) of OTHER estimates of the same person: a hold names no customer of its
-// own until its accept, and the add-ons it will book are on its estimate, not on the hold row. Same person = the known
-// customer's estimate, the same phone, or, when the estimate has no phone, the same address. The estimate's own hold is
-// the one being replaced or graduated, so it never counts against itself.
-async function heldDates(database, { customerId, keys, place, prospect }) {
+// Is this hold's estimate the same person as the one being read? The known customer's estimate, the same phone, or, when
+// the estimate being read has no phone, the same address.
+function sameHolder(theirs, { customerId, phone, address }) {
+  if (isUuid(customerId) && String(theirs.customer_id) === String(customerId)) return true;
+  if (phone) return phoneKey(theirs.customer_phone) === phone;
+  return Boolean(address) && addressKey(theirs.address) === address;
+}
+
+// Does this hold sit at the property being read? A hold names no customer, so it may lack a reliable property identity.
+// With a property id on BOTH sides (the hold's own, else its estimate's; the property being read) the ids decide, whatever
+// the phone or the address say. Otherwise the treatment ADDRESS (letters and digits only, the form the identity lock keys
+// on) must agree and be known on both sides: a phone alone never places a hold, because one phone can have estimates at
+// several properties.
+function holdIsHere(hold, theirs, { propertyId, address }) {
+  const theirProperty = [hold.property_id, theirs.property_id].find(isUuid) || null;
+  if (theirProperty && isUuid(propertyId)) return String(theirProperty) === String(propertyId);
+  return Boolean(address) && addressKey(theirs.address) === address;
+}
+
+// Live holds (customer-less rows with an expiry) of OTHER estimates of the same person AT this property: a hold names no
+// customer of its own until its accept, and the add-ons it will book are on its estimate, not on the hold row. Same person =
+// sameHolder; same place = holdIsHere. The estimate's own hold is the one being replaced or graduated, so it never counts
+// against itself.
+async function heldDates(database, { customerId, propertyId = null, keys, place, prospect }) {
   const { estimateId = null, phone = '', address = '' } = prospect || {};
   if (!isUuid(customerId) && !phone && !address) return new Map();
   const grace = require('./slot-reservation').commitGraceMinutes();
@@ -139,21 +165,19 @@ async function heldDates(database, { customerId, keys, place, prospect }) {
     .whereNotIn('s.status', NOT_BOOKED_STATUSES)
     .whereRaw('s.reservation_expires_at >= NOW() - make_interval(mins => ?)', [grace]))
     .modify((query) => { if (isUuid(estimateId)) query.whereNot('s.source_estimate_id', estimateId); })
-    .select('s.source_estimate_id', 's.scheduled_date');
+    .select('s.source_estimate_id', 's.scheduled_date', 's.property_id');
   const out = new Map();
   if (!holds.length) return out;
   const estimates = await database('estimates').whereIn('id', [...new Set(holds.map((hold) => hold.source_estimate_id))])
-    .where(function sameContact() {
-      if (isUuid(customerId)) this.orWhere('customer_id', customerId);
-      if (phone) this.orWhereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone]);
-      else if (address) this.orWhereRaw("regexp_replace(lower(COALESCE(address, '')), '[^a-z0-9]', '', 'g') = ?", [address]);
-    })
-    .select('id', 'estimate_data', 'pricing_authority');
-  const soldBy = new Map(estimates.map((row) => [String(row.id), soldAddOnKeys(row.estimate_data, { pricingAuthority: row.pricing_authority })]));
+    .select('id', 'estimate_data', 'pricing_authority', 'customer_id', 'customer_phone', 'address', 'property_id');
+  const byId = new Map(estimates.map((row) => [String(row.id), row]));
+  const person = { customerId, phone, address };
+  const here = { propertyId, address };
   for (const hold of holds) {
-    for (const key of (soldBy.get(String(hold.source_estimate_id)) || []).filter((k) => keys.includes(k))) {
-      if (hold.scheduled_date) out.set(key, [...(out.get(key) || []), dayOf(hold.scheduled_date)]);
-    }
+    const theirs = byId.get(String(hold.source_estimate_id));
+    if (!theirs || !hold.scheduled_date || !sameHolder(theirs, person) || !holdIsHere(hold, theirs, here)) continue;
+    const sold = soldAddOnKeys(theirs.estimate_data, { pricingAuthority: theirs.pricing_authority });
+    for (const key of sold.filter((k) => keys.includes(k))) out.set(key, [...(out.get(key) || []), dayOf(hold.scheduled_date)]);
   }
   return out;
 }
@@ -338,8 +362,8 @@ async function unownedEstimateCustomer(database, estimate, resolveCustomer) {
 // reserve and the accept both already run in. Outside a transaction it fences nothing, so it does nothing.
 async function lockProspectIdentity(database, estimate) {
   if (!database.isTransaction) return;
-  const { phone, address } = prospectOf(estimate);
-  for (const key of [phone && `phone:${phone}`, address && `address:${address}`].filter(Boolean)) {
+  const { phone, address, propertyId } = prospectOf(estimate);
+  for (const key of [phone && `phone:${phone}`, address && `address:${address}`, propertyId && `property:${propertyId}`].filter(Boolean)) {
     await database.raw("SELECT pg_advisory_xact_lock(hashtext('area-addon-identity'), hashtext(?::text))", [key]);
   }
 }
