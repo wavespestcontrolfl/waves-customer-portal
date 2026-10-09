@@ -62,12 +62,17 @@ describe('packetDisplayState', () => {
 
 describe('both closeout sheets use the shared rules', () => {
   const read = (file) => readFileSync(new URL(file, import.meta.url), 'utf8');
-  const sheets = [read('../components/admin/VisitCloseoutSheet.jsx'), read('../hooks/useComboStop.js')];
-  it.each([['packetDisplayState'], ['packetAfterSend'], ['resolveSendFailure'], ['postVisitPacket']])('%s is imported by the long form and the container hook', (name) => {
-    for (const source of sheets) expect(source).toContain(name);
+  // The long form's send logic lives in its hook (hooks/useVisitCloseout.js), the container's in hooks/useComboStop.js.
+  const senders = [read('../hooks/useVisitCloseout.js'), read('../hooks/useComboStop.js')];
+  it.each([['packetAfterSend'], ['resolveSendFailure'], ['postVisitPacket']])('%s is imported by the long form\'s hook and the container hook', (name) => {
+    for (const source of senders) expect(source).toContain(name);
+  });
+  it('both derive the display state from packetDisplayState', () => {
+    expect(read('../components/admin/VisitCloseoutSheet.jsx')).toContain('packetDisplayState');
+    expect(read('../hooks/useComboStop.js')).toContain('packetDisplayState');
   });
   it('neither re-derives a terminal state itself', () => {
-    for (const source of [...sheets, read('../components/tech/FastCompleteComboSheet.jsx')]) {
+    for (const source of [...senders, read('../components/admin/VisitCloseoutSheet.jsx'), read('../components/tech/FastCompleteComboSheet.jsx')]) {
       expect(source).not.toMatch(/\['done', 'failed'\]\.includes/);
       expect(source).not.toMatch(/packet\?\.officeReview/);
     }

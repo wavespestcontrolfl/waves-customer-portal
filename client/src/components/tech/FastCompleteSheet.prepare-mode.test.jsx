@@ -218,10 +218,10 @@ describe('prepare mode (a part of a grouped stop)', () => {
     fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
     fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
-    await waitFor(() => expect(reports.some(([source, busy]) => source === 'writes' && busy)).toBe(true));
+    await waitFor(() => expect(reports.some(([source, busy]) => source.endsWith(':writes') && busy)).toBe(true));
     release();
     await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
-    await waitFor(() => expect(reports.filter(([source]) => source === 'writes').at(-1)[1]).toBe(false));
+    await waitFor(() => expect(reports.filter(([source]) => source.endsWith(':writes')).at(-1)[1]).toBe(false));
   });
 
   test('a visit that is not the plain pest report flow refuses to prepare and never posts', async () => {

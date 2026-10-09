@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { X, CheckCircle2, ClipboardList } from 'lucide-react';
 import { Button, Sheet, SheetBody, SheetFooter, SheetHeader } from '../ui';
 import { CompletionPanel } from '../../pages/admin/SchedulePage';
-import { adminFetch } from '../../utils/admin-fetch';
 import { putVisitCompletionDraft } from '../../lib/completion-resume-store';
+import { useCloseoutLoad, useCloseoutSend } from '../../hooks/useVisitCloseout';
 import {
-  clearTerminalDrafts, isFinishedState, isOfficeReviewState, loadVisitCloseout, operatorScope, packetAfterSend, packetDisplayState, paymentLine, postVisitPacket, resolveSendFailure,
+  isFinishedState, isOfficeReviewState, operatorScope, packetDisplayState, paymentLine,
 } from '../../lib/visit-closeout-packet';
 
 const OUTCOMES = {
@@ -14,36 +14,58 @@ const OUTCOMES = {
   follow_up_needed: 'Follow-up needed', customer_concern: 'Customer concern',
 };
 
+// One member's card: its form's state, and the button that opens it.
+function MemberCard({ service, form, packet, busy, onOpen }) {
+  const photos = form?.body.completionPhotos?.length || 0;
+  let status = 'Form needed';
+  if (form) status = OUTCOMES[form.body.visitOutcome] || 'Form ready';
+  else if (packet) status = 'Service record saved';
+  return (
+    <section className="rounded-sm border border-hairline border-zinc-200 p-4">
+      <div className="flex items-start gap-3">
+        {form || packet ? <CheckCircle2 size={22} className="shrink-0 text-zinc-700" /> : <ClipboardList size={22} className="shrink-0 text-zinc-500" />}
+        <div className="min-w-0 flex-1">
+          <h3 className="text-base font-medium">{service.serviceType}</h3>
+          <p className="mt-1 text-sm text-zinc-600">{status}</p>
+          {photos > 0 && <p className="mt-1 text-sm text-zinc-600">{photos} {photos === 1 ? 'photo' : 'photos'} saved</p>}
+          {!packet && <Button variant="secondary" className="mt-3 text-sm" disabled={busy} onClick={onOpen}>{form ? 'Edit form' : 'Open form'}</Button>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// What the stop says about itself under the member cards.
+function CloseoutNotes({ visit, packet, state, result, prepared, total, busy, onRevoke, children }) {
+  const finished = isFinishedState(state);
+  const officeReview = isOfficeReviewState(state);
+  let intro = 'Review each service form, then close out the visit once. Only eligible completed work is included in the shared invoice.';
+  if (officeReview) intro = 'The service records are saved. The office must review this closeout before the remaining work can finish.';
+  else if (packet) intro = 'The service records are saved. Any remaining invoice, payment, or report delivery continues from this closeout.';
+  return (
+    <>
+      <p className="text-zinc-600">{intro}</p>
+      {children}
+      {!packet && <p className="text-sm text-zinc-600" role="status">{prepared} of {total} forms ready. Saved forms and photos stay on this device until the visit is recorded.</p>}
+      {packet && !finished && <p role="status" className="rounded-sm bg-zinc-100 p-4">Records saved. Closeout is still processing; you can safely resume it.</p>}
+      {finished && <p role="status" className={`rounded-sm border p-4 ${officeReview ? 'border-alert-fg text-alert-fg' : 'border-zinc-200 bg-zinc-50'}`}>{officeReview ? 'Visit recorded. The office has an alert to review the service closeout, billing, or delivery.' : 'Visit closeout is complete.'}</p>}
+      {paymentLine(result) && <p className="text-sm text-zinc-600">{paymentLine(result)}</p>}
+      {visit.summaryRevoked && <p className="text-sm text-zinc-600">The shared summary link has been revoked.</p>}
+      {visit.canRevokeSummary && <Button variant="secondary" className="text-sm" disabled={busy} onClick={onRevoke}>Revoke shared summary link</Button>}
+    </>
+  );
+}
+
 export default function VisitCloseoutSheet({ visitId, products, operatorId, onClose, onSaved }) {
-  const [visit, setVisit] = useState(null);
-  const [services, setServices] = useState([]);
-  const [draft, setDraft] = useState(null);
-  const [editing, setEditing] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [result, setResult] = useState(null);
-  const [reload, setReload] = useState(0);
-  const submitting = useRef(false);
   const scope = operatorScope(operatorId);
-
-  useEffect(() => {
-    let live = true;
-    setError('');
-    loadVisitCloseout(visitId, scope).then(({ detail, rows, draft: loaded }) => {
-      if (!live) return;
-      setVisit(detail);
-      setServices(rows);
-      setDraft(loaded);
-    }).catch((err) => { if (live) setError(err.message || 'Could not load the visit.'); });
-    return () => { live = false; };
-  }, [visitId, reload, scope]);
-
+  const load = useCloseoutLoad(visitId, scope);
+  const [editing, setEditing] = useState(null);
+  const { visit, services, draft, error, setDraft, setError } = load;
+  const send = useCloseoutSend({ visitId, scope, load, setEditing, onSaved });
   const packet = visit?.packet;
-  const display = packetDisplayState({ result, detail: visit });
-  const finished = isFinishedState(display);
-  const officeReview = isOfficeReviewState(display);
-  const ready = services.length > 0 && services.every((service) => draft?.forms?.[service.id]?.body);
-  const prepared = services.filter((service) => draft?.forms?.[service.id]?.body).length;
+  const state = packetDisplayState({ result: send.result, detail: visit });
+  const finished = isFinishedState(state);
+  const formOf = (service) => (draft?.forms?.[service.id]?.body ? draft.forms[service.id] : null);
 
   async function prepare(serviceId, body, formDraft) {
     const next = { ...draft, forms: { ...draft.forms, [serviceId]: { body, draft: formDraft } } };
@@ -53,64 +75,6 @@ export default function VisitCloseoutSheet({ visitId, products, operatorId, onCl
     setDraft(next);
     setEditing(null);
     setError('');
-  }
-
-  async function submit(candidate = draft) {
-    if (submitting.current || (!packet && !ready)) return;
-    submitting.current = true;
-    setBusy(true);
-    setError('');
-    let confirmedDraft;
-    try {
-      const response = await postVisitPacket({ visitId, packet, draft: candidate, services, scope });
-      setResult(response);
-      setVisit((current) => ({ ...current, canRevokeSummary: response.canRevokeSummary === true,
-        packet: packetAfterSend(response) }));
-      if (['done', 'office_required'].includes(response.state)) {
-        await clearTerminalDrafts(visitId, visit?.members || services, scope);
-      }
-      onSaved();
-    } catch (err) {
-      // The confirm prompts, a lost response and a changed member list: one rule for both closeout sheets.
-      const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope });
-      if (outcome.kind === 'resend') {
-        confirmedDraft = outcome.draft;
-        setDraft(confirmedDraft);
-      } else if (outcome.kind === 'reopened') {
-        setDraft(outcome.draft);
-        setError(outcome.message);
-      } else if (outcome.kind === 'error') {
-        setError(outcome.error);
-        // The server was asked what it has (an HTTP timeout does not mean the transaction failed): its answer replaces
-        // the earlier one, and a changed member list refreshes the forms.
-        if (outcome.found) {
-          setResult(null);
-          if (outcome.found.refreshed) {
-            setServices(outcome.found.refreshed.rows);
-            setDraft(outcome.found.refreshed.draft);
-            setEditing(null);
-          }
-          setVisit(outcome.found.detail);
-          if (outcome.found.detail.packet) onSaved();
-        }
-        // A membership rejection must expose the reload control instead of a stale list.
-        if (outcome.reload) setVisit(null);
-      }
-    } finally {
-      submitting.current = false;
-      setBusy(false);
-    }
-    if (confirmedDraft) return submit(confirmedDraft);
-  }
-
-  async function revokeSummary() {
-    setBusy(true);
-    setError('');
-    try {
-      await adminFetch(`/admin/visit-closeouts/${visitId}/revoke-summary`, { method: 'POST', body: '{}' });
-      setVisit((current) => ({ ...current, canRevokeSummary: false, summaryRevoked: true }));
-    } catch (err) { setError(err.message || 'Could not revoke the shared summary link.'); }
-    finally { setBusy(false); }
   }
 
   if (editing) return (
@@ -133,42 +97,18 @@ export default function VisitCloseoutSheet({ visitId, products, operatorId, onCl
       <SheetBody className="space-y-5 text-base text-zinc-900">
         {!visit && !error && <p role="status">Loading the visit…</p>}
         {error && <div role="alert" className="rounded-sm border border-alert-fg p-4 text-alert-fg">{error}</div>}
-        {!visit && error && <Button className="text-sm" onClick={() => setReload((value) => value + 1)}>Try again</Button>}
+        {!visit && error && <Button className="text-sm" onClick={load.retry}>Try again</Button>}
         {visit && <>
-          <p className="text-zinc-600">{officeReview
-            ? 'The service records are saved. The office must review this closeout before the remaining work can finish.'
-            : packet
-            ? 'The service records are saved. Any remaining invoice, payment, or report delivery continues from this closeout.'
-            : 'Review each service form, then close out the visit once. Only eligible completed work is included in the shared invoice.'}</p>
-          <div className="space-y-3">
-            {services.map((service) => {
-              // A form put back to be marked again keeps its saved inputs
-              // (reopened through `preparedDraft`) but no prepared body.
-              const form = draft?.forms?.[service.id]?.body ? draft.forms[service.id] : null;
-              return <section key={service.id} className="rounded-sm border border-hairline border-zinc-200 p-4">
-                <div className="flex items-start gap-3">
-                  {form || packet ? <CheckCircle2 size={22} className="shrink-0 text-zinc-700" /> : <ClipboardList size={22} className="shrink-0 text-zinc-500" />}
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-base font-medium">{service.serviceType}</h3>
-                    <p className="mt-1 text-sm text-zinc-600">{form ? OUTCOMES[form.body.visitOutcome] || 'Form ready' : packet ? 'Service record saved' : 'Form needed'}</p>
-                    {form?.body.completionPhotos?.length > 0 && <p className="mt-1 text-sm text-zinc-600">{form.body.completionPhotos.length} {form.body.completionPhotos.length === 1 ? 'photo' : 'photos'} saved</p>}
-                    {!packet && <Button variant="secondary" className="mt-3 text-sm" disabled={busy} onClick={() => setEditing(service)}>{form ? 'Edit form' : 'Open form'}</Button>}
-                  </div>
-                </div>
-              </section>;
-            })}
-          </div>
-          {!packet && <p className="text-sm text-zinc-600" role="status">{prepared} of {services.length} forms ready. Saved forms and photos stay on this device until the visit is recorded.</p>}
-          {packet && !finished && <p role="status" className="rounded-sm bg-zinc-100 p-4">Records saved. Closeout is still processing; you can safely resume it.</p>}
-          {finished && <p role="status" className={`rounded-sm border p-4 ${officeReview ? 'border-alert-fg text-alert-fg' : 'border-zinc-200 bg-zinc-50'}`}>{officeReview ? 'Visit recorded. The office has an alert to review the service closeout, billing, or delivery.' : 'Visit closeout is complete.'}</p>}
-          {paymentLine(result) && <p className="text-sm text-zinc-600">{paymentLine(result)}</p>}
-          {visit.summaryRevoked && <p className="text-sm text-zinc-600">The shared summary link has been revoked.</p>}
-          {visit.canRevokeSummary && <Button variant="secondary" className="text-sm" disabled={busy} onClick={revokeSummary}>Revoke shared summary link</Button>}
+          <CloseoutNotes visit={visit} packet={packet} state={state} result={send.result} prepared={services.filter(formOf).length} total={services.length} busy={send.busy} onRevoke={send.revokeSummary}>
+            <div className="space-y-3">
+              {services.map((service) => <MemberCard key={service.id} service={service} form={formOf(service)} packet={packet} busy={send.busy} onOpen={() => setEditing(service)} />)}
+            </div>
+          </CloseoutNotes>
         </>}
       </SheetBody>
       <SheetFooter>
         <Button variant="secondary" className="text-sm" onClick={onClose}>{finished ? 'Done' : 'Close'}</Button>
-        {visit && !finished && <Button className="text-sm" disabled={busy || (!packet && !ready)} onClick={() => submit()}>{busy ? 'Saving visit…' : packet ? 'Resume closeout' : 'Complete visit'}</Button>}
+        {visit && !finished && <Button className="text-sm" disabled={send.busy || (!packet && !send.ready)} onClick={() => send.submit()}>{send.busy ? 'Saving visit…' : packet ? 'Resume closeout' : 'Complete visit'}</Button>}
       </SheetFooter>
     </Sheet>
   );
