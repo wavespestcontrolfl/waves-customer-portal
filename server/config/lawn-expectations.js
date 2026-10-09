@@ -178,6 +178,12 @@ const PRODUCT_CLASS_ENTRIES = [
   // Explicit "no line" decisions. Each is a decision, not an omission.
   // Adjuvants and wetting agents: no result to describe.
   ['LESCO 90/10 Nonionic Surfactant', null],
+  // The bermuda removal mix (GATE_LAWN_BERMUDA_REMOVAL). No approved "what to expect" sentence is
+  // true for a bermudagrass removal spray (slow yellowing of the bermuda over weeks, a second spray
+  // in June), so both herbicides are an explicit null: the report says nothing about them until the
+  // owner approves a sentence.
+  ['Recognition Post Emergent Herbicide', null],
+  ['Fusilade II Post Emergent Liquid Herbicide', null],
   ['Dispatch Sprayable Wetting Agent', null],
   // Growth regulator: its only honest line is mowing advice, which is out.
   ['Primo Maxx', null],

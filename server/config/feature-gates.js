@@ -221,6 +221,7 @@
  *   GATE_TS_WATCH_LIST=true (Tree & Shrub seasonal watch list, owner DRAFT 2026-10-01, tech-facing and storage only: the photo read gains this month's watch list (server/config/tree-shrub-watch-list.js, month in America/New_York) and may name an item as a possible SIGNAL (an optional watch_signals field that never changes a score), GET /:serviceId/tree-shrub/fast-context adds `watchList`, the Fast Complete sheet shows a "This month's watch list" block (Seen / Not seen, Add from watch list, an extent) that never blocks Done, and the technician's choices are FROZEN on the service record (structured_notes.treeShrubWatchItems). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsWatchListLive(). Ships DARK; off = the prompt and every result are byte-identical to before, fast-context has no watchList key and nothing is stored.)
  *   GATE_TS_PEST_CHECK=true (Tree & Shrub live-insect check, owner 2026-10-05, tech-facing and storage only: GET /:serviceId/tree-shrub/fast-context adds `pestCheck`, the Fast Complete sheet shows a "Live insects found?" Yes / No block with insect-type chips, blocks Merit when only armored scale is picked, notes a live-finds-only product on a No, and the answers are FROZEN on the service record (structured_notes.treeShrubPestCheck). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsPestCheckLive(). Ships DARK; off = fast-context has no pestCheck key and nothing is stored.)
  *   GATE_ASSESSMENT_FAST_COMPLETE=true (Waves Assessment Fast Complete, owner 2026-10-09: the schedule payload carries `assessmentFastCompleteEnabled` for a visit whose completion profile is the assessment key, and admin Dispatch opens a one-screen sheet (talk note, photos, warm/cold/lost, recommended interests, the inspection credit toggle where the full form shows it) in place of the full form. Complete records the consultation outcome, then posts /complete with texts and the review ask off. Strict opt-in: exactly 'true', read at call time via assessmentFastCompleteLive(). Ships DARK; off = the full form as before.)
+ *   GATE_TS_NEONIC_CAP=true (Tree & Shrub yearly neonicotinoid cap per property, owner 2026-10-09, tech-facing; server/services/tree-shrub-neonic-ledger.js, server/config/tree-shrub-neonic-caps.js: Zylam and Safari share one dinotefuran cap, Merit has its own imidacloprid cap, each a label amount per acre per calendar year scaled to the property's bed area (customer_properties.bed_sqft); dinotefuran counts from any visit at the property, imidacloprid from tree & shrub visits only. GET /:serviceId/tree-shrub/fast-context adds `neonicCap`, the Fast Complete sheet shows how much of each capped product is left this year and holds Complete when an entered amount passes it. Like the live-insect check the hold is the sheet's; /complete does not refuse. No bed area = the yearly amount cannot be computed and the amount check blocks nothing; the application-count hold and the no-limit-on-file hold need no bed area and still apply. Nothing reaches the customer. Strict opt-in: exactly 'true' in every environment, read at call time via tsNeonicCapLive(). Ships DARK; off = fast-context has no neonicCap key and /complete never checks.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
  *   GATE_FAST_COMPLETE_VOICE_FILL=true (Fast Complete voice fill, server half: POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip transcribes the sheet's recording with our own transcriber and maps what the technician said onto the pest re-service sheet's own product, pest, where, how and activity choices through one structured model call (services/fast-complete-voice-fill.js), validated server-side so anything off-list or unspoken, including any amount without a spoken number, comes back as an `unclear` item, and splits the note into a customer note and an office note. Nothing is stored; the audit line carries counts only, never the audio, the transcript or notes. Strict opt-in: exactly 'true' in every environment, read at call time via fastCompleteVoiceFillLive(). The report flow (GATE_FAST_COMPLETE_REPORT: any untyped pest visit, and any specialty visit the sheet reads a lane or typed record for) has its own two reads under the same gate: .../voice-fill/dictation answers one clip as words for the note box, and .../voice-fill/products reads the products the note names when the report is written; the sheet lands them as rows the technician confirms. The lawn re-service sheet (GATE_LAWN_RESERVICE_FAST_COMPLETE also on) uses the same two reads against its own catalog and ways. Ships DARK; off = each route answers 404 {enabled:false}.)
  *   GATE_FAST_COMPLETE_INVOICED_VISITS=true (Fast Complete for a visit already invoiced or returning from the payment flow, owner 2026-10-09: admin Dispatch opens the visit's one-screen sheet instead of the full form, and the sheet posts invoiceAlreadySent: true exactly when the full form does (the visit carries completionInvoiceAlreadySent), so /complete takes the same branch: no second pay-link text, the existing invoice reused, a paid invoice left paid. The schedule row's `invoicedVisitFastCompleteEnabled` carries the gate. Strict opt-in: exactly 'true', read at call time via fastCompleteInvoicedVisitsLive(). Ships DARK; off = the full form, as before.)
@@ -344,6 +345,9 @@ const gates = {
   agentSessionGuard: process.env.GATE_AGENT_SESSION_GUARD === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
+  // Customer-facing pickers stop at a 16:00 start (dark). Registered for logGateStatus only;
+  // scheduling/customer-windows.js reads the env at call time.
+  customerLastStart16: gateEnvValue('GATE_CUSTOMER_LAST_START_16'),
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
   customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
@@ -4159,6 +4163,11 @@ const gates = {
   // tsPestCheckLive().
   tsPestCheck: process.env.GATE_TS_PEST_CHECK === 'true',
 
+  // Tree & Shrub yearly neonicotinoid cap per property (owner 2026-10-09). Ships DARK in every
+  // environment. This entry is for logGateStatus only: the fast-context answer reads
+  // GATE_TS_NEONIC_CAP at call time via tsNeonicCapLive().
+  tsNeonicCap: process.env.GATE_TS_NEONIC_CAP === 'true',
+
   // Tree & Shrub report "From your technician" paragraph (proposed 2026-10-05, owner go-ahead pending): one
   // model call at completion, frozen, printed on the T&S report. Ships DARK in
   // every environment. This entry is for logGateStatus only: the completion
@@ -4359,6 +4368,16 @@ const gates = {
   // (lawn-protocol-operating-layer.js) read GATE_LAWN_V13 at call time via
   // lawnV13Live(), so unsetting it is the kill switch (no redeploy).
   lawnV13: process.env.GATE_LAWN_V13 === 'true',
+  // Bermuda removal add-on on lawn visits (owner 2026-10-06): a lawn the
+  // customer's accepted estimate or staff marked "bermuda removal" gets a
+  // Recognition + Fusilade II backpack spot step on the April and June visits
+  // (St. Augustine and Zoysia only). Ships DARK: off unless exactly 'true'
+  // (the 'on' / '1' spellings read off). Also counts the estimate add-on's
+  // spray cost in the lawn margin (the estimate add-on stays St. Augustine
+  // only). This entry is for
+  // logGateStatus only: every reader calls lawnBermudaRemovalLive() at call
+  // time, so unsetting the variable is the kill switch (no redeploy).
+  lawnBermudaRemoval: process.env.GATE_LAWN_BERMUDA_REMOVAL === 'true',
   // Lawn Fast Complete weed-spot rules (owner 2026-10-08): one cap-aware Weed spots
   // entry, the surfactant left out at 90 F or hotter, and the technician's spot area.
   // Ships DARK. This entry is for logGateStatus only: lawn-fast-complete.js reads
@@ -4586,6 +4605,12 @@ function tsWatchListLive() {
 // the completion freeze of the live-insect answers.
 function tsPestCheckLive() {
   return process.env.GATE_TS_PEST_CHECK === 'true';
+}
+
+// GATE_TS_NEONIC_CAP read at CALL time — strict `=== 'true'`, dark in every
+// environment. The canonical reader for the T&S fast-context `neonicCap`.
+function tsNeonicCapLive() {
+  return process.env.GATE_TS_NEONIC_CAP === 'true';
 }
 
 // GATE_TS_TECH_PARAGRAPH read at CALL time — strict `=== 'true'`, dark in every
@@ -6018,6 +6043,13 @@ function lawnV13Live() {
   return process.env.GATE_LAWN_V13 === 'true';
 }
 
+// GATE_LAWN_BERMUDA_REMOVAL read at CALL time, strict 'true' only. The one
+// reader for the lawn bermuda-removal add-on (services/lawn-bermuda-removal.js,
+// the plan engine, the tank sheet and the cost line in service-pricing.js). Off = every output is byte-identical to before.
+function lawnBermudaRemovalLive() {
+  return process.env.GATE_LAWN_BERMUDA_REMOVAL === 'true';
+}
+
 // GATE_LAWN_SPOT_RULES read at CALL time — strict `'true'` only, so an unset variable
 // is the kill switch. The lawn Fast Complete context adds plannedProducts.weedMix and
 // spotRules only while it is on (lawn-fast-complete.js); off = the old payload exactly.
@@ -6222,6 +6254,8 @@ module.exports.tsTechFindingsCopyLive = tsTechFindingsCopyLive;
 module.exports.tsWatchListLive = tsWatchListLive;
 // GATE_TS_PEST_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.tsPestCheckLive = tsPestCheckLive;
+// GATE_TS_NEONIC_CAP reader, on its own line so gate PRs never conflict.
+module.exports.tsNeonicCapLive = tsNeonicCapLive;
 // GATE_TS_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
 module.exports.tsTechParagraphLive = tsTechParagraphLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
@@ -6302,6 +6336,8 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_LAWN_BERMUDA_REMOVAL reader, on its own line so gate PRs never conflict.
+module.exports.lawnBermudaRemovalLive = lawnBermudaRemovalLive;
 // GATE_LAWN_SPOT_RULES reader, on its own line so gate PRs never conflict.
 module.exports.lawnSpotRulesLive = lawnSpotRulesLive;
 // GATE_LAWN_TREATMENT_GUIDE reader, on its own line so gate PRs never conflict.

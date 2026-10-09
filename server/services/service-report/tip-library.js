@@ -26,6 +26,16 @@
  * Lawn tips (owner 2026-09-29) may also carry `findings` and `months`, which
  * only reorder the picker (see LAWN_FINDINGS).
  *
+ * A tip may carry `pests` (owner 2026-10-09): the pest sheet's chips
+ * (TIP_PESTS) it is advice for. The pest sheet lifts it when the tech taps or
+ * names that pest, on any visit; it never selects a tip. Only a tip that
+ * claims no work is tagged: no bait, traps or stations, and no word of what
+ * the technician treated or where ("the treatment", "where I worked"). A
+ * lifted tip is then true whatever this visit did. A tip that does name the
+ * work stays in its own list and opens by search. A general tip (no
+ * `services`) whose copy names the treatment carries `namesWork: true`, and
+ * the sheet never lifts it by a word of the note either.
+ *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
  */
@@ -37,6 +47,8 @@ const { detectServiceLine } = require('./service-line-configs');
 const SERVICE_LINES = Object.freeze(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
 const SEASONS = Object.freeze(['wet', 'dry', 'all']);
 const MAX_TIPS_PER_VISIT = 3;
+// The pest sheet's pest chips (FastCompleteSheet PEST_CHIPS, less "Other").
+const TIP_PESTS = Object.freeze(['Ants', 'Roaches', 'Spiders', 'Silverfish', 'Wasps', 'Earwigs', 'Fleas', 'Crickets', 'Centipedes']);
 // The "write your own" line: one sentence. The picker enforces the same
 // maxLength; the server rejects, never trims.
 const MAX_CUSTOM_TIP_CHARS = 240;
@@ -199,55 +211,60 @@ const GROUP_ORDER = Object.freeze({
 // The leading group of a visit whose service has its own tips.
 const FOR_SERVICE_GROUP = Object.freeze({ id: 'for_service', label: 'For this service' });
 
+// Every general-pest identity (recurring, one-time, WaveGuard) and the
+// native-roach packages: the service keys several tips share.
+const GENERAL_PEST_SERVICES = Object.freeze(["pest_initial_palmetto_knockdown", "pest_control", "pest_recurring", "pest_general_quarterly", "pest_general_bimonthly", "pest_general_monthly", "pest_general_semiannual", "waveguard_membership", "pest_onetime", "one_time_pest_control", "pest_initial_cleanout"]);
+const NATIVE_ROACH_SERVICES = Object.freeze(['cockroach_control', 'pest_initial_roach', 'pest_initial_palmetto_knockdown']);
+
 const TIPS = Object.freeze([
   // ── Moisture ──────────────────────────────────────────────────────────
   {
     id: 'moisture_ac_drip', group: 'moisture', label: 'A/C condensate line',
-    keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
+    pests: ['Ants', 'Roaches'], keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
     copy: "Your A/C condensate line runs all summer, and where it drips the soil against the slab never dries. Ants and roaches follow that moisture gradient straight to the foundation. If the line ends at the wall, a short extension that carries it a couple of feet into the bed makes that strip dry again.",
   },
   {
     id: 'moisture_hose_bib', group: 'moisture', label: 'Fix drips at hose bibs',
-    keywords: ['hose', 'spigot', 'leak', 'water', 'ghost ants'], lines: ['pest'], season: 'all',
+    pests: ['Ants'], keywords: ['hose', 'spigot', 'leak', 'water', 'ghost ants'], lines: ['pest'], season: 'all',
     copy: "A slow drip at a hose bib keeps one patch of soil wet around the clock — exactly the micro-habitat ghost ants and springtails move toward. It's usually a worn washer, and it's a quick fix that removes a whole colony's reason to be there.",
   },
   {
     id: 'moisture_bath_fan', group: 'moisture', label: 'Bath fan until the mirror clears',
-    keywords: ['bathroom', 'humidity', 'fan', 'roach'], lines: ['pest'], season: 'all',
+    pests: ['Roaches'], keywords: ['bathroom', 'humidity', 'fan', 'roach'], lines: ['pest'], season: 'all',
     copy: "Humidity trapped in a closed bathroom keeps the baseboards and cabinet kicks damp. German roaches need that humidity more than they need food, so run the fan after every shower until the mirror clears — that drops the room below what they can live on.",
   },
   {
     id: 'moisture_under_sink', group: 'moisture', label: 'Check under the kitchen sink',
-    keywords: ['sink', 'cabinet', 'leak', 'trap', 'roach'], lines: ['pest'], season: 'all',
+    pests: ['Roaches'], keywords: ['sink', 'cabinet', 'leak', 'trap', 'roach'], lines: ['pest'], season: 'all',
     copy: "The cabinet under the kitchen sink is the harborage I find most often in SWFL kitchens. A slow weep at the trap or the supply lines keeps the cabinet floor dark and damp. Once a month, run a hand along the back corner — if it's damp, that repair does more than anything I can apply.",
   },
   {
     id: 'moisture_ac_auto', group: 'moisture', label: 'A/C fan on Auto, not On',
-    keywords: ['thermostat', 'humidity', 'silverfish', 'booklice'], lines: ['pest'], season: 'wet',
+    pests: ['Roaches', 'Silverfish'], keywords: ['thermostat', 'humidity', 'silverfish', 'booklice'], lines: ['pest'], season: 'wet',
     copy: "Roaches, silverfish, and booklice all track indoor humidity. With the thermostat fan set to On, the coil re-evaporates the water it just pulled out; on Auto the house settles around 50% humidity, and that takes away the conditions they establish in.",
   },
 
   // ── Lighting ──────────────────────────────────────────────────────────
   {
     id: 'light_warm_bulbs', group: 'lighting', label: 'Warm porch bulbs',
-    keywords: ['porch', 'light', 'bulb', '2700k', 'spiders', 'moths'], lines: ['pest', 'mosquito'], season: 'all',
+    pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'bulb', '2700k', 'spiders', 'moths'], lines: ['pest', 'mosquito'], season: 'all',
     copy: "Insects steer by short-wavelength light, so a bright white or blue-white bulb — anything over about 3000K — pulls flying insects to your door, and the spiders and geckos that eat them follow. A warm 2700K bulb, or a yellow \"bug\" bulb, is far less visible to them.",
   },
   {
     id: 'light_motion_sensor', group: 'lighting', label: 'Lights on a motion sensor',
-    keywords: ['porch', 'light', 'sensor', 'timer'], lines: ['pest', 'mosquito'], season: 'all',
+    pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'sensor', 'timer'], lines: ['pest', 'mosquito'], season: 'all',
     copy: "Every hour the porch light runs is another hour insects collect at the door. A motion sensor gives you light when you walk up and dark the rest of the night — by morning the difference at the threshold is obvious.",
   },
   {
     id: 'light_aim_away', group: 'lighting', label: 'Aim landscape lights away',
-    keywords: ['landscape', 'uplight', 'spotlight', 'entry'], lines: ['pest'], season: 'all',
+    pests: ['Spiders'], keywords: ['landscape', 'uplight', 'spotlight', 'entry'], lines: ['pest'], season: 'all',
     copy: "Uplights pointed back at the walls gather insects at the entries every night. Turning them out toward the yard, or switching them to warm bulbs, moves that crowd away from the door.",
   },
 
   // ── Around the house ──────────────────────────────────────────────────
   {
     id: 'ext_shrub_clearance', group: 'exterior', label: "A hand's width off the wall",
-    keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
+    namesWork: true, keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
     copy: "Branches touching the house are a bridge over the treated band along the foundation — ants and roaches walk the branch, not the ground, and the treatment never touches them. Trim to a hand's width of daylight between plant and wall and the bridge is closed.",
   },
   {
@@ -262,17 +279,17 @@ const TIPS = Object.freeze([
   },
   {
     id: 'ext_lanai_track', group: 'exterior', label: 'Rinse the lanai screen track',
-    keywords: ['lanai', 'screen', 'track', 'leaves', 'ants'], lines: ['pest', 'mosquito'], season: 'all',
+    pests: ['Ants'], keywords: ['lanai', 'screen', 'track', 'leaves', 'ants'], lines: ['pest', 'mosquito'], season: 'all',
     copy: "The screen track collects leaves and holds water after every rain — a food source for ants and a breeding spot for mosquitos in the same six inches. A monthly rinse with the hose takes care of both.",
   },
   {
     id: 'ext_palm_roof', group: 'exterior', label: 'Palm fronds off the roof',
-    keywords: ['palm', 'fronds', 'roof', 'rats', 'branches'], lines: ['rodent', 'pest', 'tree_shrub'], season: 'all',
+    pests: ['Ants', 'Roaches'], keywords: ['palm', 'fronds', 'roof', 'rats', 'branches'], lines: ['rodent', 'pest', 'tree_shrub'], season: 'all',
     copy: "Fronds and branches touching the roofline are a highway. Roof rats climb better than they burrow, and ants and roaches use the same route into the soffit. A few feet of clearance is exclusion without a single trap.",
   },
   {
     id: 'ext_leaf_litter', group: 'exterior', label: 'Clear leaf litter from the foundation',
-    keywords: ['leaves', 'debris', 'earwigs', 'millipedes'], lines: ['pest'], season: 'all',
+    pests: ['Roaches', 'Earwigs', 'Crickets', 'Centipedes'], keywords: ['leaves', 'debris', 'earwigs', 'millipedes'], lines: ['pest'], season: 'all',
     copy: "Leaf litter against the foundation stays damp underneath and harbors roaches, earwigs, and millipedes right where they can find a gap. Keeping that first foot bare and dry is one of the simplest things you can do.",
   },
 
@@ -304,19 +321,19 @@ const TIPS = Object.freeze([
   },
   {
     id: 'water_floor_mats', group: 'water', label: 'Flip floor mats after rain',
-    keywords: ['mat', 'door mat', 'rug', 'rubber', 'lanai', 'water'], lines: ['mosquito', 'pest'], season: 'wet',
+    pests: ['Roaches', 'Earwigs'], keywords: ['mat', 'door mat', 'rug', 'rubber', 'lanai', 'water'], lines: ['mosquito', 'pest'], season: 'wet',
     copy: "Rubber-backed door mats and lanai floor mats hold a surprising amount of water underneath — enough for mosquitos to breed in, and a cool damp shelter for roaches and earwigs right at the threshold. After a rain, flip them or hang them on the rail until they're dry.",
   },
 
   // ── Kitchen and pantry ────────────────────────────────────────────────
   {
     id: 'interior_pet_bowls', group: 'kitchen', label: 'Pet bowls up overnight',
-    keywords: ['pet', 'dog', 'cat', 'bowl', 'food', 'ants'], lines: ['pest'], season: 'all',
+    pests: ['Ants'], keywords: ['pet', 'dog', 'cat', 'bowl', 'food', 'ants'], lines: ['pest'], season: 'all',
     copy: "A bowl left down is an open food and water source all night, and it's the most common thing I trace an ant trail back to. Up at bedtime, down at breakfast.",
   },
   {
     id: 'interior_trash_night', group: 'kitchen', label: 'Kitchen trash out at night',
-    keywords: ['trash', 'garbage', 'can', 'roach'], lines: ['pest'], season: 'all',
+    pests: ['Ants', 'Roaches'], keywords: ['trash', 'garbage', 'can', 'roach'], lines: ['pest'], season: 'all',
     copy: "Roaches and ants forage overnight. An empty can gives them nothing on the shift they're actually working — the difference shows in a week.",
   },
   {
@@ -326,12 +343,12 @@ const TIPS = Object.freeze([
   },
   {
     id: 'interior_range_grease', group: 'kitchen', label: 'Degrease behind the range',
-    keywords: ['stove', 'range', 'grease', 'oven', 'german roach'], lines: ['pest'], season: 'all',
+    pests: ['Roaches'], keywords: ['stove', 'range', 'grease', 'oven', 'german roach'], lines: ['pest'], season: 'all',
     copy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
   },
   {
     id: 'interior_cardboard', group: 'kitchen', label: 'Cardboard boxes to plastic bins',
-    keywords: ['cardboard', 'boxes', 'garage', 'closet', 'storage'], lines: ['pest'], season: 'all',
+    pests: ['Roaches', 'Silverfish'], keywords: ['cardboard', 'boxes', 'garage', 'closet', 'storage'], lines: ['pest'], season: 'all',
     copy: "Corrugated cardboard is roach harborage — they feed on the glue and lay egg cases in the flutes. Boxes in the garage and closets do better as plastic bins with lids, and a move-in is when it matters most.",
   },
 
@@ -348,7 +365,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'seal_screen_tears', group: 'sealing', label: 'Patch lanai screen tears',
-    keywords: ['screen', 'lanai', 'tear', 'wasps', 'mosquito'], lines: ['mosquito', 'pest'], season: 'all',
+    namesWork: true, keywords: ['screen', 'lanai', 'tear', 'wasps', 'mosquito'], lines: ['mosquito', 'pest'], season: 'all',
     copy: "One tear in the lanai screen is a permanent open door for mosquitos and wasps, no matter what I treat outside it. A patch kit from the hardware store handles it in a few minutes.",
   },
   {
@@ -484,7 +501,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'lawn_mow_after_weed_treatment', group: 'lawn', label: 'Ask before mowing after a weed treatment',
-    keywords: ['mow', 'herbicide', 'sedge', 'wait', 'weeds', 'treatment'], lines: ['lawn'], season: 'all',
+    namesWork: true, keywords: ['mow', 'herbicide', 'sedge', 'wait', 'weeds', 'treatment'], lines: ['lawn'], season: 'all',
     findings: ['sedges', 'broadleaf_weeds', 'crabgrass'],
     copy: "Mowing too soon after a weed treatment cuts the weeds before the treatment has worked into them. How long to wait depends on the product I used, so ask me before the next mow. If a crew mows for you, ask them to check with me first.",
   },
@@ -514,7 +531,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'lawn_treated_weeds_leave', group: 'lawn', label: 'Leave treated weeds in place',
-    keywords: ['weeds', 'yellow', 'brown', 'pull', 'wait', 'treated'], lines: ['lawn'], season: 'all',
+    namesWork: true, keywords: ['weeds', 'yellow', 'brown', 'pull', 'wait', 'treated'], lines: ['lawn'], season: 'all',
     findings: ['sedges', 'broadleaf_weeds', 'crabgrass', 'dollarweed'],
     copy: "Weeds that have been treated can turn yellow or brown while the treatment works through them. Pulling them early can interrupt that, so leave them in place until my next visit. If a weed looks unchanged, point it out to me.",
   },
@@ -621,7 +638,7 @@ const TIPS = Object.freeze([
   // ── Pets and fleas ────────────────────────────────────────────────────
   {
     id: 'flea_bedding_vacuum', group: 'fleas', label: 'Hot-wash bedding, vacuum daily',
-    keywords: ['flea', 'dog', 'cat', 'bedding', 'vacuum', 'eggs'], lines: ['pest'], season: 'all',
+    pests: ['Fleas'], keywords: ['flea', 'dog', 'cat', 'bedding', 'vacuum', 'eggs'], lines: ['pest'], season: 'all',
     copy: "Flea eggs and larvae live in the bedding and carpet where the pet sleeps, not on the pet. A hot wash of the bedding weekly and a daily vacuum of those spots for a couple of weeks removes the stages a treatment can't reach — and empty the vacuum outside.",
   },
   // ── Bed bugs (service tips, owner-approved 2026-10-02) ────────────────────────────────────────────────────
@@ -686,7 +703,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'gr_hitchhikers', group: 'roaches', label: "Unpack deliveries outside",
-    keywords: ["delivery", "grocery", "appliance", "secondhand", "moving"], lines: ["pest"], season: 'all',
+    pests: ['Roaches'], keywords: ["delivery", "grocery", "appliance", "secondhand", "moving"], lines: ["pest"], season: 'all',
     services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
     copy: "German roaches usually ride in: grocery boxes, used appliances, and secondhand furniture. Unpack deliveries in the garage or outside, and get the cardboard out of the house the same day.",
   },
@@ -694,11 +711,11 @@ const TIPS = Object.freeze([
   // ── Palmetto bugs (service tips, owner-approved 2026-10-02) ───────────────────────────────────────────────
   {
     id: 'pal_dry_drains', group: 'moisture', label: "Run water in unused drains",
-    keywords: ["drain", "guest bath", "tub", "laundry sink", "palmetto"], lines: ["pest"], season: 'all',
+    pests: ['Roaches'], keywords: ["drain", "guest bath", "tub", "laundry sink", "palmetto"], lines: ["pest"], season: 'all',
     // Every general-pest identity: prod's one-time visit is the admin-created
     // one_time_pest_control row, migration-built databases its twin
     // pest_initial_cleanout (sms-book-funnel-map.js).
-    services: ["pest_initial_palmetto_knockdown", "pest_control", "pest_recurring", "pest_general_quarterly", "pest_general_bimonthly", "pest_general_monthly", "pest_general_semiannual", "waveguard_membership", "pest_onetime", "one_time_pest_control", "pest_initial_cleanout"],
+    services: GENERAL_PEST_SERVICES,
     copy: "A drain nobody uses (a guest tub, a laundry sink, a floor drain in the garage) dries out its trap, and palmetto bugs come up through it from the line. Run water in each one once a week so the trap stays full.",
   },
 
@@ -717,7 +734,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'flea_shady_spots', group: 'fleas', label: "Open up where pets rest outside",
-    keywords: ["yard", "shade", "deck", "fence", "dog run"], lines: ["pest"], season: 'all',
+    pests: ['Fleas'], keywords: ["yard", "shade", "deck", "fence", "dog run"], lines: ["pest"], season: 'all',
     services: ["flea_tick"],
     copy: "Outside, fleas develop in the shady, sheltered spots where pets lie down: under decks, along fences, beneath shrubs. Keeping those spots raked and open to the sun makes them a poor place for fleas to grow.",
   },
@@ -778,25 +795,25 @@ const TIPS = Object.freeze([
   },
   {
     id: 'bw_cover_sweets', group: 'stinging', label: "Lids on drinks and trash outside",
-    keywords: ["yellowjacket", "soda", "juice", "lanai", "trash"], lines: ["pest"], season: 'wet',
+    pests: ['Wasps'], keywords: ["yellowjacket", "soda", "juice", "lanai", "trash"], lines: ["pest"], season: 'wet',
     services: ["bee_wasp_removal"],
     copy: "Late in the summer, yellowjackets go after sweets and come to open cans, juice boxes, and fruit on the lanai. Cups with lids and trash cans that close keep them from settling in around where you sit.",
   },
   {
     id: 'bw_call_early', group: 'stinging', label: "Call early about a new nest",
-    keywords: ["nest", "eaves", "paper wasp", "small", "spring"], lines: ["pest"], season: 'all',
+    pests: ['Wasps'], keywords: ["nest", "eaves", "paper wasp", "small", "spring"], lines: ["pest"], season: 'all',
     services: ["bee_wasp_removal"],
     copy: "Paper wasps start a nest under the eaves as a small cluster in spring. A nest the size of a golf ball is a quick visit; by late summer the same spot can hold a few dozen wasps. If you see one starting, let me know.",
   },
   {
     id: 'md_rarely_sting', group: 'stinging', label: "Wash off old mud tubes",
-    keywords: ["mud dauber", "mud tubes", "eaves", "hose", "lanai"], lines: ["pest"], season: 'all',
+    pests: ['Wasps'], keywords: ["mud dauber", "mud tubes", "eaves", "hose", "lanai"], lines: ["pest"], season: 'all',
     services: ["mud_dauber_removal"],
     copy: "Mud daubers are solitary wasps and rarely sting; the mud tubes on the eaves and the lanai are their nurseries. Once the tubes are empty, washing them off with the hose keeps the eaves clean and shows you right away if new building starts.",
   },
   {
     id: 'md_fewer_spiders', group: 'stinging', label: "Fewer spiders, fewer mud daubers",
-    keywords: ["spiders", "porch light", "bulbs", "eaves", "webs"], lines: ["pest"], season: 'all',
+    pests: ['Spiders'], keywords: ["spiders", "porch light", "bulbs", "eaves", "webs"], lines: ["pest"], season: 'all',
     services: ["mud_dauber_removal"],
     copy: "Mud daubers stock their nests with spiders, so a house with fewer spiders draws fewer daubers. Warm porch bulbs and swept eaves cut down the insects the spiders live on.",
   },
@@ -975,6 +992,292 @@ const TIPS = Object.freeze([
     services: ["wildlife_trapping"],
     copy: "Pet food left outside overnight is the meal that brings raccoons, opossums, and rats to the lanai. Feeding inside, or picking the bowl up at dusk, takes away the reason to come back.",
   },
+  // ── Service tips, second batch (owner-approved 2026-10-09: things the
+  // customer can do for their own case) ─────────────────────────────────
+  {
+    id: 'gp_sprinkler_off_wall', group: 'exterior', label: "Aim sprinklers off the wall",
+    keywords: ["sprinkler", "irrigation", "wall", "foundation", "wet"], lines: ["pest"], season: 'all',
+    services: GENERAL_PEST_SERVICES,
+    copy: "A sprinkler head that hits the house keeps the base of the wall wet and wears down the band I treat along the foundation. Turn that head so it waters the bed and not the wall. The strip dries out, and what I put down lasts the way it should.",
+  },
+  {
+    id: 'gp_first_days', group: 'exterior', label: "A few more bugs for a few days",
+    keywords: ["more bugs", "flush", "dead bugs", "first week", "after treatment"], lines: ["pest"], season: 'all',
+    services: GENERAL_PEST_SERVICES,
+    copy: "For the first few days after a visit you may see more insects than usual, often slow or on their backs. That is the treatment bringing them out of the cracks they hide in, and it settles down over a week or two. If it does not, let me know.",
+  },
+  {
+    id: 'gp_rinse_recycling', group: 'kitchen', label: "Rinse cans before the bin",
+    pests: ['Ants', 'Roaches'], keywords: ["recycling", "cans", "bottles", "bin", "rinse"], lines: ["pest"], season: 'all',
+    copy: "A soda can or a wine bottle in the recycling bin feeds ants and roaches all week. A quick rinse before it goes in, and a bin with a lid kept off the garage wall, takes that food away.",
+  },
+  {
+    id: 'gp_garage_dusk', group: 'sealing', label: "Garage door down before dark",
+    keywords: ["garage", "dusk", "palmetto", "light", "flying"], lines: ["pest"], season: 'all',
+    services: [...GENERAL_PEST_SERVICES, ...NATIVE_ROACH_SERVICES.filter((key) => !GENERAL_PEST_SERVICES.includes(key))],
+    copy: "Palmetto bugs fly toward light at dusk, and an open garage with the light on is the widest door on the house. Closing it before the lights come on keeps most of them outside, where the treatment is.",
+  },
+  {
+    id: 'cr_gutters', group: 'roaches', label: "Clean the gutters twice a year",
+    keywords: ["gutters", "leaves", "roofline", "soffit", "smokybrown"], lines: ["pest"], season: 'all',
+    services: NATIVE_ROACH_SERVICES,
+    copy: "Wet leaves in a gutter are where the large outdoor roaches live and breed, right at the roofline above your soffits. Cleaning the gutters before and after the rainy season takes away a place they breed at the edge of the house.",
+  },
+  {
+    id: 'cr_dead_ones', group: 'roaches', label: "Dead ones are a good sign",
+    keywords: ["dead roaches", "dying", "after treatment", "sweep", "lanai"], lines: ["pest"], season: 'all',
+    services: NATIVE_ROACH_SERVICES,
+    copy: "Over the next two weeks you may find large roaches dead or slow in the garage, on the lanai, or by the doors. Those are the ones coming in from outside and crossing what I put down. Sweep them up; there is no need to spray anything yourself.",
+  },
+  {
+    id: 'rs_where_and_when', group: 'exterior', label: "Tell me where and when",
+    keywords: ["photo", "room", "time of day", "still seeing", "callback"], lines: ["pest"], season: 'all',
+    services: ["pest_re_service"],
+    copy: "If you see activity again, note the room, the time of day, and what it was. A phone photo is the most helpful thing you can send me. It shows me where they are coming from, so I can treat that spot instead of the whole house.",
+  },
+  {
+    id: 'rs_give_it_time', group: 'exterior', label: "Give it 10 to 14 days",
+    keywords: ["how long", "days", "still seeing", "patience", "two weeks"], lines: ["pest"], season: 'all',
+    services: ["pest_re_service"],
+    copy: "Most of what I put down works over days, not minutes. Insects cross it and carry it back to where they hide, and the activity drops over the next 10 to 14 days. If you still see steady activity after that, let me know.",
+  },
+  {
+    id: 'vr_no_food', group: 'roaches', label: "No food in the car for two weeks",
+    keywords: ["car", "crumbs", "wrappers", "trash", "food"], lines: ["pest"], season: 'all',
+    services: ["vehicle_german_roach", "vehicle_roach_addon"],
+    copy: "Roaches stay in a car for the crumbs under the seats and the wrappers in the door pockets. For the next two weeks, keep food out of the car and empty the trash at the end of every day, so the bait is the only meal they can find.",
+  },
+  {
+    id: 'vr_what_rides', group: 'roaches', label: "Check what rides in the car",
+    keywords: ["car", "boxes", "grocery bag", "backpack", "trunk"], lines: ["pest"], season: 'all',
+    services: ["vehicle_german_roach", "vehicle_roach_addon"],
+    copy: "Roaches usually ride into a car in a box, a grocery bag, or a backpack. Shake bags out before they go in, and do not leave cardboard boxes in the trunk or on the back seat overnight.",
+  },
+  {
+    id: 'vr_no_fogger', group: 'roaches', label: "Skip the bug bomb",
+    keywords: ["car", "fogger", "bug bomb", "vacuum", "floor mats"], lines: ["pest"], season: 'all',
+    services: ["vehicle_german_roach", "vehicle_roach_addon"],
+    copy: "A fogger in a car pushes roaches deeper into the dash and the door panels, where nothing reaches them, and it coats the surfaces you touch. Leave the bait to do the work, and vacuum the seat seams and floor mats every few days.",
+  },
+  {
+    id: 'plug_light_water', group: 'lawn', label: "Light water every day at first",
+    keywords: ["plugs", "watering", "new plugs", "roots", "daily"], lines: ["lawn"], season: 'all',
+    services: ["plugging"],
+    copy: "New plugs have short roots and dry out fast. Water them lightly once or twice a day for the first two weeks, then go back to deeper watering two days a week so the roots follow the water down.",
+  },
+  {
+    id: 'plug_stay_off', group: 'lawn', label: "Mower and feet off the plugs",
+    keywords: ["plugs", "mower", "traffic", "dog", "rooted"], lines: ["lawn"], season: 'all',
+    services: ["plugging"],
+    copy: "A plug has rooted when it does not lift with a gentle tug, usually in about three weeks. Until then, keep the mower, the dog, and foot traffic off those spots so the roots are not torn loose.",
+  },
+  {
+    id: 'td_water_in', group: 'lawn', label: "Water the top dressing in",
+    keywords: ["top dressing", "sand", "compost", "water in", "mow"], lines: ["lawn"], season: 'all',
+    services: ["top_dressing"],
+    copy: "The top dressing works once it settles down between the grass blades. Water it in well today, and wait to mow until the grass tips show through, so the mower does not pick the material back up.",
+  },
+  {
+    id: 'td_rake_level', group: 'lawn', label: "Rake the piles level",
+    keywords: ["top dressing", "piles", "rake", "smother", "level"], lines: ["lawn"], season: 'all',
+    services: ["top_dressing"],
+    copy: "If the top dressing sits in small piles after it dries, pull a leaf rake over them so the grass tips show. A pile left thick smothers the grass under it.",
+  },
+  {
+    id: 'dt_thin_is_normal', group: 'lawn', label: "Thin for a few weeks is normal",
+    keywords: ["dethatch", "thin", "rough", "recovery", "verticut"], lines: ["lawn"], season: 'all',
+    services: ["dethatching"],
+    copy: "The lawn looks thin and a little rough after dethatching because the dead layer is out and the soil shows. Keep it watered on your normal schedule and, while the grass is growing in warm weather, it fills back in over the next few weeks. Hold off on mowing short until it does.",
+  },
+  {
+    id: 'dt_thatch_source', group: 'lawn', label: "Thatch comes from too much food and water",
+    keywords: ["thatch", "fertilizer", "overwatering", "spongy", "comes back"], lines: ["lawn"], season: 'all',
+    services: ["dethatching"],
+    copy: "Thatch builds when a lawn gets more fertilizer and water than it can use. Keep to the watering days and the feeding plan we set, and the layer comes back much slower.",
+  },
+  {
+    id: 'lk_fills_from_edges', group: 'lawn', label: "Brown spots fill in from the edges",
+    keywords: ["brown spots", "dead grass", "runners", "chinch", "recovery"], lines: ["lawn"], season: 'all',
+    services: ["lawn_pest_knockdown"],
+    copy: "Grass that the insects already killed stays brown; it does not turn green again. St. Augustine and Zoysia fill those spots by sending runners in from the healthy edges over several weeks. Regular watering and a normal mowing height help it cover faster.",
+  },
+  {
+    id: 'lk_watch_the_edge', group: 'lawn', label: "Watch the edge of the spot",
+    keywords: ["edge", "spreading", "chinch", "webworm", "brown"], lines: ["lawn"], season: 'all',
+    services: ["lawn_pest_knockdown"],
+    copy: "The insects feed where the brown grass meets the green, not in the middle of a dead spot. Look at that edge once a week. If the brown keeps moving outward, let me know before your next visit.",
+  },
+  {
+    id: 'pi_new_fronds', group: 'tree_shrub', label: "Watch the new fronds",
+    keywords: ["palm", "injection", "new fronds", "results", "yellow"], lines: ["tree_shrub"], season: 'all',
+    services: ["palm_injection", "palm_injection_semiannual"],
+    copy: "What I put into the palm reaches the growth that comes after it. Older fronds that are already yellow or spotted will not change. Look at the new fronds that open over the coming months, sometimes a year or more, for the difference.",
+  },
+  {
+    id: 'pi_trunk_wounds', group: 'tree_shrub', label: "Keep nails and trimmers off the trunk",
+    keywords: ["palm", "trunk", "nails", "string trimmer", "wound"], lines: ["tree_shrub"], season: 'all',
+    services: ["palm_injection", "palm_injection_semiannual"],
+    copy: "A palm cannot close a wound in its trunk the way an oak can. Keep nails, screws, light hooks, and the string trimmer away from the trunk, because every cut or hole stays open for the life of the palm.",
+  },
+  {
+    id: 'ms_nozzles_clear', group: 'water', label: "Keep the nozzles clear",
+    keywords: ["misting", "nozzle", "hedge", "blocked", "trim"], lines: ["mosquito"], season: 'all',
+    services: ["mosquito_misting_system"],
+    copy: "A nozzle that a hedge has grown over sprays into the leaves in front of it and nowhere else. When the landscaping gets trimmed, ask for a hand's width of open space around each nozzle so the mist reaches the yard.",
+  },
+  {
+    id: 'ms_mist_times', group: 'water', label: "Tell me when you use the yard",
+    keywords: ["misting", "timer", "schedule", "lanai", "pool"], lines: ["mosquito"], season: 'all',
+    services: ["mosquito_misting_system"],
+    copy: "The system mists on a timer, at the hours mosquitos are most active. If a cycle runs when you are usually out on the lanai or when the kids are in the pool, tell me, and I will move the times.",
+  },
+  {
+    id: 'ri_listen', group: 'rodent', label: "Note when and where you hear them",
+    keywords: ["noise", "scratching", "night", "attic", "ceiling"], lines: ["rodent"], season: 'all',
+    services: ["rodent_inspection", "rodent_general_one_time"],
+    copy: "For the next few nights, note the time and the room when you hear scratching or running overhead. Something like \"2 a.m., over the kitchen\" shows me the route they use, and the plan I write is built around it.",
+  },
+  {
+    id: 'ri_no_store_poison', group: 'rodent', label: "Hold off on store-bought bait",
+    keywords: ["store bait", "smell", "wall", "attic", "d-con"], lines: ["rodent"], season: 'all',
+    services: ["rodent_inspection", "rodent_general_one_time"],
+    copy: "Store-bought bait lets a rat die wherever it happens to be, often inside a wall or the attic, and the smell lasts for weeks. Hold off until we agree on a plan, so we know where every animal ends up.",
+  },
+  {
+    id: 'bc_find_the_water', group: 'termite', label: "Find what wet the wood",
+    keywords: ["borate", "wet wood", "gutter", "leak", "sprinkler"], lines: ["termite"], season: 'all',
+    services: ["bora_care"],
+    copy: "Borate stays in wood that stays dry. If a gutter, a hose bib, or a sprinkler was wetting that wood, fixing it now keeps the treatment where I put it.",
+  },
+  // ── Third batch (owner-approved 2026-10-09, "batch 2 ok") ─────────────────
+  {
+    id: 'ant_wipe_trail', group: 'kitchen', label: "Clean up what the ants were after",
+    namesWork: true, keywords: ["trail", "crumbs", "spill", "counter", "wipe"], lines: ["pest"], season: 'all',
+    copy: "Ants follow a scent trail that the first scouts lay down. Clean up the spill or the crumbs they were walking to, and keep that spot clean for a week. Leave the sill, the door frame, and the baseboard where I worked as they are for now, since wiping there can undo the treatment.",
+  },
+  {
+    id: 'ant_seal_sweets', group: 'kitchen', label: "Wipe the honey jar and the syrup",
+    pests: ['Ants'], keywords: ["honey", "syrup", "sugar", "sweets", "ghost ants"], lines: ["pest"], season: 'all',
+    copy: "The small ants in a Florida kitchen go for sweets first. A sticky ring under the honey jar, the syrup bottle, or the sugar bowl is enough to keep a trail coming, so wipe the bottoms and keep those in a sealed bin or the fridge.",
+  },
+  {
+    id: 'ant_lanai_pots', group: 'exterior', label: "Let lanai pots dry between waterings",
+    pests: ['Ants'], keywords: ["potted plants", "lanai", "saucer", "soil", "ghost ants"], lines: ["pest"], season: 'all',
+    copy: "Ghost ants and other small ants nest in the soil of potted plants on the lanai and walk in from there. Let the pots dry on top between waterings, and lift the saucers so water does not sit under them.",
+  },
+  {
+    id: 'spider_brush_webs', group: 'exterior', label: "Brush webs down every couple of weeks",
+    pests: ['Spiders'], keywords: ["webs", "broom", "egg sacs", "corner", "cobwebs"], lines: ["pest"], season: 'all',
+    copy: "A web that comes back in the same corner means insects are flying there, usually to a light. Brushing webs down with a broom every couple of weeks takes the egg sacs with them, and it shows you which bulb to change.",
+  },
+  {
+    id: 'spider_shake_gloves', group: 'exterior', label: "Shake out garage shoes and gloves",
+    pests: ['Spiders'], keywords: ["gloves", "shoes", "garage", "boots", "widow"], lines: ["pest"], season: 'all',
+    copy: "Spiders rest in anything dark and still, and garden gloves and shoes by the garage door are the first place they settle. Shake them out before you put a hand or a foot in.",
+  },
+  {
+    id: 'silverfish_paper', group: 'moisture', label: "Keep paper out of damp rooms",
+    pests: ['Silverfish'], keywords: ["books", "paper", "photos", "damp", "closet"], lines: ["pest"], season: 'all',
+    copy: "Silverfish feed on paper, glue, and starch, and they need damp air to live. Books, photo boxes, and stored papers do better on a shelf in an air-conditioned room than in the garage or under a sink.",
+  },
+  {
+    id: 'damp_things_by_door', group: 'exterior', label: "Lift pots off the ground by the door",
+    pests: ['Earwigs', 'Crickets', 'Centipedes'], keywords: ["pots", "pool toys", "hose", "doorstep", "damp"], lines: ["pest"], season: 'all',
+    copy: "Earwigs, crickets, and centipedes spend the day under whatever is damp and touching the ground by a door: flower pots, pool toys, a rolled hose. Setting pots up on feet and keeping the first step outside each door bare leaves them nowhere to wait.",
+  },
+  {
+    id: 'wasp_check_covers', group: 'stinging', label: "Look before you lift the grill cover",
+    pests: ['Wasps'], keywords: ["grill cover", "umbrella", "patio chair", "paper wasp", "nest"], lines: ["pest"], season: 'all',
+    copy: "Paper wasps build in still, sheltered spots: under the grill cover, inside a folded umbrella, on the underside of a chair. Here they build most of the year, so give those spots a quick look before you reach in whenever something has sat unused for a week or two.",
+  },
+  {
+    id: 'wasp_plug_tubing', group: 'stinging', label: "Plug the open ends of patio tubing",
+    pests: ['Wasps'], keywords: ["patio furniture", "tubing", "swing set", "mud dauber", "plug"], lines: ["pest"], season: 'all',
+    copy: "Paper wasps and mud daubers build inside the hollow ends of patio chairs, swing sets, and umbrella poles. Push a rubber plug or a wad of foil into each open end so the tube is not a ready-made nest.",
+  },
+  {
+    id: 'gp_pressure_wash_first', group: 'exterior', label: "Pressure wash before my visit, not after",
+    keywords: ["pressure wash", "power wash", "paint", "pool deck", "wash off"], lines: ["pest"], season: 'all',
+    services: GENERAL_PEST_SERVICES,
+    copy: "Pressure washing the walls, the lanai, or the pool deck takes what I put down off with the dirt. If you plan to pressure wash or paint, schedule it for the week before my visit instead of the week after.",
+  },
+  {
+    id: 'gp_garage_floor_edge', group: 'exterior', label: "Clear floor along the garage walls",
+    keywords: ["garage", "boxes", "storage", "floor", "wall"], lines: ["pest"], season: 'all',
+    services: GENERAL_PEST_SERVICES,
+    copy: "Insects travel along the edge where the garage floor meets the wall, and that edge is where I treat. Boxes and bags sitting on the floor against the wall cover it up. A hand's width of clear floor along each wall keeps that line working.",
+  },
+  {
+    id: 'mq_thin_hedges', group: 'water', label: "Thin the thick hedges",
+    keywords: ["hedge", "shrubs", "shade", "thick", "resting"], lines: ["mosquito"], season: 'all',
+    services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
+    copy: "Mosquitos spend the heat of the day resting in thick, shady leaves. A hedge that is thinned so light and air move through it holds far fewer of them, and the treatment reaches the inside of the plant.",
+  },
+  {
+    id: 'mq_lanai_fan', group: 'water', label: "Run a fan where you sit",
+    keywords: ["fan", "lanai", "patio", "biting", "sitting outside"], lines: ["mosquito"], season: 'all',
+    services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
+    copy: "Mosquitos are weak fliers. A ceiling fan or a box fan aimed across the chairs on the lanai keeps them from landing on you, and it does more than a candle.",
+  },
+  {
+    id: 'mq_downspout_pipe', group: 'water', label: "Check the ribbed downspout pipe",
+    keywords: ["downspout", "corrugated", "extension", "drain pipe", "ridges"], lines: ["mosquito"], season: 'all',
+    services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
+    copy: "The flexible ribbed pipe on the end of a downspout holds a little water in every ridge, and mosquitos breed there. Swap it for a smooth pipe, or lift it and tip it out once a week.",
+  },
+  {
+    id: 'flea_the_car', group: 'fleas', label: "Vacuum where the pet rides in the car",
+    pests: ['Fleas'], keywords: ["car", "back seat", "seat cover", "truck", "cargo"], lines: ["pest"], season: 'all',
+    services: ["flea_tick"],
+    copy: "Flea eggs fall off wherever the pet rests, and that includes the back seat and the cargo mat. Vacuum the car where the pet rides and wash the seat cover hot, so the pet does not bring a new batch back into the house.",
+  },
+  {
+    id: 'flea_white_towel', group: 'fleas', label: "Comb the pet over a white towel",
+    pests: ['Fleas'], keywords: ["flea dirt", "comb", "towel", "specks", "check the pet"], lines: ["pest"], season: 'all',
+    services: ["flea_tick"],
+    copy: "Flea dirt shows as black specks on a white towel long before you see a flea. Comb the pet over one twice a week and tell me if the specks come back, so we know if the house or the pet is the source.",
+  },
+  {
+    id: 'rs_seed_in_metal', group: 'rodent', label: "Bird seed and pet food in a metal can",
+    keywords: ["bird seed", "dog food", "metal can", "chewed", "bag"], lines: ["rodent"], season: 'all',
+    services: ["rodent_sanitation_light", "rodent_sanitation_medium", "rodent_sanitation_heavy", "rodent_sanitation_standard", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation"],
+    copy: "Rats chew through a bag of bird seed or dog food in one night, and thin plastic does not slow them much. A metal can with a tight lid keeps the food in and the smell down.",
+  },
+  {
+    id: 'rs_dog_waste', group: 'rodent', label: "Pick up dog waste daily",
+    keywords: ["dog waste", "poop", "yard", "pickup", "droppings"], lines: ["rodent"], season: 'all',
+    services: ["rodent_sanitation_light", "rodent_sanitation_medium", "rodent_sanitation_heavy", "rodent_sanitation_standard", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation"],
+    copy: "Rats feed on dog waste left in the yard, and it is a food source most people never think of. A daily pickup takes it away.",
+  },
+  {
+    id: 'wl_strap_the_cans', group: 'wildlife', label: "Strap the trash can lids",
+    keywords: ["trash cans", "bungee", "pickup day", "tipped over", "garbage"], lines: ["pest"], season: 'all',
+    services: ["wildlife_trapping"],
+    copy: "Raccoons work the trash cans the night before pickup. A strap or bungee across the lid, or putting the cans out in the morning instead of the night before, takes away the easiest meal on the street.",
+  },
+  {
+    id: 'wl_pet_door_night', group: 'wildlife', label: "Lock the pet door at night",
+    keywords: ["pet door", "dog door", "cat door", "opossum", "kitchen"], lines: ["pest"], season: 'all',
+    services: ["wildlife_trapping"],
+    copy: "A pet door is the right size for a raccoon or an opossum, and they learn fast where the food is. Lock or cover it at night while the traps are out.",
+  },
+  {
+    id: 'wl_latch_screen_door', group: 'wildlife', label: "Latch the lanai screen door",
+    keywords: ["screen door", "latch", "fruit", "table", "slide"], lines: ["pest"], season: 'all',
+    services: ["wildlife_trapping"],
+    copy: "Raccoons learn to slide an unlatched screen door open to reach the lanai and whatever is on the table. Latch it at dusk, and keep pet food and fruit off the lanai while the traps are out.",
+  },
+  {
+    id: 'lre_weekly_photo', group: 'lawn', label: "One photo a week from the same spot",
+    keywords: ["photo", "spot", "spreading", "weekly", "same place"], lines: ["lawn"], season: 'all',
+    services: ["lawn_re_service", "lawn_inspection"],
+    copy: "A lawn changes slowly, and it is hard to tell from memory if a spot is growing or filling in. Take one photo a week from the same place and send them to me if it gets worse. The photos show me the direction it is going.",
+  },
+  {
+    id: 'ts_trimmer_guard', group: 'tree_shrub', label: "Keep the string trimmer off the bark",
+    keywords: ["string trimmer", "weed eater", "bark", "girdle", "guard"], lines: ["tree_shrub"], season: 'all',
+    copy: "String trimmer line cuts the bark at the base of a young tree or shrub, and a ring of cuts starves the plant from the bottom up. A bare ring of soil or a plastic guard around the base keeps the trimmer away from it.",
+  },
 ]);
 
 // Deep-frozen: the registry is the screened source of customer copy, and
@@ -1012,6 +1315,11 @@ function registryLineFor(serviceLine) {
  * particular services (`services`: catalog service keys, owner-approved
  * 2026-10-02) leads those visits' list in its own group ("For this service")
  * and stays out of every other visit's list.
+ *
+ * `more` is every tip the list leaves out (owner 2026-10-09, "open search"):
+ * the picker searches it and the pest sheet lifts from it, so a recurring
+ * visit that finds roaches or fleas can reach that advice. It is never listed
+ * unasked, so a tip that names work still leads only its own services.
  */
 function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [] } = {}) {
   const line = registryLineFor(serviceLine);
@@ -1032,10 +1340,12 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   // its own tips (Codex #5582).
   const keys = new Set([serviceKey, ...serviceKeys].filter(Boolean));
   const forService = keys.size ? TIPS.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
+  const listed = new Set([...forService, ...groups.flatMap((group) => group.tips)]);
   return {
     line,
     season,
     groups: forService.length ? [{ ...FOR_SERVICE_GROUP, primary: true, tips: forService }, ...groups] : groups,
+    more: TIPS.filter((tip) => !listed.has(tip)),
   };
 }
 
@@ -1127,6 +1437,7 @@ module.exports = {
   SERVICE_LINES,
   SEASONS,
   MAX_TIPS_PER_VISIT,
+  TIP_PESTS,
   MAX_CUSTOM_TIP_CHARS,
   LAWN_FINDINGS,
   monthForDate,

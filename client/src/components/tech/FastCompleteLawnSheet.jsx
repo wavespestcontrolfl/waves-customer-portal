@@ -1624,6 +1624,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               quiet
               library={tips}
               priorityTipIds={noteTipIds}
+              sentLast={false}
               priorityOrdered
               tipId={form.tipId}
               customTip={form.customTip}

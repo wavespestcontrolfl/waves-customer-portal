@@ -28,6 +28,8 @@ const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS }
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
+const bermudaRemoval = require('./lawn-bermuda-removal');
+const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
 // 'rescheduled' is the phantom row a legacy customer reschedule leaves behind
@@ -855,6 +857,20 @@ function reportFactsContextKeys() {
  * missing visit; an ineligible visit answers `eligible: false` with the reason
  * and the visit identity and skips the heavier reads.
  */
+// The outcome that sends a visit to the full form, or null for the quick sheet. The eligibility's
+// own reason comes first. Then the bermuda removal mix: it is one grouped selection the quick sheet
+// has no UI for, so a visit that OFFERS it (decided from the visit's step eligibility, whatever the
+// completion defaults say) takes the full form. A read error while checking it fails CLOSED to the
+// full form (where the warning and the account check live), never an eligible quick sheet.
+async function fullFormOutcome(knex, svc, reason) {
+  if (reason) return { reason };
+  const mixOffered = await bermudaRemoval.stepOffered(knex, svc.id).catch((err) => {
+    logger.warn(`[lawn-fast] bermuda eligibility unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return true;
+  });
+  return mixOffered ? { reason: 'bermuda_removal', needsFullForm: BERMUDA_FULL_FORM_REASON } : null;
+}
+
 async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds } = {}) {
   const base = await resolveLawnFastEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
@@ -862,7 +878,10 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
   // The technician rides the identity so a reassignment since the sheet opened is
   // caught at submit (recapVisitIdentityChanged compares it when sent).
   const service = { ...recapServiceIdentity(svc, profile), technicianId: svc.technician_id ?? null };
-  if (reason) return { ok: true, eligible: false, reason, visitType, service };
+  // Why this visit takes the full form, if it does: the eligibility's own reason, or the bermuda
+  // removal mix (fullFormOutcome).
+  const fullForm = await fullFormOutcome(knex, svc, reason);
+  if (fullForm) return { ok: true, eligible: false, ...fullForm, visitType, service };
 
   const { assessmentRow, assessmentReadFailed, assessmentUnusable } = await loadAssessmentState(svc, knex, readFailures);
   const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex, readFailures) : null;

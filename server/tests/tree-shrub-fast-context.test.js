@@ -37,7 +37,7 @@ function fakeKnex(tables) {
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'whereNotExists', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
     const settle = () => (data instanceof Error ? Promise.reject(data) : Promise.resolve(Array.isArray(data) ? data : []));
     chain.first = async () => {
       if (data instanceof Error) throw data;
@@ -625,5 +625,74 @@ describe('GATE_TS_PEST_CHECK: the fast-context pestCheck', () => {
     const ctx = await build();
     expect(ctx.eligible).toBe(false);
     expect('pestCheck' in ctx).toBe(false);
+  });
+});
+
+describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
+  const saved = process.env.GATE_TS_NEONIC_CAP;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_NEONIC_CAP; else process.env.GATE_TS_NEONIC_CAP = saved;
+  });
+  const catalog = [
+    cat('zylam', 'Zylam Insecticide', { category: 'insecticide', active_ingredient: 'Dinotefuran' }),
+    cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' }),
+  ];
+  const ledgerRow = { product_name: 'Zylam Insecticide', active_ingredient: 'Dinotefuran', quantity_applied: 9.8625, quantity_unit: 'fl_oz', service_line: 'tree_shrub' };
+  const build = (tables = {}) => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: '2026-10-01' }),
+    products_catalog: catalog,
+    customer_properties: { bed_sqft: 10890 },
+    'property_application_history as pah': [ledgerRow, { product_name: 'Merit 2F', active_ingredient: 'Imidacloprid', quantity_applied: 50, quantity_unit: 'fl_oz', service_line: 'lawn' }],
+    ...tables,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent and the ledger is never read', async () => {
+    delete process.env.GATE_TS_NEONIC_CAP;
+    const knex = fakeKnex({ scheduled_services: visit({ scheduled_date: '2026-10-01' }), products_catalog: catalog });
+    const ctx = await buildTreeShrubFastContext('visit-1', knex);
+    expect(ctx.eligible).toBe(true);
+    expect('neonicCap' in ctx).toBe(false);
+    expect(knex.calls.some(([table]) => table === 'customer_properties')).toBe(false);
+  });
+
+  test('gate on: what is left of Zylam at this property, a lawn visit\'s imidacloprid left out', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    const ctx = await build();
+    // The year is today's (ET), the day a completion records, not the scheduled day.
+    const thisYear = Number(require('../utils/datetime-et').etDateString().slice(0, 4));
+    expect(ctx.neonicCap).toMatchObject({ available: true, year: thisYear, bedSqft: 10890 });
+    const lastDecember = await build({ scheduled_services: visit({ scheduled_date: `${thisYear - 1}-12-30` }) });
+    expect(lastDecember.neonicCap.year).toBe(thisYear);
+    expect(ctx.neonicCap.ingredients.find((entry) => entry.key === 'imidacloprid').usedShare).toBe(0);
+    const dino = ctx.neonicCap.ingredients.find((entry) => entry.key === 'dinotefuran');
+    expect(dino.usedShare).toBeCloseTo(0.5, 6);
+    expect(dino.capByProduct).toEqual([{ productId: 'zylam', name: 'Zylam', unit: 'fl_oz', yearlyAmount: 19.725, remainingAmount: 9.8625, maxApplications: 3, applicationsUsed: 1 }]);
+  });
+
+  test('gate on, no bed area: the reason rides the payload and no amount does', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    const ctx = await build({ customer_properties: { bed_sqft: null } });
+    const dino = ctx.neonicCap.ingredients.find((entry) => entry.key === 'dinotefuran');
+    expect(dino).toMatchObject({ usedShare: null, reason: 'bed_area_needed' });
+    expect(dino.capByProduct[0]).toMatchObject({ productId: 'zylam', yearlyAmount: null, remainingAmount: null });
+  });
+
+  test('gate on, a failed ledger read: available:false and the sheet still loads', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    const ctx = await build({ 'property_application_history as pah': new Error('boom') });
+    expect(ctx.eligible).toBe(true);
+    expect(ctx.neonicCap).toMatchObject({ available: false, reason: 'ledger_unavailable' });
+  });
+
+  test('an ineligible visit carries no neonicCap even with the gate on', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build();
+    expect(ctx.eligible).toBe(false);
+    expect('neonicCap' in ctx).toBe(false);
   });
 });
