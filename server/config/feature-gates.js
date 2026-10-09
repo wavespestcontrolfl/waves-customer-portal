@@ -4357,6 +4357,16 @@ const gates = {
   // (lawn-protocol-operating-layer.js) read GATE_LAWN_V13 at call time via
   // lawnV13Live(), so unsetting it is the kill switch (no redeploy).
   lawnV13: process.env.GATE_LAWN_V13 === 'true',
+  // Bermuda removal add-on on lawn visits (owner 2026-10-06): a lawn the
+  // customer's accepted estimate or staff marked "bermuda removal" gets a
+  // Recognition + Fusilade II backpack spot step on the April and June visits
+  // (St. Augustine and Zoysia only). Ships DARK: off unless exactly 'true'
+  // (the 'on' / '1' spellings read off). Also counts the estimate add-on's
+  // spray cost in the lawn margin (the estimate add-on stays St. Augustine
+  // only). This entry is for
+  // logGateStatus only: every reader calls lawnBermudaRemovalLive() at call
+  // time, so unsetting the variable is the kill switch (no redeploy).
+  lawnBermudaRemoval: process.env.GATE_LAWN_BERMUDA_REMOVAL === 'true',
   // Lawn Fast Complete weed-spot rules (owner 2026-10-08): one cap-aware Weed spots
   // entry, the surfactant left out at 90 F or hotter, and the technician's spot area.
   // Ships DARK. This entry is for logGateStatus only: lawn-fast-complete.js reads
@@ -6009,6 +6019,13 @@ function lawnV13Live() {
   return process.env.GATE_LAWN_V13 === 'true';
 }
 
+// GATE_LAWN_BERMUDA_REMOVAL read at CALL time, strict 'true' only. The one
+// reader for the lawn bermuda-removal add-on (services/lawn-bermuda-removal.js,
+// the plan engine, the tank sheet and the cost line in service-pricing.js). Off = every output is byte-identical to before.
+function lawnBermudaRemovalLive() {
+  return process.env.GATE_LAWN_BERMUDA_REMOVAL === 'true';
+}
+
 // GATE_LAWN_SPOT_RULES read at CALL time — strict `'true'` only, so an unset variable
 // is the kill switch. The lawn Fast Complete context adds plannedProducts.weedMix and
 // spotRules only while it is on (lawn-fast-complete.js); off = the old payload exactly.
@@ -6279,6 +6296,8 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_LAWN_BERMUDA_REMOVAL reader, on its own line so gate PRs never conflict.
+module.exports.lawnBermudaRemovalLive = lawnBermudaRemovalLive;
 // GATE_LAWN_SPOT_RULES reader, on its own line so gate PRs never conflict.
 module.exports.lawnSpotRulesLive = lawnSpotRulesLive;
 // GATE_LAWN_TREATMENT_GUIDE reader, on its own line so gate PRs never conflict.
