@@ -227,21 +227,24 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     }
   });
 
-  test('every Distance line and the guide state one scale spray a year', () => {
+  test('Distance: whitefly rate with its limits; the scale use is on hold on every line and in the guide', () => {
     const lines = visits.flatMap((v) => `${v.primary}\n${v.secondary}`.split('\n')).filter((line) => /^Distance IGR/.test(line));
     expect(lines).toHaveLength(7);
-    for (const line of lines) expect(line).toMatch(/no more than 5 gal of mix per 1,000 sq ft; one scale spray per property per calendar year \(\$16\.52\)$/);
-    const limits = guide.products.distance.limits.join(' ');
-    expect(limits).toMatch(/Scales and mealybugs: one application per calendar year\./);
+    for (const line of lines) {
+      expect(line).toMatch(/whiteflies 6–8 fl oz\/100 gal, no more than 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 at least 21 days apart; scale: HOLD, call the office first/);
+      expect(line).not.toMatch(/listed scales 8–12/);
+    }
+    const distance = guide.products.distance;
+    // No scale rate or mix is offered while the label's two yearly figures for scale are unreconciled.
+    expect(distance.mixes).toEqual([['Whiteflies', 0.06, 0.08]]);
+    expect(JSON.stringify(distance.rates)).not.toMatch(/8–12/);
+    expect(distance.rates[1][0]).toBe('Scale and mealybug: HOLD');
+    const limits = distance.limits.join(' ');
     expect(limits).toMatch(/6 fl oz followed by 6 fl oz at least 21 days later/);
+    expect(limits).toMatch(/Scale and mealybug use is on hold\./);
     expect(limits).not.toMatch(/two per six months/);
-    // The yearly limit is 0.176 lb ai per acre. Distance holds 0.86 lb ai per gallon (label p. 1), so
-    // that is 26.2 fl oz per acre = 0.60 fl oz per 1,000 sq ft: the 12 fl oz per 100 gal rate at the
-    // label volume of 100 gal per 20,000 sq ft (5 gal per 1,000 sq ft). The figures agree.
-    expect(((0.176 / 0.86) * 128).toFixed(1)).toBe('26.2');
-    expect((26.2 / 43.56).toFixed(2)).toBe('0.60');
-    expect((12 * (43560 / 20000)).toFixed(1)).toBe('26.1');
-    expect(limits).toMatch(/0\.60 fl oz per 1,000 sq ft\. One spray at 12 fl oz per 100 gal and 5 gal of mix per 1,000 sq ft uses all of it\./);
-    expect(guide.products.distance.apply).toMatch(/5 gal per 1,000 sq ft: do not exceed it/);
+    for (const visit of visits) {
+      for (const row of visit.fieldGuide.conditional) if (row.key === 'distance') expect(row.where).toBe('Whitefly nymphs; scale on hold');
+    }
   });
 });

@@ -206,7 +206,7 @@
     "distance": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Whiteflies and scale crawlers. Scale species include black, California red, euonymus, Florida wax, San Jose, and snow scale. Mealybugs: suppression only.",
+      "targets": "Whiteflies. The label also lists scale crawlers and mealybug suppression; that use is on hold (see Restrictions).",
       "apply": "Cover all plant surfaces evenly to the point of runoff. The label volume is 100 gal of mix per 20,000 sq ft, which is 5 gal per 1,000 sq ft: do not exceed it. Time scale treatments for crawlers.",
       "rates": [
         [
@@ -214,8 +214,8 @@
           "Whiteflies."
         ],
         [
-          "8–12 fl oz / 100 gal",
-          "Listed scales; mealybug suppression."
+          "Scale and mealybug: HOLD",
+          "Call the office before a scale spray. Oil on crawlers or a Zylam drench need no call."
         ]
       ],
       "mixes": [
@@ -223,18 +223,12 @@
           "Whiteflies",
           0.06,
           0.08
-        ],
-        [
-          "Scale crawlers",
-          0.08,
-          0.12
         ]
       ],
       "limits": [
         "Does not provide rapid adult-insect control.",
-        "Scales and mealybugs: one application per calendar year. A property gets one scale spray a year.",
-        "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz at least 21 days later.",
-        "Yearly limit: 0.176 lb of active ingredient per acre, all pyriproxyfen products together. Distance holds 0.86 lb per gallon, so that is 26 fl oz of Distance per acre, or 0.60 fl oz per 1,000 sq ft. One spray at 12 fl oz per 100 gal and 5 gal of mix per 1,000 sq ft uses all of it.",
+        "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz at least 21 days later. Yearly limit 0.176 lb of active ingredient per acre, all pyriproxyfen products together.",
+        "Scale and mealybug use is on hold. The label allows one application a year and prints the yearly limit two ways (12 fl oz per acre, and 0.176 lb active ingredient per acre, which is 26 fl oz per acre). No scale spray until Valent confirms which one applies.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
       "source": "Valent · EPA 59639-96 · label accepted 11-08-23 · Table 1",
@@ -245,7 +239,8 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Choose target rate"
+      "summary": "Whitefly rate; scale on hold",
+      "program": "Owner follow-up: ask Valent which yearly limit applies to the scale use."
     },
     "tristar": {
       "kind": "Insects · foliar spray",

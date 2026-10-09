@@ -149,11 +149,10 @@ Technician-facing text only; no gate, migration, catalog or price change.
   100 sq ft (16 to 32 fl oz of product per 100 sq ft), so the program has no
   drench: the guide names it as a limit only. Reliant has no catalog row yet, so a visit cannot record it until
   the product is bought and added.
-- **Distance IGR: one scale spray a year.** The current label (accepted
-  2023-11-08) allows one scale or mealybug application per calendar year, and
-  for whitefly one spray at 8 fl oz per 100 gal or 6 then 6 at least 21 days
-  apart. The yearly limit is 0.176 lb ai per acre; at 0.86 lb ai per gallon
-  that is 0.60 fl oz of Distance per 1,000 sq ft, which one spray at 12 fl oz
-  per 100 gal and the label volume (5 gal of mix per 1,000 sq ft) uses in full.
-  All seven Distance lines and the guide entry state the one-spray limit and
-  the 5 gal per 1,000 sq ft volume limit. The sheet does not enforce it.
+- **Distance IGR: whitefly only; scale use on hold.** The current label
+  (accepted 2023-11-08) prints the scale yearly limit two ways: 12 fl oz per
+  acre, and 0.176 lb ai per acre (26 fl oz per acre at the label's 0.86 lb ai
+  per gallon). Until Valent confirms which applies, all seven Distance lines
+  and the guide give the whitefly rate and limits only, and say to call the
+  office before a scale spray. Oil on crawlers and a Zylam drench stay the
+  scale tools that need no call. The sheet does not enforce this.
