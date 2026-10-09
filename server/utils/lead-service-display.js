@@ -108,12 +108,33 @@ function classify(part, catalogNames) {
   const topics = topicsFor(part);
   if (catalogName) return { kind: 'catalog', name: catalogName, frequency, topic: topics[0] || null };
   if (!topics.length) return { kind: 'other', name: part, frequency };
-  return { kind: 'topic', topics, frequency, assess: ASSESS_WORD_RE.test(part) };
+  return { kind: 'topic', text: part, topics, frequency, assess: ASSESS_WORD_RE.test(part) };
 }
 
 function assessmentLabel(shorts) {
   const unique = [...new Set(shorts)].sort((a, b) => SHORT_ORDER.indexOf(a) - SHORT_ORDER.indexOf(b));
   return unique.length ? `${ASSESSMENT} (${unique.join(' + ')})` : ASSESSMENT;
+}
+
+// The cadence the person stated, in the catalog's spelling. Bi-monthly is
+// tested before monthly.
+const CADENCES = [
+  ['Bi-Monthly', /\bbi[-\s]?monthly\b|\bevery\s+(?:other|two|2)\s+months?\b/i],
+  ['Every 6 Weeks', /\bevery\s+(?:6|six)\s+weeks?\b/i],
+  ['Monthly', /\bmonthly\b|\bevery\s+month\b|\bper\s+month\b/i],
+  ['Quarterly', /\bquarterly\b|\bevery\s+quarter\b|\bper\s+quarter\b/i],
+  ['Semiannual', /\bsemi[-\s]?annual(?:ly)?\b|\btwice\s+a\s+year\b/i],
+];
+const CADENCE_PREFIX_RE = new RegExp(`^(?:${CADENCES.map(([word]) => word).join('|')}) `);
+
+// The topic's recurring service at the stated cadence when the catalog has
+// that row ("Monthly pest control" → Monthly Pest Control Service); the
+// topic's default cadence when none is stated or no such row exists.
+function recurringName(topic, text, catalogNames) {
+  const stated = CADENCES.find(([, re]) => re.test(text));
+  if (!stated || !catalogNames || !CADENCE_PREFIX_RE.test(topic.recurring)) return topic.recurring;
+  const wanted = topic.recurring.replace(CADENCE_PREFIX_RE, `${stated[0]} `);
+  return catalogNames.get(wanted.toLowerCase()) || topic.recurring;
 }
 
 // Where one part of the text goes: a name of its own, or into the
@@ -125,13 +146,16 @@ function placePart(part, plan, name, toAssessment) {
     name(part.name);
   } else if (part.kind === 'catalog') {
     if (plan.assessmentBooked && part.topic && !part.topic.fixed) toAssessment(part.topic.short);
+    // Recurring wins for the whole lead: a one-time catalog row beside a
+    // recurring request reads as that topic's recurring service.
+    else if (plan.recurring && part.frequency === 'one_time' && part.topic?.recurring) name(part.topic.recurring);
     else name(part.name);
   } else {
     for (const topic of part.topics) {
       if (part.assess && !plan.oneTime) toAssessment(topic.short);
       else if (topic.fixed) name(topic.fixed);
       else if (plan.assess || !topic.recurring) toAssessment(topic.short);
-      else name(plan.recurring ? topic.recurring : topic.oneTime);
+      else name(plan.recurring ? recurringName(topic, part.text, plan.catalogNames) : topic.oneTime);
     }
   }
 }
@@ -146,7 +170,7 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null } = {}) {
   // An assessment visit covers the recurring work it was booked to look at.
   // A one-time request is never an assessment.
   const assessmentBooked = !oneTime && parts.some((part) => part.kind === 'assessment');
-  const plan = { recurring, oneTime, assessmentBooked, assess: assessmentBooked || (!recurring && !oneTime) };
+  const plan = { recurring, oneTime, assessmentBooked, assess: assessmentBooked || (!recurring && !oneTime), catalogNames };
 
   const out = [];
   const shorts = [];

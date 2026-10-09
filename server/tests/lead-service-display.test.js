@@ -36,6 +36,8 @@ describe('leadServiceDisplay', () => {
     ['Recurring Lawn Care + One-Time Lawn Treatment', 'Monthly Lawn Care Service'],
     ['Recurring Cockroach Control', 'Quarterly Pest Control Service'],
     ['Rodent Bait Stations', 'Quarterly Rodent Bait Station Service'],
+    ['Recurring Lawn Care + One-Time Lawn Care Service', 'Monthly Lawn Care Service'],
+    ['Quarterly Pest Control Service + One-Time Lawn Care Service', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
   ])('one frequency for the lead, recurring wins: %s → %s', (text, expected) => {
     expect(name(text)).toBe(expected);
   });
@@ -73,6 +75,15 @@ describe('leadServiceDisplay', () => {
     ['Ongoing lawn treatment, including fertilizer, weed, pest, and disease treatments', 'Monthly Lawn Care Service'],
     ['Commercial Service', 'Commercial Service'],
   ])('one-job services and unknown text keep their name: %s → %s', (text, expected) => {
+    expect(name(text)).toBe(expected);
+  });
+
+  test.each([
+    ['Monthly pest control for ants', 'Monthly Pest Control Service'],
+    ['Bi-monthly lawn care', 'Monthly Lawn Care Service'], // no bi-monthly row in this catalog
+    ['Quarterly Pest Control Service + monthly lawn care', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
+    ['Recurring Pest Control', 'Quarterly Pest Control Service'],
+  ])('a stated cadence is kept when the catalog has that service: %s → %s', (text, expected) => {
     expect(name(text)).toBe(expected);
   });
 
