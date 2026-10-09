@@ -2751,7 +2751,7 @@ function areaAddOnCategoryForItem(item = {}) {
 // The add-on identity fields every re-shaping of a one-time row must keep, so
 // the key and tier survive normalize, render, choice and acceptance copies
 // (a copy that drops addOnKey loses the family and the catalog service).
-const AREA_ADDON_ROW_FIELDS = ['addOnKey', 'catalogServiceKey', 'addOnCategory', 'areaSqFt', 'tierSqFt', 'grassType', 'visitContext', 'carriesVisitDrive', 'onSiteMinutes'];
+const AREA_ADDON_ROW_FIELDS = ['addOnKey', 'catalogServiceKey', 'addOnCategory', 'areaSqFt', 'tierSqFt', 'grassType', 'visitContext', 'carriesVisitDrive', 'carriesJobAdmin', 'onSiteMinutes'];
 // priceUnit is the billing-unit marker: an area add-on's price is one application, and every customer
 // estimate surface reads it as "$X per application". Set here for every re-shaping, so a row that
 // lost the mapper's marker still carries it.

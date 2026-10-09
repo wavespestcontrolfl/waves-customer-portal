@@ -44,9 +44,11 @@ describe('area add-on treatment pricing', () => {
     for (const [key, cfg] of Object.entries(AREA_ADDONS.items)) {
       for (const areaSqFt of cfg.tiers || [undefined]) {
         for (const visitContext of ['standalone', 'sameTripAddOn']) {
-          const line = priceAreaAddOn(key, { areaSqFt, visitContext, grassType: 'st_augustine' });
-          expect(line.margin).toBeGreaterThanOrEqual(AREA_ADDONS.targetMargin);
-          expect(line.price % 10).toBe(9);
+          for (const carries of [true, false]) {
+            const line = priceAreaAddOn(key, { areaSqFt, visitContext, grassType: 'st_augustine', carriesDrive: carries, carriesAdmin: carries });
+            expect(line.margin).toBeGreaterThanOrEqual(AREA_ADDONS.targetMargin);
+            expect(line.price % 10).toBe(9);
+          }
         }
       }
     }
@@ -181,8 +183,8 @@ describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
   test('two add-ons on one estimate are two line items and sum into the one-time total', () => {
     const estimate = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
     const lines = addOnLines(estimate);
-    expect(lines.map((l) => [l.addOnKey, l.price])).toEqual([['bed_pre_emergent', 139], ['web_sweep', 59]]);
-    expect(estimate.summary.oneTimeTotal).toBe(198);
+    expect(lines.map((l) => [l.addOnKey, l.price])).toEqual([['bed_pre_emergent', 139], ['web_sweep', 39]]);
+    expect(estimate.summary.oneTimeTotal).toBe(178);
   });
 
   test('a recurring customer gets no discount on an add-on, at any tier', () => {
@@ -210,7 +212,7 @@ describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
     expect(withAddOns.waveGuard.tier).toBe(without.waveGuard.tier);
     expect(withAddOns.waveGuard.activeServices).toEqual(without.waveGuard.activeServices);
     expect(withAddOns.summary.recurringAnnualAfterDiscount).toBe(without.summary.recurringAnnualAfterDiscount);
-    expect(withAddOns.summary.oneTimeTotal).toBe(without.summary.oneTimeTotal + 198);
+    expect(withAddOns.summary.oneTimeTotal).toBe(without.summary.oneTimeTotal + 178);
     // Add-ons alone are not a qualifying service.
     const alone = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
     expect(alone.waveGuard.activeServices).toEqual([]);
@@ -222,8 +224,8 @@ describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
       manualDiscount: { type: 'PERCENT', value: 10 },
       services: { areaAddOns: TWO_ADDONS },
     });
-    expect(addOnLines(estimate).map((l) => l.price)).toEqual([139, 59]);
-    expect(estimate.summary.oneTimeTotal).toBe(198);
+    expect(addOnLines(estimate).map((l) => l.price)).toEqual([139, 39]);
+    expect(estimate.summary.oneTimeTotal).toBe(178);
   });
 
   test.each([
@@ -389,12 +391,55 @@ describe('several area add-ons are one visit with one drive', () => {
       expect(lines.every((l) => l.visitContext === 'standalone')).toBe(true);
     }
     // The follower prices at its same-trip price: the drive is not charged twice.
-    const sameTrip = (key, areaSqFt) => priceAreaAddOn(key, { areaSqFt, visitContext: 'sameTripAddOn' }).price;
+    const sameTrip = (key, areaSqFt) => priceAreaAddOn(key, { areaSqFt, visitContext: 'sameTripAddOn', carriesAdmin: false }).price;
     expect(addOnLines(run(three)).map((l) => l.price)).toEqual([
       priceAreaAddOn('bed_pre_emergent', { areaSqFt: 1500 }).price,
       sameTrip('fire_ant_yard', 3000),
       sameTrip('web_sweep'),
     ]);
+  });
+
+  // The $8 booking-and-invoicing cost is one job's cost, however many add-ons ride on it (Codex round 7 P2).
+  test('the visit pays one admin charge: the first priced add-on carries it, own visit or same visit', () => {
+    const { adminPerJob } = AREA_ADDONS;
+    const sameVisit = { pest: { frequency: 'quarterly' }, areaAddOnVisit: 'sameTripAddOn' };
+    for (const lines of [addOnLines(run(three)), addOnLines(run(three, sameVisit))]) {
+      expect(lines.map((l) => l.costs.admin)).toEqual([adminPerJob, 0, 0]);
+      expect(lines.map((l) => l.carriesJobAdmin)).toEqual([true, false, false]);
+    }
+    // A direct call prices a group of one: it carries the admin.
+    expect(priceAreaAddOn('web_sweep', {})).toMatchObject({ carriesJobAdmin: true, costs: expect.objectContaining({ admin: adminPerJob }) });
+    expect(priceAreaAddOn('web_sweep', { carriesAdmin: false })).toMatchObject({ carriesJobAdmin: false, costs: expect.objectContaining({ admin: 0 }) });
+    // The carrier is the one that pays the admin's markup: the same add-on is cheaper without it.
+    expect(priceAreaAddOn('web_sweep', { carriesAdmin: false, carriesDrive: false }).price).toBe(39);
+    // A custom quote never carries it.
+    expect(priceAreaAddOn('bed_pre_emergent', { areaSqFt: 9000 })).toMatchObject({ carriesJobAdmin: false, price: null });
+    const lines = addOnLines(run([{ key: 'bed_pre_emergent', areaSqFt: 9000 }, { key: 'web_sweep' }]));
+    expect(lines.map((l) => [l.addOnKey, l.carriesJobAdmin])).toEqual([['bed_pre_emergent', false], ['web_sweep', true]]);
+  });
+
+  test('the full price table: carrier and non-carrier, own visit and same visit, every tier', () => {
+    const price = (key, areaSqFt, opts) => priceAreaAddOn(key, { areaSqFt, grassType: 'st_augustine', ...opts }).price;
+    const table = {
+      // [own carrier, own follower, same carrier, same follower]
+      bed_pre_emergent: { 1000: [99, 49, 69, 49], 2000: [139, 89, 109, 89], 3500: [199, 149, 169, 149] },
+      lawn_insect_spot: { 1000: [79, 29, 49, 29], 2000: [89, 39, 59, 39], 3500: [109, 59, 79, 59] },
+      fire_ant_yard: { 3000: [99, 49, 69, 49], 5000: [129, 79, 99, 79], 8000: [169, 119, 139, 119] },
+      lawn_insect_preventive: { 3000: [99, 49, 69, 49], 5000: [119, 69, 89, 69], 8000: [149, 99, 119, 99] },
+      hardscape_weed: { 1000: [119, 69, 89, 69], 2000: [179, 129, 149, 129], 3500: [259, 209, 229, 209] },
+    };
+    for (const [key, tiers] of Object.entries(table)) {
+      for (const [tier, [ownCarrier, ownFollower, sameCarrier, sameFollower]] of Object.entries(tiers)) {
+        const area = Number(tier);
+        const follower = { carriesDrive: false, carriesAdmin: false };
+        expect([
+          price(key, area), price(key, area, follower),
+          price(key, area, { visitContext: 'sameTripAddOn' }), price(key, area, { visitContext: 'sameTripAddOn', ...follower }),
+        ]).toEqual([ownCarrier, ownFollower, sameCarrier, sameFollower]);
+      }
+    }
+    expect([priceAreaAddOn('web_sweep').price, priceAreaAddOn('web_sweep', { carriesDrive: false, carriesAdmin: false }).price,
+      priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn' }).price]).toEqual([89, 39, 59]);
   });
 
   test('the group is cheaper than the same add-ons each paying their own drive', () => {
@@ -412,8 +457,9 @@ describe('several area add-ons are one visit with one drive', () => {
     expect(lines.map((l) => [l.addOnKey, l.carriesVisitDrive, l.price])).toEqual([
       ['bed_pre_emergent', false, null],
       ['fire_ant_yard', true, priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000 }).price],
-      ['web_sweep', false, priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn' }).price],
+      ['web_sweep', false, priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn', carriesAdmin: false }).price],
     ]);
+    expect(lines.map((l) => [l.addOnKey, l.carriesJobAdmin])).toEqual([['bed_pre_emergent', false], ['fire_ant_yard', true], ['web_sweep', false]]);
     // A label-bound add-on with an unverified grass quotes as custom: the next priced one carries.
     const grass = addOnLines(run([{ key: 'lawn_insect_spot', areaSqFt: 1000, grassType: 'unknown' }, { key: 'web_sweep' }]));
     expect(grass.map((l) => [l.addOnKey, l.carriesVisitDrive])).toEqual([['lawn_insect_spot', false], ['web_sweep', true]]);
@@ -482,7 +528,7 @@ describe('area add-ons through the legacy mapper', () => {
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.oneTime.items.map((i) => [i.service, i.name, i.price, i.addOnKey])).toEqual([
       ['area_addon', 'Bed Pre-Emergent Weed Control', 139, 'bed_pre_emergent'],
-      ['area_addon', 'Web Sweep', 59, 'web_sweep'],
+      ['area_addon', 'Web Sweep', 39, 'web_sweep'],
     ]);
     expect(mapped.oneTime.items[0]).toMatchObject({
       tierSqFt: 2000,
@@ -491,12 +537,13 @@ describe('area add-ons through the legacy mapper', () => {
       addOnCategory: 'lawn_care',
       visitContext: 'standalone',
       carriesVisitDrive: true,
+      carriesJobAdmin: true,
     });
     expect(mapped.oneTime.items[0].onSiteMinutes).toBeCloseTo(6 + 8 * 2, 5);
-    expect(mapped.oneTime.items[1]).toMatchObject({ catalogServiceKey: 'area_addon_web_sweep', addOnCategory: 'pest_control', visitContext: 'standalone', carriesVisitDrive: false });
+    expect(mapped.oneTime.items[1]).toMatchObject({ catalogServiceKey: 'area_addon_web_sweep', addOnCategory: 'pest_control', visitContext: 'standalone', carriesVisitDrive: false, carriesJobAdmin: false });
     expect(mapped.oneTime.specItems).toEqual([]);
-    expect(mapped.oneTime.total).toBe(198);
-    expect(mapped.oneTime.otSubtotal).toBe(198);
+    expect(mapped.oneTime.total).toBe(178);
+    expect(mapped.oneTime.otSubtotal).toBe(178);
     expect(mapped.hasOneTime).toBe(true);
   });
 

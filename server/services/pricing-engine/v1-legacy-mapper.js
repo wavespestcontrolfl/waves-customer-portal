@@ -220,6 +220,8 @@ function areaAddOnFields(li = {}) {
     priceUnit: AREA_ADDON_PRICE_UNIT,
     // True on the ONE line of an own visit that carries the visit's drive allowance.
     carriesVisitDrive: li.carriesVisitDrive === true,
+    // True on the ONE priced line that carries the visit's single booking-and-invoicing charge.
+    carriesJobAdmin: li.carriesJobAdmin === true,
     // Engine on-site minutes (no drive): the booked visit's duration floor.
     onSiteMinutes: li.costs?.onSiteMin ?? null,
     discountable: false,

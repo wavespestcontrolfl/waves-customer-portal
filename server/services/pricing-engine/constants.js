@@ -1526,6 +1526,8 @@ const ONE_TIME = {
 // with one cost-plus formula —
 //   cost  = material at the tier's top area + labor + drive (own visit only)
 //           + adminPerJob
+// The drive and adminPerJob are the cost of ONE visit and ONE booking, so the
+// group pays each once: the first priced add-on carries them (priceAreaAddOnList).
 //   price = cost / (1 - targetMargin), rounded UP to a price ending in 9
 // Pricing at the tier's top edge makes targetMargin the LOWEST margin in the
 // tier. Own visit is the default (most asks arrive between pest visits); a
@@ -1547,7 +1549,7 @@ const ONE_TIME = {
 // ruling 2026-10-08): it drives tax, the invoice label and the service mix.
 const AREA_ADDONS = {
   targetMargin: 0.60,
-  adminPerJob: 8,             // booking + invoicing per one-time job
+  adminPerJob: 8,             // booking + invoicing of ONE job (the whole add-on group), charged once
   items: {
     // Snapshot 2.5TG at 3.45 lb/1,000 ($2.99/lb). Owner ruling: offer 2 a
     // year to pest customers (label: 600 lb/acre per 12 months, 60 days apart).

@@ -243,14 +243,14 @@ describe('the estimate page classifies an add-on row by its key, not its name', 
     ])('%s keeps every add-on row at the engine price and out of the discount base', (_label, manualDiscount) => {
       const { estData, mapped } = engineWith(manualDiscount);
       const enginePrices = Object.fromEntries(mapped.oneTime.items.filter((r) => r.service === 'area_addon').map((r) => [r.addOnKey, r.price]));
-      expect(enginePrices).toEqual({ web_sweep: 89, fire_ant_yard: 69 });
+      expect(enginePrices).toEqual({ web_sweep: 89, fire_ant_yard: 49 });
       // The engine took nothing from the add-ons: their rows sum to the full price.
-      expect(Object.values(enginePrices).reduce((a, b) => a + b, 0)).toBe(158);
+      expect(Object.values(enginePrices).reduce((a, b) => a + b, 0)).toBe(138);
       const { amount, list } = choice(estData);
       expect(addOnPrices(list)).toEqual(enginePrices);
       expect(list.filter((r) => r.service === 'area_addon').every((r) => r.grossPrice === undefined && r.manualDiscountApplied === undefined)).toBe(true);
       const pestRow = list.find((r) => r.service === 'one_time_pest');
-      expect(amount).toBe(Math.round((pestRow.price + 89 + 69) * 100) / 100);
+      expect(amount).toBe(Math.round((pestRow.price + 89 + 49) * 100) / 100);
     });
 
     test('rows mixed with a discountable specialty: only the specialty is cut, and the cut is the whole slice', () => {
@@ -279,8 +279,8 @@ describe('the estimate page classifies an add-on row by its key, not its name', 
     test('an add-on-only estimate with a manual discount keeps the engine\'s price and total', () => {
       for (const manualDiscount of [{ type: 'PERCENT', value: 25 }, { type: 'FIXED', value: 40 }]) {
         const { mapped } = estimate([{ key: 'web_sweep' }, { key: 'fire_ant_yard', areaSqFt: 3000 }], { options: { manualDiscount } });
-        expect(mapped.oneTime.items.map((r) => r.price)).toEqual([89, 69]);
-        expect(mapped.oneTime.total).toBe(158);
+        expect(mapped.oneTime.items.map((r) => r.price)).toEqual([89, 49]);
+        expect(mapped.oneTime.total).toBe(138);
       }
     });
   });
@@ -555,7 +555,7 @@ describe('the admin save replays the estimator request and the stored engine inp
     const rows = out.serverResult.oneTime.items.filter((i) => i.service === 'area_addon');
     expect(rows.map((r) => [r.addOnKey, r.price, r.catalogServiceKey])).toEqual([
       ['fire_ant_yard', 129, 'area_addon_fire_ant_yard'],
-      ['web_sweep', 59, 'area_addon_web_sweep'],
+      ['web_sweep', 39, 'area_addon_web_sweep'],
     ]);
     // The stored shape is detected by the kill-switch guard, and replays through the engine alone.
     const stored = { engineRequest: request([{ key: 'web_sweep' }]).engineRequest, result: out.serverResult };
@@ -570,7 +570,7 @@ describe('the admin save replays the estimator request and the stored engine inp
     const cases = [
       [[{ key: 'web_sweep' }], [['web_sweep', 89]]],
       [[{ key: 'fire_ant_yard', areaSqFt: 3000 }], [['fire_ant_yard', 99]]],
-      [[{ key: 'web_sweep' }, { key: 'bed_pre_emergent', areaSqFt: 1000 }], [['web_sweep', 89], ['bed_pre_emergent', 69]]],
+      [[{ key: 'web_sweep' }, { key: 'bed_pre_emergent', areaSqFt: 1000 }], [['web_sweep', 89], ['bed_pre_emergent', 49]]],
     ];
     for (const [areaAddOns, expected] of cases) {
       const options = { grassType: 'st_augustine', areaAddOns };

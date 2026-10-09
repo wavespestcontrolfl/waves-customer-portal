@@ -8540,6 +8540,9 @@ function priceAreaAddOn(addOnKey, options = {}) {
   // it carries the drive; priceAreaAddOnList hands it to the first PRICED
   // add-on only (a custom quote never carries it).
   const carriesDrive = options.carriesDrive !== false;
+  // The visit's one booking-and-invoicing charge (adminPerJob): the same rule,
+  // and the same first priced line, as the drive. A direct caller carries it.
+  const carriesAdmin = options.carriesAdmin !== false;
 
   const base = {
     service: 'area_addon',
@@ -8547,6 +8550,7 @@ function priceAreaAddOn(addOnKey, options = {}) {
     name: cfg.name,
     visitContext,
     carriesVisitDrive: false,
+    carriesJobAdmin: false,
     // The add-on's own catalog identity and family travel on the line so
     // nothing downstream guesses a service from the display name.
     catalogServiceKey: cfg.serviceKey,
@@ -8579,7 +8583,8 @@ function priceAreaAddOn(addOnKey, options = {}) {
   const onSiteMin = cfg.setupMin + cfg.minPer1000 * tierK;
   const driveMin = visitContext === 'standalone' && carriesDrive ? GLOBAL.DRIVE_TIME : 0;
   const laborCost = (onSiteMin + driveMin) * GLOBAL.LABOR_RATE / 60;
-  const cost = materialCost + laborCost + AREA_ADDONS.adminPerJob;
+  const adminCost = carriesAdmin ? AREA_ADDONS.adminPerJob : 0;
+  const cost = materialCost + laborCost + adminCost;
   const price = roundUpToNine(cost / (1 - AREA_ADDONS.targetMargin));
 
   const detailParts = [];
@@ -8589,6 +8594,7 @@ function priceAreaAddOn(addOnKey, options = {}) {
   return {
     ...base,
     carriesVisitDrive: driveMin > 0,
+    carriesJobAdmin: carriesAdmin,
     price,
     areaSqFt,
     tierSqFt,
@@ -8600,7 +8606,7 @@ function priceAreaAddOn(addOnKey, options = {}) {
     costs: {
       material: roundMoney(materialCost),
       labor: roundMoney(laborCost),
-      admin: AREA_ADDONS.adminPerJob,
+      admin: adminCost,
       onSiteMin: roundMoney(onSiteMin),
       driveMin,
       total: roundMoney(cost),
@@ -8650,7 +8656,9 @@ function normalizeAreaAddOnVisit(visit) {
 // share ONE drive allowance, carried by the FIRST listed add-on that is
 // actually priced (a custom quote or a commercial manual quote never carries
 // it); every other add-on prices with no drive. On a same visit no add-on
-// carries a drive.
+// carries a drive. The visit's one adminPerJob (booking + invoicing) rides on
+// the first priced add-on the same way, on either visit: a second add-on does
+// not cost a second booking.
 // Returns the priced lines, the normalized requests and the visit (for the host check).
 function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote, visit } = {}) {
   // The estimate's grass: the first source (lawn service, request, property)
@@ -8679,11 +8687,13 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
     return { entry, options, normalized };
   });
   let driveCarried = false;
+  let adminCarried = false;
   const lines = requests
     .filter(({ entry, normalized }) => !isCommercialManualQuote?.(entry, normalized.addOnKey === 'web_sweep' ? 'pest_control' : 'lawn_care'))
     .map(({ options, normalized }) => {
-      const line = priceAreaAddOn(normalized.addOnKey, { ...options, carriesDrive: !driveCarried });
+      const line = priceAreaAddOn(normalized.addOnKey, { ...options, carriesDrive: !driveCarried, carriesAdmin: !adminCarried });
       driveCarried = driveCarried || line.carriesVisitDrive === true;
+      adminCarried = adminCarried || line.carriesJobAdmin === true;
       return line;
     });
   return { lines, requests, visit: visitContext };
