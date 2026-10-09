@@ -331,6 +331,15 @@ describe('reschedule-public wiring', () => {
     expect(src).toMatch(/'recurring_pattern', 'recurring_interval_days'\);\n[\s\S]{0,700}if \(cadenceChangedSince\(svc, locked\)\)/);
   });
 
+  test('the search rechecks the visit after its availability build and before it applies the limit', () => {
+    const start = src.indexOf("router.post('/:token/find-slots'");
+    const body = src.slice(start, src.indexOf("router.post('/:token',", start));
+    const recheck = body.indexOf('if (moveLimits.moveLimitsEnabled() && await visitChangedSince(svc)) {');
+    expect(recheck).toBeGreaterThan(body.indexOf('buildAvailabilityForService(svc'));
+    expect(body.indexOf('applyMoveLimit(')).toBeGreaterThan(recheck);
+    expect(body.slice(recheck, recheck + 300)).toMatch(/code: 'SCOPE_CHANGED'/);
+  });
+
   test('visitChangedSince: another date, start or status, or an unreadable visit, is a change', async () => {
     const { visitChangedSince } = router._test;
     const svc = { id: 'svc-1', scheduled_date: '2026-10-15', window_start: '09:00:00', status: 'confirmed' };

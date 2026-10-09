@@ -815,6 +815,26 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByRole('button', { name: /Choose 1:00 PM on/ })).not.toBeInTheDocument();
   });
 
+  it('move limits: a search that meets SCOPE_CHANGED reloads the page and shows no error', async () => {
+    let getCalls = 0;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ error: 'plan just updated', code: 'SCOPE_CHANGED' }, 409));
+      if (!opts.method || opts.method === 'GET') {
+        getCalls += 1;
+        return Promise.resolve(jsonResponse(reschedulablePayload()));
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+    renderPage();
+    const input = await screen.findByLabelText('Search for a service date or time');
+    fireEvent.change(input, { target: { value: 'next friday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(getCalls).toBe(2));
+    expect(screen.queryByText('plan just updated')).not.toBeInTheDocument();
+  });
+
   it('move limits: a first visit past its online moves shows the text-us card, not an error', async () => {
     stubFetch({ get: jsonResponse({ ...reschedulablePayload(), state: 'not_reschedulable', reason: 'move_limit', availability: null }) });
     renderPage();

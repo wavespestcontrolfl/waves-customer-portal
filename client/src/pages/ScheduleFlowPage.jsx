@@ -1816,7 +1816,8 @@ export default function ScheduleFlowPage({ flow }) {
     // Reschedule: a move limit applied since the page loaded (another tab's
     // move, a gate set while the page was open). Reload, as Confirm does, so
     // the page shows the text-or-call card and not a stale picker.
-    if (body.code === 'MOVE_LIMIT') {
+    // SCOPE_CHANGED: the visit changed while the search ran (same reload).
+    if (body.code === 'MOVE_LIMIT' || (flow === 'reschedule' && body.code === 'SCOPE_CHANGED')) {
       await load();
       return { summary: null };
     }

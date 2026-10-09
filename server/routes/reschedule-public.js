@@ -786,6 +786,12 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     if (!availability) {
       return res.status(503).json({ error: 'Slot search is unavailable right now. Please pick from the times below.' });
     }
+    // The parse and the availability build take time. A visit that changed
+    // meanwhile (date, start, status or plan cadence) reloads the page; its
+    // limit and list would be stale. Only with the move-limit gate set.
+    if (moveLimits.moveLimitsEnabled() && await visitChangedSince(svc)) {
+      return res.status(409).json({ error: 'The scheduling details for your plan just updated — please review the latest options.', code: 'SCOPE_CHANGED' });
+    }
     // Late-move limit: the search is a filter over what GET offers, so it
     // drops the same days, decided over the whole booking range as GET does.
     // It also returns the limit as it stands now: the search replaces the
