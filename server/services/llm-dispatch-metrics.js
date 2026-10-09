@@ -695,11 +695,22 @@ async function upsertSessionRow(trx, row, turnKey) {
  * billed session never vanishes from the ledger during API degradation.
  * `agentId` is accepted for the runners' convenience but has no column yet —
  * the session id (provider_ref) resolves it in the Console.
+ * `abandoned` is not an outcome: a runner sets it when its run succeeded but
+ * it left the stream before the session said it ended, so the session is
+ * told to stop (agent-control/session-guard.js) and the row stays ok.
  */
-async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null } = {}) {
+async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null, abandoned = false } = {}) {
+  // The runner's own time: taken before the interrupt and the usage GET
+  // below, which are cleanup and observability time.
+  const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
+  // Every runner exit passes through here, so this is the one place a session
+  // its runner gave up on is told to stop (GATE_AGENT_SESSION_GUARD; never
+  // throws; not the customer assistant). It returns once the session has
+  // stopped, so the usage GET below reads the settled figure. Independent of
+  // the ledger gate.
+  await require('./agent-control/session-guard').stopAbandonedSession({ laneId, sessionId, failure, abandoned });
   try {
     if (!ledgerEnabled() || !sessionId) return null;
-    const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
     // The usage GET runs OUTSIDE the transaction below: a pooled connection

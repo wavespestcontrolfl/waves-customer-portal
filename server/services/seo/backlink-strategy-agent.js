@@ -15,7 +15,8 @@ const db = require('../../models/db');
 const { executeBacklinkTool } = require('./backlink-strategy-tools');
 const { BACKLINK_STRATEGY_AGENT_CONFIG } = require('./backlink-strategy-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
-const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
+const { isSessionTerminal, streamFailureOf } = require('../agent-control/session-events');
+const { sessionBudget } = require('../agent-control/session-guard');
 const { readSessionFrames } = require('../agent-control/session-stream');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -28,7 +29,7 @@ const BETA_HEADER = 'managed-agents-2026-04-01';
 const REQUIRED_TOOL_NAMES = ['list_prospects', 'create_link_prospects'];
 
 function buildSessionCreateBody(agentId, environmentId) {
-  return { agent: agentId, environment_id: environmentId };
+  return { agent: agentId, environment_id: environmentId, ...sessionBudget('agent_backlink') };
 }
 
 function buildUserMessageEvent(text) {
@@ -302,9 +303,13 @@ const BacklinkStrategyAgent = {
           break;
         }
 
-        if (isSessionError(event)) {
-          logger.error(`[backlink-strategy] Agent error: ${JSON.stringify(data)}`);
-          failure = 'session_error_event';
+        // An error event, or the session's spend cap (budget_exhausted).
+        // A local, so an event that is neither never clears a failure an
+        // earlier event set (max_tool_calls / max_events).
+        const streamFailure = streamFailureOf(event, data);
+        if (streamFailure) {
+          logger.error(`[backlink-strategy] Agent ${streamFailure}: ${JSON.stringify(data)}`);
+          failure = streamFailure;
           break;
         }
       }
