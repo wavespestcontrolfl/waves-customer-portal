@@ -179,12 +179,17 @@ describe('resolveForCompletion', () => {
     expect((await resolve([swapped2])).of(swapped2)).toEqual([]);
   });
 
-  test('no lawnFast block, or the guide off: the row keeps its own tags', async () => {
+  test('no lawnFast block (the full form, other sheets): the row keeps its own tags, gate on or off', async () => {
     const tagged = row(ARTAVIA, { targets: ['Dollar spot'] });
     expect((await resolve([tagged], { lawnFast: null })).of(tagged)).toEqual(['Dollar spot']);
-    expect((await resolve([tagged], { live: () => false })).of(tagged)).toEqual(['Dollar spot']);
+    expect((await resolve([tagged], { lawnFast: null, live: () => false })).of(tagged)).toEqual(['Dollar spot']);
+  });
+
+  test('a lawnFast completion with the gate off (a stale sheet loaded while it was on) stores no target, ignores targetFind, reads nothing, and is not refused', async () => {
     const confirm = jest.fn();
-    await resolve([tagged], { live: () => false, confirm });
+    const rows = [row(ARTAVIA, { targets: ['Dollar spot'] }), row(ARENA, { targets: [], targetFind: 'chinch' }), row(CELSIUS, { targets: ['Crabgrass'] }), row(IRON, { targets: [] })];
+    const out = await resolve(rows, { live: () => false, confirm });
+    for (const r of rows) expect(out.of(r)).toEqual([]);
     expect(confirm).not.toHaveBeenCalled();
   });
 
@@ -291,9 +296,88 @@ describe('the frozen report facts read the same targets as the stored row', () =
     expect(freeze(resolved.submitted(broadcast)).wateringRule ?? null).toBeNull();
   });
 
-  test('gate off: the very same list goes to the freeze, with the sheet\'s own tags', async () => {
+  test('gate off, lawnFast, tags sent by a stale sheet: nothing stored and no target-dependent hold in the frozen facts', async () => {
     const resolved = await spotTarget.resolveForCompletion({ ...names(), live: () => false, confirm: async () => SETS() });
+    expect(resolved.of(submitted[0])).toEqual([]);
+    expect(freeze(submitted).wateringRule).toBeTruthy();
+    expect(freeze(resolved.submitted(submitted)).wateringRule ?? null).toBeNull();
+  });
+
+  test('gate off, not a lawnFast completion: the very same list goes to the freeze, with the row\'s own tags (unchanged)', async () => {
+    const resolved = await spotTarget.resolveForCompletion({ ...names(), lawnFast: null, live: () => false, confirm: async () => SETS() });
     expect(resolved.submitted(submitted)).toBe(submitted);
     expect(freeze(resolved.submitted(submitted)).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+  });
+
+  test('gate off, lawnFast, rows with no tags: the very same list (byte-identical to main)', async () => {
+    const plain = [{ productId: TALAK, method: 'spot_treatment', targets: [] }];
+    const resolved = await spotTarget.resolveForCompletion({ ...names(), rows: plain, live: () => false, confirm: async () => SETS() });
+    expect(resolved.submitted(plain)).toBe(plain);
+  });
+});
+
+describe('GATE_LAWN_SPOT_TARGET (dark; live only while the treatment guide is)', () => {
+  const NAMES = ['GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'];
+  const saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
+  const set = (on) => { for (const name of NAMES) { if (on) process.env[name] = 'true'; else delete process.env[name]; } };
+  afterEach(() => { for (const name of NAMES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
+  const featureGates = require('../config/feature-gates');
+  const completionArgs = (rows) => ({ rows, catalog: CATALOG, canonicalId: (id) => String(id).toLowerCase(), inferMethod: (product, row) => row.method, serviceLine: 'lawn', confirm: jest.fn(async () => SETS()) });
+
+  test('the reader is strict and needs the guide (and so the spot rules and v13)', () => {
+    set(false);
+    expect(featureGates.lawnSpotTargetLive()).toBe(false);
+    process.env.GATE_LAWN_SPOT_TARGET = 'true';
+    expect(featureGates.lawnSpotTargetLive()).toBe(false);
+    process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+    process.env.GATE_LAWN_SPOT_RULES = 'true';
+    expect(featureGates.lawnSpotTargetLive()).toBe(false);
+    process.env.GATE_LAWN_V13 = 'true';
+    expect(featureGates.lawnSpotTargetLive()).toBe(true);
+    process.env.GATE_LAWN_SPOT_TARGET = 'TRUE';
+    expect(featureGates.lawnSpotTargetLive()).toBe(false);
+  });
+
+  test('off: the context has no spotTargets key, even with the guide live; on: it carries the lists', () => {
+    set(true);
+    delete process.env.GATE_LAWN_SPOT_TARGET;
+    expect(spotTarget.contextKey()).toEqual({});
+    process.env.GATE_LAWN_SPOT_TARGET = 'true';
+    expect(spotTarget.contextKey()).toEqual({ spotTargets: spotTarget.contextBlock() });
+  });
+
+  test('off (the default live reader): a lawnFast completion stores no target and no chinch find; a non-lawnFast completion keeps every tag', async () => {
+    set(true);
+    delete process.env.GATE_LAWN_SPOT_TARGET;
+    const rows = [
+      { productId: ARTAVIA, method: 'spot_treatment', targets: ['free text from the picker'] },
+      { productId: ARENA, method: 'spot_treatment', targets: [], targetFind: 'chinch' },
+      { productId: TAKE_ALL, method: 'spot_treatment', targets: ['Dollar spot', 'Large patch'] },
+    ];
+    const args = completionArgs(rows);
+    const stale = await spotTarget.resolveForCompletion({ ...args, lawnFast: { visitType: 'recurring' } });
+    for (const row of rows) expect(stale.of(row)).toEqual([]);
+    const fullForm = await spotTarget.resolveForCompletion({ ...args, lawnFast: null });
+    for (const row of rows) expect(fullForm.of(row)).toBe(row.targets);
+    expect(args.confirm).not.toHaveBeenCalled();
+  });
+
+  test('real builders: with the gate off a stale sheet\'s tags print what main prints for the sheet\'s own `targets: []`', async () => {
+    set(true);
+    delete process.env.GATE_LAWN_SPOT_TARGET;
+    const apps = [{ name: 'Artavia 2 SC (Azoxy)', own: ['Dollar spot'], id: ARTAVIA }, { name: 'Arena 50 WDG', own: ['Southern chinch bugs'], id: ARENA }, { name: 'Atticus Talak 7.9 F', own: ['free text'], id: TALAK }];
+    for (const app of apps) {
+      const row = { productId: app.id, method: 'spot_treatment', targets: app.own, targetFind: 'chinch' };
+      const resolved = await spotTarget.resolveForCompletion({ ...completionArgs([row]), lawnFast: {} });
+      const printed = (targets) => buildLawnExpectations({ applications: [{ name: app.name, targets }], visitDate: '2026-10-09', nextVisitGapDays: 42 }, { includeUnapproved: false }).rows.map((r) => [r.id, r.sentences.map((x) => x.text)]);
+      expect(printed(resolved.of(row))).toEqual(printed([]));
+      expect(printed(resolved.of(row))[0][0]).toMatch(/preventive/);
+    }
+  });
+
+  test('on: the same stale-looking tags are judged by the server (a confirmed target is stored)', async () => {
+    set(true);
+    const row = { productId: ARTAVIA, method: 'spot_treatment', targets: ['Dollar spot'] };
+    expect((await spotTarget.resolveForCompletion({ ...completionArgs([row]), lawnFast: {} })).of(row)).toEqual(['Dollar spot']);
   });
 });

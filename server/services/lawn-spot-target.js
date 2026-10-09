@@ -83,10 +83,30 @@ function chinchFoundIds(lawnFast) {
 }
 const ownTags = (row) => (Array.isArray(row?.targets) ? row.targets : []);
 
+// The gate is off (never on, or turned off while a sheet loaded with the lists was open): the lawn sheet sends `targets: []` as it always
+// did on main, so a target a stale sheet still sends is DISCARDED for this lawnFast completion (stored as none, and the report facts read
+// the same none). The completion is not refused. Rows with no tags are left exactly as they are; other completions never reach this.
+function discardGatedTags(rows, verdict) {
+  for (const row of Array.isArray(rows) ? rows : []) if (row && row.productId && ownTags(row).length) verdict.set(lowerId(row.productId), []);
+}
+
+// The verdict of each candidate (spot) row, from the server's staged sets: a failed read (`sets` null) stores none.
+function verdictsFor({ candidates, product, sets, found, verdict }) {
+  const { troubleTypeFor } = require('./lawn-trouble-areas');
+  for (const row of candidates) {
+    const id = lowerId(row.productId);
+    const category = product(row).category;
+    const type = !sets ? null : troubleTypeFor({
+      category, hint: row.troubleType || (row.targetFind === 'chinch' || found.has(id) ? 'chinch' : null), takeAll: sets.takeAll.has(id), chinch: sets.chinch.has(id), chinchOnly: sets.chinchOnly.has(id),
+    });
+    verdict.set(id, targetsFor({ category, type, requested: ownTags(row).find((tag) => typeof tag === 'string') }));
+  }
+}
+
 /**
  * The stored targets for a completion's rows: `{ of(row) }`, where `of` answers the tags a row is stored with. For a spot fungicide
  * or insecticide row of a Lawn Fast Complete completion (a `lawnFast` block, GATE_LAWN_SPOT_TARGET live) that is the server's verdict
- * (`[]` or `[name]`; always `[]` for a row the server does not resolve as a spot row); for every other row it is the row's own tags, exactly as before. The staged sets are read once, only when a
+ * (`[]` or `[name]`; always `[]` for a row the server does not resolve as a spot row); for every other row it is the row's own tags, exactly as before (a `lawnFast` completion with the gate off stores none: the sheet sends none on main). The staged sets are read once, only when a
  * candidate row exists. The sheet's `troubleType` / `targetFind` are hints: the server's `confirm()` sets decide (troubleTypeFor).
  * `catalog` is the completion's catalog map, `canonicalId` and `inferMethod` the completion's own functions.
  */
@@ -97,7 +117,8 @@ async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, infe
   // whose `targets` are the resolved ones (what the report's frozen facts must read).
   const submitted = (list) => (verdict.size && Array.isArray(list) ? list.map((row) => (row && verdict.has(lowerId(row.productId)) ? { ...row, targets: of(row) } : row)) : list);
   const result = { of, submitted };
-  if (lawnFast == null || !live()) return result;
+  if (lawnFast == null) return result;
+  if (!live()) { discardGatedTags(rows, verdict); return result; }
   const product = (row) => catalog.get(canonicalId(row.productId)) || {};
   const targetRows = (Array.isArray(rows) ? rows : []).filter((row) => row && row.productId && isTargetCategory(categoryOf(product(row).category)));
   // A target belongs to a SPOT treatment only, as the server itself resolves the method (the persistence rule, as preflightPlaces does):
@@ -105,22 +126,13 @@ async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, infe
   const candidates = targetRows.filter((row) => inferMethod(product(row), row, serviceLine) === 'spot_treatment');
   for (const row of targetRows) if (!candidates.includes(row)) verdict.set(lowerId(row.productId), []);
   if (!candidates.length) return result;
-  const found = chinchFoundIds(lawnFast);
   let sets = null;
   try {
     sets = await confirm();
   } catch (err) {
     logger.warn(`[lawn-spot-target] staged sets unavailable: no target stored (${err?.code || err?.name || 'Error'})`);
   }
-  const { troubleTypeFor } = require('./lawn-trouble-areas');
-  for (const row of candidates) {
-    const id = lowerId(row.productId);
-    const category = product(row).category;
-    const type = !sets ? null : troubleTypeFor({
-      category, hint: row.troubleType || (row.targetFind === 'chinch' || found.has(id) ? 'chinch' : null), takeAll: sets.takeAll.has(id), chinch: sets.chinch.has(id), chinchOnly: sets.chinchOnly.has(id),
-    });
-    verdict.set(id, targetsFor({ category, type, requested: ownTags(row).find((tag) => typeof tag === 'string') }));
-  }
+  verdictsFor({ candidates, product, sets, found: chinchFoundIds(lawnFast), verdict });
   return result;
 }
 

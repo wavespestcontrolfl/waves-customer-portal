@@ -309,8 +309,10 @@ describe('gallons sprayed at completion', () => {
   test('withSprayedGallons runs the places check only when the gallons step did not refuse', async () => {
     const next = jest.fn(async () => null);
     const loadPlan = async () => ({ plan: { protocol: { structured: { id: 'p' } } } });
-    // Gate off: the step is skipped and the places check runs.
-    expect(await help.withSprayedGallons({ knex: {}, svc: SVC, products: [{ productId: P_CEL, sprayedGallons: 2 }], loadPlan }, next)).toBeNull();
+    // Gate off: a row without gallons runs the places check; a row with gallons is refused before it.
+    expect(await help.withSprayedGallons({ knex: {}, svc: SVC, products: [{ productId: P_CEL, areaValue: 5, areaUnit: 'sqft' }], loadPlan }, next)).toBeNull();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(await help.withSprayedGallons({ knex: {}, svc: SVC, products: [{ productId: P_CEL, sprayedGallons: 2, areaValue: 5 }], loadPlan }, next)).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable' } });
     expect(next).toHaveBeenCalledTimes(1);
     // Gate on, a refused row: the refusal comes back and the places check never runs.
     gates(true);
@@ -338,10 +340,13 @@ describe('gallons sprayed at completion', () => {
     expect(card(2000)).toEqual({ 'sp-1': 'Spot treatment, about 2,000 sq ft' });
   });
 
-  test('gate off: the field is ignored and the row is exactly what the sheet sent', async () => {
+  test('gate off (a cached sheet still sends gallons): the row is refused, correctably, and its client-derived area is never trusted or marked; a row without gallons is untouched', async () => {
     const products = [{ productId: P_CEL, sprayedGallons: 2, areaValue: 700, areaUnit: 'sqft' }];
-    expect(await run(products, { isLive: () => false })).toBeNull();
+    expect(await run(products, { isLive: () => false })).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable', productId: P_CEL } });
     expect(products[0]).toMatchObject({ areaValue: 700 });
     expect(help.sprayedGallonsFreeze(products)).toEqual({});
+    const plain = [{ productId: P_CEL, areaValue: 700, areaUnit: 'sqft' }, { productId: P_CER, sprayedGallons: '' }];
+    expect(await run(plain, { isLive: () => false })).toBeNull();
+    expect(plain[0]).toEqual({ productId: P_CEL, areaValue: 700, areaUnit: 'sqft' });
   });
 });

@@ -312,7 +312,7 @@ function convertGallons(wanted, staged, month) {
  *   400 lawn_gallons_unavailable_now  the staged rows or the plan could not be read. A named PRE-COMMIT refusal (nothing is written): a 4xx,
  *                                  so the shared submit hook treats it as correctable (fresh key, form editable) and the tech can enter the
  *                                  area instead; a 5xx would lock the form to the same body and key
- * While the gate is off the field is ignored and the row is exactly what the sheet sent. Input: `{ knex, svc, products, loadPlan }`
+ * While the gate is off a row carrying the field is refused (400 lawn_gallons_unavailable, correctable); a row without it is untouched. Input: `{ knex, svc, products, loadPlan }`
  * (`loadPlan(svc, knex)` is the sheet's plan reader) plus, for tests, `isLive` and `readStaged`.
  */
 async function applyGallons(input) {
@@ -320,7 +320,10 @@ async function applyGallons(input) {
   const rows = (Array.isArray(products) ? products : []).filter((row) => row && typeof row === 'object');
   for (const row of rows) delete row[FROM_GALLONS];
   const wanted = rows.filter(asked);
-  if (!wanted.length || !isLive()) return null;
+  if (!wanted.length) return null;
+  // The gate is off (never on, or turned off while a cached sheet was open): the conversion path is closed, and so is a gallons row's
+  // client-derived area, which would otherwise be trusted without the server's mark. Refused before the places check, correctably.
+  if (!isLive()) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed is not available right now. Enter the area instead.', { productId: wanted[0].productId });
   const bad = wanted.find((row) => gallonsOf(row) === null || gallonsOf(row) > MAX_GALLONS);
   if (bad) return refusal(400, 'lawn_gallons_invalid', `Enter the gallons sprayed as a number above zero (up to ${MAX_GALLONS}), or enter the area instead.`, { productId: bad.productId });
   const staged = await gallonsStaged({ knex, svc, wanted, loadPlan, readStaged });

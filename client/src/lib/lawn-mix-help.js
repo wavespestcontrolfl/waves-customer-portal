@@ -62,7 +62,7 @@ export function weedMixLines(help, rows, tank) {
   const ordered = !!order && listed.length > 1 && listed.length === rows.length && listed.every(({ row }) => order.includes(lowerId(row.productId)));
   const sorted = ordered ? [...listed].sort((a, b) => order.indexOf(lowerId(a.row.productId)) - order.indexOf(lowerId(b.row.productId))) : listed;
   return {
-    lines: sorted.map(({ row, entry }) => ({ id: row.productId, name: row.name, line: mixLine(entry, tank), note: entry.perTank ? null : entry.note })),
+    lines: sorted.map(({ row, entry }) => ({ id: row.productId, name: row.name, line: mixLine(entry, tank), tank: !!entry.perTank, note: entry.perTank ? null : entry.note })),
     order: ordered ? sorted.map(({ row }) => row.name) : null,
     labelLines: listed.flatMap(({ entry }) => (Array.isArray(entry.labelLines) ? entry.labelLines : [])),
   };

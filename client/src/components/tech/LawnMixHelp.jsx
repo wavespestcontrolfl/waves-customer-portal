@@ -69,8 +69,8 @@ export function RowMixHelp({ row, mix, locked, onChange }) {
   const carrier = carrierOf(mix.help, row.productId);
   return (
     <div role="group" aria-label={`Mix for ${row.name}`} className="tech-spot-area">
-      <p className="tech-product-editor-label">Mix for a full tank</p>
-      <TankChips mix={mix} label={row.name} locked={locked} />
+      {entry.perTank && <p className="tech-product-editor-label">Mix for a full tank</p>}
+      {entry.perTank && <TankChips mix={mix} label={row.name} locked={locked} />}
       <MixText line={mixLine(entry, mix.tank)} note={entry.perTank ? null : entry.note} />
       {carrier && !row.spotExempt && (
         <GallonsControl title={row.name} value={row.spotGallons} carrier={carrier} tanks={mix.help.tanks} locked={locked} onChange={(value) => onChange({ spotGallons: value, spotSqft: value ? '' : row.spotSqft })} />
@@ -91,8 +91,8 @@ export function WeedMixHelp({ mix, rows, surfactant, locked, onWeedArea }) {
   if (!lines.length && !carrier) return null;
   return (
     <div role="group" aria-label="Mix for Weed spots" className="tech-spot-area">
-      <p className="tech-product-editor-label">Mix for a full tank</p>
-      <TankChips mix={mix} label="Weed spots" locked={locked} />
+      {lines.some((entry) => entry.tank) && <p className="tech-product-editor-label">Mix for a full tank</p>}
+      {lines.some((entry) => entry.tank) && <TankChips mix={mix} label="Weed spots" locked={locked} />}
       {lines.map((entry) => <MixText key={entry.id} line={entry.line && { ...entry.line, text: `${entry.name}, ${entry.line.text}` }} note={entry.note && `${entry.name}: ${entry.note}`} />)}
       {surfactant && surfactant.included === false && surfactant.note && <p className="tech-visit-muted" role="status">{surfactant.note}</p>}
       {order && <p className="tech-visit-muted" role="status">{`Mixing order: ${order.join(', ')}.`}</p>}

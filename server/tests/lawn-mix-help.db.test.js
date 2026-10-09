@@ -180,7 +180,7 @@ describeDb('mix help through PostgreSQL', () => {
       if (expected) expect(typed).toMatchObject(expected); else expect(typed).toBeNull();
     });
 
-    test('a product the staged rows give no carrier is refused (enter the area instead), and the gate off ignores the gallons', async () => {
+    test('a product the staged rows give no carrier is refused (enter the area instead), and the gate off refuses the gallons', async () => {
       const svc = await svcOf();
       const noCarrier = (await byGallons(svc, { productId: catalog[NIS].id, name: NIS, applicationMethod: 'spot_treatment', areaPlace: 'front', sprayedGallons: 1 })).refusal;
       expect(noCarrier).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable' } });
@@ -188,7 +188,9 @@ describeDb('mix help through PostgreSQL', () => {
       process.env.GATE_LAWN_V13 = 'true';
       process.env.GATE_LAWN_SPOT_RULES = 'true';
       const products = [arenaRow({ totalAmount: 0.147, areaValue: 700, areaUnit: 'sqft', sprayedGallons: 4 })];
-      expect(await help.withSprayedGallons({ knex, svc, products, loadPlan }, async () => null)).toBeNull();
+      const next = jest.fn(async () => null);
+      expect(await help.withSprayedGallons({ knex, svc, products, loadPlan }, next)).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable' } });
+      expect(next).not.toHaveBeenCalled();
       expect(products[0].areaValue).toBe(700);
     });
   });

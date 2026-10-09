@@ -469,6 +469,7 @@ describe('definite refusals (GitHub Codex P2s on #5967)', () => {
   it('the lawn gallons check that could not read (a pre-commit 400) is correctable, where the same refusal as a 503 would lock the form', () => {
     expect(completionFailureOutcome({ status: 400, code: 'lawn_gallons_unavailable_now' })).toBe('correctable');
     expect(completionFailureOutcome({ status: 503, code: 'lawn_gallons_unavailable_now' })).toBe('retry');
+    expect(completionFailureOutcome({ status: 400, code: 'lawn_gallons_unavailable' })).toBe('correctable');
   });
   it('a 403 that names its reason is refused for good; a bare 403 or a lapsed login stays open', () => {
     expect(completionFailureOutcome({ status: 403, code: 'service_not_assigned' })).not.toBe('retry');
