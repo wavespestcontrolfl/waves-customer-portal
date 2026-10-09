@@ -437,6 +437,208 @@ describe('unreadableProductIds: what the fresh read could not read (not forbidde
   });
 });
 
+// GATE_LAWN_TROUBLE_AREAS: the other guided picks and the weeds and chinch cards, judged per place.
+describe('per-place offers: a product is held back only when NO place permits it', () => {
+  const PLACES = ['front', 'back', 'left_side', 'right_side'];
+  const CAP = [{ type: 'annual_max_apps', message: 'Artavia: 2/2 — LIMIT REACHED.' }];
+  const candidate = (id, name, extra = {}) => ({ raw: { product: { id, name }, ...extra }, item: { productId: id, name } });
+  const ROWS = new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } }], [P_ACE, { role: 'insecticide_spot', gates: { trigger: 'caterpillars' } }]]);
+  const both = () => [candidate(P_ART, 'Artavia'), candidate(P_ACE, 'Acelepryn')];
+  const run = (candidates = both()) => addOnOffers({ candidates, rows: ROWS, svc, knex: {}, places: PLACES });
+  // Capped lawn-wide, and at the places named only.
+  const cappedAt = (id, ...places) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+    capped: new Map(!options?.place || places.includes(options.place) ? [[id, CAP]] : []), warnings: [], blocks: [],
+  }));
+
+  test('capped lawn-wide and at the front, open at the back: still offered, not blocked, not unreadable', async () => {
+    cappedAt(P_ART, 'front');
+    const offers = await run();
+    expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' } });
+    expect(offers.blocked).toEqual([]);
+    expect(offers.unreadable).toEqual([]);
+    // Only the capped pick is read again, once per place, with the place as the sixth argument.
+    const calls = engine.v13VisitLimits.mock.calls;
+    expect(calls).toHaveLength(5);
+    expect(calls.slice(1).map((c) => [c[2].map((l) => l.product.id), c[5]])).toEqual(PLACES.map((place) => [[P_ART], { place }]));
+  });
+
+  test('capped at every place: blocked, with no offer', async () => {
+    cappedAt(P_ART, ...PLACES);
+    const offers = await run();
+    expect(offers.fungus).toBeNull();
+    expect(offers.blocked).toEqual([P_ART]);
+    expect(offers.caterpillars).toEqual({ item: { productId: P_ACE, name: 'Acelepryn' } });
+  });
+
+  test('a place whose read throws permits nothing (fail closed) and is unknown there: the pick is not offered and is unreadable, not blocked', async () => {
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      if (options?.place) throw new Error('db down');
+      return { capped: new Map([[P_ART, CAP]]), warnings: [], blocks: [] };
+    });
+    const offers = await run();
+    expect(offers.fungus).toBeNull();
+    expect(offers.blocked).toEqual([]);
+    expect(offers.unreadable).toEqual([P_ART]);
+  });
+
+  test('the per-place blocks this read found ride the offers, in the context\'s shape, for every product read (empty = open everywhere)', async () => {
+    cappedAt(P_ART, 'front', 'left_side');
+    const offers = await run();
+    expect(offers.placeBlocked).toEqual({
+      [P_ART]: { front: 'Artavia: 2/2 — LIMIT REACHED.', left_side: 'Artavia: 2/2 — LIMIT REACHED.' },
+      [P_ACE]: {},
+    });
+  });
+
+  test('a newly open product is an empty entry; a newly capped place is named; an unreadable place is not a block; nothing capped reads once', async () => {
+    cappedAt(P_ART);
+    expect((await run()).placeBlocked).toEqual({ [P_ART]: {}, [P_ACE]: {} });
+    engine.v13VisitLimits.mockReset();
+    noLimits();
+    expect((await run()).placeBlocked).toEqual({ [P_ART]: {}, [P_ACE]: {} });
+    expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      if (options?.place === 'back') throw new Error('db down');
+      return { capped: new Map([[P_ART, CAP]]), warnings: [], blocks: [] };
+    });
+    expect((await run()).placeBlocked[P_ART]).toEqual({ front: 'Artavia: 2/2 — LIMIT REACHED.', left_side: 'Artavia: 2/2 — LIMIT REACHED.', right_side: 'Artavia: 2/2 — LIMIT REACHED.' });
+  });
+
+  test('no places asked: the offers carry no placeBlocked key (byte-identical)', async () => {
+    cappedAt(P_ART, 'front');
+    const offers = await addOnOffers({ candidates: both(), rows: ROWS, svc, knex: {} });
+    expect(offers).not.toHaveProperty('placeBlocked');
+  });
+
+  test('nothing capped: one read, as before; a city hold is blocked at every place', async () => {
+    const offers = await run();
+    expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);
+    expect(offers.blocked).toEqual([]);
+    const held = await run([candidate(P_ART, 'Artavia', { unavailable: { kind: 'city_hold' } })]);
+    expect(held.fungus).toBeNull();
+    expect(held.blocked).toEqual([P_ART]);
+  });
+
+  test('no places asked: the lawn-wide answer, five arguments', async () => {
+    cappedAt(P_ART, 'front');
+    const offers = await addOnOffers({ candidates: both(), rows: ROWS, svc, knex: {} });
+    expect(offers.fungus).toBeNull();
+    expect(offers.blocked).toEqual([P_ART]);
+    expect(engine.v13VisitLimits.mock.calls.every((c) => c.length === 5)).toBe(true);
+  });
+
+  // Mixed reads: a place whose limit read FAILS is unknown, not closed. A product unreadable at ANY place stays unreadable at the
+  // top level (released to the search with the note, never dropped by reconciliation); each place keeps its own answer.
+  describe('mixed successful and failed reads per place', () => {
+    const TYPED = [{ type: 'annual_max_apps', message: 'limit' }];
+    const TYPELESS = [{ message: 'application limits could not be read.' }];
+    const readsBy = (perPlace, wide) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      const answer = options?.place ? perPlace[options.place] : wide;
+      if (answer instanceof Error) throw answer;
+      return { capped: new Map(items.map((i) => i.product.id).filter((id) => answer[id]).map((id) => [id, answer[id]])), warnings: [], blocks: [] };
+    });
+
+    test('chinch: Front takes the bifenthrin product, Back\'s Arena read fails, the others cap Arena: Arena stays unreadable at the top level', async () => {
+      readsBy({ front: { [P_ARENA]: TYPED }, back: { [P_ARENA]: TYPELESS }, left_side: { [P_ARENA]: TYPED }, right_side: { [P_ARENA]: TYPED } }, { [P_ARENA]: TYPED });
+      engine.v13ProtocolRows.mockReturnValue(new Map([[P_ART, {}]]));
+      const found = await resolveChinch({ svc, structured: { id: 'protocol-1', version: 'v13' }, knex: fakeKnex([
+        { product_id: P_ARENA, product_name: 'Arena 50 WDG', gates: { trigger: 'chinch_20_to_25_per_sqft' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 4, catalog_id: P_ARENA, catalog_name: 'Arena 50 WDG', catalog_active: true },
+        { product_id: P_TALAK, product_name: 'Atticus Talak 7.9 F', gates: { trigger: 'chinch_second_product_caterpillars_or_mole_cricket_nymphs' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 7, catalog_id: P_TALAK, catalog_name: 'Atticus Talak 7.9 F', catalog_active: true },
+      ]), places: PLACES });
+      expect(found).toMatchObject({ productId: P_TALAK });
+      expect(found.unreadableIds).toContain(P_ARENA);
+      expect(found.blockedIds).not.toContain(P_ARENA);
+      // Each place keeps its own answer: Front is capped (blocked), Back is unknown (unreadable, nothing offered there).
+      expect(found.byPlace.front).toMatchObject({ productId: P_TALAK, blockedIds: [P_ARENA] });
+      expect(found.byPlace.back).toMatchObject({ productId: null, unreadableIds: expect.arrayContaining([P_ARENA]) });
+      expect(found.byPlace.left_side.unreadableIds).toEqual([]);
+    });
+
+    test('weed mix lives in lawn-weed-mix.test.js; the add-on pick: capped at three places, unreadable at the fourth, is unreadable (not blocked) and not offered', async () => {
+      const ROWS2 = new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } }]]);
+      const c = [{ raw: { product: { id: P_ART, name: 'Artavia' } }, item: { productId: P_ART, name: 'Artavia' } }];
+      const run2 = () => addOnOffers({ candidates: c, rows: ROWS2, svc, knex: {}, places: PLACES });
+      readsBy({ front: { [P_ART]: TYPED }, back: { [P_ART]: TYPELESS }, left_side: { [P_ART]: TYPED }, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      let offers = await run2();
+      expect(offers.fungus).toBeNull();
+      expect(offers.unreadable).toEqual([P_ART]);
+      expect(offers.blocked).toEqual([]);
+      // The whole read at one place throwing is the same unknown; a pick open at another place is simply offered.
+      readsBy({ front: { [P_ART]: TYPED }, back: new Error('db down'), left_side: { [P_ART]: TYPED }, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      offers = await run2();
+      expect(offers.unreadable).toEqual([P_ART]);
+      expect(offers.blocked).toEqual([]);
+      readsBy({ front: { [P_ART]: TYPED }, back: new Error('db down'), left_side: {}, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      offers = await run2();
+      expect(offers.fungus).toEqual({ item: { productId: P_ART, name: 'Artavia' } });
+      expect(offers.unreadable).toEqual([]);
+      // Capped at every place that was read, none unknown: still blocked.
+      readsBy({ front: { [P_ART]: TYPED }, back: { [P_ART]: TYPED }, left_side: { [P_ART]: TYPED }, right_side: { [P_ART]: TYPED } }, { [P_ART]: TYPED });
+      offers = await run2();
+      expect(offers.blocked).toEqual([P_ART]);
+      expect(offers.unreadable).toEqual([]);
+    });
+
+    test('chinch per place: Arena capped at the front while Talak\'s read fails there stays closed (blocked), Talak stays unreadable; a different place is judged on its own', async () => {
+      readsBy({ front: { [P_ARENA]: TYPED, [P_TALAK]: TYPELESS }, back: {}, left_side: {}, right_side: {} }, { [P_ARENA]: TYPED });
+      engine.v13ProtocolRows.mockReturnValue(new Map([[P_ART, {}]]));
+      const found = await resolveChinch({ svc, structured: { id: 'protocol-1', version: 'v13' }, knex: fakeKnex([
+        { product_id: P_ARENA, product_name: 'Arena 50 WDG', gates: { trigger: 'chinch_20_to_25_per_sqft' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 4, catalog_id: P_ARENA, catalog_name: 'Arena 50 WDG', catalog_active: true },
+        { product_id: P_TALAK, product_name: 'Atticus Talak 7.9 F', gates: { trigger: 'chinch_second_product_caterpillars_or_mole_cricket_nymphs' }, rate_per_1000: null, rate_unit: 'label_rate', sort_order: 4, month: 7, catalog_id: P_TALAK, catalog_name: 'Atticus Talak 7.9 F', catalog_active: true },
+      ]), places: PLACES });
+      expect(found.byPlace.front).toMatchObject({ productId: null, blockedIds: [P_ARENA], unreadableIds: [P_TALAK] });
+      expect(found.byPlace.back).toMatchObject({ productId: P_ARENA, blockedIds: [], unreadableIds: [] });
+    });
+
+    test('add-on picks are judged one by one: a pick capped at the front stays closed there while another pick\'s failed read does not release it', async () => {
+      const ROWS3 = new Map([[P_ART, { role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } }], [P_ACE, { role: 'insecticide_spot', gates: { trigger: 'caterpillars' } }]]);
+      const cs = [{ raw: { product: { id: P_ART, name: 'Artavia' } }, item: { productId: P_ART, name: 'Artavia' } }, { raw: { product: { id: P_ACE, name: 'Acelepryn' } }, item: { productId: P_ACE, name: 'Acelepryn' } }];
+      // Artavia: capped everywhere. Acelepryn: unknown everywhere. Neither read changes the other's verdict.
+      readsBy(Object.fromEntries(PLACES.map((p) => [p, { [P_ART]: TYPED, [P_ACE]: TYPELESS }])), { [P_ART]: TYPED, [P_ACE]: TYPELESS });
+      const offers = await addOnOffers({ candidates: cs, rows: ROWS3, svc, knex: {}, places: PLACES });
+      expect(offers.blocked).toEqual([P_ART]);
+      expect(offers.unreadable).toEqual([P_ACE]);
+    });
+
+    test('the guide\'s blocked and unreadable lists follow the top-level unreadable ids of the weed mix and the chinch ladder', () => {
+      const { unreadableProductIds, blockedProductIds } = require('../services/lawn-treatment-guide');
+      const weedMix = { mode: 'replacement', productIds: ['b'], groupProductIds: ['a', 'b', 'c'], unreadableIds: ['a'] };
+      expect(unreadableProductIds({ offers: {}, chinch: { unreadableIds: [P_ARENA] }, weedMix })).toEqual([P_ARENA, 'a']);
+      // 'a' is not offered by the top-level mode, but it is unknown somewhere, so it is not reported as forbidden.
+      expect(blockedProductIds({ offers: {}, chinch: { blockedIds: [] }, weedMix })).toEqual(['c']);
+    });
+  });
+
+  test('weedOffer carries what each place takes; a place whose set the sheet cannot build is left out', () => {
+    const items = [{ productId: 'a', name: 'Lead' }, { productId: 'b', name: 'Blind' }];
+    const mix = { mode: 'lead', productIds: ['a'], note: null, byPlace: {
+      front: { mode: 'replacement', productIds: ['b'], note: 'Use Blind.' },
+      back: { mode: 'lead', productIds: ['a'], note: null },
+      left_side: { mode: 'none', productIds: [], note: 'Limit.' },
+      right_side: { mode: 'lead', productIds: ['a', 'missing'], note: null },
+    } };
+    const offer = weedOffer(mix, items);
+    expect(Object.keys(offer.byPlace)).toEqual(['front', 'back']);
+    expect(offer.byPlace.front).toMatchObject({ productIds: ['b'], names: ['Blind'], note: 'Use Blind.' });
+    expect(weedOffer({ mode: 'lead', productIds: ['a'] }, items)).not.toHaveProperty('byPlace');
+  });
+
+  test('the weeds card and the chinch card carry a set per place; other cards and the lawn-wide form carry none', () => {
+    const weeds = { productIds: ['a'], names: ['Lead'], items: [{ productId: 'a', name: 'Lead' }], note: null, byPlace: { back: { productIds: ['a'], names: ['Lead'], items: [{ productId: 'a', name: 'Lead' }], note: null } } };
+    const chinchItem = { productId: P_ARENA, name: 'Arena' };
+    const talak = { productId: P_TALAK, name: 'Talak' };
+    const offers = { chinch: { item: talak, note: 'n', byPlace: { front: { item: talak, note: 'n' }, back: { item: chinchItem, note: null }, left_side: { item: null, note: 'none' } } } };
+    const cards = buildCards({ signals: { weedCoverage: 40, insect: 'severe' }, month: 7, offers, weeds });
+    expect(cards.find((c) => c.kind === 'weeds').byPlace).toEqual(weeds.byPlace);
+    expect(cards.find((c) => c.kind === 'chinch').byPlace).toEqual({
+      front: { productIds: [P_TALAK], names: ['Talak'], items: [talak], note: 'n' },
+      back: { productIds: [P_ARENA], names: ['Arena'], items: [chinchItem], note: null },
+    });
+    const plain = buildCards({ signals: { weedCoverage: 40, insect: 'severe' }, month: 7, offers: { chinch: { item: talak, note: null } }, weeds: { ...weeds, byPlace: undefined } });
+    for (const card of plain) expect(card).not.toHaveProperty('byPlace');
+  });
+});
+
 describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
   const STRUCTURED = { id: 'protocol-1', version: 'v13' };
   const staged = (productId, name, trigger, month, extra = {}) => ({
@@ -501,6 +703,11 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
     expect(await run()).toMatchObject({ rungIds: RUNGS, ...expected });
   });
 
+  test('another limit on Arena holds the offer, but a rung whose own read failed stays unreadable (a sibling\'s known limit does not make it forbidden)', async () => {
+    limited([[P_ARENA, [{ type: 'min_interval_days', message: 'Arena: wait 14 days.' }]], [P_TALAK, UNREAD]]);
+    expect(await run()).toMatchObject({ productId: null, note: 'Arena: wait 14 days.', blockedIds: [P_ARENA], unreadableIds: [P_TALAK] });
+  });
+
   test('the whole read threw: nothing offered, every rung unreadable, none blocked', async () => {
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
     expect(await run()).toMatchObject({ productId: null, note: NOTE, rungIds: RUNGS, blockedIds: [], unreadableIds: RUNGS });
@@ -531,6 +738,67 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
     engine.v13ProtocolRows.mockReturnValue(new Map([[P_ART, {}]]));
     expect(await run(ROWS(), { version: 'v13' })).toBeNull();
     expect(engine.v13VisitLimits).not.toHaveBeenCalled();
+  });
+
+  // GATE_LAWN_TROUBLE_AREAS: the same ladder at each place of the lawn.
+  describe('with places', () => {
+    const PLACES = ['front', 'back', 'left_side', 'right_side'];
+    const withPlaces = () => resolveChinch({ svc, structured: STRUCTURED, knex: fakeKnex(ROWS()), places: PLACES });
+    const cappedAt = (...places) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(!options?.place || places.includes(options.place) ? [[P_ARENA, CAP]] : []), warnings: [], blocks: [],
+    }));
+
+    test('no places asked: no byPlace, and the limit reader gets the five arguments it always did', async () => {
+      const found = await run();
+      expect('byPlace' in found).toBe(false);
+      expect(engine.v13VisitLimits.mock.calls.every((call) => call.length === 5)).toBe(true);
+    });
+
+    test('nothing capped: every place takes Arena and the reader is asked once', async () => {
+      const found = await withPlaces();
+      expect(Object.keys(found.byPlace)).toEqual(PLACES);
+      for (const place of PLACES) expect(found.byPlace[place]).toMatchObject({ productId: P_ARENA, note: null });
+      expect(found).toMatchObject({ productId: P_ARENA });
+      expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);
+    });
+
+    test('Arena at its yearly count at the front only: the front gets the bifenthrin product, the others Arena; the top level is the first place with a product', async () => {
+      cappedAt('front');
+      const found = await withPlaces();
+      expect(found.byPlace.front).toMatchObject({ productId: P_TALAK, note: 'Arena yearly limit reached; Atticus is used in its place.', blockedIds: [P_ARENA] });
+      expect(found.byPlace.back).toMatchObject({ productId: P_ARENA, note: null });
+      expect(found).toMatchObject({ productId: P_TALAK });
+      expect(engine.v13VisitLimits.mock.calls.map((call) => call[5]?.place)).toEqual([undefined, 'front', 'back', 'left_side', 'right_side']);
+    });
+
+    test('a yearly AMOUNT limit at a place marks that place amountBlocked; a count limit does not', async () => {
+      const at = (type) => engine.v13VisitLimits.mockImplementation(async (_k, _s, _i, _r, _t, options) => ({
+        capped: new Map(!options?.place || options.place === 'front' ? [[P_ARENA, [{ type, matchType: type === 'annual_max_rate' ? 'v13_amount' : 'product', message: 'x' }]]] : []), warnings: [], blocks: [],
+      }));
+      at('annual_max_rate');
+      const amount = await withPlaces();
+      expect(amount.byPlace.front.amountBlocked).toBe(true);
+      expect('amountBlocked' in amount.byPlace.back).toBe(false);
+      at('annual_max_apps');
+      expect('amountBlocked' in (await withPlaces()).byPlace.front).toBe(false);
+    });
+
+    test('both rungs capped at every place: nothing anywhere, and why', async () => {
+      engine.v13VisitLimits.mockImplementation(async () => ({ capped: new Map([[P_ARENA, CAP], [P_TALAK, CAP]]), warnings: [], blocks: [] }));
+      const found = await withPlaces();
+      for (const place of PLACES) expect(found.byPlace[place]).toMatchObject({ productId: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.' });
+      expect(found).toMatchObject({ productId: null });
+    });
+
+    test('a place whose limit read throws is unreadable for that place (never "open"), the others judge on their own', async () => {
+      engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+        if (options?.place === 'back') throw new Error('db down');
+        return { capped: new Map([[P_ARENA, CAP]]), warnings: [], blocks: [] };
+      });
+      const found = await withPlaces();
+      expect(found.byPlace.back).toMatchObject({ productId: null, unreadableIds: [P_ARENA, P_TALAK] });
+      expect(found.byPlace.front).toMatchObject({ productId: P_TALAK });
+    });
   });
 
   // Three cases, kept apart: (1) the lookup succeeded and stages no chinch row = null; (2) the lookup
@@ -575,7 +843,7 @@ describe('lawnTreatmentGuideLive: strict, and only with the spot rules and the v
 
 describe('treatmentGuideFreeze: the completion record', () => {
   const card = (extra = {}) => ({ kind: 'fungus', shown: true, checked: 'found', taken: true, productIds: [P_ART], ...extra });
-  const freeze = (cards, extra = {}) => treatmentGuideFreeze({ visitType: 'recurring', treatmentGuide: { v: 1, cards, ...extra } });
+  const freeze = (cards, extra = {}, options = undefined) => treatmentGuideFreeze({ visitType: 'recurring', treatmentGuide: { v: 1, cards, ...extra } }, options);
   beforeEach(() => { process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true'; });
 
   test('the v13 program off: nothing is written (fail closed)', () => {
@@ -642,6 +910,47 @@ describe('treatmentGuideFreeze: the completion record', () => {
     const kinds = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'].map((kind) => card({ kind }));
     expect(freeze(kinds).lawnTreatmentGuide.cards).toHaveLength(5);
   });
+
+  // GATE_LAWN_TROUBLE_AREAS: a card taken at a place also names the place, and its ids are the products actually added.
+  describe('a card taken at a place', () => {
+    const placed = (extra = {}) => card({ kind: 'weeds', productIds: [P_CEL, P_CERT], place: 'back', ...extra });
+    const applied = (...ids) => ({ appliedIds: new Set(ids) });
+    beforeEach(() => { process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; });
+    afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+
+    test('the place and the flat list of ids actually added are recorded', () => {
+      expect(freeze([placed()], {}, applied(P_CEL, P_CERT)).lawnTreatmentGuide.cards).toEqual([
+        { kind: 'weeds', shown: true, checked: 'found', taken: true, productIds: [P_CEL, P_CERT], place: 'back' },
+      ]);
+    });
+
+    test('ids that were not applied are dropped; a card with a place and nothing applied is not taken and names no place', () => {
+      expect(freeze([placed()], {}, applied(P_CEL)).lawnTreatmentGuide.cards[0]).toMatchObject({ taken: true, productIds: [P_CEL], place: 'back' });
+      const none = freeze([placed()], {}, applied(P_ART)).lawnTreatmentGuide.cards[0];
+      expect(none).toMatchObject({ taken: false, productIds: [] });
+      expect(none).not.toHaveProperty('place');
+    });
+
+    test.each([['roof'], [''], [null], [3], ['BACK']])('a place that is not on the closed list (%p) is not recorded: the card is exactly what it always was', (place) => {
+      const out = freeze([placed({ place })], {}, applied(P_CEL, P_CERT)).lawnTreatmentGuide.cards[0];
+      expect(out).toEqual({ kind: 'weeds', shown: true, checked: 'found', taken: true, productIds: [P_CEL, P_CERT] });
+    });
+
+    test('a card not taken carries no place even if one is sent', () => {
+      expect(freeze([placed({ taken: false })], {}, applied(P_CEL)).lawnTreatmentGuide.cards[0]).toEqual({ kind: 'weeds', shown: true, checked: 'found', taken: false, productIds: [P_CEL, P_CERT] });
+    });
+
+    test('the report ties read the same record: a find with a place still yields the flat ids actually applied (what verifyGuideFind checks)', () => {
+      const { guideTakenFindings } = require('../services/lawn-treatment-guide');
+      const record = freeze([card({ kind: 'chinch', productIds: [P_CEL, P_CERT], place: 'front', checked: 'found' })], {}, applied(P_CEL)).lawnTreatmentGuide;
+      expect(guideTakenFindings({ lawnTreatmentGuide: record })).toEqual([{ kind: 'chinch', productIds: [P_CEL] }]);
+    });
+
+    test('without the places gate the record is byte-identical: the place is ignored and ids are not narrowed', () => {
+      delete process.env.GATE_LAWN_TROUBLE_AREAS;
+      expect(freeze([placed()], {}, applied(P_ART)).lawnTreatmentGuide.cards[0]).toEqual({ kind: 'weeds', shown: true, checked: 'found', taken: true, productIds: [P_CEL, P_CERT] });
+    });
+  });
 });
 
 describe('guideTakenFindings: the one deliberate reader of the record besides the freeze', () => {
@@ -690,6 +999,6 @@ describe('the record never leaves the technician side', () => {
 
   test('the completion freezes it through the validator, from the lawnFast echo', () => {
     const source = fs.readFileSync(path.join(root, 'services', 'complete-scheduled-service.js'), 'utf8');
-    expect(source).toContain("...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast),");
+    expect(source).toContain("...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),");
   });
 });
