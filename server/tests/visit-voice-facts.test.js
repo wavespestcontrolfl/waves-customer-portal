@@ -891,6 +891,15 @@ describe('validateVoiceFacts: the web sweep', () => {
     ['another doer carried over an "and"', 'Customer brushed the porch and swept the eaves.'],
     ['rain carried over an "and"', 'Rain washed the walls and knocked down the webs.'],
     ['another doer, said for today', 'Customer brushed the porch and swept the eaves today.'],
+    // Codex round 6 on #6147.
+    ['"the home" is not outside', 'Removed cobwebs in the home.'],
+    ['a room named with "front"', 'Removed cobwebs from the front bedroom.'],
+    ['a ceiling with no outside fixture', 'Knocked down webs on the ceiling.'],
+    ['a bare "by" someone', 'Removed cobwebs from the porch by homeowner.'],
+    ['a weekday', 'Swept the eaves on Monday.'],
+    ['the previous service', 'Swept the eaves during the previous service. Sprayed today.'],
+    ['days ago', 'Knocked down the webs two days ago.'],
+    ['a date', 'Swept the eaves 10/2.'],
     ['rain, said for this morning', 'Rain washed the walls and knocked down the webs this morning.'],
     ['a denial before a sweep said for today', "Didn't spray and swept the eaves today."],
   ])('no sweep when %s', (_label, note) => {
@@ -902,6 +911,10 @@ describe('validateVoiceFacts: the web sweep', () => {
     'I treated the garage and knocked down the webs outside.',
     'Then sprayed the lanai and brushed the cobwebs off the entry.',
     'Customer was not home and I swept the eaves.',
+    'Knocked down the webs around the house.',
+    'Swept the webs off the front door and the back of the house.',
+    'Brushed the cobwebs by hand off the lanai.',
+    'Swept the eaves today, last service was in August.',
   ])('the tech\'s own work carried over an "and" stands: %s', (note) => {
     expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).not.toBeNull();
   });

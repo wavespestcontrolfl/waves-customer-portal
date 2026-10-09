@@ -765,12 +765,18 @@ const SWEEP_EAVE_PART_RE = new RegExp(String.raw`${SWEEP_LEAD}(?:${SWEEP_BRUSH})
 const SWEEP_DEWEB_PART_RE = new RegExp(String.raw`${SWEEP_LEAD}de-?webbed\b`);
 // Said in the part itself: a denial, an undone sweep, another day, a sweep
 // that was already there, someone else's hand, or only if needed.
-const SWEEP_PART_REFUSED_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|incomplete|skipped|omitted|unfinished|already|if|unless|by\s+(?:the|a|an|their|his|her)\b|before\s+(?:i|we)\b|prior\s+to)\b`);
+const SWEEP_PART_REFUSED_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS}|incomplete|skipped|omitted|unfinished|already|if|unless|by(?!\s+hand\b)|before\s+(?:i|we)\b|prior\s+to)\b`);
 const SWEEP_TODAY_RE = /\b(?:today|this\s+(?:visit|time|service|trip|morning|afternoon))\b/;
 // A place said in the part: it must be outside the home.
-const SWEEP_PLACE_RE = /\b(?:from|in|inside|on|off|at|around|under|underneath|along|above|below|behind|near|by|within|throughout|across)\b/;
-const SWEEP_OUTSIDE_RE = /\b(?:outside|exterior|outdoors?|eaves?|soffits?|fascia|overhangs?|roofline|gutters?|lanai|porch|patio|entry|entryway|entries|doors?|door\s+frames?|windows?|window\s+frames?|pool\s+cage|screen\s+enclosure|house|home|perimeter|corners?|front|back|sides?|carport|garage\s+door)\b/;
-const SWEEP_INSIDE_RE = /\b(?:inside|interior|indoors?)\b/;
+const SWEEP_PLACE_RE = /\b(?:from|in|inside|on|off|at|around|under|underneath|along|above|below|behind|near|within|throughout|across)\b/;
+// Outside is an outside fixture, or the outside of the house in so many words:
+// "the home", "the front" or "the back" alone say nothing ("removed cobwebs in
+// the home", "from the front bedroom"; Codex P2 on #6147).
+const SWEEP_OUTSIDE_RE = /\b(?:outside|exterior|outdoors?|eaves?|soffits?|fascia|overhangs?|roofline|gutters?|lanai|porch|patio|entry|entryway|entries|(?:front|back|side|garage|entry|exterior)\s+doors?|door\s+frames?|window\s+frames?|exterior\s+windows?|pool\s+cage|screen\s+enclosure|carport|(?:around|outside(?:\s+of)?)\s+the\s+(?:house|home|perimeter)|(?:front|back|sides?)\s+of\s+the\s+(?:house|home))\b/;
+const SWEEP_INSIDE_RE = /\b(?:inside|interior|indoors?|(?:bed|bath|living|dining|laundry|family|guest|utility|mud)\s?rooms?|rooms?|kitchen|foyer|hall(?:way)?s?|closets?|attic|basement|pantry|office|den|stairs?|stairwell|cabinets?|baseboards?)\b/;
+// 4) A day that is not today, named outright: a weekday, a month, a date,
+// "two days ago", "the previous service" (Codex P2 on #6147).
+const SWEEP_DATED_RE = /\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|(?:\d+|a|an|one|two|three|four|five|six|several|few|couple(?:\s+of)?)\s+(?:days?|weeks?|months?|visits?|services?)\s+(?:ago|back|earlier)|(?:previous|prior|earlier|past)\s+(?:service|visit|treatment|trip|appointment|week|month|quarter)s?|earlier\s+this\s+(?:week|month))\b/;
 
 // The clause a part sits in says something that reaches the part: another day
 // said anywhere in the clause ("swept the eaves and webs last visit"), or a
@@ -780,7 +786,7 @@ const SWEEP_INSIDE_RE = /\b(?:inside|interior|indoors?)\b/;
 function sweepPartGoverned(part, clauseBefore, clause) {
   // "Today" answers only the day; who did it and whether it was denied are
   // still asked (pre-push P1).
-  if (OTHER_DAY_RE.test(clause) && !SWEEP_TODAY_RE.test(part)) return true;
+  if ((OTHER_DAY_RE.test(clause) || SWEEP_DATED_RE.test(clause)) && !SWEEP_TODAY_RE.test(part)) return true;
   if (/^\s*(?:i|we)\s/.test(part)) return false;
   return DENIAL_IN_RE.test(clauseBefore) || FUTURE_BEFORE_RE.test(`${clauseBefore} `) || !sweepClauseIsOwnWork(clauseBefore);
 }
@@ -800,7 +806,7 @@ function sweepPartStands(part, clauseBefore, clause) {
   const swept = SWEEP_WEB_PART_RE.test(part) || SWEEP_EAVE_PART_RE.test(part) || SWEEP_DEWEB_PART_RE.test(part);
   if (!swept) return false;
   if (SWEEP_PART_REFUSED_RE.test(part) || OTHER_DAY_RE.test(part)) return false;
-  if (SWEEP_INSIDE_RE.test(part) && !/\b(?:outside|exterior|outdoors?)\b/.test(part)) return false;
+  if (SWEEP_INSIDE_RE.test(part)) return false;
   if (SWEEP_PLACE_RE.test(part) && !SWEEP_OUTSIDE_RE.test(part)) return false;
   return !sweepPartGoverned(part, clauseBefore, clause);
 }

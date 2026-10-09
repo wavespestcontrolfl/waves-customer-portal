@@ -25702,6 +25702,15 @@ function buildTypedFindingsPromptBlock({
 // is not completed-work evidence for the sweep. Added only when the sheet says
 // so; every other request's prompt is as it was.
 const SWEEP_NOT_DONE_LINE = 'Technician correction: the eaves and webs were NOT swept on this visit. Do not say that eaves, webs or cobwebs were swept, brushed, knocked down or removed, whatever the note says.';
+// A draft that still claims the sweep after that correction is refused like any
+// other wording the report may not carry (Codex P2 on #6147): a removal word
+// and a web or eave in one sentence, either order, or "web sweep" / "web
+// removal" by name. Linear: one pass per sentence.
+const SWEEP_CLAIM_ACTION_RE = /\b(?:swe(?:ep|pt|eping)|brush(?:ed|ing)?|knock(?:ed|ing)?\s+(?:down|off|out)|remov(?:ed|ing|al)|clear(?:ed|ing)|clean(?:ed|ing)|wip(?:ed|ing)|took\s+down|de-?webb?(?:ed|ing)?)\b/i;
+const SWEEP_CLAIM_THING_RE = /\b(?:spider\s?webs?|cobwebs?|webs?|webbing|eaves?|soffits?)\b/i;
+function reportClaimsSweep(text) {
+  return String(text || '').split(/[.!?\n]+/).some((sentence) => SWEEP_CLAIM_ACTION_RE.test(sentence) && SWEEP_CLAIM_THING_RE.test(sentence));
+}
 
 router.post('/generate-report', async (req, res) => {
   try {
@@ -26823,7 +26832,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // A cached draft is served only if it still passes both screens as they
     // read now: a product, alias or active ingredient added since it was
     // cached must not ride out on the cache.
-    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached)) {
+    // The chip tapped off: a draft that still claims the sweep is never served.
+    const sweepClaimRefused = (text) => sweepNotDone === true && reportClaimsSweep(text);
+    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached) && !sweepClaimRefused(cached)) {
       return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
     }
     // The same wall-clock ceiling the provider chain keeps: the last-resort
@@ -26836,7 +26847,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // 2026-10-03): the pattern screen exempts watering / mowing clauses, so
       // a result promise phrased around watering needs a reader. Fails open.
       extraRejection: async (text, { remainingMs } = {}) => {
-        const cheap = (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text);
+        const cheap = (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text)
+          || (sweepClaimRefused(text) ? 'sweep_not_done' : null);
         if (cheap || !lawnTimingCheckOn) return cheap;
         // The flag describes the draft this call judges: the accepted draft
         // is always the last one checked.
@@ -26896,7 +26908,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // technician's own structured observations, which can carry a result
       // promise the pattern screen exempts (codex #5734 r1). Fails open.
       // The cheap screens first: a copy they already refuse costs no model call.
-      const fallbackScreened = report && (screenTradeNames(report) || writerRulesScreen(report));
+      const fallbackScreened = report && (screenTradeNames(report) || writerRulesScreen(report) || sweepClaimRefused(report));
       const fallbackTiming = report && !fallbackScreened && lawnTimingCheckOn
         ? await lawnDraftTimingRejection(report, { remainingMs: reportChainDeadline - Date.now() })
         : null;

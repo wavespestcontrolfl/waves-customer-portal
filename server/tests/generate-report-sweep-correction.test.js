@@ -69,3 +69,32 @@ test('no correction unless the sheet sends an exact true', async () => {
     expect(text).toContain('Actions completed: Swept eaves, window frames, door frames, and lanai\nAreas serviced:');
   }
 });
+
+// Codex P2 on #6147: the correction is checked on the draft, not only asked for.
+test('a draft that still claims the sweep is refused; the next draft that obeys is used', async () => {
+  mockProvider
+    .mockResolvedValueOnce({ ok: true, text: 'WHAT WE DID\n\nTreated the perimeter and swept the cobwebs from the eaves.\n\nWHAT WE FOUND\n\nNo activity noted.' })
+    .mockResolvedValue({ ok: true, text: 'WHAT WE DID\n\nTreated the exterior perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' });
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: NOTE, actionsCompleted: [], sweepNotDone: true, fresh: true }), res);
+  expect(res.statusCode).toBe(200);
+  expect(mockProvider.mock.calls.length).toBeGreaterThan(1);
+  const { report } = res.json.mock.calls[0][0];
+  expect(report).not.toMatch(/swept|cobwebs/i);
+});
+
+test('when every draft claims the sweep, none is used', async () => {
+  mockProvider.mockResolvedValue({ ok: true, text: 'WHAT WE DID\n\nKnocked down webs along the eaves and treated the perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' });
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: NOTE, actionsCompleted: [], sweepNotDone: true, fresh: true }), res);
+  const body = res.json.mock.calls[0][0];
+  expect(String(body.report || '')).not.toMatch(/webs/i);
+});
+
+test('without the correction the same draft is used as written', async () => {
+  mockProvider.mockResolvedValue({ ok: true, text: 'WHAT WE DID\n\nTreated the perimeter and swept the cobwebs from the eaves.\n\nWHAT WE FOUND\n\nNo activity noted.' });
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: NOTE, actionsCompleted: ['Swept eaves, window frames, door frames, and lanai'], fresh: true }), res);
+  expect(res.statusCode).toBe(200);
+  expect(res.json.mock.calls[0][0].report).toMatch(/swept the cobwebs/);
+});
