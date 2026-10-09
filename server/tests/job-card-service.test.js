@@ -727,6 +727,29 @@ describe('mixForProduct', () => {
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at })).toMatchObject({ amount: 6.215, rateSource: 'catalog' });
   });
 
+  test('a v13 spot row (Arena in the May and June windows) is dosed at its own rate over its own carrier: a 4-gallon fill is 1,000 sq ft and 0.147 oz; a row with no carrier falls back as before', async () => {
+    const arena = { id: 'p1', name: 'Arena 50 WDG', category: 'insecticide', default_rate_per_1000: 0.29, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const planWith = (spot, windowCarrier = 1) => jest.fn().mockResolvedValue({
+      propertyGate: { blocks: [] },
+      mixCalculator: { carrierGalPer1000: windowCarrier, items: [], conditionalOptions: [{ product: { id: 'p1' }, selected: false, spot }] },
+    });
+    const dose = (rows, buildPlan) => jobCard.mixForProduct('p1', 4, { serviceId: 'svc1', dbh: makeDb({ scheduled_services: [lawnVisit], products_catalog: [arena], equipment_calibrations: rows }), deps: { buildPlan, evaluateApprovals: approve() }, ...at });
+    const row = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: 4 };
+    // May and June windows carry 1 gal per 1,000 sq ft; the rig (2 gal) is not the product's carrier either.
+    for (const [month, windowCarrier] of [['May', 1], ['June', 1]]) {
+      for (const rig of [[], [live]]) {
+        const out = await dose(rig, planWith(row, windowCarrier));
+        expect({ month, rig: rig.length, amount: out.amount, unit: out.unit, coversSqft: out.coversSqft, ratePer1000: out.ratePer1000 }).toEqual({ month, rig: rig.length, amount: 0.147, unit: 'oz', coversSqft: 1000, ratePer1000: 0.147 });
+      }
+    }
+    // No carrier on the row: the window's carrier (no rig) or the rig's, as before.
+    const noCarrier = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: null };
+    expect(await dose([], planWith(noCarrier, 1))).toMatchObject({ amount: 0.588, coversSqft: 4000 });
+    expect(await dose([live], planWith(noCarrier, 1))).toMatchObject({ amount: 0.294, coversSqft: 2000 });
+    // A spot row with no stated rate keeps the catalog rate over the usual carrier.
+    expect(await dose([live], planWith({ ratePer1000: null, rateUnit: null, carrierGalPer1000: 4 }))).toMatchObject({ amount: 0.58, ratePer1000: 0.29 });
+  });
+
   test('a rig pick doses a full tank of that rig on its own carrier and volume; without one the visit\'s rig resolves as the card does', async () => {
     const tank1 = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: 'Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' };
     const backpack = { id: 'cal-3', equipment_system_id: 'sys-3', system_type: 'backpack', system_name: 'FlowZone', carrier_gal_per_1000: 1.33, calibration_status: 'estimated_not_field_verified', tank_capacity_gal: '4.00' };

@@ -2201,6 +2201,14 @@ Reschedule button when it is `null`, and (only when `merged === true`) folds
 this card into the "Your plan" section (title "Your upcoming visits" when
 there is no plan summary). Gate off: neither field is present and the two
 sections stay separate, byte-identical to before.
+`GATE_LAWN_REPORT_CLARITY` (owner 2026-10-08; dark, strict `true`, read at call
+time): on a LAWN report only, the card lists ONE visit, the next upcoming lawn
+visit at this report's property (same property scoping as below, same
+service-line classifier as the report's next-visit pick; the scan pages on until
+one lawn visit is found). With none, or when the read fails, the card is
+`{ visits: [] }` (plus `merged: true` with `GATE_REPORT_PLAN_RESCHEDULE`), which
+the client renders as no visits and no "next visit" line. Other service lines
+and gate off: unchanged.
 Lists every one of the customer's upcoming scheduled visits across ANY
 program (pest, lawn, tree & shrub, mosquito, termite, rodent, …), not just
 the report's own service line (`nextAppointment` above is unchanged and
@@ -2453,6 +2461,22 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
+`GATE_LAWN_REPORT_CLARITY` (dark, strict `true`; also requires
+`GATE_LAWN_WATERING_RULE`; gate off leaves the payload unchanged, key for key):
+when a water-in is BUILT AT COMPLETION for a customer with no sprinkler head type
+or measured rate on file, its `lines` give the amount and no minutes ("Water in
+today’s treatment with about ½ inch by Fri 8 PM.", then "Run it even if it is not
+your usual day."; hold-then-water-in keeps its hold line and continues "After
+that, water in today’s treatment with about ½ inch by …") and the frozen
+instruction records `amountOnly: true`. The frozen instruction is replayed as
+written whatever the gate says. A LIVE-VIEW-ONLY optional string
+`reportV2.banner.setupLine` ("Add your sprinkler setup and we’ll give you minutes
+for each zone.") exists only under a frozen `amountOnly` water-in or
+hold-then-water-in while the gate is on; it is deleted from every non-live render
+(`stripLiveOnlyScheduleFields`), is never in `lines`, and counts toward
+`reportV2.lead`'s word budget when present. The client shows it as a link to the
+portal property tab. The watering text, PDF, hero task and Ask Waves read `lines`
+only. No new route, query parameter or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
 optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to

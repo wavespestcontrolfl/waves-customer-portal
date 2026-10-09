@@ -22,15 +22,16 @@ async function post(body) {
 
 beforeEach(() => { LimitChecker.checkLimits.mockClear(); mockOwned.value = true; });
 
+// The route is a PROPOSAL check that names no dose: `proposal: true` lets a v13 yearly amount cap count the program's dose.
 test('a named property is passed to the checker', async () => {
   const res = await post({ customerId: C1, propertyId: P1, products: [{ productId: 'prod-1', name: 'X' }] });
   expect(res.body.allowed).toBe(true);
-  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: P1 });
+  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: P1, proposal: true });
 });
 
 test('no property: the checker is asked without one (it then judges the busiest property of the customer)', async () => {
   await post({ customerId: C1, products: [{ productId: 'prod-1' }] });
-  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: null });
+  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: null, proposal: true });
 });
 
 test('customerId and products are still required', async () => {

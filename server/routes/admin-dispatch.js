@@ -4687,6 +4687,27 @@ router.post('/:lawnFastServiceId/lawn-fast/watering-preview', async (req, res, n
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/treatment-guide?assessmentId=
+// The "Suggested from this lawn" cards for the visit's confirmed lawn assessment (owner 2026-10-08):
+// one card per photo finding from a fixed rule table, each with its check to do first and a product
+// the technician taps. Read-only; no model call. Dark behind GATE_LAWN_TREATMENT_GUIDE (404
+// {enabled:false} while off, nothing read). See services/lawn-treatment-guide.js.
+const TREATMENT_GUIDE_STATUS = { invalid_assessment: 400, not_found: 404, not_eligible: 409, not_confirmed: 409, not_usable: 409 };
+router.get('/:lawnFastServiceId/lawn-fast/treatment-guide', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').lawnTreatmentGuideLive()) return res.status(404).json({ enabled: false });
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const result = await require('../services/lawn-fast-complete').buildLawnTreatmentGuide({ serviceId, assessmentId: req.query.assessmentId });
+    if (!result.ok) {
+      const status = TREATMENT_GUIDE_STATUS[result.reason] || recapStatusForReason(result.reason);
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    const { ok, ...body } = result;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip
 // multipart: audio (the recording), sheet: 'pest_reservice', duration_seconds
 // Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL). Owner

@@ -38,6 +38,11 @@
 // true) are ignored here.
 // Generic copy prints minutes only, never "about a quarter inch": at the UF
 // rates the runtime uses those minutes are really 0.33-0.38 inch.
+// GATE_LAWN_REPORT_CLARITY (owner 2026-10-08), for the "generic" basis only
+// (step 3, no head type on file): the rule-of-thumb figures are not the
+// customer's system, so a completion built with `plainWhenNoSetup` states the
+// AMOUNT and no minutes, and records instruction.amountOnly. The caller decides
+// at completion (the instruction is then FROZEN); this module reads no gate.
 //
 // Mowing is a SEPARATE result (instruction.mowHold, never part of `lines`: the
 // watering text sends `lines` verbatim). It exists only when an applied product
@@ -85,6 +90,9 @@ const DRY_HOLD_FLOOR_HOURS = 6; // used only when no dry-hold rule carries hold_
 const DRY_LABEL = 'today’s treatment has dried';
 const DRY_PLAN_LABEL = 'the spray has dried';
 const FULL_CYCLE = 'one full cycle on each turf zone';
+// The live banner's invitation under an amount-only water-in (banner.setupLine).
+// Never part of `lines`: the PDF, the watering text and Ask Waves do not carry it.
+const SETUP_INVITE_LINE = 'Add your sprinkler setup and we’ll give you minutes for each zone.';
 
 // ── Time helpers ─────────────────────────────────────────────────────────
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -133,6 +141,16 @@ function formatWhen(date, anchor) {
   const days = Math.round((Date.parse(`${atDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000);
   if (days >= 6) return `${WEEKDAYS[at.dayOfWeek]}, ${MONTHS[at.month - 1]} ${at.day} at ${clock}`;
   return `${WEEKDAYS[at.dayOfWeek]} ${clock}`;
+}
+
+// "¼ inch", "½ inch", "0.27 inch", "1 inch", "1.5 inches": exact quarter
+// fractions in words, otherwise up to two decimals. Singular up to one inch.
+function formatInches(value) {
+  const n = Math.round(Number(value) * 100) / 100;
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const quarters = { 0.25: '¼', 0.5: '½', 0.75: '¾' };
+  const text = quarters[n] || String(n);
+  return `${text} ${n <= 1 ? 'inch' : 'inches'}`;
 }
 
 // ── Mow hold ─────────────────────────────────────────────────────────────
@@ -215,7 +233,7 @@ function scaledMinutes(perQuarterInch, inches) {
   return Math.max(5, Math.round((perQuarterInch * (inches / BASE_INCHES)) / 5) * 5);
 }
 
-function minutesFor(runtime, inches) {
+function minutesFor(runtime, inches, plainWhenNoSetup = false) {
   const empty = { spray: null, rotor: null, unknown: false, measured: null };
   const rt = runtime && typeof runtime === 'object' && runtime.unconfirmed !== true ? runtime : null;
 
@@ -255,7 +273,11 @@ function minutesFor(runtime, inches) {
   if (onFile) {
     return { minutes: { ...empty, unknown: true }, basis: 'unknown_heads', clause: FULL_CYCLE };
   }
-  // No head type on file: never assume no sprinklers. Both generic figures.
+  // No head type on file: never assume no sprinklers. Both generic figures,
+  // unless the caller asked for the amount alone (GATE_LAWN_REPORT_CLARITY).
+  if (plainWhenNoSetup) {
+    return { minutes: { ...empty }, basis: 'generic', clause: null, amountOnly: true, amount: formatInches(inches) };
+  }
   return { minutes: { ...empty, spray, rotor }, basis: 'generic', clause: `spray heads about ${spray} minutes a zone and rotors about ${rotor} minutes` };
 }
 
@@ -308,7 +330,34 @@ function waterInDeadline(at, waterIns, byHours, holdEnd) {
   return by;
 }
 
-function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
+// The water-in half of the instruction: amount, deadline and minutes. Fills the
+// water-in fields of `out` and returns the detail the lines are written from,
+// or null when no honest deadline exists (C. see waterInDeadline).
+function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd }) {
+  const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
+  const byHours = Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24)));
+  const detail = { inches, byHours, ...minutesFor(runtime, inches, plainWhenNoSetup) };
+  const by = waterInDeadline(at, waterIns, byHours, holdEnd);
+  if (!by) return null;
+  out.minutes = detail.minutes;
+  out.waterInInches = inches;
+  out.waterInBy = by.toISOString();
+  out.waterInByLabel = formatWhen(by, at);
+  if (detail.amountOnly) out.amountOnly = true;
+  return detail;
+}
+
+// The water-in sentences. Minutes: "by <when>" then "Run <clause>" (one line after
+// a hold). Amount only (no sprinkler setup on file): "with about ½ inch by <when>".
+function waterInLines(detail, whenLabel, afterHold) {
+  const lead = afterHold ? 'After that, water in' : 'Water in';
+  if (detail.amountOnly) return [`${lead} today’s treatment with about ${detail.amount} by ${whenLabel}.`];
+  return afterHold
+    ? [`${lead} today’s treatment by ${whenLabel}: run ${detail.clause}.`]
+    : [`${lead} today’s treatment by ${whenLabel}.`, `Run ${detail.clause}.`];
+}
+
+function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhenNoSetup } = {}) {
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
   const resolved = list.map(ruleOf);
@@ -364,29 +413,16 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
   const effectiveHoldEnd = [timedEnd, dryEnd].filter(Boolean).sort((x, y) => y - x)[0] || null;
 
   let waterInDetail = null;
-  let by = null;
   if (waterIns.length) {
-    const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
-    const byHours = Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24)));
-    waterInDetail = { inches, byHours, ...minutesFor(runtime, inches) };
-    // C. See waterInDeadline.
-    by = waterInDeadline(at, waterIns, byHours, effectiveHoldEnd);
-    if (!by) return out;
-    out.minutes = waterInDetail.minutes;
-    out.waterInInches = inches;
-    out.waterInBy = by.toISOString();
-    out.waterInByLabel = formatWhen(by, at);
+    waterInDetail = applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: effectiveHoldEnd });
+    if (!waterInDetail) return out;
   }
   out.ruleSource = ruleSourceOf([...holds, ...waterIns]);
 
   if (!holds.length) {
     out.state = 'water_in';
     out.expiresAt = out.waterInBy;
-    out.lines = [
-      `Water in today’s treatment by ${out.waterInByLabel}.`,
-      `Run ${waterInDetail.clause}.`,
-      ANY_DAY_LINE,
-    ];
+    out.lines = [...waterInLines(waterInDetail, out.waterInByLabel, false), ANY_DAY_LINE];
     return out;
   }
 
@@ -413,7 +449,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
     out.expiresAt = dryHolds.length ? null : out.waterInBy;
     out.lines = [
       `Skip your turf watering until ${holdLabel}.`,
-      `After that, water in today’s treatment by ${out.waterInByLabel}: run ${waterInDetail.clause}.`,
+      ...waterInLines(waterInDetail, out.waterInByLabel, true),
       ANY_DAY_LINE,
     ];
   } else {
@@ -451,6 +487,8 @@ function composeBannerLines(instruction, { hasWeekPlan = false, planRunInches = 
 module.exports = {
   buildWateringInstruction,
   composeBannerLines,
+  formatInches,
+  SETUP_INVITE_LINE,
   normalizeMowHoldDays,
   isValidMowHold,
   GENERIC_MINUTES_PER_QUARTER_INCH,
