@@ -155,6 +155,15 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
+// Details opens the appointment details sheet on the schedule row the sheet was
+// opened from. When the live visit no longer matches that row (customer, date,
+// property, service or status drift: the sheet's blockedReason), the row is
+// stale and a cancel or move there would act on the current visit by id while
+// showing the old one, so Details is withheld until the sheet is reopened.
+export function detailsHandler(ctx, onViewDetails) {
+  return ctx?.blockedReason ? undefined : onViewDetails;
+}
+
 // `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
 // form button until the sheet itself says the visit needs the full form.
 // `onViewDetails` (owner 2026-10-09): a Details pill, shown while the visit is

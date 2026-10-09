@@ -26,7 +26,7 @@ jest.mock('../middleware/admin-auth', () => {
 const mockCommit = jest.fn(async () => ({ ok: true, results: [], qualityDates: [] }));
 jest.mock('../services/rain-out', () => ({
   commit: (...a) => mockCommit(...a),
-  getOptions: jest.fn(async () => ({ ok: true })),
+  getOptions: jest.fn(async () => ({ ok: true, sameDay: [{ kind: 'same_day' }], days: [{ kind: 'day' }] })),
   previewMovedSms: jest.fn(async () => ({ ok: true })),
   checkTarget: jest.fn(async () => ({ ok: true })),
 }));
@@ -115,4 +115,49 @@ test('detail: what admin-dispatch actually passes to commit for a technician cal
   // Documentation of the observed behaviour (not the desired one).
    
   console.log('OBSERVED status', r.status, 'commit calls', mockCommit.mock.calls.length, JSON.stringify(mockCommit.mock.calls[0]?.[0] || null));
+});
+
+// The tech portal's details sheet opens Dispatch's Quick Move. Under
+// GATE_COLLECTIVE_SERIES_ANCHOR, POST /rain-out refuses a non-admin any date
+// change on a recurring visit, so GET /rain-out-options offers that caller
+// today's options only (sameDayOnly) instead of days it would then refuse.
+describe('admin-dispatch rain-out options for a technician on a recurring visit', () => {
+  const prevGate = process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    else process.env.GATE_COLLECTIVE_SERIES_ANCHOR = prevGate;
+  });
+  async function getOptions(id) {
+    const res = await fetch(`${baseUrl}/api/admin/dispatch/${id}/rain-out-options`);
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+  beforeEach(() => {
+    db.__state.scheduledServices.push(
+      { id: 'svc-rec', technician_id: 'tech-1', customer_id: 'cust-1', status: 'scheduled', scheduled_date: etToday, is_recurring: true },
+      { id: 'svc-once', technician_id: 'tech-1', customer_id: 'cust-1', status: 'scheduled', scheduled_date: etToday, is_recurring: false },
+    );
+  });
+
+  test('gate on, recurring: today only, flagged sameDayOnly', async () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const { status, body: opts } = await getOptions('svc-rec');
+    expect(status).toBe(200);
+    expect(opts.sameDay).toHaveLength(1);
+    expect(opts.days).toEqual([]);
+    expect(opts.sameDayOnly).toBe(true);
+  });
+
+  test('gate on, one-off visit: every day stays offered', async () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const { body: opts } = await getOptions('svc-once');
+    expect(opts.days).toHaveLength(1);
+    expect(opts.sameDayOnly).toBeUndefined();
+  });
+
+  test('gate off, recurring: every day stays offered', async () => {
+    delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    const { body: opts } = await getOptions('svc-rec');
+    expect(opts.days).toHaveLength(1);
+    expect(opts.sameDayOnly).toBeUndefined();
+  });
 });

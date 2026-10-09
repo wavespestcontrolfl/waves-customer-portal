@@ -836,6 +836,10 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                     type="date"
                     value={customDate}
                     min={todayStr}
+                    // sameDayOnly (GET /rain-out-options): this login may not
+                    // move this recurring visit to another day.
+                    max={options?.sameDayOnly ? todayStr : undefined}
+                    disabled={!!options?.sameDayOnly}
                     onChange={(e) => setCustomDate(e.target.value)}
                     style={{
                       width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 500,
