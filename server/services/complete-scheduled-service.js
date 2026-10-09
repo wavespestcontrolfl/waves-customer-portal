@@ -6248,6 +6248,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
               code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,
             });
           }
+          // The add-on each application row belongs to was resolved BEFORE this lock. An Update Details save that removed or
+          // replaced an add-on (or moved the visit's own service) in between would leave rows tagged to work the visit no
+          // longer carries: resolved again on the LOCKED visit, and any difference rolls the record back as a changed visit
+          // (the form reloads and is submitted against what the visit carries now). No add-on row submitted: no query.
+          if (lockedSvcRow && !areaAddOnGovernedRate.sameAddOnTags(addOnTags, await areaAddOnGovernedRate.resolveApplicationAddOnTags(trx, lockedSvcRow, products))) {
+            throw Object.assign(new Error('add-on treatments changed during completion'), { code: 'visit_identity_changed' });
+          }
           // Identity drift on the LOCKED row, for a client that sent the
           // visit identity its form was built against: a visit moved to
           // another customer/property, reclassified, or rescheduled after
@@ -6256,13 +6263,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           if (expectedVisit && lockedSvcRow
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
-          }
-          // The add-on each application row belongs to was resolved BEFORE this lock. An Update Details save that removed or
-          // replaced an add-on (or moved the visit's own service) in between would leave rows tagged to work the visit no
-          // longer carries: resolved again on the LOCKED visit, and any difference rolls the record back as a changed visit
-          // (the form reloads and is submitted against what the visit carries now). No add-on row submitted: no query.
-          if (lockedSvcRow && !areaAddOnGovernedRate.sameAddOnTags(addOnTags, await areaAddOnGovernedRate.resolveApplicationAddOnTags(trx, lockedSvcRow, products))) {
-            throw Object.assign(new Error('add-on treatments changed during completion'), { code: 'visit_identity_changed' });
           }
           servicePhotoVisit = require('./service-photos').servicePhotoVisitSnapshot(lockedSvcRow);
           // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
