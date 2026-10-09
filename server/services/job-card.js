@@ -1409,10 +1409,14 @@ function mergeProductLines(lines) {
  * dosing instruction, so a spray-check Hold withholds it exactly as it
  * withholds a planned amount; area basis, limit and safety stay.
  */
-function governedForCard(governed, verdict) {
+function governedForCard(governed, verdict, product = {}) {
   if (!governed) return undefined;
-  const held = verdict.verdict === 'hold';
-  return { ...governed, rate: held ? null : governed.rate, rateNote: held ? `Spray check: ${verdict.reason} — rate withheld` : null };
+  // Same contract as a planned amount: no actionable rate while the spray
+  // check holds, or until the catalog product's label is verified.
+  const withheldReason = (verdict.verdict === 'hold' && `Spray check: ${verdict.reason} — rate withheld`)
+    || (!product.label_verified_at && 'Label rate not yet verified — rate withheld')
+    || null;
+  return { ...governed, rate: withheldReason ? null : governed.rate, rateNote: withheldReason };
 }
 
 async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
@@ -1452,7 +1456,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       verdictReason: verdict.reason,
       planned,
       // A chemical area add-on's label text (rate, area, limit, safety).
-      governed: governedForCard(line.governed, verdict),
+      governed: governedForCard(line.governed, verdict, p),
       // The plan's requirement for the shortage line — never an actionable
       // dose (it survives every withhold so "On hand X vs Y" stays whole).
       demand: demandMix ? { amount: Number(demandMix.amount), unit: demandMix.amountUnit || p.rate_unit || null } : null,

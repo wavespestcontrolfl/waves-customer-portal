@@ -1985,6 +1985,20 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       expect(buildPlan).not.toHaveBeenCalled();
     });
 
+    test('an unverified catalog label withholds the rate and keeps area, limit and safety', async () => {
+      const key = 'area_addon_lawn_insect_preventive';
+      const unverified = catalog.map((row) => (row.name === PRODUCT_BY_KEY[key] ? { ...row, label_verified_at: null } : row));
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: unverified, dbh: () => ({}) });
+      const [card] = await cardsFor(out.lines);
+      expect(card.governed).toMatchObject({ rate: null, rateNote: 'Label rate not yet verified — rate withheld', area: expect.any(String), limit: expect.any(String) });
+      // A Hold on an unverified label reports the Hold.
+      const [held] = await jobCard._test.buildProductCards({
+        facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
+        verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
+      });
+      expect(held.governed).toMatchObject({ rate: null, rateNote: 'Spray check: wind over 10 mph — rate withheld' });
+    });
+
     test('a spray-check Hold withholds the rate and keeps area, limit and safety', async () => {
       const key = 'area_addon_hardscape_weed';
       const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });

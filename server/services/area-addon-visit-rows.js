@@ -143,8 +143,12 @@ function needsNewSlotError(needed, booked) {
 // 90 minutes of treatments riding a 30-minute stop into the next booking.
 async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownServiceKey = null, adoptedRow = {} }) {
   // Lazy: estimate-slot-availability loads slot-reservation, which loads this module.
-  const profile = require('./estimate-slot-availability').resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
-  if (areaAddOnProfileRows(profile).length === 0) return 0;
+  const availability = require('./estimate-slot-availability');
+  if (areaAddOnProfileRows(availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' })).length === 0) return 0;
+  // The SAME resolver a fresh booking sizes with: under scheduling capacity it
+  // reads each service's catalog allowance on this transaction, so adoption
+  // neither refuses a visit a new booking would fit nor passes a shorter one.
+  const profile = await availability.resolveCatalogSlotProfile(estimate, { serviceMode: 'one_time' }, trx);
   const needed = Number(profile.durationMinutes) || 0;
   const booked = bookedVisitMinutes(adoptedRow);
   if (!(booked >= needed)) throw needsNewSlotError(needed, booked);
