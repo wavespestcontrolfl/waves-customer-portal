@@ -351,7 +351,7 @@ function isoOrNull(value) {
 // ("14:00:00-04:00"): an Eastern offset of either season is the wall clock
 // it spells (the isoOrNull rule above), so it reads as the bare time. Any
 // other offset is not a bare ET time and falls through.
-const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:-0[45]:?00)?$/;
+const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:-0[45](?::?00)?)?$/;
 // The schema checks a dated callback time as digits only. A date that does
 // not exist ("2026-02-30T14:00") would be rolled forward by the ET parser's
 // Date.UTC into a real-looking deadline on another day: no due time instead

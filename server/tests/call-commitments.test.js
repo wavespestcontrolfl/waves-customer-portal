@@ -190,6 +190,8 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     // The season slipped (-05:00 in September): the spoken hour still stands.
     expect(at('09:00:00-05:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
     expect(at('09:00:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    // Every Eastern spelling the old format allowed: -04, -0400, -04:00 (codex #6215 r7 P2).
+    for (const zone of ['-04', '-05', '-0400', '-0500']) expect(at(`09:00:00${zone}`, '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
     // A UTC time is not a bare ET wall clock: no invented instant.
     expect(at('09:00:00Z', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
   });
