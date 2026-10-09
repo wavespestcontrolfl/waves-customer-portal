@@ -48,7 +48,7 @@ describe('shared watering sentences', () => {
   test('the shared file holds the UF wilt signs, the fewer-longer-runs sentence and the add-minutes sentence', () => {
     expect(COPY.wiltSigns).toBe(WILT);
     expect(COPY.surplusAdvice).toBe('Skip a watering day rather than shortening your runs — longer runs reach the roots better than short ones.');
-    expect(COPY.deficitAdvice).toBe(`If the grass shows ${WILT}, add a few minutes to each run on your allowed watering days.`);
+    expect(COPY.deficitAdvice).toBe(`If the grass shows ${WILT}, run one full cycle on your next allowed watering day.`);
   });
 
   test('every shared sentence passes the customer copy screen', () => {
@@ -72,7 +72,7 @@ describe('portal recommendation cards (property-recommendations.js)', () => {
 
   test('deficit card: wilt signs first, then more minutes on allowed days (never an added day)', () => {
     expect(IRRIGATION_ADVICE.water_deficit_likely.body).toBe(
-      `Your recent lawn visits show less rain and sprinkler water than your lawn needs. If the grass shows ${WILT}, add a few minutes to each run on your allowed watering days.`,
+      `Your recent lawn visits show less rain and sprinkler water than your lawn needs. If the grass shows ${WILT}, run one full cycle on your next allowed watering day.`,
     );
   });
 
