@@ -829,7 +829,7 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     const recs = audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action === 'recommended');
     const b = recs.find((d) => d.service.id === 'b1');
     expect(b.newPlacement).toMatchObject({ date: CAND_BIG.date, window_start: CAND_BIG.start_time });
-    expect(b.reason_description).toMatch(/^Would move \(/);
+    expect(b.reason_description).toMatch(/^Would move \(.*\) after the overlapping visit moves \(estimate/);
   });
 
   // Apply moves a grouped visit as one unit. The partner overlaps two of its

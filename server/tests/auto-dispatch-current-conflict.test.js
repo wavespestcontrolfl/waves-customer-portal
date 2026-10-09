@@ -121,7 +121,7 @@ test('another technician\'s stop does not count; an unassigned row and an interv
 test('a closed day is its own conflict and is read first', async () => {
   blackout.isBlackoutDate.mockResolvedValue(true);
   expect(await currentConflict({ ...SERVICE, scheduled_date: '2026-11-26' }, CTX)).toEqual({ kind: 'closed_day', date: '2026-11-26' });
-  expect(blackout.isBlackoutDate).toHaveBeenCalledWith('2026-11-26', CTX.db);
+  expect(blackout.isBlackoutDate).toHaveBeenCalledWith('2026-11-26', CTX.db, { strict: true });
   expect(rebooker.probeMoveConflicts).not.toHaveBeenCalled();
 });
 

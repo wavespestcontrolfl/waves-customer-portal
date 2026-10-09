@@ -307,9 +307,9 @@ function overlapOf(evalResult) {
   return conflict && conflict.kind === 'overlap' ? conflict : null;
 }
 
-function logDryRunRecommendation(run, service, evalResult) {
+function logDryRunRecommendation(run, service, evalResult, note = '') {
   run.totals.recommended++;
-  return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: wouldMoveDescription(evalResult), ...evalResult.audit, appliedBy: 'auto_dispatch' });
+  return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: `${wouldMoveDescription(evalResult)}${note}`, ...evalResult.audit, appliedBy: 'auto_dispatch' });
 }
 
 // Dry run only: one recommendation per overlapping pair, in the order apply
@@ -339,8 +339,12 @@ async function recommendOverlapFixes(run) {
     if (cleared && pm.result.withoutConflict) {
       // The partner's move clears the overlap; this visit then moves on the
       // ordinary rules, to the slot those rules pick.
+      // An ESTIMATE: a dry run moves nothing, so this slot is scored on the
+      // schedule before the partner's move; apply mode evaluates the visit
+      // again after that move and may pick another slot or none. The row
+      // says so (Codex #6207 r12 P2).
       for (const id of unitIdsOf(pm)) movers.add(id);
-      await logDryRunRecommendation(run, pm.service, pm.result.withoutConflict);
+      await logDryRunRecommendation(run, pm.service, pm.result.withoutConflict, ' after the overlapping visit moves (estimate: scored before that move)');
     } else if (cleared) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });
     } else {

@@ -8,7 +8,8 @@
  * Two conflicts, both read with the same sources the move writer and the
  * offer surfaces use (never a re-expression of them):
  *   closed_day  the visit's date is an owner blackout day or weekly day off
- *               (scheduling/blackout-dates.js isBlackoutDate);
+ *               (scheduling/blackout-dates.js isBlackoutDate, strict: a read
+ *               failure throws);
  *   overlap     the visit's own arrival span overlaps another live stop that
  *               date: the rebooker's read-only probe (probeMoveConflicts,
  *               booked interviews included) expanded by occupancy.js's
@@ -140,7 +141,10 @@ async function currentConflict(service, ctx, excludeIds) {
   if (!ctx.conflictMoves || !service.window_start) return null;
   const dateStr = toDateStr(service.scheduled_date);
   const { isBlackoutDate } = require('../scheduling/blackout-dates');
-  if (await isBlackoutDate(dateStr, ctx.db)) return { kind: 'closed_day', date: dateStr };
+  // Strict: an unreadable closed-day list throws (the visit's evaluation
+  // fails and the run says so) instead of reading "open" and leaving the
+  // visit on a closed day unseen (Codex #6207 r12 P2).
+  if (await isBlackoutDate(dateStr, ctx.db, { strict: true })) return { kind: 'closed_day', date: dateStr };
   const ids = await overlappingStopIds(service, ctx, excludeIds || new Set([String(service.id)]), dateStr);
   return ids.length ? { kind: 'overlap', date: dateStr, with: ids } : null;
 }
