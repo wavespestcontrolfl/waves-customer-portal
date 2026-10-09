@@ -35,10 +35,37 @@ describe('getCounties (no database)', () => {
     expect(applicationLimits.getCounty({ city: city.toUpperCase() })).toBe(counties[0]);
   });
 
-  test('Longboat Key is both counties whatever the ZIP says; a shared ZIP with an unknown city is both too', () => {
+  test('Longboat Key is Sarasota and Manatee whatever the ZIP says', () => {
     expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '34228' })).toEqual([SARASOTA, MANATEE]);
     expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '34202' })).toEqual([SARASOTA, MANATEE]);
-    expect(applicationLimits.getCounties({ city: 'University Park', zip: '34243' })).toEqual([SARASOTA, MANATEE]);
+    expect(applicationLimits.getCounties({ city: 'Longboat Key', zip: '' })).toEqual([SARASOTA, MANATEE]);
+  });
+
+  // Each shared ZIP resolves to its own pair, as the service-area map (config/county-zips.js) lists it.
+  test.each([
+    ['34228', 'Longboat Key', [SARASOTA, MANATEE]],
+    ['34243', 'University Park', [SARASOTA, MANATEE]],
+    ['34223', 'Englewood area', [SARASOTA, CHARLOTTE]],
+    ['34224', 'Englewood area', [SARASOTA, CHARLOTTE]],
+  ])('shared ZIP %s (%s) is exactly %j', (zip, city, counties) => {
+    expect(applicationLimits.getCounties({ city, zip })).toEqual(counties);
+    expect(applicationLimits.getCounties({ city: '', zip: `${zip}-1234` })).toEqual(counties);
+  });
+
+  test('the shared ZIPs are exactly the four the service-area map lists under two counties, each pair read from the map', () => {
+    const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
+    const listed = {};
+    for (const [county, zips] of Object.entries(SERVICE_AREA_COUNTY_ZIPS)) for (const zip of zips) (listed[zip] = listed[zip] || []).push(`${county.toLowerCase()}_county`);
+    const shared = Object.entries(listed).filter(([, counties]) => counties.length > 1);
+    expect(shared.map(([zip]) => zip).sort()).toEqual(['34223', '34224', '34228', '34243']);
+    for (const [zip, counties] of shared) {
+      expect(applicationLimits.getCounties({ city: '', zip }).slice().sort()).toEqual(counties.slice().sort());
+    }
+  });
+
+  test('Englewood by name keeps the county it always had (Sarasota); a Charlotte ZIP outside the shared list is Charlotte alone', () => {
+    expect(applicationLimits.getCounties({ city: 'Englewood', zip: '34223' })).toEqual([SARASOTA]);
+    expect(applicationLimits.getCounties({ city: '', zip: '33950' })).toEqual([CHARLOTTE]);
   });
 
   test('a ZIP decides when the city is not on a list; nothing found is no county, as before', () => {
@@ -113,6 +140,27 @@ describeDb('the county nitrogen blackout, through checkLimits', () => {
     expect(found.join(' ')).toMatch(/manatee county/);
     expect(found.join(' ')).toMatch(/sarasota county/);
     expect(blackouts(await judge('Longboat Key', '2026-10-15', '34228'))).toEqual([]);
+  });
+
+  test('an Englewood-area shared ZIP (34223) is Sarasota and Charlotte: only the Sarasota blackout row exists, so one entry, never Manatee', async () => {
+    const found = blackouts(await judge('Somewhere', '2026-07-15', '34223'));
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/sarasota county/);
+    const lbk = blackouts(await judge('Somewhere', '2026-07-15', '34243'));
+    expect(lbk.join(' ')).toMatch(/sarasota county/);
+    expect(lbk.join(' ')).toMatch(/manatee county/);
+  });
+
+  test('with the prod severity (warning, not hard_block) the blackout is a warning, not a block, in an added city', async () => {
+    await knex('product_limits').where({ limit_type: 'seasonal_blackout' }).update({ severity: 'warning' });
+    try {
+      const result = await judge('Anna Maria', '2026-07-15', '34216');
+      expect(blackouts(result)).toEqual([]);
+      expect(result.warnings.filter((w) => w.type === 'seasonal_blackout')).toHaveLength(1);
+      expect(result.allowed).toBe(true);
+    } finally {
+      await knex('product_limits').where({ limit_type: 'seasonal_blackout' }).update({ severity: 'hard_block' });
+    }
   });
 
   test('Punta Gorda and Port Charlotte resolve to Charlotte County, which has no blackout row in product_limits: nothing is blocked, as before', async () => {

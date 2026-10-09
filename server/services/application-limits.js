@@ -5,6 +5,7 @@ const { applyV13CountCaps, v13CapEntryFor, V13_AMOUNT } = require('../config/law
 const V13_VERSION = '2026.10-v13';
 const { worstPropertyCount, worstPropertyTotal } = require('../utils/property-counts');
 const { resolveAddressCounty, SHARED_SERVICE_AREA_ZIPS } = require('../config/address-county');
+const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
 // active ingredient shared by every product that carries it (prodiamine: 65 WDG,
@@ -41,6 +42,12 @@ function windowsAround(items, day) {
   return [...sets.values()];
 }
 const dated = (rows) => rows.map((row, index) => ({ row, index, no: dayNumber(etCalendarDayOf(row.application_date)) }));
+
+// The counties of each ZIP the service-area map lists under more than one (34228 and 34243: Manatee and Sarasota; 34223 and 34224:
+// Sarasota and Charlotte), as product_limits jurisdictions, read from the map itself and never assumed. Sarasota first.
+const COUNTY_ORDER = ['Sarasota', 'Manatee', 'Charlotte'];
+const SHARED_ZIP_COUNTIES = new Map([...SHARED_SERVICE_AREA_ZIPS].map((zip) => [zip, COUNTY_ORDER
+  .filter((county) => SERVICE_AREA_COUNTY_ZIPS[county]?.includes(zip)).map((county) => `${county.toLowerCase()}_county`)]));
 
 const pct = (share) => Math.round(share * 1000) / 10;
 const capUnitOf = (limitUnit) => String(limitUnit || '').split('/')[0].trim();
@@ -511,18 +518,18 @@ class ApplicationLimitChecker {
   //  3. the repo's address tables (config/address-county.js, the table the watering rules use): the ZIP first, then a city that sits
   //     wholly in one county (Punta Gorda and Port Charlotte: Charlotte; Anna Maria, Holmes Beach, Bradenton Beach, Myakka City:
   //     Manatee; Siesta Key: Sarasota);
-  //  4. a ZIP the service-area map lists under two counties (34228, 34243, 34223, 34224): both;
+  //  4. a ZIP the service-area map lists under two counties: exactly those two, read from the map (34228 and 34243: Sarasota and
+  //     Manatee; 34223 and 34224: Sarasota and Charlotte);
   //  5. nothing found: [] (getCounty answers 'all', no county rule applies).
   getCounties(customer) {
     if (!customer) return [];
     const city = String(customer.city || '').trim().toLowerCase();
     if (['bradenton', 'lakewood ranch', 'parrish', 'palmetto', 'ellenton'].includes(city)) return ['manatee_county'];
     if (['sarasota', 'venice', 'nokomis', 'osprey', 'north port', 'englewood'].includes(city)) return ['sarasota_county'];
-    const shared = ['sarasota_county', 'manatee_county'];
-    if (city === 'longboat key') return shared;
+    if (city === 'longboat key') return ['sarasota_county', 'manatee_county'];
     const county = resolveAddressCounty({ zip: customer.zip, city });
     if (county) return [`${county.toLowerCase()}_county`];
-    return SHARED_SERVICE_AREA_ZIPS.has(String(customer.zip || '').trim().slice(0, 5)) ? shared : [];
+    return SHARED_ZIP_COUNTIES.get(String(customer.zip || '').trim().slice(0, 5)) || [];
   }
 
   isNitrogenFertilizer(product) {
