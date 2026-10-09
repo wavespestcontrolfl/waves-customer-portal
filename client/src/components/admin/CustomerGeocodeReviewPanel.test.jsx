@@ -1087,3 +1087,126 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(laterEvent.defaultPrevented).toBe(true);
   });
 });
+
+// The pin check after a visit (GATE_PIN_PARKED_CHECK): a truck-spot suggestion on the customer's review.
+describe("CustomerGeocodeReviewPanel pin suggestion", () => {
+  const suggestion = {
+    id: "11111111-1111-4111-8111-111111111111",
+    visit_date: "2026-10-08",
+    latitude: 27.4912345,
+    longitude: -82.5712345,
+    distance_m: 540,
+    stop_minutes: 25,
+    source: "site_visit",
+    evidence: "Truck parked here during the completed visit on Oct 8, 2026 (Bouncie GPS). Pin was 540 m away.",
+  };
+  const withSuggestion = (extra = {}) => ({ enabled: true, ...record({ review: { status: "geocoded", reason: "coordinates_present" } }), pin_suggestion: suggestion, ...extra });
+
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem("waves_admin_token", "test-token");
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("shows nothing new when the response carries no suggestion", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, ...record() })));
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /Primary service location review/ }));
+    await screen.findByText("Review location");
+    expect(screen.queryByTestId("pin-suggestion")).not.toBeInTheDocument();
+    expect(screen.queryByText("Truck spot suggested")).not.toBeInTheDocument();
+  });
+
+  it("opens by itself with the visit date, the distance and the stop length", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => response(withSuggestion())));
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    const box = await screen.findByTestId("pin-suggestion");
+    expect(box).toHaveTextContent("Oct 8, 2026");
+    expect(box).toHaveTextContent("540 m");
+    expect(box).toHaveTextContent("25 minutes");
+    expect(screen.getByText("Truck spot suggested")).toBeInTheDocument();
+  });
+
+  it("fills the verify form from the suggestion and still needs the confirmation", async () => {
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ enabled: true, ...record(), review: { status: "verified" } });
+      return response(withSuggestion());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use the truck's spot" }));
+
+    expect(screen.getByLabelText("Latitude")).toHaveValue("27.4912345");
+    expect(screen.getByLabelText("Longitude")).toHaveValue("-82.5712345");
+    expect(screen.getByLabelText("Confirmation source")).toHaveValue("site_visit");
+    expect(screen.getByLabelText("Evidence")).toHaveValue(suggestion.evidence);
+    expect(screen.getByRole("button", { name: "Verify pin" })).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("I confirmed this is the primary service location"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify pin" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, options]) => options?.method === "POST")).toBe(true));
+    const [url, options] = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(url).toContain("/admin/customer-geocodes/customer-1/resolve");
+    expect(JSON.parse(options.body)).toEqual({
+      revision: "revision-1",
+      action: "verify_pin",
+      latitude: 27.4912345,
+      longitude: -82.5712345,
+      source: "site_visit",
+      evidence: suggestion.evidence,
+      confirmed: true,
+      pin_suggestion_id: suggestion.id,
+    });
+  });
+
+  it("sends no suggestion id for a pin the person typed in by hand", async () => {
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ enabled: true, ...record(), review: { status: "verified" } });
+      return response(withSuggestion());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Confirmed at the front entry." } });
+    fireEvent.click(screen.getByLabelText("I confirmed this is the primary service location"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify pin" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    const [, options] = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(options.body)).not.toHaveProperty("pin_suggestion_id");
+  });
+
+  it("dismisses the suggestion and reloads without it", async () => {
+    let dismissed = false;
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (options.method === "POST") {
+        dismissed = true;
+        return response({ enabled: true, dismissed: true });
+      }
+      const body = withSuggestion();
+      if (dismissed) delete body.pin_suggestion;
+      return response(body);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(screen.queryByTestId("pin-suggestion")).not.toBeInTheDocument());
+    const [url, options] = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(url).toContain(`/admin/customer-geocodes/customer-1/pin-suggestions/${suggestion.id}/dismiss`);
+    expect(options.method).toBe("POST");
+  });
+
+  it("says so when the dismiss fails and keeps the suggestion", async () => {
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => (options.method === "POST"
+      ? response({ error: "boom" }, 500)
+      : response(withSuggestion()))));
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be dismissed");
+    expect(screen.getByTestId("pin-suggestion")).toBeInTheDocument();
+  });
+});

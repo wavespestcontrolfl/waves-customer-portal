@@ -147,6 +147,24 @@ function ReviewSummary({ record, draftActive, onSelectCustomer }) {
   );
 }
 
+// The pin check after a visit (GATE_PIN_PARKED_CHECK): the truck parked well away from the saved pin during a
+// completed visit. "Use the truck's spot" only fills the verify form; staff still confirm. "Dismiss" says the pin is right.
+function PinSuggestion({ suggestion, disabled, busy, onUse, onDismiss }) {
+  return (
+    <div className="mt-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 p-3" data-testid="pin-suggestion">
+      <div className="text-14 font-medium text-zinc-900">The truck parked away from this pin</div>
+      <div className="mt-1 text-14 text-ink-secondary">
+        On {formatETDateOnly(suggestion.visit_date, { month: "short", day: "numeric", year: "numeric" })} the truck stood about {suggestion.stop_minutes} minutes,
+        {" "}{suggestion.distance_m} m from the saved pin, and never stopped within arrival range of it.
+      </div>
+      <div className="flex flex-wrap gap-2 mt-2">
+        <Button variant="secondary" disabled={disabled} onClick={onUse}>Use the truck&apos;s spot</Button>
+        <Button variant="secondary" disabled={disabled} loading={busy} onClick={onDismiss}>Dismiss</Button>
+      </div>
+    </div>
+  );
+}
+
 function ReviewActions({ record, disabled, saving, onEdit, onResolve }) {
   const retryAvailable = record.review?.status === "provider_unavailable" && !hasCompletePin(record.customer);
   return (
@@ -170,12 +188,15 @@ function ReviewActions({ record, disabled, saving, onEdit, onResolve }) {
   );
 }
 
-function ReviewRecord({ record, active, draftActive, actionsDisabled, saving, error, conflicted, unavailable, onAcknowledgeConflict, onEdit, onResolve, onSelectCustomer }) {
+function ReviewRecord({ record, active, draftActive, actionsDisabled, saving, error, conflicted, unavailable, prefill, dismissing, onAcknowledgeConflict, onEdit, onResolve, onSelectCustomer, onUseTruckSpot, onDismissSuggestion }) {
   return (
     <div className="py-3 border-t border-hairline border-zinc-200 first:border-t-0">
       {!unavailable && (
         <>
           <ReviewSummary record={record} draftActive={draftActive} onSelectCustomer={onSelectCustomer} />
+          {record.pin_suggestion && !active && (
+            <PinSuggestion suggestion={record.pin_suggestion} disabled={actionsDisabled} busy={dismissing} onUse={onUseTruckSpot} onDismiss={onDismissSuggestion} />
+          )}
           {!active && <ReviewActions record={record} disabled={actionsDisabled} saving={saving} onEdit={onEdit} onResolve={onResolve} />}
         </>
       )}
@@ -184,7 +205,7 @@ function ReviewRecord({ record, active, draftActive, actionsDisabled, saving, er
           Latest saved pin: {hasCompletePin(record.customer) ? `${record.customer.latitude}, ${record.customer.longitude}` : "No saved pin"}
         </div>
       )}
-      {active && <CustomerGeocodeReviewForm record={record} saving={saving} error={error} conflicted={conflicted} unavailable={unavailable} cancelDisabled={saving || (conflicted && !unavailable)} onAcknowledgeConflict={onAcknowledgeConflict} onResolve={onResolve} onCancel={onEdit} />}
+      {active && <CustomerGeocodeReviewForm key={prefill?.id || "manual"} prefill={prefill} record={record} saving={saving} error={error} conflicted={conflicted} unavailable={unavailable} cancelDisabled={saving || (conflicted && !unavailable)} onAcknowledgeConflict={onAcknowledgeConflict} onResolve={onResolve} onCancel={onEdit} />}
     </div>
   );
 }
@@ -210,6 +231,8 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
   const [detailLoading, setDetailLoading] = useState(false);
   const [profileRefreshPending, setProfileRefreshPending] = useState(false);
   const [retryingProfileRefresh, setRetryingProfileRefresh] = useState(false);
+  const [prefill, setPrefill] = useState(null);
+  const [dismissingId, setDismissingId] = useState(null);
   const requestRef = useRef(0);
   const abortRef = useRef(null);
   const saveAbortRef = useRef(null);
@@ -350,6 +373,8 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
     setError("");
     setLoadError("");
     setProfileRefreshPending(false);
+    setPrefill(null);
+    setDismissingId(null);
     return () => {
       scopeRef.current += 1;
       saveAbortRef.current?.abort();
@@ -396,6 +421,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
       activeIdRef.current = null;
       setActiveId(null);
       setConflictId(null);
+      setPrefill(null);
       let refreshFailed = false;
       try {
         await onResolved?.();
@@ -486,19 +512,47 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
       activeIdRef.current = null;
       setActiveId(null);
       setConflictId(null);
+      setPrefill(null);
       setError("");
       if (loadError) void load();
       return;
     }
     activeIdRef.current = customerId;
     setActiveId((id) => id === customerId ? null : customerId);
+    setPrefill(null);
     setError("");
   };
-  return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, retryingProfileRefresh, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord };
+  // Opens the verify form filled with the pin check's suggestion. Nothing is saved until staff confirm and press Verify pin.
+  const useTruckSpot = (record) => {
+    if (!record.pin_suggestion) return;
+    activeIdRef.current = record.customer.id;
+    setActiveId(record.customer.id);
+    setPrefill(record.pin_suggestion);
+    setError("");
+  };
+  const dismissSuggestion = async (record) => {
+    if (dismissingId || !record.pin_suggestion) return;
+    const scope = scopeRef.current;
+    const current = () => mountedRef.current && scope === scopeRef.current;
+    setDismissingId(record.pin_suggestion.id);
+    setError("");
+    let failure = "";
+    try {
+      await adminFetch(`/admin/customer-geocodes/${encodeURIComponent(record.customer.id)}/pin-suggestions/${encodeURIComponent(record.pin_suggestion.id)}/dismiss`, { method: "POST" });
+    } catch (dismissError) {
+      failure = dismissError.status === 409 ? "That pin suggestion was already closed. The latest is loaded." : "The pin suggestion could not be dismissed. Try again.";
+    }
+    if (!current()) return;
+    await load({ preserveDraft: false });
+    if (!current()) return;
+    if (failure) setError(failure);
+    setDismissingId(null);
+  };
+  return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, retryingProfileRefresh, prefill, dismissingId, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord, useTruckSpot, dismissSuggestion };
 }
 
 function ReviewContents({ customerId, onSelectCustomer, model }) {
-  const { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, retryingProfileRefresh, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord } = model;
+  const { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, retryingProfileRefresh, prefill, dismissingId, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord, useTruckSpot, dismissSuggestion } = model;
   const recordsUnavailable = detailLoading || Boolean(loadError);
   const visibleRecords = recordsUnavailable
     ? state.records.filter((record) => record.customer.id === activeId)
@@ -543,10 +597,14 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
           error={activeId === record.customer.id ? error : ""}
           conflicted={conflictId === record.customer.id}
           unavailable={recordsUnavailable}
+          prefill={activeId === record.customer.id ? prefill : null}
+          dismissing={Boolean(record.pin_suggestion) && dismissingId === record.pin_suggestion.id}
           onAcknowledgeConflict={acknowledgeConflict}
           onEdit={() => editRecord(record.customer.id)}
           onResolve={(body) => resolve(record, body)}
           onSelectCustomer={onSelectCustomer}
+          onUseTruckSpot={() => useTruckSpot(record)}
+          onDismissSuggestion={() => dismissSuggestion(record)}
         />
       ))}
       {showPagination && (
@@ -566,6 +624,9 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
   const [open, setOpen] = useState(false);
   const model = useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveChange });
   const { state, loadError, error } = model;
+  // A pin suggestion is worth seeing without a click: open the panel once when one arrives.
+  const hasSuggestion = Boolean(customerId && state.records.some((record) => record.pin_suggestion));
+  useEffect(() => { if (hasSuggestion) setOpen(true); }, [hasSuggestion]);
   if (state.enabled === false) return null;
   if (state.enabled === null && !loadError && !error) return null;
   return (
@@ -578,7 +639,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
         onClick={() => setOpen((value) => !value)}
       >
         <span className="flex items-center gap-2 text-14 font-medium text-zinc-900"><MapPin size={16} />{customerId ? "Primary service location review" : "Address review queue"}</span>
-        <span className="flex items-center gap-2 text-14 text-ink-secondary">{!customerId && state.total > 0 ? state.total : ""}<ChevronDown size={16} className={cn("transition-transform", open && "rotate-180")} /></span>
+        <span className="flex items-center gap-2 text-14 text-ink-secondary">{!customerId && state.total > 0 ? state.total : ""}{hasSuggestion && <Badge tone="neutral">Truck spot suggested</Badge>}<ChevronDown size={16} className={cn("transition-transform", open && "rotate-180")} /></span>
       </button>
       <div hidden={!open}><ReviewContents customerId={customerId} onSelectCustomer={onSelectCustomer} model={model} /></div>
     </Card>

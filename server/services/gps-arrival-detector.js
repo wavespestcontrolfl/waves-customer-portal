@@ -649,6 +649,10 @@ function resetConfigCache() {
 
 module.exports = {
   maybeMarkArrivedFromGps,
+  // Shared with the pin check after a visit (pin-parked-check.js): the one
+  // distance function and the one arrival-radius setting, never a copy.
+  distanceMeters,
+  loadArrivalConfig: loadConfig,
   _test: {
     DEFAULT_CONFIG,
     buildArrivalDecision,
