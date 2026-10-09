@@ -129,7 +129,7 @@ import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPos
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
 import { HeldLines, SodBanner } from './LawnSodParts';
-import { newSodOf, releasedPlanned, sodAddLook, sodLineOf, sodRowNote, sodWords, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
+import { newSodOf, sodAddLook, sodLineOf, sodRowNote, sodWords, splitHeldPlanned } from '../../lib/lawn-sod-sheet';
 import SpotTargetControl from './LawnSpotTarget';
 import { spotTargetsOf, targetBodyFields } from '../../lib/lawn-spot-target';
 import { RowMixHelp, WeedMixHelp, useMixHelp } from './LawnMixHelp';
@@ -955,9 +955,10 @@ const plannedRows = (ctx, catalog) => rowsForPlanned(splitHeldPlanned(uniquePlan
 function useProductRows(ctx, catalog) {
   const spotRules = !!ctx.spotRules;
   const [rows, setRows] = useState(() => plannedRows(ctx, catalog));
-  // The products the technician added or removed himself this session (a hold released later leaves his choice alone).
+  // The products the technician added, removed or changed himself this session (a later re-read of the holds leaves his choice alone).
   const touched = useRef(new Set());
   const updateRow = useCallback((productId, patch) => {
+    touched.current.add(String(productId).toLowerCase());
     setRows((prev) => prev.map((row) => {
       if (row.productId !== productId) return row;
       // A unit change on a row whose amount is figured (nothing typed, no plan
@@ -992,13 +993,20 @@ function useProductRows(ctx, catalog) {
     touched.current.add(String(productId).toLowerCase());
     setRows((prev) => prev.filter((row) => row.productId !== productId));
   }, []);
-  // A planned default whose new-sod hold ended comes back as the selected row a fresh sheet would show, unless the
-  // technician already added or removed that product himself (or the row is there).
-  const releasePlanned = useCallback((items) => {
+  // GATE_LAWN_NEW_SOD_NOTE: the rows after the holds were read again (the rooted tick). `start` is what a FRESH sheet would start
+  // with now: the refreshed plan's lines the refreshed holds do not keep off. A row the technician has not touched follows it:
+  // it leaves when the refreshed plan or holds no longer start with it, it takes the refreshed plan's quantity, and a released
+  // line comes back. A product he added, removed or changed himself stays as he left it.
+  const reconcilePlanned = useCallback((start) => {
+    const lower = (id) => String(id).toLowerCase();
+    const fresh = new Map(start.map((item) => [lower(item.productId), item]));
     setRows((prev) => {
-      const here = new Set(prev.map((row) => String(row.productId).toLowerCase()));
-      const back = items.filter((item) => !here.has(String(item.productId).toLowerCase()) && !touched.current.has(String(item.productId).toLowerCase()));
-      return back.length ? [...prev, ...rowsForPlanned(back, ctx, catalog)] : prev;
+      const mine = (row) => touched.current.has(lower(row.productId)) || row.added;
+      const kept = prev.filter((row) => mine(row) || fresh.has(lower(row.productId)))
+        .map((row) => (mine(row) ? row : rowsForPlanned([fresh.get(lower(row.productId))], ctx, catalog)[0]));
+      const here = new Set(kept.map((row) => lower(row.productId)));
+      const back = start.filter((item) => !here.has(lower(item.productId)) && !touched.current.has(lower(item.productId)));
+      return [...kept, ...rowsForPlanned(back, ctx, catalog)];
     });
   }, [ctx, catalog]);
   const removeRows = useCallback((ids) => setRows((prev) => prev.filter((row) => !ids.includes(row.productId))), []);
@@ -1006,7 +1014,7 @@ function useProductRows(ctx, catalog) {
   const applyStock = useCallback((fresh) => {
     setRows((prev) => prev.map((row) => ({ ...row, product: withFreshStock(row.product, fresh) })));
   }, []);
-  return { rows, updateRow, addProduct, removeRow, removeRows, applyStock, releasePlanned };
+  return { rows, updateRow, addProduct, removeRow, removeRows, applyStock, reconcilePlanned };
 }
 
 // ── what is missing, and the body ───────────────────────────────────────────
@@ -1067,7 +1075,7 @@ const noProductNoteJoined = (note, rows, newSod) => {
   return text.includes(newSod.noProductNote) ? text : [text, newSod.noProductNote].filter(Boolean).join(' ');
 };
 
-function missingRequirement({ noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
@@ -1075,6 +1083,8 @@ function missingRequirement({ noProductOk = false, form, rows, guideHold, lawnSq
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
   const missingPlace = rows.find((row) => row.placeRule && !row.place);
   const [, reason = ''] = [
+    // GATE_LAWN_NEW_SOD_NOTE: the rooted tick is being saved, or the holds could not be read again after it.
+    [sodWait, sodWait],
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
     [assessmentReady === false, 'Wait for the lawn check to finish.'],
@@ -1476,11 +1486,13 @@ function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }
 
 // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them, and the rooted tick. The tick reads the holds again
 // (`sodFresh`; `undefined` = the context's own).
-function useSodHolds({ ctx, request, base, releasePlanned }) {
+function useSodHolds({ ctx, request, base, reconcilePlanned }) {
   const [sodFresh, setSodFresh] = useState(undefined);
   // True from the tick until the holds are read again: the sheet does not complete on the rows of the old holds.
   const [sodBusy, setSodBusy] = useState(false);
   const [sodStale, setSodStale] = useState(false);
+  // The planned lines as the server last gave them (`undefined` = the context's own): the plan may have changed since the sheet opened.
+  const [plannedFresh, setPlannedFresh] = useState(undefined);
   const saveSodRooted = useCallback(async (sodLaidOn) => {
     await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
     // The weed lines un-hold on this re-read: the server's own words, not a guess here.
@@ -1498,14 +1510,17 @@ function useSodHolds({ ctx, request, base, releasePlanned }) {
     if (fresh?.unavailable) throw new Error(SOD_REREAD_MESSAGE);
     setSodStale(false);
     setSodFresh(fresh);
-    // A planned default the hold kept off the sheet comes back; an add-on is a plain "Add" again on its own.
-    releasePlanned(releasedPlanned(uniquePlanned(ctx.planned), ctx.newSod, fresh));
-  }, [request, base, ctx, releasePlanned]);
+    // The rows follow the refreshed plan and holds, not the opening ones: a released line comes back, a line the plan dropped
+    // or the holds now keep off leaves. An add-on is a plain "Add" again on its own.
+    const planned = plannedItemsOf(data);
+    setPlannedFresh(planned);
+    reconcilePlanned(splitHeldPlanned(uniquePlanned(planned), fresh).start);
+  }, [request, base, reconcilePlanned]);
   const confirmSodRooted = useCallback(async (sodLaidOn) => {
     setSodBusy(true);
     try { await saveSodRooted(sodLaidOn); } finally { setSodBusy(false); }
   }, [saveSodRooted]);
-  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale ? SOD_REREAD_MESSAGE : '' };
+  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, planned: plannedFresh, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale ? SOD_REREAD_MESSAGE : '' };
 }
 
 function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
@@ -1518,7 +1533,9 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads them again (`undefined` = the context's own).
-  const { newSod, confirmSodRooted, sodWait } = useSodHolds({ ctx, request, base, releasePlanned: products.releasePlanned });
+  const { newSod, planned: sodPlanned, confirmSodRooted, sodWait } = useSodHolds({ ctx, request, base, reconcilePlanned: products.reconcilePlanned });
+  // The context with the planned lines of the last read: the skipped list and the held group follow them.
+  const sheetCtx = useMemo(() => (sodPlanned ? { ...ctx, planned: sodPlanned } : ctx), [ctx, sodPlanned]);
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
@@ -1639,13 +1656,13 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
 
   const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
   // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
-  const missingReason = sodWait || missingRequirement({ noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ newSod, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap }),
+      () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap }),
       [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
     );
   };
@@ -1695,7 +1712,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
-          <ProductsSection mix={mix} ctx={ctx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={(value) => { setWeedArea(value); if (value) mix.setWeedGallons(''); }} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection mix={mix} ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={(value) => { setWeedArea(value); if (value) mix.setWeedGallons(''); }} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}

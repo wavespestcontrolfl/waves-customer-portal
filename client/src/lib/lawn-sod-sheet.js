@@ -56,11 +56,3 @@ export const sodWords = (line) => (line?.held ? line.reason : line?.note) || '';
 export const sodAddLook = (line) => (line?.held
   ? { className: 'tech-protocol-addon tech-sod-held-line', suffix: ' anyway', label: 'Add anyway' }
   : { className: 'tech-protocol-addon', suffix: '', label: 'Add' });
-
-/**
- * The planned items a hold kept off the sheet when it opened (`before`) that the server no longer holds (`after`, the
- * re-read after the rooted tick; the caller never passes an `unavailable` one). No hold at all (`null`) releases every one.
- */
-export function releasedPlanned(planned, before, after) {
-  return (planned || []).filter((item) => sodHeld(before, item.productId) && !sodHeld(after, item.productId));
-}

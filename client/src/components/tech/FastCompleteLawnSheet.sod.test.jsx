@@ -404,6 +404,43 @@ describe('the rooted tick', () => {
     await screen.findByText('Saved. The sheet could not reload the holds. Tap the box again.');
     expect(within(banner()).getByRole('checkbox').checked).toBe(false);
   });
+  // Codex round 3 on #6240: the re-read's plan and holds decide the rows, not the opening ones.
+  describe('the plan or the holds changed while the sheet was open', () => {
+    const HELD_BAG = { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer waits until the sod has been mowed twice and does not lift.' };
+    const rowNames = () => completeCalls()[0].body.products.map((p) => p.productId);
+    const tickIt = async () => {
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await waitFor(() => expect(within(banner()).queryByRole('checkbox')).toBeNull());
+    };
+
+    test('a held line the refreshed plan dropped does not come back, and is not a skipped default', async () => {
+      await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(AFTER, { items: [item(P_NUTRA, 'Test Nutra Mix', { applicationMethod: 'broadcast_spray', amountUnit: 'fl_oz', amount: 30 })] }));
+      await tickIt();
+      await analyzeAndComplete();
+      expect(rowNames()).toEqual([P_NUTRA]);
+      expect(completeCalls()[0].body.lawnProtocolCompletion).toBeUndefined();
+    });
+
+    test('an untouched row the refreshed holds now keep off leaves the sheet; a released line takes the refreshed quantity', async () => {
+      const NOW_HELD = { ...AFTER, lines: { [P_NUTRA]: { held: true, kinds: ['fertilizer'], reason: HELD_FERT } } };
+      await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(NOW_HELD, { items: [item(P_BAG24, 'Test 24-0-11 Bag', { amount: 9 }), item(P_NUTRA, 'Test Nutra Mix', { applicationMethod: 'broadcast_spray', amountUnit: 'fl_oz', amount: 30 })] }));
+      await tickIt();
+      expect(within(heldGroup()).getByText('Test Nutra Mix')).toBeTruthy();
+      const bag = screen.getAllByRole('group', { name: 'Test 24-0-11 Bag' }).filter((el) => !el.classList.contains('tech-sod-held'));
+      expect(within(bag[0]).getByRole('spinbutton').value).toBe('9');
+      await analyzeAndComplete();
+      expect(rowNames()).toEqual([P_BAG24]);
+    });
+
+    test('a row the technician changed himself stays as he left it', async () => {
+      await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(AFTER, { items: [item(P_BAG24, 'Test 24-0-11 Bag')] }));
+      const nutra = () => screen.getAllByRole('group', { name: 'Test Nutra Mix' })[0];
+      fireEvent.change(within(nutra()).getByRole('spinbutton'), { target: { value: '22' } });
+      await tickIt();
+      expect(within(nutra()).getByRole('spinbutton').value).toBe('22');
+    });
+  });
+
   // Codex round 2 on #6240: a saved tick whose re-read failed leaves the old holds' rows on the sheet.
   test('after a saved tick whose re-read failed, Complete stays off until a tick reads the holds again', async () => {
     const HELD_BAG = { held: true, kinds: ['weedKiller'], reason: 'Held: new sod. Weed killer waits until the sod has been mowed twice and does not lift.' };
