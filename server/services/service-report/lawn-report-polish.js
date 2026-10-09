@@ -93,10 +93,12 @@ function joinWords(words) {
 }
 
 /**
- * "45 min, Mondays" from the stored run minutes and watering days. Only the part that is on file prints
- * ("45 min", "Mondays"); all seven days read "every day". null when neither part is on file.
+ * What the customer's stored sprinkler schedule holds: { text: "45 min, Mondays", parts } or null when neither part
+ * is on file. Only the part that is on file prints ("45 min", "Mondays"); all seven days read "every day".
+ * `parts` says WHICH are on file, so the card's words can follow the missing input:
+ * 'minutes_and_days' | 'minutes_only' | 'days_only'.
  */
-function describeScheduleOnFile(propertyPrefs) {
+function scheduleOnFileDetail(propertyPrefs) {
   if (!propertyPrefs) return null;
   const inputs = normalizeRuntimeInputs({
     runMinutes: propertyPrefs.irrigation_run_minutes,
@@ -104,8 +106,16 @@ function describeScheduleOnFile(propertyPrefs) {
     systemType: propertyPrefs.irrigation_system_type,
   });
   const days = inputs.wateringDays.length === 7 ? 'every day' : joinWords(inputs.wateringDays.map((day) => DAY_WORDS[day]));
-  const parts = [inputs.runMinutes != null ? `${inputs.runMinutes} min` : null, days || null].filter(Boolean);
-  return parts.length ? parts.join(', ') : null;
+  const minutes = inputs.runMinutes != null ? `${inputs.runMinutes} min` : null;
+  const parts = [minutes, days || null].filter(Boolean);
+  if (!parts.length) return null;
+  return { text: parts.join(', '), parts: minutes && days ? 'minutes_and_days' : (minutes ? 'minutes_only' : 'days_only') };
+}
+
+/** "45 min, Mondays" (see scheduleOnFileDetail), or null when nothing is on file. */
+function describeScheduleOnFile(propertyPrefs) {
+  const detail = scheduleOnFileDetail(propertyPrefs);
+  return detail ? detail.text : null;
 }
 
 const formatInches = (value) => Number(value).toFixed(2).replace(/\.?0+$/, '');
@@ -133,6 +143,7 @@ function scheduleOnFileExplanation(scheduleText, target) {
  * The extras buildLawnWaterContext adds to its result while the gate is live:
  *   scheduleKind  'inches' (A) | 'runtime_only' (B) | 'none' (C)
  *   scheduleText  B only: what is on file ("45 min, Mondays")
+ *   scheduleParts B only: which parts are on file ('minutes_and_days' | 'minutes_only' | 'days_only')
  *   irrigationBasis  A only, and only for a figure derived from minutes and days
  * `inchesKnown` is the final verdict of the advice engine (profileMissing === false); `fromPrefs` says the figure
  * the report used came from the portal entry (explicit or derived), not a turf or assessment reading.
@@ -144,28 +155,53 @@ function polishWaterContext({ propertyPrefs, scheduleUnconfirmed, profileMissing
     return { scheduleKind: 'inches', ...(basis ? { irrigationBasis: basis } : {}) };
   }
   const onFile = !scheduleUnconfirmed && propertyPrefs && propertyPrefs.irrigation_system !== false
-    ? describeScheduleOnFile(propertyPrefs) : null;
-  return onFile ? { scheduleKind: 'runtime_only', scheduleText: onFile } : { scheduleKind: 'none' };
+    ? scheduleOnFileDetail(propertyPrefs) : null;
+  return onFile ? { scheduleKind: 'runtime_only', scheduleText: onFile.text, scheduleParts: onFile.parts } : { scheduleKind: 'none' };
 }
 
 /**
  * The water payload fields the report copies from the context (a spread in mapWater, both paths). The card's state
- * follows the figure the card itself prints: with inches on the card (`scheduleOnFile`) it is A (the basis line only
- * on the live path, where the figure is the portal's); without them, B when the context found a schedule on file,
- * else C. State B also replaces the explanation (it said "we don't have your irrigation schedule on file yet").
- * Nothing while the gate is off (the context carries no polish key).
+ * follows the figure the card itself prints: with inches on the card (`scheduleOnFile`) it is A, and a derived
+ * figure carries its basis line (the snapshot path only reaches here after snapshotForCard proved the snapshot's
+ * figure is the context's own); without inches, B when the context found a schedule on file, else C. State B also
+ * replaces the explanation (it said "we don't have your irrigation schedule on file yet") and says WHICH parts are
+ * on file (scheduleParts). Nothing while the gate is off (the context carries no polish key).
  */
-function waterPolishFields(waterContext, { target = null, scheduleOnFile = false, live = true } = {}) {
+function waterPolishFields(waterContext, { target = null, scheduleOnFile = false } = {}) {
   if (!waterContext || !waterContext.scheduleKind) return {};
   if (scheduleOnFile) {
-    return { scheduleKind: 'inches', ...(live && waterContext.irrigationBasis ? { irrigationBasis: waterContext.irrigationBasis } : {}) };
+    return { scheduleKind: 'inches', ...(waterContext.irrigationBasis ? { irrigationBasis: waterContext.irrigationBasis } : {}) };
   }
   if (waterContext.scheduleKind !== 'runtime_only') return { scheduleKind: 'none' };
   return {
     scheduleKind: 'runtime_only',
     scheduleText: waterContext.scheduleText,
+    scheduleParts: waterContext.scheduleParts,
     explanation: scheduleOnFileExplanation(waterContext.scheduleText, target),
   };
+}
+
+const positiveOrNull = (value) => {
+  const n = numberOrNull(value);
+  return n != null && n > 0 ? n : null;
+};
+
+/**
+ * The area water snapshot the card may use, or null (the card then reads the live context). A snapshot stores the
+ * weekly irrigation figure it was computed with but not where that figure came from or which rate table made it, so
+ * while the gate is live it is used ONLY when that figure equals the figure the report resolves now (explicit
+ * inches as the customer entered them, else the figure derived on the banner's table, else a turf or assessment
+ * reading). An older snapshot made on the package's default table, or one made before the customer changed the
+ * schedule, disagrees: its balance and total would print a number of unknown origin, so the card falls to the live
+ * context, which prints the current figure with its basis, or the third state when none can be derived.
+ * Gate off (the context carries no polish key): the snapshot passes through unchanged.
+ */
+function snapshotForCard(waterContext, waterSnapshot) {
+  if (!waterSnapshot || !waterContext || !waterContext.scheduleKind) return waterSnapshot;
+  const stored = positiveOrNull(waterSnapshot.irrigation_inches_per_week);
+  const current = positiveOrNull(waterContext.irrigationInchesPerWeek);
+  if (stored == null || current == null) return stored == null && current == null ? waterSnapshot : null;
+  return Math.abs(stored - current) <= 0.01 ? waterSnapshot : null;
 }
 
 module.exports = {
@@ -178,5 +214,6 @@ module.exports = {
   derivedBasisLine,
   polishWaterContext,
   waterPolishFields,
+  snapshotForCard,
   scheduleOnFileExplanation,
 };

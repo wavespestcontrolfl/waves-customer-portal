@@ -96,6 +96,41 @@ describe('ONE rate table: the banner\'s (spray 15 min, rotor 40 min per quarter 
   });
 });
 
+describe('the label-line half needs the facts gate; the Water card half does not', () => {
+  const FACTS = 'GATE_LAWN_REPORT_FACTS';
+  const savedFacts = process.env[FACTS];
+  afterEach(() => { if (savedFacts === undefined) delete process.env[FACTS]; else process.env[FACTS] = savedFacts; });
+  const set = (polishOn, factsOn) => {
+    if (polishOn) gateOn(); else gateOff();
+    if (factsOn) process.env[FACTS] = 'true'; else delete process.env[FACTS];
+  };
+
+  test('truth table: lawnReportLabelLinesLive() = polish AND facts, strict true', () => {
+    const rows = [[false, false, false], [true, false, false], [false, true, false], [true, true, true]];
+    rows.forEach(([p, f, want]) => { set(p, f); expect(featureGates.lawnReportLabelLinesLive()).toBe(want); });
+    process.env[GATE] = '1'; process.env[FACTS] = 'true';
+    expect(featureGates.lawnReportLabelLinesLive()).toBe(false);
+  });
+
+  test('polish alone (facts dark): the Water card and status key still work', () => {
+    set(true, false);
+    expect(featureGates.lawnReportPolishLive()).toBe(true);
+    expect(featureGates.lawnReportLabelLinesLive()).toBe(false);
+    const water = mapWater(buildLawnWaterContext({ propertyPrefs: { irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['rotor', 'spray'], irrigation_system: true }, serviceDate: '2026-10-09', completionRainfall7dInches: 1.2 }));
+    expect(water.scheduleKind).toBe('runtime_only');
+    expect(polish.lawnPolishPayload({ serviceLine: 'lawn', reportV2: {} })).toEqual({ lawnPolish: true });
+  });
+
+  test('read side: a record frozen with labelLines renders them whatever either gate says', () => {
+    const notes = JSON.stringify({ lawnReportFacts: { v: 1, frozenAt: '2026-10-09T12:00:00Z', reentry: { rule: 'dry' }, productUse: {}, labelLines: { v: 1, items: { 'sp-9': [0] } } } });
+    [[false, false], [true, false], [false, true], [true, true]].forEach(([p, f]) => {
+      set(p, f);
+      expect(facts.frozenLabelDropsFor('lawn', notes)).toEqual({ 'sp-9': [0] });
+      expect(facts.precautionForCard(facts.frozenLabelDropsFor('lawn', notes), { id: 'sp-9' }, 'A. B.')).toBe('B.');
+    });
+  });
+});
+
 describe('the report\'s irrigation figure while the gate is live', () => {
   const prefs = (extra) => ({ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['rotor'], irrigation_system: true, ...extra });
 
@@ -183,6 +218,92 @@ describe('the report\'s irrigation figure while the gate is live', () => {
       const water = mapWater(buildLawnWaterContext({ propertyPrefs: prefs({ irrigation_system_type: systemType }), serviceDate: '2026-10-09', completionRainfall7dInches: 1.2 }));
       ['scheduleKind', 'scheduleText', 'irrigationBasis'].forEach((key) => expect(water).not.toHaveProperty(key));
     }
+  });
+});
+
+describe('an area water snapshot is used only when its irrigation figure is the one the report resolves now', () => {
+  const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
+  const prefs = (extra) => ({ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['rotor'], irrigation_system: true, ...extra });
+  // No property rainfall, so the card may fall back to the area snapshot.
+  const context = (propertyPrefs) => buildLawnWaterContext({ propertyPrefs, serviceDate: '2026-10-09' });
+  const snapshot = (irrigation_inches_per_week) => ({
+    status: 'low', interpretation: 'water_deficit_likely', confidence: 'high', rain_7day_inches: 0.5, adjusted_rain_7day_inches: 0.5,
+    irrigation_inches_per_week, total_water_7day_inches: 0.5 + irrigation_inches_per_week, target_water_inches_per_week: 1,
+  });
+
+  test('explicit inches + a snapshot made with the same figure: the snapshot is used, inches as entered, no basis line', () => {
+    gateOn();
+    const water = mapWater(context(prefs({ irrigation_inches_per_week: 1.25 })), snapshot(1.25));
+    expect(water).toMatchObject({ source: 'area_snapshot', scheduleKind: 'inches', irrigationInches: 1.25 });
+    expect(water).not.toHaveProperty('irrigationBasis');
+  });
+
+  test('explicit inches + a snapshot with another figure: the customer\'s inches print as entered (the live card), never the snapshot\'s', () => {
+    gateOn();
+    const water = mapWater(context(prefs({ irrigation_inches_per_week: 1.25 })), snapshot(0.38));
+    expect(water).toMatchObject({ source: 'irrigation_advice', scheduleKind: 'inches', irrigationInches: 1.25 });
+    expect(water).not.toHaveProperty('irrigationBasis');
+  });
+
+  test('single head + a snapshot made on the same table: the snapshot is used and the basis line rides with the figure', () => {
+    gateOn();
+    const water = mapWater(context(prefs()), snapshot(0.28));
+    expect(water).toMatchObject({ source: 'area_snapshot', scheduleKind: 'inches', irrigationInches: 0.28 });
+    expect(water.irrigationBasis).toMatch(/^About 0\.28" a week from 45 minutes per zone/);
+  });
+
+  test('single head + an OLD snapshot (package table, 0.38): no figure of unknown origin; the card prints the current 0.28 with its basis', () => {
+    gateOn();
+    const water = mapWater(context(prefs()), snapshot(0.38));
+    expect(water).toMatchObject({ source: 'irrigation_advice', scheduleKind: 'inches', irrigationInches: 0.28 });
+    expect(water.irrigationBasis).toMatch(/^About 0\.28"/);
+    expect(JSON.stringify(water)).not.toMatch(/0\.38|0\.88/);
+  });
+
+  test('mixed heads + a snapshot that holds a figure: the third state (schedule on file, inches not on file), no snapshot number', () => {
+    gateOn();
+    const water = mapWater(context(prefs({ irrigation_system_type: ['rotor', 'spray'] })), snapshot(0.38));
+    expect(water).toMatchObject({ source: 'irrigation_advice', scheduleKind: 'runtime_only', scheduleText: '45 min, Mondays', scheduleParts: 'minutes_and_days', scheduleOnFile: false });
+    expect(water.irrigationInches).toBeNull();
+    expect(JSON.stringify(water)).not.toMatch(/0\.38|0\.88/);
+  });
+
+  test('gate off: the snapshot passes through exactly as before, whatever its figure', () => {
+    gateOff();
+    const water = mapWater(context(prefs()), snapshot(0.99));
+    expect(water).toMatchObject({ source: 'area_snapshot', irrigationInches: 0.99 });
+    ['scheduleKind', 'irrigationBasis', 'scheduleParts'].forEach((key) => expect(water).not.toHaveProperty(key));
+    expect(polish.snapshotForCard({}, snapshot(0.99))).toEqual(snapshot(0.99));
+  });
+
+  test('the diagnosis reads the same snapshot as the card (a rejected snapshot drives neither)', () => {
+    gateOn();
+    const waterContext = context(prefs());
+    const report = (irrigation) => buildLawnReportV2({ lawnAssessment: { scores: {}, waterContext }, applications: [], waterSnapshot: { ...snapshot(irrigation), interpretation: 'wet_condition_watch', status: 'high' } });
+    expect(report(0.28).water.source).toBe('area_snapshot');
+    const old = report(0.38);
+    expect(old.water.source).toBe('irrigation_advice');
+    expect(old.water.status).not.toBe('high');
+  });
+});
+
+describe('state B says which parts of the schedule are on file', () => {
+  test.each([
+    [{ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['rotor', 'spray'] }, 'minutes_and_days', '45 min, Mondays'],
+    [{ irrigation_run_minutes: 45, watering_days: [], irrigation_system_type: ['rotor', 'spray'] }, 'minutes_only', '45 min'],
+    [{ irrigation_run_minutes: null, watering_days: ['Mon', 'Thu'], irrigation_system_type: ['rotor'] }, 'days_only', 'Mondays and Thursdays'],
+  ])('%j', (propertyPrefs, parts, text) => {
+    gateOn();
+    const water = mapWater(buildLawnWaterContext({ propertyPrefs: { irrigation_system: true, ...propertyPrefs }, serviceDate: '2026-10-09', completionRainfall7dInches: 1.2 }));
+    expect(water).toMatchObject({ scheduleKind: 'runtime_only', scheduleParts: parts, scheduleText: text });
+  });
+
+  test('state A and state C carry no parts', () => {
+    gateOn();
+    const a = mapWater(buildLawnWaterContext({ propertyPrefs: { irrigation_inches_per_week: 1, irrigation_system: true }, serviceDate: '2026-10-09', completionRainfall7dInches: 1.2 }));
+    const c = mapWater(buildLawnWaterContext({ propertyPrefs: null, serviceDate: '2026-10-09', completionRainfall7dInches: 1.2 }));
+    expect(a).not.toHaveProperty('scheduleParts');
+    expect(c).not.toHaveProperty('scheduleParts');
   });
 });
 

@@ -21,7 +21,7 @@ const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
 const { photoZoneLabel } = require('../lawn-visit-input');
-const { waterPolishFields } = require('./lawn-report-polish');
+const { waterPolishFields, snapshotForCard } = require('./lawn-report-polish');
 const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
@@ -187,8 +187,10 @@ const SNAP_STATUS = { low: 'low', high: 'high', balanced: 'balanced', unknown: '
 
 // Prefer the area-calibrated water-intake snapshot (Phase 2) when it has a real
 // reading; otherwise fall back to the live irrigation-advice water context.
-function mapWater(waterContext, waterSnapshot = null) {
+function mapWater(waterContext, storedSnapshot = null) {
   const grassLabel = 'lawn';
+  // GATE_LAWN_REPORT_POLISH: a snapshot whose irrigation figure is not the one the report resolves now is not used.
+  const waterSnapshot = snapshotForCard(waterContext, storedSnapshot);
   // Property-level rainfall (Open-Meteo at the client's exact lat/lng, behind
   // waterContext.rainfallInches7d) is authoritative — it's more precise than the
   // regional area centroid and is the same source the 7-day chart now uses, so the
@@ -226,7 +228,7 @@ function mapWater(waterContext, waterSnapshot = null) {
       // The sent plan is independent of which rainfall source the card uses.
       weekPlan: (waterContext && waterContext.weekPlan) || null,
       // GATE_LAWN_REPORT_POLISH: the card's third state (nothing while the gate is off).
-      ...waterPolishFields(waterContext, { target: num(waterSnapshot.target_water_inches_per_week), scheduleOnFile: snapshotScheduleOnFile, live: false }),
+      ...waterPolishFields(waterContext, { target: num(waterSnapshot.target_water_inches_per_week), scheduleOnFile: snapshotScheduleOnFile }),
     };
   }
   if (!waterContext) return null;
@@ -573,8 +575,10 @@ const ISSUE_TOPIC = {
  *   (GATE_LAWN_REPORT_FACTS); null = the product label's re-entry line, as before
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6, reentryText } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot: storedWaterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6, reentryText } = {}) {
   if (!lawnAssessment) return null;
+  // GATE_LAWN_REPORT_POLISH: the card, the diagnosis and the insights all read the SAME snapshot, or none.
+  const waterSnapshot = snapshotForCard(lawnAssessment.waterContext, storedWaterSnapshot);
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
   const advice = lawnAssessment.waterContext?.irrigationAdvice || {};

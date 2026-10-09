@@ -231,6 +231,16 @@ describe('GATE_LAWN_REPORT_POLISH: the one-label-line decision rides the same fr
     expect(facts.precautionForCard(drops, { id: 'sp-1' }, SPRAY_CATALOG[0].customer_precaution_summary)).toBeNull();
   });
 
+  test('polish live but the facts gate dark: nothing is frozen at all (the dependency is on the facts gate)', async () => {
+    process.env.GATE_LAWN_REPORT_POLISH = 'true';
+    delete process.env.GATE_LAWN_REPORT_FACTS;
+    loadServiceRecordForPdf.mockResolvedValue({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: '{}' });
+    const { knex, state } = store({ service_products: [sprayRow], products_catalog: SPRAY_CATALOG, lawn_assessments: [], lawn_assessment_runs: [], lawn_protocol_products: [] });
+    await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    delete process.env.GATE_LAWN_REPORT_POLISH;
+    expect(state.notes.lawnReportFacts).toBeUndefined();
+  });
+
   test('gate off: no labelLines key, so a record renders exactly as before', async () => {
     live();
     const block = await completeSpray();
