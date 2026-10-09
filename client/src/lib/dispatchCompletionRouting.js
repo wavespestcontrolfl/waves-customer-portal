@@ -29,17 +29,16 @@ export function mergePostPaymentService(freshService, paymentService) {
 
 // Admin Dispatch opens the Tree & Shrub Fast Complete sheet for a visit the
 // shared rule makes eligible (same rule as the technician home page). A visit
-// returning from the payment flow carries invoice fields the sheet does not
-// send, so it keeps the full form, whose body marks the invoice as handled.
+// returning from the payment flow keeps the full form, whose body marks the
+// invoice as handled, unless GATE_FAST_COMPLETE_INVOICED_VISITS is on for the
+// row: the sheets then post that same mark (refusesInvoicedVisit below).
 // So does a row with no `propertyId` key (the mobile week list's rows carry no
 // premise): the sheet checks the routed premise against the live visit, and
 // without it a cached row moved to another property could complete unnoticed.
 export function shouldOpenTreeShrubFastComplete(service) {
   return isTreeShrubFastCompleteEligible(service)
     && service != null && "propertyId" in service
-    && !service?.completionInvoiceAlreadySent
-    && !service?.checkoutInvoiceId
-    && !service?.checkoutInvoiceToken;
+    && !refusesInvoicedVisit(service);
 }
 
 // Admin Dispatch opens the lawn Fast Complete sheet for a visit the shared rule
@@ -50,9 +49,7 @@ export function shouldOpenTreeShrubFastComplete(service) {
 export function shouldOpenLawnFastComplete(service) {
   return isLawnFastCompleteEligible(service)
     && service != null && "propertyId" in service
-    && !service?.completionInvoiceAlreadySent
-    && !service?.checkoutInvoiceId
-    && !service?.checkoutInvoiceToken;
+    && !refusesInvoicedVisit(service);
 }
 
 // Admin Dispatch opens the lawn re-service's own Fast Complete sheet for a
@@ -66,7 +63,7 @@ export function shouldOpenLawnReserviceFastComplete(service) {
   return isLawnReserviceFastCompleteEligible(service)
     && !lawnReserviceServerRefuses(service)
     && "propertyId" in service
-    && !returningFromPayment(service);
+    && !refusesInvoicedVisit(service);
 }
 
 function lawnReserviceServerRefuses(service) {
@@ -79,9 +76,18 @@ function lawnReserviceServerRefuses(service) {
   return !!(service.visitCloseoutPacket || service.visitId || service.visit_id);
 }
 
-// A visit returning from the payment flow carries invoice fields no sheet sends.
+// A visit returning from the payment flow, or already invoiced.
 function returningFromPayment(service) {
-  return !!(service.completionInvoiceAlreadySent || service.checkoutInvoiceId || service.checkoutInvoiceToken);
+  return !!(service?.completionInvoiceAlreadySent || service?.checkoutInvoiceId || service?.checkoutInvoiceToken);
+}
+
+// Whether the sheets refuse a visit for its invoice. They do unless the schedule
+// row carries GATE_FAST_COMPLETE_INVOICED_VISITS (`invoicedVisitFastCompleteEnabled`,
+// exactly true): then the sheet opens, and posts the full form's own
+// invoiceAlreadySent (lib/completion-invoice-fields.js), so /complete takes the
+// branch the full form's body selects for the same visit.
+function refusesInvoicedVisit(service) {
+  return returningFromPayment(service) && service?.invoicedVisitFastCompleteEnabled !== true;
 }
 
 // Admin Dispatch opens the pest Fast Complete sheet, in its report flow, for the
@@ -99,9 +105,7 @@ export function shouldOpenPestFastComplete(service) {
     && !profile?.findingsType
     && !(profile?.companions || []).length
     && service != null && "propertyId" in service
-    && !service?.completionInvoiceAlreadySent
-    && !service?.checkoutInvoiceId
-    && !service?.checkoutInvoiceToken;
+    && !refusesInvoicedVisit(service);
 }
 
 // Admin Dispatch opens the same sheet, in its report flow, for the specialty
@@ -117,9 +121,7 @@ export function shouldOpenSpecialtyFastComplete(service, { stationMapOff = false
   return (isLaneReportEligible(service) || isTypedReportEligible(service, { stationMapOff }))
     && !(service?.completionProfile?.companions || []).length
     && "propertyId" in service
-    && !service?.completionInvoiceAlreadySent
-    && !service?.checkoutInvoiceId
-    && !service?.checkoutInvoiceToken;
+    && !refusesInvoicedVisit(service);
 }
 
 // Which one-screen sheet admin Dispatch opens for a visit, or null for the

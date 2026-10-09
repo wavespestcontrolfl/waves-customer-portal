@@ -5183,6 +5183,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // "Tell me what you did" mic, Check chips and office note when on. Read
       // at call time; no per-tech flag.
       fastCompleteVoiceFillEnabled: fastCompleteVoiceFillLive(),
+      // GATE_FAST_COMPLETE_INVOICED_VISITS: admin Dispatch opens an already
+      // invoiced visit (or one returning from payment) in its Fast Complete
+      // sheet, which sends the full form's invoiceAlreadySent. Read at call time.
+      invoicedVisitFastCompleteEnabled: require('../config/feature-gates').fastCompleteInvoicedVisitsLive(),
       // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
@@ -6350,6 +6354,8 @@ router.get('/', async (req, res, next) => {
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
+        // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
+        invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -6981,6 +6987,7 @@ router.get('/week', async (req, res, next) => {
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
+          invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,

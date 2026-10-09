@@ -41,6 +41,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import {
   UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
@@ -472,7 +473,7 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useLawnContext({ base, request, service });
-  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other

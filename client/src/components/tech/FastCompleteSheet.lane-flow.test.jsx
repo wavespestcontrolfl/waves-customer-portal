@@ -638,3 +638,30 @@ describe('the record\'s rules', () => {
     expect(mergeLaneRecord(record, { status: 'failed', areas: [], findings: [], unclearGroups: [] }, bedBug)).toBe(record);
   });
 });
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): a lane visit already
+// invoiced from the payment flow completes here with the full form's invoice
+// field.
+describe('a lane visit already invoiced from the payment flow', () => {
+  async function send(service) {
+    const request = makeRequest();
+    await openSheet(request, service);
+    addProduct('Temprid FX', '1');
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    return request.bodies('/complete')[0];
+  }
+
+  test('posts invoiceAlreadySent: true', async () => {
+    const body = await send({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    expect(body).toMatchObject({ includePayLink: true, structuredObservations: ['Scheduled follow-up treatment', 'Live adults', 'Preparation complete'] });
+  }, 20000);
+
+  test('a visit with only a door-charge marker, or none, posts no invoice field', async () => {
+    expect(await send({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' })).not.toHaveProperty('invoiceAlreadySent');
+    cleanup();
+    expect(await send(SERVICE)).not.toHaveProperty('invoiceAlreadySent');
+  }, 30000);
+});
