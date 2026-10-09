@@ -122,11 +122,20 @@ describe('the ledger scope: which rows spend the bed allowance', () => {
 
   // Dinotefuran is an ornamental product only here: a lawn visit that also treated the shrubs
   // (a combined lawn + tree & shrub stop) spent the same allowance (Codex r2 #6204).
-  test('dinotefuran counts from any visit', () => {
+  test('Zylam and Safari count from any visit', () => {
     for (const service_line of ['tree_shrub', 'lawn', 'pest', null]) {
       expect(isTreeShrubLedgerRow({ product_name: 'Zylam Insecticide', active_ingredient: 'Dinotefuran', service_line })).toBe(true);
       expect(isTreeShrubLedgerRow({ product_name: 'Safari 20 SG', active_ingredient: 'Dinotefuran 20%', service_line })).toBe(true);
     }
+  });
+
+  // Alpine WSG on a pest visit is a structural application: not an ornamental one, and never an
+  // "earlier application not counted" on the tree & shrub sheet (Codex r3 #6204).
+  test('a dinotefuran product with no cap entry counts only from a tree & shrub visit', () => {
+    const alpine = { product_name: ALPINE.name, active_ingredient: ALPINE.active_ingredient };
+    expect(isTreeShrubLedgerRow({ ...alpine, service_line: 'pest' })).toBe(false);
+    expect(isTreeShrubLedgerRow({ ...alpine, service_line: null })).toBe(false);
+    expect(isTreeShrubLedgerRow({ ...alpine, service_line: 'tree_shrub' })).toBe(true);
   });
 
   // A database whose ledger query answers `rows`, remembering the first query it built so its SQL can be read.

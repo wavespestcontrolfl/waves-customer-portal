@@ -91,13 +91,15 @@ function computeNeonicLedger({ rows = [], bedSqft = null, catalog = [] } = {}) {
   });
 }
 
-// A ledger row that counts against the bed cap. Dinotefuran here is an ornamental product only
-// (Zylam, Safari), so its rows count from any visit: a lawn visit that also treated the shrubs
-// spent the same allowance. Imidacloprid is also a lawn product, and a lawn application is another
-// treated area, so its rows count only from a tree & shrub visit (`service_line` is the record's
-// own column; an older record without one is read from its service type).
+// A ledger row that counts against the bed cap. Zylam and Safari (the configured dinotefuran
+// products) are ornamental products only here, so their rows count from any visit: a lawn visit
+// that also treated the shrubs spent the same allowance. Every other row counts only from a tree &
+// shrub visit: imidacloprid is also a lawn product (another treated area), and another dinotefuran
+// product (Alpine WSG on a pest visit is structural) is not an ornamental application at all.
+// `service_line` is the record's own column; an older record without one is read from its service type.
 function isTreeShrubLedgerRow(row) {
-  if (capFor(row.product_name, row.active_ingredient)?.cap.key === 'dinotefuran') return true;
+  const found = capFor(row.product_name, row.active_ingredient);
+  if (found?.cap.key === 'dinotefuran' && found.entry) return true;
   const line = row.service_line || (row.service_type ? detectServiceLine(row.service_type) : null);
   return line === 'tree_shrub';
 }
