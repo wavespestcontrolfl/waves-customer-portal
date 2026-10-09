@@ -7247,7 +7247,9 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
         <div className="text-ui-label text-ink-secondary" data-testid="sod-last-pre-emergent">
           {last
             ? `Last pre-emergent by Waves: ${last.dateText} (${last.product})`
-            : "No pre-emergent by Waves on record"}
+            : sodInfo.lastPreEmergentUnreadable
+              ? "Pre-emergent history could not be read. Check the service history."
+              : "No pre-emergent by Waves on record"}
         </div>
       )}
       {sodInfo?.preEmergentWarning && (

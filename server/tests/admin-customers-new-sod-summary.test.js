@@ -75,7 +75,7 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
 
   it('a customer with no sod record and no pre-emergent history gets empty lines and no warning', async () => {
     const { body } = await getNewSod();
-    expect(body.newSod).toEqual({ holdLines: [], lastPreEmergent: null, preEmergentWarning: null });
+    expect(body.newSod).toEqual({ holdLines: [], lastPreEmergent: null, lastPreEmergentUnreadable: false, preEmergentWarning: null });
   });
 
   it('names the newest pre-emergent, skipping newer products that are not one', async () => {
@@ -90,11 +90,13 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     expect(body.newSod.lastPreEmergent).toMatchObject({ date: '2026-03-02', dateText: 'Mar 2, 2026', product: 'Prodiamine 65 WDG' });
   });
 
-  it('a failed history read says none on record instead of failing the page', async () => {
+  it('a failed history read is reported as unreadable, never as none on record, and does not fail the page', async () => {
     mockState.productsThrow = true;
     const { status, body } = await getNewSod();
     expect(status).toBe(200);
     expect(body.newSod.lastPreEmergent).toBeNull();
+    expect(body.newSod.lastPreEmergentUnreadable).toBe(true);
+    expect(body.newSod.preEmergentWarning).toBeNull();
   });
 
   it('warns when the pre-emergent was under 84 days before the saved sod date, and not at 84 days', async () => {

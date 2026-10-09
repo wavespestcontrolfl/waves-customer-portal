@@ -53,8 +53,8 @@ function daysBetween(fromYmd, toYmd) {
  * The newest completed pre-emergent application on the customer's file.
  * Uses the same product test as the lawn watering rule (isPreEmergent), on the
  * product name plus what the catalog says about it.
- * @returns {Promise<{ date: string, product: string }|null>} null when none, or
- *   when the history could not be read (the form then says none on record)
+ * @returns {Promise<{ date: string, product: string }|{ unreadable: true }|null>} null when none;
+ *   { unreadable: true } when the history could not be read (the form says so: a failed read is not "none")
  */
 async function lastWavesPreEmergent(knex, customerId) {
   let rows;
@@ -76,7 +76,7 @@ async function lastWavesPreEmergent(knex, customerId) {
         'pc.subcategory as catalog_subcategory',
       );
   } catch {
-    return null;
+    return { unreadable: true };
   }
   for (const row of rows || []) {
     const date = ymdOrNull(row.service_date);
@@ -169,12 +169,16 @@ function buildNewSodSummary({ prefsRow, lastPreEmergent, todayEt, enteredSodLaid
   const typed = enteredSodLaidOn !== undefined && enteredSodLaidOn !== null;
   const checked = typed ? validateSodLaidOn(enteredSodLaidOn, todayEt) : null;
   const judgedDate = typed ? (checked.ok ? checked.value : null) : ymdOrNull(prefsRow?.sod_laid_on);
+  const unreadable = lastPreEmergent?.unreadable === true;
+  const last = unreadable ? null : lastPreEmergent;
   return {
     holdLines: holdLinesFor(prefsRow, todayEt),
-    lastPreEmergent: lastPreEmergent
-      ? { date: lastPreEmergent.date, dateText: formatDay(lastPreEmergent.date), product: lastPreEmergent.product }
+    lastPreEmergent: last
+      ? { date: last.date, dateText: formatDay(last.date), product: last.product }
       : null,
-    preEmergentWarning: judgedDate ? preEmergentWarning(judgedDate, lastPreEmergent) : null,
+    // true: the history read failed, so "none on record" must not be shown.
+    lastPreEmergentUnreadable: unreadable,
+    preEmergentWarning: judgedDate ? preEmergentWarning(judgedDate, last) : null,
   };
 }
 
