@@ -23,3 +23,22 @@ describe('an area add-on is never the pest completion form', () => {
     expect(isAreaAddOnVisit({})).toBe(false);
   });
 });
+
+describe('a pest visit with an area add-on row attached (Codex r6 P1)', () => {
+  it('is not the recap modal or the pest report flow: the generic form records the add-on', () => {
+    const host = pest({ category: 'pest_control', serviceKey: 'pest_general_quarterly', findingsType: null });
+    expect(isFastCompleteReportEligible(host)).toBe(true);
+    const withRow = { ...host, areaAddOnRowsAttached: true, areaAddOnKeys: ['area_addon_bed_pre_emergent'] };
+    expect(isPestControlService(withRow)).toBe(false);
+    expect(isFastCompleteReportEligible(withRow)).toBe(false);
+  });
+
+  it('a lawn-family add-on, own or attached, asks the generic form for a lawn product area; the web sweep does not', async () => {
+    const { carriesLawnAreaAddOnWork } = await import('./areaAddOns');
+    expect(carriesLawnAreaAddOnWork({ completionProfile: { serviceKey: 'area_addon_fire_ant_yard' } })).toBe(true);
+    expect(carriesLawnAreaAddOnWork({ areaAddOnKeys: ['area_addon_web_sweep', 'area_addon_bed_pre_emergent'] })).toBe(true);
+    expect(carriesLawnAreaAddOnWork({ areaAddOnKeys: ['area_addon_web_sweep'] })).toBe(false);
+    expect(carriesLawnAreaAddOnWork({ completionProfile: { serviceKey: 'pest_general_quarterly' } })).toBe(false);
+    expect(carriesLawnAreaAddOnWork(null)).toBe(false);
+  });
+});

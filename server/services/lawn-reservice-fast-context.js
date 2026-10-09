@@ -238,9 +238,10 @@ function customerRequestOf(svc) {
  * heavier reads.
  */
 async function buildLawnReserviceFastContext(serviceId, knex = db) {
-  const { ok, reason, svc, profile } = await resolveEligibility(serviceId, knex);
+  const { ok, reason, svc, profile, hasAreaAddOnRows } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
   const service = recapServiceIdentity(svc, profile);
+  if (hasAreaAddOnRows) return { ok: true, eligible: false, reason: 'area_addon_attached', service };
   if (!profile) return { ok: true, eligible: false, reason: 'profile_unavailable', service };
   if (!isLawnReserviceProfile(profile)) return { ok: false, reason: 'not_lawn_re_service' };
   const ineligibleReason = await lawnReserviceIneligibleReason(svc, profile, knex);

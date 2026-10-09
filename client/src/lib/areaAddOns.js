@@ -35,6 +35,30 @@ export function isAreaAddOnVisit(service) {
     || isAreaAddOnServiceKey(service?.service_key_snapshot);
 }
 
+// A visit that carries area add-on work: it is an add-on itself, or it has an
+// add-on attached as a row (a same-trip add-on rides a normal pest or lawn visit;
+// the schedule feed sets `areaAddOnRowsAttached` and lists the catalog keys in
+// `areaAddOnKeys`). The lightweight completion flows (pest report flow, lawn /
+// re-service / Tree & Shrub Fast Complete) record no add-on product or treated
+// area, so such a visit takes the generic form.
+export function carriesAreaAddOnWork(service) {
+  return isAreaAddOnVisit(service) || service?.areaAddOnRowsAttached === true;
+}
+
+// The visit applies a lawn-family add-on (everything except the web sweep, which
+// is pest control): its own key when the add-on is the visit, else an attached
+// row's. The generic form then asks for the treated area on a lawn product
+// (a broadcast or granular fire-ant or pre-emergent pass is recorded by area),
+// whatever line the host visit belongs to.
+const WEB_SWEEP_KEY = "area_addon_web_sweep";
+export function carriesLawnAreaAddOnWork(service) {
+  const keys = [
+    service?.completionProfile?.serviceKey, service?.serviceKey, service?.service_key_snapshot,
+    ...(Array.isArray(service?.areaAddOnKeys) ? service.areaAddOnKeys : []),
+  ];
+  return keys.some((key) => isAreaAddOnServiceKey(key) && key !== WEB_SWEEP_KEY);
+}
+
 export const STANDALONE_VISIT = "standalone";
 export const SAME_VISIT = "sameTripAddOn";
 export const LARGER_TIER = "larger";

@@ -24,6 +24,7 @@
 const logger = require('./logger');
 
 const AREA_ADDON_ENGINE_KEY = 'area_addon';
+const AREA_ADDON_KEY_PREFIX = 'area_addon_';
 
 // The profile service the appointment itself is stamped with. ONE rule for the
 // catalog stamp (slot-reservation catalogLinkForProfile) and for "everything
@@ -155,7 +156,38 @@ async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownSe
   return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey });
 }
 
+// The attached area add-on rows of these visits (a `scheduled_service_addons` row
+// whose catalog key is an area add-on): a Map of visit id to the catalog keys. ONE
+// batched read. A visit with such a row has work the lightweight completion flows
+// (the pest report flow, the lawn, lawn re-service and Tree & Shrub Fast Complete
+// sheets) cannot record, so every eligibility check asks this. Ids that are not
+// uuids cannot have rows and are skipped (no query at all when none is left).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function areaAddOnKeysByVisit(knex, visitIds = []) {
+  const byVisit = new Map();
+  const ids = [...new Set((Array.isArray(visitIds) ? visitIds : []).filter(Boolean).map(String))].filter((id) => UUID_RE.test(id));
+  if (!ids.length) return byVisit;
+  const rows = await knex('scheduled_service_addons as a')
+    .leftJoin('services as s', 's.id', 'a.service_id')
+    .whereIn('a.scheduled_service_id', ids)
+    .select('a.scheduled_service_id', 'a.service_key_snapshot', 's.service_key');
+  for (const row of rows) {
+    // The booked snapshot wins over the live catalog key (the closeout resolver's rule).
+    const key = String(row.service_key_snapshot || row.service_key || '');
+    if (!key.startsWith(AREA_ADDON_KEY_PREFIX)) continue;
+    const id = String(row.scheduled_service_id);
+    byVisit.set(id, [...new Set([...(byVisit.get(id) || []), key])]);
+  }
+  return byVisit;
+}
+
+async function visitHasAreaAddOnRows(knex, visitId) {
+  return (await areaAddOnKeysByVisit(knex, [visitId])).has(String(visitId));
+}
+
 module.exports = {
+  areaAddOnKeysByVisit,
+  visitHasAreaAddOnRows,
   writeAdoptedAreaAddOns,
   bookedVisitMinutes,
   AREA_ADDON_ENGINE_KEY,

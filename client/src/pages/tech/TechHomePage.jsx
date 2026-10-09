@@ -57,6 +57,7 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
+import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
@@ -111,6 +112,7 @@ const API = import.meta.env.VITE_API_URL || '';
 // Gate off, or any other service, is byte-identical to today's routing.
 function isReserviceFastCompleteEligible(service) {
   return service?.reserviceFastCompleteEnabled === true
+    && !carriesAreaAddOnWork(service)
     && service?.completionProfile?.serviceKey === 'pest_re_service'
     // A completed (or otherwise closed) re-service stays on the recap
     // editor, which updates an existing record; /complete would only

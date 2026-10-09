@@ -201,8 +201,10 @@ async function loadProductAliases(knex, productIds) {
 // sheetRecordFor, with its own gates). The re-service sheet's fill takes only a
 // pest re-service.
 async function loadPestContext(serviceId, knex = db, { anyPestVisit = false } = {}) {
-  const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
+  const { ok, reason, svc, profile, eligible, hasAreaAddOnRows } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
+  // A visit with an area add-on row takes the generic form, which records the add-on's product and area.
+  if (hasAreaAddOnRows) return { ok: false, reason: 'area_addon_attached' };
   if (!anyPestVisit && profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
   const record = anyPestVisit ? await sheetRecordFor(profile, svc, knex) : { lane: null, typedType: null };
   const specialty = record.lane || record.typedType || null;

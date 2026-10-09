@@ -91,7 +91,7 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
-import { isAreaAddOnVisit } from "../../lib/areaAddOns";
+import { carriesAreaAddOnWork, carriesLawnAreaAddOnWork } from "../../lib/areaAddOns";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -943,15 +943,15 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
   termite: "termite",
 };
 
-// An area add-on visit (GATE_AREA_ADDONS) is generic one-time work. The name
+// An area add-on visit (GATE_AREA_ADDONS), or a visit with an add-on row attached, is generic work. The name
 // reads "lawn" for "Lawn Insect Spot Treatment" and "pest" for "Web Sweep", and
 // neither takes that line's completion form: the visit's catalog key decides.
 const AREA_ADDON_LINE = "general";
 function visitServiceCategory(service, serviceType) {
-  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
+  return carriesAreaAddOnWork(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
 }
 function visitServiceLine(service, serviceType) {
-  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
+  return carriesAreaAddOnWork(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
 }
 
 function detectServiceCategory(serviceType) {
@@ -10392,7 +10392,7 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
 // covers two areas, so it records no single shared coverage (null) and its
 // products and findings keep their own areas.
 function propertyAreaLineFor(service) {
-  if (isAreaAddOnVisit(service)) return null;
+  if (carriesAreaAddOnWork(service)) return null;
   const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
   const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
   return raw === normalized ? normalized : null;
@@ -13586,7 +13586,10 @@ export function CompletionPanel({
   // compliance gate still requires its own completion photos (T&S needs >=2),
   // so keep the uploader whenever any companion is present.
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
-  const serviceTypeForArea = service?.serviceType || service?.service_type || "";
+  // A lawn-family area add-on (own visit or attached row) is recorded by area on a lawn
+  // product, whatever line the host visit belongs to ("Fire Ant Yard Treatment" reads as pest).
+  const ownServiceType = service?.serviceType || service?.service_type || "";
+  const serviceTypeForArea = carriesLawnAreaAddOnWork(service) ? "Lawn Care" : ownServiceType;
   const calibrationRequired = isLawn && !!service.waveguardTier;
   // Advisory inventory posture is member-tier only — mirrors the server's
   // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets

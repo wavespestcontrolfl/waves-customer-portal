@@ -415,9 +415,10 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
  * reason and the visit identity, and skips the heavier reads.
  */
 async function buildTreeShrubFastContext(serviceId, knex = db) {
-  const { ok, reason, svc, profile } = await resolveEligibility(serviceId, knex);
+  const { ok, reason, svc, profile, hasAreaAddOnRows } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
   const service = recapServiceIdentity(svc, profile);
+  if (hasAreaAddOnRows) return { ok: true, eligible: false, reason: 'area_addon_attached', service };
   const ineligibleReason = await treeShrubFastIneligibleReason(svc, profile, knex);
   if (ineligibleReason) return { ok: true, eligible: false, reason: ineligibleReason, service };
 

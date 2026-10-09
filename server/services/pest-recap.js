@@ -116,7 +116,15 @@ async function resolveEligibility(serviceId, knex = db, { strict = false } = {})
   // profiles (project_required / special_project) are likewise excluded:
   // those services must close through their project, and the recap would
   // skip that billing/artifact path entirely.
-  return { ok: true, svc, profile, eligible: recapEligibleProfile(profile) };
+  // A visit that carries an area add-on row has work the lightweight flows cannot
+  // record (its product and treated area): it keeps the generic completion form.
+  // A failed read is "has rows" (the full form), never an eligible verdict.
+  const hasAreaAddOnRows = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(knex, serviceId)
+    .catch((err) => {
+      logger.warn(`[pest-recap] area add-on row lookup failed for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+      return true;
+    });
+  return { ok: true, svc, profile, hasAreaAddOnRows, eligible: !hasAreaAddOnRows && recapEligibleProfile(profile) };
 }
 
 // An area add-on (the web sweep is pest control by family) is generic one-time

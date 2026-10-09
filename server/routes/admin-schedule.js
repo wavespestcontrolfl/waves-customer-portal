@@ -41,6 +41,31 @@ const { isAreaAddOnCatalogKey } = require('../services/pricing-engine/constants'
 function lawnFastCompleteOffered(completionProfile) {
   return lawnFastCompleteLive() && !isAreaAddOnCatalogKey(completionProfile?.serviceKey);
 }
+// A visit that carries an attached area add-on row (a same-trip add-on rides a normal
+// pest or lawn visit as a scheduled_service_addons row) has work the lightweight flows
+// cannot record: its product and treated area. Every lightweight flow is off for it and
+// the generic completion form is the way in. One batched read per feed
+// (areaAddOnKeysByVisit). The flags are a hint: each sheet's context route re-reads
+// the rows (resolveEligibility fails closed) and is the authority, so a failed read
+// here is logged and leaves the flags as they were.
+const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
+  reserviceFastCompleteEnabled: false,
+  treeShrubFastCompleteEnabled: false,
+  lawnReserviceFastCompleteEnabled: false,
+  lawnFastCompleteEnabled: false,
+  fastCompleteRecapEnabled: false,
+  fastCompleteReportEnabled: false,
+  typedReportFlowEnabled: false,
+  areaAddOnRowsAttached: true,
+});
+async function areaAddOnVisitIdsForFeed(serviceIds) {
+  try {
+    return await require('../services/area-addon-visit-rows').areaAddOnKeysByVisit(db, serviceIds);
+  } catch (e) {
+    logger.warn(`[schedule] area add-on row lookup failed: ${e.message}`);
+    return new Map();
+  }
+}
 // The report flow needs a plain untyped, uncombined profile (the typed forms and
 // companion sections are required at completion and the flow has none).
 function fastCompleteReportOffered(completionProfile) {
@@ -5135,6 +5160,7 @@ async function loadProjectCompletionContextByServiceId(services) {
   const treeShrubFastCompleteEnabled = tsFastCompleteLive();
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
+  const addOnVisitIds = await areaAddOnVisitIdsForFeed(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5143,7 +5169,7 @@ async function loadProjectCompletionContextByServiceId(services) {
         completionProfileLookupFailed = true;
         return null;
       });
-    return [service.id, {
+    const entry = {
       completionProfile,
       // Whether the inspection-credit lane is live — Dispatch V2 completes
       // from THIS endpoint's payload, and the closeout panel renders its
@@ -5252,7 +5278,9 @@ async function loadProjectCompletionContextByServiceId(services) {
       // An OUTAGE is not "no linked project": a visit with a project must not
       // look project-free and complete on its own record.
       linkedProjectLookupFailed,
-    }];
+    };
+    const addOnKeys = addOnVisitIds.get(String(service.id));
+    return [service.id, addOnKeys ? { ...entry, ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOnKeys: addOnKeys } : entry];
   }));
   return new Map(entries);
 }
@@ -6363,6 +6391,8 @@ router.get('/', async (req, res, next) => {
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
+        areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
+        areaAddOnKeys: projectCompletionContext.areaAddOnKeys || [],
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
@@ -6994,6 +7024,8 @@ router.get('/week', async (req, res, next) => {
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
+          areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
+          areaAddOnKeys: projectCompletionContext.areaAddOnKeys || [],
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,

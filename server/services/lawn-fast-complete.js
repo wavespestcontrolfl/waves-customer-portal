@@ -102,9 +102,11 @@ function isLawnProgramProfile(profile) {
   return profile.category === LAWN_CATEGORY && !isAreaAddOnCatalogKey(profile.serviceKey);
 }
 
-function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
+function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [], hasAreaAddOnRows = false }) {
   if (!profile) return 'profile_unavailable';
   if (!isLawnProgramProfile(profile)) return 'not_lawn';
+  // An attached area add-on row is work this sheet cannot record (product and treated area).
+  if (hasAreaAddOnRows) return 'area_addon_attached';
   // The three lawn_care sheets partition the visits: the lawn re-service and Tree & Shrub
   // (which shares the lawn_care category) are decided by their OWN sheets' predicates, and
   // the Waves Assessment visit is its own diagnostic lane. Derived from the completion
@@ -152,7 +154,7 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses 
   // no profile row may still synthesize one, as it always has.
   const base = await resolveEligibility(serviceId, knex, { strict: true });
   if (!base.ok) return { ok: false, reason: base.reason };
-  const { svc, profile } = base;
+  const { svc, profile, hasAreaAddOnRows } = base;
   const readFailures = new Set();
   let visitGroupStatus = null;
   if (svc.visit_id) {
@@ -160,7 +162,7 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses 
     const visit = await knex('service_visits').where({ id: svc.visit_id }).first('status');
     visitGroupStatus = visit ? String(visit.status || '') : null;
   }
-  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses });
+  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses, hasAreaAddOnRows });
   let visitType = null;
   if (profile && withVisitType) {
     const billingMode = reason === 'not_lawn' ? null : await loadBillingMode(svc, knex, readFailures);
@@ -969,6 +971,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  *   profile_unavailable                          503 (retry, same key; a transient lookup failure)
  *   not_lawn, lawn_re_service, assessment_visit,
  *   project_backed, has_companions, grouped_visit,
+ *   area_addon_attached (the visit carries an area add-on row),
  *   terminal_status (cancelled, skipped, no_show,
  *     incomplete, rescheduled)                   409 lawn_fast_not_eligible (terminal)
  *   terminal_status when status is 'completed'   allowed (see above)

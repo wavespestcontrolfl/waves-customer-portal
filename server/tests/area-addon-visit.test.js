@@ -505,3 +505,71 @@ describe('completion route: an area add-on is generic work whatever its name say
     expect(recapEligibleProfile(profile('pest_general_quarterly', { findingsType: 'cockroach' }))).toBe(false);
   });
 });
+
+
+describe('an attached area add-on row keeps the lightweight completion flows off (Codex r6 P1)', () => {
+  const { lawnFastIneligibleReason } = require('../services/lawn-fast-complete');
+  const rows = require('../services/area-addon-visit-rows');
+  const VISIT = '7c1b0a5e-2f3d-4a6b-9c8d-0e1f2a3b4c5d';
+  const lawnProfile = { serviceKey: 'lawn_care_recurring', category: 'lawn_care', companions: [] };
+
+  test('the lawn sheet refuses a lawn visit that carries an add-on row, and still accepts one that does not', () => {
+    const svc = { id: VISIT, status: 'confirmed' };
+    expect(lawnFastIneligibleReason({ svc, profile: lawnProfile })).toBeNull();
+    expect(lawnFastIneligibleReason({ svc, profile: lawnProfile, hasAreaAddOnRows: true })).toBe('area_addon_attached');
+  });
+
+  test('areaAddOnKeysByVisit is one batched read of uuids only, and a visit without rows is absent', async () => {
+    const seen = [];
+    const knex = (table) => {
+      const qb = { leftJoin: () => qb, whereRaw: () => qb, select: () => qb, whereIn: (_c, ids) => { seen.push([table, ids]); return qb; },
+        then: (res, rej) => Promise.resolve([
+          { scheduled_service_id: VISIT, service_key: 'area_addon_bed_pre_emergent' },
+          { scheduled_service_id: VISIT, service_key_snapshot: 'area_addon_web_sweep', service_key: 'lawn_care' },
+          { scheduled_service_id: VISIT, service_key: 'area_addon_web_sweep' },
+          { scheduled_service_id: VISIT, service_key: 'dethatching' },
+        ]).then(res, rej) };
+      return qb;
+    };
+    knex.raw = (sql) => sql;
+    const map = await rows.areaAddOnKeysByVisit(knex, [VISIT, 'combo', null, VISIT]);
+    expect(seen).toEqual([['scheduled_service_addons as a', [VISIT]]]);
+    expect(map.get(VISIT)).toEqual(['area_addon_bed_pre_emergent', 'area_addon_web_sweep']);
+    seen.length = 0;
+    expect((await rows.areaAddOnKeysByVisit(knex, ['combo'])).size).toBe(0);
+    expect(seen).toEqual([]);
+  });
+});
+
+describe('resolveEligibility reads the attached add-on rows (Codex r6 P1)', () => {
+  const VISIT = '7c1b0a5e-2f3d-4a6b-9c8d-0e1f2a3b4c5d';
+  function load(addOnRows) {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/service-completion-profiles', () => ({
+      ...jest.requireActual('../services/service-completion-profiles'),
+      resolveCompletionProfileForScheduledService: async () => ({ serviceKey: 'pest_general_quarterly', category: 'pest_control', findingsType: null, companions: [] }),
+    }));
+    const recap = require('../services/pest-recap');
+    const knex = (table) => {
+      const qb = { where: () => qb, leftJoin: () => qb, whereRaw: () => qb, whereIn: () => qb, select: () => qb,
+        first: async () => ({ id: VISIT, status: 'confirmed' }),
+        then: (res, rej) => (addOnRows instanceof Error ? Promise.reject(addOnRows) : Promise.resolve(addOnRows)).then(res, rej) };
+      return qb;
+    };
+    knex.raw = (sql) => sql;
+    return { recap, knex };
+  }
+
+  test('a pest visit with no add-on row is eligible; with one it is not (the generic form records the add-on)', async () => {
+    const plain = load([]);
+    expect(await plain.recap.resolveEligibility(VISIT, plain.knex)).toMatchObject({ ok: true, eligible: true, hasAreaAddOnRows: false });
+    const withRow = load([{ scheduled_service_id: VISIT, service_key: 'area_addon_bed_pre_emergent' }]);
+    expect(await withRow.recap.resolveEligibility(VISIT, withRow.knex)).toMatchObject({ ok: true, eligible: false, hasAreaAddOnRows: true });
+  });
+
+  test('a failed row read is "has rows" (the full form), never an eligible verdict', async () => {
+    const failing = load(new Error('connection lost'));
+    expect(await failing.recap.resolveEligibility(VISIT, failing.knex)).toMatchObject({ ok: true, eligible: false, hasAreaAddOnRows: true });
+  });
+});
