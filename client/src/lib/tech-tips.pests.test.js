@@ -70,6 +70,10 @@ describe('pestSheetTipIds', () => {
     const library = { season: 'dry', groups: [{ tips: [tip('bowls', { keywords: ['ants'] }), tip('auto', { keywords: ['humidity'], season: 'wet' }), tip('fan', { keywords: ['humidity'] })] }] };
     expect(pestSheetTipIds(library, { note: 'No ants seen. Humidity is high inside.' })).toEqual(['fan']);
   });
+  it('never lifts a tip that names the treatment by a word of the note', () => {
+    const library = { groups: [{ tips: [tip('trail', { keywords: ['spill'], namesWork: true }), tip('jar', { keywords: ['spill'] })] }] };
+    expect(pestSheetTipIds(library, { note: 'Wiped a spill from the counter.' })).toEqual(['jar']);
+  });
   it('answers nothing before the library loads', () => {
     expect(pestSheetTipIds(null, { pests: ['Ants'] })).toEqual([]);
   });

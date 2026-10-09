@@ -135,7 +135,9 @@ export function pestSheetTipIds(library, { pests = [], note = "" } = {}) {
   const byId = new Map(every.map((tip) => [tip.id, tip]));
   // The same two rules for the keyword lift: nothing the note rules out, and
   // nothing for the other season.
-  const forNote = tipsCalledForByNote(listed.filter(inSeason), withoutNegated(note)).map((id) => byId.get(id));
+  // nothing for the other season; and never a tip that names the treatment
+  // (`namesWork`), since a word of the note does not say what was treated.
+  const forNote = tipsCalledForByNote(listed.filter((tip) => inSeason(tip) && !tip.namesWork), withoutNegated(note)).map((id) => byId.get(id));
   const lifted = [...new Set([...forPests, ...forNote])];
   return unsentTipsFirst(lifted, library?.lastSent).slice(0, PEST_TIP_LIFT_MAX).map((tip) => tip.id);
 }
