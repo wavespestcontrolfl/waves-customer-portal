@@ -794,6 +794,40 @@ describe('lawn bounded product section', () => {
     expect(mockWindowContext.mock.calls[0][1].grassTrack).toBe('st_augustine');
   });
 
+  describe('the city hold on the lawn brief (North Port Nutra-TECH, June to September)', () => {
+    const NUTRA = 'LESCO Nutra-TECH T&O Micronutrient Package';
+    const june = () => mockSummarize.mockReturnValue({
+      window: { key: 'jun', month: 6, title: 'June Nutra-TECH + Pre-Emergent', visitType: 'hose', goal: 'Micronutrients and pre-emergent' },
+      products: [
+        { productName: NUTRA, productId: 'nt', role: 'micronutrients', applicationMode: 'broadcast', ratePer1000: 12, rateUnit: 'fl oz', defaultInPlan: true, gates: { requiresZeroNP: true, northPortProductWindow: true } },
+        { productName: 'Dimension 2EW', productId: 'dim', role: 'pre_emergent', applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz', defaultInPlan: true, gates: {} },
+      ],
+    });
+    const briefFor = async (extra) => {
+      june();
+      const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', ...extra }] }));
+      expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+      return storedBrief(state).brief.product_guidance;
+    };
+
+    test('North Port: the product is a hold with the plan\'s text and no dose, not a conditional product', async () => {
+      const guidance = await briefFor({ service_address_city: 'North Port' });
+      expect(guidance.products.map((p) => p.name)).toEqual(['Dimension 2EW']);
+      expect(guidance.conditional_products.map((p) => p.name)).toEqual([]);
+      expect(guidance.held_products).toHaveLength(1);
+      expect(guidance.held_products[0]).toMatchObject({ name: NUTRA, hold: true });
+      expect(guidance.held_products[0].message).toBe(`${NUTRA}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`);
+      expect(JSON.stringify(guidance.held_products)).not.toMatch(/ratePer1000|rateUnit|12/);
+    });
+
+    test('another city: the product is guidance as before (conditional, with its rate) and nothing is held', async () => {
+      const guidance = await briefFor({ service_address_city: 'Sarasota' });
+      expect(guidance.held_products).toEqual([]);
+      expect(guidance.conditional_products.map((p) => [p.name, p.ratePer1000])).toEqual([[NUTRA, 12]]);
+      expect(guidance.products.map((p) => p.name)).toEqual(['Dimension 2EW']);
+    });
+  });
+
   test('a customer at an application limit demotes the fixed product to conditional (codex P1)', async () => {
     mockSummarize.mockReturnValue({
       window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },
