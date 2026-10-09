@@ -406,6 +406,30 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(isPersonPlacedVisit).toHaveBeenCalledWith(expect.objectContaining({ id: SERVICE.id }), trx, { refresh: true });
   });
 
+  test('a conflict-forced move re-reads the conflict on the move transaction (Codex #6207 r1 P2)', async () => {
+    const slots = require('../services/auto-dispatch/candidate-slots');
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const read = jest.spyOn(slots._internals, 'readCurrentConflict');
+    const trx = fakeTrx();
+    const sourceConflict = { kind: 'overlap', date: '2026-12-07', with: ['o1'] };
+    try {
+      // Still in conflict: the guard passes.
+      read.mockResolvedValueOnce(sourceConflict);
+      await makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE });
+      expect(read).toHaveBeenCalledWith(expect.objectContaining({ id: SERVICE.id }), { db: trx, conflictMoves: true });
+      // The other stop moved away since the evaluation: refuse.
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      // A move that cleared the normal bar reads nothing.
+      read.mockClear();
+      await makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1', service: SERVICE });
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('a sibling a person placed refuses the whole grouped move (Codex #6055 r1 P1)', async () => {
     const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
     isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });

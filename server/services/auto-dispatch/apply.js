@@ -262,6 +262,20 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
   await assertFlexWindows(trx, [row], best, etDateString(new Date()), refuse);
 }
 
+// A move that skipped the score bar and the drive floor because the visit
+// was in conflict (move-rules.js mustMove) is only still that move while the
+// conflict stands. The other stop can move or cancel, or the owner can reopen
+// the day, between the evaluation and this transaction; the row's own CAS
+// cannot see either. Re-read the conflict here, on the move transaction, with
+// the reader the evaluation used; gone means refuse, and the next run scores
+// the visit on the normal bar (Codex #6207 r1 P2). A read failure refuses too.
+async function assertSourceConflictHolds(trx, service, sourceConflict, refuse) {
+  if (!sourceConflict) return;
+  const { _internals: { readCurrentConflict } } = require('./candidate-slots');
+  const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
+  if (!still) throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
+}
+
 function makeMoveGuard({ service, best, config = {} }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
@@ -275,6 +289,7 @@ function makeMoveGuard({ service, best, config = {} }) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
+    await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
     // A person may have placed this visit since pass 1 (even back onto the

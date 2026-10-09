@@ -757,6 +757,9 @@ async function applyPlannedMove(pm, run, attempt) {
   const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, {
     ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary,
     alternateCandidates: fresh.rankedCandidates,
+    // The conflict that lifted the bar for this move; the move guard re-reads
+    // it on the move transaction and refuses when it is gone.
+    sourceConflict: (fresh.current && fresh.current.conflict) || null,
     rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
   });
   totals.changed += result.movedCount || 1;

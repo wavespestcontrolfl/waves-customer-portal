@@ -52,6 +52,11 @@ function meetsDriveFloor({ current, cand, config }) {
   const floor = config.minDayMoveDriveSavingMinutes || 0;
   // 0 turns the floor off: the score bar alone decides, as before.
   if (floor <= 0 || !isDayMove(current, cand)) return true;
+  // The legacy model (GATE_AUTO_DISPATCH_SHARED_MODEL off) measures a grouped
+  // visit's current detour against its own co-located siblings, so it reads
+  // 0 and no saving could ever be shown: the floor has no number to test
+  // (Codex #6207 r1 P1). The score bar still applies.
+  if (current.detour_group_blind) return true;
   return driveSavingMinutes(current, cand) >= floor;
 }
 

@@ -13,11 +13,13 @@
  *               date: the rebooker's read-only probe (probeMoveConflicts,
  *               booked interviews included) expanded by occupancy.js's
  *               occupiedRows. The visit's own group is excluded. So is every
- *               other row of the SAME customer (two services at one address
- *               in one hour are one stop for the technician, grouped or
- *               not) and, once there are two technicians, a row assigned to
- *               a different one (owner 2026-10-03: only the same technician
- *               or an unassigned row counts).
+ *               other row of the same customer AT THE SAME PLACE (two
+ *               services at one address in one hour are one stop for the
+ *               technician, grouped or not; the same customer's second
+ *               property is a different stop, visit-groups.js canJoin) and,
+ *               once there are two technicians, a row assigned to a different
+ *               one (owner 2026-10-03: only the same technician or an
+ *               unassigned row counts).
  *
  * The result only lifts the score bar and the drive floor for this visit
  * (move-rules.js). Every other guard still applies to it: eligibility, the
@@ -36,11 +38,37 @@ function hhmmToMin(t) {
   return Number.isNaN(h) ? null : h * 60 + (m || 0);
 }
 
-// Another stop the technician has to be at: not this customer's own row, and
-// not a row that belongs to a different technician.
+function sameCustomer(row, service) {
+  return !!row.customer_id && String(row.customer_id) === String(service.customer_id);
+}
+
+// A row a different technician works is not this technician's stop.
 function isOtherStop(row, service) {
-  if (row.customer_id && String(row.customer_id) === String(service.customer_id)) return false;
   return !(row.technician_id && service.technician_id && String(row.technician_id) !== String(service.technician_id));
+}
+
+// Where a row is worked: its linked property, else its own service address,
+// else '' (the customer's primary address).
+function placeKey(row) {
+  if (row.property_id) return `p:${row.property_id}`;
+  const line = String(row.service_address_line1 || '').trim().toLowerCase();
+  return line ? `a:${line}|${String(row.service_address_zip || '').trim()}` : '';
+}
+
+// Ids among `rows` that are the visit's own customer at the visit's own
+// place: one stop with the visit, not a conflict. The probe's projection
+// carries no location, so the place is read here (Codex #6207 r1 P1: a
+// customer with two properties booked into one hour IS a conflict).
+async function samePlaceIds(db, service, rows) {
+  const ids = rows.filter((r) => sameCustomer(r, service)).map((r) => String(r.id));
+  if (!ids.length) return new Set();
+  const places = await db('scheduled_services')
+    .whereIn('id', [String(service.id), ...ids])
+    .select('id', 'property_id', 'service_address_line1', 'service_address_zip');
+  const byId = new Map(places.map((p) => [String(p.id), placeKey(p)]));
+  const own = byId.get(String(service.id));
+  // A row that cannot be read is treated as a different place (a conflict).
+  return new Set(ids.filter((id) => byId.has(id) && byId.get(id) === own));
 }
 
 async function overlappingStopIds(service, ctx, excludeIds, dateStr) {
@@ -56,10 +84,11 @@ async function overlappingStopIds(service, ctx, excludeIds, dateStr) {
     },
     excludeServiceIds: [...excludeIds],
   });
-  return occupiedRows(rows)
+  const overlapping = occupiedRows(rows)
     .filter((r) => isOtherStop(r, service) && r.startMin != null && Number.isFinite(r.endMin))
-    .filter((r) => windowsOverlap(start, end, r.startMin, r.endMin))
-    .map((r) => String(r.id));
+    .filter((r) => windowsOverlap(start, end, r.startMin, r.endMin));
+  const samePlace = await samePlaceIds(ctx.db, service, overlapping);
+  return overlapping.map((r) => String(r.id)).filter((id) => !samePlace.has(id));
 }
 
 /**
@@ -77,4 +106,4 @@ async function currentConflict(service, ctx, excludeIds) {
   return ids.length ? { kind: 'overlap', date: dateStr, with: ids } : null;
 }
 
-module.exports = { currentConflict, _internals: { isOtherStop, overlappingStopIds } };
+module.exports = { currentConflict, _internals: { isOtherStop, placeKey, samePlaceIds, overlappingStopIds } };

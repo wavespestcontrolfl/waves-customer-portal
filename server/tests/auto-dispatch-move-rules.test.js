@@ -59,6 +59,12 @@ describe('drive floor', () => {
     // Off means off: a day move that adds drive is left to the score bar.
     expect(meetsDriveFloor({ current: CURRENT, cand: dayMove({ detour_minutes: 20 }), config: { minDayMoveDriveSavingMinutes: 0 } })).toBe(true);
   });
+
+  test('a legacy grouped current placement has no detour to test, so the floor does not apply (Codex #6207 r1 P1)', () => {
+    const blind = { ...CURRENT, detour_minutes: 0, detour_group_blind: true };
+    expect(meetsDriveFloor({ current: blind, cand: dayMove({ detour_minutes: 3 }), config: CONFIG })).toBe(true);
+    expect(meetsDriveFloor({ current: { ...blind, detour_group_blind: undefined }, cand: dayMove({ detour_minutes: 3 }), config: CONFIG })).toBe(false);
+  });
 });
 
 describe('rankCandidates', () => {

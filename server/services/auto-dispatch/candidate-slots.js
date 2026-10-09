@@ -613,6 +613,9 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     date: dateStr,
     start_time: service.window_start ? String(service.window_start).slice(0, 5) : null,
     capability_level: ctx.capabilityFor(techId, category),
+    // The legacy neighbors above exclude only this row, so a grouped visit's
+    // detour is measured against its own siblings (move-rules.js drive floor).
+    ...(service.visit_id && !autoDispatchSharedModelLive() ? { detour_group_blind: true } : {}),
     ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr)),
     ...(await currentConflictField(service, ctx)),
   };
@@ -622,10 +625,16 @@ async function computeCurrentPlacement(service, prefs, ctx) {
 // visit overlaps another customer's stop or sits on a closed day
 // (current-conflict.js). Gate off: no read, no field.
 async function currentConflictField(service, ctx) {
-  if (!ctx.conflictMoves) return {};
-  const { excludeIds } = await groupContextFor(service, ctx);
-  const conflict = await currentConflict(service, ctx, excludeIds);
+  const conflict = await readCurrentConflict(service, ctx);
   return conflict ? { conflict } : {};
+}
+
+// Also the apply-time re-read (apply.js makeMoveGuard, on the move
+// transaction): the group is read on the same connection as the conflict.
+async function readCurrentConflict(service, ctx) {
+  if (!ctx.conflictMoves) return null;
+  const { excludeIds } = await groupContextFor(service, ctx);
+  return currentConflict(service, ctx, excludeIds);
 }
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL: the current placement's numbers from the
@@ -840,6 +849,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict,
   },
 };
