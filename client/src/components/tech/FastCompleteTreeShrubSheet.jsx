@@ -579,7 +579,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
   const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
   const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
-  // GATE_TS_NEONIC_CAP: gate off (no ctx.neonicCap) = no line and no hold. The server refuses the same completion.
+  // GATE_TS_NEONIC_CAP: gate off (no ctx.neonicCap) = no line and no hold. The hold is the sheet's; /complete does not refuse.
   const neonicCap = useMemo(() => evaluateNeonicCap(ctx.neonicCap, rows), [ctx.neonicCap, rows]);
   const productBlock = firstText(pestCheck.evaluation.blockMessage, neonicCap.blockMessage);
   const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || productBlock;

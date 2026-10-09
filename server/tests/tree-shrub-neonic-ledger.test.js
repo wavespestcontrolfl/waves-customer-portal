@@ -1,5 +1,5 @@
 // T&S yearly neonicotinoid cap per property (GATE_TS_NEONIC_CAP): the share math across Zylam + Safari,
-// the separate Merit cap, unsized rows, no bed area, the T&S-only ledger scope, and the /complete refusal.
+// the separate Merit cap, unsized rows, no bed area, and which ledger rows count. The hold is the sheet's.
 // Synthetic data; a table-keyed fake database (the SQL scoping itself is application-limits' own, reused).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -7,8 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const knexFactory = require('knex');
 const {
-  computeNeonicLedger, neonicCapBlocks, neonicCapBlockPayload, isTreeShrubLedgerRow,
-  loadNeonicLedgerRows, treeShrubNeonicCapBlocks, buildNeonicCapContext, CODE,
+  computeNeonicLedger, isTreeShrubLedgerRow, loadNeonicLedgerRows, loadBedSqft, buildNeonicCapContext,
 } = require('../services/tree-shrub-neonic-ledger');
 const { NEONIC_CAPS, SQFT_PER_ACRE } = require('../config/tree-shrub-neonic-caps');
 
@@ -110,69 +109,24 @@ describe('computeNeonicLedger', () => {
   });
 });
 
-describe('neonicCapBlocks (the visit\'s own rows against the year so far)', () => {
-  const ledgerWith = (rows) => computeNeonicLedger({ rows, bedSqft: BED, catalog: CATALOG });
-
-  test('an amount inside what is left passes; an amount on the cap exactly passes', () => {
-    expect(neonicCapBlocks({ ledger: ledgerWith([row(ZYLAM, 15, 'fl_oz')]), rows: [{ productId: ZYLAM.id, totalAmount: 4.725, unit: 'fl_oz' }] })).toEqual([]);
-  });
-
-  test('an amount over what is left is a block that names the product, the amount and what is left', () => {
-    const blocks = neonicCapBlocks({ ledger: ledgerWith([row(ZYLAM, 15, 'fl_oz')]), rows: [{ productId: ZYLAM.id, totalAmount: 5, unit: 'fl_oz' }] });
-    expect(blocks).toEqual([{ code: CODE, productId: ZYLAM.id, message: 'Zylam: 5.0 fl oz is over the 4.7 fl oz left this year for this property.' }]);
-    expect(neonicCapBlockPayload(blocks)).toMatchObject({ error: blocks[0].message, code: 'tree_shrub_neonic_cap_exceeded', details: [blocks[0].message], blocks });
-  });
-
-  test('Safari this visit counts against Zylam used earlier (one shared cap)', () => {
-    // Zylam used 3/4 of the year; 3 oz of Safari is 3/10.8 = 0.278 of the year, over the quarter left.
-    const blocks = neonicCapBlocks({ ledger: ledgerWith([row(ZYLAM, 14.79375, 'fl_oz')]), rows: [{ productId: SAFARI.id, totalAmount: 3, unit: 'oz' }] });
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].message).toBe('Safari: 3.0 oz is over the 2.7 oz left this year for this property.');
-  });
-
-  test('two rows of one ingredient on this visit add up', () => {
-    const blocks = neonicCapBlocks({ ledger: ledgerWith([]), rows: [
-      { productId: ZYLAM.id, totalAmount: 12, unit: 'fl_oz' },
-      { productId: SAFARI.id, totalAmount: 5, unit: 'oz' },
-    ] });
-    expect(blocks.map((b) => b.productId)).toEqual([ZYLAM.id, SAFARI.id]);
-  });
-
-  test('Merit is judged on its own: a full dinotefuran year does not block Merit', () => {
-    const ledger = ledgerWith([row(ZYLAM, 25, 'fl_oz')]);
-    expect(neonicCapBlocks({ ledger, rows: [{ productId: MERIT.id, totalAmount: 6, unit: 'fl_oz' }] })).toEqual([]);
-    expect(neonicCapBlocks({ ledger, rows: [{ productId: MERIT.id, totalAmount: 7, unit: 'fl_oz' }] })).toHaveLength(1);
-  });
-
-  test('no bed area blocks nothing', () => {
-    const noBed = computeNeonicLedger({ rows: [], bedSqft: null, catalog: CATALOG });
-    expect(neonicCapBlocks({ ledger: noBed, rows: [{ productId: ZYLAM.id, totalAmount: 999, unit: 'fl_oz' }] })).toEqual([]);
-  });
-
-  // Fail closed (Codex security r1 #6204): a capped row the check cannot size is refused, not skipped.
-  test('a capped row in a unit that does not convert, or with no amount, is refused', () => {
-    const needed = { code: 'tree_shrub_neonic_cap_amount_needed', productId: ZYLAM.id, message: 'Zylam: enter the amount in fl oz so the yearly limit can be checked.' };
-    expect(neonicCapBlocks({ ledger: ledgerWith([]), rows: [{ productId: ZYLAM.id, totalAmount: 999, unit: 'each' }] })).toEqual([needed]);
-    expect(neonicCapBlocks({ ledger: ledgerWith([]), rows: [{ productId: ZYLAM.id, totalAmount: '', unit: 'fl_oz' }] })).toEqual([needed]);
-    expect(neonicCapBlocks({ ledger: ledgerWith([]), rows: [{ productId: SAFARI.id, totalAmount: 0, unit: 'oz' }] })[0].message)
-      .toBe('Safari: enter the amount in oz so the yearly limit can be checked.');
-  });
-
-  test('a product id in another letter case still matches its cap', () => {
-    const blocks = neonicCapBlocks({ ledger: ledgerWith([row(ZYLAM, 15, 'fl_oz')]), rows: [{ productId: ZYLAM.id.toUpperCase(), totalAmount: 5, unit: 'fl_oz' }] });
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].code).toBe(CODE);
-  });
-});
-
-describe('the ledger scope: Tree & Shrub visits only', () => {
-  test('a lawn visit\'s imidacloprid, a pest visit\'s and a row with no visit are not counted', () => {
-    expect(isTreeShrubLedgerRow({ service_line: 'tree_shrub' })).toBe(true);
-    expect(isTreeShrubLedgerRow({ service_line: null, service_type: 'Tree & Shrub Care' })).toBe(true);
-    expect(isTreeShrubLedgerRow({ service_line: 'lawn' })).toBe(false);
-    expect(isTreeShrubLedgerRow({ service_line: 'pest' })).toBe(false);
-    expect(isTreeShrubLedgerRow({ service_line: null, service_type: 'Every 6 Weeks Lawn Care Service' })).toBe(false);
+describe('the ledger scope: which rows spend the bed allowance', () => {
+  test('imidacloprid counts from a tree & shrub visit only; a lawn or pest visit\'s does not', () => {
+    const merit = { product_name: 'Merit 2F', active_ingredient: 'Imidacloprid' };
+    expect(isTreeShrubLedgerRow({ ...merit, service_line: 'tree_shrub' })).toBe(true);
+    expect(isTreeShrubLedgerRow({ ...merit, service_line: null, service_type: 'Tree & Shrub Care' })).toBe(true);
+    expect(isTreeShrubLedgerRow({ ...merit, service_line: 'lawn' })).toBe(false);
+    expect(isTreeShrubLedgerRow({ ...merit, service_line: 'pest' })).toBe(false);
+    expect(isTreeShrubLedgerRow({ ...merit, service_line: null, service_type: 'Every 6 Weeks Lawn Care Service' })).toBe(false);
     expect(isTreeShrubLedgerRow({})).toBe(false);
+  });
+
+  // Dinotefuran is an ornamental product only here: a lawn visit that also treated the shrubs
+  // (a combined lawn + tree & shrub stop) spent the same allowance (Codex r2 #6204).
+  test('dinotefuran counts from any visit', () => {
+    for (const service_line of ['tree_shrub', 'lawn', 'pest', null]) {
+      expect(isTreeShrubLedgerRow({ product_name: 'Zylam Insecticide', active_ingredient: 'Dinotefuran', service_line })).toBe(true);
+      expect(isTreeShrubLedgerRow({ product_name: 'Safari 20 SG', active_ingredient: 'Dinotefuran 20%', service_line })).toBe(true);
+    }
   });
 
   // A database whose ledger query answers `rows`, remembering the first query it built so its SQL can be read.
@@ -198,9 +152,10 @@ describe('the ledger scope: Tree & Shrub visits only', () => {
       row(MERIT, 3, 'fl_oz'),
       row(MERIT, 9, 'fl_oz', { service_line: 'lawn' }),
       row(ZYLAM, 1, 'fl_oz', { service_line: null, service_type: 'Shrub Care' }),
+      row(ZYLAM, 2, 'fl_oz', { service_line: 'lawn' }),
     ]);
     const kept = await loadNeonicLedgerRows(database, svc, '2026-10-09');
-    expect(kept.map((r) => [r.product_name, r.quantity_applied])).toEqual([['Merit 2F', 3], ['Zylam Insecticide', 1]]);
+    expect(kept.map((r) => [r.product_name, r.quantity_applied])).toEqual([['Merit 2F', 3], ['Zylam Insecticide', 1], ['Zylam Insecticide', 2]]);
     const ledger = computeNeonicLedger({ rows: kept, bedSqft: BED, catalog: CATALOG });
     expect(entryOf(ledger, 'imidacloprid').usedShare).toBeCloseTo(0.46875, 6);
   });
@@ -215,7 +170,11 @@ describe('the ledger scope: Tree & Shrub visits only', () => {
     expect(sql).toMatch(/"pah"\."property_id" is null or "pah"\."property_id" = \?/);
     expect(sql).toContain('not exists');
     expect(sql).toMatch(/"pah"\."service_record_id" is null or "pah"\."service_record_id" not in/);
-    expect(sql).toMatch(/ILIKE/i);
+    // The name and ingredient frozen on the application win over the catalog's current ones:
+    // renaming a product or editing its ingredient must not re-class its history (Codex r2 #6204).
+    expect(sql).toContain('COALESCE(pah.active_ingredient, sp.active_ingredient, pc.active_ingredient) ILIKE ?');
+    expect(sql).toContain('COALESCE(sp.product_name, pc.name) as product_name');
+    expect(sql).toContain('COALESCE(pah.active_ingredient, sp.active_ingredient, pc.active_ingredient) as active_ingredient');
     expect(bindings).toEqual(expect.arrayContaining(['cust-1', 'prop-1', '2026-01-01', '2026-12-31', 'dinotefuran%', 'imidacloprid%', 'visit-1']));
   });
 
@@ -223,126 +182,6 @@ describe('the ledger scope: Tree & Shrub visits only', () => {
     const { database, built } = ledgerDb([]);
     await loadNeonicLedgerRows(database, svc, '2027-01-02');
     expect(built.query.toSQL().bindings).toEqual(expect.arrayContaining(['2027-01-01', '2027-12-31']));
-  });
-});
-
-describe('treeShrubNeonicCapBlocks (the /complete check)', () => {
-  const saved = process.env.GATE_TS_NEONIC_CAP;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_TS_NEONIC_CAP; else process.env.GATE_TS_NEONIC_CAP = saved;
-  });
-  const svc = { id: 'visit-1', customer_id: 'cust-1', property_id: 'prop-1', scheduled_date: '2026-10-09' };
-
-  // Tables answered by name; the ledger rows come from property_application_history.
-  function fakeDb({ bed = BED, ledger = [], catalog = CATALOG, failLedger = false } = {}) {
-    const reads = [];
-    const database = jest.fn((table) => {
-      reads.push(table);
-      const chain = {};
-      for (const m of ['join', 'leftJoin', 'where', 'whereNull', 'whereNotExists', 'whereRaw', 'whereNot']) chain[m] = () => chain;
-      chain.whereIn = (_c, ids) => ({ select: async () => catalog.filter((c) => ids.includes(c.id)) });
-      chain.first = async () => ({ bed_sqft: bed });
-      chain.select = async () => { if (failLedger) throw new Error('ledger down'); return ledger; };
-      return chain;
-    });
-    database.raw = (sql) => sql;
-    database.reads = reads;
-    return database;
-  }
-  const submit = (...items) => items.map(([product, totalAmount, amountUnit]) => ({ productId: product.id, totalAmount, amountUnit }));
-
-  test('gate off: nothing is read and nothing is refused', async () => {
-    delete process.env.GATE_TS_NEONIC_CAP;
-    const database = fakeDb({ ledger: [row(ZYLAM, 50, 'fl_oz')] });
-    expect(await treeShrubNeonicCapBlocks(database, svc, submit([ZYLAM, 99, 'fl_oz']))).toEqual([]);
-    expect(database.reads).toEqual([]);
-  });
-
-  test('gate on: a completion over the cap is refused with the code and the amounts', async () => {
-    process.env.GATE_TS_NEONIC_CAP = 'true';
-    const database = fakeDb({ ledger: [row(ZYLAM, 15, 'fl_oz')] });
-    const blocks = await treeShrubNeonicCapBlocks(database, svc, submit([ZYLAM, 5, 'fl_oz']));
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]).toMatchObject({ code: 'tree_shrub_neonic_cap_exceeded', productId: ZYLAM.id });
-    expect(blocks[0].message).toBe('Zylam: 5.0 fl oz is over the 4.7 fl oz left this year for this property.');
-  });
-
-  test('gate on: an amount inside the cap and a product with no cap pass; the latter without a ledger read', async () => {
-    process.env.GATE_TS_NEONIC_CAP = 'true';
-    expect(await treeShrubNeonicCapBlocks(fakeDb({ ledger: [row(ZYLAM, 15, 'fl_oz')] }), svc, submit([ZYLAM, 4, 'fl_oz']))).toEqual([]);
-    const snapshot = { id: 'cat-snap', name: 'Snapshot 2.5TG', active_ingredient: 'Isoxaben' };
-    const noCap = fakeDb({ catalog: [snapshot] });
-    expect(await treeShrubNeonicCapBlocks(noCap, svc, submit([snapshot, 999, 'lb']))).toEqual([]);
-    expect(noCap.reads).not.toContain('property_application_history');
-  });
-
-  test('gate on: a capped product with a blank amount, an "each" unit or an upper-case id is refused, not skipped', async () => {
-    process.env.GATE_TS_NEONIC_CAP = 'true';
-    const ledger = [row(ZYLAM, 15, 'fl_oz')];
-    for (const item of [[ZYLAM, '', 'fl_oz'], [ZYLAM, 999, 'each']]) {
-      const blocks = await treeShrubNeonicCapBlocks(fakeDb({ ledger }), svc, submit(item));
-      expect(blocks).toMatchObject([{ code: 'tree_shrub_neonic_cap_amount_needed', productId: ZYLAM.id }]);
-      expect(neonicCapBlockPayload(blocks).code).toBe('tree_shrub_neonic_cap_amount_needed');
-    }
-    const upper = await treeShrubNeonicCapBlocks(fakeDb({ ledger }), svc, [{ productId: ZYLAM.id.toUpperCase(), totalAmount: 5, amountUnit: 'fl_oz' }]);
-    expect(upper).toMatchObject([{ code: 'tree_shrub_neonic_cap_exceeded' }]);
-    expect(neonicCapBlockPayload(upper).code).toBe('tree_shrub_neonic_cap_exceeded');
-  });
-
-  test('gate on, no bed area: not checked, not refused', async () => {
-    process.env.GATE_TS_NEONIC_CAP = 'true';
-    const database = fakeDb({ bed: null });
-    expect(await treeShrubNeonicCapBlocks(database, svc, submit([ZYLAM, 999, 'fl_oz']))).toEqual([]);
-    expect(database.reads).not.toContain('property_application_history');
-  });
-
-  test('gate on: a failed ledger read throws, so /complete answers 503 instead of skipping a label limit', async () => {
-    process.env.GATE_TS_NEONIC_CAP = 'true';
-    await expect(treeShrubNeonicCapBlocks(fakeDb({ failLedger: true }), svc, submit([ZYLAM, 1, 'fl_oz']))).rejects.toThrow('ledger down');
-  });
-  // Two visits at one property finishing together: the check runs again inside the writing
-  // transaction under a customer lock held until the ledger rows commit (pre-push P1 #6204).
-  describe('recheckNeonicCapInTransaction', () => {
-    const { recheckNeonicCapInTransaction } = require('../services/tree-shrub-neonic-ledger');
-    const trxOf = (options) => {
-      const trx = fakeDb(options);
-      const locks = [];
-      trx.raw = jest.fn(async (sql, bindings) => { locks.push([sql, bindings]); return {}; });
-      trx.locks = locks;
-      return trx;
-    };
-
-    test('gate off: no lock and no read', async () => {
-      delete process.env.GATE_TS_NEONIC_CAP;
-      const trx = trxOf({ ledger: [row(ZYLAM, 50, 'fl_oz')] });
-      await recheckNeonicCapInTransaction(trx, svc, submit([ZYLAM, 99, 'fl_oz']), { serviceDate: '2026-10-09' });
-      expect(trx.locks).toEqual([]);
-      expect(trx.reads).toEqual([]);
-    });
-
-    test('gate on: locks the customer, then passes inside the cap', async () => {
-      process.env.GATE_TS_NEONIC_CAP = 'true';
-      const trx = trxOf({ ledger: [row(ZYLAM, 15, 'fl_oz')] });
-      await recheckNeonicCapInTransaction(trx, svc, submit([ZYLAM, 4, 'fl_oz']), { serviceDate: '2026-10-09' });
-      // The first raw call is the lock; later ones are the ledger query's own raw fragments.
-      expect(trx.locks[0]).toEqual(['SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['ts.neonic_cap', 'cust-1']]);
-    });
-
-    test('gate on: a visit with no property takes the same customer lock', async () => {
-      process.env.GATE_TS_NEONIC_CAP = 'true';
-      const trx = trxOf({});
-      await recheckNeonicCapInTransaction(trx, { ...svc, property_id: null }, submit([ZYLAM, 1, 'fl_oz']), { serviceDate: '2026-10-09' });
-      expect(trx.locks[0][1]).toEqual(['ts.neonic_cap', 'cust-1']);
-    });
-
-    test('gate on: rows another visit committed first refuse this one with an operational 400', async () => {
-      process.env.GATE_TS_NEONIC_CAP = 'true';
-      const trx = trxOf({ ledger: [row(ZYLAM, 15, 'fl_oz')] });
-      await expect(recheckNeonicCapInTransaction(trx, svc, submit([ZYLAM, 5, 'fl_oz']), { serviceDate: '2026-10-09' }))
-        .rejects.toMatchObject({ statusCode: 400, code: 'tree_shrub_neonic_cap_exceeded', isOperational: true, message: 'Zylam: 5.0 fl oz is over the 4.7 fl oz left this year for this property.' });
-      // The lock comes before the read.
-      expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(trx.mock.invocationCallOrder[0]);
-    });
   });
 });
 
@@ -359,6 +198,19 @@ describe('buildNeonicCapContext (the sheet)', () => {
     expect(out).toMatchObject({ available: true, year: 2026, bedSqft: BED });
     expect(entryOf(out.ingredients, 'dinotefuran')).toMatchObject({ reason: null });
   });
+  // No property link: no one bed area, and the history would span every property of the customer.
+  test('a visit with no property answers available:false without a read (Codex r2 #6204)', async () => {
+    const database = jest.fn(() => { throw new Error('must not read'); });
+    expect(await buildNeonicCapContext({ ...svc, property_id: null }, '2026-10-09', CATALOG, database))
+      .toEqual({ available: false, reason: 'property_needed', year: 2026, ingredients: [] });
+    expect(database).not.toHaveBeenCalled();
+  });
+  test('the bed area is the visit property\'s own', async () => {
+    const where = jest.fn(() => ({ first: async () => ({ bed_sqft: 2500 }) }));
+    expect(await loadBedSqft(() => ({ where }), svc)).toBe(2500);
+    expect(where).toHaveBeenCalledWith({ id: 'prop-1' });
+    expect(await loadBedSqft(() => ({ where: () => ({ first: async () => ({ bed_sqft: null }) }) }), svc)).toBeNull();
+  });
   test('a failed read answers available:false (the sheet shows nothing and blocks nothing)', async () => {
     const database = () => { throw new Error('boom'); };
     database.raw = (sql) => sql;
@@ -368,22 +220,8 @@ describe('buildNeonicCapContext (the sheet)', () => {
 
 describe('wiring', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-  test('the refusal sits after the lawn products block, on a fresh attempt only, before any write', () => {
-    const gate = source.indexOf("claim.action === 'proceed' && !isIncompleteVisit && (reportServiceLine === 'tree_shrub'");
-    expect(gate).toBeGreaterThan(source.indexOf('lawnProhibitedProductsBlockPayload(prohibited)'));
-    expect(gate).toBeLessThan(source.indexOf("claim.action === 'proceed' && treeShrubCloseoutRequired"));
-    expect(source.slice(gate, gate + 2200)).toContain('treeShrubNeonicCapBlocks(db, svc, products');
-    expect(source.slice(gate, gate + 2200)).toContain('status: 400, body: neonicCapBlockPayload(neonicBlocks)');
-    // The year judged is the completion day (or the backfilled day), the date the ledger row carries.
-    expect(source.slice(gate, gate + 2200)).toContain('backfillPlan.active ? backfillPlan.serviceDate : etDateString(finiteDate(packetContext?.completionAt) || new Date())');
-    expect(source.slice(gate, gate + 2200)).not.toContain('svc.scheduled_date');
-  });
-  test('the in-transaction recheck sits just before the ledger write, on the date the ledger row carries', () => {
-    const recheck = source.indexOf('await recheckNeonicCapInTransaction(trx, svc, products, { serviceDate: completionServiceDate });');
-    const write = source.indexOf('await ComplianceService.createComplianceRecords(record.id, { trx });');
-    expect(recheck).toBeGreaterThan(0);
-    expect(write - recheck).toBeGreaterThan(0);
-    expect(write - recheck).toBeLessThan(400);
+  test('/complete does not refuse on the cap: the hold is the sheet\'s, like the live-insect check', () => {
+    expect(source).not.toMatch(/neonic/i);
   });
   test('the gate is a strict opt-in with its own reader', () => {
     const gates = require('../config/feature-gates');

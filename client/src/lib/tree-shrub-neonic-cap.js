@@ -3,9 +3,9 @@
 // The yearly neonicotinoid cap on the Tree & Shrub Fast Complete sheet (GATE_TS_NEONIC_CAP,
 // owner 2026-10-09). Pure functions: the server sends `neonicCap` in the fast context (how much
 // of each capped product's yearly amount the property has used, and the product amounts in the
-// product's own unit) and is the authority: /complete refuses a completion over the cap with
-// `tree_shrub_neonic_cap_exceeded`. This only shows what is left and holds Complete early, with
-// the same math and the same wording as server/services/tree-shrub-neonic-ledger.js.
+// product's own unit). This shows what is left and holds Complete on an amount over it. Like the
+// live-insect check, the hold is the sheet's: /complete does not refuse, and an application that
+// was made is always recorded.
 //
 // Products that share an active ingredient share one cap: an amount is a share of its own
 // product's yearly amount, and the shares of the year so far and of this visit's rows add up to 1.
@@ -75,6 +75,8 @@ function ingredientResult(ingredient, rows) {
     const left = Math.max(0, 1 - used - (thisVisit - share)) * product.yearlyAmount;
     const unit = unitLabel(product.unit);
     lines[row.productId] = `${product.name} left this year: ${formatLeft(left)} ${unit} of ${formatYearly(product.yearlyAmount)}${note}`;
+    // An amount in a unit that does not convert ("each") cannot be checked: hold it, never skip it.
+    if (!amount && Number(row.totalAmount) > 0) holds.push(`${product.name}: enter the amount in ${unit} so the yearly limit can be checked.`);
     if (over && share > 0) {
       holds.push(`${product.name}: ${formatEntered(amount)} ${unit} is over the ${formatLeft(left)} ${unit} left this year for this property.`);
     }

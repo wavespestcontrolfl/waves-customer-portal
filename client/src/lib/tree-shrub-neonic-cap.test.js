@@ -65,6 +65,13 @@ describe('evaluateNeonicCap', () => {
     expect(out.lines.zylam).toBe('Zylam left this year: 4.7 fl oz of 19.7');
   });
 
+  test('an entered amount in a unit that does not convert holds Complete, never skips the check', () => {
+    const out = evaluateNeonicCap(context({ dino: 0 }), [row('zylam', 999, 'each')]);
+    expect(out.blockMessage).toBe('Zylam: enter the amount in fl oz so the yearly limit can be checked.');
+    // No amount yet is the sheet's own "enter the amount" hold, not this one.
+    expect(evaluateNeonicCap(context({ dino: 0 }), [row('zylam', '', 'fl_oz')]).blockMessage).toBe('');
+  });
+
   test('an amount on the cap exactly does not hold', () => {
     expect(evaluateNeonicCap(context({ dino: 15 / 19.725 }), [row('zylam', 4.725, 'fl_oz')]).blockMessage).toBe('');
   });

@@ -115,7 +115,6 @@ const {
 const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { freezePestCheck } = require('./tree-shrub-pest-check');
-const { treeShrubNeonicCapBlocks, recheckNeonicCapInTransaction, neonicCapBlockPayload, UNAVAILABLE_CODE: NEONIC_CAP_UNAVAILABLE_CODE } = require('./tree-shrub-neonic-ledger');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -4703,32 +4702,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
-    // T&S yearly neonicotinoid cap (GATE_TS_NEONIC_CAP): a fresh closeout whose entered amounts, with the
-    // property's tree & shrub year so far, pass the label cap is refused before any write. A resume or
-    // replay of a committed completion is left alone; an incomplete visit already put the product down,
-    // so it is recorded as it happened. Gate off: the check returns [] without a read.
-    if (claim.action === 'proceed' && !isIncompleteVisit && (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')) {
-      let neonicBlocks;
-      try {
-        // The year judged is the year the ledger row will carry: the backfilled day, else the day the
-        // visit is completed (a packet member's own completion instant), never the scheduled day.
-        neonicBlocks = await treeShrubNeonicCapBlocks(db, svc, products, {
-          serviceDate: backfillPlan.active ? backfillPlan.serviceDate : etDateString(finiteDate(packetContext?.completionAt) || new Date()),
-        });
-      } catch (err) {
-        logger.error(`[dispatch] T&S neonic cap read failed for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(NEONIC_CAP_UNAVAILABLE_CODE), db);
-        return ({ status: 503, body: {
-          error: 'Could not check the yearly product limit for this property. Try again in a moment.',
-          code: NEONIC_CAP_UNAVAILABLE_CODE,
-        } });
-      }
-      if (neonicBlocks.length) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(neonicBlocks[0].code), db);
-        return ({ status: 400, body: neonicCapBlockPayload(neonicBlocks) });
-      }
-    }
-
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
     if (claim.action === 'proceed') {
@@ -8048,11 +8021,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Incomplete visits are included on purpose — any product logged
         // was physically applied regardless of the visit outcome.
         if (insertedServiceProducts.length) {
-          // GATE_TS_NEONIC_CAP: the yearly cap again, under a customer lock held until these ledger rows
-          // commit, on the date they carry. Two visits of one customer cannot both spend one allowance.
-          if (!isIncompleteVisit && (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')) {
-            await recheckNeonicCapInTransaction(trx, svc, products, { serviceDate: completionServiceDate });
-          }
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
           // GATE_LAWN_TROUBLE_AREAS: the lawn's trouble-area store, from the spot rows that carry a place (secondary; never fails the visit).

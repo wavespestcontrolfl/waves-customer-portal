@@ -642,7 +642,7 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
     scheduled_services: visit({ scheduled_date: '2026-10-01' }),
     products_catalog: catalog,
     customer_properties: { bed_sqft: 10890 },
-    'property_application_history as pah': [ledgerRow, { ...ledgerRow, quantity_applied: 50, service_line: 'lawn' }],
+    'property_application_history as pah': [ledgerRow, { product_name: 'Merit 2F', active_ingredient: 'Imidacloprid', quantity_applied: 50, quantity_unit: 'fl_oz', service_line: 'lawn' }],
     ...tables,
   }));
   beforeEach(() => {
@@ -659,7 +659,7 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
     expect(knex.calls.some(([table]) => table === 'customer_properties')).toBe(false);
   });
 
-  test('gate on: what is left of Zylam at this property, a lawn visit\'s row left out', async () => {
+  test('gate on: what is left of Zylam at this property, a lawn visit\'s imidacloprid left out', async () => {
     process.env.GATE_TS_NEONIC_CAP = 'true';
     const ctx = await build();
     // The year is today's (ET), the day a completion records, not the scheduled day.
@@ -667,6 +667,7 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
     expect(ctx.neonicCap).toMatchObject({ available: true, year: thisYear, bedSqft: 10890 });
     const lastDecember = await build({ scheduled_services: visit({ scheduled_date: `${thisYear - 1}-12-30` }) });
     expect(lastDecember.neonicCap.year).toBe(thisYear);
+    expect(ctx.neonicCap.ingredients.find((entry) => entry.key === 'imidacloprid').usedShare).toBe(0);
     const dino = ctx.neonicCap.ingredients.find((entry) => entry.key === 'dinotefuran');
     expect(dino.usedShare).toBeCloseTo(0.5, 6);
     expect(dino.capByProduct).toEqual([{ productId: 'zylam', name: 'Zylam', unit: 'fl_oz', yearlyAmount: 19.725, remainingAmount: 9.8625 }]);
