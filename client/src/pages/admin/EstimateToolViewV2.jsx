@@ -47,13 +47,12 @@ import {
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
-import AreaAddOnsGroup from "../../components/admin/AreaAddOnsGroup";
+import AreaAddOnsGroup, { PerApplicationPrice } from "../../components/admin/AreaAddOnsGroup";
+import { isFootprintFreeSelection } from "../../lib/estimate-footprint";
 import {
   areaAddOnOption,
-  isAreaAddOnOnly,
   pickedGrass,
   areaAddOnRowLabel,
-  isAreaAddOnPricedPerApplication,
   buildKnownAreas,
   countAreaAddOns,
   readAreaAddOnCatalog,
@@ -4372,16 +4371,9 @@ export default function EstimateToolViewV2({
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
-      // Quotes priced without the home/lot footprint, so no property data is
-      // needed: bed bug, pre-slab, Bora-Care (priced from attic/raw-wood sqft
-      // or surface linear ft), recurring foam (drill points + cadence), and
-      // area add-ons alone (a web sweep takes no area; a tiered add-on carries
-      // its own treated area), so an operator can quote them before a property
-      // lookup (or with no sqft).
-      const onlyService = (key) => selectedServices.length === 1 && selectedServices[0] === key;
-      const footprintFree = ["BEDBUG", "PRESLAB", "BORACARE", "FOAM_RECURRING"].some(onlyService)
-        || isAreaAddOnOnly(selectedServices, form.areaAddOns);
-      if (!footprintFree && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      // Quotes priced without the home/lot footprint need no property data, so an
+      // operator can quote them before a property lookup (lib/estimate-footprint.js).
+      if (!isFootprintFreeSelection(selectedServices, form.areaAddOns) && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -8885,12 +8877,7 @@ export default function EstimateToolViewV2({
                                             : areaAddOnRowLabel(item, "Standalone"))
                                   }
                                   detail={item.detail}
-                                  price={isAreaAddOnPricedPerApplication(item) ? (
-                                    <>
-                                      {fmtInt(item.price)}
-                                      <span className="block text-14 font-normal text-ink-secondary">per application</span>
-                                    </>
-                                  ) : fmtInt(item.price)}
+                                  price={<PerApplicationPrice item={item} amount={fmtInt(item.price)} />}
                                 />{" "}
                               </TierGridV2>{" "}
                               {item.service === "pest_initial_roach" &&

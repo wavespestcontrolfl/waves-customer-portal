@@ -17,7 +17,7 @@ const catalog = [topchoice, { id: "prod-other", name: "Test general product", ca
 
 const fireAnt = { key: "area_addon_fire_ant_yard", name: "Fire Ant Yard Treatment", areaSqFt: 4200, tierSqFt: 5000, areaLabel: "lawn", grassType: null };
 const sweep = { key: "area_addon_web_sweep", name: "Web Sweep", areaSqFt: null, tierSqFt: null, areaLabel: null, grassType: null };
-const attached = (addOns) => ({ areaAddOnRowsAttached: true, areaAddOnKeys: addOns.map((a) => a.key), areaAddOns: addOns });
+const attached = (addOns) => ({ areaAddOnRowsAttached: true, areaAddOns: addOns });
 
 const lawnHost = { id: "host-lawn", customerId: "c1", customerName: "Synthetic Customer", serviceType: "Lawn Care", status: "on_site", scheduledDate: "2099-01-01", completionProfile: { serviceKey: "lawn", category: "lawn_care", requiresProducts: false }, lawnFastCompleteEnabled: true };
 const pestHost = { id: "host-pest", customerId: "c1", customerName: "Synthetic Customer", serviceType: "Pest Control", status: "on_site", scheduledDate: "2099-01-01", completionProfile: { serviceKey: "pest_general_quarterly", category: "pest_control", requiresProducts: false }, fastCompleteReportEnabled: true };

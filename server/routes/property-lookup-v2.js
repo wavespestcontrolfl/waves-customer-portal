@@ -5271,6 +5271,12 @@ function areaAddOnVisitFromOptions(options) {
   return visit;
 }
 
+// The engine's services.areaAddOns / services.areaAddOnVisit for these options: both, or nothing.
+function areaAddOnServices(options, ctx) {
+  const areaAddOns = areaAddOnsFromOptions(options, ctx);
+  return areaAddOns ? { areaAddOns, areaAddOnVisit: areaAddOnVisitFromOptions(options) } : {};
+}
+
 // An association's common-area job (HOA / multifamily), by the operator's
 // business type or the property's subtype. One predicate for the lookup's
 // suite scope and the translate-time refusal; the estimate tool's
@@ -5970,11 +5976,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('PLUGGING')) {
     services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }
-  const areaAddOns = areaAddOnsFromOptions(o, { track, grassChosen: !!o.grassType });
-  if (areaAddOns) {
-    services.areaAddOns = areaAddOns;
-    services.areaAddOnVisit = areaAddOnVisitFromOptions(o);
-  }
+  Object.assign(services, areaAddOnServices(o, { track, grassChosen: !!o.grassType }));
   if (sel.has('RODENT_SANITATION')) {
     services.sanitation = {
       tier: o.sanitationTier || 'standard',

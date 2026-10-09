@@ -5279,9 +5279,9 @@ async function loadProjectCompletionContextByServiceId(services) {
       linkedProjectLookupFailed,
     };
     const addOns = addOnVisitIds.get(String(service.id));
-    // The keys keep the lightweight flows off; the list (name, sold area) labels each add-on's
-    // product row on the host visit's own completion form.
-    return [service.id, addOns ? { ...entry, ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOnKeys: [...new Set(addOns.map((a) => a.key))], areaAddOns: addOns } : entry];
+    // areaAddOnRowsAttached keeps the lightweight flows off; the list (key, name, sold area) labels
+    // each add-on's product row on the host visit's own completion form.
+    return [service.id, addOns ? { ...entry, ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOns: addOns } : entry];
   }));
   return new Map(entries);
 }
@@ -6393,8 +6393,7 @@ router.get('/', async (req, res, next) => {
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
-        areaAddOnKeys: projectCompletionContext.areaAddOnKeys || [],
-        areaAddOns: projectCompletionContext.areaAddOns || [],
+        areaAddOns: projectCompletionContext.areaAddOns,
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
@@ -7027,8 +7026,7 @@ router.get('/week', async (req, res, next) => {
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
-          areaAddOnKeys: projectCompletionContext.areaAddOnKeys || [],
-          areaAddOns: projectCompletionContext.areaAddOns || [],
+          areaAddOns: projectCompletionContext.areaAddOns,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
@@ -7980,41 +7978,21 @@ async function scheduleCreateHandler(req, res, next) {
       if (linkedEstimate.status !== 'accepted' && linkedEstimate.expires_at && new Date(linkedEstimate.expires_at) < new Date()) {
         return res.status(400).json({ error: 'This estimate has expired. Revive it on the Estimates page before booking from it.' });
       }
-      // A suppression-carrying estimate cannot be BOOKED while
-      // GATE_BERMUDA_SUPPRESSION is off. This must run in the preflight,
-      // BEFORE the appointment transaction: the accept-on-book failure
-      // handler below deliberately KEEPS the booking when acceptance fails,
-      // so the manual-acceptance gate alone would still schedule (and
-      // possibly prepay-stamp) the disabled add-on (codex #3272 r6).
-      // Applies to the already-accepted link path too — scheduling the
-      // program is exactly what the kill switch must stop.
+      // A suppression-carrying or area add-on estimate cannot be BOOKED while its gate is off,
+      // and a not-yet-accepted recurring estimate that carries an area add-on cannot be booked
+      // at all (its best-effort acceptance would drop the add-on). This must run in the
+      // preflight, BEFORE the appointment transaction: the accept-on-book failure handler
+      // below deliberately KEEPS the booking when acceptance fails, so the manual-acceptance
+      // gate alone would still schedule (and possibly prepay-stamp) the disabled add-on (codex
+      // #3272 r6). Applies to the already-accepted link path too (the gates), because
+      // scheduling the program is exactly what the kill switch must stop.
       {
-        const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-        if (estimateDataCarriesBermudaSuppression(linkedEstimate.estimate_data)
-          && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-          return res.status(409).json({
-            error: 'This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before booking from it.',
-            code: 'BERMUDA_SUPPRESSION_GATED',
-          });
-        }
-        // Same rule for a persisted area add-on treatment (GATE_AREA_ADDONS).
-        const areaAddOnMapper = require('../services/pricing-engine/v1-legacy-mapper');
-        if (areaAddOnMapper.estimateAreaAddOnsGated(linkedEstimate.estimate_data)) {
-          return res.status(409).json({
-            error: areaAddOnMapper.areaAddOnsGatedStaffMessage('booking from it'),
-            code: areaAddOnMapper.AREA_ADDONS_GATED_CODE,
-          });
-        }
-        // The appointment commits BEFORE the best-effort acceptance, which refuses a recurring estimate that carries
-        // an area add-on (it would convert the plan and drop the add-on): refuse here so nothing is booked.
-        const manualAccept = require('../services/estimate-manual-acceptance');
-        if (linkedEstimate.status !== 'accepted'
-          && manualAccept.recurringAcceptWouldDropAreaAddOns(linkedEstimate, bookingBillingTerm)) {
-          return res.status(409).json({
-            error: manualAccept.AREA_ADDON_RECURRING_MARK_WON_MESSAGE,
-            code: areaAddOnMapper.AREA_ADDONS_ONE_TIME_ONLY_CODE,
-          });
-        }
+        const addOnRefusal = require('../services/estimate-manual-acceptance').persistedAddOnRefusal(linkedEstimate, {
+          action: 'booking from it',
+          billingTerm: bookingBillingTerm,
+          checkRecurring: linkedEstimate.status !== 'accepted',
+        });
+        if (addOnRefusal) return res.status(409).json({ error: addOnRefusal.message, code: addOnRefusal.code });
       }
       // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
       // (retired 2026-09-24) must not be booked-and-accepted here: the

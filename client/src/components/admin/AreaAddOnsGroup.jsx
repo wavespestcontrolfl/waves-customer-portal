@@ -5,6 +5,7 @@ import {
   SAME_VISIT,
   STANDALONE_VISIT,
   countAreaAddOns,
+  isAreaAddOnPricedPerApplication,
   knownAreaFor,
   newAddOnEntry,
   reseedAddOnEntries,
@@ -255,5 +256,17 @@ export default function AreaAddOnsGroup({
         </>
       )}
     </div>
+  );
+}
+
+// The price cell of a one-time row on the estimate preview: an add-on's price is one application, so
+// it carries the unit under it ("per application"); every other row shows the amount alone.
+export function PerApplicationPrice({ item, amount }) {
+  if (!isAreaAddOnPricedPerApplication(item)) return amount;
+  return (
+    <>
+      {amount}
+      <span className="block text-14 font-normal text-ink-secondary">per application</span>
+    </>
   );
 }

@@ -376,7 +376,7 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     const guard = route.indexOf('slotBlockingRefusal(estimate');
     expect(guard).toBeGreaterThan(0);
     // Every shortcut / alternative payload comes after it.
-    for (const needle of ['rejectGatedSuppressionEstimate(res, estimate)', 'isCommercialAutoEstimate(estimate)', 'isRodentGuaranteeOnlyEstimate(estimate']) {
+    for (const needle of ['rejectGatedSuppressionEstimate(res, estimate', 'isCommercialAutoEstimate(estimate)', 'isRodentGuaranteeOnlyEstimate(estimate']) {
       expect([needle, route.indexOf(needle) > guard]).toEqual([needle, true]);
     }
     // ... and only viewability refusals precede it.
@@ -401,7 +401,7 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     const predicate = route.slice(route.indexOf('const noBookingRefusal ='));
     const guard = predicate.indexOf('lockedContactReviewRefusal(row, trx');
     expect(guard).toBeGreaterThan(0);
-    for (const needle of ['estimateDataCarriesBermudaSuppression(row', 'isCommercialAutoEstimate(row)', 'isRodentGuaranteeOnlyEstimate(row']) {
+    for (const needle of ['gatedAddOnRefusal(row)', 'isCommercialAutoEstimate(row)', 'isRodentGuaranteeOnlyEstimate(row']) {
       expect([needle, predicate.indexOf(needle) > guard]).toEqual([needle, true]);
     }
     expect(route.slice(0, route.indexOf('const noBookingRefusal =')))
@@ -429,9 +429,9 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     const estSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     const accept = estSrc.slice(estSrc.indexOf("res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));\n    }\n    // ORDER (the same as /data"));
     const at = (needle) => accept.indexOf(needle);
-    const park = at("estimatePublicBlockingState(estimate, { suppressionGated: bermudaSuppressionGated || areaAddOnsGated })");
+    const park = at("estimatePublicBlockingState(estimate, { suppressionGated: !!gatedAddOn })");
     expect(park).toBeGreaterThan(0);
-    for (const needle of ["code: 'BERMUDA_SUPPRESSION_GATED'", 'contactLastNameError', 'HOLD_EXPIRED_409', 'No appointment is needed for this renewal', 'quoteRequirement.quoteRequired', 'estimateTrenchingReviewRequired(estData)']) {
+    for (const needle of ['if (gatedAddOn) return res.status(409).json(gatedAddOn);', 'contactLastNameError', 'HOLD_EXPIRED_409', 'No appointment is needed for this renewal', 'quoteRequirement.quoteRequired', 'estimateTrenchingReviewRequired(estData)']) {
       expect([needle, at(needle) > park]).toEqual([needle, true]);
     }
     // The Bermuda gate no longer answers ahead of the accepted / inactive refusals.

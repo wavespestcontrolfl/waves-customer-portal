@@ -116,7 +116,7 @@ describe('fastCompleteReportEnabled', () => {
       expect(map.get(UUID_ADDON_VISIT)).toMatchObject({
         fastCompleteReportEnabled: false, lawnFastCompleteEnabled: false, fastCompleteRecapEnabled: false, typedReportFlowEnabled: false,
         reserviceFastCompleteEnabled: false, lawnReserviceFastCompleteEnabled: false, treeShrubFastCompleteEnabled: false,
-        areaAddOnRowsAttached: true, areaAddOnKeys: ['area_addon_fire_ant_yard'],
+        areaAddOnRowsAttached: true,
         // The host keeps its own lane; the list labels the add-on's product fields (name, sold area).
         areaAddOns: [{ key: 'area_addon_fire_ant_yard', name: 'Fire Ant Yard Treatment', areaSqFt: null, tierSqFt: null, areaLabel: 'lawn', grassType: null }],
       });

@@ -28,7 +28,7 @@ describe('a pest visit with an area add-on row attached (Codex r6 P1)', () => {
   it('is not the recap modal or the pest report flow: the visit own full form, with the add-on fields, records it', () => {
     const host = pest({ category: 'pest_control', serviceKey: 'pest_general_quarterly', findingsType: null });
     expect(isFastCompleteReportEligible(host)).toBe(true);
-    const withRow = { ...host, areaAddOnRowsAttached: true, areaAddOnKeys: ['area_addon_bed_pre_emergent'] };
+    const withRow = { ...host, areaAddOnRowsAttached: true, areaAddOns: [{ key: 'area_addon_bed_pre_emergent' }] };
     expect(isPestControlService(withRow)).toBe(false);
     expect(isFastCompleteReportEligible(withRow)).toBe(false);
   });
@@ -38,7 +38,7 @@ describe('a pest visit with an area add-on row attached (Codex r6 P1)', () => {
     expect(areaAddOnRowServiceType({ completionProfile: { serviceKey: 'area_addon_fire_ant_yard' } }, 'Fire Ant Yard Treatment', null)).toBe('Lawn Care');
     expect(areaAddOnRowServiceType({ completionProfile: { serviceKey: 'area_addon_web_sweep' } }, 'Web Sweep', null)).toBe('Web Sweep');
     // A host visit keeps its own type: attached add-on rows never re-type the host's products.
-    expect(areaAddOnRowServiceType({ completionProfile: { serviceKey: 'pest_general_quarterly' }, areaAddOnKeys: ['area_addon_bed_pre_emergent'] }, 'Pest Control', null)).toBe('Pest Control');
+    expect(areaAddOnRowServiceType({ completionProfile: { serviceKey: 'pest_general_quarterly' }, areaAddOns: [{ key: 'area_addon_bed_pre_emergent' }] }, 'Pest Control', null)).toBe('Pest Control');
     expect(areaAddOnRowServiceType(null, 'Pest Control', null)).toBe('Pest Control');
   });
 });

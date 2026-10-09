@@ -144,6 +144,7 @@ function areaAddOnVisitCopy(item = {}) {
 
 // Fills the tier and the visit context into an area add-on's bullets. A row
 // with no tier drops the bullet that names the area rather than print a blank.
+// Bullets of every other service carry no placeholder and come back unchanged.
 function fillAreaAddOnLines(lines = [], item = {}) {
   const tier = Number(item.tierSqFt);
   const area = tier > 0 ? `${tier.toLocaleString('en-US')} sq ft` : null;
@@ -333,7 +334,7 @@ function resolveOneTimeServiceCopy(item = {}, options = {}) {
   if (key === 'termite_trenching' && !purchasedTrenchingWarranty) {
     lines = lines.filter((line) => line !== PURCHASED_TRENCHING_WARRANTY_BULLET);
   }
-  if (key.startsWith('area_addon_')) lines = fillAreaAddOnLines(lines, item);
+  lines = fillAreaAddOnLines(lines, item);
   // Dethatching: debris hauling is priced separately (cleanupLevel) — the
   // bullet rides only when the row says it is included (codex #3823 r3 P1).
   if (key === 'dethatching' && item.debrisRemovalIncluded !== true) {

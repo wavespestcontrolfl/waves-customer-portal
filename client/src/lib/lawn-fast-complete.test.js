@@ -46,7 +46,7 @@ describe('an area add-on is never a lawn visit', () => {
 });
 
 describe('a visit with an area add-on row attached (Codex r6 P1)', () => {
-  const attached = { areaAddOnRowsAttached: true, areaAddOnKeys: ['area_addon_fire_ant_yard'] };
+  const attached = { areaAddOnRowsAttached: true, areaAddOns: [{ key: 'area_addon_fire_ant_yard' }] };
   it('keeps the lawn sheet and the lawn re-service sheet off: the generic form records the add-on', async () => {
     const { isLawnReserviceFastCompleteEligible } = await import('./lawn-fast-complete');
     expect(isLawnFastCompleteEligible(lawn())).toBe(true);

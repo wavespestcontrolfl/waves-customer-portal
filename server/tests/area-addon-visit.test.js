@@ -553,7 +553,7 @@ describe('an attached area add-on row keeps the lightweight completion flows off
   test('the lawn sheet refuses a lawn visit that carries an add-on row, and still accepts one that does not', () => {
     const svc = { id: VISIT, status: 'confirmed' };
     expect(lawnFastIneligibleReason({ svc, profile: lawnProfile })).toBeNull();
-    expect(lawnFastIneligibleReason({ svc, profile: lawnProfile, hasAreaAddOnRows: true })).toBe('area_addon_attached');
+    expect(lawnFastIneligibleReason({ svc: { ...svc, hasAreaAddOnRows: true }, profile: lawnProfile })).toBe('area_addon_attached');
   });
 
   test('areaAddOnKeysByVisit is one batched read of uuids only, and a visit without rows is absent', async () => {
@@ -600,13 +600,13 @@ describe('resolveEligibility reads the attached add-on rows (Codex r6 P1)', () =
 
   test('a pest visit with no add-on row is eligible; with one it is not (the generic form records the add-on)', async () => {
     const plain = load([]);
-    expect(await plain.recap.resolveEligibility(VISIT, plain.knex)).toMatchObject({ ok: true, eligible: true, hasAreaAddOnRows: false });
+    expect(await plain.recap.resolveEligibility(VISIT, plain.knex)).toMatchObject({ ok: true, eligible: true, svc: expect.objectContaining({ hasAreaAddOnRows: false }) });
     const withRow = load([{ scheduled_service_id: VISIT, service_key: 'area_addon_bed_pre_emergent' }]);
-    expect(await withRow.recap.resolveEligibility(VISIT, withRow.knex)).toMatchObject({ ok: true, eligible: false, hasAreaAddOnRows: true });
+    expect(await withRow.recap.resolveEligibility(VISIT, withRow.knex)).toMatchObject({ ok: true, eligible: false, svc: expect.objectContaining({ hasAreaAddOnRows: true }) });
   });
 
   test('a failed row read is "has rows" (the full form), never an eligible verdict', async () => {
     const failing = load(new Error('connection lost'));
-    expect(await failing.recap.resolveEligibility(VISIT, failing.knex)).toMatchObject({ ok: true, eligible: false, hasAreaAddOnRows: true });
+    expect(await failing.recap.resolveEligibility(VISIT, failing.knex)).toMatchObject({ ok: true, eligible: false, svc: expect.objectContaining({ hasAreaAddOnRows: true }) });
   });
 });

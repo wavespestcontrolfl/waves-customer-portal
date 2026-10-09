@@ -37,8 +37,8 @@ export function isAreaAddOnVisit(service) {
 
 // A visit that carries area add-on work: it is an add-on itself, or it has an
 // add-on attached as a row (a same-trip add-on rides a normal pest or lawn visit;
-// the schedule feed sets `areaAddOnRowsAttached` and lists the catalog keys in
-// `areaAddOnKeys`). The lightweight completion shortcuts (pest report flow, lawn /
+// the schedule feed sets `areaAddOnRowsAttached` and lists the add-ons in
+// `areaAddOns`). The lightweight completion shortcuts (pest report flow, lawn /
 // re-service / Tree & Shrub Fast Complete, the voice fill) record no add-on product
 // or treated area, so a visit like that stays off them. This is the SHORTCUT rule
 // only: which completion form a visit takes is isAreaAddOnVisit (below).

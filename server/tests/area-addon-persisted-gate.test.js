@@ -100,25 +100,35 @@ describe('deposit record boundary (a payment intent minted gate-on must not be r
 });
 
 describe('booking from a linked estimate (admin schedule)', () => {
-  test('the preflight refuses a gated add-on estimate with 409 AREA_ADDONS_GATED before the appointment transaction', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    const bermuda = src.indexOf("code: 'BERMUDA_SUPPRESSION_GATED'");
-    const area = src.indexOf('estimateAreaAddOnsGated(linkedEstimate.estimate_data)');
-    expect(bermuda).toBeGreaterThan(0);
-    expect(area).toBeGreaterThan(bermuda);
-    // Same preflight block as the Bermuda guard: nothing but that block sits between them.
-    expect(src.slice(bermuda, area)).not.toMatch(/db\.transaction|trx\(/);
-    expect(src.slice(area, area + 400)).toMatch(/status\(409\)[\s\S]*AREA_ADDONS_GATED_CODE/);
+  const { persistedAddOnRefusal, AREA_ADDON_RECURRING_MARK_WON_MESSAGE } = require('../services/estimate-manual-acceptance');
+  const schedule = () => require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+
+  test('a gated add-on estimate is refused 409 AREA_ADDONS_GATED, with the booking wording, whatever its status', () => {
+    delete process.env.GATE_AREA_ADDONS;
+    const refusal = persistedAddOnRefusal({ estimate_data: storedWithAddOn() }, { action: 'booking from it', checkRecurring: false });
+    expect(refusal).toEqual({ code: 'AREA_ADDONS_GATED', message: expect.stringMatching(/before booking from it\.$/) });
   });
 
-  test('the preflight refuses a recurring estimate carrying an add-on before the appointment transaction (Codex r6)', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    const check = src.indexOf('recurringAcceptWouldDropAreaAddOns(linkedEstimate');
-    const firstTransaction = src.indexOf('db.transaction', src.indexOf('estimateAreaAddOnsGated(linkedEstimate.estimate_data)'));
-    expect(check).toBeGreaterThan(0);
-    expect(check).toBeLessThan(firstTransaction);
-    expect(src.slice(check, check + 400)).toMatch(/status\(409\)[\s\S]*AREA_ADDON_RECURRING_MARK_WON_MESSAGE[\s\S]*AREA_ADDONS_ONE_TIME_ONLY_CODE/);
-    // An already-accepted estimate converts nothing here, so it is not refused.
-    expect(src.slice(check - 120, check)).toMatch(/linkedEstimate\.status !== 'accepted'/);
+  test('the bermuda guard shares the helper and keeps its code and wording', () => {
+    const refusal = persistedAddOnRefusal({ estimate_data: { engineRequest: { options: { bermudaSuppression: true } } } }, { action: 'booking from it' });
+    expect(refusal).toEqual({ code: 'BERMUDA_SUPPRESSION_GATED', message: expect.stringMatching(/bermudagrass-suppression add-on.*before booking from it\.$/) });
+  });
+
+  test('a recurring estimate carrying an add-on is refused with the one-time-only code; an accepted one (checkRecurring off) is not', () => {
+    process.env.GATE_AREA_ADDONS = 'true';
+    const recurring = { estimate_data: storedWithAddOn(), monthly_total: 59, annual_total: 708, onetime_total: 0 };
+    expect(persistedAddOnRefusal(recurring, { action: 'booking from it' })).toEqual({ code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY', message: AREA_ADDON_RECURRING_MARK_WON_MESSAGE });
+    expect(persistedAddOnRefusal(recurring, { action: 'booking from it', checkRecurring: false })).toBeNull();
+    expect(persistedAddOnRefusal({ estimate_data: {} }, { action: 'booking from it' })).toBeNull();
+  });
+
+  test('the schedule preflight asks it before the appointment transaction and skips the recurring check for an accepted estimate', () => {
+    const src = schedule();
+    const call = src.indexOf("persistedAddOnRefusal(linkedEstimate, {");
+    const firstTransaction = src.indexOf('db.transaction', call);
+    expect(call).toBeGreaterThan(0);
+    expect(call).toBeLessThan(firstTransaction);
+    expect(src.slice(call, call + 300)).toContain("checkRecurring: linkedEstimate.status !== 'accepted'");
+    expect(src.slice(call, call + 500)).toMatch(/status\(409\)\.json\(\{ error: addOnRefusal\.message, code: addOnRefusal\.code \}\)/);
   });
 });

@@ -463,6 +463,17 @@ function recurringAcceptWouldDropAreaAddOns(estimate = {}, billingTerm = 'standa
   });
 }
 
+// Why a stored estimate cannot be accepted, or booked from, because of the add-ons it carries:
+// a gated add-on whose gate is off, or (checkRecurring) an area add-on a recurring accept would
+// drop. { code, message } or null. The one rule for Mark Won and the schedule's booking preflight.
+function persistedAddOnRefusal(estimate = {}, { action, billingTerm = 'standard', checkRecurring = true } = {}) {
+  const mapper = require('./pricing-engine/v1-legacy-mapper');
+  const gated = mapper.gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, action);
+  if (gated) return gated;
+  return checkRecurring && recurringAcceptWouldDropAreaAddOns(estimate, billingTerm)
+    ? { code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE, message: AREA_ADDON_RECURRING_MARK_WON_MESSAGE } : null;
+}
+
 async function markEstimateManuallyAccepted({
   estimateId,
   adminUserId,
@@ -552,28 +563,14 @@ async function markEstimateManuallyAccepted({
     if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Manager approval is required before this estimate can be manually accepted.', 400);
     }
-    // Same live-gate rule as the public accept route (codex #3272 r5): the
-    // canonical manual-acceptance path (admin Mark Won + linked-estimate
-    // booking) converts from stored rows without re-entering priceLawnCare,
-    // so a persisted suppression estimate must not be accepted/billed/
-    // scheduled while GATE_BERMUDA_SUPPRESSION is off. Already-accepted
-    // retries returned above stay untouched.
-    {
-      const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
-      if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
-        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-        throw httpError('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before accepting.', 409);
-      }
-      // Same rule for a persisted area add-on treatment (GATE_AREA_ADDONS).
-      const { estimateAreaAddOnsGated, areaAddOnsGatedStaffMessage } = require('./pricing-engine/v1-legacy-mapper');
-      if (estimateAreaAddOnsGated(estimate.estimate_data || estimate.estimateData)) {
-        throw httpError(areaAddOnsGatedStaffMessage('accepting'), 409);
-      }
-      if (recurringAcceptWouldDropAreaAddOns(estimate, normalizedBillingTerm)) {
-        const { AREA_ADDONS_ONE_TIME_ONLY_CODE } = require('./pricing-engine/v1-legacy-mapper');
-        throw Object.assign(httpError(AREA_ADDON_RECURRING_MARK_WON_MESSAGE, 409), { code: AREA_ADDONS_ONE_TIME_ONLY_CODE });
-      }
-    }
+    // Same live-gate rule as the public accept route (codex #3272 r5): the canonical
+    // manual-acceptance path (admin Mark Won + linked-estimate booking) converts from
+    // stored rows without re-entering the pricer, so a persisted suppression or area
+    // add-on estimate must not be accepted/billed/scheduled while its gate is off, and a
+    // recurring accept must not drop a sold add-on. Already-accepted retries returned
+    // above stay untouched.
+    const addOnRefusal = persistedAddOnRefusal(estimate, { action: 'accepting', billingTerm: normalizedBillingTerm });
+    if (addOnRefusal) throw Object.assign(httpError(addOnRefusal.message, 409), { code: addOnRefusal.code });
     if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }
@@ -1261,6 +1258,7 @@ async function markEstimateManuallyAccepted({
 module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   MANUAL_ACCEPTABLE_STATUSES,
   markEstimateManuallyAccepted,
+  persistedAddOnRefusal,
   recurringAcceptWouldDropAreaAddOns,
   AREA_ADDON_RECURRING_MARK_WON_MESSAGE,
   normalizeManualBillingTerm,

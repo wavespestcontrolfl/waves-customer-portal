@@ -1578,8 +1578,39 @@ function estimateAreaAddOnsGated(estimateDataRaw) {
 function areaAddOnsGatedStaffMessage(action) {
   return `This estimate includes an area add-on treatment, which is currently disabled (GATE_AREA_ADDONS). Re-enable the gate or rebuild the estimate without the add-on before ${action}.`;
 }
+// The staff-facing refusal for a stored estimate whose gated add-on is switched off: the
+// bermudagrass-suppression add-on first, then an area add-on. { code, message } or null; `action`
+// completes "...before <action>." ("sending", "accepting", "booking from it").
+function gatedAddOnStaffRefusal(estimateDataRaw, action) {
+  if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+    return {
+      code: 'BERMUDA_SUPPRESSION_GATED',
+      message: `This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before ${action}.`,
+    };
+  }
+  return estimateAreaAddOnsGated(estimateDataRaw)
+    ? { code: AREA_ADDONS_GATED_CODE, message: areaAddOnsGatedStaffMessage(action) } : null;
+}
+// Why a stored estimate is never suggested for annual prepay because of the add-ons it carries
+// ('estimate carries a gated add-on' | 'estimate carries an area add-on'), or null.
+function annualPrepayBlockingAddOnReason(estimateDataRaw) {
+  if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) return 'estimate carries a gated add-on';
+  return estimateDataCarriesAreaAddOns(estimateDataRaw) ? 'estimate carries an area add-on' : null;
+}
 // Customer-facing message (same wording the Bermuda refusal uses).
 const AREA_ADDONS_GATED_CUSTOMER_MESSAGE = 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.';
+// The customer-facing refusal for a stored estimate whose gated add-on is switched off:
+// { error, code } (the 409 body) or null. The bermudagrass-suppression add-on first, then an area add-on.
+function gatedAddOnCustomerRefusal(estimateDataRaw) {
+  if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+    return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: 'BERMUDA_SUPPRESSION_GATED' };
+  }
+  return estimateAreaAddOnsGated(estimateDataRaw)
+    ? { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE } : null;
+}
 
 // Accepted area add-ons are scheduled and invoiced by the one-time accept
 // (one appointment carrying the service mix, the one-time total as its price).
@@ -1597,6 +1628,9 @@ module.exports = {
   estimateDataCarriesAreaAddOns,
   estimateAreaAddOnsGated,
   areaAddOnsGatedStaffMessage,
+  gatedAddOnStaffRefusal,
+  gatedAddOnCustomerRefusal,
+  annualPrepayBlockingAddOnReason,
   AREA_ADDONS_GATED_CODE,
   AREA_ADDONS_GATED_CUSTOMER_MESSAGE,
   AREA_ADDONS_ONE_TIME_ONLY_CODE,

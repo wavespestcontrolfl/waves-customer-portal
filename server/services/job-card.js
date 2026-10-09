@@ -1166,7 +1166,7 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   // An area add-on visit (protocols.json area_addon) states the label facts the card
   // shows beside its product: rate, area basis, yearly limit, safety line, and the
   // grass its rate is bound to. The rate is a label text, never a tank amount.
-  if (visit.labelFacts) for (const line of lines) line.governed = visit.labelFacts;
+  lines.forEach((line) => { line.governed = visit.labelFacts; });
   const fieldGuide = treeShrubFieldGuide(visit);
   return { visit, lines, procedure: {
     name: program.name,
@@ -1812,6 +1812,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   }
   // Withhold reasons in guard order — the first that applies wins; the
   // catalog contract (label_verified_at) and a spray Hold sit among them.
+  const lineFacts = protocolLine || {};
   const withheld = [
     // The visit's catalog identity is not a treatment (inspection,
     // assessment, the specialty grab-bag) and no booked add-on's protocol
@@ -1823,13 +1824,13 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
-    [Boolean(protocolLine?.labelHold), protocolLine?.labelHold],
+    [Boolean(lineFacts.labelHold), lineFacts.labelHold],
     // An area add-on dose follows the treated area sold, so it is the label rate on
     // the card, never a tank amount off the catalog default rate.
-    [Boolean(protocolLine?.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
+    [Boolean(lineFacts.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
     // The protocol lists this product as "if needed": no dose until the
     // call is made, exactly as the card withholds its amount.
-    [protocolLine?.selected === false, `Listed as "if needed" on ${protocolLine?.addon || "this visit's protocol"} — confirm the call before mixing`],
+    [lineFacts.selected === false, `Listed as "if needed" on ${lineFacts.addon || "this visit's protocol"} — confirm the call before mixing`],
     [!tankMixable, 'Not a tank mix — apply as labeled'],
     [!product.label_verified_at, 'Label rate not yet verified'],
     [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],

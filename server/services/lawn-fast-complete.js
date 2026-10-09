@@ -102,11 +102,17 @@ function isLawnProgramProfile(profile) {
   return profile.category === LAWN_CATEGORY && !isAreaAddOnCatalogKey(profile.serviceKey);
 }
 
-function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [], hasAreaAddOnRows = false }) {
-  if (!profile) return 'profile_unavailable';
+// Why this is not a lawn-program visit for the sheet, or null: not a lawn visit at all, or a visit
+// with an attached area add-on row (work this sheet cannot record: its product and treated area).
+function lawnProgramRefusal(svc, profile) {
   if (!isLawnProgramProfile(profile)) return 'not_lawn';
-  // An attached area add-on row is work this sheet cannot record (product and treated area).
-  if (hasAreaAddOnRows) return 'area_addon_attached';
+  return svc?.hasAreaAddOnRows ? 'area_addon_attached' : null;
+}
+
+function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
+  if (!profile) return 'profile_unavailable';
+  const notLawnProgram = lawnProgramRefusal(svc, profile);
+  if (notLawnProgram) return notLawnProgram;
   // The three lawn_care sheets partition the visits: the lawn re-service and Tree & Shrub
   // (which shares the lawn_care category) are decided by their OWN sheets' predicates, and
   // the Waves Assessment visit is its own diagnostic lane. Derived from the completion
@@ -154,7 +160,7 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses 
   // no profile row may still synthesize one, as it always has.
   const base = await resolveEligibility(serviceId, knex, { strict: true });
   if (!base.ok) return { ok: false, reason: base.reason };
-  const { svc, profile, hasAreaAddOnRows } = base;
+  const { svc, profile } = base;
   const readFailures = new Set();
   let visitGroupStatus = null;
   if (svc.visit_id) {
@@ -162,7 +168,7 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses 
     const visit = await knex('service_visits').where({ id: svc.visit_id }).first('status');
     visitGroupStatus = visit ? String(visit.status || '') : null;
   }
-  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses, hasAreaAddOnRows });
+  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses });
   let visitType = null;
   if (profile && withVisitType) {
     const billingMode = reason === 'not_lawn' ? null : await loadBillingMode(svc, knex, readFailures);

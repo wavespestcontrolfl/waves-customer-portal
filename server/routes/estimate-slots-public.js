@@ -159,31 +159,25 @@ const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void'])
 // PaymentIntent minted gate-on must never finalize gate-off). Returns a
 // sent 409 (caller must `return` it) or null when unaffected. Callers'
 // row loads all carry estimate_data (`.first()` or an explicit column).
-// A persisted area add-on treatment (GATE_AREA_ADDONS off) rides the same rail: same helpers, same 409, its own
+// A persisted area add-on treatment (GATE_AREA_ADDONS off) rides the same rail: same helper, same 409, its own
 // code (AREA_ADDONS_GATED), and like the Bermuda shape it is never priced (its replay would throw).
-function isBermudaGatedEstimate(estimate = {}) {
-  const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-  return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
-    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+// The 409 body ({ error, code }) or null.
+function gatedAddOnRefusal(estimate = {}) {
+  return require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data);
 }
 function isSuppressionGatedEstimate(estimate = {}) {
-  return isBermudaGatedEstimate(estimate)
-    || require('../services/pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estimate.estimate_data);
+  return !!gatedAddOnRefusal(estimate);
 }
-function gatedEstimateRefusalBody(estimate = {}) {
-  const { AREA_ADDONS_GATED_CODE, AREA_ADDONS_GATED_CUSTOMER_MESSAGE } = require('../services/pricing-engine/v1-legacy-mapper');
-  return isBermudaGatedEstimate(estimate)
-    ? {
-      error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
-      code: 'BERMUDA_SUPPRESSION_GATED',
-    }
-    : { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE };
+// Area add-ons are booked only by a one-time accept: a recurring-mode reserve of an estimate that carries
+// one holds nothing (the accept would refuse it). `serviceMode` is passed by the reserve route only.
+function recurringAreaAddOnRefusalBody(estimate = {}, serviceMode) {
+  const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+  return serviceMode && serviceMode !== 'one_time' && mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data)
+    ? { error: mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE } : null;
 }
-function rejectGatedSuppressionEstimate(res, estimate = {}) {
-  if (isSuppressionGatedEstimate(estimate)) {
-    return res.status(409).json(gatedEstimateRefusalBody(estimate));
-  }
-  return null;
+function rejectGatedSuppressionEstimate(res, estimate = {}, { serviceMode } = {}) {
+  const body = gatedAddOnRefusal(estimate) || recurringAreaAddOnRefusalBody(estimate, serviceMode);
+  return body ? res.status(409).json(body) : null;
 }
 
 // The DURABLE call-side verdict (codex P1, PR #3304 GH r10): when a
@@ -714,7 +708,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       const blocked = await slotBlockingRefusal(estimate, {});
       if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
     }
-    const gatedReserve = rejectGatedSuppressionEstimate(res, estimate);
+    slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
+    const gatedReserve = rejectGatedSuppressionEstimate(res, estimate, { serviceMode: slotOpts.serviceMode });
     if (gatedReserve) return gatedReserve;
     if (isCommercialAutoEstimate(estimate)) {
       return res.status(409).json({
@@ -731,14 +726,6 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         error: 'No appointment is needed for this renewal — accept without booking.',
         invoiceOnlyAcceptance: true,
       });
-    }
-    slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
-    // Area add-ons are booked only by a one-time accept: do not hold a recurring slot the accept would refuse.
-    if (slotOpts.serviceMode !== 'one_time') {
-      const mapper = require('../services/pricing-engine/v1-legacy-mapper');
-      if (mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data)) {
-        return res.status(409).json({ error: mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE });
-      }
     }
 
     try {
@@ -1186,22 +1173,9 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
       // the pre-txn rejectIneligibleEstimate passed, and extending then
       // answers 200 for a quote the customer is refused everywhere else,
       // holding capacity until the next refusal. Same body the pre-txn path
-      // returns.
-      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-      if (estimateDataCarriesBermudaSuppression(row.estimate_data)
-        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-        return {
-          status: 409,
-          body: {
-            error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
-            code: 'BERMUDA_SUPPRESSION_GATED',
-          },
-        };
-      }
-      // A persisted area add-on (GATE_AREA_ADDONS off): same recheck, its own code.
-      if (require('../services/pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(row.estimate_data)) {
-        return { status: 409, body: gatedEstimateRefusalBody(row) };
-      }
+      // returns. The area add-on (GATE_AREA_ADDONS off) is rechecked here too, with its own code.
+      const gatedAddOn = gatedAddOnRefusal(row);
+      if (gatedAddOn) return { status: 409, body: gatedAddOn };
       if (isCommercialAutoEstimate(row)) {
         return {
           status: 409,

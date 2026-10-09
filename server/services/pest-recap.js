@@ -124,7 +124,8 @@ async function resolveEligibility(serviceId, knex = db, { strict = false } = {})
       logger.warn(`[pest-recap] area add-on row lookup failed for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
       return true;
     });
-  return { ok: true, svc, profile, hasAreaAddOnRows, eligible: !hasAreaAddOnRows && recapEligibleProfile(profile) };
+  // The flag rides on the visit (svc.hasAreaAddOnRows) so every sheet's own ineligible-reason check reads it.
+  return { ok: true, svc: { ...svc, hasAreaAddOnRows }, profile, eligible: !hasAreaAddOnRows && recapEligibleProfile(profile) };
 }
 
 // An area add-on (the web sweep is pest control by family) is generic one-time
