@@ -137,7 +137,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers7_m');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers8_m');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -210,6 +210,10 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(prompt).toContain(
       "- CANCELLATIONS are never escalated as their own category: acknowledge, ask what's driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {\"type\":\"escalate\",\"note\":\"cancel_request\"} to intended_actions so a person still processes the actual cancellation."
     );
+    // Owner 2026-10-08: a customer ending the PLAN hears about the portal's self-cancel, once;
+    // a one-visit cancel is never pointed at it, and the draft never claims the cancellation.
+    expect(prompt).toContain('ONLY when the customer wants to end their recurring service plan altogether (not skip, move or cancel ONE visit), also tell them ONCE that they can cancel the plan on their own at any time in the customer portal, under Plan');
+    expect(prompt).toContain('never say the plan is cancelled, and never point a one-visit request at the portal plan cancellation.');
   });
 
   test('each category gate removes exactly that category from HELD and adds its own instruction', () => {
@@ -938,7 +942,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers7_m');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers8_m');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1432,7 +1436,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers7_m');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers8_m');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1441,7 +1445,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers7_m'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers8_m'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 

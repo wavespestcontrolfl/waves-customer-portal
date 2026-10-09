@@ -180,7 +180,12 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // VERSION_SUFFIX_FACT_MARKERS.m = COMPANY + LABEL + VISIT STATUS & OPEN LOOPS +
 // PAYMENT + the MISSED VISIT scope line). 'house_voice_v12_real_answers7_m': 31 chars,
 // 36 with all four category tags. A later revision mints the next number + its own key.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}7_m`;
+// PORTAL SELF-CANCEL (owner 2026-10-08): the unconditional CANCELLATIONS bullet now also
+// tells a customer ending their PLAN that the portal's Plan tab cancels it. A rule
+// change, not a fact section: the number moves to "8" (its own cohort, so graduation
+// and exam evidence never pool with drafts that lacked the rule) and the cumulative
+// fact key stays 'm' — the facts block is unchanged, so '7_m' items stay gradable.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}8_m`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -385,7 +390,7 @@ function realAnswersHandoffBullets() {
   // a complaint as a plain pest report is caught by the human in the loop,
   // not by code.
   lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — ${pestComplaintTieBreakLabels()} — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says that service line is ALREADY BOOKED, do NOT offer a new link, OPEN TIMES or a paid visit for it — acknowledge what they're seeing and refer to the appointment already on the schedule (the date/window in the fact), offering to help with that visit. When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
-  lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
+  lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation. ONLY when the customer wants to end their recurring service plan altogether (not skip, move or cancel ONE visit), also tell them ONCE that they can cancel the plan on their own at any time in the customer portal, under Plan — never say the plan is cancelled, and never point a one-visit request at the portal plan cancellation.');
   return lines.join('\n');
 }
 
