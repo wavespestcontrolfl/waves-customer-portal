@@ -2039,10 +2039,19 @@ function initScheduledJobs() {
   // still open (a clean rollback), so the tick is not skipped here. runExclusive records the job health.
   cron.schedule('35 6 * * *', async () => {
     try {
-      await runExclusive('pin-parked-check', async () => {
+      const lockRes = await runExclusive('pin-parked-check', async () => {
         const result = await require('./pin-parked-check').runPinParkedCheck();
         if (result.created > 0) logger.info(`[pin-parked-check] ${result.created} new pin suggestion(s)`);
       });
+      // A tick that never ran (no lock connection) is recorded as a failed run, like the geocode-review alert.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`pin-parked-check tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('pin-parked-check').catch(() => {});
+        await recordJobEnd('pin-parked-check', startedAt, error).catch(() => {});
+        throw error;
+      }
     } catch (err) {
       logger.error(`[pin-parked-check] tick failed: ${err.message}`);
     }

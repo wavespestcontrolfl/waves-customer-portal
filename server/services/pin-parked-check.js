@@ -34,7 +34,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { pinParkedCheckLive } = require('../config/feature-gates');
-const { distanceMeters, loadArrivalConfig } = require('./gps-arrival-detector');
+const { distanceMeters, loadArrivalConfig, validLatitude, validLongitude } = require('./gps-arrival-detector');
 const truckStops = require('./bouncie-truck-stops');
 const { effectiveReview, effectiveCustomer, reviewEnabled } = require('./customer-geocode-review');
 const { stampedAddressDiverges } = require('./stamped-address');
@@ -54,12 +54,17 @@ const HOME_MIN_DAYS = 3;
 const FENCE_TYPES = ['business', 'personal', 'supplier'];
 const PENDING_BELL_LIMIT = 50;
 const RETIRE_LIMIT = 500;
+const NEIGHBOUR_LIMIT = 2000;
 
+// A pin the detector's own distance function can measure: latitude in [-90, 90], longitude in [-180, 180], not 0.
 const usablePin = (lat, lng) => {
-  const a = lat == null || lat === '' ? NaN : Number(lat);
-  const b = lng == null || lng === '' ? NaN : Number(lng);
-  return Number.isFinite(a) && Number.isFinite(b) && a !== 0 && b !== 0 ? { lat: a, lng: b } : null;
+  const a = validLatitude(lat);
+  const b = validLongitude(lng);
+  return a != null && b != null && a !== 0 && b !== 0 ? { lat: a, lng: b } : null;
 };
+
+// A distance that could not be measured (null) never matches anything: not "at the pin", not "closest".
+const isWithin = (distance, meters) => distance != null && distance <= meters;
 
 // ET calendar day -> [start, end) in epoch ms.
 function etDayBounds(day) {
@@ -70,16 +75,14 @@ function etDayBounds(day) {
 
 // ---------- reads ----------
 
-async function loadCompletedVisits(conn, { fromMs, toMs }) {
-  const rows = await conn('scheduled_services as s')
+function completedVisitQuery(conn) {
+  return conn('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
     .join('technicians as t', 't.id', 's.technician_id')
     .leftJoin('customer_properties as p', function joinPrimary() {
       this.on('p.customer_id', '=', 'c.id').andOnVal('p.active', '=', true).andOnVal('p.is_primary', '=', true);
     })
     .where('s.status', 'completed')
-    .where('s.completed_at', '>=', new Date(fromMs))
-    .where('s.completed_at', '<', new Date(toMs))
     .whereNull('c.deleted_at')
     .whereRaw("NULLIF(btrim(t.bouncie_imei), '') IS NOT NULL")
     .orderBy('s.completed_at', 'desc').orderBy('s.id')
@@ -95,7 +98,38 @@ async function loadCompletedVisits(conn, { fromMs, toMs }) {
       'p.city as primary_city', 'p.state as primary_state', 'p.zip as primary_zip',
       'p.latitude as primary_latitude', 'p.longitude as primary_longitude', 't.bouncie_imei',
     );
-  return rows.map((row) => ({ ...row, ...effectivePinColumns(row), bouncie_imei: String(row.bouncie_imei).trim() }));
+}
+
+const shapeVisits = (rows) => rows.map((row) => ({ ...row, ...effectivePinColumns(row), bouncie_imei: String(row.bouncie_imei).trim() }));
+
+async function loadCompletedVisits(conn, { fromMs, toMs }) {
+  return shapeVisits(await completedVisitQuery(conn)
+    .where('s.completed_at', '>=', new Date(fromMs))
+    .where('s.completed_at', '<', new Date(toMs)));
+}
+
+/**
+ * The same technicians' OTHER completed visits that touch the evidence days of the judged visits, whenever they were
+ * completed: a delayed visit worked on an older day needs that day's other jobs to tell a neighbour's stop from its
+ * own. Bounded by the technicians, the days (never past the lookback cap, see requiredDays) and a row limit.
+ */
+async function loadNeighbourVisits(conn, visits, now) {
+  const technicianIds = [...new Set(visits.map((visit) => visit.technician_id))];
+  const days = [...new Set(visits.flatMap((visit) => requiredDays(visit, now).days))].sort();
+  if (!technicianIds.length || !days.length) return [];
+  const first = etDayBounds(days[0]).startMs;
+  const last = etDayBounds(days[days.length - 1]).endMs;
+  const known = new Set(visits.map((visit) => visit.id));
+  const rows = shapeVisits(await completedVisitQuery(conn)
+    .whereIn('s.technician_id', technicianIds)
+    .where(function inDays() {
+      this.whereBetween('s.scheduled_date', [days[0], days[days.length - 1]])
+        .orWhere(function worked() {
+          this.where('s.completed_at', '>=', new Date(first)).where('s.completed_at', '<', new Date(last));
+        });
+    })
+    .limit(NEIGHBOUR_LIMIT));
+  return oneRowPerVisit(rows.filter((row) => !known.has(row.id) && visitDays(row).some((day) => days.includes(day))));
 }
 
 /**
@@ -149,8 +183,21 @@ function homeBaseFrom(rows) {
   return best && best.days >= HOME_MIN_DAYS ? { lat: best.lat / best.days, lng: best.lng / best.days } : null;
 }
 
-async function loadHomeBase(conn, imei, now) {
-  const since = etDateString(addETDays(now, -HOME_LOOKBACK_DAYS));
+/**
+ * First ET day whose trips count toward a vehicle's home base: the lookback start, or the day AFTER the tracker
+ * mapping began when that is later (trips before it may be another technician's routine). NULL changed_at = no bound.
+ */
+function homeSince(now, mappingChangedAt) {
+  const lookback = etDateString(addETDays(now, -HOME_LOOKBACK_DAYS));
+  if (!mappingChangedAt) return lookback;
+  const changed = new Date(mappingChangedAt);
+  if (!Number.isFinite(changed.getTime())) return lookback;
+  const dayAfter = etDateString(addETDays(changed, 1));
+  return dayAfter > lookback ? dayAfter : lookback;
+}
+
+async function loadHomeBase(conn, imei, now, mappingChangedAt = null) {
+  const since = homeSince(now, mappingChangedAt);
   const { rows } = await conn.raw(
     `SELECT DISTINCT ON (trip_date) trip_date, start_lat, start_lng FROM mileage_log
       WHERE vehicle_id = ? AND trip_date >= ? AND start_lat IS NOT NULL AND start_lng IS NOT NULL
@@ -199,8 +246,12 @@ function destinationOf(visit) {
   return usablePin(visit.customer_latitude, visit.customer_longitude);
 }
 
-const nearestPinDistance = (pins, stop) => Math.min(...pins.map((pin) => distanceMeters(pin.lat, pin.lng, stop.lat, stop.lng)));
-const within = (point, stop, meters) => point && distanceMeters(point.lat, point.lng, stop.lat, stop.lng) <= meters;
+/** The shortest measurable distance from a stop to any of the pins; null when none could be measured. */
+const nearestPinDistance = (pins, stop) => {
+  const measured = pins.map((pin) => distanceMeters(pin.lat, pin.lng, stop.lat, stop.lng)).filter((d) => d != null);
+  return measured.length ? Math.min(...measured) : null;
+};
+const within = (point, stop, meters) => Boolean(point) && isWithin(distanceMeters(point.lat, point.lng, stop.lat, stop.lng), meters);
 
 /** Why a stop is not this job's stop: home base, a fence, or the neighbour's visit. Null when it could be. */
 function excludedStopReason(stop, { radius, home, fences, neighbours }) {
@@ -220,11 +271,12 @@ function judgeVisit({ visit, stops, radius, context }) {
   const customerPin = usablePin(visit.customer_latitude, visit.customer_longitude);
   const pins = [destination, customerPin].filter(Boolean);
   // "A stop at the pin" is generous: a stop near the visit's own stamp OR the saved pin means the pin works.
-  if (stops.some((stop) => nearestPinDistance(pins, stop) <= radius)) return { flag: false, reason: 'stop_at_pin' };
+  if (stops.some((stop) => isWithin(nearestPinDistance(pins, stop), radius))) return { flag: false, reason: 'stop_at_pin' };
   if (!stops.length) return { flag: false, reason: 'no_stops' };
   // Everything that picks or limits the suggested stop is measured from the saved pin: the pin the suggestion would replace.
   if (!customerPin) return { flag: false, reason: 'no_saved_pin' };
-  const measured = stops.map((stop) => ({ stop, metres: nearestPinDistance([customerPin], stop) }));
+  const measured = stops.map((stop) => ({ stop, metres: nearestPinDistance([customerPin], stop) })).filter((m) => m.metres != null);
+  if (!measured.length) return { flag: false, reason: 'no_stops' };
   const closest = measured.reduce((a, b) => (b.metres < a.metres ? b : a));
   if (closest.metres > MAX_STOP_DISTANCE_M) return { flag: false, reason: 'stop_too_far' };
   if (closest.stop.minutes < REPORT_MIN_STOP_MINUTES) return { flag: false, reason: 'stop_too_short' };
@@ -457,10 +509,17 @@ const tallyKey = (tally, key) => { tally[key] = (tally[key] || 0) + 1; };
  * (visitDays, capped at MAX_LOOKBACK_DAYS back). A vehicle whose stops cannot be read maps to null; a vehicle
  * none of whose visits can be judged is not read at all.
  */
+/** The newest tracker-mapping instant among a vehicle's visits (one technician owns an imei); null when none. */
+function latestMapping(visits, imei) {
+  const times = visits.filter((visit) => visit.bouncie_imei === imei && visit.mapping_changed_at)
+    .map((visit) => new Date(visit.mapping_changed_at).getTime()).filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)) : null;
+}
+
 /** A vehicle with its home base. A home-base lookup that fails makes the vehicle unknown, like an unreadable stop query. */
-async function withHomeBase(conn, imei, stops, now) {
+async function withHomeBase(conn, imei, stops, now, mappingChangedAt) {
   try {
-    return { stops, home: await loadHomeBase(conn, imei, now) };
+    return { stops, home: await loadHomeBase(conn, imei, now, mappingChangedAt) };
   } catch (err) {
     logger.warn(`${LOG} could not read the home base`, { error: err.code || err.name });
     return null;
@@ -474,7 +533,7 @@ async function loadVehicles(conn, visits, window) {
       .map((visit) => requiredDays(visit, window.now)).filter((r) => !r.unloadable).flatMap((r) => r.days).sort();
     if (!needed.length) { vehicles.set(imei, { stops: [], home: null }); continue; }
     const stops = await stopsFor(conn, imei, { ...window, fromMs: etDayBounds(needed[0]).startMs });
-    vehicles.set(imei, stops ? await withHomeBase(conn, imei, stops, window.now) : null);
+    vehicles.set(imei, stops ? await withHomeBase(conn, imei, stops, window.now, latestMapping(visits, imei)) : null);
   }
   return vehicles;
 }
@@ -483,14 +542,14 @@ async function loadVehicles(conn, visits, window) {
  * One verdict per visit, judged against its own technician's truck. A visit whose truck data could not be read, or
  * one of whose required days is before the lookback cap, is `unknown`: no suggestion, nothing closed from it.
  */
-function judgeVisits(visits, vehicles, { radius, fences, now }) {
+function judgeVisits(visits, vehicles, { radius, fences, now, pool = visits }) {
   return visits.map((visit) => {
     const vehicle = vehicles.get(visit.bouncie_imei);
     const required = requiredDays(visit, now);
     if (required.unloadable) return { visit, verdict: { flag: false, reason: 'days_not_loaded', unknown: true } };
     if (!vehicle) return { visit, verdict: { flag: false, reason: 'stops_unreadable', unknown: true } };
     const stops = vehicle.stops.filter((stop) => required.days.includes(etDateString(new Date(stop.startMs))));
-    const context = { home: vehicle.home, fences, neighbours: neighbourPins(visit, visits) };
+    const context = { home: vehicle.home, fences, neighbours: neighbourPins(visit, pool) };
     return { visit, verdict: judgeVisit({ visit, stops, radius, context }) };
   });
 }
@@ -541,7 +600,8 @@ async function runPinParkedCheck({ now = new Date(), conn = db } = {}) {
   const openByCustomer = new Map((await conn('customer_pin_suggestions').where({ status: 'open' }).select(store.COLUMNS))
     .map((row) => [String(row.customer_id), row]));
   const vehicles = await loadVehicles(conn, visits, window);
-  const judged = judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn), now });
+  const pool = [...visits, ...await loadNeighbourVisits(conn, visits, now)];
+  const judged = judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn), now, pool });
   for (const { verdict } of judged) tallyKey(tally, verdict.flag ? 'flagged' : verdict.reason);
   const byCustomer = new Map();
   for (const j of judged) byCustomer.set(String(j.visit.customer_id), [...(byCustomer.get(String(j.visit.customer_id)) || []), j]);
@@ -561,7 +621,7 @@ module.exports = {
   runPinParkedCheck,
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
-    alertDetail, settledReason, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    alertDetail, settledReason, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

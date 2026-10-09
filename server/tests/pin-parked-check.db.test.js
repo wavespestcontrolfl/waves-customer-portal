@@ -723,6 +723,92 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     });
   });
 
+  describe('neighbour visits are loaded for every evidence day, whenever they were completed', () => {
+    // Our visit: scheduled and worked Oct 7, closed out Oct 8. The neighbour job was Oct 7 too and closed Oct 7:
+    // outside the 2-day window (Oct 8-9) the main query reads.
+    const LATE = { scheduled_date: '2026-10-07', completed_at: new Date('2026-10-08T15:30:00Z') };
+
+    test("a stop explained by the same technician's job on the older evidence day is not offered as a pin", async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      const neighbourPin = north(520);
+      const neighbourId = await customer(neighbourPin);
+      await completedVisit(customerId, techId, LATE);
+      await completedVisit(neighbourId, techId, {
+        scheduled_date: '2026-10-07', completed_at: new Date('2026-10-07T15:00:00Z'), lat: neighbourPin.lat, lng: neighbourPin.lng,
+      });
+      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
+      const result = await run();
+      expect(result).toMatchObject({ visits: 1, created: 0, neighbour_visit: 1 });
+      expect(await all(customerId)).toHaveLength(0);
+    });
+
+    test('without that older neighbour job the same stop is still offered', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await completedVisit(customerId, techId, LATE);
+      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
+      expect((await run()).created).toBe(1);
+    });
+
+    test("another technician's job that day is not a neighbour for this truck", async () => {
+      const techId = await technician();
+      const other = await technician('TESTIMEI0002');
+      const customerId = await customer();
+      const neighbourId = await customer(north(520));
+      await completedVisit(customerId, techId, LATE);
+      await completedVisit(neighbourId, other, {
+        scheduled_date: '2026-10-07', completed_at: new Date('2026-10-07T15:00:00Z'), lat: north(520).lat, lng: north(520).lng,
+      });
+      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
+      expect((await run()).created).toBe(1);
+    });
+
+    test('a neighbour job beyond the lookback cap is not loaded', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      const neighbourId = await customer(north(520));
+      await completedVisit(customerId, techId, LATE);
+      await completedVisit(neighbourId, techId, {
+        scheduled_date: '2026-09-20', completed_at: new Date('2026-09-20T15:00:00Z'), lat: north(520).lat, lng: north(520).lng,
+      });
+      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
+      expect((await run()).created).toBe(1);
+    });
+  });
+
+  describe('the home base ignores trips from before the current mapping', () => {
+    test('trips before the remap are not the vehicle home; trips after it are', async () => {
+      const home = north(540);
+      const techId = await technician(IMEI, new Date('2026-10-05T12:00:00Z'));
+      const customerId = await customer();
+      await completedVisit(customerId, techId);
+      await truckStopsAt(home, 30);
+      // three days of "starts here" BEFORE the remap (another technician's routine): they must not count
+      for (const day of ['2026-10-01', '2026-10-02', '2026-10-03']) {
+        await mockPg('mileage_log').insert({ vehicle_id: IMEI, trip_date: day, distance_miles: 3, start_lat: home.lat, start_lng: home.lng });
+      }
+      expect((await run()).created).toBe(1);
+      await open(customerId).del();
+      // after the remap the same pattern is this technician's own home
+      for (const day of ['2026-10-07', '2026-10-08', '2026-10-09']) {
+        await mockPg('mileage_log').insert({ vehicle_id: IMEI, trip_date: day, distance_miles: 3, start_lat: home.lat, start_lng: home.lng });
+      }
+      expect(await run()).toMatchObject({ created: 0, home_base: 1 });
+    });
+  });
+
+  describe('coordinates the detector cannot measure', () => {
+    test('a customer pin or stop outside the valid ranges creates nothing', async () => {
+      const techId = await technician();
+      const customerId = await customer({ lat: 95, lng: -82.57 }, { latitude: 95, longitude: -82.57 });
+      await completedVisit(customerId, techId, { lat: null, lng: null });
+      await truckStopsAt(north(540), 30);
+      expect((await run()).created).toBe(0);
+      expect(await all(customerId)).toHaveLength(0);
+    });
+  });
+
   describe('a tracker remap: the current device says nothing about visits before the mapping began', () => {
     test('a visit on a day before the remap is not judged: no suggestion, nothing closed', async () => {
       const techId = await technician(IMEI, new Date('2026-10-08T20:00:00Z')); // pointed at this device mid-day Oct 8

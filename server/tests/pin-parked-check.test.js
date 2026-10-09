@@ -232,6 +232,40 @@ describe("the neighbours' pins (a deliberately generous exclusion)", () => {
   });
 });
 
+describe('coordinates the detector cannot measure', () => {
+  test('usablePin takes only latitude in [-90, 90] and longitude in [-180, 180], never 0, null or text', () => {
+    expect(p.usablePin(27.49, -82.57)).toEqual({ lat: 27.49, lng: -82.57 });
+    expect(p.usablePin('27.49', '-82.57')).toEqual({ lat: 27.49, lng: -82.57 });
+    for (const [lat, lng] of [[91, -82], [27, -181], [-91, 10], [27, 200], [0, -82], [27, 0], [null, -82], ['', '-82'], ['x', 'y'], [Infinity, 1]]) {
+      expect(p.usablePin(lat, lng)).toBeNull();
+    }
+  });
+  test('a null distance matches nothing: not within, and not the closest', () => {
+    expect(p.isWithin(null, 175)).toBe(false);
+    expect(p.isWithin(0, 175)).toBe(true);
+    expect(p.isWithin(175, 175)).toBe(true);
+    expect(p.isWithin(176, 175)).toBe(false);
+    // a pin the detector cannot measure is ignored, a measurable one still counts
+    expect(p.nearestPinDistance([{ lat: 95, lng: 0.5 }], { lat: 27.49, lng: -82.57 })).toBeNull();
+    const near = p.nearestPinDistance([{ lat: 95, lng: 0.5 }, at(300)], stop(0));
+    expect(Math.round(near)).toBe(300);
+  });
+  test('a stop with an unmeasurable position is never "at the pin" and never the suggestion', () => {
+    expect(judge([{ ...stop(0), lat: 95 }])).toEqual({ flag: false, reason: 'no_stops' });
+    expect(judge([{ ...stop(0), lat: 95 }, stop(540)]).distanceM).toBe(540);
+  });
+});
+
+describe('home base since', () => {
+  const NOW = new Date('2026-10-09T12:00:00Z');
+  test('is the lookback start with no remap, and the day after a later remap otherwise', () => {
+    expect(p.homeSince(NOW, null)).toBe('2026-09-09');
+    expect(p.homeSince(NOW, new Date('2026-08-01T12:00:00Z'))).toBe('2026-09-09'); // an old remap does not shorten the lookback
+    expect(p.homeSince(NOW, new Date('2026-10-02T15:00:00Z'))).toBe('2026-10-03');
+    expect(p.homeSince(NOW, 'not a date')).toBe('2026-09-09');
+  });
+});
+
 describe('home base', () => {
   const day = (n, lat, lng) => ({ trip_date: `2026-09-${10 + n}`, start_lat: lat, start_lng: lng });
 
@@ -363,7 +397,9 @@ describe('gate and wiring', () => {
     expect(gates).toContain('module.exports.pinParkedCheckLive = pinParkedCheckLive;');
     const scheduler = read('../services/scheduler.js');
     // The tick is NOT skipped when the gate is off: the run retires leftover suggestions (clean rollback).
-    expect(scheduler).toMatch(/cron\.schedule\('35 6 \* \* \*', async \(\) => \{\s*try \{\s*await runExclusive\('pin-parked-check'/);
+    expect(scheduler).toMatch(/cron\.schedule\('35 6 \* \* \*', async \(\) => \{\s*try \{\s*const lockRes = await runExclusive\('pin-parked-check'/);
+    // A tick that never ran (no lock connection) is recorded as a failed run, as the geocode-review alert does; a held lease is normal.
+    expect(scheduler).toMatch(/lockRes\?\.skipped === true && lockRes\.reason !== 'lease_held'\) \{[\s\S]{0,400}?recordJobStart\('pin-parked-check'\)[\s\S]{0,200}?recordJobEnd\('pin-parked-check', startedAt, error\)[\s\S]{0,100}?throw error;/);
   });
 
   test('the job never calls the geocoder or writes a pin', () => {
