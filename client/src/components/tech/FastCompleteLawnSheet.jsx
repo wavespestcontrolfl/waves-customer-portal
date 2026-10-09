@@ -287,6 +287,7 @@ const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 // without it is the legacy context, so the sheet then has no holds to show.
 const SOD_AWARE = 'sodAware=1';
 const SOD_BUSY_MESSAGE = 'Checking the new sod holds. Wait a moment.';
+const SOD_UNSURE_MESSAGE = 'The sheet could not confirm the save. Tap the box again.';
 const SOD_REOPEN_MESSAGE = 'Saved. The sheet could not reload the holds. Close this visit and open it again.';
 // The parts of the context that come from the visit's plan: the re-read after the rooted tick replaces them together.
 const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'guidedProductIds', 'takeAllProductIds', 'troubleAreas', 'mixHelp'];
@@ -1500,12 +1501,21 @@ function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
   const saved = useRef(false);
   // The plan parts of the context as the server last gave them (null = the context's own): the plan may have changed since the sheet opened.
   const [planFresh, setPlanFresh] = useState(null);
+  // Counts the re-reads the sheet rebuilt from: the treatment guide reads again with each (its cards name the plan's products).
+  const [rereads, setRereads] = useState(0);
   const saveSodRooted = useCallback(async (sodLaidOn) => {
     try {
       await request(`${base}/lawn-fast/sod-rooted?${SOD_AWARE}`, { method: 'POST', body: JSON.stringify({ sodLaidOn }) });
     } catch (err) {
+      // No answer from the server (the connection dropped, or the answer could not be read): the tick may be saved. The sheet
+      // waits as it does after a save; the tick is idempotent, so tapping again is safe.
+      if (!err?.status) {
+        saved.current = true;
+        setSodStale(SOD_UNSURE_MESSAGE);
+        throw new Error(SOD_UNSURE_MESSAGE);
+      }
       // The tick was saved on an earlier tap and the server no longer offers it (404): this sheet cannot read the holds again.
-      if (!(saved.current && err?.status === 404)) throw err;
+      if (!(saved.current && err.status === 404)) throw err;
       setSodStale(SOD_REOPEN_MESSAGE);
       throw new Error(SOD_REOPEN_MESSAGE);
     }
@@ -1525,13 +1535,14 @@ function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
     // and so do the rows: a released line comes back, a line the plan dropped or the holds now keep off leaves.
     setPlanFresh(Object.fromEntries(PLAN_CONTEXT_FIELDS.map((key) => [key, next[key]])));
     reconcilePlanned(splitHeldPlanned(uniquePlanned(next.planned), next.newSod).start);
+    setRereads((n) => n + 1);
   }, [request, base, service, reconcilePlanned]);
   const confirmSodRooted = useCallback(async (sodLaidOn) => {
     setSodBusy(true);
     try { await saveSodRooted(sodLaidOn); } finally { setSodBusy(false); }
   }, [saveSodRooted]);
   const liveCtx = useMemo(() => (planFresh ? { ...ctx, ...planFresh } : ctx), [ctx, planFresh]);
-  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, liveCtx, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale };
+  return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, liveCtx, rereads, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale };
 }
 
 function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
@@ -1541,7 +1552,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const products = useProductRows(ctx, catalog);
   // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads the plan and the holds again;
   // `sheetCtx` is the context with the plan parts of that last read (the opening context until then).
-  const { newSod, liveCtx: sheetCtx, confirmSodRooted, sodWait } = useSodHolds({ ctx, service, request, base, reconcilePlanned: products.reconcilePlanned });
+  const { newSod, liveCtx: sheetCtx, rereads: sodRereads, confirmSodRooted, sodWait } = useSodHolds({ ctx, service, request, base, reconcilePlanned: products.reconcilePlanned });
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
   const searchedIds = useRef([]);
   const dosesRef = useRef({});
@@ -1561,7 +1572,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_TROUBLE_AREAS: the known areas the tech cleared on this sheet (and where the take-all ones were): the take-all card follows them at once.
   const [clearedAreas, setClearedAreas] = useState([]);
   const [clearedPlaces, setClearedPlaces] = useState([]);
-  const { guide: rawGuide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick, idsRef: searchedIds });
+  const { guide: rawGuide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick + sodRereads, idsRef: searchedIds });
   const guide = useMemo(() => withClearedTakeAll(rawGuide, { known: placeCtx.troubleAreas?.known, clearedIds: clearedAreas, clearedPlaces }), [rawGuide, placeCtx, clearedAreas, clearedPlaces]);
   // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
   const { gov, removed: removedByGuide } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks, products });

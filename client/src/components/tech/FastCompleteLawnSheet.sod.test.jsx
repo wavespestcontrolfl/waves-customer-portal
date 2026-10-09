@@ -464,6 +464,41 @@ describe('the rooted tick', () => {
       expect(within(banner()).getByRole('checkbox')).toBeTruthy();
     });
 
+    // Codex round 5 on #6240.
+    test('a tick with no answer from the server (the save may have landed) keeps Complete off until a tick and a re-read succeed', async () => {
+      await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(AFTER));
+      await confirmAssessment();
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      rootedAnswer = new TypeError('Failed to fetch');
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await waitFor(() => expect(screen.getAllByText('The sheet could not confirm the save. Tap the box again.').length).toBeGreaterThan(0));
+      expect(completeButton().disabled).toBe(true);
+      rootedAnswer = { enabled: true, sodRootedOn: '2026-10-05', changed: false };
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+    });
+
+    test('a refusal with a status (the server said no) does not block Complete', async () => {
+      await openSheet(context(DAY31), context(AFTER));
+      await confirmAssessment();
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      rootedAnswer = Object.assign(new Error('The sod record changed. Reopen the visit.'), { status: 409, code: 'sod_record_changed' });
+      fireEvent.click(within(banner()).getByRole('checkbox'));
+      await screen.findByText('The sod record changed. Reopen the visit.');
+      expect(completeButton().disabled).toBe(false);
+    });
+
+    test('the treatment guide is read again with the re-read', async () => {
+      guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [] };
+      await openSheet({ ...context(DAY31), treatmentGuide: true }, { ...context(AFTER), treatmentGuide: true });
+      await confirmAssessment();
+      const guideReads = () => requests.filter((r) => r.path.includes('/lawn-fast/treatment-guide')).length;
+      await waitFor(() => expect(guideReads()).toBeGreaterThan(0));
+      const before = guideReads();
+      await tickIt();
+      await waitFor(() => expect(guideReads()).toBe(before + 1));
+    });
+
     test('a row the technician changed himself stays as he left it', async () => {
       await openSheet(context({ ...DAY31, lines: { [P_BAG24]: HELD_BAG } }), context(AFTER, { items: [item(P_BAG24, 'Test 24-0-11 Bag')] }));
       const nutra = () => screen.getAllByRole('group', { name: 'Test Nutra Mix' })[0];
