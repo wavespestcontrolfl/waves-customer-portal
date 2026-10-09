@@ -34,7 +34,7 @@ const inventoryOperations = require('../inventory-operations');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const {
   classifyItem, logQueuedLine, findPossibleDuplicateMovement, lockShipment, shipmentHandedOff, SOURCES,
-  TITLE_SIZE_RE, sizeUnit, parseSizeNumber, sizesAgree, round4,
+  TITLE_SIZE_RE, sizeClaimMatches, sizeUnit, parseSizeNumber, sizesAgree, round4,
   parseMultipack, MULTIPACK_PATTERNS, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
 } = require('./receipt-processor');
 
@@ -96,7 +96,7 @@ function escapeForRegExp(value) {
 // it's been consumed — see validateReading).
 function parsedSizeClaims(text) {
   const claims = [];
-  for (const match of String(text || '').matchAll(TITLE_SIZE_RE)) {
+  for (const match of sizeClaimMatches(text)) {
     const [fullMatch, number, first, second] = match;
     const resolved = canonicalUnit(first, second);
     if (!resolved) continue;
