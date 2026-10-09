@@ -1681,8 +1681,11 @@ function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWe
           >
             {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(place) => updateRow(row.productId, { pickedPlace: place })} /> : null}
           </ProductEditor>
-          {row === areaHost && <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea} />}
-          {row === areaHost && row.placeRule && areas && <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlace} />}
+          {row === areaHost && (
+            <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea}>
+              {row.placeRule && areas ? <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlace} /> : null}
+            </SpotAreaControl>
+          )}
         </React.Fragment>
       ))}
       {areas && <KnownTroubleAreas known={areas.known} unavailable={areas.knownUnavailable} locked={locked} clear={onClearArea} />}
@@ -2041,7 +2044,7 @@ function ChinchFoundEntry({ chinch, catalog, places, labels, on, locked, waiting
 }
 
 // The area a spot row went down on: quick sizes and a typed box (owner 2026-10-08).
-function SpotAreaControl({ title = null, value, locked, onChange }) {
+function SpotAreaControl({ title = null, value, locked, onChange, children = null }) {
   const areaId = useId();
   return (
     <div role="group" aria-label={title || 'Area treated'} className={title ? 'tech-spot-area tech-product-editor' : 'tech-spot-area'}>
@@ -2063,6 +2066,7 @@ function SpotAreaControl({ title = null, value, locked, onChange }) {
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value)}
       />
+      {children}
     </div>
   );
 }

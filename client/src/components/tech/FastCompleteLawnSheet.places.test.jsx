@@ -511,6 +511,22 @@ describe('Weed spots: the entry is one tap per place', () => {
     expect(sent(P_LEAD).areaPlace).toBe('front');
   });
 
+  test('the place chips sit inside the Weed spots card, under the area sizes, and inside every other spot row card', async () => {
+    await open(placeContext({ weedMix: { ...LEAD_SET, groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND], replacementProductId: P_BLIND, noAreaProductIds: [P_SURF] } }));
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+    const card = screen.getByRole('group', { name: 'Weed spots' });
+    const where = screen.getByRole('group', { name: 'Weed spots place' });
+    expect(card.contains(where)).toBe(true);
+    expect(card.className).toContain('tech-product-editor');
+    // Under the area sizes: the size chips come before the place chips in the card.
+    const size = within(card).getByRole('button', { name: '500 sq ft' });
+    expect(size.compareDocumentPosition(where) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // A normal spot row keeps its place control inside its own card.
+    addFungicide();
+    const row = editorFor('Spot Fungicide');
+    expect(within(row).getByText('Where on the lawn')).toBeTruthy();
+  });
+
   test('the surfactant rides the weed place: no place of its own to pick', async () => {
     await open(CHOICES(ALL(LEAD_SET)));
     addWeedAt('Back');
