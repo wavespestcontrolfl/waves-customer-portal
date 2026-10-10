@@ -122,10 +122,12 @@ async function raiseOne(item, raiseAdminAlert, shortDateET) {
 // Close the notices that no longer apply. A notice stays open while its visit
 // is still live on the notice's date (and, for a visit with no arrival time,
 // still has none), unless the run has proof the conflict is gone: `clearedIds`
-// holds the visits it moved, or evaluated and read no conflict for. A visit
-// the run skipped, failed on or never loaded keeps its notice, and so does
-// every visit of a run whose guard reads failed (Codex #6253 r1 P2). The
-// visit's own row decides the "no arrival time" case, so it needs no proof.
+// holds the visits it read with the conflict read on and found clear. That
+// read covers every visit with an open notice, evaluated this run or not
+// (index.js settleConflicts), so a person's same-day fix closes the notice.
+// A visit whose read failed keeps its notice, and so does every visit of a
+// run whose guard reads failed (Codex #6253 r1 P2). The visit's own row
+// decides the "no arrival time" case, so it needs no proof.
 async function closeResolved(bucket, { nowDate, clearedIds }) {
   try {
     const audit = require('./audit');
@@ -143,6 +145,18 @@ async function closeResolved(bucket, { nowDate, clearedIds }) {
     }, nowDate);
   } catch (err) {
     logger.error(`[auto-dispatch] needs-a-person notice close failed: ${err.message}`);
+  }
+}
+
+// The visits of every notice still open (key = prefix + visit id + ':' + date).
+// index.js settleConflicts reads each one's conflict again. Never throws.
+async function standingVisitIds() {
+  try {
+    const keys = await require('./audit').standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
+    return [...new Set([...keys].map((key) => String(key).slice(KEY_PREFIX.length).split(':')[0]).filter(Boolean))];
+  } catch (err) {
+    logger.warn(`[auto-dispatch] open needs-a-person notices could not be read: ${err.message}`);
+    return [];
   }
 }
 
@@ -180,5 +194,5 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
 }
 
 module.exports = {
-  RESOLVED_TITLE, noticeKey, collect, collectUnmoved, raiseNotices,
+  RESOLVED_TITLE, noticeKey, collect, collectUnmoved, raiseNotices, standingVisitIds,
 };

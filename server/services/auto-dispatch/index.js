@@ -284,16 +284,34 @@ function noteUnmoved(run, service, reasonCode) {
 }
 
 // The visit as it stands now: a move this run (its own, a group's, a partner's)
-// may have changed its slot or freed the stop it overlapped. Returns null when
-// it is no longer an open visit, { clear: true } when it no longer conflicts.
+// or a person may have changed its slot or freed the stop it overlapped.
+// Returns null when it is no longer an open visit with an arrival time,
+// { clear: true } when it no longer conflicts.
 async function standingConflict(seen, id) {
-  const row = await db('scheduled_services').where({ id })
-    .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
-  if (!row || !VALID_STATUSES.has(row.status)) return null;
+  const row = await db('scheduled_services').where({ id }).first('*');
+  if (!row || !VALID_STATUSES.has(row.status) || !row.window_start) return null;
   const service = { ...seen.service, ...row };
   // Required lazily, like apply.js's conflict re-read.
   const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, seen.ctx);
   return conflict ? { service, conflict } : { clear: true };
+}
+
+// Every visit whose conflict the run must read at its end: the ledger (each
+// visit the run evaluated in conflict), the members a partial group move
+// left behind (a one-time add-on is never loaded by the scan, so it has no
+// ledger entry: Codex #6253 r4 P1), and the visits of the notices still open
+// (a person-placed visit is skipped before the conflict read, so a person's
+// same-day fix would never close its notice: r4 P2). The last kind is
+// `noticeOnly`: it can close a notice, never raise one.
+async function conflictsToSettle(run) {
+  const pending = new Map(run.conflicts);
+  if (run.config.conflictMovesEnabled !== true) return pending;
+  const unseen = (extra) => ({ service: null, conflict: null, ctx: { db, conflictMoves: true }, ...extra });
+  for (const id of run.strandedIds) if (!pending.has(id)) pending.set(id, unseen({ reason: 'ERROR' }));
+  for (const id of await needsPerson.standingVisitIds()) {
+    if (!pending.has(id) && !run.clearedIds.has(id)) pending.set(id, unseen({ noticeOnly: true }));
+  }
+  return pending;
 }
 
 // Run end: every visit still in conflict is handed to the notice, whatever
@@ -302,17 +320,17 @@ async function standingConflict(seen, id) {
 // own moves, and a person who moved or cancelled the visit while the run
 // worked (Codex #6253 r3), both clear it. A visit that is clear raises
 // nothing and closes its standing notice. A re-read that fails keeps what
-// the run saw. Never throws.
+// the run saw (nothing, for a visit it never evaluated). Never throws.
 async function settleConflicts(run) {
-  for (const [id, seen] of run.conflicts) {
-    let now = seen;
+  for (const [id, seen] of await conflictsToSettle(run)) {
+    let now = seen.conflict ? seen : null;
     try {
       now = await standingConflict(seen, id);
     } catch (err) {
       logger.warn(`[auto-dispatch] conflict re-read failed for ${id}: ${err.message}`);
     }
     if (now && now.clear) run.clearedIds.add(id);
-    else if (now) needsPerson.collectUnmoved(run.needsPerson, now.service, seen.reason, now.conflict);
+    else if (now && !seen.noticeOnly) needsPerson.collectUnmoved(run.needsPerson, now.service, seen.reason, now.conflict);
   }
 }
 
@@ -1234,7 +1252,7 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
   run.totals.failed++;
   run.totals.changed += applyErr.movedCount || 0;
   const failedMembers = Array.isArray(applyErr.failedMembers) ? applyErr.failedMembers : [];
-  for (const id of failedMembers) run.quarantinedIds.add(String(id));
+  for (const id of failedMembers) { run.quarantinedIds.add(String(id)); run.strandedIds.add(String(id)); }
   logger.error(`[auto-dispatch] apply failed for ${pm.service.id}: ${applyErr.message}`);
   noteUnmoved(run, pm.service, 'ERROR');
   try {
@@ -1331,6 +1349,7 @@ async function runAutoDispatch(opts = {}) {
     pass1Complete: false,
     conflicts: new Map(), // id -> { service, conflict, ctx, reason }: every visit read in conflict (settleConflicts)
     clearedIds: new Set(), // visits read placed and clear with the conflict read on (notice close)
+    strandedIds: new Set(), // members a partial group move left behind (settleConflicts)
   };
 
   try {

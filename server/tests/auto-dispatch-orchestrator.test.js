@@ -1252,10 +1252,14 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
       let wanted = null;
       const where = chain.where;
       chain.where = (...args) => { if (args[0] && typeof args[0] === 'object' && args[0].id) wanted = args[0].id; return where(...args); };
-      chain.first = async () => servicesResult.find((row) => row.id === wanted) || null;
+      chain.first = async () => [...servicesResult, ...unscannedRows].find((row) => row.id === wanted) || null;
       return chain;
     });
   };
+  // Visits the scan does not load (a one-time add-on, a person-placed visit)
+  // that a point-read still finds.
+  let unscannedRows = [];
+  beforeEach(() => { unscannedRows = []; });
   // The run's end reads every conflict again (Codex #6253 r3): the visit's
   // row is there and the conflict still stands.
   const standing = (conflict = OVERLAP) => {
@@ -1394,6 +1398,52 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
         expect(res).toMatchObject({ changed: 1, failed: 1 });
         expect(noticedIds()).toEqual(['m2']);
       });
+    });
+
+    // Codex #6253 r4 P1: a one-time add-on is never loaded by the scan, so
+    // it has no ledger entry of its own.
+    test('a partial grouped move: a member the scan never loaded is read at the end too', async () => {
+      await applyMode(async () => {
+        rowReads();
+        unscannedRows = [svc({ id: 'addon', is_recurring: false })];
+        candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+        apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('partial'), { code: 'VISIT_PARTIAL_MOVE', movedCount: 1, failedMembers: ['addon'] }));
+        candidateSlots._internals.readCurrentConflict.mockImplementation(async (service) => (service.id === 'addon' ? OVERLAP : null));
+        await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(noticedIds()).toEqual(['addon']);
+        // Left behind but clear of every stop: nothing to tell.
+        raiseAdminAlert.mockClear();
+        candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+        await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(noticedIds()).toEqual([]);
+      });
+    });
+
+    // Codex #6253 r4 P2: a person-placed visit is skipped before the conflict
+    // read, so the run reads the conflict of every visit with an open notice.
+    test('an open notice on a visit the run never evaluated closes when a person fixed it, and only then', async () => {
+      const closable = () => {
+        const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+        audit.retireResolvedNotices.mock.calls[audit.retireResolvedNotices.mock.calls.length - 1][0].stillOpen(q);
+        return q.whereNotIn.mock.calls.flatMap(([, ids]) => ids);
+      };
+      rowReads();
+      servicesResult = [];
+      unscannedRows = [svc({ id: 'placed' }), svc({ id: 'notime', window_start: null })];
+      audit.standingNoticeKeys.mockResolvedValue(new Set(['auto-dispatch-needs-person:placed:2026-08-04', 'auto-dispatch-needs-person:notime:2026-08-04']));
+      // Still overlapping: the notice stays, and no second one is raised.
+      candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(closable()).toEqual([]);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      // The person re-timed it clear. The visit with no arrival time is not
+      // "clear": its own row decides that notice.
+      candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(closable()).toEqual(['placed']);
+      // Gate off: no conflict is read, so nothing is proven.
+      await runAutoDispatch({ mode: 'dry_run' });
+      expect(closable()).toEqual([]);
     });
 
     test('a visit whose overlap a partner\'s move cleared raises nothing and is proof for the closer', async () => {
