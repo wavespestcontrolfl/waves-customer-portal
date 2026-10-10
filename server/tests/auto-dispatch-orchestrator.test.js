@@ -1057,6 +1057,47 @@ describe('moves need a real drive saving (owner 2026-10-09; same-day re-times to
     expect(lastDecision('recommended').routeMetrics).toMatchObject({ day_move: false, drive_saving_minutes: 15 });
   });
 
+  // GATE_AUTO_DISPATCH_ROAD_CHECK (owner 2026-10-09, "drive time yes").
+  describe('the road check on a move the model approves', () => {
+    const roadCheck = require('../services/auto-dispatch/road-check');
+    const legs = (name, date) => ({ [roadCheck.ROAD_LEGS]: { prev: { p: name }, stop: { s: name }, next: { n: name }, date, startMin: 540 } });
+    // [in, out, base] minutes per placement, as Google would answer.
+    const roads = (table) => jest.spyOn(roadCheck, 'createRunTravel').mockReturnValue({
+      preload: async () => {},
+      lookup: (leg) => ({ minutes: table[leg.from.p || leg.from.s][leg.from.s ? 1 : (leg.to.s ? 0 : 2)], source: 'google_traffic' }),
+      diagnostics: () => ({ requests: 6, elements: 6 }),
+    });
+    const current = { ...CURRENT, ...legs('now', CURRENT.date) };
+    const cand = { ...CAND_BIG, ...legs('cand', CAND_BIG.date) };
+    afterEach(() => jest.restoreAllMocks());
+
+    test('real roads agree: the move is recommended and the row carries both numbers', async () => {
+      roads({ now: [25, 25, 10], cand: [10, 10, 10] });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true })).toMatchObject({ recommended: 1 });
+      expect(lastDecision('recommended').routeMetrics).toMatchObject({
+        drive_saving_minutes: 40, road: { saving_minutes: 30, current_detour_minutes: 40, candidate_detour_minutes: 10, source: 'google' },
+      });
+    });
+
+    test('real roads say the move saves too little: nothing moves (NO_ROAD_DRIVE_SAVING)', async () => {
+      roads({ now: [12, 12, 10], cand: [11, 11, 10] });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true })).toMatchObject({ recommended: 0 });
+      const row = lastDecision('no_change');
+      expect(row.reason_code).toBe('NO_ROAD_DRIVE_SAVING');
+      expect(row.reason_description).toBe('The model says the move saves 40 drive minutes; real roads say 2 < 6 required');
+    });
+
+    test('gate off: no reader is made and the model decides alone', async () => {
+      const made = roads({ now: [12, 12, 10], cand: [11, 11, 10] });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+      expect(await runAutoDispatch({ mode: 'dry_run' })).toMatchObject({ recommended: 1 });
+      expect(made).not.toHaveBeenCalled();
+      expect(lastDecision('recommended').routeMetrics.road).toBeUndefined();
+    });
+  });
+
   test('a day move over the score bar with under 6 minutes saved reads NO_DRIVE_SAVING', async () => {
     const current = { ...CURRENT, detour_minutes: 5, same_area_share: 0, route_minutes: 600 };
     const cand = { ...CAND_BIG, detour_minutes: 2, same_area_share: 1, route_minutes: 300, start_time: '09:00' };
