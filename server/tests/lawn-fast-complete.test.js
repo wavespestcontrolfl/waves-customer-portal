@@ -291,6 +291,28 @@ describe('buildLawnFastContext', () => {
     expect(ctx.plannedProducts.month).toBe(10);
   });
 
+  test('GATE_LAWN_NOV_LARGE_PATCH_N: a planned nitrogen line keeps the plan\'s reduced amount and its fungus note on the sheet; no other planned row gains a note', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [
+          {
+            product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+            mix: { amount: 20.833, amountUnit: 'lb', ratePer1000: 2.0833, rateUnit: 'lb', treatedSqft: 10000 },
+            gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, { key: 'activeFungusNitrogen', severity: 'note', text: NOTE }],
+          },
+          { product: { id: P_HERB, name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' }, gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }] },
+        ],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    const [feed, spray] = ctx.plannedProducts.items;
+    expect(feed).toMatchObject({ productId: P_GRAN, amount: 20.833, amountUnit: 'lb', ratePer1000: 2.0833, rateUnit: 'lb', treatedSqft: 10000, gateNotes: [NOTE] });
+    expect(spray).not.toHaveProperty('gateNotes');
+  });
+
   describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
     const removal = require('../services/lawn-bermuda-removal');
     let offered;

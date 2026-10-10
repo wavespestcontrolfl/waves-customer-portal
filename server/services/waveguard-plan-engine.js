@@ -3,6 +3,8 @@ const { savepointRead } = require('../utils/savepoint-read');
 const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
+const logger = require('./logger');
+const { V13_TROUBLE_N_TARGETS, FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
@@ -732,6 +734,41 @@ function parseVisitNutrientTargets(notes) {
     targetNPer1000: numberOrNull(nApp) ?? numberOrNull(nRate),
     targetKPer1000: numberOrNull(kApp) ?? numberOrNull(kRate),
   };
+}
+
+// GATE_LAWN_NOV_LARGE_PATCH_N: does the visit's property have an ACTIVE mapped trouble area of this type? A gate that is off, a visit
+// with no property, or a read that fails is "no" (the normal target stands); a failed read logs its code only.
+async function hasActiveTroubleArea(knex, service, type) {
+  const areas = require('./lawn-trouble-areas');
+  try {
+    const propertyId = await areas.propertyOf(knex, service);
+    return Boolean(propertyId) && (await savepointRead(knex, (k) => areas.loadActive(k, propertyId))).some((area) => area.type === type);
+  } catch (err) {
+    logger.warn(`[plan] trouble areas unreadable for ${service?.id}: ${err?.code || err?.name || 'Error'}`);
+    return false;
+  }
+}
+
+// The ONE place a visit's nutrient targets come from, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the
+// completion defaults, the yearly limit check and the Fast Complete planned amount all read the same number. `nitrogenCut` is the
+// reduced N target when GATE_LAWN_NOV_LARGE_PATCH_N changed it (see config/lawn-v13-nitrogen-targets.js), else null. Never raises
+// a target; gate off, not v13, no matching month or no active mapped area = the visit's own target, untouched.
+async function visitNutrientTargets(knex, service, { notes, month, v13Active }) {
+  const targets = parseVisitNutrientTargets(notes);
+  const rule = v13Active && featureGates.lawnNovLargePatchNLive() ? V13_TROUBLE_N_TARGETS.find((entry) => entry.month === MONTH_ABBR.indexOf(month) + 1) : null;
+  if (!rule || !(targets.targetNPer1000 > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType))) return { targets, nitrogenCut: null };
+  return { targets: { ...targets, targetNPer1000: rule.targetNPer1000 }, nitrogenCut: rule.targetNPer1000 };
+}
+
+// The line note for a nitrogen bag sized for the reduced target (in the line's gateNotes, the way the Fast Complete sheet and the
+// plan panel already show a line's notes). [] for any line the cut did not size.
+function fungusNitrogenNotes(mix, nitrogenCut) {
+  if (nitrogenCut == null || mix?.rateSource !== 'target_n_analysis' || mix.targetNPer1000 !== nitrogenCut) return [];
+  return [{
+    key: FUNGUS_NITROGEN_NOTE_KEY,
+    severity: 'note',
+    text: `Active fungus mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). Close the spreader over the patch and 6 ft around it.`,
+  }];
 }
 
 function derivedNutrientRate(product, nutrient, targetPer1000) {
@@ -1840,11 +1877,11 @@ function v13LineNotices(planItems, capped, ignoredSubstitutionIds) {
 
 // The staged v13 row's gates and what they mean in the field (null and empty for
 // every other plan), carried so the panel and job card can show them.
-function v13ItemFields(line, gateContext, product) {
+function v13ItemFields(line, gateContext, product, extraNotes = []) {
   const row = line?.row;
   return {
     gates: row?.gates && Object.keys(row.gates).length ? row.gates : null,
-    gateNotes: row ? v13GateNotes(row.gates, gateContext) : [],
+    gateNotes: [...(row ? v13GateNotes(row.gates, gateContext) : []), ...extraNotes],
     // A row with no calculated quantity: selectable, label rate as reference, never an amount.
     spot: line?.state === 'spot'
       ? {
@@ -2022,7 +2059,10 @@ async function buildPlanForService(serviceId, options = {}) {
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
     ...step.lines,
   ];
-  const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
+  // through v13LineState (one decision per line) and keeps its protocol product.
+  const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
+  const { targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(knex, service, { notes: visit?.notes, month, v13Active });
   // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
   // own protocol row supplies its rate, its sunny-turf limit and its gates.
   const v13Rows = v13ProtocolRows(structuredProtocol);
@@ -2069,9 +2109,6 @@ async function buildPlanForService(serviceId, options = {}) {
     municipality: resolvedOrdinanceCity,
     productionMode: structuredProtocol?.window?.productionMode,
   };
-  // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
-  // through v13LineState (one decision per line) and keeps its protocol product.
-  const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
   const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, gateContext, item) : null);
@@ -2096,7 +2133,7 @@ async function buildPlanForService(serviceId, options = {}) {
     return {
       ...planLineFields(item),
       // Gate off: no v13 field at all, the payload is the old one.
-      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct) : {}),
+      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, fungusNitrogenNotes(mix, nitrogenCut)) : {}),
       matched: !!plannedProduct,
       product: planProductSnapshot(plannedProduct, mix),
       substitution: planSubstitutionSnapshot(substitution),
@@ -2415,6 +2452,8 @@ module.exports = {
   selectProtocolVisit,
   calculateProductAmount,
   parseVisitNutrientTargets,
+  visitNutrientTargets,
+  fungusNitrogenNotes,
   summarizeMaterialCost,
   effectiveAreaFactor,
   v13ProtocolRows,

@@ -8,7 +8,8 @@ const {
   calculateProductAmount,
   effectiveAreaFactor,
   matchCatalogProduct,
-  parseVisitNutrientTargets,
+  visitNutrientTargets,
+  fungusNitrogenNotes,
   parseProtocolLines,
   resolveProtocolItems,
   summarizeMaterialCost,
@@ -1076,7 +1077,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     });
     const conditionalLines = [...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];
     const allLines = [...baseLines, ...conditionalLines];
-    const nutrientTargets = parseVisitNutrientTargets(visit.notes);
+    const { targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(db, scheduled, { notes: visit.notes, month, v13Active: lawnV13On() });
 
     const matchedLines = resolveProtocolItems(allLines, products, {
       selectedConditionalProductIds: req.query.selectedConditionalProductIds,
@@ -1158,7 +1159,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
-        ...(v13Active ? v13ItemFields(v13Line, gateContext, product) : {}),
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, fungusNitrogenNotes(plannedMix, nitrogenCut)) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render
