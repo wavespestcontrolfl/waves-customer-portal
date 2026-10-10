@@ -53,9 +53,16 @@ function parseConfirmed(raw) {
 
 /**
  * @param row  the prefs columns (+ optional turf_/assessment_irrigation_inches_per_week)
+ * @param rateTable  'owner' | 'package', REQUIRED: the head rate table the usability test derives with (see below)
  * @returns true when ANY figure the plan/report would size from is unconfirmed.
  */
-function sizingFieldsUnconfirmed(row = {}) {
+function sizingFieldsUnconfirmed(row, rateTable) {
+  // The head rate table decides whether a confirmed runtime YIELDS a figure (deriveIrrigationInchesPerWeek returns
+  // null past its plausibility ceiling, and the ceiling is crossed at different minutes under the package and owner
+  // tables). So the table is REQUIRED, never defaulted to the live gate: a decision passes the table it freezes, a
+  // replay passes the snapshot's stored table (storedRateTable), and only a purely live reader passes liveRateTable().
+  if (rateTable !== 'owner' && rateTable !== 'package') throw new TypeError("sizingFieldsUnconfirmed needs a rate table: 'owner' or 'package'");
+  row = row || {};
   const confirmed = parseConfirmed(row.irrigation_confirmed_fields);
   const ok = (f) => present(row[f]) && confirmed.includes(f);
   if (IRRIGATION_SIZING_FIELDS.some((f) => present(row[f]) && !confirmed.includes(f))) return true;
@@ -69,14 +76,15 @@ function sizingFieldsUnconfirmed(row = {}) {
   const explicit = Number(row.irrigation_inches_per_week);
   const explicitUsable = ok('irrigation_inches_per_week') && Number.isFinite(explicit) && explicit > 0;
   const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
+  const { rateOptionsForTable } = require('./irrigation-rates');
   const runtimeUsable = RUNTIME_FIELDS.every(ok)
-    && deriveIrrigationInchesPerWeek({ runMinutes: row.irrigation_run_minutes, wateringDays: row.watering_days, systemType: row.irrigation_system_type }).inchesPerWeek != null;
+    && deriveIrrigationInchesPerWeek({ runMinutes: row.irrigation_run_minutes, wateringDays: row.watering_days, systemType: row.irrigation_system_type }, rateOptionsForTable(rateTable)).inchesPerWeek != null;
   return !(explicitUsable || runtimeUsable);
 }
 
 /** The whole move guard: a stamped move AND something unconfirmed to size from. */
-function scheduleUnconfirmedAfterMove(row = {}) {
-  return !!row.irrigation_home_changed_at && sizingFieldsUnconfirmed(row);
+function scheduleUnconfirmedAfterMove(row, rateTable) {
+  return !!(row || {}).irrigation_home_changed_at && sizingFieldsUnconfirmed(row, rateTable);
 }
 
 /** The turf county was re-saved after the last move (or there was no move). */

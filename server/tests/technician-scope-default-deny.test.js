@@ -122,6 +122,8 @@ describe('matcher', () => {
     ['GET', '/api/admin/drafts/11111111-2222-4333-8444-555555555555', true],
     ['POST', '/api/stripe/terminal/handoff', true],
     ['POST', '/api/admin/consultations/11111111-2222-4333-8444-555555555555/outcome', true],
+    ['GET', '/api/admin/consultations/11111111-2222-4333-8444-555555555555/estimate', true],
+    ['POST', '/api/admin/consultations/11111111-2222-4333-8444-555555555555/estimate', false],
     ['GET', '/api/admin/consultations/stats', false],
     ['POST', '/api/stripe/terminal/capture', false],
     ['GET', '/api/admin/lawn-assessment/customers', true],

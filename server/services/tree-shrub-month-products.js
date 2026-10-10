@@ -46,13 +46,14 @@ const PROTOCOL_PRODUCTS = [
   { token: /\bsequestar\b/i, pattern: /^sequestar\s+6%\s+fe\s+eddha\b/i, method: 'soil_drench' },
 ];
 
-// Primary lines that name no product to suggest: scouting and reporting work,
-// the blackout reminder, and "Mn Combo" (no products_catalog row).
+// Primary lines that name no product to suggest: scouting and reporting work
+// and the blackout reminder.
 // Lines the sheet never turns into a suggestion. "(held" marks a product
 // the protocol withholds (e.g. a label that prohibits residential use).
-// "Fe/Mn micros" has no verified catalog product: the old mapping was LESCO
-// Chelated Iron Plus, a 12-0-0 nitrogen source the owner dropped from T&S
-// (2026-10-01, #5089), and June sits inside the summer N blackout.
+// Mn Combo and "Fe/Mn micros" are no longer T&S program lines (owner
+// 2026-10-09: manganese is the palm Mn sulfate secondary line only), and the
+// old mapping for micros, LESCO Chelated Iron Plus, is a 12-0-0 nitrogen source
+// the owner dropped from T&S (2026-10-01, #5089).
 // A line whose application method is still unverified ("verify container
 // label and method", "no verified … injector recipe") is withheld too: a
 // suggested row's method is fixed on the sheet, so a guessed foliar/drench
@@ -60,7 +61,7 @@ const PROTOCOL_PRODUCTS = [
 // Same for a line whose label or dose is still unverified ("exact bag label
 // needed; hold dose" — 13-0-13, Copper; Codex r3 #5089): the sheet cannot
 // show that hold, so the product is not offered until the recipe is confirmed.
-const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report|mn combo\b|fe\/mn micros\b)|\(held\b|\bverify\b[^;]*\bmethod\b|\bno verified\b[^;]*\brecipe\b|\bexact\b[^;]*\blabel needed\b|\bhold dose\b/i;
+const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report)|\(held\b|\bverify\b[^;]*\bmethod\b|\bno verified\b[^;]*\brecipe\b|\bexact\b[^;]*\blabel needed\b|\bhold dose\b/i;
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 

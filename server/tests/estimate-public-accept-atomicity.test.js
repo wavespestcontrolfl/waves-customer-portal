@@ -4252,6 +4252,60 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
       expect([clean.status, clean.data]).toEqual([409, BERMUDA_409]);
     });
 
+    test('area add-on (GATE_AREA_ADDONS off) AND parked -> the park; gated, NOT parked -> its own coded 409 and nothing converts', async () => {
+      const AREA_409 = { error: BERMUDA_409.error, code: 'AREA_ADDONS_GATED' };
+      const addOnPatch = { result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] }, oneTime: { items: [{ service: 'area_addon', name: 'Web Sweep', price: 59 }], specItems: [] } } };
+      const parked = await parkedAttempt(withData('est-mx-area-1', addOnPatch));
+      expect(isPark(parked)).toBe(true);
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      const clean = await unparkedAttempt(withData('est-mx-area-2', addOnPatch));
+      expect([clean.status, clean.data]).toEqual([409, AREA_409]);
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('area add-on (GATE_AREA_ADDONS on) accepted in recurring mode -> its own coded 409 before any write; the recurring conversion never runs', async () => {
+      const prior = process.env.GATE_AREA_ADDONS;
+      process.env.GATE_AREA_ADDONS = 'true';
+      try {
+        const addOnPatch = { result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] }, oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 89 }], specItems: [] } } };
+        const attempt = await unparkedAttempt(withData('est-mx-area-rec-1', addOnPatch));
+        expect([attempt.status, attempt.data]).toEqual([409, {
+          error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+          code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+        }]);
+        expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+        expect(storedEstimate().status).toBe('sent');
+      } finally {
+        if (prior === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prior;
+      }
+    });
+
+    // Codex round 26 (P0): the gate can turn off between the unlocked check and the commit; the limit recheck reads nothing then.
+    test('the add-on gate is read again inside the accept transaction, before the limit recheck (source order), and a gated add-on throws the coded 409', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+      const commit = src.indexOf('assertAreaAddOnGateOpenAtCommit(estimate);');
+      expect(commit).toBeGreaterThan(src.indexOf('.update(withServedDisclosurePreserved(trx, acceptedUpdates));'));
+      expect(src.indexOf("await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {", commit) - commit).toBeLessThan(120);
+      const fn = src.slice(src.indexOf('function assertAreaAddOnGateOpenAtCommit('), src.indexOf('function assertAreaAddOnsHaveAppointment('));
+      expect(fn).toContain('gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })');
+      expect(fn).toContain('{ status: 409, code: refusal.code }');
+    });
+
+    // Codex round 19 on #6135: with no appointment the accept would hand back the generic /book link, which writes no add-on row.
+    // Round 20: a visit merely linked to the estimate does not count either (only a slot or an adopted visit gets the add-on rows).
+    test('area add-on accepted in one-time mode with no appointment -> coded 400 before any write', async () => {
+      const prior = process.env.GATE_AREA_ADDONS;
+      process.env.GATE_AREA_ADDONS = 'true';
+      try {
+        const addOnPatch = { result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] }, oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 89 }], specItems: [] } } };
+        const attempt = await unparkedAttempt({ ...withData('est-mx-area-noappt-1', addOnPatch), show_one_time_option: true, onetime_total: 199 }, { serviceMode: 'one_time' });
+        expect([attempt.status, attempt.data]).toEqual([400, { error: 'Please pick your appointment time to finish booking.', code: 'AREA_ADDON_APPOINTMENT_REQUIRED' }]);
+        expect(storedEstimate().status).toBe('sent');
+      } finally {
+        if (prior === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prior;
+      }
+    });
+
     test('quote-required AND parked -> quote_required wins (not the park, no alert); trenching AND parked -> trenching wins', async () => {
       const quote = await parkedAttempt(withData('est-mx-quote-1', { proposal: { enabled: true } }));
       expect(quote.status).toBe(409);

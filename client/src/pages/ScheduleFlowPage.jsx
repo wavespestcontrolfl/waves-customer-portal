@@ -459,6 +459,53 @@ function recurringNoteCopy(data, selectedSlot) {
     : 'Only this visit will move — the rest of your regular service schedule stays the same.';
 }
 
+// The next plan visit's new date for a picked slot (payload.nextVisit, server
+// gate GATE_RESCHEDULE_NEXT_VISIT_DATE). Null when the server named none for
+// this date or the date does not change.
+function nextVisitShiftFor(data, slotDate) {
+  const from = data?.nextVisit?.currentDate;
+  const to = data?.nextVisit?.byDate?.[String(slotDate || '')];
+  return from && to && from !== to ? { from, to } : null;
+}
+
+// A search or a slot-taken refresh replaces the day list, and its response
+// is the server's current answer for those days: take its next-visit dates
+// and its move limit whole, and show none when it sends none (the next visit
+// stopped being movable; the limit stopped applying).
+// `prev`: the page data being refreshed. A search whose limit needs no
+// whole-range list sends `moveLimit` without `noTimeSoon`; the value the
+// first load set then stays. No `moveLimit` at all clears the line.
+function withNextVisit(body, prev) {
+  const sent = body?.moveLimit || null;
+  const moveLimit = sent && sent.noTimeSoon === undefined
+    ? { ...sent, noTimeSoon: Boolean(prev?.moveLimit?.noTimeSoon) }
+    : sent;
+  return { nextVisit: body?.nextVisit || null, moveLimit };
+}
+
+function shortDateLabel(dateStr) {
+  try {
+    const [y, m, d] = String(dateStr).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+function NextVisitNote({ shift, futurePlacementDays }) {
+  return (
+    <div data-glass="soft" data-testid="next-visit-note" style={{
+      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
+      padding: '10px 12px', fontSize: 14, color: '#9A3412', lineHeight: 1.5,
+    }}>
+      Your next visit moves too. It is on {shortDateLabel(shift.from)} now and will be due
+      {futurePlacementDays === 3 ? ' around ' : ' on '}{shortDateLabel(shift.to)}.
+    </div>
+  );
+}
+
 function ReanchorNote({ futurePlacementDays }) {
   return (
     <div data-glass="soft" style={{
@@ -650,8 +697,21 @@ const INELIGIBLE_COPY = {
   self_serve_notice: 'This visit is coming up too soon to move online.',
 };
 
+// First visit, third online move (owner 2026-10-09, GATE_RESCHEDULE_MOVE_LIMITS):
+// the office sets the time. Its own title and body: nothing went wrong.
+const MOVE_LIMIT_COPY = 'This visit has been moved a couple of times online, so our team will set the next time with you. Text or call and we\'ll get it sorted.';
+
 function IneligibleCard({ data }) {
   const reasonCopy = INELIGIBLE_COPY[data?.reason] || INELIGIBLE_COPY.not_available;
+  if (data?.reason === 'move_limit') {
+    return (
+      <Card>
+        <CardTitle>{data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}let&apos;s find a time that works</CardTitle>
+        <div data-testid="move-limit-card" style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{MOVE_LIMIT_COPY}</div>
+        <ContactRow />
+      </Card>
+    );
+  }
   return (
     <Card>
       <CardTitle>{data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}we can&apos;t move this one online</CardTitle>
@@ -669,6 +729,29 @@ function IneligibleCard({ data }) {
 // badge + move heading lead, the was/now card follows, and the hero below
 // reframes as the optional "different time?" ask — the moved-to slot is
 // already confirmed.
+// Customer move limits (payload.moveLimit, server gate
+// GATE_RESCHEDULE_MOVE_LIMITS). laterByOffice: later days are held back for
+// this visit and the office arranges them. noTimeSoon: nothing is open in the
+// next 7 days. Each line hands off to the office; the picker below stays
+// usable. No date is named: the server sends none.
+function MoveLimitNote({ moveLimit }) {
+  if (!moveLimit?.laterByOffice && !moveLimit?.noTimeSoon) return null;
+  return (
+    // 16px: these lines are guidance the customer acts on, not fine print.
+    <div data-glass="soft" data-testid="move-limit-note" style={{ ...SOFT_NOTE, fontSize: 16, lineHeight: 1.55, marginTop: 14 }}>
+      {moveLimit.noTimeSoon ? (
+        <div>Nothing is open in the next 7 days. If you need a sooner visit, text or call the office and we&apos;ll find a time.</div>
+      ) : null}
+      {moveLimit.laterByOffice ? (
+        <div style={moveLimit.noTimeSoon ? { marginTop: 8 } : undefined}>
+          Need a later date than the ones shown? Text or call us and we&apos;ll find a time.
+        </div>
+      ) : null}
+      <ContactRow />
+    </div>
+  );
+}
+
 function RescheduleHero({ data, selectedSlot }) {
   const current = data?.current || {};
   const move = data.weatherMove;
@@ -727,6 +810,7 @@ function RescheduleHero({ data, selectedSlot }) {
             {recurringNoteCopy(data, selectedSlot)}
           </div>
         ) : null}
+        <MoveLimitNote moveLimit={data.moveLimit} />
       </div>
     </>
   );
@@ -1370,19 +1454,31 @@ const FLOWS = {
       disclosed_collective: !!data?.collectiveAnchor,
       disclosed_future_placement_days: data?.futurePlacementDays ?? null,
       disclosed_current_date: data?.current?.date || null,
+      // The next-visit date the note under Confirm named for this slot
+      // (null = none named). The server projects it again under its locks
+      // and answers SCOPE_CHANGED when the plan no longer matches.
+      disclosed_next_visit_date: data?.collectiveAnchor ? (nextVisitShiftFor(data, slot.date)?.to ?? null) : null,
+      disclosed_next_visit_current_date: data?.collectiveAnchor ? (nextVisitShiftFor(data, slot.date)?.from ?? null) : null,
     }),
     // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.
     // SELF_SERVE_NOTICE (owner ruling 2026-09-23): the visit slid inside the
     // notice window between page load and Confirm — reload so the page
     // renders the truthful (now not-reschedulable) state instead of leaving
     // a stale picker up under the error banner.
-    stateChangedCodes: ['SCOPE_CHANGED', 'SELF_SERVE_NOTICE'],
+    // MOVE_LIMIT: a move limit applied since the page loaded (reload shows it).
+    stateChangedCodes: ['SCOPE_CHANGED', 'SELF_SERVE_NOTICE', 'MOVE_LIMIT'],
     stateChangedMessage: 'The scheduling details for your plan just updated — here is the latest.',
     // Inside the picked row so the heads-up sits directly under the Confirm
     // it applies to — never below the fold.
-    pickedNote: (data, slot) => (!data.collectiveAnchor && slotReanchors(data, slot.date)
-      ? <div className="wpk-picked-note"><ReanchorNote futurePlacementDays={data.futurePlacementDays} /></div>
-      : null),
+    pickedNote: (data, slot) => {
+      const shift = data.collectiveAnchor ? nextVisitShiftFor(data, slot.date) : null;
+      if (shift) {
+        return <div className="wpk-picked-note"><NextVisitNote shift={shift} futurePlacementDays={data.futurePlacementDays} /></div>;
+      }
+      return !data.collectiveAnchor && slotReanchors(data, slot.date)
+        ? <div className="wpk-picked-note"><ReanchorNote futurePlacementDays={data.futurePlacementDays} /></div>
+        : null;
+    },
   },
   reservice: {
     endpoint: 'reservice',
@@ -1724,6 +1820,14 @@ export default function ScheduleFlowPage({ flow }) {
       showReserviceLocationReview();
       return { summary: null };
     }
+    // Reschedule: a move limit applied since the page loaded (another tab's
+    // move, a gate set while the page was open). Reload, as Confirm does, so
+    // the page shows the text-or-call card and not a stale picker.
+    // SCOPE_CHANGED: the visit changed while the search ran (same reload).
+    if (body.code === 'MOVE_LIMIT' || (flow === 'reschedule' && body.code === 'SCOPE_CHANGED')) {
+      await load();
+      return { summary: null };
+    }
     if (!res.ok) throw new Error(body.error || 'search failed');
     // Inspection: a terminal state (already_booked / converted / gone) from
     // the server's eligibility re-check replaces the page, exactly as the
@@ -1735,7 +1839,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (body.availability) {
       // The pick survives when the results still offer it (see the
       // availability effect above); otherwise that effect clears it.
-      setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -1833,7 +1937,7 @@ export default function ScheduleFlowPage({ flow }) {
           if (body.lead) mergeData({ lead: body.lead });
         }
         if (body.availability) {
-          setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
         } else if (flow === 'inspection') {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper

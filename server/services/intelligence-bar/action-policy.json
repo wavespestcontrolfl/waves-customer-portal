@@ -1455,6 +1455,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "offer_choices": {
+    "module": "choice-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "needs_me": {
     "module": "needs-me-tools.js",
     "domain": "ops",

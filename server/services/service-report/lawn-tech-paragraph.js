@@ -30,8 +30,7 @@
  * gate read: callers decide.
  */
 
-const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
-const { customerCopyViolations } = require('./technician-report-copy');
+const { createTechParagraphEngine, clean, copyScreenProblem } = require('./tech-paragraph-engine');
 const { FIELD_WORD_CAPS } = require('./lawn-report-lead');
 
 const PROMPT_VERSION = 'lawn_tech_paragraph_v2';
@@ -43,6 +42,8 @@ const MAX_NOTE_CHARS = 1500;
 const MAX_OBSERVATIONS = 3;
 const MAX_MAYBE = 2;
 const MAX_PRODUCTS = 5;
+// The category form lists at most this many category phrases (the Visit Summary's cap).
+const MAX_CATEGORIES = 4;
 // The applied product's full display name, never cut (lawn-visit-memory.js keeps up
 // to 200; an 82-character catalog row exists).
 const MAX_PRODUCT_NAME_CHARS = 200;
@@ -192,11 +193,18 @@ function normalizeInputs(raw = {}) {
   for (const f of Array.isArray(raw.findings) ? raw.findings : []) {
     if (f && FINDING_KEYS.includes(f.key) && !findings.some((g) => g.key === f.key)) findings.push({ key: f.key });
   }
-  return {
+  const base = {
     technicianNote: String(raw.technicianNote == null ? '' : raw.technicianNote).replace(/\r/g, '').trim().slice(0, MAX_NOTE_CHARS),
     products,
     findings,
   };
+  // GATE_LAWN_REPORT_COPY_FIXES: the caller asks for the category form, so the applied products
+  // become { kind, alsoFeeds } (the Visit Summary's table) and no product name rides along.
+  // Absent for every other caller, so the normalized inputs and their hash are unchanged.
+  if (raw.categoryOnly !== true) return base;
+  const { normalizeFacts } = require('./lawn-visit-summary');
+  const source = Array.isArray(raw.applied) && raw.applied.length ? raw.applied : raw.products;
+  return { ...base, products: [], categoryOnly: true, applied: normalizeFacts({ applied: source }).applied };
 }
 
 // ── Slots and rendering ───────────────────────────────────────────────────
@@ -214,6 +222,9 @@ function buildSlots(inputs, observed) {
     observed: observed.map((o) => ({ condition: o.condition, place: o.place || NO_PLACE })),
     maybe: inputs.findings.filter((f) => !NOTE_COVERS[f.key].test(note)).map((f) => f.key).slice(0, MAX_MAYBE),
     products: inputs.products.map((p) => p.name),
+    // The category form (GATE_LAWN_REPORT_COPY_FIXES): phrase ids of the Visit Summary's table. The
+    // key exists only on an entry built in that form, so every older slots object is unchanged.
+    ...(inputs.categoryOnly === true ? { categories: require('./lawn-visit-summary').appliedCategoryIds(inputs.applied) } : {}),
   };
 }
 
@@ -238,6 +249,10 @@ function renderSentences(s) {
   if (items.length) out.push(fill(LAWN_SENTENCES.observed, { items: joinList(items) }));
   if (s.maybe.length) out.push(fill(LAWN_SENTENCES.maybe, { labels: joinList(s.maybe.map((k) => FINDING_LABELS[k])) }));
   if (s.products.length) out.push(fill(LAWN_SENTENCES.products, { products: joinList(s.products) }));
+  else if (s.categories.length) {
+    const { APPLIED_PHRASES } = require('./lawn-visit-summary');
+    out.push(fill(LAWN_SENTENCES.products, { products: joinList(s.categories.map((id) => APPLIED_PHRASES[id])) }));
+  }
   return out;
 }
 
@@ -248,6 +263,7 @@ function usableSlots(slots) {
     observed: (Array.isArray(s.observed) ? s.observed : []).filter((o) => o && Object.hasOwn(CONDITIONS, o.condition)).slice(0, MAX_OBSERVATIONS),
     maybe: [...new Set((Array.isArray(s.maybe) ? s.maybe : []).filter((k) => Object.hasOwn(FINDING_LABELS, k)))].slice(0, MAX_MAYBE),
     products: (Array.isArray(s.products) ? s.products : []).map((n) => clean(n)).filter(Boolean).slice(0, MAX_PRODUCTS),
+    categories: [...new Set((Array.isArray(s.categories) ? s.categories : []).filter((id) => typeof id === 'string' && Object.hasOwn(require('./lawn-visit-summary').APPLIED_PHRASES, id)))].slice(0, MAX_CATEGORIES),
   };
 }
 
@@ -260,30 +276,17 @@ function fitted(slots) {
   const s = usableSlots(slots);
   while (wordsIn(renderSentences(s)) > MAX_WORDS) {
     if (s.products.length > 1) s.products.pop();
+    else if (s.categories.length > 1) s.categories.pop();
     else if (s.maybe.length) s.maybe.pop();
     else if (s.observed.length > 1) s.observed.pop();
-    else return { observed: [], maybe: [], products: [] };
+    else return { observed: [], maybe: [], products: [], categories: [] };
   }
   return s;
 }
 
-// The copy screen, with one exact exception. A real catalog name reads to the
-// screen as an access code ("... Combo AM 1% ..."), so the known names in
-// CATALOG_NAMES_NOT_CODES are screened with "combo" neutralized; every other name,
-// "Security Combo 1234" included, is screened in full (Codex r2, r3, r5). The
-// sentence around a name is always screened in full with the names masked.
-// 2026-10-06 read-only check: of 238 prod catalog rows this is the only name the
-// screen flags. A new such name stays out of the paragraph until it is added here.
-const CATALOG_NAMES_NOT_CODES = new Set([
-  'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
-]);
-const screenedName = (name) => (CATALOG_NAMES_NOT_CODES.has(name) ? name.replace(/\bcombo\b/gi, 'blend') : name);
-const maskProducts = (text, products) => products.reduce((t, name) => t.split(name).join('the product'), text);
-function screenProblem(text, products) {
-  const named = products.filter((name) => text.includes(name));
-  return customerCopyViolations(maskProducts(text, named)).length > 0
-    || named.some((name) => customerCopyViolations(screenedName(name)).length > 0);
-}
+// The copy screen (copyScreenProblem, tech-paragraph-engine.js): the sentence in
+// full with the catalog names masked, each name in full, one exact exception.
+const screenProblem = copyScreenProblem;
 
 /** Slots -> the paragraph text, or '' when none. A sentence that fails the
  * customer-copy screen drops on its own. Pure. */

@@ -280,7 +280,16 @@ function reentryTargetLine(target) {
   return `${target.label}: ready once dry — your technician confirms timing`;
 }
 
+// The aftercare card's re-entry line for the printed record: only when something was applied, sanitized, and not
+// the very sentence the summary above already printed (a frozen lawn condition is both).
+function aftercareReentryLine(data, hasActualTreatment, reentrySummary) {
+  const line = hasActualTreatment ? sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) : '';
+  return line && line !== reentrySummary ? line : '';
+}
+
 function zoneNames(app, zones, serviceLine = 'pest') {
+  // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS); other rows read the zones below.
+  if (typeof app.areaUse === 'string' && app.areaUse.trim()) return app.areaUse.trim();
   const byId = new Map((zones || []).map((zone) => [String(zone.id), zone]));
   const ids = Array.isArray(app.zone_ids) ? app.zone_ids : [];
   const names = ids.map((id) => byId.get(String(id))?.label).filter(Boolean);
@@ -521,7 +530,12 @@ export default function ServiceReportDocument({ data, token }) {
   // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31): the whole pest line —
   // recurring, one-time, re-service — prints a traced map or nothing; the
   // '-ton1' PDF key suffix re-renders cached pest documents once.
-  const schematicSuppressed = callbackSchematicSuppressed || data.pestTraceOrNothing === true;
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES: a lawn visit whose coverage verdict,
+  // frozen at completion, says the zones were only schematic defaults prints no
+  // generated map or A-D legend either (the server sets lawnCoverageHidden; the
+  // ':covhide=1' PDF key stamp re-keys cached PDFs). A real traced map still prints.
+  const schematicSuppressed = callbackSchematicSuppressed || data.pestTraceOrNothing === true
+    || data.lawnCoverageHidden === true;
   const schematicSvg = schematicSuppressed
     ? null
     : (data.treatmentMap?.schematic?.svg || data.mapSvg || null);
@@ -837,7 +851,7 @@ export default function ServiceReportDocument({ data, token }) {
   // Stripped sentence by sentence: the banner composes a plan sentence onto a
   // frozen line (partial credit), so the frozen sentence alone must go too.
   const bannerSentences = hasActualTreatment
-    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    && ['hold', 'water_in', 'hold_then_water_in', 'water_in_by_rain'].includes(data.reportV2?.banner?.state)
     ? (data.reportV2.banner.lines || [])
       .filter((line) => typeof line === 'string' && line)
       .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
@@ -1361,8 +1375,10 @@ export default function ServiceReportDocument({ data, token }) {
             {reentry?.irrigationReadyAt && !lawnV2Watering && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
-            {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
-              <Bullet>{sanitizeReentryCopy(data.reportV2.aftercare.reentry)}</Bullet>
+            {/* A frozen lawn re-entry condition (GATE_LAWN_REPORT_FACTS) is the summary above AND the aftercare line:
+                one sentence, printed once. */}
+            {aftercareReentryLine(data, hasActualTreatment, reentrySummary) && (
+              <Bullet>{aftercareReentryLine(data, hasActualTreatment, reentrySummary)}</Bullet>
             )}
           </div>
         )}
@@ -1860,7 +1876,9 @@ export default function ServiceReportDocument({ data, token }) {
                 non-live render, precisely so a reschedule can't fossilize a
                 stale appointment in a cached PDF. Rendering it here was dead
                 code that only ever appeared in a direct component test. */}
-            {isWaveGuard ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
+            {/* GATE_LAWN_REPORT_COPY_FIXES (server sets lawnCopyFixes on a lawn report): this sentence is
+                the pest program's re-service wording, so a lawn report prints nothing here. */}
+            {isWaveGuard && data.lawnCopyFixes !== true ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
             Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
             <br />
             Full interactive report:{' '}

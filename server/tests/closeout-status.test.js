@@ -655,6 +655,19 @@ describe('closeout-status: comms + follow-up', () => {
     expect(facts.license).toMatchObject({ state: 'done', expiryUnrecorded: true });
   });
 
+  test('a blank license expiry settles the expiry only: a required category is still judged (Codex r6)', () => {
+    const tech = (categories) => ({ id: 'tech-1', fl_applicator_license: 'JE362022', license_expiry: null, license_categories: categories });
+    const run = (categories, req) => deriveCloseoutFacts(closedOutInputs({
+      requirements: baseRequirements(req), visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: tech(categories),
+    })).facts.license;
+    const needsLo = { requiresLicense: true, licenseCategory: 'L&O' };
+    expect(run(['GHP'], needsLo)).toMatchObject({ state: 'failed', reason: 'technician_license_category_mismatch' });
+    expect(run(null, needsLo)).toMatchObject({ state: 'unknown', reason: 'technician_license_categories_unrecorded' });
+    expect(run(['L&O'], needsLo)).toMatchObject({ state: 'done', reason: 'technician_licensed', expiryUnrecorded: true });
+    expect(run(['GHP'], { requiresLicense: true, licenseCategory: 'GHP', licenseCategories: ['GHP', 'L&O'] }))
+      .toMatchObject({ state: 'failed', reason: 'technician_license_category_mismatch', requiredCategories: ['ghp', 'lo'] });
+  });
+
   test('no comms marker: delivered report email counts; otherwise UNKNOWN, never pending; explicit catalog no-notice → not_required', () => {
     const bare = { ...closedOutInputs().record, structured_notes: {} };
     expect(deriveCloseoutFacts(closedOutInputs({ record: bare })).facts.comms).toMatchObject({ state: 'done', reason: 'report_email_delivered' });
@@ -1308,5 +1321,114 @@ describe('closeout-status: loader against a fake knex', () => {
       expect(result.requirements.asOf).toBe('current_catalog');
       expect(resolverMock).toHaveBeenCalled();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex round 8 P1 on #6135: a visit with two chemical area add-ons closed green with one application row.
+// The application fact now needs a row for EACH chemical add-on (service_products.area_addon_key), and for
+// the host's own log when the host owes one. The frozen list decides; a snapshot without it keeps its verdict.
+// ---------------------------------------------------------------------------
+describe('closeout-status: one application row for each chemical area add-on', () => {
+  const SPOT = 'area_addon_lawn_insect_spot';
+  const PREVENTIVE = 'area_addon_lawn_insect_preventive';
+  const run = (requirements, over = {}) => deriveCloseoutFacts(closedOutInputs({
+    requirements: baseRequirements({ category: 'lawn_care', frozen: true, ...requirements }), retractedApplicationCount: 0, ...over,
+  })).facts.application;
+  const two = { areaAddOnApplicationKeys: [SPOT, PREVENTIVE], hostApplicationLog: false };
+
+  test('two chemical add-ons with one row: pending, naming the add-on with no row', () => {
+    expect(run(two, { activeApplicationCount: 1, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 } } })).toMatchObject({
+      state: 'pending', reason: 'addon_application_rows_missing', requiredAddOns: [SPOT, PREVENTIVE], missingAddOns: [PREVENTIVE], activeCount: 1,
+    });
+  });
+
+  test('both rows: done, naming the add-ons recorded', () => {
+    expect(run(two, { activeApplicationCount: 2, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 }, [PREVENTIVE]: { active: 1, recorded: 1, retracted: 0 } } }))
+      .toMatchObject({ state: 'done', reason: 'active_application_rows', addOnsRecorded: [SPOT, PREVENTIVE] });
+  });
+
+  test('a row recorded for the add-on and retracted afterwards: failed, naming it (not pending)', () => {
+    expect(run(two, { activeApplicationCount: 1, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 }, [PREVENTIVE]: { active: 0, recorded: 0, retracted: 1 } } }))
+      .toMatchObject({ state: 'failed', reason: 'addon_application_rows_retracted', missingAddOns: [PREVENTIVE] });
+  });
+
+  test('a tagged row with no rate, area or amount (saved before the completion required them) does not satisfy the add-on', () => {
+    // active 1 but recorded 0: the row exists and holds nothing, so the add-on still owes its record.
+    expect(run(two, { activeApplicationCount: 2, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 }, [PREVENTIVE]: { active: 1, recorded: 0, retracted: 0 } } }))
+      .toMatchObject({ state: 'pending', reason: 'addon_application_rows_missing', missingAddOns: [PREVENTIVE] });
+  });
+
+  test('the per-add-on read counts a row as recorded only with a positive rate, area and amount', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'closeout-status.js'), 'utf8');
+    expect(src).toContain('sp.application_rate > 0 AND sp.area_value > 0 AND sp.total_amount > 0');
+  });
+
+  test('the host\'s own log and each add-on\'s log are separate requirements', () => {
+    const lawnHost = { areaAddOnApplicationKeys: [SPOT], hostApplicationLog: true };
+    // One row, and it is the add-on\'s: the host (lawn visit) still owes its own.
+    expect(run(lawnHost, { activeApplicationCount: 1, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 } } }))
+      .toMatchObject({ state: 'pending', reason: 'addon_application_rows_missing', missingAddOns: [], missingHostApplication: true });
+    // One untagged row (the host\'s): the add-on still owes its own.
+    expect(run(lawnHost, { activeApplicationCount: 1, addOnApplications: {} }))
+      .toMatchObject({ state: 'pending', missingAddOns: [SPOT] });
+    // Both: done.
+    expect(run(lawnHost, { activeApplicationCount: 2, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 } } }))
+      .toMatchObject({ state: 'done', addOnsRecorded: [SPOT] });
+  });
+
+  test('a web sweep beside one chemical add-on: the sweep needs none (it is not in the list)', () => {
+    expect(run({ areaAddOnApplicationKeys: [SPOT], hostApplicationLog: false }, { activeApplicationCount: 1, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 } } }))
+      .toMatchObject({ state: 'done' });
+  });
+
+  test('no rows at all stays pending and names every add-on that owes one; all retracted stays failed', () => {
+    expect(run(two, { activeApplicationCount: 0, addOnApplications: {} })).toMatchObject({ state: 'pending', reason: 'no_application_rows', missingAddOns: [SPOT, PREVENTIVE] });
+    expect(run(two, { activeApplicationCount: 0, retractedApplicationCount: 2, addOnApplications: {} })).toMatchObject({ state: 'failed', reason: 'all_application_rows_retracted', missingAddOns: [SPOT, PREVENTIVE] });
+  });
+
+  test('the per-add-on read failing is unknown, never green and never missing', () => {
+    expect(run(two, { activeApplicationCount: 2, addOnApplications: null })).toMatchObject({ state: 'unknown', reason: 'application_addon_lookup_failed' });
+  });
+
+  test('requirements that were not frozen (live catalog) judge per add-on only once a row carries a tag: an older completion keeps its verdict', () => {
+    const live = { ...two, frozen: false };
+    // No tagged row anywhere: completed before rows carried a tag. One untagged row stays done, none stays pending.
+    expect(run(live, { activeApplicationCount: 1, addOnApplications: {} })).toMatchObject({ state: 'done', reason: 'active_application_rows' });
+    expect(run(live, { activeApplicationCount: 1, addOnApplications: null })).toMatchObject({ state: 'done', reason: 'active_application_rows' });
+    expect(run(live, { activeApplicationCount: 0, addOnApplications: {} })).toMatchObject({ state: 'pending', reason: 'no_application_rows' });
+    expect(run(live, { activeApplicationCount: 0, addOnApplications: {} })).not.toHaveProperty('missingAddOns');
+    // A tagged row proves it was completed after the tags: the per-add-on rule applies.
+    expect(run(live, { activeApplicationCount: 1, addOnApplications: { [SPOT]: { active: 1, recorded: 1, retracted: 0 } } })).toMatchObject({ state: 'pending', missingAddOns: [PREVENTIVE] });
+    // A frozen list always applies.
+    expect(run(two, { activeApplicationCount: 1, addOnApplications: {} })).toMatchObject({ state: 'pending', missingAddOns: [SPOT, PREVENTIVE] });
+  });
+
+  test('a snapshot without the list keeps its original verdict: one row is done, however many add-ons were on the visit', () => {
+    expect(run({}, { activeApplicationCount: 1, addOnApplications: undefined })).toMatchObject({ state: 'done', reason: 'active_application_rows' });
+    expect(run({}, { activeApplicationCount: 0 })).toMatchObject({ state: 'pending', reason: 'no_application_rows' });
+    // ... and the non-performed outcome rule is untouched by the list.
+    expect(run(two, { activeApplicationCount: 0, record: { ...closedOutInputs().record, structured_notes: { completionSmsStatus: 'sent', visitOutcome: 'no_access' } } }).state).not.toBe('done');
+  });
+
+  test('the loader reads the tags only for a visit that names add-ons; a failed read is recorded as unavailable, not as no rows', async () => {
+    const { addOnApplicationCounts } = require('../services/closeout-status');
+    // No add-on named (every visit without a chemical add-on, every old snapshot): nothing is queried.
+    const never = () => { throw new Error('must not query'); };
+    expect(await addOnApplicationCounts(never, ['rec'], baseRequirements(), [])).toBeUndefined();
+    // Named add-ons but no record yet: nothing to count.
+    expect(await addOnApplicationCounts(never, [], baseRequirements({ areaAddOnApplicationKeys: [SPOT], hostApplicationLog: false }), [])).toEqual({});
+    // The ledger rows are counted per tag, active and retracted apart.
+    const rowsFor = [{ key: SPOT, active: '1', recorded: '1', retracted: '0' }, { key: PREVENTIVE, active: '1', recorded: '0', retracted: '2' }];
+    const chain = (result) => {
+      const q = { join: () => q, whereIn: () => q, whereNotNull: () => q, groupBy: () => q, select: () => q, then: (res, rej) => result().then(res, rej) };
+      return q;
+    };
+    const knex = Object.assign(() => chain(async () => rowsFor), { raw: (sql) => sql });
+    expect(await addOnApplicationCounts(knex, ['rec'], baseRequirements(two), [])).toEqual({ [SPOT]: { active: 1, recorded: 1, retracted: 0 }, [PREVENTIVE]: { active: 1, recorded: 0, retracted: 2 } });
+    const unavailable = [];
+    const broken = Object.assign(() => chain(async () => { throw new Error('ledger offline'); }), { raw: (sql) => sql });
+    expect(await addOnApplicationCounts(broken, ['rec'], baseRequirements(two), unavailable)).toBeNull();
+    expect(unavailable).toEqual([{ lookup: 'property_application_history (area add-on rows)', error: 'ledger offline' }]);
   });
 });

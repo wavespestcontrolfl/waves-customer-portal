@@ -4,8 +4,9 @@
 // opens on "customer home - spoke with them", has no Protocol actions field
 // and no visit-level Areas treated field, and each product row offers the
 // whole pest area list. The areas sent at completion are the rows' own areas.
-// A non-pest line keeps both fields. One box stays (owner 2026-10-05):
-// "Swept eaves and webs" records the pest protocol's sweep action.
+// A non-pest line keeps both fields. The "Swept eaves and webs" box of
+// 2026-10-05 is gone (owner 2026-10-08: the sweep comes only from the
+// technician's talk-to-text note); a draft that already carries it still sends it.
 // Seeded default rows start on an area (owner 2026-10-05): Perimeter for an
 // exterior method; other methods start empty.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -142,11 +143,11 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     expect(areasFields()).toHaveLength(0);
   });
 
-  it('shows one unchecked "Swept eaves and webs" box on a regular pest visit', async () => {
+  it('shows no "Swept eaves and webs" box on a regular pest visit (owner 2026-10-08)', async () => {
     await mount(regularPest());
     await screen.findByText('Taurus SC');
-    expect(screen.getAllByRole('checkbox', { name: 'Swept eaves and webs' })).toHaveLength(1);
-    expect(sweepBox().checked).toBe(false);
+    expect(sweepBox()).toBeNull();
+    expect(screen.queryByText('Swept eaves and webs')).toBeNull();
   });
 
   it('shows no sweep box on a line that is not a regular pest visit', async () => {
@@ -162,24 +163,7 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     expect(sweepBox()).toBeNull();
   });
 
-  it('sends the sweep action with its exterior, no-treatment scope when the box is checked', async () => {
-    const onSubmit = await mount(regularPest());
-    await screen.findByText('Taurus SC');
-    fireEvent.click(sweepBox());
-    expect(sweepBox().checked).toBe(true);
-    fillLinearFeet();
-    await act(async () => { fireEvent.click(submitButton()); });
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    const body = onSubmit.mock.calls[0][1];
-    expect(body.protocolActionsCompleted).toEqual([SWEEP_LABEL]);
-    expect(body.protocolActionScopesCompleted).toEqual([
-      { label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false },
-    ]);
-    // The notes carry the same marker line the old dropdown wrote.
-    expect(body.technicianNotes || body.notes || '').toContain(`[Protocol] ${SWEEP_LABEL}`);
-  });
-
-  it('sends no protocol action when the box is left unchecked, or checked and unchecked again', async () => {
+  it('sends no protocol action on a regular pest visit', async () => {
     const onSubmit = await mount(regularPest());
     await screen.findByText('Taurus SC');
     fillLinearFeet();
@@ -187,20 +171,7 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit.mock.calls[0][1].protocolActionsCompleted).toEqual([]);
     expect(onSubmit.mock.calls[0][1].protocolActionScopesCompleted).toEqual([]);
-
-    cleanup();
-    localStorage.clear();
-    const second = await mount(regularPest());
-    await screen.findByText('Taurus SC');
-    fireEvent.click(sweepBox());
-    fireEvent.click(sweepBox());
-    expect(sweepBox().checked).toBe(false);
-    fillLinearFeet();
-    await act(async () => { fireEvent.click(submitButton()); });
-    await waitFor(() => expect(second).toHaveBeenCalledTimes(1));
-    expect(second.mock.calls[0][1].protocolActionsCompleted).toEqual([]);
-    expect(second.mock.calls[0][1].protocolActionScopesCompleted).toEqual([]);
-    expect(JSON.stringify(second.mock.calls[0][1])).not.toContain('[Protocol]');
+    expect(JSON.stringify(onSubmit.mock.calls[0][1])).not.toContain('[Protocol]');
   });
 
   it('keeps both fields on a line that is not a regular pest visit', async () => {
@@ -450,7 +421,7 @@ describe('restoring a saved draft on a regular pest visit', () => {
     expect(body.areasServiced).toEqual(['Yard']);
   });
 
-  it('an old draft that carries the sweep opens with the box checked and sends it', async () => {
+  it('an old draft that carries the sweep still sends it, with no box to show it (its [Protocol] line stays in the notes)', async () => {
     const service = regularPest();
     const onSubmit = vi.fn().mockResolvedValue({});
     localStorage.setItem(draftKey(service), JSON.stringify({
@@ -461,7 +432,8 @@ describe('restoring a saved draft on a regular pest visit', () => {
     }));
     await mount(service, { onSubmit });
     fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
-    await waitFor(() => expect(sweepBox().checked).toBe(true));
+    await screen.findByDisplayValue((value) => String(value).includes(`[Protocol] ${SWEEP_LABEL}`));
+    expect(sweepBox()).toBeNull();
     await act(async () => { fireEvent.click(submitButton()); });
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const body = onSubmit.mock.calls[0][1];
@@ -469,25 +441,6 @@ describe('restoring a saved draft on a regular pest visit', () => {
     expect(body.protocolActionScopesCompleted).toEqual([
       { label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false },
     ]);
-  });
-
-  it('a draft saved with the box checked comes back checked, and an unchecked one comes back clear', async () => {
-    vi.useFakeTimers();
-    const service = regularPest();
-    try {
-      await mount(service);
-      fireEvent.click(sweepBox());
-      await act(async () => { vi.advanceTimersByTime(2000); });
-    } finally {
-      vi.useRealTimers();
-    }
-    const saved = JSON.parse(localStorage.getItem(draftKey(service)));
-    expect(saved.selectedProtocolActionLabels).toEqual([SWEEP_LABEL]);
-    expect(saved.actionScopeByLabel[SWEEP_LABEL]).toMatchObject({ scope: 'exterior', treatmentApplied: false });
-    cleanup();
-    await mount(service);
-    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
-    await waitFor(() => expect(sweepBox().checked).toBe(true));
   });
 
   it('keeps a protocol action the draft already carries and still sends it', async () => {

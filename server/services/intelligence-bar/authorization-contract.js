@@ -503,6 +503,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', 'Clears stale tracker evidence on this visit (tracker state released, cleanup run; no status change)');
     }
   }
+  // Product picker (owner 2026-10-07): the operator's words did not name one product, so the card lists the shortlist and
+  // writes nothing. The list itself rides in the contract (product_choices), so the hash covers every product offered.
+  const productChoices = toolName === 'adjust_stock' && Array.isArray(preview?.product_choices) ? preview.product_choices : null;
+  if (productChoices) {
+    const what = String(preview.movement_type || '').replace(/_/g, ' ');
+    const entered = preview.entered_quantity != null ? ` ${preview.entered_quantity} ${preview.entered_unit || ''}`.trimEnd() : '';
+    push('operational', `Pick the product for this stock change (${what}${entered}). Nothing changes until you pick a product and confirm the next card.`);
+  }
   // A stock write always shows what it records and where the count lands (owner 2026-10-05): the product, the amount and unit
   // the operator entered, and the on-hand count before and after in the product's own inventory unit.
   if ((toolName === 'adjust_stock' || (toolName === 'update_restock_request' && params?.action === 'receive'))
@@ -914,8 +922,15 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('billing', `Monthly bill total: ${money(rc.total_before)} → ${money(rc.total_after)}${rc.replaces_whole_bill ? ' (replaces the whole bill)' : ''}`, {
       before: money(rc.total_before), after: money(rc.total_after),
     });
-    push('billing', 'No price-change notice is sent to the customer');
+    // The tier-upgrade email (below) states the new monthly rate, so the
+    // card must not also say that no notice goes.
+    if (!preview.tier_upgrade_email) push('billing', 'No price-change notice is sent to the customer');
   }
+  // Tier-upgrade email (owner 2026-10-08, GATE_IB_TIER_UPGRADE_EMAIL): decided
+  // at proposal time by tier-upgrade-email.js and pinned on the stored params;
+  // absent whenever the gate is off or the card does not qualify.
+  const tierUpgradeEmail = toolName === 'update_customer' && !!preview?.tier_upgrade_email;
+  if (tierUpgradeEmail) push('comms', require('./tier-upgrade-email').cardLine(preview.tier_upgrade_email));
   // Billing-lane stamp (#3140): the executors stamp billing_mode
   // 'monthly_membership' on any affected row the update leaves with a
   // membership tier + positive monthly rate and no billing lane, and notify
@@ -1000,6 +1015,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // The portal's own Auto Pay-off / payment-method-removed notices, only
       // when their gate is on and an email is on file (the plan says which).
       || (toolName === 'remove_saved_payment_method' && preview?.notifies_customer === true)
+      || tierUpgradeEmail
       || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
@@ -1053,7 +1069,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       }
     }
     if (bookingConfirmationLines) bookingConfirmationLines.forEach((line) => push('comms', line));
-    else push('comms', contactLabel);
+    // The tier-upgrade email has its own line above; an email change on the
+    // same card has its own double-opt-in line too.
+    else if (!tierUpgradeEmail) push('comms', contactLabel);
   }
 
   // cancel_appointment's assigned-technician cancel notice
@@ -1090,8 +1108,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     version: CONTRACT_VERSION,
     tool: toolName,
     tier: tierFor(toolName),
-    action_label: ACTION_LABELS[toolName] || humanKey(toolName),
+    action_label: productChoices ? 'Choose the product' : (ACTION_LABELS[toolName] || humanKey(toolName)),
     effects,
+    ...(productChoices ? { product_choices: productChoices.map((choice) => ({ ...choice })) } : {}),
     // Irreversibility is derived, not just allowlisted: anything that sends
     // an outbound message (customer texts on a notifying move, the tax
     // advisor's admin SMS) or spends externally (price research) cannot be

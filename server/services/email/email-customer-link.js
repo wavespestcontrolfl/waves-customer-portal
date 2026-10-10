@@ -63,19 +63,26 @@ function recipientAddresses(row) {
   return [...new Set([row.to_address, row.cc_address, row.bcc_address].flatMap(extractEmailAddresses))];
 }
 
+// `asOf` (optional): judge the thread as it stood then. Only mail stored
+// before that time counts, so a customer who joined the thread later does
+// not change who an older send belonged to (the auto-dispatch proofreader
+// replay, Codex #6258 r7). Without it the thread is read as it stands now.
+const storedBefore = (asOf) => (q) => { if (asOf) q.where('created_at', '<', asOf); };
+
 // A send in the customer's thread counts as reaching THAT customer only
 // when its own recipients prove it: some recipient (To/Cc/Bcc) is the
 // customer's email or an address the customer wrote to us from in this
 // thread, and none is another active customer's email. Forwarding the
 // thread internally, or replying to someone else on it, never closes the
 // customer's ask (pre-push audit, 2026-09-30).
-async function threadSendReachesCustomer(conn, row, customerId) {
+async function threadSendReachesCustomer(conn, row, customerId, asOf) {
   const recipients = recipientAddresses(row);
   if (!recipients.length) return false;
   const customer = await conn('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
   if (!customer) return false;
   const inboundFrom = await conn('emails')
     .where({ gmail_thread_id: row.gmail_thread_id, customer_id: customerId })
+    .modify(storedBefore(asOf))
     .whereNotNull('from_address').pluck('from_address');
   const customerAddresses = new Set([customer.email, ...inboundFrom].flatMap(extractEmailAddresses));
   if (!recipients.some((a) => customerAddresses.has(a))) return false;
@@ -85,7 +92,7 @@ async function threadSendReachesCustomer(conn, row, customerId) {
   return !others;
 }
 
-async function resolveEmailCustomerLink(conn, row) {
+async function resolveEmailCustomerLink(conn, row, { asOf } = {}) {
   // A send may name its customer only in Cc or Bcc (an empty To).
   if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return null;
   // Cc/Bcc never captured (a row synced before capture existed, or a caller
@@ -96,11 +103,12 @@ async function resolveEmailCustomerLink(conn, row) {
     const threadCustomers = await conn('emails')
       .where({ gmail_thread_id: row.gmail_thread_id })
       .whereNotNull('customer_id')
+      .modify(storedBefore(asOf))
       .modify((q) => { if (row.id) q.whereNot('id', row.id); })
       .distinct('customer_id').pluck('customer_id');
     if (threadCustomers.length > 1) return null; // a mixed thread never guesses
     if (threadCustomers.length === 1) {
-      return (await threadSendReachesCustomer(conn, row, threadCustomers[0])) ? threadCustomers[0] : null;
+      return (await threadSendReachesCustomer(conn, row, threadCustomers[0], asOf)) ? threadCustomers[0] : null;
     }
   }
   const recipients = recipientAddresses(row);

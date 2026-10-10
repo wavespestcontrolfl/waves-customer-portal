@@ -21,7 +21,7 @@
  */
 
 const logger = require('./logger');
-const { etOffsetIso } = require('../utils/datetime-et');
+const { etOffsetIso, etParts, etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 const NWS_BASE = 'https://api.weather.gov';
 const USER_AGENT = '(wavespestcontrol.com, contact@wavespestcontrol.com)';
@@ -31,6 +31,23 @@ const CACHE_TTL_MS = 30 * 60 * 1000;
 // Forecast cache keyed by rounded grid coordinate. SWFL route density
 // means most of a day's customers share a key.
 const _cache = new Map();
+
+// Size bound for the coordinate-keyed caches. Public routes pass caller-
+// chosen coordinates, and a TTL that is only checked on read never frees an
+// entry, so a caller varying the point could grow a cache without limit
+// (Codex #6126 r4). On a write past the bound: drop expired entries, then
+// the oldest (a Map keeps insertion order). 500 keys of the 2-decimal grid
+// cover far more than a day's real customers.
+const CACHE_MAX_ENTRIES = 500;
+function cachePut(cache, key, entry, ttlMs) {
+  cache.delete(key);
+  cache.set(key, entry);
+  if (cache.size <= CACHE_MAX_ENTRIES) return;
+  const now = Date.now();
+  const stampOf = (e) => (typeof e === 'number' ? e : e.at);
+  for (const [k, e] of cache) if (now - stampOf(e) >= ttlMs) cache.delete(k);
+  while (cache.size > CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value);
+}
 
 function cacheKey(lat, lng) {
   return `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
@@ -85,9 +102,8 @@ const FORECAST_BACKUP_MAX_MS = 3500;
 // before the shared client's cache is warm.
 const _backupInFlight = new Map();
 
-async function readOpenMeteoHours(latNum, lngNum, timeoutMs) {
+async function readOpenMeteoHours(latNum, lngNum, timeoutMs, fromMs = Math.floor(Date.now() / 3600000) * 3600000) {
   const { fetchPropertyForecast } = require('./service-report/application-conditions');
-  const fromMs = Math.floor(Date.now() / 3600000) * 3600000;
   const forecast = await fetchPropertyForecast({
     latitude: latNum,
     longitude: lngNum,
@@ -147,22 +163,59 @@ function fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs = TOTAL_BUDGET_
 // current hour and ends 7 days later, so its first and last dates can be
 // partial, and a max over part of a day understates a wetter missing part.
 const DAYTIME_HOURS = 12;
-function dailyFromHours(hours) {
-  const byDate = {};
+const maxOf = (a, b) => (b != null && (a == null || b > a) ? b : a);
+// Complete daytime dates, in date order: [{ date, rainChance, tempHighF }].
+function daytimeFromHours(hours) {
+  const byDate = new Map();
   for (const hour of hours) {
     const date = hour.startTime.slice(0, 10);
     const hh = Number(hour.startTime.slice(11, 13));
     if (hh < 6 || hh >= 18) continue;
-    const day = byDate[date] || (byDate[date] = { hours: new Set(), rainChance: null });
+    if (!byDate.has(date)) byDate.set(date, { date, hours: new Set(), rainChance: null, tempHighF: null });
+    const day = byDate.get(date);
     day.hours.add(hh);
-    const chance = hour.rainChance;
-    if (chance != null && (day.rainChance == null || chance > day.rainChance)) day.rainChance = chance;
+    day.rainChance = maxOf(day.rainChance, hour.rainChance);
+    day.tempHighF = maxOf(day.tempHighF, hour.temperatureF);
   }
+  return [...byDate.values()]
+    .filter((day) => day.hours.size === DAYTIME_HOURS)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(({ date, rainChance, tempHighF }) => ({ date, rainChance, tempHighF }));
+}
+
+function dailyFromHours(hours) {
   const out = {};
-  for (const [date, day] of Object.entries(byDate)) {
-    if (day.hours.size === DAYTIME_HOURS) out[date] = { rainChance: day.rainChance, shortForecast: null, source: 'open-meteo' };
+  for (const day of daytimeFromHours(hours)) {
+    out[day.date] = { rainChance: day.rainChance, shortForecast: null, source: 'open-meteo' };
   }
   return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Open-Meteo daytime (6 AM-6 PM ET) highs and rain chances for the complete
+ * dates in the next 7 days, for a reader with its own NWS path that needs a
+ * backup (pest forecast). Shares the backup read, its dedupe and the shared
+ * client's cache. `timeoutMs` = what the caller's own budget has left
+ * (never longer than the client's deadline). Never throws; null when
+ * unavailable.
+ */
+async function getOpenMeteoDaytime(lat, lng, { timeoutMs = FORECAST_BACKUP_MAX_MS } = {}) {
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (lat == null || lng == null || !Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+  // While today's daytime period is running (6 AM-6 PM ET) the read starts
+  // at today's 6 AM, so today is a complete date here as it is among NWS's
+  // daytime periods; a read from the current hour would drop it and shift
+  // the six dates one day later (Codex #6119 r3). Its own read (another
+  // window than the hourly backup's), never thrown.
+  const now = new Date(Date.now());
+  const etHour = etParts(now).hour;
+  const fromMs = etHour >= 6 && etHour < 18
+    ? parseETDateTime(`${etDateString(now)}T06:00`).getTime()
+    : Math.floor(now.getTime() / 3600000) * 3600000;
+  const hours = await readOpenMeteoHours(latNum, lngNum, Math.min(timeoutMs, FORECAST_BACKUP_MAX_MS), fromMs).catch(() => null);
+  const days = hours ? daytimeFromHours(hours) : [];
+  return days.length ? days : null;
 }
 
 async function openMeteoDailyBackup(latNum, lngNum, startedAt) {
@@ -192,7 +245,7 @@ async function getDailyRainOutlook(lat, lng) {
   const startedAt = Date.now();
   const byDate = (await nwsDaily(latNum, lngNum)) || (await openMeteoDailyBackup(latNum, lngNum, startedAt));
   if (!byDate) return null;
-  _cache.set(key, { at: Date.now(), value: byDate });
+  cachePut(_cache, key, { at: Date.now(), value: byDate }, CACHE_TTL_MS);
   return byDate;
 }
 
@@ -260,7 +313,7 @@ async function getDailyRainOutlookBounded(lat, lng, { deadlineMs = 1200 } = {}) 
     _dailyInFlight.set(key, lookup);
     lookup.then((value) => {
       _dailyInFlight.delete(key);
-      if (value === null) _dailyFailCooldown.set(key, Date.now());
+      if (value === null) cachePut(_dailyFailCooldown, key, Date.now(), DAILY_FAIL_COOLDOWN_MS);
       else _dailyFailCooldown.delete(key);
     });
   }
@@ -317,7 +370,7 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
   // A backup answer reached only because THIS caller capped NWS is not
   // cached: an uncapped reader (storm watch, Rain Out) must still try NWS,
   // the primary source (Codex #6102 r3).
-  if (nws || nwsBudgetMs >= TOTAL_BUDGET_MS) _hourlyCache.set(key, { at: Date.now(), value: hours });
+  if (nws || nwsBudgetMs >= TOTAL_BUDGET_MS) cachePut(_hourlyCache, key, { at: Date.now(), value: hours }, HOURLY_CACHE_TTL_MS);
   return hours;
 }
 
@@ -387,6 +440,7 @@ module.exports = {
   getDailyRainOutlook,
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
+  getOpenMeteoDaytime,
   forecastLinkForZip,
-  _test: { dailyFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };

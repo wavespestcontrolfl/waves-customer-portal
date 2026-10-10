@@ -123,6 +123,38 @@ beforeEach(() => {
   mockActivePlanCustomer.mockReset().mockResolvedValue(false);
 });
 
+test('lawn_pricing_v2 carries the area add-on catalog beside the Bermuda flag, built from AREA_ADDONS, and no other key does', async () => {
+  const { AREA_ADDONS } = require('../services/pricing-engine/constants');
+  const prior = process.env.GATE_AREA_ADDONS;
+  mockPricingConfigRow = { config_key: 'lawn_pricing_v2', data: {} };
+  try {
+    await withServer(async (baseUrl) => {
+      for (const [gate, enabled] of [[undefined, false], ['false', false], ['1', true], ['true', true], ['on', true]]) {
+        if (gate === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = gate;
+        const response = await call(baseUrl, 'GET', '/lawn_pricing_v2', { role: 'admin' });
+        expect(response.status).toBe(200);
+        expect(response.json.areaAddOns.enabled).toBe(enabled);
+        expect(response.json.areaAddOns.visitContexts).toEqual(['standalone', 'sameTripAddOn']);
+        expect(response.json.areaAddOns.items.map((item) => item.key)).toEqual(Object.keys(AREA_ADDONS.items));
+        expect(response.json.subFeaturesAvailable).toHaveProperty('bermudaSuppression');
+      }
+      const { items } = (await call(baseUrl, 'GET', '/lawn_pricing_v2', { role: 'admin' })).json.areaAddOns;
+      expect(items.find((item) => item.key === 'bed_pre_emergent')).toEqual({
+        key: 'bed_pre_emergent', name: 'Bed Pre-Emergent Weed Control', category: 'lawn_care', areaLabel: 'bed', tiers: [1000, 2000, 3500], maxPerYear: 4, minDaysApart: 60, limitText: '4 in 12 months, at least 60 days apart', requiresGrassTrack: null,
+      });
+      expect(items.find((item) => item.key === 'lawn_insect_spot')).toMatchObject({ requiresGrassTrack: 'st_augustine', areaLabel: 'treated lawn' });
+      expect(items.find((item) => item.key === 'web_sweep')).toMatchObject({ category: 'pest_control', areaLabel: null, tiers: null });
+      // A copy: editing the payload never edits the pricing table.
+      items[0].tiers.push(1);
+      expect(AREA_ADDONS.items.bed_pre_emergent.tiers).toEqual([1000, 2000, 3500]);
+      mockPricingConfigRow = { config_key: 'lawn_brackets_other', data: {} };
+      expect((await call(baseUrl, 'GET', '/lawn_brackets_other', { role: 'admin' })).json).not.toHaveProperty('areaAddOns');
+    });
+  } finally {
+    if (prior === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prior;
+  }
+});
+
 test('lawn_pricing_v2 offers bahia as a new lawn plan only while GATE_LAWN_V13 is off', async () => {
   const prior = process.env.GATE_LAWN_V13;
   mockPricingConfigRow = { config_key: 'lawn_pricing_v2', data: {} };

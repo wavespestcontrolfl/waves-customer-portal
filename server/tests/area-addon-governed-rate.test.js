@@ -1,0 +1,655 @@
+/**
+ * Codex round 8 P1 on #6135: the completion form prefilled the catalog default rate for an add-on product
+ * (Arena 0.29 oz, Acelepryn 0.05 fl oz per 1,000 sq ft) where the governed add-on rates are 0.147 and 0.184.
+ * The governed rate is numbers in protocols.json (area_addon labelFacts.ratePer1000 and rateUnit); the schedule
+ * feed carries it on every add-on of the visit; the completion keeps which add-on a row belongs to and flags a
+ * row recorded above it. No database: small fakes.
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/area-addon-visit-rows', () => ({ areaAddOnKeysByVisit: jest.fn() }));
+
+const fs = require('fs');
+const path = require('path');
+const rows = require('../services/area-addon-visit-rows');
+const governed = require('../services/area-addon-governed-rate');
+
+const VISIT = '11111111-1111-4111-8111-111111111111';
+const ARENA = 'area_addon_lawn_insect_spot';
+const ACEL = 'area_addon_lawn_insect_preventive';
+const SNAP = 'area_addon_bed_pre_emergent';
+const SWEEP = 'area_addon_web_sweep';
+
+// A knex-like fake: knex(table) returns a thenable chain that resolves to `tables[table]`.
+function fakeKnex(tables = {}, { columns = {} } = {}) {
+  const k = (table) => {
+    const q = { where: () => q, whereIn: () => q, whereNotNull: () => q, select: () => q, columnInfo: async () => columns[table] || {},
+      then: (res, rej) => (tables[table] instanceof Error ? Promise.reject(tables[table]) : Promise.resolve(tables[table] || [])).then(res, rej) };
+    return q;
+  };
+  return k;
+}
+
+describe('the governed rate, one place', () => {
+  test('each chemical add-on resolves its numeric rate by catalog key', () => {
+    expect(governed.governedRateFor(ARENA)).toEqual({ ratePer1000: 0.147, rateUnit: 'oz', productName: 'Arena 50 WDG' });
+    expect(governed.governedRateFor(ACEL)).toEqual({ ratePer1000: 0.184, rateUnit: 'fl_oz', productName: 'Acelepryn Insecticide' });
+    expect(governed.governedRateFor(SNAP)).toEqual({ ratePer1000: 3.45, rateUnit: 'lb', productName: 'Snapshot 2.5TG' });
+    expect(governed.governedRateFor('area_addon_fire_ant_yard')).toEqual({ ratePer1000: 2, rateUnit: 'lb', productName: 'Topchoice Granular Insecticide' });
+    expect(governed.governedRateFor('area_addon_hardscape_weed')).toEqual({ ratePer1000: 16, rateUnit: 'fl_oz', productName: 'Roundup QuikPro SC' });
+    expect(governed.governedRateFor(SWEEP)).toBeNull();
+    expect(governed.isGoverned(ARENA)).toBe(true);
+    expect(governed.isGoverned(SWEEP)).toBe(false);
+  });
+
+  // The resolution of one add-on's product (resolveGovernedProducts): an active row to select, or none.
+  const active = (id, name, verifiedAt) => ({ status: 'active', ids: [id], product: { id, name, active: true, label_verified_at: verifiedAt } });
+
+  test('feedRate holds the rate back for the wrong grass or an unverified label, and says why; the product rides by ID', () => {
+    const arena = active('p-arena', 'Arena 50 WDG', '2026-08-01');
+    const acel = active('p-acel', 'Acelepryn Insecticide', '2026-08-01');
+    expect(governed.feedRate(ARENA, { grassType: 'st_augustine', resolution: arena })).toEqual({ ratePer1000: 0.147, rateUnit: 'oz', productName: 'Arena 50 WDG', productId: 'p-arena', productStatus: 'active', productNote: null, withheld: null });
+    expect(governed.feedRate(ARENA, { grassType: 'bahia', resolution: arena }).withheld).toBe('The rate is for St. Augustine only and the grass on the estimate is not.');
+    expect(governed.feedRate(ARENA, { grassType: null, resolution: arena }).withheld).toMatch(/St\. Augustine only/);
+    expect(governed.feedRate(ACEL, { resolution: acel }).withheld).toBeNull();
+    expect(governed.feedRate(SNAP, { resolution: active('p-snap', 'Snapshot 2.5TG', null) })).toMatchObject({ productId: 'p-snap', withheld: 'The label rate is not verified yet.' });
+    // The read failing (null) holds every rate back and names no product.
+    expect(governed.feedRate(ACEL, { resolution: null })).toMatchObject({
+      productId: null, productStatus: 'unknown', productNote: 'The product for this add-on could not be confirmed right now. Reload the visit or ask the office.', withheld: 'The label rate is not verified yet.',
+    });
+    expect(governed.feedRate(SWEEP, { resolution: arena })).toBeNull();
+  });
+
+  test.each([
+    ['inactive', { status: 'inactive', ids: ['p-snap'], product: null }],
+    ['unresolved', { status: 'unresolved', ids: [], product: null }],
+  ])('a governed product that is %s has no selectable product: the plain sentence, no product ID, no rate', (status, resolution) => {
+    expect(governed.feedRate(SNAP, { resolution })).toMatchObject({
+      productId: null,
+      productStatus: status,
+      productNote: 'Snapshot 2.5TG is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.',
+      withheld: 'Snapshot 2.5TG is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.',
+    });
+  });
+
+  describe('the one resolver: the catalog product of an add-on, by identity', () => {
+    const row = (id, name, extra = {}) => ({ id, name, active: true, aliases: [], ...extra });
+
+    test('a product renamed in the Service Library, its old name kept as an alias, is the same product', () => {
+      const renamed = row('p-snap', 'Snapshot Pro Granular', { aliases: ['Snapshot 2.5TG'], label_verified_at: '2026-08-01' });
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-other', 'Demand CS'), renamed])).toMatchObject({ status: 'active', ids: ['p-snap'], product: { id: 'p-snap' } });
+    });
+
+    test('duplicate-named active and inactive rows: the active one is selected, history counts both ids', () => {
+      const inactive = row('p-old', 'Snapshot 2.5TG', { active: false });
+      const live = row('p-new', 'Snapshot 2.5TG');
+      for (const catalog of [[inactive, live], [live, inactive]]) {
+        const out = governed.resolveProductIn('Snapshot 2.5TG', catalog);
+        expect(out.status).toBe('active');
+        expect(out.product.id).toBe('p-new');
+        expect([...out.ids].sort()).toEqual(['p-new', 'p-old']);
+      }
+    });
+
+    // Codex round 25: the legacy row was left inactive under the protocol name; the renamed row is active and keeps the name as an alias.
+    test('an inactive legacy row and the renamed active row that aliases its name are one product: the active one is selected, both ids count', () => {
+      const legacy = row('p-old', 'Snapshot 2.5TG', { active: false });
+      const renamed = row('p-new', 'Snapshot Pro Granular', { aliases: ['Snapshot 2.5TG'] });
+      for (const catalog of [[legacy, renamed, row('p-other', 'Demand CS')], [renamed, legacy]]) {
+        const out = governed.resolveProductIn('Snapshot 2.5TG', catalog);
+        expect(out.status).toBe('active');
+        expect(out.product.id).toBe('p-new');
+        expect([...out.ids].sort()).toEqual(['p-new', 'p-old']);
+      }
+    });
+
+    test('only inactive rows: nothing to select, history still counts them; no row at all: unresolved', () => {
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-old', 'Snapshot 2.5TG', { active: false })])).toEqual({ status: 'inactive', product: null, ids: ['p-old'] });
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-x', 'Demand CS')])).toEqual({ status: 'unresolved', product: null, ids: [] });
+      // A null `active` is active (the catalog's own rule), like the job card's.
+      expect(governed.resolveProductIn('Snapshot 2.5TG', [row('p-n', 'Snapshot 2.5TG', { active: null })]).status).toBe('active');
+    });
+
+    test('resolveGovernedProducts reads the catalog and its aliases once, for every governed key, and skips the sweep', async () => {
+      const calls = [];
+      const knex = (table) => { calls.push(table); return fakeKnex({ products_catalog: [{ id: 'p-snap', name: 'Snapshot Pro Granular', active: true }, { id: 'p-arena', name: 'Arena 50 WDG', active: false }], product_aliases: [{ product_id: 'p-snap', alias_name: 'Snapshot 2.5TG' }] })(table); };
+      const out = await governed.resolveGovernedProducts(knex, [SNAP, ARENA, SNAP, SWEEP]);
+      expect(calls).toEqual(['products_catalog', 'product_aliases']);
+      expect([...out.keys()]).toEqual([SNAP, ARENA]);
+      expect(out.get(SNAP)).toMatchObject({ status: 'active', ids: ['p-snap'] });
+      expect(out.get(ARENA)).toMatchObject({ status: 'inactive', ids: ['p-arena'], product: null });
+      expect(await governed.resolveGovernedProducts(knex, [SWEEP])).toEqual(new Map());
+      expect(calls).toHaveLength(2);
+    });
+  });
+});
+
+describe('the schedule feed', () => {
+  test('every attached add-on carries its governed rate, the visit that IS an add-on carries its own, in ONE catalog read', async () => {
+    const calls = [];
+    const knex = (table) => { calls.push(table); return fakeKnex({ products_catalog: [{ id: 'p-arena', name: 'Arena 50 WDG', active: true, label_verified_at: '2026-08-01' }] })(table); };
+    const byVisit = new Map([[VISIT, [{ key: ACEL, name: 'Yearly Lawn Insect Preventive' }, { key: SWEEP, name: 'Web Sweep' }]]]);
+    const ownRow = { id: 'v-own', service_key_snapshot: ARENA, area_addon_scope: JSON.stringify({ grassType: 'st_augustine' }) };
+    const own = await governed.areaAddOnFeed(knex, byVisit, [{ id: VISIT }, ownRow]);
+    // One catalog read (its aliases follow it).
+    expect(calls).toEqual(['products_catalog', 'product_aliases']);
+    const [acel, sweep] = byVisit.get(VISIT);
+    // Arena is verified; Acelepryn has no catalog row here, so nothing is selectable and its rate is held back (not the catalog default).
+    expect(acel.governed).toMatchObject({ ratePer1000: 0.184, rateUnit: 'fl_oz', productName: 'Acelepryn Insecticide', productId: null, productStatus: 'unresolved', withheld: expect.stringContaining('no product can be chosen') });
+    expect(sweep.governed).toBeUndefined();
+    expect(own.get('v-own')).toEqual({ key: ARENA, governed: { ratePer1000: 0.147, rateUnit: 'oz', productName: 'Arena 50 WDG', productId: 'p-arena', productStatus: 'active', productNote: null, withheld: null } });
+    expect(own.has(VISIT)).toBe(false);
+  });
+
+  test('no chemical add-on on any visit: no query at all, and nothing is added', async () => {
+    const calls = [];
+    const knex = (table) => { calls.push(table); return fakeKnex()(table); };
+    const own = await governed.areaAddOnFeed(knex, new Map(), [{ id: VISIT, service_key_snapshot: 'pest_general_quarterly' }, { id: 'x' }]);
+    expect(own.size).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  test('a failed label read never fails the feed: every rate is held back and no product is named', async () => {
+    const own = await governed.areaAddOnFeed(fakeKnex({ products_catalog: new Error('connection lost') }), new Map(), [{ id: 'v', service_key_snapshot: ACEL }]);
+    expect(own.get('v').governed).toMatchObject({ withheld: 'The label rate is not verified yet.', productId: null, productStatus: 'unknown', productNote: expect.stringContaining('could not be confirmed') });
+  });
+
+  test('a renamed product (old name kept as an alias) rides the feed by ID with its verified label; an inactive one is not offered', async () => {
+    const knex = fakeKnex({
+      products_catalog: [
+        { id: 'p-arena', name: 'Arena Pro WDG', active: true, label_verified_at: '2026-08-01' },
+        { id: 'p-acel', name: 'Acelepryn Insecticide', active: false, label_verified_at: '2026-08-01' },
+      ],
+      product_aliases: [{ product_id: 'p-arena', alias_name: 'Arena 50 WDG' }],
+    });
+    const byVisit = new Map([[VISIT, [{ key: ARENA, grassType: 'st_augustine' }, { key: ACEL }]]]);
+    const own = await governed.areaAddOnFeed(knex, byVisit, [{ id: 'v-own', service_key_snapshot: ARENA, area_addon_scope: { grassType: 'st_augustine' } }]);
+    const [arena, acel] = byVisit.get(VISIT);
+    expect(arena.governed).toMatchObject({ productId: 'p-arena', productName: 'Arena 50 WDG', withheld: null });
+    expect(own.get('v-own').governed).toMatchObject({ productId: 'p-arena', withheld: null });
+    expect(acel.governed).toMatchObject({ productId: null, productStatus: 'inactive', withheld: expect.stringContaining('not an active product in the Service Library') });
+  });
+
+  test('the route carries it on both feed payloads and only when the visit has an add-on', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(src.match(/areaAddOnOwn: projectCompletionContext\.areaAddOnOwn,/g)).toHaveLength(2);
+    expect(src).toContain('...(own ? { areaAddOnOwn: own } : {})');
+  });
+});
+
+describe('which add-on each application row belongs to', () => {
+  beforeEach(() => rows.areaAddOnKeysByVisit.mockReset());
+
+  test('a tag is kept only for an add-on the visit carries; a forged or unknown tag is dropped', async () => {
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map([[VISIT, [ARENA, SWEEP]]]));
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: 'pest_general_quarterly' }, [
+      { productId: 'p-arena', areaAddOnKey: ARENA },
+      { productId: 'p-forged', areaAddOnKey: SNAP },
+      { productId: 'p-sweep', areaAddOnKey: SWEEP },
+      { productId: 'p-junk', areaAddOnKey: { $ne: 1 } },
+      { productId: 'p-plain' },
+    ]);
+    expect([...tags]).toEqual([[`p-arena|${ARENA}`, ARENA]]);
+  });
+
+  test('on a visit whose own service is a chemical add-on, an untagged row is that add-on\'s and a forged tag falls back to it', async () => {
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map([[VISIT, [SNAP]]]));
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: ARENA }, [
+      { productId: 'p-own' }, { productId: 'p-attached', areaAddOnKey: SNAP }, { productId: 'p-forged', areaAddOnKey: 'area_addon_fire_ant_yard' },
+    ]);
+    expect(Object.fromEntries(tags)).toEqual({ 'p-own|': ARENA, [`p-attached|${SNAP}`]: SNAP, 'p-forged|area_addon_fire_ant_yard': ARENA });
+  });
+
+  test('the own add-on is also read from the sold scope when the snapshot is missing', async () => {
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map());
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, area_addon_scope: { catalogServiceKey: ACEL } }, [{ productId: 'p' }]);
+    expect(Object.fromEntries(tags)).toEqual({ 'p|': ACEL });
+  });
+
+  test('an ordinary completion (no add-on claimed, not an add-on visit) runs no query at all', async () => {
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: 'pest_general_quarterly' }, [{ productId: 'p' }, null, { productId: 'q', areaAddOnKey: 5 }]);
+    expect(tags.size).toBe(0);
+    expect(rows.areaAddOnKeysByVisit).not.toHaveBeenCalled();
+  });
+
+  test('a host visit with no chemical add-on tags nothing', async () => {
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map());
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: 'lawn_standard' }, [{ productId: 'p', areaAddOnKey: ARENA }]);
+    expect(tags.size).toBe(0);
+    expect(tags.unreadable).toBeUndefined();
+  });
+
+  test('a visit that IS a chemical add-on and whose rows claim no other add-on tags its rows without reading anything', async () => {
+    rows.areaAddOnKeysByVisit.mockRejectedValue(new Error('connection lost'));
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: ARENA }, [{ productId: 'p' }, { productId: 'q', areaAddOnKey: ARENA }]);
+    expect(Object.fromEntries(tags)).toEqual({ 'p|': ARENA, [`q|${ARENA}`]: ARENA });
+    expect(rows.areaAddOnKeysByVisit).not.toHaveBeenCalled();
+    expect(tags.unreadable).toBeUndefined();
+  });
+
+  // Codex round 14 P2: a failed read must not look like a visit with no add-ons.
+  describe('a failed add-on read is not "no add-ons"', () => {
+    const unreadable = async (svc, products) => {
+      rows.areaAddOnKeysByVisit.mockRejectedValue(new Error('connection lost'));
+      return governed.resolveApplicationAddOnTags(fakeKnex(), svc, products);
+    };
+    const host = { id: VISIT, service_key_snapshot: 'ts_standard_6x' };
+    const claim = [{ productId: 'p-snap', areaAddOnKey: SNAP }];
+
+    test('a read that was needed and failed marks the map unreadable and tags nothing', async () => {
+      const tags = await unreadable(host, claim);
+      expect(tags.size).toBe(0);
+      expect(tags.unreadable).toBe(true);
+      // The same when the visit is an add-on and a row claims another one.
+      const mixed = await unreadable({ id: VISIT, service_key_snapshot: ARENA }, [{ productId: 'p' }, ...claim]);
+      expect(mixed.size).toBe(0);
+      expect(mixed.unreadable).toBe(true);
+    });
+
+    test('a fresh completion is refused with a retryable 503 before anything is written; a replay or resume is not', async () => {
+      const tags = await unreadable(host, claim);
+      const never = () => { throw new Error('must not query'); };
+      const run = (opts) => governed.requireAddOnActuals(never, claim, tags, opts).then(() => null, (err) => err);
+      expect(await run({ fresh: true })).toMatchObject({
+        statusCode: 503, isOperational: true, code: 'area_addon_unreadable',
+        message: 'The add-on treatments for this visit could not be read right now. Try completing the visit again.',
+      });
+      expect(await run()).toMatchObject({ statusCode: 503 });
+      expect(await run({ fresh: false })).toBeNull();
+    });
+
+    test('a completion that claims nothing and is not an add-on visit runs no read and cannot fail for it', async () => {
+      const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), host, [{ productId: 'p' }]);
+      expect(tags.unreadable).toBeUndefined();
+      expect(await governed.requireAddOnActuals(() => { throw new Error('must not query'); }, [{ productId: 'p' }], tags)).toBeUndefined();
+    });
+
+    test('the completion refuses the fresh closeout from the same call, and the limit audit reads the add-on rows when the tags were unreadable', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+      expect(src).toContain('addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags)');
+      expect(governed.mayHaveAddOnRows(new Map())).toBe(false);
+      expect(governed.mayHaveAddOnRows(Object.assign(new Map(), { unreadable: true }))).toBe(true);
+      expect(governed.mayHaveAddOnRows(new Map([['p|', ARENA]]))).toBe(true);
+      expect(src).toContain("await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });");
+    });
+  });
+
+  test('the column is written only when it exists and the row has a tag', () => {
+    const tags = new Map([[`p|${ARENA}`, ARENA]]);
+    expect(governed.addOnProductColumns({ area_addon_key: {} }, tags, { productId: 'p', areaAddOnKey: ARENA })).toEqual({ area_addon_key: ARENA });
+    expect(governed.addOnProductColumns({}, tags, { productId: 'p', areaAddOnKey: ARENA })).toEqual({});
+    expect(governed.addOnProductColumns({ area_addon_key: {} }, tags, { productId: 'other' })).toEqual({});
+    // The host's row of the SAME product is another row: no tag.
+    expect(governed.addOnProductColumns({ area_addon_key: {} }, tags, { productId: 'p' })).toEqual({});
+  });
+
+  test('a host row and an add-on row of the SAME product are two rows with two identities (Snapshot on a Tree & Shrub visit plus the bed add-on)', async () => {
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map([[VISIT, [SNAP]]]));
+    const submitted = [{ productId: 'p-snap' }, { productId: 'p-snap', areaAddOnKey: SNAP }];
+    const tags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: 'ts_standard_6x' }, submitted);
+    expect(Object.fromEntries(tags)).toEqual({ [`p-snap|${SNAP}`]: SNAP });
+    const identities = submitted.map((p) => governed.productRowIdentity(tags, p));
+    expect(identities).toEqual(['p-snap|', `p-snap|${SNAP}`]);
+    expect(new Set(identities).size).toBe(2);
+    // Two untagged rows of one product, or two rows tagged for the same add-on, are the same row.
+    const same = [{ productId: 'p-snap' }, { productId: 'p-snap' }].map((p) => governed.productRowIdentity(tags, p));
+    expect(new Set(same).size).toBe(1);
+    // On a visit whose own service is the add-on, an untagged row and a row tagged with that same add-on are one row.
+    rows.areaAddOnKeysByVisit.mockResolvedValue(new Map());
+    const ownTags = await governed.resolveApplicationAddOnTags(fakeKnex(), { id: VISIT, service_key_snapshot: SNAP }, [{ productId: 'p-snap' }, { productId: 'p-snap', areaAddOnKey: SNAP }]);
+    expect(new Set([{ productId: 'p-snap' }, { productId: 'p-snap', areaAddOnKey: SNAP }].map((p) => governed.productRowIdentity(ownTags, p))).size).toBe(1);
+  });
+
+  test('the completion saves one row per identity, not per product', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).toContain('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);');
+    expect(src).toContain('if (seenProductIds.has(rowIdentity)) continue;');
+    expect(src).not.toContain('seenProductIds.has(p.productId)');
+  });
+});
+
+// Codex round 11 P2 on #6135: a technician could POST the right productId and a valid areaAddOnKey with no rate, amount or
+// treated area; the tag was saved, closeout counted the row, and the FDACS ledger held a null dose. A tagged row now
+// carries its actuals or the completion is a 400, and the total is filled from the rate and the area.
+describe('a row tagged to a chemical add-on must carry its application actuals', () => {
+  const tagOf = (p, key = ARENA) => new Map([[governed.productRowKey(p), key]]);
+  const names = fakeKnex({ services: [{ service_key: ARENA, name: 'Lawn Insect Spot Treatment' }] });
+  const full = (over = {}) => ({ productId: 'p-arena', name: 'Arena 50 WDG', areaAddOnKey: ARENA, rate: '0.147', rateUnit: 'oz', areaValue: '2000', areaUnit: 'sqft', ...over });
+  // The refusal is a thrown operational 400 (the completion's other post-claim refusals are thrown the same way); null when the row passes.
+  const check = (p, key, opts) => governed.requireAddOnActuals(names, [p], tagOf(p, key), opts).then(() => null, (err) => err);
+
+  test('a row with every actual passes, and a missing total is filled from the rate and the area', async () => {
+    const p = full();
+    expect(await check(p)).toBeNull();
+    expect(p).toMatchObject({ totalAmount: 0.294, amountUnit: 'oz' });
+    // A total the client sent is replaced by the server's own (rate x treated area) whenever the rate has an area basis.
+    const sent = full({ totalAmount: '0.3', amountUnit: 'oz' });
+    expect(await check(sent)).toBeNull();
+    expect(sent).toMatchObject({ totalAmount: 0.294, amountUnit: 'oz' });
+    // A per-acre rate: 160 lb per acre over 43,560 sq ft is 160 lb; a per-1,000-sq-ft unit written out is the same as a bare one.
+    const acre = full({ rate: 160, rateUnit: 'lb/acre', areaValue: 43560 });
+    expect(await check(acre)).toBeNull();
+    expect(acre).toMatchObject({ totalAmount: 160, amountUnit: 'lb' });
+    const written = full({ rate: 3.45, rateUnit: 'lb/1000sf', areaValue: 1000 });
+    expect(await check(written)).toBeNull();
+    expect(written).toMatchObject({ totalAmount: 3.45, amountUnit: 'lb' });
+  });
+
+  test.each([
+    ['no rate', { rate: '' }, 'application rate'],
+    ['a zero rate', { rate: 0 }, 'application rate'],
+    ['a negative rate', { rate: '-1' }, 'application rate'],
+    ['a rate with no unit', { rateUnit: '' }, 'rate unit'],
+    ['no treated area', { areaValue: '' }, 'treated square feet'],
+    ['a zero area', { areaValue: 0 }, 'treated square feet'],
+    ['an area in the wrong unit', { areaUnit: 'linear_ft' }, 'treated square feet'],
+    ['an area with no unit', { areaUnit: undefined }, 'treated square feet'],
+  ])('%s is a 400 naming the add-on and the field', async (_label, over, field) => {
+    const out = await check(full(over));
+    expect(out).toMatchObject({ statusCode: 400, isOperational: true, code: 'area_addon_actuals_required', addOnKey: ARENA });
+    expect(out.message).toBe(`Lawn Insect Spot Treatment add-on: enter the ${field} for Arena 50 WDG, then complete the visit.`);
+  });
+
+  test('every missing field is named, and a mix-concentration rate with no total asks for the total', async () => {
+    expect((await check(full({ rate: '', areaValue: '' }))).message).toBe('Lawn Insect Spot Treatment add-on: enter the application rate and treated square feet for Arena 50 WDG, then complete the visit.');
+    // oz/gal has no area to multiply by: the total must come from the technician.
+    expect((await check(full({ rateUnit: 'oz/gal' }))).message).toBe('Lawn Insect Spot Treatment add-on: enter the total amount for Arena 50 WDG, then complete the visit.');
+    expect(await check(full({ rateUnit: 'oz/gal', totalAmount: 4 }))).toBeNull();
+  });
+
+  test('an untagged row, a row the visit does not carry, and an ordinary completion are not checked and run no query', async () => {
+    const never = () => { throw new Error('must not query'); };
+    const bare = { productId: 'p', rate: '', areaValue: '' };
+    const run = (...args) => governed.requireAddOnActuals(never, ...args).then(() => null, (err) => err);
+    expect(await run([bare], new Map())).toBeNull();
+    expect(await run([bare], tagOf({ productId: 'other' }))).toBeNull();
+    expect(await run(undefined, tagOf(bare))).toBeNull();
+    expect(await run([full()], new Map())).toBeNull();
+    // A replay or resume of a committed completion is not checked (the row below would be refused).
+    const empty = full({ rate: '' });
+    expect(await run([empty], tagOf(empty), { fresh: false })).toBeNull();
+  });
+
+  test('the server computes the total from the rate and the treated area and replaces a total the client sent', async () => {
+    // 0.147 oz per 1,000 sq ft over 1,000 sq ft is 0.147 oz, whatever the request says.
+    const crafted = full({ rate: '0.147', rateUnit: 'oz/1000sf', areaValue: '1000', areaUnit: 'sqft', totalAmount: '999', amountUnit: 'lb' });
+    expect(await check(crafted)).toBeNull();
+    expect(crafted).toMatchObject({ totalAmount: 0.147, amountUnit: 'oz' });
+    // A rate with no area basis keeps the total the technician typed, and needs one.
+    const mix = full({ rate: '1.5', rateUnit: 'oz/gal', totalAmount: '12', amountUnit: 'oz' });
+    expect(await check(mix)).toBeNull();
+    expect(mix).toMatchObject({ totalAmount: '12', amountUnit: 'oz' });
+  });
+
+  test('an incomplete visit is not exempt: a product that was applied needs its actuals whatever the outcome', async () => {
+    const noArea = full({ areaValue: '', totalAmount: '' });
+    const err = await check(noArea, undefined, { incomplete: true });
+    expect(err).toMatchObject({ statusCode: 400, code: 'area_addon_actuals_required' });
+    // The completion no longer passes the outcome to the check at all.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).not.toMatch(/requireAddOnActuals\([^)]*isIncompleteVisit/);
+  });
+
+  test('the host\'s untagged row of the same product is not an add-on row', async () => {
+    const host = { productId: 'p-snap', rate: '', areaValue: '' };
+    const addOn = { productId: 'p-snap', areaAddOnKey: SNAP, name: 'Snapshot 2.5TG', rate: 3.45, rateUnit: 'lb', areaValue: 1000, areaUnit: 'sqft' };
+    expect(await governed.requireAddOnActuals(names, [host, addOn], tagOf(addOn, SNAP))).toBeUndefined();
+    expect(host.totalAmount).toBeUndefined();
+    expect(addOn.totalAmount).toBe(3.45);
+  });
+
+  test('a failed name lookup still names the add-on', async () => {
+    const out = await governed.requireAddOnActuals(fakeKnex({ services: new Error('offline') }), [full({ rate: '' })], tagOf(full())).catch((err) => err);
+    expect(out.message).toBe('Lawn Insect Spot add-on: enter the application rate for Arena 50 WDG, then complete the visit.');
+  });
+
+  test('the completion refuses a fresh closeout before any write, and the office alert reads the new finding', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const refuse = src.indexOf("await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });");
+    expect(refuse).toBeGreaterThan(src.indexOf('areaAddOnGovernedRate.resolveApplicationAddOnTags(db, svc, products)'));
+    // before the inventory preflight and the insert read the amount it fills in
+    expect(refuse).toBeLessThan(src.indexOf('await actualProductInventoryBlocks(products, db)'));
+    expect(refuse).toBeLessThan(src.indexOf('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);'));
+    expect(src).toContain('[areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: areaAddOnGovernedRate.uncheckedRateSentence');
+  });
+});
+
+describe('a row recorded above the governed rate is flagged, never blocked', () => {
+  const row = (over) => ({ product_id: 'p', product_name: 'Arena 50 WDG', application_rate: 0.29, rate_unit: 'oz', area_addon_key: ARENA, ...over });
+
+  test('the catalog default rate (Arena 0.29 oz) and the catalog ceiling (Acelepryn 0.37 fl oz) are above the governed rates', () => {
+    expect(governed.rateFindings([row({})])).toEqual([expect.objectContaining({
+      code: 'application_limit_exceeded', limitType: 'area_addon_governed_rate', current: 0.29, max: 0.147, productName: 'Arena 50 WDG',
+      message: 'Recorded. The office will review: Arena 50 WDG was recorded at 0.29 oz per 1,000 sq ft, above the governed add-on rate of 0.147.',
+    })]);
+    // The catalog's label range for Acelepryn tops out at 0.37 fl oz: still above the governed 0.184.
+    expect(governed.rateFindings([row({ product_name: 'Acelepryn Insecticide', application_rate: 0.37, rate_unit: 'fl oz', area_addon_key: ACEL })])).toHaveLength(1);
+  });
+
+  test('the governed rate itself, and below it, are not flagged', () => {
+    expect(governed.rateFindings([row({ application_rate: 0.147 }), row({ application_rate: 0.1 })])).toEqual([]);
+  });
+
+  // Codex round 11 P1: Number(null) is 0 and a different valid unit fell through the comparison: no finding, no office alert.
+  test('a blank, zero or negative rate on the governed product is a finding, never a silent pass', () => {
+    for (const rate of [null, undefined, '', 0, '0', -0.2]) {
+      expect(governed.rateFindings([row({ application_rate: rate })])).toEqual([expect.objectContaining({
+        code: 'application_limit_exceeded', limitType: 'area_addon_rate_unchecked', reason: 'rate_missing', productName: 'Arena 50 WDG', max: '0.147 oz',
+        message: 'Recorded. The office will review: Arena 50 WDG was recorded for an add-on with no application rate, so it could not be held to the governed rate of 0.147 oz.',
+      })]);
+    }
+  });
+
+  test('a rate in a convertible unit is compared in the governed unit (lb to oz, g to oz, gal to fl oz, per acre)', () => {
+    // Arena is governed in oz: 0.01 lb = 0.16 oz is over 0.147; 0.009 lb = 0.144 oz is under.
+    expect(governed.rateFindings([row({ application_rate: 0.01, rate_unit: 'lb' })])).toEqual([expect.objectContaining({
+      limitType: 'area_addon_governed_rate', current: 0.16, max: 0.147,
+      message: 'Recorded. The office will review: Arena 50 WDG was recorded at 0.01 lb per 1,000 sq ft (0.16 oz per 1,000 sq ft), above the governed add-on rate of 0.147.',
+    })]);
+    expect(governed.rateFindings([row({ application_rate: 0.009, rate_unit: 'lb' })])).toEqual([]);
+    // 5 g = 0.1764 oz is over; 4 g = 0.1411 oz is under.
+    expect(governed.rateFindings([row({ application_rate: 5, rate_unit: 'g' })])).toHaveLength(1);
+    expect(governed.rateFindings([row({ application_rate: 4, rate_unit: 'g' })])).toEqual([]);
+    // Acelepryn is governed in fl oz: 0.002 gal = 0.256 fl oz is over; 0.001 gal = 0.128 fl oz is under.
+    const acel = { product_name: 'Acelepryn Insecticide', area_addon_key: ACEL };
+    expect(governed.rateFindings([row({ ...acel, application_rate: 0.002, rate_unit: 'gal' })])).toEqual([expect.objectContaining({ limitType: 'area_addon_governed_rate' })]);
+    expect(governed.rateFindings([row({ ...acel, application_rate: 0.001, rate_unit: 'gal' })])).toEqual([]);
+    // Snapshot is governed in lb: 60 oz = 3.75 lb is over 3.45, 50 oz = 3.125 lb is under.
+    const snap = { product_name: 'Snapshot 2.5TG', area_addon_key: SNAP };
+    expect(governed.rateFindings([row({ ...snap, application_rate: 60, rate_unit: 'oz' })])).toHaveLength(1);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 50, rate_unit: 'oz' })])).toEqual([]);
+    // The same rate written per 1,000 sq ft ('lb/1000sf') or per acre ('lb/acre': 160 lb per acre = 3.67 lb per 1,000 sq ft, over).
+    expect(governed.rateFindings([row({ ...snap, application_rate: 3.5, rate_unit: 'lb/1000sf' })])).toHaveLength(1);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 3.4, rate_unit: 'lb/1000sf' })])).toEqual([]);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 160, rate_unit: 'lb/acre' })])).toEqual([expect.objectContaining({
+      limitType: 'area_addon_governed_rate',
+      message: expect.stringContaining('was recorded at 160 lb per acre (3.6731 lb per 1,000 sq ft)'),
+    })]);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 140, rate_unit: 'lb/acre' })])).toEqual([]);
+  });
+
+  test('a unit with no safe conversion is a finding naming both units, never a silent pass', () => {
+    const unchecked = (over) => governed.rateFindings([row(over)]);
+    // oz is weight or fluid: against fl oz it is not safe. Arena (oz) recorded in fl oz, Acelepryn (fl oz) recorded in oz.
+    expect(unchecked({ rate_unit: 'fl_oz' })).toEqual([expect.objectContaining({
+      limitType: 'area_addon_rate_unchecked', reason: 'unit_not_comparable', current: 'fl oz',
+      message: 'Recorded. The office will review: Arena 50 WDG was recorded in fl oz, and the governed add-on rate is in oz.',
+    })]);
+    expect(governed.rateFindings([row({ product_name: 'Acelepryn Insecticide', area_addon_key: ACEL, rate_unit: 'oz', application_rate: 0.1 })])).toEqual([
+      expect.objectContaining({ reason: 'unit_not_comparable', message: expect.stringContaining('recorded in oz, and the governed add-on rate is in fl oz') }),
+    ]);
+    // A mix concentration, a count, or no unit at all.
+    expect(unchecked({ rate_unit: 'oz/gal' })[0]).toMatchObject({ reason: 'unit_not_comparable', current: 'oz/gal' });
+    expect(unchecked({ rate_unit: 'each' })[0]).toMatchObject({ reason: 'unit_not_comparable' });
+    expect(unchecked({ rate_unit: null })).toEqual([expect.objectContaining({
+      reason: 'unit_not_comparable', current: null,
+      message: 'Recorded. The office will review: Arena 50 WDG was recorded with no unit, and the governed add-on rate is in oz.',
+    })]);
+    // Weight against volume is not a conversion either (a gallon of Snapshot is not a pound).
+    expect(governed.rateFindings([row({ product_name: 'Snapshot 2.5TG', area_addon_key: SNAP, rate_unit: 'gal' })])[0]).toMatchObject({ reason: 'unit_not_comparable' });
+    // An untagged row, or a tag with no governed rate (the sweep), is not an add-on row at all.
+    expect(governed.rateFindings([row({ area_addon_key: SWEEP }), row({ area_addon_key: 'pest_general_quarterly' })])).toEqual([]);
+  });
+
+  test('a tagged row recorded with a product other than the governed one is flagged (the add-on is governed to ONE product)', () => {
+    const findings = governed.rateFindings([row({ product_name: 'Some other product', product_id: 'p-other' })]);
+    expect(findings).toEqual([expect.objectContaining({
+      code: 'application_limit_exceeded', limitType: 'area_addon_wrong_product', productName: 'Some other product', current: 'Some other product', max: 'Arena 50 WDG',
+      message: 'Recorded. The office will review: Some other product was recorded for an add-on that uses Arena 50 WDG.',
+    })]);
+    // A catalog row the matcher resolved from the protocol's hint is the governed product, whatever its name says.
+    expect(governed.rateFindings([row({ product_name: 'Arena 50 WDG Insecticide', product_id: 'p-arena', application_rate: 0.147 })], new Map([[ARENA, ['p-arena']]]))).toEqual([]);
+    expect(governed.rateFindings([row({ product_id: 'p-other', application_rate: 0.147 })], new Map([[ARENA, ['p-arena']]]))).toHaveLength(1);
+    // Any row of the product counts (a duplicate-named or deactivated row of it); a renamed product recorded under its new name passes.
+    expect(governed.rateFindings([row({ product_name: 'Arena Pro WDG', product_id: 'p-arena-old', application_rate: 0.147 })], new Map([[ARENA, ['p-arena', 'p-arena-old']]]))).toEqual([]);
+    // No row resolved (an empty list): the recorded name is compared with the hint, as before.
+    expect(governed.rateFindings([row({ product_name: 'Some other product', product_id: 'p-other' })], new Map([[ARENA, []]]))).toHaveLength(1);
+    // The wrong product is not ALSO compared with the rate.
+    expect(governed.rateFindings([row({ product_name: 'Some other product', application_rate: 5 })])).toHaveLength(1);
+  });
+
+  test('the completion check merges the finding into the limit advisory, tells the office once, and never throws', async () => {
+    const notify = jest.fn(async () => {});
+    const db = fakeKnex({ service_products: [row({})] }, { columns: { service_products: { area_addon_key: {} } } });
+    const advisory = { advisory: true, blocks: [{ code: 'application_limit_exceeded', message: 'earlier', productId: 'q' }] };
+    const out = await governed.flagRatesAboveGoverned({ svc: { id: VISIT }, record: { id: 'r' }, database: db, advisory, notify });
+    expect(out.advisory).toBe(true);
+    expect(out.blocks.map((b) => b.message)).toEqual(['earlier', expect.stringContaining('above the governed add-on rate of 0.147')]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0].findings).toHaveLength(1);
+
+    // Nothing over, no column yet, no record, or a failed read: the advisory comes back as it was.
+    const clean = fakeKnex({ service_products: [row({ application_rate: 0.147 })] }, { columns: { service_products: { area_addon_key: {} } } });
+    expect(await governed.flagRatesAboveGoverned({ svc: {}, record: { id: 'r' }, database: clean, advisory, notify })).toBe(advisory);
+    expect(await governed.flagRatesAboveGoverned({ svc: {}, record: { id: 'r' }, database: fakeKnex({ service_products: [row({})] }), advisory, notify })).toBe(advisory);
+    expect(await governed.flagRatesAboveGoverned({ svc: {}, record: null, database: db, advisory, notify })).toBe(advisory);
+    const broken = fakeKnex({ service_products: new Error('connection lost') }, { columns: { service_products: { area_addon_key: {} } } });
+    expect(await governed.flagRatesAboveGoverned({ svc: {}, record: { id: 'r' }, database: broken, advisory, notify })).toBe(advisory);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  test('the completion check resolves the governed product through the catalog (a renamed product is still the governed one)', async () => {
+    const tables = {
+      service_products: [row({ product_name: 'Arena Pro WDG', product_id: 'p-arena', application_rate: 0.147 }), row({ product_name: 'Other', product_id: 'p-other', application_rate: 0.147 })],
+      products_catalog: [{ id: 'p-arena', name: 'Arena Pro WDG', active: true }],
+      product_aliases: [{ product_id: 'p-arena', alias_name: 'Arena 50 WDG' }],
+    };
+    const notify = jest.fn(async () => {});
+    const out = await governed.flagRatesAboveGoverned({ svc: {}, record: { id: 'r' }, database: fakeKnex(tables, { columns: { service_products: { area_addon_key: {} } } }), advisory: null, notify });
+    expect(out.blocks).toEqual([expect.objectContaining({ productId: 'p-other', message: expect.stringContaining('was recorded for an add-on that uses Arena 50 WDG') })]);
+  });
+
+  test('the completion wires it: the tags before the insert, the column on the row, the check after the limit findings', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const tags = src.indexOf('areaAddOnGovernedRate.resolveApplicationAddOnTags(db, svc, products)');
+    const insert = src.indexOf('Object.assign(serviceProductInsert, areaAddOnGovernedRate.addOnProductColumns(serviceProductCols, addOnTags, p));');
+    const check = src.indexOf('areaAddOnGovernedRate.flagRatesAboveGoverned({');
+    const limits = src.indexOf('await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });');
+    expect(tags).toBeGreaterThan(0);
+    expect(insert).toBeGreaterThan(tags);
+    expect(limits).toBeGreaterThan(insert);
+    expect(check).toBeGreaterThan(limits);
+    expect(src).toContain('notify: notifyOfficeOfLimitFindings');
+  });
+});
+
+describe('the job card never prints the form\'s numbers', () => {
+  test('governedForCard drops ratePer1000 and rateUnit from the card text', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'job-card.js'), 'utf8');
+    expect(src).toContain('ratePer1000: _ratePer1000, rateUnit: _rateUnit, ...facts');
+  });
+});
+
+// Codex round 42: the completion resolves the tags again on the locked visit and compares.
+describe('sameAddOnTags', () => {
+  const tags = (entries, unreadable = false) => { const map = new Map(entries); if (unreadable) map.unreadable = true; return map; };
+  test('the same rows tagged to the same add-ons are the same; a dropped, added or moved tag, or a changed readability, is not', () => {
+    const a = tags([['p-1|area_addon_fire_ant_yard', 'area_addon_fire_ant_yard']]);
+    expect(governed.sameAddOnTags(a, tags([['p-1|area_addon_fire_ant_yard', 'area_addon_fire_ant_yard']]))).toBe(true);
+    expect(governed.sameAddOnTags(tags([]), tags([]))).toBe(true);
+    expect(governed.sameAddOnTags(a, tags([]))).toBe(false);
+    expect(governed.sameAddOnTags(tags([]), a)).toBe(false);
+    expect(governed.sameAddOnTags(a, tags([['p-1|area_addon_fire_ant_yard', 'area_addon_bed_pre_emergent']]))).toBe(false);
+    expect(governed.sameAddOnTags(tags([]), tags([], true))).toBe(false);
+  });
+  // Codex round 43: the complete set, not only what the submitted products claim.
+  test('visitAreaAddOnKeySet: own add-on plus attached rows, sorted; the completion compares it before and under the lock', async () => {
+    const VISIT = '10000000-0000-4000-8000-0000000000c1';
+    const visitRows = require('../services/area-addon-visit-rows');
+    // (the row reader is mocked in this suite: it returns the visit's area add-on row keys)
+    visitRows.areaAddOnKeysByVisit.mockResolvedValueOnce(new Map([[VISIT, ['area_addon_web_sweep']]]));
+    await expect(governed.visitAreaAddOnKeySet({}, { id: VISIT, service_key_snapshot: 'area_addon_fire_ant_yard' }))
+      .resolves.toBe('area_addon_fire_ant_yard,area_addon_web_sweep');
+    visitRows.areaAddOnKeysByVisit.mockResolvedValueOnce(new Map());
+    await expect(governed.visitAreaAddOnKeySet({}, { id: VISIT, service_key_snapshot: 'pest_control' })).resolves.toBe('');
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const before = src.indexOf('const addOnKeysBeforeLock = await failSoftRead(db, (k) => areaAddOnGovernedRate.visitAreaAddOnKeySet(k, svc), null);');
+    const lock = src.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const under = src.indexOf('addOnKeysBeforeLock !== await areaAddOnGovernedRate.visitAreaAddOnKeySet(trx, lockedSvcRow)');
+    expect(before).toBeGreaterThan(0);
+    expect(before).toBeLessThan(lock);
+    expect(under).toBeGreaterThan(lock);
+  });
+
+  test('the completion asks it on the locked visit row, before the record is written (source)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const lock = src.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const ask = src.indexOf('areaAddOnGovernedRate.sameAddOnTags(addOnTags, await areaAddOnGovernedRate.resolveApplicationAddOnTags(trx, lockedSvcRow, products))');
+    expect(lock).toBeGreaterThan(0);
+    expect(ask).toBeGreaterThan(lock);
+    expect(ask).toBeLessThan(src.indexOf('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);'));
+  });
+});
+
+// Codex round 45: a completed visit records an application for every chemical add-on it carries (they are invoiced from the visit).
+describe('requireEveryChemicalAddOnRecorded', () => {
+  const FIRE = 'area_addon_fire_ant_yard';
+  const tags = (entries) => new Map(entries);
+  const ask = (set, map, opts) => governed.requireEveryChemicalAddOnRecorded({}, set, map, opts);
+  beforeEach(() => { require('../models/db').mockReset(); });
+
+  test('every carried chemical add-on has a row: passes; the web sweep is never required; no add-on: no query', async () => {
+    await expect(ask(`${FIRE},area_addon_web_sweep`, tags([['p-1|x', FIRE]]))).resolves.toBeUndefined();
+    await expect(ask('area_addon_web_sweep', tags([]))).resolves.toBeUndefined();
+    await expect(ask('', tags([]))).resolves.toBeUndefined();
+  });
+
+  test('a carried chemical add-on with no row is refused by name', async () => {
+    await expect(ask(FIRE, tags([]))).rejects.toMatchObject({
+      statusCode: 400, code: 'area_addon_application_required', addOnKey: FIRE,
+      message: expect.stringMatching(/add-on: no product is recorded for it\. Record its product, rate and treated square feet, then complete the visit\. If it was not applied, ask the office to take it off this visit first\.$/),
+    });
+    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([['p-1|x', FIRE]]))).rejects.toMatchObject({ addOnKey: 'area_addon_bed_pre_emergent' });
+  });
+
+  test('an incomplete outcome and a replay are not judged; a set that could not be read is a retryable refusal for a fresh completed visit', async () => {
+    await expect(ask(FIRE, tags([]), { incomplete: true })).resolves.toBeUndefined();
+    await expect(ask(FIRE, tags([]), { fresh: false })).resolves.toBeUndefined();
+    // Codex round 46: unknown is not "no add-on".
+    await expect(ask(null, tags([]))).rejects.toMatchObject({ statusCode: 503, code: expect.any(String) });
+    await expect(ask(null, tags([]), { incomplete: true })).resolves.toBeUndefined();
+    await expect(ask(null, tags([]), { fresh: false })).resolves.toBeUndefined();
+  });
+
+  test('the completion asks it before the transaction, with the outcome (source)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).toContain("requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });");
+  });
+});
+
+// Codex round 54: the lightweight pest recap.
+describe('the pest recap and area add-ons', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'pest-recap.js'), 'utf8');
+  test('an add-on attached after the eligibility read is seen under the visit lock, and the stale recap is refused before anything is written', () => {
+    const lock = src.indexOf("// 0. Lock the service row");
+    const recheck = src.indexOf("const addOnAttachedUnderLock = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(trx, serviceId).catch(() => true);");
+    expect(lock).toBeGreaterThan(0);
+    expect(recheck).toBeGreaterThan(lock);
+    expect(src.slice(recheck, recheck + 260)).toContain("rejectReason = 'visit_identity_changed';");
+    expect(recheck).toBeLessThan(src.indexOf('// 0c. Re-check the stale-recap guard under the lock.'));
+  });
+  test('an add-on product row is not counted as a usual product of its host line', () => {
+    const sql = src.slice(src.indexOf('const COMMON_PRODUCTS_SQL = `'), src.indexOf('top_products AS ('));
+    expect(sql).toContain('AND sp.area_addon_key IS NULL');
+  });
+});

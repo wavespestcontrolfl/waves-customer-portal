@@ -83,9 +83,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     // the visit seam keeps a member only when its service is groupable.
     const svcId = async (key) => (await db('services').where({ service_key: key }).first('id')).id;
     const lawnServiceId = await svcId('lawn_care_6week');
-    // The riding partner is tree & shrub: since 2026-10-05 pest and lawn never
-    // share one stop (two stop groups), so only a lawn-group partner stays grouped.
-    const pestServiceId = await svcId('tree_shrub_quarterly');
+    const pestServiceId = await svcId('pest_general_quarterly');
     const insert = async (o) => (await db('scheduled_services').insert({ id: randomUUID(), ...base, ...o }).returning('*'))[0];
     const lawnParent = await insert({
       status: 'completed', recurring_pattern: 'every_6_weeks', service_type: 'Lawn Care - Every 6 Weeks', service_id: lawnServiceId, scheduled_date: LAWN_START,
@@ -98,14 +96,14 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
       }));
     }
     const pestParent = await insert({
-      status: 'completed', recurring_pattern: 'quarterly', service_type: 'Quarterly Tree & Shrub Care Service', service_id: pestServiceId, scheduled_date: addDays(LAWN_START, -7),
+      status: 'completed', recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control', service_id: pestServiceId, scheduled_date: addDays(LAWN_START, -7),
     });
     // Pest rides lawn occurrences 1 and 3 (12 weeks apart), same window and tech.
     const pest = [];
     for (const idx of [0, 2]) {
       pest.push(await insert({
         status: 'pending', recurring_parent_id: pestParent.id, recurring_pattern: 'quarterly',
-        service_type: 'Quarterly Tree & Shrub Care Service', service_id: pestServiceId, scheduled_date: dateOnly(lawn[idx].scheduled_date),
+        service_type: 'Quarterly Pest Control', service_id: pestServiceId, scheduled_date: dateOnly(lawn[idx].scheduled_date),
       }));
     }
     // Group each lawn occurrence with its pest partner into one open visit.
@@ -120,7 +118,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
         stop_base_key: vg.stopBaseKey({ propertyId: null, customerId, scheduledDate: date }),
         stop_seq: 1,
         technician_id: techId,
-        group_family: 'lawn_stop',
+        group_family: 'recurring_property_service',
         status: 'open',
         created_by: 'test',
       }).returning('*');
@@ -225,7 +223,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     // A pest booster already sits on the day the first stop would move to.
     await db('scheduled_services').insert({
       id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, status: 'pending',
-      recurring_parent_id: f.pestParent.id, recurring_pattern: 'quarterly', service_type: 'Quarterly Tree & Shrub Care Service',
+      recurring_parent_id: f.pestParent.id, recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
       service_id: f.pest[0].service_id, scheduled_date: addDays(dateOnly(f.lawn[0].scheduled_date), 1),
       window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30,
     });
@@ -277,7 +275,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     const followDay = addDays(dateOnly(f.pest[0].scheduled_date), 14);
     const [child] = await db('scheduled_services').insert({
       id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, status: 'pending', customer_confirmed: false,
-      parent_service_id: f.pest[0].id, source_action: 'ai_call_pipeline_followup', service_type: 'Quarterly Tree & Shrub Care Service',
+      parent_service_id: f.pest[0].id, source_action: 'ai_call_pipeline_followup', service_type: 'Quarterly Pest Control',
       scheduled_date: followDay, window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30,
     }).returning('*');
     const result = await moveLawnSeries(f, { days: 3 });
@@ -353,7 +351,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     const f = await build();
     const [legacy] = await db('scheduled_services').insert({
       id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, status: 'pending',
-      recurring_parent_id: f.pestParent.id, recurring_pattern: 'quarterly', service_type: 'Quarterly Tree & Shrub Care Service',
+      recurring_parent_id: f.pestParent.id, recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
       service_id: f.pest[0].service_id, scheduled_date: addDays(dateOnly(f.lawn[0].scheduled_date), 1),
       window_start: '15:00', window_end: '16:00', estimated_duration_minutes: 30,
     }).returning('id');

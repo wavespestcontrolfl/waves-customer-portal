@@ -33,6 +33,8 @@ jest.mock('../services/estimate-converter', () => ({
   // Real cadence reader: manual acceptance now runs the retired-T&S-cadence
   // gate (codex P1 r9), which reads each row's cadence through it.
   explicitServiceCadence: (...args) => jest.requireActual('../services/estimate-converter').explicitServiceCadence(...args),
+  // Real one-time-only rule: the area add-on Mark Won refusal asks the converter's own question.
+  shouldSuppressRecurringConversion: (...args) => jest.requireActual('../services/estimate-converter').shouldSuppressRecurringConversion(...args),
   // Real-enough commercial helpers for the taxed invoiceTotal path: key from
   // the row's service field, flat base rate, and a blended rate equal to the
   // base (single-line commercial quotes in these tests are fully taxable).
@@ -795,6 +797,144 @@ describe('estimate manual acceptance', () => {
       if (prev === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
       else process.env.GATE_BERMUDA_SUPPRESSION = prev;
     }
+  });
+
+  test('blocks manual acceptance of a persisted area add-on estimate while GATE_AREA_ADDONS is off; gate on passes the add-on guard', async () => {
+    const prev = process.env.GATE_AREA_ADDONS;
+    try {
+      const estimate = {
+        id: 'estimate-area-addon-gated',
+        status: 'sent',
+        estimate_data: JSON.stringify({ engineInputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } } }),
+      };
+      delete process.env.GATE_AREA_ADDONS;
+      const gated = makeDb(estimate);
+      await expect(markEstimateManuallyAccepted({
+        estimateId: estimate.id,
+        adminUserId: 1,
+        database: gated.database,
+      })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/GATE_AREA_ADDONS/) });
+      expect(gated.updates).toHaveLength(0);
+
+      process.env.GATE_AREA_ADDONS = 'true';
+      let thrown;
+      try {
+        await markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 1, database: makeDb(estimate).database });
+      } catch (err) {
+        thrown = err;
+      }
+      // Whatever this minimal fixture fails on, it is NOT the add-on gate.
+      if (thrown) expect(thrown.message).not.toMatch(/GATE_AREA_ADDONS/);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_AREA_ADDONS;
+      else process.env.GATE_AREA_ADDONS = prev;
+    }
+  });
+
+  describe('a recurring estimate carrying an area add-on (Codex r6)', () => {
+    const { recurringAcceptWouldDropAreaAddOns, AREA_ADDON_RECURRING_MARK_WON_MESSAGE } = require('../services/estimate-manual-acceptance');
+    const addOnRow = { service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 59 };
+    const recurringWithAddOn = {
+      id: 'estimate-recurring-addon', status: 'sent', monthly_total: 65, annual_total: 780, onetime_total: 59,
+      estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', mo: 65 }] }, oneTime: { items: [addOnRow] } } }),
+    };
+    const addOnOnly = {
+      id: 'estimate-addon-only', status: 'sent', monthly_total: 0, annual_total: 0, onetime_total: 59,
+      estimate_data: JSON.stringify({ result: { recurring: { services: [] }, oneTime: { items: [addOnRow] } } }),
+    };
+
+    test('Mark Won refuses before any write, with the staff message and the one-time-only code', async () => {
+      const prev = process.env.GATE_AREA_ADDONS;
+      process.env.GATE_AREA_ADDONS = 'true';
+      try {
+        const db = makeDb(recurringWithAddOn);
+        await expect(markEstimateManuallyAccepted({ estimateId: recurringWithAddOn.id, adminUserId: 1, database: db.database }))
+          .rejects.toMatchObject({ statusCode: 409, code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY', message: AREA_ADDON_RECURRING_MARK_WON_MESSAGE });
+        expect(db.updates).toHaveLength(0);
+      } finally {
+        if (prev === undefined) delete process.env.GATE_AREA_ADDONS;
+        else process.env.GATE_AREA_ADDONS = prev;
+      }
+    });
+
+    test('the predicate: recurring plan plus add-on drops it; add-on only, or no add-on, does not', () => {
+      expect(recurringAcceptWouldDropAreaAddOns(recurringWithAddOn)).toBe(true);
+      expect(recurringAcceptWouldDropAreaAddOns(recurringWithAddOn, 'prepay_annual')).toBe(true);
+      expect(recurringAcceptWouldDropAreaAddOns(addOnOnly)).toBe(false);
+      expect(recurringAcceptWouldDropAreaAddOns({ ...recurringWithAddOn, estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', mo: 65 }] } } }) })).toBe(false);
+    });
+  });
+
+  // Codex round 14 P1: the add-on refusals and the yearly-limit recheck judged the estimate as first read, and the locked
+  // re-read replaced estimate_data without running them again. An estimator save that commits between the two reads is
+  // judged now: every add-on decision reads the row this transaction holds FOR UPDATE.
+  describe('the add-on decisions read the LOCKED estimate row (Codex round 14)', () => {
+    const addOnRow = { service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 59 };
+    const plain = { id: 'estimate-stale', status: 'sent', customer_id: null, monthly_total: 0, annual_total: 0, onetime_total: 120, estimate_data: JSON.stringify({ result: { oneTime: { items: [{ service: 'rodent_trapping', price: 120 }] } } }) };
+    // The row an estimator save committed after the first read: the same estimate with an area add-on on it.
+    const saved = (extra = {}) => ({ ...plain, onetime_total: 179, estimate_data: JSON.stringify({ engineInputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } }, result: { recurring: { services: [] }, oneTime: { items: [addOnRow] } } }), ...extra });
+    // First (unlocked) reads see `stale`; the FOR UPDATE read sees `fresh`.
+    function raceDb(stale, fresh) {
+      const base = makeDb(fresh);
+      const database = jest.fn((table) => {
+        const builder = base.database(table);
+        if (table !== 'estimates') return builder;
+        let locked = false;
+        const lock = builder.forUpdate.bind(builder);
+        builder.forUpdate = () => { locked = true; return lock(); };
+        builder.first = async () => (locked ? fresh : stale);
+        return builder;
+      });
+      Object.assign(database, { fn: base.database.fn, raw: base.database.raw, transaction: jest.fn(async (callback) => callback(database)) });
+      return { database, updates: base.updates };
+    }
+    const withGate = async (value, fn) => {
+      const prev = process.env.GATE_AREA_ADDONS;
+      if (value === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = value;
+      try { return await fn(); } finally { if (prev === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prev; }
+    };
+
+    test('an add-on saved after the first read, with its gate off, is refused', async () => {
+      await withGate(undefined, async () => {
+        const { database, updates } = raceDb(plain, saved());
+        await expect(markEstimateManuallyAccepted({ estimateId: plain.id, adminUserId: 1, database }))
+          .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/GATE_AREA_ADDONS/) });
+        expect(updates).toHaveLength(0);
+      });
+    });
+
+    test('a recurring plan saved onto a one-time estimate after the first read is refused, with the one-time-only code', async () => {
+      await withGate('true', async () => {
+        const recurring = saved({ monthly_total: 65, annual_total: 780, estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', mo: 65 }] }, oneTime: { items: [addOnRow] } } }) });
+        const { database, updates } = raceDb(plain, recurring);
+        await expect(markEstimateManuallyAccepted({ estimateId: plain.id, adminUserId: 1, database }))
+          .rejects.toMatchObject({ statusCode: 409, code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY' });
+        expect(updates).toHaveLength(0);
+      });
+    });
+
+    test('the yearly-limit recheck is handed the LOCKED row\'s add-ons, after the lock, and its refusal stops the acceptance', async () => {
+      const limits = require('../services/area-addon-limits');
+      const fresh = saved();
+      const seen = [];
+      const spy = jest.spyOn(limits, 'assertAreaAddOnLimitsOpen').mockImplementation(async (trx, { estimate }) => {
+        seen.push(estimate.estimate_data);
+        throw Object.assign(new Error('limit reached'), { statusCode: 409, code: 'AREA_ADDON_LIMIT_REACHED' });
+      });
+      try {
+        await withGate('true', async () => {
+          const { database, updates } = raceDb(plain, fresh);
+          await expect(markEstimateManuallyAccepted({ estimateId: plain.id, adminUserId: 1, database }))
+            .rejects.toMatchObject({ code: 'AREA_ADDON_LIMIT_REACHED' });
+          expect(updates).toHaveLength(0);
+        });
+        // Judged once, on the locked row: the stale first read never reached the recheck.
+        expect(seen).toEqual([fresh.estimate_data]);
+        expect(seen[0]).not.toBe(plain.estimate_data);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 
   test('refuses manual acceptance of a not-yet-accepted 4x/quarterly tree & shrub estimate (retired 2026-09-24, codex P1 r9)', async () => {

@@ -115,6 +115,11 @@ const KNOWN_UNMAPPED_ENGINE_KEYS = [
   // 2026-09-03: flea_tick now carries the package's follow-up policy and
   // maps it — 20260903000060.)
   'pest_initial_roach',
+  // ONE raw engine key for six distinct add-ons (migration 20261008200000):
+  // engine_keys cannot name one row. Identity rides the exact
+  // `catalogServiceKey` the engine line and the mapped row carry
+  // (area_addon_<addOnKey>); an area add-on row without it stays unlinked.
+  'area_addon',
 ];
 
 // Load the knexfile BEFORE deciding to skip — it resolves the Railway

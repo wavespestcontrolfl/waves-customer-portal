@@ -280,6 +280,17 @@ const toCount = (v) => (v === null || v === undefined || v === '' || !Number.isF
  *   openai     usage.{input_tokens, input_tokens_details.cached_tokens, output_tokens, output_tokens_details.reasoning_tokens}
  *   gemini     usageMetadata.{promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount}
  */
+// Cache-write tokens of an Anthropic usage block. A message gives the total
+// (`cache_creation_input_tokens`); a Managed Agents session gives only the
+// per-TTL object (`cache_creation: { ephemeral_5m_input_tokens,
+// ephemeral_1h_input_tokens }`). Neither present = unknown (null), not zero.
+function anthropicCacheWrites(usage) {
+  if (usage.cache_creation_input_tokens != null) return usage.cache_creation_input_tokens;
+  const perTtl = usage.cache_creation;
+  if (!perTtl || typeof perTtl !== 'object') return null;
+  return Object.values(perTtl).reduce((sum, v) => sum + (Number(v) || 0), 0);
+}
+
 function extractUsage(provider, data) {
   const out = { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null };
   try {
@@ -288,7 +299,7 @@ function extractUsage(provider, data) {
       if (!u || typeof u !== 'object') return out;
       out.input_tokens = toCount(u.input_tokens);
       out.cached_input_tokens = toCount(u.cache_read_input_tokens);
-      out.cache_write_tokens = toCount(u.cache_creation_input_tokens);
+      out.cache_write_tokens = toCount(anthropicCacheWrites(u));
       out.output_tokens = toCount(u.output_tokens);
     } else if (provider === 'openai') {
       const u = data?.usage;
@@ -425,6 +436,53 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
     }).catch((err) => logger.debug(`[llm-dispatch-metrics] failCall skipped: ${err.message}`));
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] failCall skipped: ${err.message}`);
+  }
+}
+
+/**
+ * Record one finished round of a STREAMED call whose Message has the
+ * Anthropic usage shape. ledgerCall wraps a call that resolves once; a live
+ * voice turn streams, is aborted by barge-in as a matter of course, and must
+ * not wait on the ledger, so the voice relay records each round it finished
+ * here instead. Fire-and-forget like recordCall: never throws, never awaited.
+ * With `errorCode` the round is recorded as a failed call: with its usage
+ * when the provider finished and billed a response the caller could not use,
+ * with none (`message` null) when the request itself failed.
+ *
+ * `provider` is the provider that served the round. The OpenAI relay client
+ * maps its usage to the Anthropic shape (input_tokens excludes cached reads);
+ * the ledger stores OpenAI rows with cached reads INSIDE input_tokens
+ * (extractUsage, and llm-cost's pricing), so that is restored here.
+ */
+function recordStreamedMessage({ provider, requestedModel, message, latencyMs = null, laneId, errorCode = null }) {
+  try {
+    // A round that resolved can still be a failed one, exactly as ledgerCall
+    // files it: the model declined, the answer was cut off, or it said nothing.
+    const code = errorCode
+      || (message?.stop_reason === 'refusal' ? `${provider}_refusal` : null)
+      || (message?.stop_reason === 'max_tokens' ? `${provider}_incomplete` : null)
+      || (endedWithoutText(message) ? 'empty_text' : null);
+    const usage = extractUsage('anthropic', message);
+    if (provider === 'openai') {
+      if (usage.input_tokens != null) usage.input_tokens += usage.cached_input_tokens || 0;
+      usage.cache_write_tokens = null;
+      // the relay client carries OpenAI's reasoning count beside the mapped fields
+      usage.reasoning_tokens = toCount(message?.usage?.reasoning_tokens);
+    }
+    void recordCall({
+      provider,
+      requestedModel,
+      servedModel: message?.model,
+      ok: !code,
+      errorCode: code,
+      usage,
+      latencyMs,
+      providerRef: message?.id,
+      laneId,
+      policyLabel: applyReplayLane(laneId),
+    });
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] recordStreamedMessage skipped: ${err.message}`);
   }
 }
 
@@ -648,11 +706,22 @@ async function upsertSessionRow(trx, row, turnKey) {
  * billed session never vanishes from the ledger during API degradation.
  * `agentId` is accepted for the runners' convenience but has no column yet —
  * the session id (provider_ref) resolves it in the Console.
+ * `abandoned` is not an outcome: a runner sets it when its run succeeded but
+ * it left the stream before the session said it ended, so the session is
+ * told to stop (agent-control/session-guard.js) and the row stays ok.
  */
-async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null } = {}) {
+async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null, abandoned = false } = {}) {
+  // The runner's own time: taken before the interrupt and the usage GET
+  // below, which are cleanup and observability time.
+  const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
+  // Every runner exit passes through here, so this is the one place a session
+  // its runner gave up on is told to stop (GATE_AGENT_SESSION_GUARD; never
+  // throws; not the customer assistant). It returns once the session has
+  // stopped, so the usage GET below reads the settled figure. Independent of
+  // the ledger gate.
+  await require('./agent-control/session-guard').stopAbandonedSession({ laneId, sessionId, failure, abandoned });
   try {
     if (!ledgerEnabled() || !sessionId) return null;
-    const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
     // The usage GET runs OUTSIDE the transaction below: a pooled connection
@@ -683,7 +752,9 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
           policyLabel: lane || `anthropic/${model || 'session'}`,
           provider: 'anthropic',
           requestedModel: model,
-          servedModel: session.model,
+          // a session names its model on the agent it ran (`agent.model.id`);
+          // it has no top-level `model`
+          servedModel: session.agent?.model?.id || session.model,
           ok: !errorCode,
           errorCode,
           tokens,
@@ -1171,6 +1242,7 @@ module.exports = {
   recordCall,
   failCall,
   ledgerCall,
+  recordStreamedMessage,
   ledgerCallRejected,
   recordSessionUsage,
   recordTrace,

@@ -218,7 +218,22 @@ function windowForVisit(protocol, windowKey, month) {
   return protocol.windows.find(match) || null;
 }
 
-async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false } = {}) {
+// A staged v13 row can carry a cap figure (gates.annualMaxApps, annual_counter.maxApplications) above
+// the cap the app enforces (a stale row, an older value): every reader sees min(row, v13 cap), so a
+// screen never advertises more than the plan and the closeout allow. Gate off, or not a v13
+// protocol: the rows as stored.
+async function withV13CapMetadata(knex, protocol, products) {
+  if (protocol?.version !== LAWN_V13_VERSION || !products.length) return products;
+  const caps = require('../config/lawn-v13-count-caps');
+  const clamped = [];
+  for (const product of products) {
+    const entry = await caps.v13CapEntryFor(knex, product.product_id, product.product_name);
+    clamped.push(caps.withEntryCapMetadata(entry, product));
+  }
+  return clamped;
+}
+
+async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false, includeBermudaRemoval = false } = {}) {
   // An appointment's assigned version must not fall through to the currently
   // active protocol when that assignment can no longer be resolved.
   const assignedId = !protocolId && protocolKey ? await resolveAssignedProtocolId(knex, protocolKey, protocolVersion) : protocolId;
@@ -249,13 +264,17 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
       'pc.moa_group',
     )
     .orderBy('lpp.sort_order', 'asc');
+  // The bermuda removal rows (migration 20261006190100) belong to the lawns that
+  // asked for the step, never to the window as a whole: every reader leaves them
+  // out unless it names the account as a bermuda removal lawn.
+  if (!includeBermudaRemoval) require('./lawn-bermuda-removal').withoutBermudaRemovalRows(productsQuery, 'lpp');
   const productsRead = savepointRead(knex, () => productsQuery);
   const products = strict ? await productsRead : await productsRead.catch(() => []);
 
   return {
     protocol,
     window,
-    products: products.map(normalizeProduct),
+    products: await withV13CapMetadata(knex, protocol, products.map(normalizeProduct)),
     gates: protocol.gates,
   };
 }

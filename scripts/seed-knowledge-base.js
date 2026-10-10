@@ -142,10 +142,13 @@ Sources: charlottecountyfl.gov (One Charlotte One Water) for Charlotte County; c
       category: 'chemicals',
       tags: ['celsius', 'herbicide', 'wg', 'application-limit', 'warm-season-turf'],
       confidence: 'high',
-      content: `# Celsius WG — Max 3 Applications Per Property Per Year
+      content: `# Celsius WG — Label Max 3 Applications Per Property Per Year; Waves v13 Max 2 Per Lawn
 
 ## Label Restriction
 Celsius WG (thiencarbazone-methyl + iodosulfuron + dicamba) is limited to a MAXIMUM of 3 applications per property per calendar year per the label.
+
+## Waves lawn program (v13)
+Label maximum: 3 applications per year per property. Waves lawn program (v13): max 2 applications per lawn per year — do not plan a third.
 
 ## Rates
 - Standard rate: 0.085 oz per 1,000 sq ft
@@ -154,12 +157,12 @@ Celsius WG (thiencarbazone-methyl + iodosulfuron + dicamba) is limited to a MAXI
 
 ## Application Tracking
 - Track Celsius apps per property in service notes
-- Flag customers approaching 3rd application — switch to alternative (Dismiss, Certainty, or manual pulling)
-- Do NOT apply if property has received 3 applications this calendar year regardless of who applied them
+- Flag customers approaching their 2nd application under the v13 program (the 3rd is the label maximum) — after the Celsius cap use Blindside (1 application per lawn per year at 0.149 oz per 1,000 sq ft; label: warm-season rate 0.149 to 0.23 oz a pass, no more than 0.23 oz per 1,000 sq ft a year) or manual pulling. Certainty goes with Celsius and shares the same 2 per lawn per year, so it is not the switch
+- Do NOT apply if the property has received 2 applications this calendar year under the v13 program, or 3 under the label, regardless of who applied them
 
 ## Alternatives After Cap
-- Dismiss NXT (sulfentrazone + prodiamine) — different MOA, no annual cap concern
-- Certainty (sulfosulfuron) — good for sedge pressure
+- Dismiss NXT (sulfentrazone + prodiamine) — retired: do not reorder. Use up existing stock on green kyllinga under 85°F only; it is not an alternative after the Celsius cap
+- Certainty (sulfosulfuron) — good for sedge pressure; under v13 it is capped at 2 applications per lawn per year and goes with Celsius, so it does not replace a capped Celsius pass
 - Recognition + Fusilade II tank mix — bermudagrass suppression in St. Augustine (bermudagrass ONLY — bahiagrass is not in the 2026 Fusilade II weed table; NEVER Fusilade alone over St. Augustine; see the Recognition + Fusilade II article)`,
       // Correction (2026-08-07): the alternatives list pointed at Fusilade II
       // ALONE for bermuda in St. Augustine — the solo-application injury

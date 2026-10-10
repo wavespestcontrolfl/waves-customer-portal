@@ -9,7 +9,7 @@ const {
   validateWorkDate,
 } = require('../utils/staff-time-work-date');
 const {
-  isAutoClockInJobEligible, isFreshEvent, isLiveVisit, liveVisitsAtCustomer,
+  hasVehicleAgreement, isAutoClockInJobEligible, isFreshEvent, isLiveVisit, liveVisitsAtCustomer,
 } = require('./geofence-auto-clock-in');
 const {
   ACTIVE_WRITE_GENERATION,
@@ -260,6 +260,10 @@ async function assertAutoClockInVisit(trx, technicianId, jobId) {
 // with the time of the insert, so it is checked again here, last, with the same
 // isFreshEvent.
 async function openAutoClockInShift(trx, technicianId, { autoClockIn, lat, lng }) {
+  // Only here, where a shift would actually be opened: a tech already clocked in still starts timers.
+  if (!(await hasVehicleAgreement(trx, technicianId))) {
+    throw Object.assign(new Error('Sign the vehicle use and commuting agreement before auto clock-in.'), { code: 'auto_clock_in_no_agreement' });
+  }
   const worked = await trx('time_entries')
     .where({ technician_id: technicianId, entry_type: 'shift' })
     .where('status', '!=', 'voided')

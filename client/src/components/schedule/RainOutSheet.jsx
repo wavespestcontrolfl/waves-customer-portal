@@ -310,7 +310,9 @@ function authHeaders() {
   };
 }
 
-export default function RainOutSheet({ service, onClose, onDone }) {
+// `allowRouteScope` false (a non-admin login, which POST /rain-out refuses
+// scope 'route' for): this stop only, no whole-route chip.
+export default function RainOutSheet({ service, onClose, onDone, allowRouteScope = true }) {
   const isMobile = useIsMobile();
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');
@@ -555,6 +557,11 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // server applies it while choosing, so no chip ever advertises an
     // hour that goes customElapsed the moment it's tapped.
     sameDayFloorMin: minTodayStartMin,
+    // The same two best-times rows as New Appointment (owner 2026-10-08):
+    // road-priced chips with the chance of rain for each hour, ranked by
+    // rain fit (GATE_BOOKING_RAIN_RANK). The server reads what the visit
+    // books from its own rows (serviceId), add-ons and a shared stop included.
+    bestRows: true,
   });
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):
@@ -790,7 +797,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                         )}
                         {opt.rainChance != null && (
                           <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
-                            {opt.rainChance}% rain
+                            {opt.rainChance}% rain{opt.rainScope === 'day' ? ' that day' : ''}
                           </span>
                         )}
                       </span>
@@ -829,6 +836,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     type="date"
                     value={customDate}
                     min={todayStr}
+                    // sameDayOnly (GET /rain-out-options): this login may not
+                    // move this recurring visit to another day.
+                    max={options?.sameDayOnly ? todayStr : undefined}
+                    disabled={!!options?.sameDayOnly}
                     onChange={(e) => setCustomDate(e.target.value)}
                     style={{
                       width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 500,
@@ -863,13 +874,20 @@ export default function RainOutSheet({ service, onClose, onDone }) {
             {/* Best-times chips: tappable only while the custom picker is
                 active (they set the custom start); a preset target is fixed,
                 so the chips go display-only. */}
+            {/* sameDayOnly (GET /rain-out-options): a suggestion on another day
+                would submit a move POST /rain-out refuses this login, so only
+                today's slots are taken and the date-changing pick is off. */}
             <AvailabilityStrip
               availability={availability}
               currentDate={landingDate}
               currentStart={isCustom ? customStart : selected?.window?.start}
               currentTechnicianId={service.technicianId || service.technician_id}
-              onPick={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
+              onPick={isCustom ? (slot) => {
+                if (options?.sameDayOnly && slot.date !== todayStr) return;
+                setCustomDate(slot.date); setCustomStart(slot.start);
+              } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
+              bestRows
             />
             <BestTimeHint
               bestTimes={bestTimes}
@@ -879,7 +897,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               currentDate={landingDate}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}
-              onPickDate={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
+              onPickDate={isCustom && !options?.sameDayOnly ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
             />
 
@@ -905,7 +923,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               </div>
             )}
 
-            {routeCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && !isCustomReason && (
+            {allowRouteScope && routeCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && !isCustomReason && (
               <>
                 <div style={sectionLabel}>SCOPE</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>

@@ -1,0 +1,28 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`catalog identity beats the words in a name exactly these catalog keys are rain-OK 1`] = `
+[
+  "bed_bug_treatment",
+  "cockroach_control",
+  "german_roach",
+  "german_roach_initial",
+  "lawn_inspection",
+  "new_customer_inspection",
+  "pest_inspection",
+  "rodent_bait_quarterly",
+  "rodent_inspection",
+  "rodent_monitoring",
+  "rodent_sanitation_heavy",
+  "rodent_sanitation_light",
+  "rodent_sanitation_medium",
+  "rodent_sanitation_standard",
+  "rodent_trap_check_additional",
+  "rodent_trapping_followup",
+  "rodent_trapping_followup_3pack",
+  "termite_inspection",
+  "vehicle_german_roach",
+  "waves_assessment",
+  "waves_assessment_plus",
+  "wdo_inspection",
+]
+`;

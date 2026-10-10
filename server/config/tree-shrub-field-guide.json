@@ -138,12 +138,12 @@
     "mainspring": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Whiteflies, caterpillars, soft scales, leafminers, thrips, lace bugs, leaf-feeding beetles, and aphids on landscape ornamentals.",
+      "targets": "Whiteflies, soft scales, leafminers, thrips, lace bugs, leaf-feeding beetles, and aphids on landscape ornamentals. The label also lists caterpillars; the program does not use Mainspring for them.",
       "apply": "Spray for even, thorough foliage coverage when infestations are first detected. Do not make foliar applications during rain.",
       "rates": [
         [
           "2–8 fl oz / 100 gal",
-          "Whiteflies, caterpillars, soft scales, and the other listed foliar pests except aphids."
+          "Whiteflies, soft scales, and the other listed foliar pests except aphids."
         ],
         [
           "4–8 fl oz / 100 gal",
@@ -155,7 +155,7 @@
         "At least 7 days between treatments. Outdoor maximum: 32 fl oz/acre/year, accounting for other cyantraniliprole products.",
         "Keep people and pets out until sprays dry."
       ],
-      "program": "The table retains the draft 4–8 fl oz/100 gal choice. Whether to use the full 2–8 range for whiteflies and caterpillars still needs your call.",
+      "program": "Caterpillar jobs use Acelepryn Insecticide or DiPel, never Mainspring (owner 2026-10-09). The table retains the draft 4–8 fl oz/100 gal choice. Whether to use the full 2–8 range for whiteflies still needs your call.",
       "source": "Syngenta · EPA 100-1543 · 09-23 · pp. 19–20",
       "url": "https://assets.syngenta-us.com/pdf/labels/SCP%201543A-L1A_0923.pdf",
       "name": "Mainspring GNL",
@@ -170,19 +170,52 @@
       ],
       "summary": ""
     },
+    "acelepryn": {
+      "kind": "Insects · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Leaf-feeding caterpillars on landscape shrubs, trees and palms, such as bagworms and tussock moth caterpillars. The label has no whitefly use.",
+      "apply": "Spray for full foliage coverage, at least 1 gallon of mix per 1,000 sq ft. Use the higher rates as pest pressure and foliage area increase. Add a spreader-sticker on hard-to-wet foliage such as holly or ivy.",
+      "rates": [
+        [
+          "2–16 fl oz / 100 gal",
+          "Leaf-feeding caterpillars. Use on live finds only."
+        ]
+      ],
+      "limits": [
+        "At least 7 days between treatments.",
+        "Do not apply when rain is forecast within 48 hours (label runoff advisory).",
+        "One application: no more than 16 fl oz per acre, which is 0.37 fl oz per 1,000 sq ft.",
+        "Yearly limit: 38.3 fl oz per acre, which is 0.88 fl oz per 1,000 sq ft, all chlorantraniliprole products together. Lawn Acelepryn on the same area counts.",
+        "Keep people and pets out until sprays dry."
+      ],
+      "program": "Acelepryn Insecticide (chlorantraniliprole alone) is the caterpillar product (owner 2026-10-09). Do not use Acelepryn Xtra here: it adds a neonicotinoid. It is IRAC group 28, the same group as Mainspring, so it is not a rotation partner for Mainspring.",
+      "source": "Syngenta · EPA 100-1489 · label accepted 01-11-24 · section 7.2.1",
+      "url": "https://www3.epa.gov/pesticides/chem_search/ppls/000100-01489-20240111.pdf",
+      "name": "Acelepryn Insecticide",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "mix": [
+        0.02,
+        0.16
+      ],
+      "summary": ""
+    },
     "distance": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Whiteflies and scale crawlers. Scale species include black, California red, euonymus, Florida wax, San Jose, and snow scale. Mealybugs: suppression only.",
-      "apply": "Cover all plant surfaces evenly to the point of runoff. The foliar table specifies 100 gal of mix per 20,000 sq ft. Time scale treatments for crawlers.",
+      "targets": "Whiteflies. The label also lists scale crawlers and mealybug suppression; that use is on hold (see Restrictions).",
+      "apply": "Cover all plant surfaces evenly to the point of runoff. Use the label volume: 100 gal of mix per 20,000 sq ft, which is 5 gal per 1,000 sq ft.",
       "rates": [
         [
           "6–8 fl oz / 100 gal",
           "Whiteflies."
         ],
         [
-          "8–12 fl oz / 100 gal",
-          "Listed scales; mealybug suppression."
+          "Scale and mealybug: HOLD",
+          "Call the office before a scale spray. Oil on crawlers or a Zylam drench need no call."
         ]
       ],
       "mixes": [
@@ -190,47 +223,63 @@
           "Whiteflies",
           0.06,
           0.08
-        ],
-        [
-          "Scale crawlers",
-          0.08,
-          0.12
         ]
       ],
       "limits": [
         "Does not provide rapid adult-insect control.",
-        "Whitefly directions: second treatment in 14–28 days if needed; maximum two per six months or crop cycle.",
+        "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz 21 to 28 days later. Yearly limit 0.176 lb of active ingredient per acre, all pyriproxyfen products together.",
+        "Scale and mealybug use is on hold. The label allows one application a year and prints the yearly limit two ways (12 fl oz per acre, and 0.176 lb active ingredient per acre, which is 26 fl oz per acre). No scale spray until Valent confirms which one applies.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
-      "source": "Valent · EPA 59639-96 · 2019-DIS-0001-1330-L · p. 6",
-      "url": "https://www.domyown.com/msds/Distance_IGR_Label_2020.pdf",
+      "source": "Valent · EPA 59639-96 · label accepted 11-08-23 · Table 1",
+      "url": "https://www3.epa.gov/pesticides/chem_search/ppls/059639-00096-20231108.pdf",
       "name": "Distance IGR",
       "equipment": [
         "bg",
         "flowzone",
         "rig"
       ],
-      "summary": "Choose target rate"
+      "summary": "Whitefly rate; scale on hold",
+      "program": "Owner follow-up: ask Valent which yearly limit applies to the scale use."
     },
     "tristar": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Hard and soft scales (including Florida wax, euonymus, tea, and Caribbean black scale) and whiteflies. Use on live finds only: armored scale crawlers or whitefly nymphs and adults.",
+      "targets": "Whiteflies, mealybugs, aphids and soft scales (Florida wax, cottony cushion). Use on live finds only, foliar only. Not for armored scale (euonymus, tea, false Florida red, oleander): use Distance, oil or a Zylam drench.",
       "apply": "Cover all plant surfaces evenly. The label sets the finished spray volume by plant size. Tank mixing with a surfactant may improve control of adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
       "rates": [
         [
+          "4.0 fl oz / 100 gal",
+          "Aphids."
+        ],
+        [
+          "8.5 fl oz / 100 gal",
+          "Mealybugs."
+        ],
+        [
           "8.5–16.5 fl oz / 100 gal",
-          "Hard and soft scales, and whiteflies. Use the higher rate when pressure is high."
+          "Whiteflies and soft scales. Use the higher rate when pressure is high."
         ]
       ],
       "mixes": [
         [
-          "Scale or whitefly",
+          "Aphids",
+          0.04,
+          0.04
+        ],
+        [
+          "Mealybugs",
+          0.085,
+          0.085
+        ],
+        [
+          "Whitefly or soft scale",
           0.085,
           0.165
         ]
       ],
       "limits": [
+        "Not for armored scale. Use Distance on crawlers, oil, or a Zylam drench.",
         "Do not reapply more than once every 7 days.",
         "Maximum 4 applications per calendar year; 25.3 fl oz per acre per application; 92.5 fl oz per acre per year.",
         "Group 4A neonicotinoid: count it with Merit and Zylam in the annual 4A log.",
@@ -259,6 +308,9 @@
         ]
       ],
       "limits": [
+        "Live scale crawlers, nymphs or mites only. Not a routine spray.",
+        "Do not spray above 90°F.",
+        "Do not spray within 7 days of a forecast cold snap.",
         "Do not treat moisture-stressed plants.",
         "Check plant sensitivity before wide use.",
         "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl, or dimethoate; check the full incompatibility and timing directions.",
@@ -338,32 +390,39 @@
       "name": "Merit 2F",
       "summary": "Dose by plant size"
     },
-    "kphite": {
-      "kind": "Diseases · method-specific rates",
+    "reliant": {
+      "kind": "Diseases · foliar spray",
       "targetTitle": "Disease targets",
-      "targets": "Listed Phytophthora, Pythium, Rhizoctonia, Fusarium, and other ornamental diseases. Mildews have foliar directions.",
-      "apply": "Use the directions for the plant and delivery method. Soil drench, foliar spray, and direct trunk injection are different label uses.",
+      "targets": "Phytophthora and Pythium root and crown rots on landscape ornamentals. Use only on beds with root-rot history or replacement plantings.",
+      "apply": "Foliar spray is the program method: phosphite moves down to the roots. Wet all foliage to the point of runoff.",
       "rates": [
         [
-          "Soil drench: 12–24 fl oz / 100 gal",
-          "The ornamental table also prints ⅛–¼ fl oz/gal."
-        ],
-        [
-          "Foliar: 1–2 qt in at least 100 gal / acre",
-          "The table also prints ⅓–⅔ fl oz/gal; see disease and plant directions."
+          "Foliar: 2–4 tsp / gal",
+          "Root rot (Phytophthora, Pythium). Repeat as needed at 14–21 days."
         ]
       ],
       "limits": [
         "Do not treat dormant plants or plants under heat or moisture stress.",
-        "Do not apply less than 3 days apart.",
-        "Avoid conditions that keep tissue wet for more than 4 hours."
+        "Do not exceed the rates or the intervals on the label; higher rates can injure plants.",
+        "Do not tank mix with copper. Jar test and small plant test before a mix with foliar fertilizer.",
+        "Do not apply when rain is forecast within 24 hours (label runoff advisory).",
+        "Keep people and pets out until the spray dries.",
+        "No soil drench on the program. The label's residential drench is a 0.5–1% mix (⅔–1⅓ fl oz per gal) at 25 gal per 100 sq ft: 16–32 fl oz of Reliant per 100 sq ft. Call the office before any drench."
       ],
-      "program": "The FlowZone soil injector kit is available. Confirm the T&O container label and soil-delivery directions before setting an injector recipe. The old draft showed the foliar concentration beside root-rot treatment.",
-      "source": "Plant Food Systems · EPA 73806-1 · T&O 0417 · p. 6",
-      "url": "https://plantfoodsystems.com/wp-content/uploads/2020/04/KPhite-Booklet-TO_a11y-1.pdf",
-      "name": "KPHITE 7LP",
-      "equipment": [],
-      "summary": "Choose application method"
+      "program": "Reliant takes the place of KPHITE 7LP (owner 2026-10-09). The two labels use the same foliar rate.",
+      "source": "Quest Products · EPA 83416-1 · label accepted 10-25-24 · residential Ornamental Applications, pp. 63–64",
+      "url": "https://www3.epa.gov/pesticides/chem_search/ppls/083416-00001-20241025.pdf",
+      "name": "Reliant Systemic Fungicide",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "summary": "",
+      "mix": [
+        0.3333333333333333,
+        0.6666666666666666
+      ]
     },
     "conserve": {
       "kind": "Insects · foliar spray",
@@ -428,22 +487,31 @@
       "summary": "Trees by tank · shrubs by area"
     },
     "zylam": {
-      "kind": "Insects · foliar spray",
+      "kind": "Insects · foliar spray or soil drench",
       "targetTitle": "Pest targets",
       "targets": "Listed soft and armored scales, whiteflies, mealybugs, lace bugs, and other ornamental insects. Aphids and certain thrips: suppression only.",
-      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Drench and bark applications have separate instructions.",
+      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height (see Label rates), never by the tank amount. The label directs soil applications early in the plant's growing cycle for best control: drench at the spring flush, and treat a later drench as a rescue. Pull back mulch, rock or gravel first so the mix pools at the base. Mix the dose in at least 1 quart of water per foot of plant height and pour it evenly on the soil around the base, on moist soil. With less water, irrigate 1/2 inch right after. Keep the soil moist for 7 days. Bark applications have separate instructions.",
       "rates": [
         [
           "7.25–16 fl oz / 100 gal",
           "Ornamental foliar application."
+        ],
+        [
+          "0.18–0.4 fl oz per ft of height",
+          "Soil drench, shrubs and sagos. Measure a sago from the soil to the frond tip."
         ]
       ],
       "limits": [
         "No application while bees forage or plants flower; wait until all petals have fallen.",
-        "Foliar limit: 78.9 fl oz/acre/season; no more than three applications per growing season.",
+        "No more than three applications per growing season, sprays and drenches together.",
+        "Rate a sago as a shrub by height. Never by trunk diameter: that is 3 to 5 times the dose.",
+        "Single plants only. Never drench a hedge with Zylam.",
+        "Drench only on moist soil: not dry, saturated or frozen.",
+        "After a soil drench, do not follow with a foliar Zylam spray or another neonicotinoid (label resistance direction).",
+        "Yearly limit: 78.9 fl oz per acre, which is 1.81 fl oz per 1,000 sq ft of bed area, sprays and drenches together.",
         "Follow Group 4A rotation restrictions and keep others out until dry."
       ],
-      "source": "PBI-Gordon · EPA 2217-937 · 08-2020 · pp. 2–3, 6",
+      "source": "PBI-Gordon · EPA 2217-937 · 08-2020 · pp. 2–6",
       "url": "https://labelsds.com/document.php?file=Zylam+Liquid+Label+8-1-20.pdf&product=503",
       "name": "Zylam Liquid",
       "equipment": [
@@ -455,7 +523,8 @@
         0.0725,
         0.16
       ],
-      "summary": ""
+      "summary": "",
+      "mixLabel": "Foliar spray only"
     },
     "tritek15": {
       "kind": "Insects, mites & diseases · contact oil",
@@ -469,6 +538,9 @@
         ]
       ],
       "limits": [
+        "Live scale crawlers, nymphs or mites only. Not a routine spray.",
+        "Do not spray above 90°F.",
+        "Do not spray within 7 days of a forecast cold snap.",
         "Do not treat moisture-stressed plants.",
         "Check plant sensitivity before wide use.",
         "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl, or dimethoate; check the full incompatibility and timing directions.",
@@ -509,26 +581,6 @@
         "hand",
         "push"
       ],
-      "summary": "Label needed"
-    },
-    "mncombo": {
-      "kind": "Plant nutrition",
-      "pending": "The exact Mn Combo manufacturer, formulation, and container label are still needed.",
-      "targetTitle": "Purpose",
-      "targets": "Pending the exact product label.",
-      "apply": "Application method and directions are not verified.",
-      "rates": [
-        [
-          "Label needed",
-          "No application recipe has been verified."
-        ]
-      ],
-      "limits": [
-        "Confirm the actual container label before adding treatment instructions."
-      ],
-      "source": "Exact product label not on file",
-      "name": "Mn Combo",
-      "equipment": [],
       "summary": "Label needed"
     },
     "sequestar": {

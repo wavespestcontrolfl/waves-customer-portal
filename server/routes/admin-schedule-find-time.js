@@ -22,6 +22,8 @@
  *     compareTechs?,          // hint mode, all techs, gap mode: answer `pickedByTech` — the
  *                             // picked hour on every technician's route that fits it,
  *                             // least added drive first — instead of `picked`
+ *     serviceKeys?,           // bestRows: the catalog key of each serviceTypes entry
+ *                             // (same order, '' when none), for the rain ranking
  *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
  *                             // cannot perform one is left out of `pickedByTech`
  *   }
@@ -29,6 +31,7 @@
 
 const express = require('express');
 const router = express.Router();
+const { bookingRainPlan } = require('../services/scheduling/rain-fit');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -427,14 +430,21 @@ router.post('/', async (req, res) => {
     // A summary also answers the best-times rows (find-time-hints.js
     // buildBestRows), with the picked verdict's drive numbers priced the
     // same way as the chips.
+    const rainPlan = await bookingRainPlan({
+      bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
+    }, db);
     const built = await buildHintSummary(plan, every, {
       rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,
-      // Only New Appointment shows the rows; other strips skip the rain and
-      // road-time work (Codex #6045 r2).
+      // Only a strip that shows the rows asks for them; any other skips the
+      // rain and road-time work (Codex #6045 r2).
       bestRows: bestRows === true,
       // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
-      serviceTypes: [serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
-        .filter((t) => typeof t === 'string' && t.trim()),
+      // Each name carries its catalog key when the catalog holds it, so the
+      // ranking reads the service's identity, not the words in its name.
+      // An existing visit's own rows say what moves, and how far a shared
+      // stop reaches around this service (rain-fit.js bookingRainPlan).
+      serviceTypes: rainPlan.services,
+      rainSpan: rainPlan.rainSpan,
     });
     const pickedOut = built.picked;
 

@@ -21,7 +21,8 @@ import { Button, Input, Select, UiSurface } from "../ui";
 const PILL = "!rounded-full !uppercase !tracking-[0.3px]";
 const PILL_OUTLINE = `${PILL} !border !border-[#111111]`;
 const FIELD = "!rounded-[12px] !border !border-[#E5E5E5]";
-import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
+import CloseUpPrompt, { BLADE_CROWN, closeUpBlocked, useCloseUpPrompt } from "./CloseUpPrompt";
+import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, dropStalePicks, pickOptions, pickedKey, setLabelPick, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
 // The lawn sheet's (compact) shot list: four named slots, one short line each
 // (owner 2026-10-05). Each maps onto an existing shot key and the server is not
@@ -197,6 +198,9 @@ function LawnAssessmentCompletionBlock({
   // completion form passes neither and is unchanged.
   compact = false,
   onProgress,
+  // The lawn sheet's treatment guide (GATE_LAWN_TREATMENT_GUIDE): one soft prompt for a close-up of
+  // the blades and crown when the photos include a problem area. Off everywhere else.
+  closeUpPrompt,
 }, ref) {
   const [photos, setPhotosState] = useState([]);
   // The photo list's source of truth is this ref: every change goes through
@@ -213,6 +217,8 @@ function LawnAssessmentCompletionBlock({
   // existing-assessment lookup below. Off (the default, and on any lookup
   // failure) the step keeps its three optional slots and 3-photo cap.
   const [shotList, setShotList] = useState(false);
+  // GATE_LAWN_PHOTO_LABEL_PICK: the same lookup says whether to show the customer-label chooser (off by default).
+  const [labelPick, setLabelPickOn] = useState(false);
   // False until the lookup below has answered (or failed): the mode decides the
   // photo cap, so capture waits for it rather than truncating at 3 photos and
   // then switching to 8.
@@ -244,6 +250,7 @@ function LawnAssessmentCompletionBlock({
     let cancelled = false;
     setPhotos([]);
     setShotList(false);
+    setLabelPickOn(false);
     setModeKnown(false);
     pendingShotRef.current = null;
     setReadingShots([]);
@@ -265,6 +272,7 @@ function LawnAssessmentCompletionBlock({
     request(`/admin/lawn-assessment/service/${service.id}`)
       .then((data) => {
         if (!cancelled && data?.shotListEnabled === true) setShotList(true);
+        if (!cancelled) setLabelPickOn(data?.labelPickEnabled === true);
         if (cancelled || !data?.assessment) return;
         const assessment = data.assessment;
         const scores = parseAssessmentScores(assessment);
@@ -377,7 +385,7 @@ function LawnAssessmentCompletionBlock({
     // Shot list on: every shot allows one photo (a problem area, two), so
     // picking a shot another photo holds moves it, as Front always has.
     if (shotList) {
-      setPhotos((prev) => assignShotZone(prev, index, zone));
+      setPhotos((prev) => dropStalePicks(prev, assignShotZone(prev, index, zone)));
       return;
     }
     setPhotos((prev) => {
@@ -423,6 +431,7 @@ function LawnAssessmentCompletionBlock({
             data: photo.data.split(",")[1],
             mimeType: photo.mimeType || "image/jpeg",
             ...(photo.zone ? { zone: photo.zone } : {}),
+            ...(labelPick && photo.zone && photo.labelKey && photo.labelKey !== photo.zone ? { labelKey: photo.labelKey } : {}),
           })),
           // Extra context for the vision model (see buildVisionPrompt server-side).
           turfHeightIn: gaugeHeightIn,
@@ -530,6 +539,7 @@ function LawnAssessmentCompletionBlock({
 
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
+  const closeUp = useCloseUpPrompt({ enabled: closeUpPrompt, shotList, photos, hasResult });
   const confirmed = !!confirmedId;
   // What each button can do right now: the in-flow buttons' own disabled rules,
   // reported to the sheet and enforced again by the handle below. A photo still
@@ -682,6 +692,24 @@ function LawnAssessmentCompletionBlock({
                       <option key={zone.value} value={zone.value}>{zone.label}</option>
                     ))}
                   </Select>
+                  {/* GATE_LAWN_PHOTO_LABEL_PICK: what the customer reads under this photo.
+                      Defaults to the slot's own wording; the slot itself is unchanged. */}
+                  {labelPick && shotList && photo.zone && (
+                    <div className="mt-1 text-14 leading-snug text-zinc-500">Customer sees</div>
+                  )}
+                  {labelPick && shotList && photo.zone && (
+                    <Select
+                      value={pickedKey(photo)}
+                      disabled={disabled || analyzing || hasResult || confirmed || confirming}
+                      onChange={(e) => setPhotos((prev) => setLabelPick(prev, index, e.target.value))}
+                      aria-label={`Shown to the customer as, photo ${index + 1}`}
+                      className={`!pl-2 !pr-6 !text-14 ${FIELD}`}
+                    >
+                      {pickOptions().map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </Select>
+                  )}
                 </div>
               ))}
             </div>
@@ -700,6 +728,13 @@ function LawnAssessmentCompletionBlock({
               2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
             </div>
           )}
+          <CloseUpPrompt
+            open={closeUp.open}
+            onAdd={() => { pendingShotRef.current = BLADE_CROWN; fileRef.current?.click(); }}
+            addDisabled={closeUpBlocked({ disabled, analyzing, photos, photoCap, readingShots, isFull: shotIsFull })}
+            onDismiss={closeUp.dismiss}
+            buttonClassName={PILL_OUTLINE}
+          />
           <Button
             className={PILL}
             onClick={analyze}
