@@ -216,7 +216,7 @@ WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: w
 
 WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line. With no EXPECTATIONS lines there is no recorded outcome: write the one sentence rule 1 gives an empty section (from the record: the place worked or the service type), and claim no result, no effect on the pest and no timeframe.
 
-WHAT'S NEXT. In this order: what the note or the Recommendations say we will check or do next (never a visit, a day or a window); what the customer can do that the record names (never aftercare, cleaning, watering or re-entry); and when to contact us, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of the pest found today that the customer can notice.
+WHAT'S NEXT. In this order: what the note or the Recommendations say we will check or do next (never a visit, a day or a window); what the customer can do that the record names (never aftercare, cleaning, watering or re-entry); and when to contact us, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of the pest found today that the customer can notice. With none of these recorded (no next step, no pest found, no customer concern, no EXPECTATIONS, no REACH-OUT DATE), write the one sentence rule 1 gives an empty section, and invent no sign, no contact trigger and no follow-up.
 
 A thin record gets one sentence per section, each one from the record. Write as the technician who was there would say it to the homeowner at the door.
 

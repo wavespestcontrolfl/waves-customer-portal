@@ -612,6 +612,8 @@ describe('pest writer adapter, rejection detail and repair note', () => {
     const zero = PROMPT_REWRITES.filter(([from]) => /a 0 means no visible activity|A recorded zero means/.test(from));
     expect(zero).toHaveLength(2);
     zero.forEach(([, to]) => expect(to).toMatch(/leave (?:a 0 rating|the zero) out/));
+    // WHAT'S NEXT with nothing recorded invents no trigger (Codex r2).
+    expect(PEST_WRITER_ADAPTER).toContain('invent no sign, no contact trigger and no follow-up');
     // The rejected draft is not a source of facts.
     const note = rejectedDraftRepairNote({ draft: 'D', rejection: 'owner_phrase' });
     expect(note).toContain('The rejected draft is not a source: keep only what the inputs record');

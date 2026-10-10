@@ -25212,7 +25212,7 @@ async function generateReportCopyWithFallback({
       }
 
       lastRejection = rejection;
-      rejected = { draft: report, rejection, provider: provider.name };
+      rejected = { draft: report, rejection: repairReasonFor(rejection, parsed), provider: provider.name };
       logger.warn(
         `[generate-report] ${provider.name} attempt ${attempt} rejected (${rejection})${attempt < 2 ? '; retrying' : '; trying backup'}`,
       );
@@ -25234,6 +25234,15 @@ async function generateReportCopyWithFallback({
 const writerRepairNote = (screenInputs) => (draft, rejection, { sameProvider }) => rejectedDraftRepairNote({
   draft, rejection, detail: writerRulesRejectionDetail(draft, screenInputs), includeDraft: sameProvider,
 });
+
+// A draft in the right shape that trips the parser's own word screen comes
+// back with no body, so it reads as 'malformed_shape' (kept for the log and
+// the response). The repair note names the words instead: telling the writer
+// its titles were wrong would leave the real fault in the next draft.
+function repairReasonFor(rejection, parsed) {
+  const words = rejection === 'malformed_shape' && Array.isArray(parsed?.violations) ? parsed.violations.map(String).filter(Boolean) : [];
+  return words.length ? `banned:${words.join(',')}` : rejection;
+}
 
 function repairNoteFor(repairNote, rejected, providerName) {
   if (typeof repairNote !== 'function' || !rejected) return '';

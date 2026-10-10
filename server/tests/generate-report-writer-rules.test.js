@@ -749,6 +749,32 @@ describe('a rejected draft is repaired, not written blind again', () => {
     expect(note).toContain('The words that tripped it: "no issues".');
   });
 
+  test('gate on: a shaped draft the parser refuses for a word is repaired by that word, not as a bad shape', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    const shaped = CLEAN_V2.replace('and activity was light.', 'and it looked like an infestation.');
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: shaped }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (parser word repair case).' }), res);
+    expect(mockProvider).toHaveBeenCalledTimes(2);
+    const [first, second] = mockProvider.mock.calls.map(([call]) => call);
+    const note = second.text.slice(first.text.length);
+    expect(note).toMatch(/REJECTED because it uses words the report refuses \("infestation"/);
+    expect(note).not.toContain('it is not the four titles');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  });
+
+  test('gate on: a draft in the wrong shape is still repaired as a bad shape', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (shape repair case).' }), mkRes());
+    const [first, second] = mockProvider.mock.calls.map(([call]) => call);
+    expect(second.text.slice(first.text.length)).toContain('it is not the four titles');
+  });
+
   test('gate on: a note that says "no issues" carries the hint under the note', async () => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
     await handler(mkReq({ serviceNotes: 'Sprayed the perimeter, customer home, No Issues inside (hint case).' }), mkRes());
