@@ -7,6 +7,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+  VALID_STATUSES: jest.requireActual('../services/auto-dispatch/eligibility').VALID_STATUSES,
   heldOutOfAutoDispatch: jest.requireActual('../services/auto-dispatch/eligibility').heldOutOfAutoDispatch,
   lapsedPlanKeys: jest.fn(async () => new Set()),
   planKey: jest.requireActual('../services/auto-dispatch/eligibility').planKey,
@@ -1241,6 +1242,22 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
     try { return await fn(); } finally { process.env.AUTO_DISPATCH_ALLOW_APPLY = prev; }
   };
+  // The run's end re-reads each conflict visit's row after a move: let a
+  // point-read of scheduled_services answer with that visit's row.
+  const rowReads = () => {
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const chain = base(table);
+      if (table !== 'scheduled_services') return chain;
+      let wanted = null;
+      const where = chain.where;
+      chain.where = (...args) => { if (args[0] && typeof args[0] === 'object' && args[0].id) wanted = args[0].id; return where(...args); };
+      chain.first = async () => servicesResult.find((row) => row.id === wanted) || null;
+      return chain;
+    });
+  };
+  const inConflict = { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] };
+  const noticedIds = () => raiseAdminAlert.mock.calls.map(([, spec]) => spec.subject.id).sort();
 
   test('pass 1: a visit at the limit is skipped before any candidate is searched; a moved-once visit still moves', async () => {
     moveLogReads = [AT_LIMIT];
@@ -1342,6 +1359,71 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     });
   });
 
+  // Codex #6253 r2: the run decides ONCE, at its end, from what is true then.
+  describe('every conflict the run leaves in place, whatever path left it', () => {
+    test('a qualifying conflict move held by the per-run cap raises the notice; the one that moved does not', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+        candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+        // After the run: a1 moved and is clear, b1 still overlaps.
+        candidateSlots._internals.readCurrentConflict.mockImplementation(async (service) => (service.id === 'b1' ? OVERLAP : null));
+        const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true, maxChangesPerRun: 1 });
+        expect(res).toMatchObject({ changed: 1, recommended: 1 });
+        expect(lastDecision('recommended').reason_code).toBe('MAX_CHANGES_REACHED');
+        expect(noticedIds()).toEqual(['b1']);
+      });
+    });
+
+    test('a partial grouped move: the member left behind raises the notice, the primary that moved does not', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 's1' }), svc({ id: 'm2' })];
+        candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+        apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('partial'), { code: 'VISIT_PARTIAL_MOVE', movedCount: 1, failedMembers: ['m2'] }));
+        candidateSlots._internals.readCurrentConflict.mockImplementation(async (service) => (service.id === 'm2' ? OVERLAP : null));
+        const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(res).toMatchObject({ changed: 1, failed: 1 });
+        expect(noticedIds()).toEqual(['m2']);
+      });
+    });
+
+    test('a visit whose overlap a partner\'s move cleared raises nothing and is proof for the closer', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+        // b1 has no slot of its own; a1 moves away and frees it.
+        candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => (service.id === 'a1'
+          ? inConflict : { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] }));
+        const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(res).toMatchObject({ changed: 1 });
+        expect(raiseAdminAlert).not.toHaveBeenCalled();
+        const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+        audit.retireResolvedNotices.mock.calls[audit.retireResolvedNotices.mock.calls.length - 1][0].stillOpen(q);
+        expect(q.whereNotIn.mock.calls.flatMap(([, ids]) => ids).sort()).toEqual(['a1', 'b1']);
+      });
+    });
+
+    test('a re-read that fails keeps what the run saw', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+        candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => (service.id === 'a1'
+          ? inConflict : { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] }));
+        candidateSlots._internals.readCurrentConflict.mockRejectedValue(new Error('read down'));
+        await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(noticedIds()).toEqual(['a1', 'b1']);
+      });
+    });
+
+    test('a dry run moves nothing, so a conflict with a recommended move is told too', async () => {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ changed: 0 });
+      expect(noticedIds()).toEqual(['s1']);
+    });
+  });
+
   // The closer needs proof. `provenClear` reads the ids the run handed it.
   describe('which standing notices a run may close', () => {
     const provenClear = () => {
@@ -1378,6 +1460,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
       expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
       raiseAdminAlert.mockClear();
       await applyMode(async () => {
+        rowReads();
         candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
         const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
         expect(res).toMatchObject({ changed: 1 });

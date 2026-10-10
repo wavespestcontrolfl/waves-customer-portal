@@ -5,17 +5,19 @@
  *
  * A notice is raised for:
  *   - a visit with no arrival time yet that has used all its automatic moves;
- *   - EVERY visit the run saw in conflict (it overlaps another stop, or sits
- *     on a closed day) and did not move, whatever the reason. The reason only
- *     picks the wording:
+ *   - EVERY visit still in conflict (it overlaps another stop, or sits on a
+ *     closed day) when the run ends, whatever path left it there. The run
+ *     keeps one ledger and decides once (index.js settleConflicts). The
+ *     reason only picks the wording:
  *       move_limit    it has used all its automatic moves (move-limit.js);
  *       no_near_slot  every free slot adds more drive than
  *                     config.conflictMaxAddedDriveMinutes;
  *       no_slot       no valid slot exists;
- *       not_moved     anything else: a guard on a grouped sibling, a refused
- *                     or failed write, a hold. One rule for all, so a new
- *                     skip reason cannot leave a conflict unseen (Codex
- *                     #6253 r1: a list of reasons missed two of them).
+ *       not_moved     anything else: a guard on a grouped sibling, the
+ *                     per-run cap, a refused, failed or partial write, a dry
+ *                     run. One rule for all, so a new path cannot leave a
+ *                     conflict unseen (Codex #6253 r1 and r2: lists of
+ *                     reasons and of call sites each missed some).
  *
  * Collected during the run, raised once at its end. One notice per visit and
  * date (dedupe key below). The lane shares the auto-dispatch ring allowance
@@ -25,7 +27,7 @@
  *
  * A notice closes when its visit is cancelled, leaves the date or (no
  * arrival time) gets a time, or when the run has PROOF the conflict is gone:
- * it moved the visit, or evaluated it and read no conflict (closeResolved).
+ * it read the visit with the conflict read on and found none (closeResolved).
  * A run that could not look at the visit closes nothing.
  */
 const logger = require('../logger');
@@ -74,10 +76,6 @@ function collectUnmoved(bucket, service, reasonCode, conflict) {
   if (conflict) collect(bucket, service, REASON_KIND[reasonCode] || 'not_moved', conflict);
 }
 
-// The run moved the visit: nothing collected for it earlier in the run stands.
-function clear(bucket, service) {
-  for (const [key, item] of bucket) if (item.id === String(service.id)) bucket.delete(key);
-}
 
 function whyFor(item, spoken) {
   const [now, still] = PROBLEM[item.problem];
@@ -162,7 +160,11 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
     const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
     let left = await audit.ringsLeft();
     for (const item of audit.withinRingBudget([...bucket.values()], standing, Infinity, (row) => row.key)) {
-      // Allowance spent: nothing more is raised, a standing notice included.
+      // Allowance spent: nothing more is written, a standing notice included.
+      // Its refresh is free only when it does not ring, and a refresh whose
+      // text changed can ring (audit.noticeRang: deduped and rung), which
+      // would pass the allowance. The same rule as the pin lane (index.js
+      // raiseMissingGeoNotices, Codex #6208 r13 to r16).
       if (left <= 0) break;
       try {
         // Only a write that rang spends a slot.
@@ -178,5 +180,5 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
 }
 
 module.exports = {
-  RESOLVED_TITLE, noticeKey, collect, collectUnmoved, clear, raiseNotices,
+  RESOLVED_TITLE, noticeKey, collect, collectUnmoved, raiseNotices,
 };

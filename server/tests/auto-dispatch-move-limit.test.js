@@ -216,11 +216,4 @@ describe('needs-a-person notice', () => {
     expect([...bucket.values()].map((i) => i.kind)).toEqual(['no_near_slot', 'no_slot', 'no_slot', 'no_slot', 'move_limit', 'not_moved', 'not_moved', 'not_moved']);
   });
 
-  test('a visit the run then moves is taken out again', () => {
-    const bucket = new Map();
-    notice.collectUnmoved(bucket, visit('a', '2026-11-01'), 'ERROR', { kind: 'overlap' });
-    notice.collectUnmoved(bucket, visit('b', '2026-11-01'), 'ERROR', { kind: 'overlap' });
-    notice.clear(bucket, visit('a', '2026-11-01'));
-    expect([...bucket.values()].map((i) => i.id)).toEqual(['b']);
-  });
 });
