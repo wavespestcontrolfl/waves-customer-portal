@@ -15,7 +15,7 @@ const {
 } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
-const { etDateString, formatETTime } = require('../utils/datetime-et');
+const { etDateString, formatETTime, dateOnlyString } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 // LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
@@ -907,8 +907,8 @@ function perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey) {
 // tracker was active. A customer with no live row, or whose live row is
 // already in the first three, gets EXACTLY the old rows in the old order.
 const LIVE_TRACK_STATES = ['en_route', 'on_property'];
-function upcomingServicesBase(customer) {
-  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
+function upcomingServicesBase(customer, conn = db) {
+  return conn('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
 }
 const UPCOMING_SERVICE_COLUMNS = [
   // series link for the texting AI's next-of-series identity (withSeriesKey)
@@ -940,8 +940,8 @@ const UPCOMING_SERVICE_COLUMNS = [
 // tracking page already shows the live vehicle — UPCOMING_SERVICE_STATUSES
 // would have excluded it. Terminal rows (completed / cancelled / skipped /
 // no_show) stay excluded: customerTrackState treats those as not live.
-function liveServicesQuery(customer) {
-  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
+function liveServicesQuery(customer, conn = db) {
+  return conn('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
     .where('ss.customer_id', customer.id)
     .where('ss.scheduled_date', etDateString())
     .whereIn('ss.track_state', LIVE_TRACK_STATES)
@@ -989,6 +989,31 @@ async function stampSeriesExclusive(customer, rows, baseQuery = upcomingServices
   }
   for (const r of rows) r.series_exclusive = exclusive;
   return rows;
+}
+// A signature of EVERY upcoming visit as the drafter states it (uncapped; the same base
+// query as UPCOMING SERVICES): which visits exist, on which day, in which CUSTOMER-FACING
+// arrival window, for which service, with which technician — the fields an UPCOMING
+// SERVICES line carries. A texting-AI card that only STATES the booked schedule stores it
+// at draft time and the send seams re-read it (agent-decision-send-checks
+// scheduleFactsReason): a visit moved, added, completed, cancelled, reassigned or changed
+// to another service since changes it. The window is the derived one (deriveWindow:
+// window_start + 2 h), so an internal window_end / duration edit does NOT change it; status
+// is left out (pending -> confirmed is not a schedule change; a terminal status drops the
+// row). Throws on a failed read: callers fail closed.
+// The row set is the one the drafter can state (Codex #6232 r2): every upcoming visit PLUS
+// today's live-tracked rows loadUpcomingServices merges in (a live track_state with a status
+// outside the upcoming list). `conn`: the caller's connection or transaction — the provider
+// boundary rechecks inside a handoff transaction and must not ask the pool for another one.
+const SCHEDULE_SIGNATURE_COLUMNS = ['ss.id', 'ss.scheduled_date', 'ss.window_start', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name'];
+async function upcomingScheduleSignature(customerId, conn = db) {
+  if (!customerId) return null;
+  const upcoming = await upcomingServicesBase({ id: customerId }, conn).select(...SCHEDULE_SIGNATURE_COLUMNS);
+  const live = await liveServicesQuery({ id: customerId }, conn).select(...SCHEDULE_SIGNATURE_COLUMNS);
+  const rows = [...new Map([...upcoming, ...live].map((r) => [String(r.id), r])).values()];
+  const parts = rows
+    .map((r) => [r.id, dateOnlyString(r.scheduled_date), module.exports.deriveWindow(r), r.service_type, r.technician_name].map((x) => (x == null ? '' : String(x))).join('|'))
+    .sort();
+  return require('node:crypto').createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 async function loadUpcomingServices(customer, includeLiveEta) {
   const limited = await upcomingServicesBase(customer).orderBy('ss.scheduled_date').limit(3).select(...UPCOMING_SERVICE_COLUMNS);
@@ -1999,6 +2024,7 @@ module.exports.perVisitLiveEtas = perVisitLiveEtas;
 module.exports.buildLiveEtaGroups = buildLiveEtaGroups;
 module.exports.mergeLiveUpcoming = mergeLiveUpcoming;
 module.exports.loadUpcomingServices = loadUpcomingServices;
+module.exports.upcomingScheduleSignature = upcomingScheduleSignature;
 module.exports.seriesKeyOfRow = seriesKeyOfRow;
 module.exports.stampSeriesExclusive = stampSeriesExclusive;
 module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

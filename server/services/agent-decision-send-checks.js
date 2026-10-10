@@ -579,6 +579,24 @@ async function visitStatusReason(conn, signature, customerId, refs) {
   return unseen ? 'commitment_appeared' : null;
 }
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
+async function scheduleFactsReason(scheduleFacts, customerId, dbh, now = new Date()) {
+  if (!customerId || typeof scheduleFacts.signature !== 'string' || !scheduleFacts.signature) return 'schedule_unverifiable';
+  // Same ET day as the draft (Codex #6232 r3): the signature holds absolute days, but the
+  // reply may say "today" / "tomorrow"; after midnight ET those words mean another day.
+  const draftedAt = new Date(scheduleFacts.at);
+  const { etDateString } = require('../utils/datetime-et');
+  if (Number.isNaN(draftedAt.getTime())) return 'schedule_unverifiable';
+  if (etDateString(draftedAt) !== etDateString(now)) return 'schedule_day_changed';
+  try {
+    // on the caller's connection when it has one (the provider-boundary handoff transaction)
+    const now = await require('./context-aggregator').upcomingScheduleSignature(customerId, dbh || require('../models/db'));
+    return now === scheduleFacts.signature ? null : 'schedule_changed';
+  } catch (err) {
+    // unreadable = the same retryable verdict as an unreadable open-loop read (never a retire)
+    require('./logger').warn(`[agent-decision-send-checks] schedule recheck failed: ${err.message}; blocking send`);
+    return 'open_loops_recheck_failed';
+  }
+}
 async function openLoopsBlockReason({ decision, customerId = decision?.customer_id, dbh, now = new Date() }) {
   const snapshot = objectOrNull(parseInputSnapshot(decision?.input_snapshot)) || {};
   const refs = [...new Set([].concat(snapshot.visit_loop_commitment_ids || []))]
@@ -588,6 +606,15 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
   // rendered with nothing time-sensitive, and a fact that appeared since refuses
   const status = objectOrNull(snapshot.visit_loop_status);
   if (refs.length && commitmentDayChanged(snapshot, now)) return 'commitment_day_changed';
+  // A schedule-statement card (sms-suggest-mode schedulingStatementSuggestible): the reply
+  // states the booked schedule, so the customer's upcoming visits must read exactly as
+  // they did at draft time. Rides this check so every seam that already runs it (the
+  // immediate send, the queued-send fire, the provider boundary) covers it. Fail closed.
+  const scheduleFacts = objectOrNull(snapshot.schedule_facts);
+  if (scheduleFacts) {
+    const reason = await scheduleFactsReason(scheduleFacts, customerId, dbh, now);
+    if (reason) return reason;
+  }
   if (!refs.length && !status) return null;
   try {
     const conn = dbh || require('../models/db');
