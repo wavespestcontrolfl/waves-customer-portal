@@ -205,7 +205,7 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   });
 
   test('the card is filed for new and existing customers, with both numbers and the ask', () => {
-    const at = src.indexOf('const fileTextNumberCard = async');
+    const at = src.indexOf('const buildTextNumberCardItem = async');
     expect(at).toBeGreaterThan(-1);
     const section = src.slice(at, at + 1800);
     expect(section).not.toContain('!createdCustomerFromCall');
@@ -215,17 +215,68 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   });
 
   test('the later refresh updates the OPEN card only; it never inserts, so a settled card stays settled', () => {
-    const at = src.indexOf('const fileTextNumberCard = async');
-    const section = src.slice(at, at + 3200);
-    expect(section).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: item\.payload/);
-    // …inside ONE transaction that takes the per-call triage lock first and checks the processing claim
-    expect(section).toMatch(/await db\.transaction\(async \(trx\) => \{\s*await lockTriageCall\(trx, call\.id\);\s*const owner = await trx\('call_log'\)\.where\(\{ id: call\.id, processing_token: procToken \}\)\.forUpdate\(\)/);
-    expect(section.indexOf('lockTriageCall(trx, call.id)')).toBeLessThan(section.indexOf('if (refresh) {'));
-    expect(section).not.toContain('.merge(');
+    const writeAt = src.indexOf('const writeTextNumberCard = async (trx, item');
+    const fileAt = src.indexOf('const fileTextNumberCard = async');
+    expect(writeAt).toBeGreaterThan(-1);
+    expect(writeAt).toBeLessThan(fileAt);
+    const write = src.slice(writeAt, fileAt);
+    expect(write).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: item\.payload/);
+    expect(write).not.toContain('.merge(');
+    // …and the stand-alone writer runs it inside ONE transaction that takes the per-call triage lock
+    // first and checks the processing claim before the write
+    const file = src.slice(fileAt, fileAt + 1800);
+    expect(file).toMatch(/await db\.transaction\(async \(trx\) => \{\s*await lockTriageCall\(trx, call\.id\);\s*const owner = await trx\('call_log'\)\.where\(\{ id: call\.id, processing_token: procToken \}\)\.forUpdate\(\)[^]*?if \(!owner\) return;\s*await writeTextNumberCard\(trx, item, \{ refresh \}\);/);
+  });
+
+  test('the decision-point pair (hold + release card) commits in ONE transaction: the card is written by afterArm inside armDisclaimedNumberHold', () => {
+    const holds = fs.readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
+    // afterArm runs inside the arm transaction, after the hold row and the no-text marks, before return
+    expect(holds).toMatch(/const recorded = await recordDisclaimedNumberHold\(\{ phone, customerId, callLogId, conn: trx \}\);[^]*?if \(noTextHold\) \{[^]*?\}\s*(?:\/\/[^\n]*\n\s*)*if \(afterArm\) await afterArm\(trx\);\s*return recorded;/);
+    // the processor hands the card write to afterArm and never files the decision-point card separately
+    expect(src).toContain('afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,');
+    expect(src).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Extraction }))) return abandonToPeer('the disclaimed-number hold write');");
+    expect(src).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Ext }))) return abandonToPeer('the disclaimed-number hold write');");
+    expect(src).not.toMatch(/armCallbackNumberHoldAtDecision\(\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);\s*if \(aniCannotText\([^)]*\)\) await fileTextNumberCard/);
+    // the pair is marked landed only when the card went in with the hold
+    expect(src).toContain('if (item) noTextDecisionLanded = true;');
+  });
+
+  test('a no-text call never adopts a dictated number as the caller phone (the V1 single phone field is quarantined before the customer step)', () => {
+    const at = src.indexOf('if (callAniCannotText && extracted.phone && !isOutboundCall(call) && !samePhone(extracted.phone, call.from_phone)) {');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 400)).toContain('extracted.phone = null;');
+    expect(at).toBeLessThan(src.indexOf('const phone = resolveCallContactPhone(call, extracted.phone);'));
+  });
+
+  test('when enforce routing threw before the decision point, the post-customer write arms hold + card itself instead of refreshing a card that does not exist', () => {
+    const at = src.indexOf('if (callAniCannotText) {\n      if (!noTextDecisionLanded) {');
+    expect(at).toBeGreaterThan(-1);
+    const section = src.slice(at, at + 1400);
+    for (const line of ['v2SmsBlocked = true;', 'callbackNumberNeededHoldActive = true;', 'noTextHoldArming = true;',
+      "if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2CanonicalExtraction }))) return abandonToPeer('the disclaimed-number hold write');",
+      'await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });']) expect(section).toContain(line);
+  });
+
+  test('"Line can get texts" releases every no-text hold on the verified line, not only this call\'s, and leaves plain disclaimed-number holds alone', () => {
+    const holds = fs.readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
+    const at = holds.indexOf('async function clearNoTextHoldsForPhone(');
+    expect(at).toBeGreaterThan(-1);
+    const fn = holds.slice(at, at + 1600);
+    expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t");
+    expect(fn).toContain("t.reason_code = 'text_number_differs'");
+    expect(fn).toContain("AND NOT EXISTS (SELECT 1 FROM triage_items d");
+    expect(fn).toContain("COALESCE(d.payload->>'no_text_hold', '') <> 'true'");
+    expect(fn).toContain('AND h.cleared_at IS NULL');
+    const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    const rel = triage.slice(triage.indexOf('async function releaseNoTextHold('), triage.indexOf('async function releaseClosedNoTextHold('));
+    expect(rel).toContain('if (release) {');
+    expect(rel).toContain('Holds.clearNoTextHoldsForPhone({');
+    expect(rel).toContain('exceptCallLogId: item.call_log_id');
+    expect(rel).toMatch(/for \(const otherCallLogId of otherCalls\) \{\s*await clearCallbackNumberHold\(trx, otherCallLogId, \{ clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT\.VERIFIED_SAME_NUMBER \}\);/);
   });
 
   test('arming the no-text hold also marks a callback_number_needed card an earlier pass left open (no stale unmarked card can release it)', () => {
-    const at = src.indexOf('const fileTextNumberCard = async');
+    const at = src.indexOf('const writeTextNumberCard = async (trx, item');
     const section = src.slice(at, at + 3600);
     expect(section).toMatch(/reason_code: 'callback_number_needed'[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)[^]*?no_text_hold/);
   });
@@ -245,8 +296,8 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     const shadow = src.slice(at, at + 2200);
     expect(shadow).toContain('ASYMMETRY with enforce mode');
     expect(shadow).toContain('noTextHoldArming = aniCannotText(v2Ext?.caller);');
-    expect(shadow).toContain('if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(');
-    expect(shadow).not.toContain('!hasCanonicalWriteBlock(bridgeTriageFlags)) await fileTextNumberCard(');
+    expect(shadow).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Ext }))) return abandonToPeer('the disclaimed-number hold write');");
+    expect(shadow).not.toContain('!hasCanonicalWriteBlock(bridgeTriageFlags))');
     // enforce keeps its veto guard on both
     expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');
   });
@@ -269,15 +320,16 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   });
 
   test('the card is filed at BOTH hold decision points (before any hard-veto exit) and refreshed after the customer is known', () => {
+    // the stand-alone writer is used twice: the owed-card path of the arm helper and the post-customer refresh
     const calls = src.split('await fileTextNumberCard(').length - 1;
-    expect(calls).toBe(3);
-    const holdAt = src.indexOf("if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');\n            if (aniCannotText(v2Extraction?.caller))");
+    expect(calls).toBe(2);
+    const holdAt = src.indexOf("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Extraction }))) return abandonToPeer('the disclaimed-number hold write');");
     const vetoAt = src.indexOf('const routeDecision = buildRouteDecision({');
     expect(holdAt).toBeGreaterThan(-1);
     expect(holdAt).toBeLessThan(vetoAt);
     expect(src).toContain('await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });');
-    // decision-point failures abort the pass for retry, like the hold write
-    expect(src.split('{ failClosed: true })').length - 1).toBe(2);
+    // an owed card (hold armed earlier in the pass without it) aborts the pass for retry, like the hold write
+    expect(src.split('{ failClosed: true })').length - 1).toBe(1);
     expect(src).toMatch(/if \(failClosed\) \{[^]*?DISCLAIMED_NUMBER_HOLD_WRITE_FAILED/);
   });
 

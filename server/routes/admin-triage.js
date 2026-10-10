@@ -213,6 +213,23 @@ async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineC
     clearedBy: assignedTo,
     numberVerdict: release ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
   });
+  if (release) {
+    // The office verified the LINE, not one call: a shared office or relay number holds one row per
+    // call that said it cannot get texts, and the send boundary blocks on any of them. Lift every
+    // no-text hold on this number (never a plain disclaimed-number hold: its own card releases it)
+    // and the visit-level holds of the calls that placed them (codex #6112 r7 P2).
+    const Holds = require('../services/disclaimed-number-holds');
+    const own = await trx(Holds.TABLE).where({ source_call_log_id: item.call_log_id }).orderBy('held_at', 'desc').first('phone_e164');
+    if (own?.phone_e164) {
+      const otherCalls = await Holds.clearNoTextHoldsForPhone({
+        phoneE164: own.phone_e164, exceptCallLogId: item.call_log_id, clearedBy: assignedTo, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, conn: trx,
+      });
+      for (const otherCallLogId of otherCalls) {
+        await clearCallbackNumberHold(trx, otherCallLogId, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER });
+      }
+      cleared.numbers = (cleared.numbers || 0) + otherCalls.length;
+    }
+  }
   return callbackNumberReply(cleared.numberVerdict, cleared.numbers);
 }
 

@@ -103,8 +103,14 @@ async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId,
  * touch after it (triage_items, scheduled_services, disclaimed_number_holds)
  * are only ever reached by one of the two at a time — no deadlock cycle.
  */
-async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, noTextHold = false, conn = db }) {
-  if (!holdPhoneKey(phone) || !callLogId) return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
+async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, noTextHold = false, afterArm = null, conn = db }) {
+  if (!holdPhoneKey(phone) || !callLogId) {
+    // Nothing dialable to hold: no hold row, but a release card the caller asked for still gets written
+    // (its own transaction; there is no hold for it to be atomic with).
+    const recorded = await recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
+    if (afterArm) await conn.transaction(afterArm);
+    return recorded;
+  }
   const { lockTriageCall } = require('../utils/triage-locks');
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
@@ -131,8 +137,44 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
         .where({ call_log_id: callLogId, reason_code: 'text_number_differs' })
         .update({ updated_at: new Date() });
     }
+    // afterArm(trx): the caller's companion write (the text_number_differs release card) in THIS
+    // transaction, after the hold row and under the same lock and claim fence, so the hold and the
+    // only card that can release it commit or roll back together (codex #6112 r7 P2).
+    if (afterArm) await afterArm(trx);
     return recorded;
   });
+}
+
+/**
+ * "Line can get texts" (admin-triage releaseNoTextHold): the office verified the LINE, so every
+ * active hold a no-text statement placed on that number lifts, whichever call placed it (codex
+ * #6112 r7 P2: a shared office or relay line gets one hold row per call, and the send boundary
+ * blocks on ANY active row for the number). A hold whose source call carries a plain
+ * disclaimed-number card (callback_number_needed WITHOUT the no_text_hold marker) is an independent
+ * "that is not my number" statement and is left alone — that card has its own Resolve. Returns the
+ * source call ids whose holds cleared, so the caller can lift those calls' visit-level holds too.
+ */
+async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, clearedBy = null, reason, conn = db }) {
+  const key = holdPhoneKey(phoneE164);
+  if (!key) return [];
+  const result = await conn.raw(
+    `UPDATE ${TABLE} h
+        SET cleared_at = now(),
+            cleared_by = ?,
+            clear_reason = ?,
+            updated_at = now()
+      WHERE h.phone_e164 = ?
+        AND h.cleared_at IS NULL
+        AND (? IS NULL OR h.source_call_log_id <> ?)
+        AND EXISTS (SELECT 1 FROM triage_items t
+                     WHERE t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs')
+        AND NOT EXISTS (SELECT 1 FROM triage_items d
+                         WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
+                           AND COALESCE(d.payload->>'no_text_hold', '') <> 'true')
+      RETURNING h.source_call_log_id`,
+    [clearedBy ? String(clearedBy).slice(0, 100) : null, reason ? String(reason).slice(0, 100) : null, key, exceptCallLogId, exceptCallLogId],
+  );
+  return (result?.rows || []).map((r) => r.source_call_log_id);
 }
 
 /**
@@ -322,6 +364,7 @@ module.exports = {
   armDisclaimedNumberHold,
   ensureDisclaimedNumberHold,
   clearDisclaimedNumberHoldsForCall,
+  clearNoTextHoldsForPhone,
   disclaimedNumberHeld,
   disclaimedNumberBlocksSend,
   disclaimedNumberHeldForVisit,
