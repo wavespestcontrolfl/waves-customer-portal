@@ -2219,7 +2219,7 @@ async function buildPlanForService(serviceId, options = {}) {
     productOf: (id) => products.find((product) => String(product.id) === String(id)) || null,
   });
   planItems = bermudaProjection.items;
-  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut);
+  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut == null ? null : { from: parseVisitNutrientTargets(recipeStep?.notes).targetNPer1000, to: nitrogenCut });
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
   const v13PlanBlock = lawnV13PlanBlock({ trackKey, service, structuredProtocol });
