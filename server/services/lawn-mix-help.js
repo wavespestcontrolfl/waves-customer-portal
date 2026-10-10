@@ -16,7 +16,8 @@
  * AND the other direction: GALLONS SPRAYED entered instead of an area. /complete converts them with the product's STAGED carrier (the
  * sheet's figure is a preview only) into the recorded spot area, which then flows to the per-place limits, the ledger and the customer
  * card's "about N sq ft" exactly as a typed area does; the row is marked on structured_notes.lawnSprayedGallons so the record says the
- * area was derived.
+ * area was derived. A spot cannot be larger than the lawn: the derived area is capped at the visit's whole-lawn row (else the lawn size on
+ * file; unknown = no cap), the mark then carries capped / uncappedAreaSqft / lawnAreaSqft, and a place-limit refusal on a capped row says why.
  *
  * No agronomy number is added here: the rate, the unit and the carrier are the staged row's. Unit constants are physical. Fail closed:
  * a row whose rate, unit or carrier is missing, or whose rows disagree, shows less (no tank amount) and never a guess. Technician sheet
@@ -262,6 +263,8 @@ async function contextBlock(input) {
 // Set on a product row by the server after it converted the row's gallons. A symbol cannot arrive in a JSON body, so a sheet can never
 // claim a conversion the server did not make.
 const FROM_GALLONS = Symbol('lawnAreaFromGallons');
+// Set for the length of one gallons step on the rows persistence resolves as spot rows (the others are the whole-lawn rows).
+const SPOT_ROW = Symbol('lawnSpotRow');
 
 const refusal = (status, code, error, extra = {}) => ({ status, payload: { error, code, ...extra } });
 const asked = (row) => row.sprayedGallons !== undefined && row.sprayedGallons !== null && row.sprayedGallons !== '';
@@ -281,23 +284,40 @@ async function gallonsStaged({ knex, svc, wanted, loadPlan, readStaged }) {
   try {
     const loaded = await loadPlan(svc, knex);
     const ids = [...new Set(wanted.map((row) => String(row.productId || '').toLowerCase()))];
-    return await readStaged({ knex, protocolId: loaded?.plan?.protocol?.structured?.id, productIds: ids });
+    const rows = await readStaged({ knex, protocolId: loaded?.plan?.protocol?.structured?.id, productIds: ids });
+    // The lawn size on file is the plan's own (mixCalculator.lawnSqft: the turf profile's, and null when the profile describes another
+    // property), the same figure the sheet and the completion defaults use. Unknown stays null.
+    return rows ? { rows, planLawnSqft: positive(loaded?.plan?.mixCalculator?.lawnSqft) } : null;
   } catch (err) {
     logger.warn(`[lawn-mix-help] gallons unreadable for ${svc?.id}: ${err?.code || err?.name || 'Error'}`);
     return null;
   }
 }
 
-// Each asked row gets its area from its own staged carrier and is marked, or the step refuses (400, enter the area instead).
-function convertGallons(wanted, staged, month) {
+// The lawn area a gallons-derived spot area may not pass: the area of a whole-lawn (non-spot) row on the same completion when one states
+// it (the largest such row), else the lawn size on file. null = unknown, and the area is NOT capped (today's behaviour): a lawn with no
+// size on file and no whole-lawn row has nothing to compare with.
+function lawnAreaOf(rows, planLawnSqft) {
+  const whole = rows
+    .filter((row) => !row[SPOT_ROW] && row.areaUnit === 'sqft' && Number(row.areaValue) > 0)
+    .map((row) => Math.round(Number(row.areaValue)))
+    .filter((area) => Number.isFinite(area) && area > 0);
+  return whole.length ? Math.max(...whole) : (planLawnSqft ? Math.round(planLawnSqft) : null);
+}
+
+// Each asked row gets its area from its own staged carrier and is marked, or the step refuses (400, enter the area instead). A spot cannot be
+// larger than the lawn: gallons for a full tank on a small lawn would state an area (and so a per-1,000 dose) the lawn does not have, so the
+// area is capped at the lawn's and the mark says so (capped, uncappedAreaSqft, lawnAreaSqft).
+function convertGallons(wanted, staged, month, lawnArea) {
   for (const row of wanted) {
     const agreed = agreedRow(staged.get(String(row.productId || '').toLowerCase()) || [], month);
     const carrier = agreed && agreed.mode === 'spot' && !agreed.concentration ? positive(agreed.carrierGalPer1000) : null;
     const area = areaFromGallons(gallonsOf(row), carrier);
     if (!area) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed cannot be used for this product. Enter the area instead.', { productId: row.productId });
-    row.areaValue = area;
+    const capped = lawnArea && area > lawnArea;
+    row.areaValue = capped ? lawnArea : area;
     row.areaUnit = 'sqft';
-    row[FROM_GALLONS] = { gallons: gallonsOf(row), carrierGalPer1000: carrier, areaSqft: area };
+    row[FROM_GALLONS] = { gallons: gallonsOf(row), carrierGalPer1000: carrier, areaSqft: row.areaValue, ...(capped ? { capped: true, uncappedAreaSqft: area, lawnAreaSqft: lawnArea } : {}) };
   }
   return null;
 }
@@ -326,19 +346,45 @@ async function applyGallons(input) {
   if (!isLive()) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed is not available right now. Enter the area instead.', { productId: wanted[0].productId });
   const bad = wanted.find((row) => gallonsOf(row) === null || gallonsOf(row) > MAX_GALLONS);
   if (bad) return refusal(400, 'lawn_gallons_invalid', `Enter the gallons sprayed as a number above zero (up to ${MAX_GALLONS}), or enter the area instead.`, { productId: bad.productId });
-  const staged = await gallonsStaged({ knex, svc, wanted, loadPlan, readStaged });
-  const spot = staged && await readSpotRows(knex, wanted).catch(() => null);
+  const read = await gallonsStaged({ knex, svc, wanted, loadPlan, readStaged });
+  const staged = read && read.rows;
+  // Every product row, not only the asked ones: the whole-lawn rows are where the lawn's area is read from.
+  const spot = staged && await readSpotRows(knex, rows).catch(() => null);
   if (!staged || !spot) return refusal(400, 'lawn_gallons_unavailable_now', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.');
   // The SUBMITTED row must be a spot row as persistence resolves the method (inferServiceReportApplicationMethod, as preflightPlaces does): a
   // row sent as a whole-lawn method keeps the area it carries, so gallons never overwrite it.
   const notSpot = wanted.find((row) => !spot.includes(row));
   if (notSpot) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed cannot be used for this product. Enter the area instead.', { productId: notSpot.productId });
-  return convertGallons(wanted, staged, monthOfVisit(svc));
+  for (const row of rows) if (spot.includes(row)) row[SPOT_ROW] = true;
+  try {
+    return convertGallons(wanted, staged, monthOfVisit(svc), lawnAreaOf(rows, read.planLawnSqft));
+  } finally {
+    for (const row of rows) delete row[SPOT_ROW];
+  }
 }
 
-/** Runs the gallons step, then `next()` (the places check) unless the gallons step refused. One expression for the preflight's last line. */
-async function withSprayedGallons({ knex, svc, products, loadPlan }, next) {
-  return (await applyGallons({ knex, svc, products, loadPlan })) || next();
+const sqftText = (value) => `${Number(value).toLocaleString('en-US')} sq ft`;
+
+// The one sentence that tells the technician why a capped row was judged on the lawn's area, not on what its gallons would cover.
+function cappedReason(mark) {
+  const gallons = `${mark.gallons} ${Number(mark.gallons) === 1 ? 'gallon' : 'gallons'}`;
+  return `${gallons} at ${mark.carrierGalPer1000} gal per 1,000 sq ft covers ${sqftText(mark.uncappedAreaSqft)}, but the lawn is ${sqftText(mark.lawnAreaSqft)}; enter the gallons you actually sprayed or the area.`;
+}
+
+// The places check's refusal at a product whose area was capped carries the reason in its own message (same shape, same code).
+function withCappedReason(refused, products) {
+  const id = String(refused?.payload?.productId || '').toLowerCase();
+  const row = (Array.isArray(products) ? products : []).find((item) => item && typeof item === 'object' && item[FROM_GALLONS]?.capped && String(item.productId || '').toLowerCase() === id);
+  if (!row || typeof refused.payload.error !== 'string') return refused;
+  return { ...refused, payload: { ...refused.payload, error: `${refused.payload.error} ${cappedReason(row[FROM_GALLONS])}` } };
+}
+
+/** Runs the gallons step, then `next()` (the places check) unless the gallons step refused. One expression for the preflight's last line. `deps` are for tests. */
+async function withSprayedGallons({ knex, svc, products, loadPlan, ...deps }, next) {
+  const refused = await applyGallons({ knex, svc, products, loadPlan, ...deps });
+  if (refused) return refused;
+  const result = await next();
+  return result && result.status === 400 && result.payload?.code === 'lawn_place_limit' ? withCappedReason(result, products) : result;
 }
 
 /**
