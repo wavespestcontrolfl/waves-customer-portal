@@ -366,6 +366,14 @@ describe('spelled names — card-only', () => {
     test('another source can supply the caller turn', () => {
       expect(names([entry()], 'Agent: your last name is S-E-R-O-V\nCaller: yes', 'Caller: S-E-R-O-V')[0].turn).toBe('Caller: S-E-R-O-V');
     });
+    test('an unlabeled pass cannot rescue a spelling the diarized transcript put in an Agent turn only', () => {
+      const primary = 'Agent: your last name is S-E-R-O-V\nCaller: yes';
+      expect(names([entry()], primary, 'my last name is S-E-R-O-V')[0].turn).toBeNull();
+      expect(names([entry()], 'my last name is S-E-R-O-V', primary)[0].turn).toBeNull();
+      // A Caller copy in the diarized transcript still qualifies; an unlabeled-only spelling is taken as it is.
+      expect(names([entry()], 'Agent: is it S-E-R-O-V?\nCaller: S-E-R-O-V', 'S-E-R-O-V')[0].turn).toBe('Caller: S-E-R-O-V');
+      expect(names([entry()], 'Agent: hello\nCaller: yes', 'my last name is S-E-R-O-V')[0].turn).toBe('my last name is S-E-R-O-V');
+    });
     test('an email context disqualifies the turn', () => {
       expect(names([entry()], 'Caller: my email is S-E-R-O-V at gmail dot com')[0].turn).toBeNull();
       expect(names([entry()], 'Caller: S-E-R-O-V, at example dot com')[0].turn).toBeNull();

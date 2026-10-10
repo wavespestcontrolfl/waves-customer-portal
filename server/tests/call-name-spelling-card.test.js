@@ -183,6 +183,15 @@ describe('fileNameSpellingCard', () => {
     expect(conn.writes).toEqual([]);
   });
 
+  test('a blank stored field on a linked customer stays blank: no "record says" card from the extraction', async () => {
+    const blankLast = makeConn({ customer: { first_name: 'Quentrell', last_name: null } });
+    expect(await file(blankLast, { customerId: 'cust-1' })).toBe(false);
+    expect(blankLast.writes).toEqual([]);
+    // The same extraction on an unlinked call still compares against the name heard on the call.
+    const unlinked = makeConn();
+    expect(await file(unlinked)).toBe(true);
+    expect(JSON.parse(unlinked.writes[0].row.payload).compared_against.source).toBe('extracted');
+  });
   test('a linked customer\'s name is the saved name: the record is right, so no card; the record is wrong, a card', async () => {
     const right = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Serov' } });
     expect(await file(right, { customerId: 'cust-1' })).toBe(false);

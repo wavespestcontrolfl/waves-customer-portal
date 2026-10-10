@@ -310,21 +310,37 @@ function spelledLetterRuns(raw) {
 
 // The caller turn that contains the spelling, or null. The simple qualifier:
 // when a transcript carries Agent:/Caller: labels the turn must be labeled
-// Caller:; an unlabeled transcript (the dictation pass) is taken as it is; a turn
-// with email wording is an address, not a name.
+// Caller:; an unlabeled transcript (the dictation pass) is taken as it is, EXCEPT
+// when a labeled transcript puts the same spelling in an Agent: turn and in no
+// Caller: turn (the spelling is the employee's, so the unlabeled copy is too);
+// a turn with email wording is an address, not a name.
 function callerTurnWithSpelling(raw, sources) {
   const flat = (v) => String(v || '').replace(/[ \t]+/g, ' ');
   const needle = flat(raw).trim().replace(/\s*\n\s*/g, ' ').toLowerCase();
   if (!needle) return null;
+  const unlabeled = [];
+  let agentSpoke = false;
   for (const src of sources) {
     const text = flat(src);
     const lower = text.toLowerCase();
-    const labeled = /^\s*(?:agent|caller)\s*:/im.test(text);
+    if (!/^\s*(?:agent|caller)\s*:/im.test(text)) { unlabeled.push({ text, lower }); continue; }
     for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
       const start = text.lastIndexOf('\n', at) + 1;
       const endIdx = text.indexOf('\n', at + needle.length);
       const turn = text.slice(start, endIdx < 0 ? text.length : endIdx).trim();
-      if ((!labeled || /^caller\s*:/i.test(turn)) && !EMAIL_WORDING_RE.test(turn.toLowerCase())) return turn.slice(0, 300);
+      if (/^caller\s*:/i.test(turn)) {
+        if (!EMAIL_WORDING_RE.test(turn.toLowerCase())) return turn.slice(0, 300);
+      } else if (/^agent\s*:/i.test(turn)) agentSpoke = true;
+    }
+  }
+  // The diarized transcript binds the speaker: an Agent: spelling with no Caller: copy is never the caller's.
+  if (agentSpoke) return null;
+  for (const { text, lower } of unlabeled) {
+    for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
+      const start = text.lastIndexOf('\n', at) + 1;
+      const endIdx = text.indexOf('\n', at + needle.length);
+      const turn = text.slice(start, endIdx < 0 ? text.length : endIdx).trim();
+      if (!EMAIL_WORDING_RE.test(turn.toLowerCase())) return turn.slice(0, 300);
     }
   }
   return null;

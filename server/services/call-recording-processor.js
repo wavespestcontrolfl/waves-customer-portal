@@ -4063,7 +4063,10 @@ async function fileNameSpellingCard(conn, {
     if (customerId && isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return false;
     const customer = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
     const saved = Object.fromEntries(['first_name', 'last_name']
-      .map((f) => [f, String(customer?.[f] || '').trim() || extracted[f] || null]));
+      // A linked customer is compared on the stored fields only: a blank stored field stays blank (the
+      // missing-name cards cover it) and is never filled from the extraction. The extracted name is used
+      // only when the call has no linked customer.
+      .map((f) => [f, customer ? (String(customer[f] || '').trim() || null) : (extracted[f] || null)]));
     const differences = nameSpellingDifferences({ dictation, saved });
     if (!differences.length) return false;
     const filingCustomer = customer && customerId ? String(customerId) : null;
