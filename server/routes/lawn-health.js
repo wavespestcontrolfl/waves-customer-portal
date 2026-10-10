@@ -31,7 +31,8 @@ router.use(authenticate);
 // it at capture (lawn_assessments.photos[photo_order].labelKey). Returns a function from a photo row to the wording, or
 // null. Gate off = never reads the stored picks, so no `labelPicked` key is added and the payload is unchanged.
 function pickedLabelReader(assessment) {
-  if (!require('../config/feature-gates').lawnPhotoLabelPickLive()) return () => null;
+  const gates = require('../config/feature-gates');
+  if (!(typeof gates.lawnPhotoLabelPickLive === 'function' && gates.lawnPhotoLabelPickLive())) return () => null;
   const picks = labelPicksFromStored(assessment?.photos);
   return (photo) => pickedReportLabel(picks[Number(photo.photo_order)]);
 }
