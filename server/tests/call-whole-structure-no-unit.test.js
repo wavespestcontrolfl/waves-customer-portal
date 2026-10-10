@@ -494,6 +494,93 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, call_summary: 'Caller asked when the crew can come out. Needs the slab pre-treat' }, commercial)).toBe(true);
   });
 
+  describe('schema-valid V2 slab extraction through the processor path (r16)', () => {
+    const { validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
+    const { adoptV2PrimaryFields } = require('../utils/extraction-compat');
+    const slabV2 = (overrides = {}) => ({
+      meta: {
+        is_voicemail: false, is_spam: false, transcript_word_count: 210, transcript_duration_seconds: 120,
+        call_summary: 'Builder needs the slab pre-treat before the pour next week.',
+        call_id: '550e8400-e29b-41d4-a716-446655440000', schema_version: SCHEMA_VERSION,
+        extracted_at: '2026-10-09T02:30:00Z', extraction_model: 'test-model', extraction_prompt_version: 'v1-test',
+      },
+      caller: {
+        name_full: 'Pat Example', first_name: 'Pat', last_name: 'Example', organization_name: null, name_confidence: 0.9,
+        phone_e164: '+19415550100', phone_raw_spoken: 'nine four one five five five zero one zero zero', phone_source: 'spoken',
+        email: null, relationship_to_property: 'owner', on_site_authorization: true, decision_maker_present: true,
+        preferred_contact_method: 'phone',
+      },
+      consent: {
+        sms_consent_given: true, sms_consent_quote: 'Yes, text me.', call_recording_disclosed: true,
+        do_not_contact_request: false, sms_declined: false,
+      },
+      property: {
+        service_address: {
+          raw_text: '100 Example Rd, Parrish', street_line_1: '100 Example Rd', street_line_2: null, city: 'Parrish',
+          state: 'FL', postal_code: '34219', county: 'Manatee', subdivision_or_community: null, normalization_status: 'not_attempted',
+        },
+        property_type: 'single_family', hoa_community_flag: false, hoa_common_area_service: false, commercial_subtype: null,
+        approximate_lot_size_acres: null, approximate_living_sqft: null,
+        pets_on_property: { present: false, species_notes: null }, access_notes: null,
+      },
+      service_request: {
+        primary_service_category: 'termite', secondary_categories: [], pests_observed_status: 'not_observed_preventative', pests_observed: [],
+        service_intent: 'preventative_one_time', urgency: 'within_one_week', waveguard_tier_mentioned: null,
+        specific_service_name: 'Slab Pre-Treat Termite Service',
+      },
+      customer_history: { status: 'new_customer', competitor_name: null, referral_source: null, prior_complaint_mentioned: false },
+      scheduling: {
+        status: 'none', confirmed_start_at: null, requested_date_range_start: null, requested_date_range_end: null,
+        preferred_time_of_day: null, callback_window_start: null, callback_window_end: null, blackout_dates: [], scheduling_notes_raw: null,
+      },
+      sentiment_and_lead: { sentiment: 'neutral', lead_quality: 'hot', objections_raised: [], buying_signals: [] },
+      evidence: [{ field_path: '/property/service_address', quote: 'It is 100 Example Rd in Parrish', speaker: 'caller', transcript_offset_ms: 12000 }],
+      confidence: {
+        caller_identity: 0.9, service_address: 0.95, property_type: 0.8, primary_service_category: 0.95,
+        urgency: 0.85, scheduling_window: 0.9, consent_capture: 0.92, overall: 0.9,
+      },
+      triage_flags: [],
+      ...overrides,
+    });
+    // The processor adopts V2 fields into the extracted record, then judges the
+    // card on the merged record plus the V2-overridden view.
+    const runV2 = (v2) => {
+      const { merged } = adoptV2PrimaryFields({}, v2);
+      return callIsPreConstructionPretreat({ extracted: merged, v2Extraction: v2, services: CATALOG });
+    };
+
+    test('the fixture is schema-valid and a pure slab pre-treat drops the card', () => {
+      const v2 = slabV2();
+      const { valid, errors } = validatePersisted(v2);
+      expect(errors || []).toEqual([]);
+      expect(valid).toBe(true);
+      expect(runV2(v2)).toBe(true);
+    });
+
+    test('extra work in the V2 pain points keeps the card', () => {
+      const v2 = slabV2();
+      v2.sentiment_and_lead.objections_raised = ['termiticide injection treatment in the storefront'];
+      expect(validatePersisted(v2).valid).toBe(true);
+      expect(runV2(v2)).toBe(false);
+    });
+
+    test('a follow-up intent keeps the card', () => {
+      const v2 = slabV2();
+      v2.service_request.service_intent = 'follow_up_existing_service';
+      expect(validatePersisted(v2).valid).toBe(true);
+      expect(runV2(v2)).toBe(false);
+    });
+  });
+
+  test('every structured field is split on conjunctions; bare soil treatment is pre-treat wording (r16)', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run({ ...slab, requested_service: 'slab pre-treat plus termiticide injection treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, matched_service: 'slab pre-treat plus termiticide injection treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'soil treatment' }, commercial)).toBe(true);
+    expect(run({ ...slab, requested_service: 'soil treatment around the existing home' }, commercial)).toBe(false);
+  });
+
   test('only a new-service intent can drop the card (r14)', () => {
     const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
     const withIntent = (service_intent) => ({ property: { property_type: 'commercial' }, service_request: { service_intent } });

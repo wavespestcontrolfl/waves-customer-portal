@@ -211,7 +211,7 @@ function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}, v1Vi
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
-const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
@@ -7011,11 +7011,15 @@ function existingStructureTermiteWork(words) {
 //       c. existing-structure work: spot, foam, drill, perimeter,
 //          inspection, retreat and the like (existingStructureTermiteWork);
 //       d. existing-structure CONTEXT, whatever the treatment word is:
-//          "around the existing home", "soil / barrier treatment",
-//          "termite barrier" (unless the same fragment says pour, before the
-//          slab, new construction, new build or pre-slab).
+//          a building qualifier ("existing / current / occupied / around the
+//          / of the" + home, house, structure, building, property,
+//          foundation, residence) unless the same fragment says pour, before
+//          the slab, new construction, new build or pre-slab. A bare "soil
+//          treatment" is not context: a pre-treat is a soil treatment.
 //  5. Positive proof: every structured fragment (requested_service,
-//     matched_service, specific_service_name, each pain_points item) is the
+//     matched_service, specific_service_name, each pain_points item, every
+//     one split on the conjunctions; a bare V2 category word is a placeholder
+//     and is skipped) is the
 //     pre-slab service or plain "pre-treat" wording; one that classifies as
 //     anything else, or as nothing, keeps the card. Narrative sentences
 //     (call_summary) may be anything that carries no cue and is not another
@@ -7024,7 +7028,9 @@ function existingStructureTermiteWork(words) {
 // Any doubt keeps the card. Do not add one regex per Codex round: add a cue
 // to the matching class above.
 const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
-const PRETREAT_WORDING_RE = /\bpre[-\s]?treat(?:ment)?\b/i;
+// A pre-treat IS a soil treatment, so bare "soil treatment" is pre-treat wording
+// (existing-structure context still vetoes it when a building qualifier follows).
+const PRETREAT_WORDING_RE = /\bpre[-\s]?treat(?:ment)?\b|\bsoil (?:treatment|poison)\b/i;
 const TERMITE_ADDON_WORDING_RE = /\b(?:monitor\w*|bond|renewal|bait\w*|stations?)\b/i;
 // "Protection" and "warranty" name ordinary pre-construction wording too
 // ("termite protection before the slab pour", a pre-treat's warranty), so they
@@ -7039,7 +7045,7 @@ function hasTermiteAddonWording(text) {
     && !TERMITE_NEW_SLAB_WORDING_RE.test(text);
 }
 const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
-const EXISTING_STRUCTURE_CONTEXT_RE = /\b(?:existing|current|occupied|around the|of the)\s+(?:home|house|structure|building|property|foundation|residence)\b|\b(?:soil|barrier|perimeter)\s+treatment\b|\btermite barrier\b/i;
+const EXISTING_STRUCTURE_CONTEXT_RE = /\b(?:existing|current|occupied|around the|of the)\s+(?:home|house|structure|building|property|foundation|residence)\b/i;
 const NEW_BUILD_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|new[-\s]build|pre[-\s]?slab)\b/i;
 function hasExistingStructureContext(text) {
   return EXISTING_STRUCTURE_CONTEXT_RE.test(text) && !NEW_BUILD_WORDING_RE.test(text);
@@ -7055,15 +7061,39 @@ function splitFragments(text) {
 }
 // STRUCTURED fields name the service the caller asked for; the narrative
 // (call_summary) is free prose.
-function structuredFragmentsOf(view) {
+// V2's required primary_service_category is a bare category word (enum value),
+// and flatView copies it into requested_service and maps it to a legacy label
+// in matched_service: placeholders, not a statement of the work. They are
+// neither proof nor veto; the precise fields and the catalog row decide.
+const V2_PRIMARY_CATEGORY_VALUES = new Set(
+  (require('../schemas/call-extraction.model-output.schema.json').properties?.service_request?.properties?.primary_service_category?.enum || [])
+    .map((v) => String(v).toLowerCase()),
+);
+function isV2CategoryPlaceholder(fragment, field, v2Extraction) {
+  const value = String(fragment || '').trim().toLowerCase();
+  if (V2_PRIMARY_CATEGORY_VALUES.has(value)) return true;
+  if (field !== 'matched_service') return false;
+  const category = v2Extraction?.service_request?.primary_service_category;
+  const legacy = category ? mapServiceCategoryToLegacy(category) : null;
+  return !!legacy && value === String(legacy).toLowerCase();
+}
+// Every structured field is split on the conjunctions, not only pain_points.
+function structuredFragmentsOf(view, v2Extraction) {
+  const out = [];
+  const add = (text, field) => {
+    for (const fragment of splitFragments(text)) {
+      if (!isV2CategoryPlaceholder(fragment, field, v2Extraction)) out.push(fragment);
+    }
+  };
+  add(view.requested_service, 'requested_service');
+  add(view.matched_service, 'matched_service');
+  add(view.specific_service_name, 'specific_service_name');
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
-  const out = [view.requested_service, view.matched_service, view.specific_service_name]
-    .map((f) => String(f || '').trim()).filter(Boolean);
-  for (const item of painPoints) out.push(...splitFragments(item));
+  for (const item of painPoints) add(item, 'pain_points');
   return out;
 }
-function pretreatIsOnlyTermiteWork(view) {
-  const structured = structuredFragmentsOf(view);
+function pretreatIsOnlyTermiteWork(view, v2Extraction = null) {
+  const structured = structuredFragmentsOf(view, v2Extraction);
   const narrative = splitFragments(view.call_summary);
   const fragments = [...structured, ...narrative];
   if (hasNonPretreatTermiteCue(fragments.join('. ')) || fragments.some(hasNonPretreatTermiteCue)) return false;
@@ -7136,7 +7166,7 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
     const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
     const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
     const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords)
-      && pretreatIsOnlyTermiteWork(view);
+      && pretreatIsOnlyTermiteWork(view, v2Extraction);
     return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
