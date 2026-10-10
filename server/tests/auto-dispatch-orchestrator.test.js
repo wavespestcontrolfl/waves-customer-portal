@@ -7,6 +7,11 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+  VALID_STATUSES: jest.requireActual('../services/auto-dispatch/eligibility').VALID_STATUSES,
+  heldOutOfAutoDispatch: jest.requireActual('../services/auto-dispatch/eligibility').heldOutOfAutoDispatch,
+  lapsedPlanKeys: jest.fn(async () => new Set()),
+  planKey: jest.requireActual('../services/auto-dispatch/eligibility').planKey,
+  SLOT_CHANGED_SQL: '(1 = 1)',
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -14,14 +19,33 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
     blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
   })),
 }));
-jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
+jest.mock('../services/auto-dispatch/candidate-slots', () => ({
+  findValidCandidateSlots: jest.fn(),
+  _internals: { readCurrentConflict: jest.fn(async () => null) },
+}));
+// The real composer over the faked notification store, spied: the pin
+// notices assert the store call, the needs-a-person notices the composer call.
+jest.mock('../services/admin-alert-compose', () => {
+  const actual = jest.requireActual('../services/admin-alert-compose');
+  return { ...actual, raiseAdminAlert: jest.fn(actual.raiseAdminAlert) };
+});
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/auto-dispatch/audit', () => ({
+  // Real budget helpers and key shape; only the notification-store read is faked.
+  ...jest.requireActual('../services/auto-dispatch/audit'),
+  standingMissingGeoKeys: jest.fn(async () => new Set()),
+  ringsLeft: jest.fn(async () => 10),
+  standingNoticeKeys: jest.fn(async () => new Set()),
+  recentBudgetKeys: jest.fn(async () => new Set()),
+  retireResolvedNotices: jest.fn(async () => {}),
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),
   flagUnplacedVisits: jest.fn(async () => 0),
+  retireMissingGeoNotices: jest.fn(async () => {}),
+  maintainMissingGeoNotices: jest.fn(async () => {}),
 }));
 
 jest.mock('../services/tech-visit-notifications', () => ({
@@ -35,19 +59,31 @@ const eligibility = require('../services/auto-dispatch/eligibility');
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 const apply = require('../services/auto-dispatch/apply');
 const geocoder = require('../services/geocoder');
+const notifications = require('../services/notification-service');
+const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const audit = require('../services/auto-dispatch/audit');
 const { runAutoDispatch, _internals } = require('../services/auto-dispatch');
 
 function buildChain(result) {
   const chain = {};
   const methods = ['leftJoin', 'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count'];
+    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy'];
   methods.forEach((m) => { chain[m] = (...args) => { args.forEach((a) => { if (typeof a === 'function') a.call(chain); }); return chain; }; });
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return chain;
 }
 
 let servicesResult;
+// What the durable move log (reschedule_log) returns per read, in order; an
+// Error rejects that read. Past the end it reads empty.
+let moveLogReads;
+function moveLogChain() {
+  const next = moveLogReads.length ? moveLogReads.shift() : [];
+  const chain = buildChain([]);
+  if (next instanceof Error) chain.then = (resolve, reject) => Promise.reject(next).then(resolve, reject);
+  else chain.then = (resolve, reject) => Promise.resolve(next).then(resolve, reject);
+  return chain;
+}
 function svc(overrides = {}) {
   return {
     id: 's1', customer_id: 'c1', is_recurring: true, recurring_parent_id: null,
@@ -66,9 +102,15 @@ const CAND_MODERATE = { is_current: false, detour_minutes: 10, stops_that_day: 5
 beforeEach(() => {
   jest.clearAllMocks();
   servicesResult = [svc()];
-  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+  moveLogReads = [];
+  candidateSlots._internals.readCurrentConflict.mockReset().mockResolvedValue(null);
+  db.mockImplementation((table) => {
+    if (table === 'reschedule_log') return moveLogChain();
+    return buildChain(table === 'technician_capabilities' ? [] : servicesResult);
+  });
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
+  audit.standingMissingGeoKeys.mockResolvedValue(new Set());
   apply.applyAutoDispatchMove.mockResolvedValue({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
   apply.revalidatePlacement.mockResolvedValue({ ok: true });
 });
@@ -193,6 +235,7 @@ test('self-heals a MISSING_GEO customer by geocoding, then re-checks (not skippe
   const res = await runAutoDispatch({ mode: 'dry_run' });
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
   expect(res).toMatchObject({ skipped: 0, evaluated: 1, geocoded: 1, recommended: 1 });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled(); // healed: nothing to tell staff
 });
 
 test('still skips MISSING_GEO when geocoding cannot resolve the address', async () => {
@@ -202,6 +245,251 @@ test('still skips MISSING_GEO when geocoding cannot resolve the address', async 
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
   expect(res).toMatchObject({ skipped: 1, evaluated: 0, geocoded: 0 });
   expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
+});
+
+test('a visit still without a map point after the geocode retry raises one admin notice, deduped per visit', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+    'schedule_conflict', 'Schedule — fix the address pin on a visit', expect.stringContaining('Aug 4'),
+    expect.objectContaining({
+      bell: true,
+      link: '/admin/dispatch?tab=schedule&date=2026-08-04&appointment=s1',
+      dedupeKey: 'auto-dispatch-missing-geo:s1:2026-08-04',
+      refreshOnDedupe: true,
+      metadata: expect.objectContaining({ scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-08-04' }),
+    }),
+  );
+});
+
+describe('missing-geo notice budget (Codex #6208 r3)', () => {
+  function visitsWithoutPin(count) {
+    servicesResult = Array.from({ length: count }, (_, i) => svc({ id: `g${i}`, customer_id: `c${i}`, scheduled_date: `2026-08-${String(10 + i).padStart(2, '0')}` }));
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+    geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  }
+  const keysRung = () => notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
+
+  test('11 visits ring 10 notices, soonest date first; the latest waits for the next run', async () => {
+    visitsWithoutPin(11);
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ skipped: 11, failed: 0, status: 'completed' });
+    expect(keysRung()).toHaveLength(10);
+    expect(keysRung()[0]).toBe('auto-dispatch-missing-geo:g0:2026-08-10');
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+  });
+
+  // The recheck runs BEFORE the budget picks: the soonest visit's pin was
+  // fixed since pass 1, so the eleventh visit takes its slot (Codex #6208 r9 P2).
+  test('a visit fixed since pass 1 frees its slot for a later visit', async () => {
+    visitsWithoutPin(11);
+    let reads = 0;
+    const fixedFirst = () => servicesResult.map((r, i) => (i === 0 ? { ...r, lat: 27.4, lng: -82.5 } : r));
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? servicesResult : fixedFirst())));
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(keysRung()).toHaveLength(10);
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g0:2026-08-10');
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+  });
+
+  // A notice whose write fails rang nothing: its slot goes to the next visit (r13 P2).
+  test('a failed notice write spends no slot', async () => {
+    visitsWithoutPin(11);
+    notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(11);
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+  });
+
+  // notifyAdmin resolves null on a failed write: no notice, no slot (r14 P2).
+  test('a notice write that resolves null spends no slot', async () => {
+    visitsWithoutPin(11);
+    notifications.notifyAdmin.mockResolvedValueOnce(null);
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(11);
+  });
+
+  test('a visit with a standing notice is refreshed and spends no budget', async () => {
+    visitsWithoutPin(12);
+    // The soonest visit's notice stands: its write is deduped and does not ring.
+    audit.standingMissingGeoKeys.mockResolvedValue(new Set(['auto-dispatch-missing-geo:g0:2026-08-10']));
+    notifications.notifyAdmin.mockImplementation(async (_c, _t, _b, opts) => ({ id: 'n1', deduped: opts.dedupeKey === 'auto-dispatch-missing-geo:g0:2026-08-10' }));
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(keysRung()).toHaveLength(11); // the standing one + 10 new
+    expect(keysRung()).toContain('auto-dispatch-missing-geo:g10:2026-08-20');
+    expect(keysRung()).not.toContain('auto-dispatch-missing-geo:g11:2026-08-21');
+  });
+});
+
+test('nothing rings during pass 1: the notice comes at the run end, and a failed key read is logged, not a run failure', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  audit.standingMissingGeoKeys.mockRejectedValue(new Error('notification store down'));
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('a lapsed plan raises no missing-geo notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  // The lapsed visit is in the close list: a standing pin notice for it closes.
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// A stamped address that differs from the customer's skips the geocode
+// self-heal and its plan gate, so the notice's own plan check must put the
+// lapsed visit in the close list (Codex #6208 r6 P2).
+test('a lapsed plan on a visit with a divergent stamped address closes its standing pin notice', async () => {
+  servicesResult = [svc({ id: 's1', service_address_line1: '1 Test Rd', customer_address_line1: '9 Sample Ave' })];
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// Pass 1 makes no plan read for a visit with no answer yet; the run's end
+// reads every collected series in one query (Codex #6208 r27 P2).
+test('pin notice candidates get one bulk plan read at the run\'s end, and a lapsed series closes', async () => {
+  servicesResult = [
+    svc({ id: 's1', recurring_parent_id: 'p1', service_address_line1: '1 Test Rd', customer_address_line1: '9 Sample Ave' }),
+    svc({ id: 's2', recurring_parent_id: 'p2', service_address_line1: '2 Test Rd', customer_address_line1: '9 Sample Ave' }),
+  ];
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.lapsedPlanKeys.mockImplementationOnce(async (rows) => new Set(rows.filter((r) => r.id === 's1').map(eligibility.planKey)));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(eligibility.lapsedPlanKeys).toHaveBeenCalledTimes(1);
+  expect(eligibility.lapsedPlanKeys.mock.calls[0][0].map((r) => r.id)).toEqual(['s1', 's2']);
+  // One single-visit read: just before the one NEW notice (s2).
+  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(1);
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+describe('missing-geo notice close at the end of a run', () => {
+  beforeEach(() => {
+    geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  });
+
+  test('a visit still skipped for a missing pin is not in the close list', async () => {
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledTimes(1);
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(), expect.any(Date));
+  });
+
+  test('a visit that passed eligibility has a usable pin, so its standing notice may close', async () => {
+    eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+  });
+
+  test('does not close on a run that failed before pass 1 finished', async () => {
+    db.mockImplementation(() => { throw new Error('database down'); });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res.status).toBe('failed');
+    expect(audit.retireMissingGeoNotices).not.toHaveBeenCalled();
+    // The standing-notice upkeep reads each notice's own visit, so it does
+    // not depend on pass 1 (Codex #6208 r19 P2).
+    expect(audit.maintainMissingGeoNotices).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not close when a visit failed in pass 1 (it was not fully looked at)', async () => {
+    eligibility.isEligibleForAutoDispatch.mockImplementation(() => { throw new Error('boom'); });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res.failed).toBe(1);
+    expect(audit.retireMissingGeoNotices).not.toHaveBeenCalled();
+  });
+
+  test('a failed close is logged and does not fail the run', async () => {
+    audit.retireMissingGeoNotices.mockRejectedValueOnce(new Error('notification store down'));
+    await expect(runAutoDispatch({ mode: 'dry_run' })).resolves.toMatchObject({ status: 'completed' });
+  });
+});
+
+test('a pin fixed after pass 1 raises no missing-geo notice and the visit joins the close list (Codex #6208 r6 P2)', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  // Every scheduled_services read after the load returns the row with a pin.
+  let reads = 0;
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc({ lat: 27.4, lng: -82.5 })])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// The notice is raised at the run's end: a customer archived or deactivated
+// since pass 1 gets no alert for a pin nobody needs to fix (Codex #6208 r7 P2).
+test.each([
+  ['archived', { customer_deleted_at: '2026-08-01T10:00:00Z' }],
+  ['deactivated', { customer_active: false }],
+  // Staff took the visit out of auto-dispatch after pass 1 (r21 P2).
+  ['with a visit locked', { auto_dispatch_locked: true }],
+  ['with a visit excluded', { auto_dispatch_excluded: true }],
+  ['who confirmed the visit', { customer_confirmed: true }],
+])('a customer %s after pass 1 raises no missing-geo notice', async (_label, change) => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  let reads = 0;
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc(change)])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
+// Pass 1 reuses the plan answer the geo self-heal read (no second read per
+// skipped visit, r8 P2). The plan is read once more only just before a
+// notice is raised, at most once per notice (r11 P2).
+test('a missing-geo visit reads its plan once in pass 1 and once before its notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(eligibility.isRecurringPlanActive).toHaveBeenCalledTimes(2);
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+});
+
+test('a plan that lapses between pass 1 and the notice raises nothing and joins the close list (Codex #6208 r11 P2)', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  eligibility.isRecurringPlanActive.mockResolvedValueOnce({ active: true }).mockResolvedValueOnce({ active: false });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
+});
+
+// notifyAdmin writes no row for an internal test customer, so its visit takes
+// no slot from a real customer's (Codex #6208 r8 P2).
+test('withinRingBudget skips an internal test customer before it counts slots', () => {
+  const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+  const rows = [
+    { id: 'demo', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], date: '2026-08-01' },
+    { id: 'real', customer_id: 'c-real', date: '2026-08-02' },
+  ];
+  expect(audit.withinRingBudget(rows, new Set(), 1, audit.missingGeoKey).map((r) => r.id)).toEqual(['real']);
+});
+
+test('a failed missing-geo notice is logged and fails neither the visit nor the run', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ skipped: 1, failed: 0, status: 'completed' });
+  expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
+});
+
+test('an ineligible visit for any other reason raises no missing-geo notice', async () => {
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'LOCKED', reason_description: 'locked' });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
 });
 
 test('caps geocode ATTEMPTS even when they all fail (counts attempts, not successes)', async () => {
@@ -718,7 +1006,7 @@ describe('shared-model apply path (Codex r1)', () => {
   });
 });
 
-describe('day moves need a real drive saving (owner 2026-10-09)', () => {
+describe('moves need a real drive saving (owner 2026-10-09; same-day re-times too)', () => {
   const DEFAULT_WINDOW = { key: 'early_morning', startMin: 480, endMin: 600 };
   const prefsWithDefaultWindow = {
     preferred_day_indexes: [], effective_time_window: DEFAULT_WINDOW, preferred_time_window: null,
@@ -748,13 +1036,66 @@ describe('day moves need a real drive saving (owner 2026-10-09)', () => {
     expect(['NO_DRIVE_SAVING', 'NO_SCORE_IMPROVEMENT']).toContain(row.reason_code);
   });
 
-  test('the same gain as a same-day re-time is recommended', async () => {
+  test('a same-day re-time that saves no drive is not recommended either (it was before 2026-10-09)', async () => {
     preferences.getCustomerSchedulingPreferences.mockResolvedValue(prefsWithDefaultWindow);
     servicesResult = [svc({ window_start: '14:00', window_end: '15:00' })];
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: AFTERNOON, candidates: [{ ...NO_SAVING_DAY_MOVE, date: CURRENT.date }] });
     const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ recommended: 0 });
+    const row = lastDecision('no_change');
+    expect(row.routeMetrics).toMatchObject({ day_move: false, drive_saving_minutes: 0 });
+    expect(['NO_DRIVE_SAVING', 'NO_SCORE_IMPROVEMENT']).toContain(row.reason_code);
+  });
+
+  test('a same-day re-time that saves the floor in drive is recommended', async () => {
+    preferences.getCustomerSchedulingPreferences.mockResolvedValue(prefsWithDefaultWindow);
+    servicesResult = [svc({ window_start: '14:00', window_end: '15:00' })];
+    const current = { ...AFTERNOON, detour_minutes: 20 };
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [{ ...NO_SAVING_DAY_MOVE, date: CURRENT.date, detour_minutes: 5 }] });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
     expect(res).toMatchObject({ recommended: 1 });
-    expect(lastDecision('recommended').routeMetrics).toMatchObject({ day_move: false });
+    expect(lastDecision('recommended').routeMetrics).toMatchObject({ day_move: false, drive_saving_minutes: 15 });
+  });
+
+  // GATE_AUTO_DISPATCH_ROAD_CHECK (owner 2026-10-09, "drive time yes").
+  describe('the road check on a move the model approves', () => {
+    const roadCheck = require('../services/auto-dispatch/road-check');
+    const legs = (name, date) => ({ [roadCheck.ROAD_LEGS]: { prev: { p: name }, stop: { s: name }, next: { n: name }, date, startMin: 540 } });
+    // [in, out, base] minutes per placement, as Google would answer.
+    const roads = (table) => jest.spyOn(roadCheck, 'createRunTravel').mockReturnValue({
+      preload: async () => {},
+      lookup: (leg) => ({ minutes: table[leg.from.p || leg.from.s][leg.from.s ? 1 : (leg.to.s ? 0 : 2)], source: 'google_traffic' }),
+      diagnostics: () => ({ requests: 6, elements: 6 }),
+    });
+    const current = { ...CURRENT, ...legs('now', CURRENT.date) };
+    const cand = { ...CAND_BIG, ...legs('cand', CAND_BIG.date) };
+    afterEach(() => jest.restoreAllMocks());
+
+    test('real roads agree: the move is recommended and the row carries both numbers', async () => {
+      roads({ now: [25, 25, 10], cand: [10, 10, 10] });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true })).toMatchObject({ recommended: 1 });
+      expect(lastDecision('recommended').routeMetrics).toMatchObject({
+        drive_saving_minutes: 40, road: { saving_minutes: 30, current_detour_minutes: 40, candidate_detour_minutes: 10, source: 'google' },
+      });
+    });
+
+    test('real roads say the move saves too little: nothing moves (NO_ROAD_DRIVE_SAVING)', async () => {
+      roads({ now: [12, 12, 10], cand: [11, 11, 10] });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true })).toMatchObject({ recommended: 0 });
+      const row = lastDecision('no_change');
+      expect(row.reason_code).toBe('NO_ROAD_DRIVE_SAVING');
+      expect(row.reason_description).toBe('The model says the move saves 40 drive minutes; real roads say 2 < 6 required');
+    });
+
+    test('gate off: no reader is made and the model decides alone', async () => {
+      const made = roads({ now: [12, 12, 10], cand: [11, 11, 10] });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current, candidates: [cand] });
+      expect(await runAutoDispatch({ mode: 'dry_run' })).toMatchObject({ recommended: 1 });
+      expect(made).not.toHaveBeenCalled();
+      expect(lastDecision('recommended').routeMetrics.road).toBeUndefined();
+    });
   });
 
   test('a day move over the score bar with under 6 minutes saved reads NO_DRIVE_SAVING', async () => {
@@ -932,5 +1273,393 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     } finally {
       process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
     }
+  });
+});
+
+describe('move limit (owner 2026-10-09: at most two automatic moves per visit)', () => {
+  const AT_LIMIT = [{ scheduled_service_id: 's1', moves: '2' }];
+  const OVERLAP = { kind: 'overlap', date: CURRENT.date, with: ['other-1'] };
+  const applyMode = async (fn) => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try { return await fn(); } finally { process.env.AUTO_DISPATCH_ALLOW_APPLY = prev; }
+  };
+  // The run's end re-reads each conflict visit's row after a move: let a
+  // point-read of scheduled_services answer with that visit's row.
+  const rowReads = () => {
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const chain = base(table);
+      if (table !== 'scheduled_services') return chain;
+      let wanted = null;
+      const where = chain.where;
+      chain.where = (...args) => { if (args[0] && typeof args[0] === 'object' && args[0].id) wanted = args[0].id; return where(...args); };
+      chain.first = async () => [...servicesResult, ...unscannedRows].find((row) => row.id === wanted) || null;
+      return chain;
+    });
+  };
+  // Visits the scan does not load (a one-time add-on, a person-placed visit)
+  // that a point-read still finds.
+  let unscannedRows = [];
+  beforeEach(() => { unscannedRows = []; });
+  // The run's end reads every conflict again (Codex #6253 r3): the visit's
+  // row is there and the conflict still stands.
+  const standing = (conflict = OVERLAP) => {
+    rowReads();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(conflict);
+  };
+  const inConflict = { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] };
+  const noticedIds = () => raiseAdminAlert.mock.calls.map(([, spec]) => spec.subject.id).sort();
+
+  test('pass 1: a visit at the limit is skipped before any candidate is searched; a moved-once visit still moves', async () => {
+    moveLogReads = [AT_LIMIT];
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ skipped: 1, evaluated: 0, recommended: 0 });
+    expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+    expect(lastDecision('skipped')).toMatchObject({ reason_code: 'MOVE_LIMIT_REACHED', reason_description: expect.stringContaining('limit 2') });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+
+    moveLogReads = [[{ scheduled_service_id: 's1', moves: '1' }]];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    expect(await runAutoDispatch({ mode: 'dry_run' })).toMatchObject({ recommended: 1 });
+  });
+
+  test('one bulk read counts every loaded visit (no per-visit query in pass 1)', async () => {
+    servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' }), svc({ id: 'c1' })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(db.mock.calls.filter(([t]) => t === 'reschedule_log')).toHaveLength(1);
+  });
+
+  test('AUTO_DISPATCH_MAX_MOVES_PER_VISIT 0 turns the limit off and reads nothing', async () => {
+    moveLogReads = [AT_LIMIT];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    expect(await runAutoDispatch({ mode: 'dry_run', maxAutoMovesPerVisit: 0 })).toMatchObject({ recommended: 1 });
+    expect(db.mock.calls.filter(([t]) => t === 'reschedule_log')).toHaveLength(0);
+  });
+
+  test('an unreadable move log moves nothing and the run says so (fail closed)', async () => {
+    moveLogReads = [new Error('log down')];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ status: 'completed_with_errors', recommended: 0, skipped: 1 });
+    expect(lastDecision('skipped').reason_code).toBe('MOVE_COUNT_UNKNOWN');
+  });
+
+  test('pass 2: a move another run landed since pass 1 is counted, and the visit does not move', async () => {
+    await applyMode(async () => {
+      moveLogReads = [[], AT_LIMIT]; // pass-1 bulk read clean; pass-2 single read at the limit
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 0 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      expect(lastDecision('no_change')).toMatchObject({ reason_code: 'MOVE_LIMIT_REACHED' });
+    });
+  });
+
+  test('a visit in conflict at the limit is not moved and a person is told', async () => {
+    await applyMode(async () => {
+      moveLogReads = [AT_LIMIT];
+      standing();
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
+      const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ changed: 0, skipped: 1 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+      const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
+      expect(category).toBe('schedule_conflict');
+      expect(spec).toMatchObject({ area: 'Schedule', severity: 'needs-you', who: 'person', subject: { type: 'visit', id: 's1' } });
+      expect(spec.link).toBe('/admin/dispatch?tab=schedule&date=2026-08-04&appointment=s1');
+      expect(opts).toMatchObject({ bell: true, dedupeKey: 'auto-dispatch-needs-person:s1:2026-08-04', refreshOnDedupe: true });
+    });
+  });
+
+  // Codex #6253 r5: the recurring-placement alert already tells a person
+  // about a visit with no arrival time; this lane adds no second bell.
+  test('an unplaced due-date visit at the limit is not placed, and this lane raises no notice for it', async () => {
+    moveLogReads = [AT_LIMIT];
+    servicesResult = [svc({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-06' })];
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ skipped: 1, recommended: 0 });
+    expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  // Codex #6253 r5 P1: a guard skips the visit before any conflict read.
+  test('a visit a guard skipped before evaluation (person-placed) still raises the notice when it is in conflict', async () => {
+    rowReads();
+    const placed = { placed: true, reason_code: 'PERSON_PLACED', reason_description: 'placed by a person' };
+    eligibility.isPersonPlacedVisit.mockResolvedValueOnce(placed).mockResolvedValueOnce(placed).mockResolvedValueOnce(placed);
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ skipped: 1, evaluated: 0 });
+    expect(noticedIds()).toEqual(['s1']);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/overlaps another stop, and auto-dispatch did not move it/);
+    // Clear: nothing raised, and its standing notice may close.
+    raiseAdminAlert.mockClear();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    // Gate off: no conflict is read for anyone.
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  // Codex #6253 r1 P1: a qualifying move that a grouped sibling's guard
+  // refuses leaves the visit in conflict; a person is told.
+  test('a conflict visit whose grouped sibling refuses the move raises the notice', async () => {
+    standing();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
+    apply.previewGroupMove.mockResolvedValueOnce({ code: 'GROUP_MEMBER_GUARD', description: 'a sibling reached the move limit' });
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(lastDecision('no_change').reason_code).toBe('GROUP_MEMBER_GUARD');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/overlaps another stop, and auto-dispatch did not move it/);
+    // The same refusal on a visit that is not in conflict tells nobody.
+    raiseAdminAlert.mockClear();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    apply.previewGroupMove.mockResolvedValueOnce({ code: 'GROUP_MEMBER_GUARD', description: 'a sibling reached the move limit' });
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a conflict visit whose write fails raises the notice', async () => {
+    await applyMode(async () => {
+      standing();
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
+      apply.applyAutoDispatchMove.mockRejectedValue(new Error('refused by the writer'));
+      const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ changed: 0, failed: 1 });
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // Codex #6253 r2: the run decides ONCE, at its end, from what is true then.
+  describe('every conflict the run leaves in place, whatever path left it', () => {
+    test('a qualifying conflict move held by the per-run cap raises the notice; the one that moved does not', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+        candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+        // After the run: a1 moved and is clear, b1 still overlaps.
+        candidateSlots._internals.readCurrentConflict.mockImplementation(async (service) => (service.id === 'b1' ? OVERLAP : null));
+        const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true, maxChangesPerRun: 1 });
+        expect(res).toMatchObject({ changed: 1, recommended: 1 });
+        expect(lastDecision('recommended').reason_code).toBe('MAX_CHANGES_REACHED');
+        expect(noticedIds()).toEqual(['b1']);
+      });
+    });
+
+    test('a partial grouped move: the member left behind raises the notice, the primary that moved does not', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 's1' }), svc({ id: 'm2' })];
+        candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+        apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('partial'), { code: 'VISIT_PARTIAL_MOVE', movedCount: 1, failedMembers: ['m2'] }));
+        candidateSlots._internals.readCurrentConflict.mockImplementation(async (service) => (service.id === 'm2' ? OVERLAP : null));
+        const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(res).toMatchObject({ changed: 1, failed: 1 });
+        expect(noticedIds()).toEqual(['m2']);
+      });
+    });
+
+    // Codex #6253 r4 P1: a one-time add-on is never loaded by the scan, so
+    // it has no ledger entry of its own.
+    test('a partial grouped move: a member the scan never loaded is read at the end too', async () => {
+      await applyMode(async () => {
+        rowReads();
+        unscannedRows = [svc({ id: 'addon', is_recurring: false })];
+        candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+        apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('partial'), { code: 'VISIT_PARTIAL_MOVE', movedCount: 1, failedMembers: ['addon'] }));
+        candidateSlots._internals.readCurrentConflict.mockImplementation(async (service) => (service.id === 'addon' ? OVERLAP : null));
+        await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(noticedIds()).toEqual(['addon']);
+        // Left behind but clear of every stop: nothing to tell.
+        raiseAdminAlert.mockClear();
+        candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+        await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(noticedIds()).toEqual([]);
+      });
+    });
+
+    // Codex #6253 r4 P2: a person-placed visit is skipped before the conflict
+    // read, so the run reads the conflict of every visit with an open notice.
+    test('an open notice on a visit the run never evaluated closes when a person fixed it, and only then', async () => {
+      const closable = () => {
+        const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+        audit.retireResolvedNotices.mock.calls[audit.retireResolvedNotices.mock.calls.length - 1][0].stillOpen(q);
+        return q.whereNotIn.mock.calls.flatMap(([, ids]) => ids);
+      };
+      rowReads();
+      servicesResult = [];
+      unscannedRows = [svc({ id: 'placed' }), svc({ id: 'notime', window_start: null })];
+      audit.standingNoticeKeys.mockResolvedValue(new Set(['auto-dispatch-needs-person:placed:2026-08-04', 'auto-dispatch-needs-person:notime:2026-08-04']));
+      // Still overlapping: the notice stays, and no second one is raised.
+      candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(closable()).toEqual([]);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      // The person re-timed it clear. The visit with no arrival time is not
+      // "clear": its own row decides that notice.
+      candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(closable()).toEqual(['placed']);
+      // Gate off: no conflict is read, so nothing is proven.
+      await runAutoDispatch({ mode: 'dry_run' });
+      expect(closable()).toEqual([]);
+    });
+
+    test('a visit whose overlap a partner\'s move cleared raises nothing and is proof for the closer', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+        // b1 has no slot of its own; a1 moves away and frees it.
+        candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => (service.id === 'a1'
+          ? inConflict : { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] }));
+        const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(res).toMatchObject({ changed: 1 });
+        expect(raiseAdminAlert).not.toHaveBeenCalled();
+        const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+        audit.retireResolvedNotices.mock.calls[audit.retireResolvedNotices.mock.calls.length - 1][0].stillOpen(q);
+        expect(q.whereNotIn.mock.calls.flatMap(([, ids]) => ids).sort()).toEqual(['a1', 'b1']);
+      });
+    });
+
+    test('a re-read that fails keeps what the run saw', async () => {
+      await applyMode(async () => {
+        rowReads();
+        servicesResult = [svc({ id: 'a1' }), svc({ id: 'b1' })];
+        candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => (service.id === 'a1'
+          ? inConflict : { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] }));
+        candidateSlots._internals.readCurrentConflict.mockRejectedValue(new Error('read down'));
+        await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(noticedIds()).toEqual(['a1', 'b1']);
+      });
+    });
+
+    test('a dry run moves nothing, so a conflict with a recommended move is told too', async () => {
+      standing();
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ changed: 0 });
+      expect(noticedIds()).toEqual(['s1']);
+    });
+  });
+
+  // The closer needs proof. `provenClear` reads the ids the run handed it.
+  describe('which standing notices a run may close', () => {
+    const provenClear = () => {
+      const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+      audit.retireResolvedNotices.mock.calls[audit.retireResolvedNotices.mock.calls.length - 1][0].stillOpen(q);
+      return q.whereNotIn.mock.calls.flatMap(([, ids]) => ids);
+    };
+
+    test('a visit read clear at the end of the run is proof', async () => {
+      rowReads();
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(provenClear()).toEqual(['s1']);
+    });
+
+    test('the conflict gate off proves nothing: the conflict was never read', async () => {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
+      await runAutoDispatch({ mode: 'dry_run' });
+      expect(provenClear()).toEqual([]);
+    });
+
+    // Codex #6253 r1 P2: the move log could not be read, every visit skipped.
+    test('a run whose move-count read failed proves nothing', async () => {
+      moveLogReads = [new Error('log down')];
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
+      const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ status: 'completed_with_errors', skipped: 1 });
+      expect(provenClear()).toEqual([]);
+    });
+
+    test('a visit still in conflict is not proof; a visit the run moved is', async () => {
+      standing();
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(provenClear()).toEqual([]);
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+      raiseAdminAlert.mockClear();
+      await applyMode(async () => {
+        // After the move the conflict reads clear.
+        candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+        candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
+        const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+        expect(res).toMatchObject({ changed: 1 });
+        expect(provenClear()).toEqual(['s1']);
+        expect(raiseAdminAlert).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  test('a conflict visit whose every slot adds too much drive raises the notice (CONFLICT_NO_NEAR_SLOT)', async () => {
+    const FAR = { ...CAND_SMALL, detour_minutes: 60 };
+    standing();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [FAR] });
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(lastDecision('no_change').reason_code).toBe('CONFLICT_NO_NEAR_SLOT');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/adds too much drive/);
+  });
+
+  test('a conflict visit with no valid slot at all raises the notice; one that is not in conflict does not', async () => {
+    standing({ kind: 'closed_day', date: CURRENT.date });
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: { kind: 'closed_day', date: CURRENT.date } }, candidates: [] });
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(lastDecision('no_change').reason_code).toBe('NO_VALID_SLOT');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ why: expect.stringMatching(/closed day.*no open slot/) });
+
+    raiseAdminAlert.mockClear();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  // Codex #6253 r6: a clear read from earlier in the run is not final.
+  test('a visit read clear in pass 1 that a person put into an overlap during the run raises the notice', async () => {
+    rowReads();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(noticedIds()).toEqual(['s1']);
+  });
+
+  // Codex #6253 r3: nothing moved in the run, but a person cancelled the
+  // visit (or moved it clear) while the run worked.
+  test('a conflict a person fixed during the run raises nothing, even when the run moved nothing', async () => {
+    rowReads();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
+    // The end-of-run read finds the visit clear.
+    expect(await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true })).toMatchObject({ changed: 0 });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    // ...or cancelled: no notice, and no proof of a clear conflict either.
+    servicesResult = [svc({ status: 'cancelled' })];
+    standing();
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a failing notice never fails the run', async () => {
+    standing();
+    raiseAdminAlert.mockRejectedValueOnce(new Error('notifications down'));
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res.status).toBe('completed');
+  });
+
+  test('a closed-day read that throws fails the visit, not the run, and nothing moves (strict blackout read)', async () => {
+    await applyMode(async () => {
+      candidateSlots.findValidCandidateSlots.mockRejectedValue(new Error('blackout list unreadable'));
+      const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
+      expect(res).toMatchObject({ status: 'completed_with_errors', failed: 1, changed: 0 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    });
   });
 });

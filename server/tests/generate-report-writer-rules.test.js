@@ -709,3 +709,103 @@ test('gate on: a note of plain words that sit inside catalog names keeps an ordi
   expect(mockProvider).toHaveBeenCalledTimes(1);
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: ordinary }));
 });
+
+// Owner 2026-10-09: a note with "no issues inside" cost four blind drafts and
+// then the standard report. A rejected draft now goes back with what it broke.
+describe('a rejected draft is repaired, not written blind again', () => {
+  const REJECTED = CLEAN_V2.replace('and activity was light.', 'and there were no issues inside.');
+
+  test('gate on: the same provider gets its draft back with the reason and the words that tripped it', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: REJECTED }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (repair case).' }), res);
+    expect(mockProvider).toHaveBeenCalledTimes(2);
+    const [first, second] = mockProvider.mock.calls.map(([call]) => call);
+    expect(first.text).not.toContain('PREVIOUS DRAFT');
+    expect(second.text.startsWith(first.text)).toBe(true);
+    expect(second.system).toBe(first.system);
+    const note = second.text.slice(first.text.length);
+    expect(note).toContain(`PREVIOUS DRAFT (rejected; never reuse its wording where it broke the rule):\n${REJECTED}`);
+    expect(note).toContain('A PREVIOUS DRAFT OF THIS REPORT WAS REJECTED because it uses a phrase the report refuses');
+    expect(note).toContain('The words that tripped it: "no issues".');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  });
+
+  test('gate on: the backup provider gets the reason and the words, never the other provider\'s draft', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: REJECTED }))
+      .mockImplementationOnce(async () => ({ ok: true, text: REJECTED }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (backup repair case).' }), mkRes());
+    expect(mockProvider).toHaveBeenCalledTimes(3);
+    const [first, , third] = mockProvider.mock.calls.map(([call]) => call);
+    const note = third.text.slice(first.text.length);
+    expect(note).not.toContain('PREVIOUS DRAFT (rejected');
+    expect(note).not.toContain('Ghost ants were trailing');
+    expect(note).toContain('The words that tripped it: "no issues".');
+  });
+
+  test('gate on: a shaped draft the parser refuses for a word is repaired by that word, not as a bad shape', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    const shaped = CLEAN_V2.replace('and activity was light.', 'and it looked like an infestation.');
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: shaped }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (parser word repair case).' }), res);
+    expect(mockProvider).toHaveBeenCalledTimes(2);
+    const [first, second] = mockProvider.mock.calls.map(([call]) => call);
+    const note = second.text.slice(first.text.length);
+    expect(note).toMatch(/REJECTED because it uses words the report refuses \("infestation"/);
+    expect(note).not.toContain('it is not the four titles');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  });
+
+  test('gate on: a draft in the wrong shape is still repaired as a bad shape', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (shape repair case).' }), mkRes());
+    const [first, second] = mockProvider.mock.calls.map(([call]) => call);
+    expect(second.text.slice(first.text.length)).toContain('it is not the four titles');
+  });
+
+  test('gate on: a note that says "no issues" carries the hint under the note', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    await handler(mkReq({ serviceNotes: 'Sprayed the perimeter, customer home, No Issues inside (hint case).' }), mkRes());
+    expect(mockProvider.mock.calls[0][0].text).toContain('(The note says "no issues". The report refuses those words:');
+    mockProvider.mockClear();
+    await handler(mkReq({ serviceNotes: 'Sprayed the perimeter, customer home (no hint case).' }), mkRes());
+    expect(mockProvider.mock.calls[0][0].text).not.toContain('The report refuses those words');
+  });
+
+  test('gate off: the retry is the same message, and no hint is added', async () => {
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: 'not a report' }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track, no issues inside (gate-off repair case).' }), mkRes());
+    expect(mockProvider).toHaveBeenCalledTimes(2);
+    const [first, second] = mockProvider.mock.calls.map(([call]) => call);
+    expect(second.text).toBe(first.text);
+    expect(first.text).not.toContain('The report refuses those words');
+  });
+
+  test('gate on, lawn: outside the writer rules the retry stays the same message', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProfile = { serviceKey: 'lawn_care_6week', findingsType: null };
+    mockServiceType = 'Every 6 Weeks Lawn Care Service';
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: 'not a report' }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+    await handler(mkReq({ serviceNotes: 'Fed the front lawn, no issues (lawn repair case).' }), mkRes());
+    const calls = mockProvider.mock.calls.map(([call]) => call);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[1].text).toBe(calls[0].text);
+    expect(calls[0].text).not.toContain('The report refuses those words');
+  });
+});

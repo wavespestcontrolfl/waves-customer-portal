@@ -22,6 +22,11 @@ jest.mock('../services/service-completion-profiles', () => ({
 jest.mock('../services/visit-groups', () => ({ lockStopForRow: jest.fn(async () => {}), stopBaseKey: jest.fn(() => 'fixture-stop') }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(async () => null) }));
+// The visit's area add-on rows: none in these fixtures (the suite's db fake has no scheduled_service_addons join).
+jest.mock('../services/area-addon-visit-rows', () => ({
+  ...jest.requireActual('../services/area-addon-visit-rows'),
+  areaAddOnKeysByVisit: jest.fn(async () => new Map()),
+}));
 
 const db = require('../models/db');
 const attempts = require('../services/completion-attempts');

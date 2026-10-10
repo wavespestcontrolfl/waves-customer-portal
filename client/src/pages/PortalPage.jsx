@@ -1988,7 +1988,7 @@ function PhotoGallery({ photos }) {
           }}>
             {/* Eager: presigned URL — lazy deferred the fetch past expiry
                 and thumbnails rendered blank. */}
-            <img src={p.url} alt={`Lawn ${p.type || ''}`} style={{
+            <img src={p.url} alt={p.labelPicked ? `Lawn ${p.labelPicked.toLowerCase()}` : `Lawn ${p.type || ''}`} style={{
               width: '100%', height: '100%', objectFit: 'cover',
             }} />
             {p.isBest && (
@@ -1997,14 +1997,14 @@ function PhotoGallery({ photos }) {
                 fontSize: 14, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
               }}>BEST</div>
             )}
-            {p.type && p.type !== 'general' && (
+            {(p.labelPicked || (p.type && p.type !== 'general')) && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
                 background: 'linear-gradient(transparent, rgba(0,0,0,0.6))',
                 color: '#fff', fontSize: 14, fontWeight: 600, padding: '12px 8px 6px',
                 textTransform: 'capitalize',
               }}>
-                {p.type.replace(/_/g, ' ')}
+                {p.labelPicked || p.type.replace(/_/g, ' ')}
               </div>
             )}
           </div>

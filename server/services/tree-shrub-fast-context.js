@@ -85,6 +85,8 @@ function treeShrubProductFlags(row, { serviceDate, zone }) {
 // cover: companion sections (the retired lawn+T&S combo) and grouped visits.
 async function treeShrubFastIneligibleReason(svc, profile, knex) {
   if (!profile) return 'profile_unavailable';
+  // An attached area add-on row is work this sheet cannot record (product and treated area).
+  if (svc.hasAreaAddOnRows) return 'area_addon_attached';
   if (!isTreeShrubFastProfile(profile)) return 'not_tree_shrub';
   if (profile.projectBacked || profile.requiresProject) return 'project_backed';
   if (Array.isArray(profile.companions) && profile.companions.length) return 'has_companions';

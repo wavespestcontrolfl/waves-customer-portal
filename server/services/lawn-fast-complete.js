@@ -23,12 +23,14 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 const bermudaRemoval = require('./lawn-bermuda-removal');
+const { FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
@@ -96,9 +98,24 @@ function lawnFastVisitType(profile, billingMode, isCallback = false) {
  * `allowStatuses` lists visit statuses NOT treated as terminal (the submit
  * preflight passes ['completed'], see preflightLawnFastCompletion).
  */
+// A lawn visit by its completion profile. An area add-on (lawn care by family)
+// is generic one-time work with its own governed recipe: never the lawn
+// program's sheet, whatever its name says.
+function isLawnProgramProfile(profile) {
+  return profile.category === LAWN_CATEGORY && !isAreaAddOnCatalogKey(profile.serviceKey);
+}
+
+// Why this is not a lawn-program visit for the sheet, or null: not a lawn visit at all, or a visit
+// with an attached area add-on row (work this sheet cannot record: its product and treated area).
+function lawnProgramRefusal(svc, profile) {
+  if (!isLawnProgramProfile(profile)) return 'not_lawn';
+  return svc?.hasAreaAddOnRows ? 'area_addon_attached' : null;
+}
+
 function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
   if (!profile) return 'profile_unavailable';
-  if (profile.category !== LAWN_CATEGORY) return 'not_lawn';
+  const notLawnProgram = lawnProgramRefusal(svc, profile);
+  if (notLawnProgram) return notLawnProgram;
   // The three lawn_care sheets partition the visits: the lawn re-service and Tree & Shrub
   // (which shares the lawn_care category) are decided by their OWN sheets' predicates, and
   // the Waves Assessment visit is its own diagnostic lane. Derived from the completion
@@ -501,6 +518,13 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
+// GATE_LAWN_NOV_LARGE_PATCH_N: a nitrogen line the plan sized for the reduced target keeps the plan's note on the sheet (the planned row
+// prints its gateNotes). Only that note is carried: every other planned row is the payload it was. `{}` when the plan did not cut the bag.
+function fungusNitrogenNoteOf(item) {
+  const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => note?.key === FUNGUS_NITROGEN_NOTE_KEY && note.text).map((note) => note.text);
+  return texts.length ? { gateNotes: texts } : {};
+}
+
 // GATE_LAWN_TROUBLE_AREAS: the places the yearly limits are judged at (lawn-trouble-areas.js), or null (gate off: every
 // decision is the lawn-wide one, as before).
 const limitPlaces = async (svc, knex) => (featureGates.lawnTroubleAreasLive() && await require('./lawn-trouble-areas').propertyOf(knex, svc) ? require('./lawn-trouble-areas').PLACE_IDS : null);
@@ -691,6 +715,7 @@ async function sheetPlanned({ plan, items, addOns }, knex) {
       ratePer1000: item.mix?.ratePer1000 ?? null,
       rateUnit: item.mix?.rateUnit ?? null,
       ...programRateFor(item, programRows),
+      ...fungusNitrogenNoteOf(item),
       approvedForReport: entry.approvedForReport,
       wateringRule: entry.rule,
       wateringSummary: entry.ruleSummary,
@@ -1116,6 +1141,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  *   profile_unavailable                          503 (retry, same key; a transient lookup failure)
  *   not_lawn, lawn_re_service, assessment_visit,
  *   project_backed, has_companions, grouped_visit,
+ *   area_addon_attached (the visit carries an area add-on row),
  *   terminal_status (cancelled, skipped, no_show,
  *     incomplete, rescheduled)                   409 lawn_fast_not_eligible (terminal)
  *   terminal_status when status is 'completed'   allowed (see above)
@@ -1134,7 +1160,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, packetContext } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, packetContext, propertyServiceArea = null, actor = null } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
   if (!featureGates.lawnFastCompleteLive()) {
@@ -1242,7 +1268,7 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   // GATE_LAWN_MIX_HELP: gallons sprayed become the recorded spot area first (lawn-mix-help.js), so the places are judged on it.
   return require('./lawn-sod-sheet').checkNoProductNote({
     knex, svc, products, technicianNotes,
-    next: () => require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products })),
+    next: () => require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan, propertyServiceArea, actor }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products })),
   });
 }
 

@@ -20,6 +20,7 @@ const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
+const { applyStage1Fixes } = require('./lawn-report-stage1');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { waterPolishFields, snapshotForCard } = require('./lawn-report-polish');
 const { withCappedRain, rainCardAllowed, applyRainCard, waterStatusFor, deficitRootCause } = require('./lawn-water-rain');
@@ -535,6 +536,26 @@ function buildAftercare(applications, opts = {}) {
       waterInBy: instruction.waterInBy || null,
     });
   }
+  // GATE_LAWN_WATER_IN_RAIN: rain since the visit has watered the treatment in (read-time state, never frozen). The
+  // sentences are the instruction's own; no water-in is owed, so nothing is credited to the weekly plan. A hold line the
+  // visit had is still a hold, so the hold verdict and its task stay.
+  if (instruction && instruction.state === 'water_in_by_rain' && Array.isArray(instruction.lines) && instruction.lines.length >= 2) {
+    const holdKept = instruction.lines.length > 2;
+    return normalizeLawnAftercare({
+      watering: instruction.lines.join(' '),
+      reentry,
+      waterInRequired: false,
+      wateringHold: holdKept,
+      creditableWaterIn: false,
+      needsReview: false,
+      neutral: false,
+      evidenceSource: 'product_instruction',
+      ruleSource: instruction.ruleSource || null,
+      ...(holdKept ? { holdTask: instruction.lines[0] } : {}),
+      holdUntil: instruction.holdUntil || null,
+      waterInBy: instruction.waterInBy || null,
+    });
+  }
   if (instruction && instruction.state === 'none') {
     return {
       watering: NEUTRAL_AFTERCARE, reentry, waterInRequired: false, neutral: true, ruleSource: instruction.ruleSource || null,
@@ -741,7 +762,7 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
     .slice(0, photoLimit)
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
-    .map((p) => ({ url: p.url, label: photoZoneLabel(p.zone) }));
+    .map((p) => ({ url: p.url, label: p.labelPicked || photoZoneLabel(p.zone) }));
   // The stock "No additional observations from the photo review." placeholder
   // is not a summary: it would print as a visible sentence under the photos
   // (web strip and PDF), so it collapses to null like an empty summary.
@@ -918,10 +939,12 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
 }
 
 // The exported builder: the lawn reportV2 above, then (GATE_LAWN_REPORT_COPY_FIXES live) the copy
-// fixes. The builder above carries none of the gate's decisions; lawn-report-copy-fixes.js owns them.
+// fixes, then (GATE_LAWN_REPORT_STAGE1_FIXES live) the stage 1 fixes. The builder above carries none of the gate's decisions; lawn-report-copy-fixes.js owns them.
 function buildLawnReportV2WithCopyFixes(args) {
   const v2 = buildLawnReportV2(args);
-  return v2 && copyFixesLive() ? applyLawnCopyFixes(v2, args) : v2;
+  const fixed = v2 && copyFixesLive() ? applyLawnCopyFixes(v2, args) : v2;
+  // GATE_LAWN_REPORT_STAGE1_FIXES: the damage finding names the targeted pest (a no-op while the gate is off).
+  return applyStage1Fixes(fixed, args, classifyProduct);
 }
 
 module.exports = { buildLawnReportV2: buildLawnReportV2WithCopyFixes, monthLabel, classifyProduct, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };

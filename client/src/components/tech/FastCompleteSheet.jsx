@@ -921,23 +921,11 @@ function reportServiceDate(day) {
 // marks and the photos the writer reads. The tip prints as its own card on
 // the report (the writer never repeats it), so it is not part of it. Nor is
 // the trace: it only gives a perimeter spray its length.
-// Whether the visit swept the eaves and webs (owner 2026-10-08): what the
-// note's read heard, unless the tech tapped the chip, whose word then stands.
-// The chip corrects a read that heard a sweep that was not done, or missed one.
-function sweptOf(form, facts) {
-  return typeof form?.sweepPick === 'boolean' ? form.sweepPick : facts?.sweptEaves === true;
-}
-
-// What the writer is told when the chip is tapped off (keyed by `sweepPick`;
-// tapped on or untouched adds nothing): a note that says "swept the eaves"
-// must not put the sweep back on the report.
-const SWEEP_WRITER_CORRECTION = { false: { sweepNotDone: true } };
-
-// The chip's state for the report card, or null where no sweep is recorded.
-function sweepChipFor(ctx, form, draft, setForm) {
-  if (ctx.houseMix !== true) return null;
-  const on = sweptOf(form, draft?.facts);
-  return { on, onToggle: () => setForm((prev) => ({ ...prev, sweepPick: !on })) };
+// Whether the visit swept the eaves and webs: only what the note's read
+// heard (owner 2026-10-09: the tech says it in the note or it is not on the
+// record; no separate control).
+function sweptOf(facts) {
+  return facts?.sweptEaves === true;
 }
 
 function writerSignature(form, rows, promiseMarks, photos, recordPart = null) {
@@ -949,8 +937,6 @@ function writerSignature(form, rows, promiseMarks, photos, recordPart = null) {
       .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null, row.rateMethod ?? null])
       .sort(([a], [b]) => a.localeCompare(b)),
     customerHome: form.customerHome,
-    // The tech's own word on the sweep (the chip), when it differs from the read.
-    sweepPick: form.sweepPick ?? null,
     rating: form.rating,
     // Choosing the default's own value still changes what the writer reads.
     ratingPrefilled: !!form.ratingPrefilled,
@@ -1060,7 +1046,7 @@ function reportCompletionBody({
     // The sweep heard in the note (owner 2026-10-08): the full form's protocol
     // action and its exterior / no-treatment scope, which the report's spider
     // section reads.
-    ...pestSweepCompletionFields(sweptOf(form, heard)),
+    ...pestSweepCompletionFields(sweptOf(heard)),
     ...(ratingSent ? { clientPestRating: form.rating } : {}),
     // The untouched first-visit 5: the server re-checks it is still the
     // first visit (owner ruling 2026-09-24).
@@ -1100,6 +1086,12 @@ function reportFlowNeedsFullForm({ generateMissing, completeMissing, report, vis
   return !!report.writeError || visitPhotos.failed === true || trace.failed === true;
 }
 
+// A hold's fix as the footer's own button: the missing trace opens the tracer
+// with the outline read started.
+const HOLD_FIXES = {
+  trace: (missing, openTracer) => (missing.fix === 'trace' ? () => openTracer(true) : null),
+};
+
 const sendHoldsFor = (mode) => ({ lane: laneSendHolds, typed: typedSendHolds })[mode] || sendHolds;
 
 const NO_PRODUCT_HOLDS = {
@@ -1109,7 +1101,7 @@ const NO_PRODUCT_HOLDS = {
 
 // What still holds the report (generate) or the completion (complete), in
 // screen order, the product whose stock holds it, and the fix the hold
-// offers on the sheet ('remove_trace').
+// offers on the sheet ('remove_trace', or 'trace': the footer's Auto-trace).
 // What an empty product list says for this record mode (null: no hold).
 const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.');
 
@@ -1325,7 +1317,7 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
     ...ready.trace,
     [untraced, untraced && (traceAvailable
       ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
-      : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`)],
+      : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`), null, traceAvailable ? 'trace' : null],
     // A trace the note doesn't back can also come off ("Remove the trace").
     [unusedTrace, 'Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.', null, 'remove_trace'],
     [interiorUnheard, 'Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, trace again without Interior spray, or remove the trace.', null, 'remove_trace'],
@@ -1736,9 +1728,6 @@ function ReportFlowForm({
   const [ownForm, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
-    // The sweep chip (owner 2026-10-08): null until the tech taps it, then
-    // their word over what the note's read heard (sweptOf).
-    sweepPick: null,
     rating: ctx.rating.firstVisit ? FIRST_VISIT_RATING : null,
     ratingPrefilled: !!ctx.rating.firstVisit,
     tipId: '',
@@ -1891,9 +1880,8 @@ function ReportFlowForm({
     report.write({
       buildPayload: (facts, productFill) => {
         const { heard, writerExtras } = recordState.inputs(recordState.settle(facts), facts);
-        const payload = writerPayload({ service, visit: ctx.visit, form, rows: rowsFor(facts, productFill), facts: heard, sweptEaves: sweptOf(form, heard), ratingAllowed, photos: visitPhotos.photos, promiseMarks });
-        // The chip tapped off: the tech's word over the note for the writer too.
-        return { ...payload, ...writerExtras, ...SWEEP_WRITER_CORRECTION[form.sweepPick] };
+        const payload = writerPayload({ service, visit: ctx.visit, form, rows: rowsFor(facts, productFill), facts: heard, sweptEaves: sweptOf(heard), ratingAllowed, photos: visitPhotos.photos, promiseMarks });
+        return { ...payload, ...writerExtras };
       },
       note: form.note,
       // A typed read is judged beside the record's present values.
@@ -1930,8 +1918,10 @@ function ReportFlowForm({
   // (a stale report, a hold), revokes it.
   useEffect(() => { submission.revokeIfChanged(buildBody, { valid: canPrepare }); });
   // The tracer opens over the sheet, the way the photo manager does.
-  const openTracer = () => onOverlay(
+  // `autoTrace`: the footer's button, which starts the outline read at once.
+  const openTracer = (autoTrace = false) => onOverlay(
     <TechTreatmentZoneModal
+      autoTrace={autoTrace}
       serviceId={service.id}
       expectedPropertyId={loadedPropertyId}
       openVisitOnly
@@ -1983,9 +1973,6 @@ function ReportFlowForm({
     return (
       <ReportStep
         report={report}
-        // The sweep chip, on a plain pest visit only (the house mix): an
-        // initial cleanout, a lane or a typed visit records no sweep.
-        sweep={sweepChipFor(ctx, form, draft, setForm)}
         stale={stale}
         action={action}
         locked={locked}
@@ -2017,7 +2004,8 @@ function ReportFlowForm({
         blogPost={form.blogPost}
         onWrite={write}
         onSubmit={submit}
-        onTrace={openTracer}
+        onTrace={() => openTracer()}
+        onAutoTrace={HOLD_FIXES.trace(completeMissing, openTracer)}
         onBack={() => setStep('visit')}
         onConfirm={() => submission.confirm(summary())}
         // A promise that changed after the report was written: the list
@@ -2078,9 +2066,14 @@ const NO_REUSE = { offer: null, reusing: false, feet: null };
 
 // `traceStep`: the report step has a perimeter spray to trace (the hold the
 // copy clears); with none, the last trace is not offered.
-function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep }) {
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep, onAutoTrace }) {
   return (
     <>
+      {/* The hold is the missing trace (owner 2026-10-09): its fix sits beside
+          Complete & send, not only in the section above the fold. */}
+      {onAutoTrace && (
+        <Button type="button" className="tech-visit-action tech-visit-wide" disabled={locked || reuse.reusing} onClick={onAutoTrace}>Auto-trace the house</Button>
+      )}
       {onRetryTrace && (
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
       )}
@@ -2102,7 +2095,7 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, sweep = null, tipOffer, reuse = NO_REUSE,
+  onBackFromPrompt, tipOffer, reuse = NO_REUSE, onAutoTrace = null,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2117,6 +2110,7 @@ function ReportStep({
         removingTrace={removingTrace}
         reuse={reuse}
         traceStep={!!trace}
+        onAutoTrace={trace ? onAutoTrace : null}
       />
     </CompleteFooter>
   );
@@ -2148,7 +2142,6 @@ function ReportStep({
             traced={traced}
             blogPost={blogPost}
             pestHeard={pestHeard}
-            sweep={sweep}
             onEdit={() => setEditing(true)}
             onDoneEditing={() => setEditing(false)}
             onChangeText={report.editText}
