@@ -227,6 +227,38 @@ describe('the property read and the trouble-area read share one savepoint (codex
     expect(found.nitrogenCut).toBeNull();
     expect(log).toEqual(['SAVEPOINT SP', 'ROLLBACK TO SAVEPOINT SP', 'RELEASE SAVEPOINT SP']);
   });
+
+  // Codex #6256 r4 P1: a reader that STORES its answer asks for strict, and a failed read then throws (still after the rollback).
+  test('strict: a failed area read THROWS, after the savepoint is rolled back', async () => {
+    const log = [];
+    mockLoadActive.mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'ECONNRESET' }));
+    await expect(engine.fungusNitrogenCut(transaction(log), service, { targetN: 0.75, monthNumber: 11, v13Active: true, strict: true })).rejects.toThrow('boom');
+    expect(log).toEqual(['SAVEPOINT SP', 'ROLLBACK TO SAVEPOINT SP', 'RELEASE SAVEPOINT SP']);
+  });
+
+  test('strict: a failed property read throws too, after the rollback', async () => {
+    const log = [];
+    areas.propertyOf.mockImplementationOnce(async () => { log.push('propertyOf'); throw new Error('aborted'); });
+    await expect(engine.visitNutrientTargets(transaction(log), service, { visit: NOV_VISIT, month: 'Nov', v13Active: true, strict: true })).rejects.toThrow('aborted');
+    expect(log).toEqual(['SAVEPOINT SP', 'propertyOf', 'ROLLBACK TO SAVEPOINT SP', 'RELEASE SAVEPOINT SP']);
+  });
+
+  test('strict with a good read: the same cut; strict with the gate off: no read at all', async () => {
+    expect(await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true, strict: true })).toBe(0.5);
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    areas.propertyOf.mockClear();
+    mockLoadActive.mockClear();
+    mockLoadActive.mockRejectedValue(new Error('boom'));
+    expect(await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true, strict: true })).toBeNull();
+    expect(areas.propertyOf).not.toHaveBeenCalled();
+    expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+
+  test('not strict (the default): a failed read keeps the normal target, as before', async () => {
+    mockLoadActive.mockRejectedValue(new Error('boom'));
+    expect(await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true })).toBeNull();
+    expect(await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true, strict: false })).toBeNull();
+  });
 });
 
 describe('the archived-recipe check admits the cut for THIS visit only (codex #6256 r2 P1)', () => {

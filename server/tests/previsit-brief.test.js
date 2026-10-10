@@ -1341,9 +1341,22 @@ describe('the November nitrogen target on the lawn brief', () => {
     expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
   });
 
-  test('a failed trouble-area read keeps the stored target', async () => {
+  // Codex #6256 r4 P1: the brief is STORED, so a failed area read aborts the generation like its neighbouring reads (the prior
+  // brief survives) instead of persisting the normal target the live plan would not use once the database is back.
+  test('a failed trouble-area read aborts the generation: nothing is stored, no guidance is produced', async () => {
     november();
     loadActive.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2026-11-10', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    expect(state.updates.scheduled_services || []).toEqual([]);
+  });
+
+  test('a failed read with the gate off is never reached: the brief is generated as before', async () => {
+    november();
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    loadActive.mockRejectedValue(new Error('db down'));
     expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+    expect(loadActive).not.toHaveBeenCalled();
   });
 });

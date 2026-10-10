@@ -82,7 +82,7 @@ beforeEach(() => {
     throw new Error(`Unexpected table: ${table}`);
   });
 });
-afterEach(() => { for (const name of GATES) delete process.env[name]; });
+afterEach(() => { for (const name of [...GATES, 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY']) delete process.env[name]; });
 
 describe('active fungus mapped, gate on', () => {
   test('November 24-0-11 is sized for 0.5 lb N: 2.083 lb per 1,000, 20.83 lb on 10,000 sq ft, with the technician note', async () => {
@@ -136,13 +136,20 @@ describe('the text staff read agrees with the cut (codex #6256 r1 P1)', () => {
 
 describe('the cut follows the protocol the PLANNER resolves for the visit (codex #6256 r2 P1)', () => {
   const STALE = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 3.1 lb per 1,000 sq ft (0.75 lb N), spreader';
-  const pin = (version) => ({ lawn_protocol_key: 'fixture_v13', lawn_protocol_version: version, lawn_protocol_window_key: 'nov_v13_spreader_feeding' });
-  // The same lookup the planner makes: a pin (protocolKey) resolves to the pinned version; no pin is the current v13 protocol.
+  const pin = (version, windowMonth = 11) => { pinnedWindowMonth = windowMonth; return { lawn_protocol_key: 'fixture_v13', lawn_protocol_version: version, lawn_protocol_window_key: 'nov_v13_spreader_feeding' }; };
+  // The same lookup the planner makes: a pin (protocolKey) resolves to the pinned version and the month of the window it is pinned
+  // to (the visit's fixtureWindowMonth); no pin is the current v13 protocol.
+  let pinnedWindowMonth;
   beforeEach(() => {
+    pinnedWindowMonth = 11;
     operatingLayer.getProtocolWindowContext.mockImplementation(async (knex, args) => (args.protocolKey
-      ? (args.protocolVersion === 'gone' ? null : { protocol: { version: args.protocolVersion } })
+      ? (args.protocolVersion === 'gone' ? null : { protocol: { version: args.protocolVersion }, windowMonth: pinnedWindowMonth })
       : { protocol: { version: LAWN_V13_VERSION } }));
-    operatingLayer.summarizeProtocolContext.mockImplementation((context) => (context?.protocol?.version === LAWN_V13_VERSION ? V13_SUMMARY : context?.protocol ? { version: context.protocol.version, products: [] } : null));
+    operatingLayer.summarizeProtocolContext.mockImplementation((context) => {
+      if (!context?.protocol) return null;
+      const window = context.windowMonth ? { month: context.windowMonth } : undefined;
+      return context.protocol.version === LAWN_V13_VERSION ? { ...V13_SUMMARY, window } : { version: context.protocol.version, products: [], window };
+    });
   });
   const pinnedCalls = () => operatingLayer.getProtocolWindowContext.mock.calls.filter((call) => call[1].protocolKey);
 
@@ -193,6 +200,46 @@ describe('the cut follows the protocol the PLANNER resolves for the visit (codex
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
     expect(bag(body).raw).toMatch(/2\.1 lb per 1,000 sq ft \(0\.5 lb N\), spreader, active fungus mapped$/);
     expect(pinnedCalls()).toHaveLength(1);
+  });
+
+  // The sheet shows the recipe of the REQUESTED month, the plan the month of the window the visit is pinned to: the cut applies
+  // only when those are the same month (codex #6256 r4 P1).
+  test('pinned to the November window, November asked: the cut applies', async () => {
+    Object.assign(visit, pin(LAWN_V13_VERSION, 11));
+    expect(bag(await sheet({ month: '11' })).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
+  });
+
+  test('pinned to the October window, November asked (completion defaults on): no cut, the recipe text is untouched, no area is read', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    Object.assign(visit, pin(LAWN_V13_VERSION, 10));
+    const body = await sheet({ month: '11' });
+    expect(bag(body).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
+    expect(bag(body).raw).toBe(STALE);
+    expect(body.visit.primary).toBe(STALE);
+    expect(JSON.stringify(body)).not.toContain('activeFungusNitrogen');
+    expect(limitRate()).toBeCloseTo(3.125, 3);
+    expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+
+  test('pinned to the November window, October asked: no cut', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    Object.assign(visit, pin(LAWN_V13_VERSION, 11));
+    const body = await sheet({ month: '10' });
+    expect(JSON.stringify(body)).not.toContain('activeFungusNitrogen');
+    expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+
+  test('completion defaults off: the plan reads the month of the service date, so that is the month the cut follows', async () => {
+    Object.assign(visit, pin(LAWN_V13_VERSION, 10)); // pinned to the October window; the visit is on 2026-11-10
+    expect(bag(await sheet({ month: '11' })).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
+    expect(JSON.stringify(await sheet({ month: '10' }))).not.toContain('activeFungusNitrogen');
+  });
+
+  test('pinned to v13 but the window month is unknown: not cut (fails closed)', async () => {
+    Object.assign(visit, pin(LAWN_V13_VERSION, null));
+    expect(bag(await sheet({ month: '11' })).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
   });
 
   test('unpinned with v13 current: the cut applies, and no pinned lookup is made', async () => {

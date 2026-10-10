@@ -736,11 +736,12 @@ function parseVisitNutrientTargets(notes) {
   };
 }
 
-// GATE_LAWN_NOV_LARGE_PATCH_N: does the visit's property have an ACTIVE mapped trouble area of this type? A gate that is off, a visit
-// with no property, or a read that fails is "no" (the normal target stands); a failed read logs its code only. The property
-// resolution and the read share ONE savepoint, so a query that fails inside either cannot leave a transaction (packet closeout)
-// aborted for the planner queries after it.
-async function hasActiveTroubleArea(knex, service, type) {
+// GATE_LAWN_NOV_LARGE_PATCH_N: does the visit's property have an ACTIVE mapped trouble area of this type? A gate that is off or a
+// visit with no property is "no" (the normal target stands). A read that fails is "no" too, with its code logged, UNLESS `strict`
+// (a persisted or fail-closed reader: the previsit brief, the strict plan): then it THROWS, so nothing stores the normal target as if
+// it were the answer. The property resolution and the read share ONE savepoint either way, so a query that fails inside either
+// cannot leave a transaction (packet closeout) aborted for the queries after it.
+async function hasActiveTroubleArea(knex, service, type, { strict = false } = {}) {
   const areas = require('./lawn-trouble-areas');
   try {
     const found = await savepointRead(knex, async (k) => {
@@ -750,6 +751,7 @@ async function hasActiveTroubleArea(knex, service, type) {
     return found.some((area) => area.type === type);
   } catch (err) {
     logger.warn(`[plan] trouble areas unreadable for ${service?.id}: ${err?.code || err?.name || 'Error'}`);
+    if (strict) throw err;
     return false;
   }
 }
@@ -774,11 +776,11 @@ function fungusAdjustedVisit(visit, cut) {
 // The ONE decision whether the nitrogen target of a November visit at one property is cut, for every reader that states it (the plan,
 // the tank sheet, the previsit brief): the reduced target (config/lawn-v13-nitrogen-targets.js), else null. Gate first: with
 // GATE_LAWN_NOV_LARGE_PATCH_N off (or not a v13 program) nothing is read. Never raises a target; no matching month, a target already
-// at or under the cut, or no active mapped area of the rule's type = null.
-async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active }) {
+// at or under the cut, or no active mapped area of the rule's type = null. `strict`: a failed area read throws (see hasActiveTroubleArea).
+async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active, strict = false }) {
   if (!v13Active || !featureGates.lawnNovLargePatchNLive()) return null;
   const rule = V13_TROUBLE_N_TARGETS.find((entry) => entry.month === monthNumber);
-  if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType))) return null;
+  if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict }))) return null;
   return rule.targetNPer1000;
 }
 
@@ -786,9 +788,9 @@ async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Activ
 // yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the lines are parsed from (an
 // adjusted copy when the nitrogen target was cut: fungusNitrogenCut; else the visit itself), its targets, and `nitrogenCut` (the
 // reduced N target, else null). Call it BEFORE the visit's lines are parsed.
-async function visitNutrientTargets(knex, service, { visit, month, v13Active }) {
+async function visitNutrientTargets(knex, service, { visit, month, v13Active, strict = false }) {
   const targets = parseVisitNutrientTargets(visit?.notes);
-  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber: MONTH_ABBR.indexOf(month) + 1, v13Active }) : null;
+  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber: MONTH_ABBR.indexOf(month) + 1, v13Active, strict }) : null;
   if (cut == null) return { visit, targets, nitrogenCut: null };
   return { visit: fungusAdjustedVisit(visit, cut), targets: { ...targets, targetNPer1000: cut }, nitrogenCut: cut };
 }
@@ -1853,16 +1855,34 @@ async function visitForPlan(knex, recipeVisit, service, override = null) {
 }
 
 // Is this booked visit on the v13 protocol, decided the way the planner decides it: the same getProtocolWindowContext call with the
-// visit's own pin (protocolKey is what makes it a pin there), then the resolved version. A pinned visit whose protocol is another
-// version, or cannot be resolved or read, is not on v13 (the plan blocks it with lawn_v13_protocol_missing); an unpinned visit
-// takes the current v13 protocol, as the tank sheet's staged rows already do. For the tank sheet, which has no plan to ask.
+// visit's own pin (protocolKey is what makes it a pin there), then the resolved version. Returns `{ onV13, windowMonth }`: a pinned
+// visit whose protocol is another version, or cannot be resolved or read, is not on v13 (the plan blocks it with
+// lawn_v13_protocol_missing); `windowMonth` is the month (1-12) of the window the visit is pinned to, which is the month the plan
+// reads the recipe for, and null for an unpinned visit (it takes the current v13 protocol for the month asked, as the tank sheet's
+// staged rows already do). For the tank sheet, which has no plan to ask.
 async function visitOnV13Protocol(knex, visit, { trackKey }) {
-  if (!visit?.lawn_protocol_key) return true;
+  if (!visit?.lawn_protocol_key) return { onV13: true, windowMonth: null };
   const context = await getProtocolWindowContext(knex, {
     serviceDate: toServiceDate(visit.scheduled_date), grassTrack: trackKey, region: 'swfl', planning: true,
     windowKey: visit.lawn_protocol_window_key, protocolKey: visit.lawn_protocol_key, protocolVersion: visit.lawn_protocol_version,
   }).catch(() => null);
-  return summarizeProtocolContext(context)?.version === LAWN_V13_VERSION;
+  const summary = summarizeProtocolContext(context);
+  const windowMonth = Number(summary?.window?.month) || null;
+  // A pinned visit whose window month is unknown cannot be matched to a requested month, so it is not cut (fail closed).
+  return { onV13: summary?.version === LAWN_V13_VERSION && windowMonth != null, windowMonth };
+}
+
+// The tank sheet's v13 flag for the nitrogen cut: gate first (no protocol lookup at all with the cut off), then the planner's own
+// version and window for the visit. The sheet shows the recipe of the REQUESTED month; the plan reads the month of the window the
+// visit is pinned to (under the completion defaults, as selectProtocolVisit does) or else the month of the service date, so the cut
+// applies only to a visit that is on v13 and either unpinned or asked for in the month the plan reads.
+async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
+  if (featureGates.lawnV13Live?.() !== true || !featureGates.lawnNovLargePatchNLive()) return false;
+  const { onV13, windowMonth } = await visitOnV13Protocol(knex, visit, { trackKey });
+  if (!onV13) return false;
+  if (windowMonth == null) return true;
+  const planMonth = lawnCompletionDefaultsEnabled() ? windowMonth : etParts(toServiceDate(visit.scheduled_date)).month;
+  return planMonth === MONTH_ABBR.indexOf(month) + 1;
 }
 
 // The booked visit a reader is opened from, by id (null for no id, a malformed id or an
@@ -2104,7 +2124,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   // The visit the lines are parsed from: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated.
-  const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active });
+  const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
@@ -2501,7 +2521,7 @@ module.exports = {
   parseVisitNutrientTargets,
   visitNutrientTargets,
   fungusNitrogenCut,
-  visitOnV13Protocol,
+  sheetReadsPlansStep,
   fungusNitrogenNotes,
   summarizeMaterialCost,
   effectiveAreaFactor,

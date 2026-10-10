@@ -174,14 +174,18 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(2.0833, 3);
   });
 
-  test('a failed trouble-area read keeps the normal target and the plan still builds', async () => {
+  // Codex #6256 r4 P1: the strict plan (completion defaults, the job card) never plans the normal target off a failed area read;
+  // the lenient plan (the Lawn plan panel, the forecast) keeps the normal target and still builds.
+  test('a failed trouble-area read: the strict plan throws, the lenient plan keeps the normal target and still builds', async () => {
     const visit = await novemberVisit([{ type: 'fungus' }]);
     const areas = require('../services/lawn-trouble-areas');
     const spy = jest.spyOn(areas, 'loadActive').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     try {
-      const result = await plan(visit);
-      expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(3.125, 3);
-      expect(JSON.stringify(result)).not.toContain('activeFungusNitrogen');
+      await expect(plan(visit)).rejects.toThrow('db down');
+      await expect(buildPlanForService(visit.id, { db: knex, strict: true, completionDefaultsEnabled: false })).rejects.toThrow('db down');
+      const lenient = await buildPlanForService(visit.id, { db: knex, completionDefaultsEnabled: false });
+      expect(bagOf(lenient.mixCalculator.items).mix.ratePer1000).toBeCloseTo(3.125, 3);
+      expect(JSON.stringify(lenient)).not.toContain('activeFungusNitrogen');
     } finally { spy.mockRestore(); }
   });
 });

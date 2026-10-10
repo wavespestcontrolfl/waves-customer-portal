@@ -9,7 +9,7 @@ const {
   effectiveAreaFactor,
   matchCatalogProduct,
   visitNutrientTargets,
-  visitOnV13Protocol,
+  sheetReadsPlansStep,
   fungusNitrogenNotes,
   parseProtocolLines,
   resolveProtocolItems,
@@ -1060,9 +1060,9 @@ router.get('/lawn-mix', async (req, res, next) => {
     const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q));
     const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
     // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated, so the
-    // line text, the objective and the amount agree. Only a visit the planner would also plan on v13 (a visit pinned to an older
-    // version is withheld there, so no cut here either).
-    const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: lawnV13On() && featureGates.lawnNovLargePatchNLive() && await visitOnV13Protocol(db, scheduled, { trackKey }) });
+    // line text, the objective and the amount agree. Only a visit the planner would also plan on v13, and only for the month of the
+    // window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
+    const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
