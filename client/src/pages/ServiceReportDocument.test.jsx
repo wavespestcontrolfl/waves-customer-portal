@@ -458,6 +458,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text.split(line2)).toHaveLength(2);
   });
 
+  it('rain has watered it in (GATE_LAWN_WATER_IN_RAIN): the banner sentences print once, not again in the hero task', () => {
+    const line1 = 'Rain since your visit has watered today’s treatment in.';
+    const line2 = 'No extra sprinkler run is needed for it.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'water_in_by_rain', lines: [line1, line2], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2}`, waterInRequired: false, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2}` },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line1 }],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.split(line1)).toHaveLength(2);
+    expect(text.split(line2)).toHaveLength(2);
+  });
+
   it('partial credit: the frozen any-day sentence inside an action is stripped even though the banner composed a longer line', () => {
     const line1 = 'Water in today’s treatment by Thu 2 PM.';
     const line2 = 'Run each zone about 40 minutes.';
