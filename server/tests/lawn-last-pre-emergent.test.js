@@ -67,13 +67,21 @@ describe('the words', () => {
     });
   });
 
-  it('a sod date: counts days before the sod date; the liquid dithiopyr warns through day 91 and not on day 92', async () => {
+  it('a sod date: counts days before the sod date; Jul 2 is still inside 3 months on Oct 1; Jul 1 is over', async () => {
     const at91 = await block({ rows: [app({ service_date: '2026-07-02' })], sodLaidOn: '2026-10-01' });
     expect(at91.result.line).toBe('Last pre-emergent by Waves: Dimension 2EW, Jul 2, 2026 (91 days before the sod date).');
     expect(at91.result.warning).toMatch(/^Its label delays seeding or sprigging 3 months/);
     const at92 = await block({ rows: [app({ service_date: '2026-07-01' })], sodLaidOn: '2026-10-01' });
     expect(at92.result.line).toContain('(92 days before the sod date).');
     expect(at92.result.warning).toBeNull();
+  });
+
+  it('3 months is three calendar months, not a day count: Jan 1 is over on Apr 1 (90 days) and still inside on Mar 31', async () => {
+    const over = await block({ rows: [app({ service_date: '2026-01-01' })], sodLaidOn: '2026-04-01' });
+    expect(over.result.line).toContain('(90 days before the sod date).');
+    expect(over.result.warning).toBeNull();
+    const inside = await block({ rows: [app({ service_date: '2026-01-01' })], sodLaidOn: '2026-03-31' });
+    expect(inside.result.warning).toMatch(/3 months/);
   });
 
   it('EPA 10404-87 (the Dimension bag) warns with its own 12 weeks: day 83 warns, day 84 does not', async () => {

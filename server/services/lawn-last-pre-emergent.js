@@ -31,6 +31,7 @@ const { formatDay } = require('./lawn-sod-form-summary');
 const { inheritReferenceUnit } = require('./stamped-address');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { etCalendarDayOf, validCalendarDate } = require('../utils/datetime-et');
+const { addMonthsSameDay } = require('../utils/date-only');
 
 // The seeding and sprigging wait a label states, by the EXACT EPA registration number frozen on the application row
 // (service_products.epa_reg_number), for the labels read on 2026-10-09. A label wait belongs to one registration, never
@@ -38,9 +39,11 @@ const { etCalendarDayOf, validCalendarDate } = require('../utils/datetime-et');
 // states a wait it does not hold.
 //   - 10404-87 (LESCO Dimension 0.21% Plus Fertilizer): "delayed until 12 weeks from the time of application".
 //   - 62719-542 (Dimension 2EW): "within 3 months after a single application".
+// `over(date, referenceDay)` says whether the wait has passed on the reference day: 12 weeks is 84 days; 3 months is
+// the same day three calendar months later (date-only.js addMonthsSameDay), never a fixed day count.
 const LABEL_WAITS = Object.freeze({
-  '10404-87': Object.freeze({ underDays: 84, words: '12 weeks' }),
-  '62719-542': Object.freeze({ underDays: 92, words: '3 months' }),
+  '10404-87': Object.freeze({ words: '12 weeks', over: (date, referenceDay) => daysBetween(date, referenceDay) >= 84 }),
+  '62719-542': Object.freeze({ words: '3 months', over: (date, referenceDay) => referenceDay >= addMonthsSameDay(date, 3) }),
 });
 const warningText = (wait) => `Its label delays seeding or sprigging ${wait.words} after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.`;
 const NOTE_TEXT = 'The app does not hold this product\'s label wait for seeding or sod. Read the label.';
@@ -75,7 +78,7 @@ function wordsFor(row, { date, referenceDay, sodDate, rooted }) {
   const wait = LABEL_WAITS[String(row.epa_reg_number || '').trim()] || null;
   return {
     line: `Last pre-emergent by Waves: ${row.product_name}, ${formatDay(date)} (${when}).`,
-    warning: !rooted && wait && days < wait.underDays ? warningText(wait) : null,
+    warning: !rooted && wait && !wait.over(date, referenceDay) ? warningText(wait) : null,
     note: !rooted && !wait ? NOTE_TEXT : null,
   };
 }
