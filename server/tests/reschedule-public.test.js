@@ -1063,7 +1063,7 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     expect(guardIdx).toBeGreaterThan(-1);
     const guard = src.slice(guardIdx, guardIdx + 700);
     expect(guard).toMatch(/if \(elig\.missed\) return;/);
-    expect(guard).toMatch(/\.forUpdate\(\)\s*\.first\('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days'\)/);
+    expect(guard).toMatch(/\.forUpdate\(\)\s*\.first\('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',/);
     expect(guard).toMatch(/visitInsideMoveNoticeWindow\(locked\)/);
     expect(guard).toMatch(/code: 'SELF_SERVE_NOTICE'/);
   });

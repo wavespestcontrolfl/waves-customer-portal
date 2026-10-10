@@ -191,7 +191,12 @@ async function fullRangeForLimit(svc, limit, range, config) {
     logger.warn(`[reschedule-public] move-limit availability failed for ${svc.id}: ${err.message}`);
   }
   // No list (the build threw, or the address did not resolve this time).
-  if (!full && limit.lastDate && limit.lastDate < String(range.rangeTo).slice(0, 10)) {
+  // A limit date before the range leaves no time inside it, and one at or
+  // past the range's end drops nothing: neither needs the list.
+  const inRange = limit.lastDate
+    && limit.lastDate >= String(range.rangeFrom).slice(0, 10)
+    && limit.lastDate < String(range.rangeTo).slice(0, 10);
+  if (!full && inRange) {
     throw Object.assign(new Error('Scheduling is unavailable right now. Please try again in a moment.'), {
       statusCode: 503, isOperational: true, code: 'LIMIT_UNAVAILABLE',
     });
@@ -218,12 +223,21 @@ async function visitChangedSince(svc, database = db) {
     || cadenceChangedSince(svc, current);
 }
 
-// True, with the move-limit gate set, when the locked visit's plan cadence is
-// not the one this request loaded: the late-move allowance comes from it.
-function cadenceChangedSince(svc, locked) {
-  if (!moveLimits.moveLimitsEnabled() || !locked) return false;
-  return (locked.recurring_pattern || null) !== (svc.recurring_pattern || null)
-    || (Number(locked.recurring_interval_days) || null) !== (Number(svc.recurring_interval_days) || null);
+// True, with the move-limit gate set, when the visit as read again gives
+// another late-move allowance than the one this request loaded: a changed
+// stored cadence, or (a legacy plan row) a changed service or catalog cadence.
+// `other` carries `catalog_frequency` as selectSvc loads it.
+function cadenceChangedSince(svc, other) {
+  if (!moveLimits.moveLimitsEnabled() || !other) return false;
+  return moveLimits.allowanceDays(svc) !== moveLimits.allowanceDays(other);
+}
+
+// The locked row for the move guard, with its service's catalog cadence read
+// on the same transaction (the allowance of a legacy plan row comes from it).
+async function withCatalogCadence(locked, trx) {
+  if (!moveLimits.moveLimitsEnabled() || !locked?.service_id) return locked;
+  const service = await trx('services').where({ id: locked.service_id }).first('frequency');
+  return { ...locked, catalog_frequency: service?.frequency || null };
 }
 
 // Confirm: true when a move limit refuses this move to `date` (a blocked
@@ -1069,7 +1083,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const officeApprovalRecheck = async ({ trx }) => {
       if (elig.missed) return;
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
-        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days');
+        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',
+          'service_id', 'is_recurring', 'recurring_parent_id');
       if (visitInsideMoveNoticeWindow(locked)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
@@ -1077,7 +1092,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
       // The move limit was judged with the plan cadence this request loaded.
       // Staff can change the cadence with no move; the locked row decides.
-      if (cadenceChangedSince(svc, locked)) {
+      if (cadenceChangedSince(svc, await withCatalogCadence(locked, trx))) {
         throw Object.assign(new Error('The scheduling details for your plan just updated — please review the latest options.'), {
           statusCode: 409, isOperational: true, code: 'SCOPE_CHANGED',
         });
@@ -1317,6 +1332,7 @@ router._test = {
   fullRangeForLimit,
   visitChangedSince,
   cadenceChangedSince,
+  withCatalogCadence,
   pageEligibilityWithLimit,
   MOVE_LIMIT_MESSAGE,
   eligibility,

@@ -344,7 +344,7 @@ describe('reschedule-public wiring', () => {
       if (prev === undefined) delete process.env.GATE_RESCHEDULE_MOVE_LIMITS; else process.env.GATE_RESCHEDULE_MOVE_LIMITS = prev;
     }
     // Both movers run the guard that holds the pin.
-    expect(src).toMatch(/'recurring_pattern', 'recurring_interval_days'\);\n[\s\S]{0,700}if \(cadenceChangedSince\(svc, locked\)\)/);
+    expect(src).toMatch(/'service_id', 'is_recurring', 'recurring_parent_id'\);\n[\s\S]{0,700}if \(cadenceChangedSince\(svc, await withCatalogCadence\(locked, trx\)\)\)/);
   });
 
   test('the search rechecks the visit after its availability build and before it applies the limit', () => {
@@ -366,8 +366,21 @@ describe('reschedule-public wiring', () => {
     // A limit at or past the end of the range drops nothing: no refusal.
     await expect(fullRangeForLimit(svc, { ...limit, lastDate: '2026-11-10' }, range, {})).resolves.toBeNull();
     await expect(fullRangeForLimit(svc, { ...limit, lastDate: null }, range, {})).resolves.toBeNull();
+    // A limit date before the range: no time can be inside it, so no refusal.
+    await expect(fullRangeForLimit(svc, { ...limit, lastDate: '2026-10-20' }, range, {})).resolves.toBeNull();
     // No limit: nothing is built.
     await expect(fullRangeForLimit(svc, null, range, {})).resolves.toBeNull();
+  });
+
+  test('a legacy plan row: a changed service or catalog cadence is a cadence change', async () => {
+    const { cadenceChangedSince, withCatalogCadence } = router._test;
+    const legacy = { recurring_pattern: 'custom', recurring_interval_days: null, is_recurring: true, service_id: 'sv-1' };
+    const trx = (frequency) => () => ({ where: () => ({ first: async () => (frequency ? { frequency } : undefined) }) });
+    const loaded = { ...legacy, catalog_frequency: 'quarterly' };
+    expect(cadenceChangedSince(loaded, await withCatalogCadence(legacy, trx('quarterly')))).toBe(false);
+    expect(cadenceChangedSince(loaded, await withCatalogCadence(legacy, trx('monthly')))).toBe(true);
+    // The same allowance from another stored form is not a change.
+    expect(cadenceChangedSince(loaded, { recurring_pattern: 'custom', recurring_interval_days: 90, is_recurring: true })).toBe(false);
   });
 
   test('visitChangedSince: another date, start or status, or an unreadable visit, is a change', async () => {

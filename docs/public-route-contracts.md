@@ -858,7 +858,7 @@ blocked first visit, and the client reloads there too. The commit route's
 status or plan cadence changed since the request loaded it (another tab moved, rebooked or
 closed it), the answer is `409 SCOPE_CHANGED` and the page reloads (only
 while this gate is set). When the whole-range list that decides the
-limit cannot be built and the limit's date is inside the range, `find-slots`
+limit cannot be built and the limit's date is inside the range (not before its first day), `find-slots`
 and Confirm answer `503 { code: 'LIMIT_UNAVAILABLE' }` (retry); they never
 show or commit a date the limit may hold back. `find-slots` makes the same check after its
 availability build and answers `409 SCOPE_CHANGED` (the client reloads).
