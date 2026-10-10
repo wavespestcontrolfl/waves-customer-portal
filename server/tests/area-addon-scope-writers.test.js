@@ -315,7 +315,8 @@ describe('4. the staff "Create Appointment" from a linked estimate writes the so
     const estimate = estimateWith([SPOT_ENTRY, { key: 'web_sweep' }]);
     expect(await rows.writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId: 'v-1', estimate, ownServiceKey: 'one_time_pest' })).toBe(2);
     const spot = trx.state.addons.find((r) => r.id === 'a-1').area_addon_scope;
-    expect(spot).toEqual({ v: 1, addOnKey: 'lawn_insect_spot', catalogServiceKey: SPOT, areaSqFt: 1200, tierSqFt: 2000, grassType: 'st_augustine' });
+    // (Codex round 57: the staff writer also keeps the estimate's id on the scope, the durable "booked from this estimate" record.)
+    expect(spot).toEqual({ v: 1, addOnKey: 'lawn_insect_spot', catalogServiceKey: SPOT, areaSqFt: 1200, tierSqFt: 2000, grassType: 'st_augustine', sourceEstimateId: 'e-1' });
     expect(trx.state.addons.find((r) => r.id === 'a-2').area_addon_scope).toMatchObject({ addOnKey: 'web_sweep', catalogServiceKey: SWEEP });
   });
 
@@ -350,7 +351,7 @@ describe('4. the staff "Create Appointment" from a linked estimate writes the so
     expect(src.slice(stamp, stamp + 220)).toContain('estimate: lockedLinkedEstimate');
     expect(src.slice(stamp, stamp + 220)).not.toContain('estimate: linkedEstimate,');
     // the shared writer, not a second one
-    expect(read('services/area-addon-visit-rows.js')).toContain('return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });');
+    expect(read('services/area-addon-visit-rows.js')).toContain('return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false, estimateId: estimate.id });');
   });
 });
 

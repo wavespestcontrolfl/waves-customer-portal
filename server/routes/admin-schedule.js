@@ -8921,6 +8921,9 @@ async function scheduleCreateHandler(req, res, next) {
           // never on the preflight copy: the gated and recurring-plan refusals and the yearly limits under the customer lock.
           // The scope writer below reads the same row.
           lockedLinkedEstimate = freshLinkedEstimate;
+          // Lock order: the estimate's add-on lock first, then the place locks the limit recheck takes (the order
+          // Update Details takes them in), so the two paths never wait on each other in a cycle.
+          await require('../services/area-addon-visit-rows').lockEstimateAddOns(trx, freshLinkedEstimate.id);
           await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {
             billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,
             postedServiceKeys: postedAreaAddOnLines(pricing).map((line) => line.key).filter(Boolean),
@@ -14739,6 +14742,11 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
 
       // The edited visit's add-ons are judged at the destination as the save will leave them (its rows are replaced below).
       // (It rides the plan: `editedVisit`, read by appointment-address assertAreaAddOnLimitsAtDestination.)
+      // Lock order: the estimate's add-on lock BEFORE the place locks the address change takes (the booking's order).
+      if (addressPlan) {
+        const linked = await trx('scheduled_services').where({ id: req.params.id }).first('source_estimate_id');
+        await areaAddOnRows.lockEstimateAddOns(trx, linked && linked.source_estimate_id);
+      }
       if (addressPlan) addressPlan.editedVisit = { id: req.params.id, ownKey: updates.service_key_snapshot, scheduledDate: updates.scheduled_date, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : undefined };
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 

@@ -469,7 +469,13 @@ describe('assertAreaAddOnsNotYetBooked', () => {
     const q = {
       join: () => q,
       whereIn: (_col, keys) => { list = list.filter((r) => keys.includes(r.key)); return q; },
-      where: (_col, id) => { list = list.filter((r) => (r.estimateId || 'est-1') === id); return q; },
+      // `where(fn)`: the "of this estimate" group (the link, or the estimate id kept on the sold scope).
+      where: (fn) => {
+        const group = { linkId: null, scopeId: null, where(_col, id) { group.linkId = id; return group; }, orWhereRaw(_sql, [id]) { group.scopeId = id; return group; } };
+        fn.call(group);
+        list = list.filter((r) => (r.estimateId === undefined ? 'est-1' : r.estimateId) === group.linkId || r.scopeEstimateId === group.scopeId);
+        return q;
+      },
       whereNotIn: (_col, dead) => { list = list.filter((r) => !dead.includes(r.status || 'confirmed')); return q; },
       whereNot: (_col, id) => { list = list.filter((r) => r.visitId !== id); return q; },
       select: async () => list.map((r) => ({ service_key: r.key, scheduled_date: r.date || '2026-11-02' })),
@@ -490,6 +496,26 @@ describe('assertAreaAddOnsNotYetBooked', () => {
     }
     await expect(ask({ own: [{ key: WEB }] }, [BED])).resolves.toBeUndefined();
     await expect(ask({ own: [{ key: WEB, estimateId: 'est-other' }] }, [WEB])).resolves.toBeUndefined();
+  });
+
+  // Codex round 57: an accept-on-book links the visit after it commits (never, when that acceptance fails).
+  test('a visit with no estimate link is still this estimate\'s by the estimate id on its add-on scope', async () => {
+    await expect(ask({ own: [{ key: WEB, estimateId: null, scopeEstimateId: 'est-1' }] }, [WEB])).rejects.toMatchObject({ code: 'AREA_ADDON_ALREADY_BOOKED' });
+    await expect(ask({ rows: [{ key: WEB, estimateId: null, scopeEstimateId: 'est-1' }] }, [WEB])).rejects.toMatchObject({ code: 'AREA_ADDON_ALREADY_BOOKED' });
+    await expect(ask({ own: [{ key: WEB, estimateId: null, scopeEstimateId: 'est-other' }] }, [WEB])).resolves.toBeUndefined();
+  });
+  test('the staff scope writer keeps the estimate id on the scope; the booking takes the estimate lock before the place locks (source)', () => {
+    const rowsSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'area-addon-visit-rows.js'), 'utf8');
+    expect(rowsSrc).toContain("return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false, estimateId: estimate.id });");
+    expect(rowsSrc).toContain("...(estimateId ? { sourceEstimateId: String(estimateId) } : {}),");
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    const lock = src.indexOf("lockEstimateAddOns(trx, freshLinkedEstimate.id);");
+    expect(lock).toBeGreaterThan(0);
+    expect(lock).toBeLessThan(src.indexOf('await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {'));
+    // Update Details: before the address change's place locks
+    const editLock = src.indexOf('await areaAddOnRows.lockEstimateAddOns(trx, linked && linked.source_estimate_id);');
+    expect(editLock).toBeGreaterThan(0);
+    expect(editLock).toBeLessThan(src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);'));
   });
 
   test('the reads run under a transaction lock keyed on the estimate (two bookings of one estimate are serialized)', async () => {

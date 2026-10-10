@@ -64,7 +64,10 @@ function unresolvedError(row) {
 // scheduled_services for the add-on that IS the visit, on scheduled_service_addons for each
 // row): the treated area the customer was quoted, the tier it priced at, and, for a
 // grass-bound add-on, the grass that authorized the rate. The job card reads it back.
-function soldScope(row) {
+// `estimateId` (when the writer knows it): the estimate that sold the add-on, kept on the scope. A staff accept-on-book
+// links the visit to its estimate only after the booking commits (and not at all when that acceptance fails), so the scope
+// is the durable "this estimate's add-on is on this visit" record the already-booked check reads.
+function soldScope(row, estimateId = null) {
   const num = (value) => (Number(value) > 0 ? Number(value) : null);
   return {
     v: 1,
@@ -73,10 +76,11 @@ function soldScope(row) {
     areaSqFt: num(row.areaSqFt),
     tierSqFt: num(row.tierSqFt),
     grassType: row.grassType || null,
+    ...(estimateId ? { sourceEstimateId: String(estimateId) } : {}),
   };
 }
 
-function addOnRowData(row, catalog, cols, scheduledServiceId, trx) {
+function addOnRowData(row, catalog, cols, scheduledServiceId, trx, estimateId = null) {
   const price = Math.round(Number(row.addOnPrice) * 100) / 100;
   const data = {
     scheduled_service_id: scheduledServiceId,
@@ -91,7 +95,7 @@ function addOnRowData(row, catalog, cols, scheduledServiceId, trx) {
   // (admin-schedule lineDueOnRecurringDate), and a sold add-on is one application.
   if (cols.recurring_pattern) data.recurring_pattern = 'one_time';
   if (cols.service_key_snapshot) data.service_key_snapshot = row.catalogServiceKey;
-  if (cols.area_addon_scope) data.area_addon_scope = JSON.stringify(soldScope(row));
+  if (cols.area_addon_scope) data.area_addon_scope = JSON.stringify(soldScope(row, estimateId));
   if (cols.service_category_snapshot) data.service_category_snapshot = catalog?.category || null;
   if (cols.estimated_duration_minutes && Number(row.durationMinutes) > 0) data.estimated_duration_minutes = Math.ceil(Number(row.durationMinutes));
   return data;
@@ -100,11 +104,11 @@ function addOnRowData(row, catalog, cols, scheduledServiceId, trx) {
 // The add-on that IS the appointment (its own catalog key) has no row; its sold scope is
 // stamped on the appointment itself. No add-on in the profile, or the appointment is some
 // other service: no query.
-async function stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey }) {
+async function stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey, estimateId = null }) {
   const own = ownServiceKey ? areaAddOnProfileRows(serviceProfile).find((row) => row.catalogServiceKey === ownServiceKey) : null;
   if (!scheduledServiceId || !own) return;
   if (!(await trx.schema.hasColumn('scheduled_services', 'area_addon_scope'))) return;
-  await trx('scheduled_services').where({ id: scheduledServiceId }).update({ area_addon_scope: JSON.stringify(soldScope(own)) });
+  await trx('scheduled_services').where({ id: scheduledServiceId }).update({ area_addon_scope: JSON.stringify(soldScope(own, estimateId)) });
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +190,7 @@ async function clearOwnAreaAddOnScopeOnServiceChange(trx, visitId, updates = {})
 
 // A staff booking owns its rows (the office chose the lines): the sold scope goes onto the row of the same
 // catalog service, and no row is added or removed. Returns the number stamped.
-async function stampExistingRowScopes(trx, scheduledServiceId, wanted) {
+async function stampExistingRowScopes(trx, scheduledServiceId, wanted, estimateId = null) {
   if (!(await hasScopeColumn(trx, 'scheduled_service_addons'))) return 0;
   let stamped = 0;
   for (const row of wanted) {
@@ -194,7 +198,7 @@ async function stampExistingRowScopes(trx, scheduledServiceId, wanted) {
     stamped += await trx('scheduled_service_addons')
       .where({ scheduled_service_id: scheduledServiceId, service_key_snapshot: row.catalogServiceKey })
       .whereNull('area_addon_scope')
-      .update({ area_addon_scope: JSON.stringify(soldScope(row)) });
+      .update({ area_addon_scope: JSON.stringify(soldScope(row, estimateId)) });
   }
   return stamped;
 }
@@ -208,7 +212,7 @@ async function dropUnsoldAddOnRows(trx, scheduledServiceId, wanted) {
 }
 
 const CARRIED_ROW_DISCOUNT_COLUMNS = ['discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars'];
-async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
+async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows, estimateId = null) {
   if (!rows.length) return 0;
   const cols = await trx('scheduled_service_addons').columnInfo();
   let refreshed = 0;
@@ -219,7 +223,7 @@ async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
     // A discount stamped on the row by the original booking does not belong to the accepted estimate (an add-on is never
     // discounted): left in place, the invoice would bill less than the accepted total.
     for (const column of CARRIED_ROW_DISCOUNT_COLUMNS) if (cols[column]) data[column] = null;
-    if (cols.area_addon_scope) data.area_addon_scope = JSON.stringify(soldScope(row));
+    if (cols.area_addon_scope) data.area_addon_scope = JSON.stringify(soldScope(row, estimateId));
     if (cols.estimated_duration_minutes && Number(row.durationMinutes) > 0) data.estimated_duration_minutes = Math.ceil(Number(row.durationMinutes));
     refreshed += await trx('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId, service_key_snapshot: row.catalogServiceKey }).update(data);
   }
@@ -232,14 +236,14 @@ async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
  * A priced add-on with no catalog key (or no price) cannot be a structured row:
  * it throws, rolling the booking back, rather than dropping a sold add-on.
  */
-async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null, addMissingRows = true, refreshExisting = false }) {
-  await stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey });
+async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null, addMissingRows = true, refreshExisting = false, estimateId = null }) {
+  await stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey, estimateId });
   const wanted = secondaryAreaAddOns(serviceProfile, ownServiceKey);
   // Adoption also drops a carried area add-on row the LOCKED estimate no longer sells (it was removed by a revision after the
   // staff booking): the visit total becomes the revised estimate's, so the stale row must not stay in dispatch or the invoice.
   if (scheduledServiceId && refreshExisting) await dropUnsoldAddOnRows(trx, scheduledServiceId, wanted);
   if (!scheduledServiceId || wanted.length === 0) return 0;
-  if (!addMissingRows) return stampExistingRowScopes(trx, scheduledServiceId, wanted);
+  if (!addMissingRows) return stampExistingRowScopes(trx, scheduledServiceId, wanted, estimateId);
   for (const row of wanted) {
     if (!row.catalogServiceKey || !(Number(row.addOnPrice) > 0)) throw unresolvedError(row);
   }
@@ -249,7 +253,7 @@ async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile
   const todo = wanted.filter((row) => !have.has(row.catalogServiceKey));
   // Adoption: a row the visit already carries for a sold add-on is brought to what the LOCKED estimate sells now (price,
   // minutes, sold scope), so a revision after the staff booking cannot leave dispatch and the invoice on the old tier.
-  if (refreshExisting) await refreshCarriedAddOnRows(trx, scheduledServiceId, wanted.filter((row) => have.has(row.catalogServiceKey)));
+  if (refreshExisting) await refreshCarriedAddOnRows(trx, scheduledServiceId, wanted.filter((row) => have.has(row.catalogServiceKey)), estimateId);
   if (todo.length === 0) return 0;
   const catalogRows = await trx('services').whereIn('service_key', todo.map((row) => row.catalogServiceKey))
     .select('id', 'service_key', 'name', 'category');
@@ -259,7 +263,7 @@ async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile
     if (!byKey.has(row.catalogServiceKey)) {
       logger.error(`[area-addon-visit-rows] catalog row ${row.catalogServiceKey} missing - add-on row written from its key snapshot only (visit ${scheduledServiceId})`);
     }
-    await trx('scheduled_service_addons').insert(addOnRowData(row, byKey.get(row.catalogServiceKey), cols, scheduledServiceId, trx));
+    await trx('scheduled_service_addons').insert(addOnRowData(row, byKey.get(row.catalogServiceKey), cols, scheduledServiceId, trx, estimateId));
   }
   return todo.length;
 }
@@ -321,7 +325,7 @@ async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownSe
     throw Object.assign(new Error('The existing appointment no longer matches what this estimate sells. Book a new time for this estimate.'),
       { status: 409, statusCode: 409, code: 'AREA_ADDON_VISIT_NEEDS_NEW_SLOT', isOperational: true });
   }
-  const written = await writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, refreshExisting: true });
+  const written = await writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, refreshExisting: true, estimateId: estimate && estimate.id });
   // The accept stamped the accepted one-time total on the visit. A primary-line price left from the original booking would
   // be billed beside the add-on rows instead of that total: clear it, so the primary line is the total less the rows (the
   // split a freshly booked accept has).
@@ -344,7 +348,7 @@ async function clearPrimaryLinePrice(trx, scheduledServiceId) {
 async function writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId, estimate, ownServiceKey = null }) {
   if (!estimate || require('./area-addon-limits').soldAddOnKeys(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority }).length === 0) return 0;
   const profile = require('./estimate-slot-availability').resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
-  return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });
+  return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false, estimateId: estimate.id });
 }
 
 // Update Details: the area add-on rows of a visit that carry no sold scope after the carried ones were restored (rows the edit
@@ -458,20 +462,29 @@ function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, 
 // does) is not booked from it again. `keys` are the catalog keys being booked or added; `exceptVisitId` is the visit an
 // edit is saving. Two small reads, none when no key is an area add-on or there is no estimate.
 const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
+// One estimate at a time: a transaction advisory lock keyed on the estimate, held to commit, so two bookings of one estimate
+// cannot both read "not booked yet" (they may hold different customer locks, and a web sweep takes no place lock). LOCK
+// ORDER: this lock is taken BEFORE the place locks of the limit recheck, on every path (staff booking, Update Details).
+async function lockEstimateAddOns(trx, estimateId) {
+  if (!estimateId || typeof trx.raw !== 'function') return;
+  await trx.raw("SELECT pg_advisory_xact_lock(hashtext('area-addon-estimate'), hashtext(?::text))", [String(estimateId)]);
+}
 async function assertAreaAddOnsNotYetBooked(trx, estimate, keys, { exceptVisitId = null } = {}) {
   const wanted = [...new Set((keys || []).filter(isAreaAddOnCatalogKey))];
   if (!wanted.length || !estimate || !estimate.id) return;
-  // One estimate at a time: a transaction lock keyed on the estimate, held to commit, so two bookings of one estimate
-  // cannot both read "not booked yet" (they may hold different customer locks, and a web sweep takes no place lock).
-  if (typeof trx.raw === 'function') await trx.raw("SELECT pg_advisory_xact_lock(hashtext('area-addon-estimate'), hashtext(?::text))", [String(estimate.id)]);
-  const live = (query) => {
-    query.where('s.source_estimate_id', estimate.id).whereNotIn('s.status', DEAD_VISIT_STATUSES);
+  await lockEstimateAddOns(trx, estimate.id);
+  // A visit is this estimate's by its link (`source_estimate_id`) OR by the estimate id kept on the add-on's sold scope
+  // (`scopeColumn`): an accept-on-book links the visit only after it commits, and not at all when that acceptance fails.
+  const live = (query, scopeColumn) => {
+    query.where(function ofThisEstimate() {
+      this.where('s.source_estimate_id', estimate.id).orWhereRaw(`${scopeColumn}->>'sourceEstimateId' = ?`, [String(estimate.id)]);
+    }).whereNotIn('s.status', DEAD_VISIT_STATUSES);
     if (exceptVisitId) query.whereNot('s.id', exceptVisitId);
     return query;
   };
   const [own, rows] = await Promise.all([
-    live(trx('scheduled_services as s').whereIn('s.service_key_snapshot', wanted)).select('s.service_key_snapshot as service_key', 's.scheduled_date'),
-    live(trx('scheduled_service_addons as a').join('scheduled_services as s', 's.id', 'a.scheduled_service_id').whereIn('a.service_key_snapshot', wanted))
+    live(trx('scheduled_services as s').whereIn('s.service_key_snapshot', wanted), 's.area_addon_scope').select('s.service_key_snapshot as service_key', 's.scheduled_date'),
+    live(trx('scheduled_service_addons as a').join('scheduled_services as s', 's.id', 'a.scheduled_service_id').whereIn('a.service_key_snapshot', wanted), 'a.area_addon_scope')
       .select('a.service_key_snapshot as service_key', 's.scheduled_date'),
   ]);
   const taken = [...own, ...rows][0];
@@ -750,6 +763,7 @@ module.exports = {
   stampAddedAreaAddOnScopes,
   assertPostedAreaAddOnsSold,
   assertAreaAddOnsNotYetBooked,
+  lockEstimateAddOns,
   assertEditedAreaAddOns,
   readAreaAddOnScopesToCarry,
   restoreCarriedAreaAddOnScopes,
