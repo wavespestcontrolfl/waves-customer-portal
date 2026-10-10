@@ -856,6 +856,14 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterTreatment);
   });
 
+  test('a 14-day pre-emergent water-in (owner 2026-10-09: follow the label) never credits a plan run: the regular schedule IS how it gets its water', () => {
+    const { instruction, report } = build([{ ...WATER_IN_RULE, water_in_inches: 0.5, water_in_by_hours: 336 }], { runtime: { headTypes: ['rotor'] } });
+    expect(instruction.longWindow).toBe(true);
+    expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: false, creditableWaterIn: false, waterInRequired: true });
+    expect(report.aftercare.watering).not.toMatch(/minutes/);
+    expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(report.water.weekPlan);
+  });
+
   test('a quarter-inch water-in against a half-inch run is NOT credited: the plan stays whole and the banner says it counts toward the week', () => {
     const { instruction, report } = build([WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
     expect(instruction.waterInInches).toBe(0.25);

@@ -159,6 +159,7 @@ describe('validateRule', () => {
     ['zero inches', { mode: 'water_in', water_in_inches: 0, source: 'label' }],
     ['huge inches', { mode: 'water_in', water_in_inches: 9, source: 'label' }],
     ['bad by-hours', { mode: 'water_in', water_in_by_hours: -2, source: 'label' }],
+    ['by-hours past the 14-day label window', { mode: 'water_in', water_in_by_hours: 337, source: 'label' }],
     ['mow_hold_days is not part of this rule', { mode: 'hold', hold_hours: 24, source: 'label', mow_hold_days: 2 }],
     ['unknown key', { mode: 'hold', source: 'label', extra: 1 }],
     ['bad verified_at', { mode: 'none', source: 'owner', verified_at: 'yesterday-ish' }],
@@ -169,6 +170,11 @@ describe('validateRule', () => {
     expect(result.rule).toBeNull();
     expect(result.errors.length).toBeGreaterThan(0);
   });
+});
+
+test('a water-in window may run to the 14-day pre-emergent label window; a hold stays capped at 7 days', () => {
+  expect(validateRule({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 336, source: 'label' })).toMatchObject({ valid: true, rule: { water_in_by_hours: 336 } });
+  expect(validateRule({ mode: 'hold', hold_hours: 336, source: 'label' }).valid).toBe(false);
 });
 
 describe('resolveWateringRule', () => {

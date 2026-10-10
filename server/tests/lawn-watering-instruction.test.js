@@ -251,6 +251,76 @@ describe('hold end: rounded UP to the next clock hour in ET, worded from the vis
   });
 });
 
+describe('rule D: a pre-emergent window over 7 days follows the label (owner 2026-10-09)', () => {
+  // Stonewall: "at least 0.5 inch of rainfall or irrigation within 14 days".
+  const PRE_EM = () => WATER_IN({ water_in_inches: 0.5, water_in_by_hours: 336, source: 'label' });
+  const ARENA = () => WATER_IN({ water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' });
+  const CELSIUS = () => ({ mode: 'hold', hold_hours: 24, hold_until: 'dry', source: 'owner' });
+  const ROTOR = { runtime: { headTypes: ['rotor'] } };
+
+  test('alone: no one-off run and no minutes, even on rotors; rain and the regular schedule count', () => {
+    const r = build([PRE_EM()], ROTOR);
+    expect(r).toMatchObject({ state: 'water_in', longWindow: true, waterInInches: 0.5, waterInBy: '2026-10-14T18:00:00.000Z', waterInByLabel: 'Wed, Oct 14 at 2 PM' });
+    expect(r.minutes).toEqual({ spray: null, rotor: null, unknown: false, measured: null });
+    expect(r.lines).toEqual([
+      'Today’s treatment needs about ½ inch of water by Wed, Oct 14 at 2 PM.',
+      'Rain and your regular watering both count.',
+    ]);
+    expect(r.lines.join(' ')).not.toMatch(/minutes|usual day/);
+    // A plan on the render never swaps in the partial-credit line.
+    expect(composeBannerLines(r, WITH_PLAN)).toEqual(r.lines);
+    expectCleanCopy(r);
+  });
+
+  test('after the 24-hour post-emergent hold: the hold stays, then the label window', () => {
+    const r = build([CELSIUS(), PRE_EM()], ROTOR);
+    expect(r).toMatchObject({ state: 'hold_then_water_in', longWindow: true, holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: '2026-10-14T18:00:00.000Z' });
+    expect(r.lines).toEqual([
+      'Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.',
+      'Today’s treatment then needs about ½ inch of water by Wed, Oct 14 at 2 PM.',
+      'Rain and your regular watering both count.',
+    ]);
+    expectCleanCopy(r);
+  });
+
+  test('never merges with a short water-in: Arena keeps its quarter inch in 24 hours (no 80-minute run), the 14-day total follows', () => {
+    const r = build([ARENA(), PRE_EM()], ROTOR);
+    expect(r).toMatchObject({ state: 'water_in', waterInInches: 0.25, waterInBy: '2026-10-01T18:00:00.000Z' });
+    expect(r).not.toHaveProperty('longWindow');
+    expect(r.minutes.rotor).toBe(40);
+    expect(r.lines).toEqual([
+      'Water in today’s treatment by Thu 2 PM.',
+      'Run each zone about 40 minutes.',
+      'Run it even if it is not your usual day.',
+      'In all, it needs about ½ inch of water by Wed, Oct 14 at 2 PM. Rain and your regular watering both count.',
+    ]);
+  });
+
+  test('the October visit: Celsius hold, Arena water-in after it, the Stonewall total last', () => {
+    const r = build([CELSIUS(), ARENA(), PRE_EM()], ROTOR);
+    expect(r).toMatchObject({ state: 'hold_then_water_in', waterInInches: 0.25, holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: '2026-10-02T19:00:00.000Z' });
+    expect(r.lines).toEqual([
+      'Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.',
+      'After that, water in today’s treatment by Fri 3 PM: run each zone about 40 minutes.',
+      'Run it even if it is not your usual day.',
+      'In all, it needs about ½ inch of water by Wed, Oct 14 at 2 PM. Rain and your regular watering both count.',
+    ]);
+    // Amount only when no setup is on file.
+    const plain = build([CELSIUS(), ARENA(), PRE_EM()], { plainWhenNoSetup: true });
+    expect(plain.lines[1]).toBe('After that, water in today’s treatment with about ¼ inch by Fri 3 PM.');
+  });
+
+  test('a window of 7 days or less is still a short water-in', () => {
+    const r = build([WATER_IN({ water_in_inches: 0.5, water_in_by_hours: 168 })], ROTOR);
+    expect(r).not.toHaveProperty('longWindow');
+    expect(r.lines[1]).toBe('Run each zone about 80 minutes.');
+  });
+
+  test('a product with no rule still makes the whole visit no claim (rule A)', () => {
+    expect(build([PRE_EM(), null]).state).toBeNull();
+  });
+});
+
 describe('minutes ladder (a sprinkler system is never assumed absent)', () => {
   const waterIn = (runtime, over = {}) => build([WATER_IN(over)], { runtime });
 

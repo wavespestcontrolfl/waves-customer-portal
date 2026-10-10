@@ -509,8 +509,10 @@ function buildAftercare(applications, opts = {}) {
     const plan = opts.weekPlan;
     // Nullish BEFORE coercion: Number(null) is 0 and would credit any water-in.
     const runDepth = plan?.depthInches == null || plan.depthInches === '' ? NaN : Number(plan.depthInches);
-    const creditsRun = !plan?.title || plan.prescribesRun !== true
-      || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
+    // A long-window water-in IS the regular schedule plus rain: it never
+    // replaces a plan run.
+    const creditsRun = instruction.longWindow !== true && (!plan?.title || plan.prescribesRun !== true
+      || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001));
     return normalizeLawnAftercare({
       // Every treatment sentence: the PDF and Ask Waves read only this field.
       watering: instruction.lines.join(' '),

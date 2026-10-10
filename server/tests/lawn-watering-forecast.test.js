@@ -75,6 +75,15 @@ describe('copy', () => {
 });
 
 describe('resolveWaterInForecast (frozen at completion)', () => {
+  test('a 14-day pre-emergent water-in gets neither the forecast nor the radar note: it already says rain counts and asks for no run', async () => {
+    const long = waterIn({ water_in_inches: 0.5, water_in_by_hours: 336 });
+    expect(long.longWindow).toBe(true);
+    const fetchForecast = jest.fn(async () => ok(2));
+    expect(await resolveWaterInForecast({ instruction: long, latitude: 27.5, longitude: -82.5, fetchForecast })).toBeNull();
+    expect(fetchForecast).not.toHaveBeenCalled();
+    expect(observedCloseOut(long, [{ date: '2026-10-07', inches: 1 }], ['2026-10-07'])).toBeNull();
+  });
+
   test('forecast known and at least the amount: one sentence with the inches, window from the instruction', async () => {
     const instruction = waterIn();
     const fetchForecast = jest.fn(async () => ok(0.4));
