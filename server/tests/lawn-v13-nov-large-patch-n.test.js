@@ -200,6 +200,43 @@ describe('the property read and the trouble-area read share one savepoint (codex
   });
 });
 
+describe('the archived-recipe check admits the cut for THIS visit only (codex #6256 r2 P1)', () => {
+  const { archivedLawnRecipeMatches } = require('../services/lawn-completion-defaults');
+  const row = (extra = {}) => ({ productId: 'f24', defaultInPlan: true, ratePer1000: null, rateUnit: 'lb_n', applicationMode: 'broadcast', gates: { targetN: '0.75 lb N/1000' }, ...extra });
+  const protocol = (...products) => ({ status: 'archived', products });
+  const item = (target, extra = {}) => ({ selected: true, product: { id: 'f24' }, scope: 'BROADCAST_FULL', mix: { rateSource: 'target_n_analysis', ratePer1000: target / 0.24, targetNPer1000: target, ...extra } });
+
+  test('an archived pinned November visit with the cut keeps its items at the reduced rate', () => {
+    expect(archivedLawnRecipeMatches(protocol(row()), [item(0.5)], 0.5)).toBe(true);
+    // and the normal target still passes with or without a cut
+    expect(archivedLawnRecipeMatches(protocol(row()), [item(0.75)], null)).toBe(true);
+    expect(archivedLawnRecipeMatches(protocol(row()), [item(0.75)], 0.5)).toBe(true);
+  });
+
+  test('without the cut the check is as before: the reduced target is rejected', () => {
+    expect(archivedLawnRecipeMatches(protocol(row()), [item(0.5)])).toBe(false);
+    expect(archivedLawnRecipeMatches(protocol(row()), [item(0.5)], null)).toBe(false);
+  });
+
+  test('the cut admits only the cut: any other target is still rejected', () => {
+    for (const target of [0.4, 0.6, 0.45, 1]) expect(archivedLawnRecipeMatches(protocol(row()), [item(target)], 0.5)).toBe(false);
+  });
+
+  test('it loosens nothing else: not a potassium row, not a stated-rate row, not a different rate source', () => {
+    const kRow = row({ productId: 'k', rateUnit: 'lb_k2o', gates: { targetK2O: '0.75 lb K2O/1000' } });
+    const kItem = { selected: true, product: { id: 'k' }, scope: 'BROADCAST_FULL', mix: { rateSource: 'target_k_analysis', ratePer1000: 2, targetKPer1000: 0.5 } };
+    expect(archivedLawnRecipeMatches(protocol(kRow), [kItem], 0.5)).toBe(false);
+    const stated = row({ ratePer1000: 3.1, rateUnit: 'lb', gates: {} });
+    expect(archivedLawnRecipeMatches(protocol(stated), [item(0.5)], 0.5)).toBe(false);
+    expect(archivedLawnRecipeMatches(protocol(row()), [item(0.5, { rateSource: 'catalog_default_rate' })], 0.5)).toBe(false);
+    expect(archivedLawnRecipeMatches(protocol(row()), [item(0.5, { ratePer1000: 0 })], 0.5)).toBe(false);
+  });
+
+  test('a non-archived protocol is not checked at all, as before', () => {
+    expect(archivedLawnRecipeMatches({ status: 'staged', products: [row()] }, [item(0.5)])).toBe(true);
+  });
+});
+
 describe('fungusNitrogenNotes', () => {
   const f24 = { id: 'f24', analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
   const mixFor = async () => {

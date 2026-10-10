@@ -114,6 +114,46 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     } finally { spy.mockRestore(); }
   });
 
+  describe('a November visit pinned to v13 after v13 is ARCHIVED (codex #6256 r2 P1)', () => {
+    const archive = async (status) => knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).update({ status });
+    afterEach(() => archive('staged'));
+    const pinned = async (areas) => {
+      const visit = await novemberVisit(areas);
+      await knex('scheduled_services').where({ id: visit.id }).update({ lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'nov_v13_spreader_feeding' });
+      return visit;
+    };
+
+    test('active fungus: the planned items and the completion defaults survive, at the reduced rate', async () => {
+      await archive('archived');
+      const result = await plan(await pinned([{ type: 'fungus' }]));
+      expect(result.protocol.structured.status).toBe('archived');
+      expect(result.propertyGate.blocks.map((block) => block.code)).not.toContain('lawn_archived_recipe_unavailable');
+      const item = bagOf(result.mixCalculator.items);
+      expect(item.mix.ratePer1000).toBeCloseTo(2.0833, 3);
+      expect(bagOf(result.completionDefaults.items).mix.ratePer1000).toBeCloseTo(2.0833, 3);
+    });
+
+    test('no fungus: the archived check passes at the stored 0.75 lb N exactly as before', async () => {
+      await archive('archived');
+      const result = await plan(await pinned([]));
+      expect(result.propertyGate.blocks.map((block) => block.code)).not.toContain('lawn_archived_recipe_unavailable');
+      expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(3.125, 3);
+    });
+
+    test('a target the row does not state and the cut does not explain is still rejected', async () => {
+      await archive('archived');
+      const stored = await knex('lawn_protocol_products as lpp').join('lawn_protocol_windows as w', 'w.id', 'lpp.lawn_protocol_window_id').where('w.window_key', 'nov_v13_spreader_feeding').select('lpp.id', 'lpp.gates');
+      await knex('lawn_protocol_products').where({ id: stored[0].id }).update({ gates: JSON.stringify({ targetN: '0.9 lb N/1000', blackoutSensitive: true }) });
+      try {
+        const result = await plan(await pinned([]));
+        expect(result.propertyGate.blocks.map((block) => block.code)).toContain('lawn_archived_recipe_unavailable');
+        expect(result.mixCalculator.items).toEqual([]);
+      } finally {
+        await knex('lawn_protocol_products').where({ id: stored[0].id }).update({ gates: stored[0].gates });
+      }
+    });
+  });
+
   test('active fungus but the gate is off, or the trouble-areas gate is off: the old plan, no fungus note anywhere', async () => {
     const visit = await novemberVisit([{ type: 'fungus' }]);
     setGates(GATES.filter((name) => name !== 'GATE_LAWN_NOV_LARGE_PATCH_N'));

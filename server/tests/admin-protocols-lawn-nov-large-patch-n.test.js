@@ -134,6 +134,59 @@ describe('the text staff read agrees with the cut (codex #6256 r1 P1)', () => {
   });
 });
 
+describe('the cut follows the protocol the PLANNER resolves for the visit (codex #6256 r2 P1)', () => {
+  const STALE = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 3.1 lb per 1,000 sq ft (0.75 lb N), spreader';
+  const pin = (version) => ({ lawn_protocol_key: 'fixture_v13', lawn_protocol_version: version, lawn_protocol_window_key: 'nov_v13_spreader_feeding' });
+  // The same lookup the planner makes: a pin (protocolKey) resolves to the pinned version; no pin is the current v13 protocol.
+  beforeEach(() => {
+    operatingLayer.getProtocolWindowContext.mockImplementation(async (knex, args) => (args.protocolKey
+      ? (args.protocolVersion === 'gone' ? null : { protocol: { version: args.protocolVersion } })
+      : { protocol: { version: LAWN_V13_VERSION } }));
+    operatingLayer.summarizeProtocolContext.mockImplementation((context) => (context?.protocol?.version === LAWN_V13_VERSION ? V13_SUMMARY : context?.protocol ? { version: context.protocol.version, products: [] } : null));
+  });
+  const pinnedCalls = () => operatingLayer.getProtocolWindowContext.mock.calls.filter((call) => call[1].protocolKey);
+
+  test('pinned to an older version: no cut, the recipe text is untouched, and no area is read', async () => {
+    Object.assign(visit, pin('2026.05'));
+    const body = await sheet();
+    expect(bag(body).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
+    expect(bag(body).raw).toBe(STALE);
+    expect(body.visit.primary).toBe(STALE);
+    expect(JSON.stringify(body)).not.toContain('activeFungusNitrogen');
+    expect(limitRate()).toBeCloseTo(3.125, 3);
+    expect(mockLoadActive).not.toHaveBeenCalled();
+    expect(pinnedCalls()[0][1]).toMatchObject({ protocolKey: 'fixture_v13', protocolVersion: '2026.05', windowKey: 'nov_v13_spreader_feeding', planning: true });
+  });
+
+  test('a pin that cannot be resolved is not v13 either', async () => {
+    Object.assign(visit, pin('gone'));
+    expect(bag(await sheet()).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
+  });
+
+  test('a protocol lookup that fails is not v13 (the normal target stands)', async () => {
+    Object.assign(visit, pin(LAWN_V13_VERSION));
+    operatingLayer.getProtocolWindowContext.mockImplementation(async (knex, args) => {
+      if (args.protocolKey) throw new Error('db down');
+      return { protocol: { version: LAWN_V13_VERSION } };
+    });
+    expect(bag(await sheet()).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
+  });
+
+  test('pinned to v13: the cut applies', async () => {
+    Object.assign(visit, pin(LAWN_V13_VERSION));
+    const body = await sheet();
+    expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
+    expect(bag(body).raw).toMatch(/2\.1 lb per 1,000 sq ft \(0\.5 lb N\), spreader, active fungus mapped$/);
+    expect(pinnedCalls()).toHaveLength(1);
+  });
+
+  test('unpinned with v13 current: the cut applies, and no pinned lookup is made', async () => {
+    const body = await sheet();
+    expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
+    expect(pinnedCalls()).toHaveLength(0);
+  });
+});
+
 describe('everything else keeps the visit\'s own 0.75 lb N (3.125 lb per 1,000), with no note', () => {
   const expectNormal = async (query = {}) => {
     const body = await sheet(query);

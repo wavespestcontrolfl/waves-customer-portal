@@ -1843,6 +1843,19 @@ async function visitForPlan(knex, recipeVisit, service, override = null) {
   return { ...found, warnings: found.unknownCadence ? [unknownCadenceWarning(found.unknownCadence)] : [] };
 }
 
+// Is this booked visit on the v13 protocol, decided the way the planner decides it: the same getProtocolWindowContext call with the
+// visit's own pin (protocolKey is what makes it a pin there), then the resolved version. A pinned visit whose protocol is another
+// version, or cannot be resolved or read, is not on v13 (the plan blocks it with lawn_v13_protocol_missing); an unpinned visit
+// takes the current v13 protocol, as the tank sheet's staged rows already do. For the tank sheet, which has no plan to ask.
+async function visitOnV13Protocol(knex, visit, { trackKey }) {
+  if (!visit?.lawn_protocol_key) return true;
+  const context = await getProtocolWindowContext(knex, {
+    serviceDate: toServiceDate(visit.scheduled_date), grassTrack: trackKey, region: 'swfl', planning: true,
+    windowKey: visit.lawn_protocol_window_key, protocolKey: visit.lawn_protocol_key, protocolVersion: visit.lawn_protocol_version,
+  }).catch(() => null);
+  return summarizeProtocolContext(context)?.version === LAWN_V13_VERSION;
+}
+
 // The booked visit a reader is opened from, by id (null for no id, a malformed id or an
 // unknown visit): the columns the cadence and the application limits read.
 // scope narrows the read to what the caller may see (a technician's current or recent
@@ -1850,7 +1863,7 @@ async function visitForPlan(knex, recipeVisit, service, override = null) {
 async function loadVisitForPlan(knex, id, scope = (q) => q) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) return null;
   return (await scope(knex('scheduled_services').where({ 'scheduled_services.id': id }))
-    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days', 'lawn_protocol_version')) || null;
+    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days', 'lawn_protocol_version', 'lawn_protocol_key', 'lawn_protocol_window_key')) || null;
 }
 
 // The city a booked visit is judged under, resolved the way the plan resolves it (the stamped visit
@@ -2177,7 +2190,7 @@ async function buildPlanForService(serviceId, options = {}) {
     productOf: (id) => products.find((product) => String(product.id) === String(id)) || null,
   });
   planItems = bermudaProjection.items;
-  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
+  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut);
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
   const v13PlanBlock = lawnV13PlanBlock({ trackKey, service, structuredProtocol });
@@ -2478,6 +2491,7 @@ module.exports = {
   calculateProductAmount,
   parseVisitNutrientTargets,
   visitNutrientTargets,
+  visitOnV13Protocol,
   fungusNitrogenNotes,
   summarizeMaterialCost,
   effectiveAreaFactor,
