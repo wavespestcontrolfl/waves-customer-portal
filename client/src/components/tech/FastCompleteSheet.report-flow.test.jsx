@@ -11,8 +11,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
-  default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly }) => (
-    <div role="dialog" aria-label="Tracer" data-expected-property={String(expectedPropertyId)} data-open-visit-only={String(!!openVisitOnly)}>
+  default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly, autoTrace }) => (
+    <div role="dialog" aria-label="Tracer" data-expected-property={String(expectedPropertyId)} data-open-visit-only={String(!!openVisitOnly)} data-auto-trace={String(!!autoTrace)}>
       <button type="button" onClick={() => onSaved({ linear_ft: 182, capture_mode: 'perimeter' })}>Save trace</button>
       <button type="button" onClick={onClose}>Close tracer</button>
     </div>
@@ -613,67 +613,30 @@ const SWEEP_LABEL = 'Swept eaves, window frames, door frames, and lanai';
 const sweepBox = () => screen.queryByRole('checkbox', { name: 'Swept eaves and webs' });
 const SWEPT_FACTS = { ...FACTS, sweptEaves: true };
 
-// Owner 2026-10-08: the note fills the sweep and one chip corrects it.
+// Owner 2026-10-09: no chip either. The tech says it in the note or it is not
+// on the record.
 const sweepOn = () => screen.queryByRole('button', { name: 'Swept eaves and webs ✕' });
 const sweepOff = () => screen.queryByRole('button', { name: '+ Swept eaves' });
 describe('the swept eaves and webs, read from the note', () => {
-  test('the short sheet shows no box or section for it, only a chip beside the report once it is written', async () => {
-    await openSheet(makeRequest());
-    expect(sweepBox()).toBeNull();
-    expect(screen.queryByText('Swept eaves and webs')).toBeNull();
-    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
-    expect(sweepOn()).toBeNull();
-    expect(sweepOff()).toBeNull();
-    await generate();
-    expect(sweepOff()).toBeTruthy();
-    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+  test('the short sheet shows no box, section or chip for it, before or after the report is written', async () => {
+    for (const facts of [FACTS, SWEPT_FACTS]) {
+      await openSheet(makeRequest({ facts }));
+      expect(sweepBox()).toBeNull();
+      expect(screen.queryByText('Swept eaves and webs')).toBeNull();
+      await generate();
+      expect(sweepOn()).toBeNull();
+      expect(sweepOff()).toBeNull();
+      expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+      cleanup();
+    }
   });
 
-  test('a sweep the read heard wrongly comes off with one tap: the report is written again without it and none is sent', async () => {
-    const request = makeRequest({ facts: SWEPT_FACTS });
-    await openSheet(request);
-    await generate();
-    fireEvent.click(sweepOn());
-    expect(sweepOff()).toBeTruthy();
-    // The report was written with the sweep: it must be written again.
-    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
-    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
-    expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([]);
-    // The writer is told so in so many words, over whatever the note says.
-    expect(request.bodies('/generate-report')[1].sweepNotDone).toBe(true);
-    expect(request.bodies('/generate-report')[0]).not.toHaveProperty('sweepNotDone');
-    // The read still says swept; the tech's word stands.
-    expect(sweepOff()).toBeTruthy();
-    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
-    await screen.findByTestId('fast-complete-sent');
-    const [body] = request.bodies('/complete');
-    expect(body).not.toHaveProperty('protocolActionsCompleted');
-    expect(body).not.toHaveProperty('protocolActionScopesCompleted');
-  });
-
-  test('a sweep the read missed goes on with one tap: the report is written again with it and it is sent', async () => {
-    const request = makeRequest();
-    await openSheet(request);
-    await generate();
-    fireEvent.click(sweepOff());
-    expect(sweepOn()).toBeTruthy();
-    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
-    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
-    expect(request.bodies('/generate-report')[1].actionsCompleted).toEqual([SWEEP_LABEL]);
-    expect(request.bodies('/generate-report')[1]).not.toHaveProperty('sweepNotDone');
-    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
-    await screen.findByTestId('fast-complete-sent');
-    const [body] = request.bodies('/complete');
-    expect(body.protocolActionsCompleted).toEqual([SWEEP_LABEL]);
-    expect(body.protocolActionScopesCompleted).toEqual([{ label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false }]);
-  });
-
-  test('a sweep heard: the writer and the completion carry the label with its exterior, no-treatment scope, and the chip shows it', async () => {
+  test('a sweep heard: the writer and the completion carry the label with its exterior, no-treatment scope', async () => {
     const request = makeRequest({ facts: SWEPT_FACTS });
     await openSheet(request);
     await generate();
     expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([SWEEP_LABEL]);
-    expect(sweepOn().getAttribute('aria-pressed')).toBe('true');
+    expect(request.bodies('/generate-report')[0]).not.toHaveProperty('sweepNotDone');
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');
@@ -688,7 +651,6 @@ describe('the swept eaves and webs, read from the note', () => {
       await generate();
       // The full form's shape: an empty list, which the writer reads as none.
       expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
-      expect(sweepOff().getAttribute('aria-pressed')).toBe('false');
       fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
       await screen.findByTestId('fast-complete-sent');
       const [body] = request.bodies('/complete');
@@ -895,9 +857,15 @@ describe('complete and send', () => {
     expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside and outside · perimeter spray · for ghost ants');
     expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    // The hold's fix sits in the footer beside Complete & send (owner
+    // 2026-10-09): it opens the tracer with the outline read started.
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-trace the house' }));
+    expect((await screen.findByRole('dialog', { name: 'Tracer' })).getAttribute('data-auto-trace')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
     fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
     // The tracer saves bound to the property this sheet loaded (Codex #5538).
     expect((await screen.findByRole('dialog', { name: 'Tracer' })).getAttribute('data-expected-property')).toBe('prop-1');
+    expect(screen.getByRole('dialog', { name: 'Tracer' }).getAttribute('data-auto-trace')).toBe('false');
     // The report flow's trace is judged with the report: its save is refused
     // once the visit is completed (Codex #5538).
     expect(screen.getByRole('dialog', { name: 'Tracer' }).getAttribute('data-open-visit-only')).toBe('true');
