@@ -967,12 +967,17 @@ async function winCommercialProposal(trx, updatedEstimate) {
 // visit" pinned, the converter's own reservation read refuses a row linked
 // since (booking.js links outside this accept's locks). A carded accept (the
 // dry run or an `expected`) also fails closed when the add-on classifier
-// cannot read its evidence, and hands the converter the effect log to fill.
+// cannot read its evidence, hands the converter the effect log to fill, and
+// runs it through the side-effect gate (estimate-accept-effects.js).
 function cardConvertOptions(ctx) {
   const { expected, dryRun } = ctx;
   if (!dryRun && !expected) return {};
   return {
     strictAddOnClassification: true,
+    // ONE context for everything the conversion does outside the transaction:
+    // a dry run records it and does none of it; the carded real run records
+    // the same list and does it. Absent on the page button.
+    sideEffects: AcceptEffects.createSideEffectGate({ dryRun: dryRun === true, log: ctx.effects }),
     ...(dryRun || expected.noLinkedVisits === true ? { refuseLinkedVisits: true } : {}),
     ...(ctx.effects.enabled ? { effectLog: ctx.convertLog } : {}),
   };

@@ -399,6 +399,18 @@ describe('fail closed', () => {
     expect(result.error).toBe("Could not verify the customer's email settings — try again. Nothing was changed.");
   });
 
+  test('a side effect the conversion would do outside the post-commit plan is not hidden: the card refuses', async () => {
+    // The converter's side-effect gate listed an email the plan does not carry.
+    dryEffects = () => [
+      ...addOnEffects({ postCommit: postCommit([emailStep()]) }),
+      { kind: 'side_effect', type: 'customer_sms', target: 'new_recurring_welcome', recipient: '***42', detail: null },
+      { kind: 'side_effect', type: 'admin_bell', target: 'tier_upgrade', recipient: null, detail: 'x' },
+    ];
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('side_effect_outside_plan');
+    expect(result.error).toBe('This accept would also text the customer and ring an admin bell, and the bar cannot show that yet. Accept it from the estimate page. Nothing was changed.');
+  });
+
   test('commercial recurring work the converter would schedule by hand refuses even if the quote looked residential', async () => {
     dryEffects = () => addOnEffects({ conversion: { manual_recurring_scheduling: true } });
     expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).code).toBe('commercial_recurring');

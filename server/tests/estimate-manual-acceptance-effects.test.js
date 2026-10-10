@@ -58,13 +58,14 @@ function makeWorld({ estimateOverrides = {}, customerOverrides = {}, prefs = [],
     activity_log: [],
     leads: [],
   };
-  const state = { committed: 0, rolledBack: 0, commitsWithWrites: [] };
+  const state = { committed: 0, rolledBack: 0, commitsWithWrites: [], locks: [] };
   let depth = 0;
   let before = null;
   const database = jest.fn((table) => {
     const q = { cond: null };
     const rows = () => tables[table] || [];
-    for (const m of ['whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'forUpdate', 'orderBy', 'leftJoin', 'limit']) q[m] = () => q;
+    for (const m of ['whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'leftJoin', 'limit']) q[m] = () => q;
+    q.forUpdate = () => { state.locks.push(`row:${table}`); return q; };
     q.where = (c) => { if (typeof c !== 'function') q.cond = c; return q; };
     q.select = () => q;
     q.first = async () => rows()[0] || null;
@@ -84,7 +85,10 @@ function makeWorld({ estimateOverrides = {}, customerOverrides = {}, prefs = [],
     return q;
   });
   database.fn = { now: () => 'NOW' };
-  database.raw = jest.fn((sql) => ({ rows: [], __raw: String(sql) }));
+  database.raw = jest.fn((sql) => {
+    if (/advisory/i.test(String(sql))) state.locks.push('advisory:customer-comms');
+    return { rows: [], __raw: String(sql) };
+  });
   database.schema = { hasTable: async () => true, hasColumn: async () => true };
   database.transaction = jest.fn(async (callback) => {
     depth += 1;
@@ -116,6 +120,10 @@ function fakeConverter(world, o = {}) {
         same_family_at_other_property: false, split_by_service: o.split !== false,
       });
     }
+    // The one context for everything outside the transaction (the real
+    // converter routes each send through it; see
+    // estimate-converter-side-effect-gate.test.js).
+    if (o.sender) opts.sideEffects.run({ type: 'admin_bell', target: 'plan_rate_review', detail: 'Multi-plan rate needs review after re-quote' }, o.sender);
     Object.assign(world.tables.customers[0], { monthly_rate: '104.00', waveguard_tier: 'Gold', ...(o.customerWrites || {}) });
     world.tables.customer_plan_rates = [{ family_key: 'lawn_care', monthly_rate: '55.00' }, { family_key: 'pest_control', monthly_rate: '49.00' }];
     if (o.lawnWrites) o.lawnWrites(world.tables);
@@ -409,6 +417,70 @@ describe('finding 7: a grouped estimate lists its follow-up transfer', () => {
     const world = makeWorld({ estimateOverrides: { estimate_group_id: 'group-1' } });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(planStep(effects, 'group_followup_transfer')).toEqual({ step: 'group_followup_transfer', grouped: true });
+  });
+});
+
+describe('side effects outside the transaction', () => {
+  test('a dry run hands the converter a gate in dry-run mode: the send is listed and never made', async () => {
+    const world = makeWorld();
+    const sender = jest.fn();
+    const converter = fakeConverter(world, { sender });
+    const { effects } = await markEstimateManuallyAccepted(base(world, converter, { dryRun: true }));
+    expect(converter.convertEstimate.mock.calls[0][1].sideEffects).toMatchObject({ dryRun: true, carded: true });
+    expect(sender).not.toHaveBeenCalled();
+    expect(effects.filter((e) => e.kind === 'side_effect')).toEqual([
+      { kind: 'side_effect', type: 'admin_bell', target: 'plan_rate_review', recipient: null, detail: 'Multi-plan rate needs review after re-quote' },
+    ]);
+  });
+
+  test('the carded real run sends it, and a send that was not on the pinned list refuses before commit', async () => {
+    const dryWorld = makeWorld();
+    const { effects } = await markEstimateManuallyAccepted(base(dryWorld, fakeConverter(dryWorld, { sender: jest.fn() }), { dryRun: true }));
+    const key = Effects.effectsFingerprint(effects);
+
+    const realWorld = makeWorld();
+    const sender = jest.fn();
+    const real = fakeConverter(realWorld, { sender });
+    await markEstimateManuallyAccepted(base(realWorld, real, { expected: { effectsKey: key } }));
+    expect(real.convertEstimate.mock.calls[0][1].sideEffects).toMatchObject({ dryRun: false, carded: true });
+    expect(sender).toHaveBeenCalledTimes(1);
+    expect(realWorld.state.committed).toBe(1);
+
+    // The card was pinned with no send; the conversion now wants one.
+    const cleanWorld = makeWorld();
+    const cleanKey = Effects.effectsFingerprint((await markEstimateManuallyAccepted(base(cleanWorld, fakeConverter(cleanWorld), { dryRun: true }))).effects);
+    const lateWorld = makeWorld();
+    const lateSender = jest.fn();
+    await expect(markEstimateManuallyAccepted(base(lateWorld, fakeConverter(lateWorld, { sender: lateSender }), { expected: { effectsKey: cleanKey } })))
+      .rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(lateWorld.state.committed).toBe(0);
+  });
+
+  test('the page button gets no gate and no effect list, and its send is made', async () => {
+    const world = makeWorld();
+    const sender = jest.fn();
+    const converter = fakeConverter(world, { sender });
+    // The fake converter calls opts.sideEffects.run; the real one falls back to
+    // a pass-through when the option is absent (gateFrom). Mirror that here.
+    const original = converter.convertEstimate.getMockImplementation();
+    converter.convertEstimate.mockImplementation((id, opts) => original(id, { ...opts, sideEffects: opts.sideEffects || Effects.gateFrom(opts) }));
+    const result = await markEstimateManuallyAccepted(base(world, converter));
+    expect(converter.convertEstimate.mock.calls[0][1]).not.toHaveProperty('sideEffects');
+    expect(result).not.toHaveProperty('effects');
+    expect(sender).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('lock order: the dry run takes the real run\'s locks, in the real run\'s order', () => {
+  test('same advisory lock, same row locks, same sequence; the dry run adds none', async () => {
+    const dryWorld = makeWorld();
+    const { effects } = await markEstimateManuallyAccepted(base(dryWorld, fakeConverter(dryWorld), { dryRun: true }));
+    const realWorld = makeWorld();
+    await markEstimateManuallyAccepted(base(realWorld, fakeConverter(realWorld), { expected: { effectsKey: Effects.effectsFingerprint(effects) } }));
+    expect(dryWorld.state.locks.length).toBeGreaterThan(0);
+    expect(dryWorld.state.locks).toEqual(realWorld.state.locks);
+    // Comms lock first, then the estimate row.
+    expect(dryWorld.state.locks.slice(0, 2)).toEqual(['advisory:customer-comms', 'row:estimates']);
   });
 });
 

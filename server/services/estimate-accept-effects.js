@@ -162,6 +162,93 @@ function oneTimeLineEffects(estimate, converter) {
     .map((line) => ({ kind: 'one_time_line', ...line, consequence: 'schedule_and_invoice_by_hand' }));
 }
 
+// ── The side-effect gate: one context for everything outside the transaction ──
+//
+// The converter and the accept steps do a few things a rollback cannot undo:
+// a customer email or text, an admin bell, a tech notification, a reminder
+// row written through another pool, an invoice send. A dry run must never do
+// any of them. The accept hands the converter ONE optional context
+// (opts.sideEffects); every such call in the converter goes through
+// gate.run(). The page button passes no context, so run() just calls the
+// function and nothing changes for it.
+//
+//   dry run          : record the effect, do NOT call the function
+//   carded real run  : record the effect (the same list the card pinned), call it
+//   no context       : call it
+//
+// A side effect added later WITHOUT the gate still runs for the page, and is
+// not listed by the dry run. The paths below cannot be gated, because they
+// reach deep helpers that take no context; the gate REFUSES a carded accept
+// that would enter them (assertCardedPath), so the dry run cannot reach them
+// either. Those helpers: the recurring-visit seeder and its shortfall bell,
+// visit grouping and reminder rows, the inspection-credit hooks, the palm
+// catalog bell, the invoice and deposit service (Stripe, delivery, deposit
+// alerts), and the annual prepay term and renewal mint.
+
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-2)}` : null;
+}
+
+class CardedPathRefusal extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = 'CardedPathRefusal';
+    this.isOperational = true;
+    this.statusCode = 422;
+    this.status = 422;
+    this.code = code;
+  }
+}
+
+// descriptor: { type, target, recipient?, detail? }. Only stable facts: no
+// clocks, no generated ids, no unmasked contact details.
+function sideEffectEffect(descriptor) {
+  return {
+    kind: 'side_effect',
+    type: descriptor.type,
+    target: orNull(descriptor.target),
+    recipient: orNull(descriptor.recipient),
+    detail: orNull(descriptor.detail),
+  };
+}
+
+function createSideEffectGate({ dryRun = false, log = null } = {}) {
+  return {
+    dryRun: dryRun === true,
+    carded: true,
+    run(descriptor, fn, dryValue) {
+      if (log && typeof log.add === 'function') log.add(sideEffectEffect(descriptor));
+      if (dryRun === true) return dryValue;
+      return fn();
+    },
+  };
+}
+
+const PASS_THROUGH_GATE = Object.freeze({ dryRun: false, carded: false, run: (_descriptor, fn) => fn() });
+
+function gateFrom(opts) {
+  const gate = opts && opts.sideEffects;
+  return gate && typeof gate.run === 'function' ? gate : PASS_THROUGH_GATE;
+}
+
+// The conversion paths that reach un-gateable helpers. A carded accept (dry or
+// real) takes the manual Mark Won shape only: nothing auto-scheduled, no
+// invoice minted, no annual prepay term. Anything else is refused with a
+// reason BEFORE the conversion writes, on the dry run and the real run alike.
+function assertCardedPath(gate, { skipAutoSchedule, skipSetupInvoice, billingTerm }) {
+  if (!gate || gate.carded !== true) return;
+  if (!skipAutoSchedule) {
+    throw new CardedPathRefusal('This accept would book visits, and the bar cannot show or hold that yet. Accept it from the estimate page.', 'carded_path_schedules_visits');
+  }
+  if (!skipSetupInvoice) {
+    throw new CardedPathRefusal('This accept would create an invoice, and the bar cannot show or hold that yet. Accept it from the estimate page.', 'carded_path_creates_invoice');
+  }
+  if (billingTerm === 'prepay_annual') {
+    throw new CardedPathRefusal('Annual prepay is not offered from the bar. Accept it from the estimate page.', 'carded_path_annual_prepay');
+  }
+}
+
 // ── The post-commit plan ──
 
 const BELLS = [
@@ -339,4 +426,9 @@ module.exports = {
   planPostCommit,
   runPostCommit,
   maskEmail,
+  maskPhone,
+  CardedPathRefusal,
+  createSideEffectGate,
+  gateFrom,
+  assertCardedPath,
 };

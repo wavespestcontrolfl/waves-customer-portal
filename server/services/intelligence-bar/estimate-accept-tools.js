@@ -374,7 +374,18 @@ function messagesFromPlan({ plan, converts }) {
 // not be read, a commercial recurring line the converter schedules by hand,
 // or a per-application charge the converter left unresolved (it parks a
 // fee bell for the office).
+const SIDE_EFFECT_TEXT = {
+  customer_email: 'email the customer', customer_sms: 'text the customer', admin_bell: 'ring an admin bell', tech_notification: 'notify a technician',
+};
 function effectRefusal(effects) {
+  // A side effect the conversion would do OUTSIDE the post-commit plan is not
+  // worded on this card (it is gated and listed by the accept itself), so the
+  // card fails closed rather than hide it.
+  const outside = effectsOfKind(effects, 'side_effect');
+  if (outside.length) {
+    const what = [...new Set(outside.map((e) => SIDE_EFFECT_TEXT[e.type] || 'send a message'))].join(' and ');
+    return refuse(`This accept would also ${what}, and the bar cannot show that yet. Accept it from the estimate page.`, 'side_effect_outside_plan');
+  }
   const plan = effectOf(effects, 'post_commit')?.plan || [];
   const email = plan.find((s) => s.step === 'membership_email');
   if (email && (email.reason === 'prefs_unreadable' || email.reason === 'unknown')) {

@@ -27,6 +27,7 @@ const {
   resolveBillingCadence,
 } = require('./billing-cadence');
 const AccountMembershipEmail = require('./account-membership-email');
+const AcceptEffects = require('./estimate-accept-effects');
 const {
   sendNewRecurringWelcome,
   isNewRecurringSignupCandidate,
@@ -5063,6 +5064,13 @@ const EstimateConverter = {
     // converter auto-pick the next feasible zone date. Self-accept paths
     // still auto-schedule when there's no reservation row.
     const skipAutoSchedule = opts.skipAutoSchedule === true;
+    // The Intelligence Bar card's side-effect context (estimate-accept-
+    // effects.js). Absent for every other caller: gate.run() then just calls
+    // the function. Present on a carded accept, dry or real: every email,
+    // text, bell and tech notification below goes through it, and the
+    // paths that reach helpers that take no context are refused up front.
+    const fx = AcceptEffects.gateFrom(opts);
+    AcceptEffects.assertCardedPath(fx, { skipAutoSchedule, skipSetupInvoice, billingTerm });
     // Prepay-on-book (admin-schedule accept-on-book): the caller books the
     // first visit itself under skipAutoSchedule, so the converter can't see
     // that row and would otherwise anchor the renewal term to today — a
@@ -6847,11 +6855,11 @@ const EstimateConverter = {
               // for the enclosing commit; gate-dark, never awaited. Its
               // seeded children stay silent (series fan-out, by design).
               if (parentRow.technician_id) {
-                void require('./tech-visit-notifications').notifyTechVisitChange({
+                void fx.run({ type: 'tech_notification', target: 'visit_assigned' }, () => require('./tech-visit-notifications').notifyTechVisitChange({
                   visitId: parentRow.id, kind: 'assigned', technicianId: parentRow.technician_id, actorId: 'customer_estimate_accept',
                   snapshot: { date: parentRow.scheduled_date, windowStart: parentRow.window_start || null, windowEnd: parentRow.window_end || null },
                   trx,
-                });
+                }));
               }
               // Held-slot acceptance is a booking too (Codex #3178 r3 P1)
               // — the auto-schedule path below is not the only way an
@@ -8539,8 +8547,8 @@ const EstimateConverter = {
     };
 
     if (opts.skipMembershipEmail !== true && !suppressRecurringConversion && !commercialOnlyRecurring) {
-      void AccountMembershipEmail.sendMembershipStarted(membershipEmail)
-        .catch((err) => logger.warn(`[estimate-converter] membership.started email failed for customer ${customerId}: ${err.message}`));
+      void fx.run({ type: 'customer_email', target: 'membership_started' }, () => AccountMembershipEmail.sendMembershipStarted(membershipEmail)
+        .catch((err) => logger.warn(`[estimate-converter] membership.started email failed for customer ${customerId}: ${err.message}`)));
     }
 
     // Commercial recurring follow-ups aren't auto-scheduled yet — surface it so
@@ -8575,12 +8583,12 @@ const EstimateConverter = {
       } else {
         try {
           const NotificationService = require('./notification-service');
-          void NotificationService.notifyAdmin(
+          void fx.run({ type: 'admin_bell', target: 'commercial_schedule', detail: notificationPayload.title }, () => NotificationService.notifyAdmin(
             notificationPayload.type,
             notificationPayload.title,
             notificationPayload.body,
             notificationPayload.options
-          ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
+          ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`)));
         } catch (err) {
           logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
         }
@@ -8592,12 +8600,12 @@ const EstimateConverter = {
     if (perApplicationFeeNotification && opts.deferCommercialScheduleNotification !== true) {
       try {
         const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
+        void fx.run({ type: 'admin_bell', target: 'per_application_fee', detail: perApplicationFeeNotification.title }, () => NotificationService.notifyAdmin(
           perApplicationFeeNotification.type,
           perApplicationFeeNotification.title,
           perApplicationFeeNotification.body,
           perApplicationFeeNotification.options
-        ).catch((err) => logger.warn(`[estimate-converter] per-application fee admin notify failed: ${err.message}`));
+        ).catch((err) => logger.warn(`[estimate-converter] per-application fee admin notify failed: ${err.message}`)));
       } catch (err) {
         logger.warn(`[estimate-converter] per-application fee admin notify setup failed: ${err.message}`);
       }
@@ -8744,12 +8752,12 @@ const EstimateConverter = {
       } else {
         try {
           const NotificationService = require('./notification-service');
-          void NotificationService.notifyAdmin(
+          void fx.run({ type: 'admin_bell', target: 'tier_upgrade', detail: tierReviewPayload.title }, () => NotificationService.notifyAdmin(
             tierReviewPayload.type,
             tierReviewPayload.title,
             tierReviewPayload.body,
             tierReviewPayload.options,
-          ).catch((err) => logger.warn(`[estimate-converter] tier-upgrade admin notify failed: ${err.message}`));
+          ).catch((err) => logger.warn(`[estimate-converter] tier-upgrade admin notify failed: ${err.message}`)));
         } catch (err) {
           logger.warn(`[estimate-converter] tier-upgrade admin notify setup failed: ${err.message}`);
         }
@@ -8831,12 +8839,12 @@ const EstimateConverter = {
       } else {
         try {
           const NotificationService = require('./notification-service');
-          void NotificationService.notifyAdmin(
+          void fx.run({ type: 'admin_bell', target: 'plan_rate_review', detail: planReviewPayload.title }, () => NotificationService.notifyAdmin(
             planReviewPayload.type,
             planReviewPayload.title,
             planReviewPayload.body,
             planReviewPayload.options,
-          ).catch((err) => logger.warn(`[estimate-converter] plan-rate review notify failed: ${err.message}`));
+          ).catch((err) => logger.warn(`[estimate-converter] plan-rate review notify failed: ${err.message}`)));
         } catch (err) {
           logger.warn(`[estimate-converter] plan-rate review notify setup failed: ${err.message}`);
         }
@@ -8872,8 +8880,8 @@ const EstimateConverter = {
     // later rollback would strand the SMS + audit side effects. Those callers
     // get `welcomeSms` back in the result and fire it after commit.
     if (welcomeSms && !usingCallerDatabase) {
-      void sendNewRecurringWelcome(welcomeSms)
-        .catch((err) => logger.warn(`[estimate-converter] welcome SMS failed for customer ${customerId}: ${err.message}`));
+      void fx.run({ type: 'customer_sms', target: 'new_recurring_welcome', recipient: AcceptEffects.maskPhone(welcomeSms.customer?.phone) }, () => sendNewRecurringWelcome(welcomeSms)
+        .catch((err) => logger.warn(`[estimate-converter] welcome SMS failed for customer ${customerId}: ${err.message}`)));
     }
 
     return {
