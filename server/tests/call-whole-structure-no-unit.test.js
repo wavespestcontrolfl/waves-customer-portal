@@ -445,6 +445,16 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, requested_service: 'slab pre-treat plus a termite foam spot treatment next door' }, commercial)).toBe(false);
   });
 
+  test('an exact slab pre-treat pick mixed with existing-structure termite work keeps the unit card', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run(slab, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Wants the slab pre-treat and trenching around the old building' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'rodding along the existing wall'] }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'slab pre-treat plus a liquid perimeter treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat and a termite inspection of the office' }, commercial)).toBe(false);
+  });
+
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
     const pre = { specific_service_name: 'Slab Pre-Treat Termite Service' };
     const commercial = { property: { property_type: 'commercial' } };
