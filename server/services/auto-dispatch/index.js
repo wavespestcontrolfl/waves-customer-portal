@@ -298,15 +298,16 @@ async function standingConflict(seen, id) {
 
 // Run end: every visit still in conflict is handed to the notice, whatever
 // path left it there (no slot, a guard, the per-run cap, a failed or partial
-// write, a dry run). After any move the conflict is read again, so a visit
-// this run fixed raises nothing and closes its standing notice. A re-read
-// that fails keeps what the run saw. Never throws.
+// write, a dry run). Each conflict is read again first, always: this run's
+// own moves, and a person who moved or cancelled the visit while the run
+// worked (Codex #6253 r3), both clear it. A visit that is clear raises
+// nothing and closes its standing notice. A re-read that fails keeps what
+// the run saw. Never throws.
 async function settleConflicts(run) {
-  const reread = run.totals.changed > 0;
   for (const [id, seen] of run.conflicts) {
     let now = seen;
     try {
-      if (reread) now = await standingConflict(seen, id);
+      now = await standingConflict(seen, id);
     } catch (err) {
       logger.warn(`[auto-dispatch] conflict re-read failed for ${id}: ${err.message}`);
     }

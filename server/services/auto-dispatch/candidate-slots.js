@@ -806,19 +806,12 @@ async function conflictSameDaySlots(service, current, slots, findTimeArgs) {
     .filter((slot) => sameDayTech(slot) && slot.start_time !== current.start_time && !offered.has(slot.start_time));
 }
 
-async function findValidCandidateSlots(service, prefs, baseCtx) {
-  const geo = resolveGeo(service);
-  if (!geo) return { current: null, candidates: [], note: 'no_geo' };
-  // The visit group is read ONCE for this evaluation and shared by the
-  // current placement and every candidate (see withGroupContext).
-  const grouped = await withGroupContext(service, baseCtx);
-  // Read once: candidate generation, the cap and the current placement all
-  // use the same answer. Gate off: null, no read.
-  const ctx = { ...grouped, evalConflict: await readCurrentConflict(service, grouped) };
-
-  // Search within ± tolerance days of the visit's CURRENT date (clamped to the
-  // lock floor and lookahead horizon) so optimization tightens the route without
-  // collapsing the recurring cadence by pulling the visit far from its date.
+// The dates a move may land on. Within ± tolerance days of the visit's
+// CURRENT date (clamped to the lock floor and lookahead horizon), so
+// optimization tightens the route without collapsing the recurring cadence;
+// the route-tier window when the orchestrator passed one; and a customer
+// re-anchor's own ±3 days. `dateFrom > dateTo` means the window collapsed.
+function searchWindow(service, ctx) {
   const horizonCap = etDateString(addETDays(ctx.nowDate, ctx.lookaheadDays));
   const origDate = toDateStr(service.scheduled_date);
   let dateFrom;
@@ -854,21 +847,17 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     if (dateFrom < dueFrom) dateFrom = dueFrom;
     if (dateTo > dueTo) dateTo = dueTo;
   }
-  if (dateFrom > dateTo) {
-    // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
-    const current = await computeCurrentPlacement(service, prefs, ctx);
-    return { current, candidates: [], drops: null, feasible: 0 };
-  }
-  const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
-  const category = prefs.service_category;
+  return { dateFrom, dateTo };
+}
 
-  // Dates already occupied by another occurrence of THIS recurring series. The
-  // rebooker only checks tech-time overlap, so without this two visits from the
-  // same series could land on the same day (different time/tech). HARD filter.
-  // ALL non-cancelled rows of the series — including booster-month rows. The
-  // scheduler dedupes base recurring dates against boosters to avoid a
-  // base+booster same-day double-booking, and the rebooker only checks
-  // technician-time overlap, so boosters must block candidate dates too.
+// Dates already occupied by another occurrence of THIS recurring series. The
+// rebooker only checks tech-time overlap, so without this two visits from the
+// same series could land on the same day (different time/tech). HARD filter.
+// ALL non-cancelled rows of the series — including booster-month rows. The
+// scheduler dedupes base recurring dates against boosters to avoid a
+// base+booster same-day double-booking, and the rebooker only checks
+// technician-time overlap, so boosters must block candidate dates too.
+async function seriesDatesInWindow(service, ctx, dateFrom, dateTo) {
   const parentId = service.recurring_parent_id || service.id;
   const siblingRows = await ctx.db('scheduled_services')
     .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
@@ -878,7 +867,48 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     .whereNotIn('status', service.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .select('scheduled_date');
-  const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
+  return new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
+}
+
+// find-time route-RANKS (lowest detour first) then truncates to topN. Our HARD
+// filters (blackout, sibling, weekend, explicit preferred day/time, deactivated
+// tech) run AFTER, so if the route-best topN are all filtered out while a valid
+// slot sits just past the cap, we'd wrongly report no candidate — i.e. route
+// ranking would silently gate what the hard preference filter can see. Bound the
+// first pass at FETCH_CAP, but if it truncated (total_feasible > returned),
+// re-fetch the FULL feasible set so the hard filters see every slot. The window
+// is only ±tolerance days, so the full set is small; the re-fetch is rare (never
+// at current crew size) and only pays off in a dense window.
+async function everyFeasibleSlot(findTimeArgs, ctx) {
+  let res = await findAvailableSlots({ ...findTimeArgs, topN: ctx.fetchCap || FETCH_CAP });
+  let slots = (res && res.slots) || [];
+  if (res && typeof res.total_feasible === 'number' && res.total_feasible > slots.length) {
+    res = await findAvailableSlots({ ...findTimeArgs, topN: res.total_feasible });
+    slots = (res && res.slots) || [];
+  }
+  return slots;
+}
+
+async function findValidCandidateSlots(service, prefs, baseCtx) {
+  const geo = resolveGeo(service);
+  if (!geo) return { current: null, candidates: [], note: 'no_geo' };
+  // The visit group is read ONCE for this evaluation and shared by the
+  // current placement and every candidate (see withGroupContext).
+  const grouped = await withGroupContext(service, baseCtx);
+  // Read once: candidate generation, the cap and the current placement all
+  // use the same answer. Gate off: null, no read.
+  const ctx = { ...grouped, evalConflict: await readCurrentConflict(service, grouped) };
+
+  const { dateFrom, dateTo } = searchWindow(service, ctx);
+  if (dateFrom > dateTo) {
+    // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
+    const current = await computeCurrentPlacement(service, prefs, ctx);
+    return { current, candidates: [], drops: null, feasible: 0 };
+  }
+  const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
+  const category = prefs.service_category;
+
+  const siblingDates = await seriesDatesInWindow(service, ctx, dateFrom, dateTo);
 
   // FLEX-TIER: the flexible tier's own candidate admission (a no-op in
   // every other mode) — see flexTier.flexCandidateRules.
@@ -912,21 +942,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // consistent with SmartRebooker's overlap check (which treats 'rescheduled'
     // as a conflict). Excluding it here would propose slots apply then rejects.
   };
-  // find-time route-RANKS (lowest detour first) then truncates to topN. Our HARD
-  // filters (blackout, sibling, weekend, explicit preferred day/time, deactivated
-  // tech) run AFTER, so if the route-best topN are all filtered out while a valid
-  // slot sits just past the cap, we'd wrongly report no candidate — i.e. route
-  // ranking would silently gate what the hard preference filter can see. Bound the
-  // first pass at FETCH_CAP, but if it truncated (total_feasible > returned),
-  // re-fetch the FULL feasible set so the hard filters see every slot. The window
-  // is only ±tolerance days, so the full set is small; the re-fetch is rare (never
-  // at current crew size) and only pays off in a dense window.
-  let res = await findAvailableSlots({ ...findTimeArgs, topN: ctx.fetchCap || FETCH_CAP });
-  let slots = (res && res.slots) || [];
-  if (res && typeof res.total_feasible === 'number' && res.total_feasible > slots.length) {
-    res = await findAvailableSlots({ ...findTimeArgs, topN: res.total_feasible });
-    slots = (res && res.slots) || [];
-  }
+  const slots = await everyFeasibleSlot(findTimeArgs, ctx);
 
   // Drop tally — why feasible slots were rejected. Surfaced to the audit so an
   // empty candidate set reads as "honored the customer's preference, nothing

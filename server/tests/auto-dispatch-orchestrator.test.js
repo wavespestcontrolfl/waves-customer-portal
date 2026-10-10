@@ -1256,6 +1256,12 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
       return chain;
     });
   };
+  // The run's end reads every conflict again (Codex #6253 r3): the visit's
+  // row is there and the conflict still stands.
+  const standing = (conflict = OVERLAP) => {
+    rowReads();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(conflict);
+  };
   const inConflict = { current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] };
   const noticedIds = () => raiseAdminAlert.mock.calls.map(([, spec]) => spec.subject.id).sort();
 
@@ -1308,7 +1314,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
   test('a visit in conflict at the limit is not moved and a person is told', async () => {
     await applyMode(async () => {
       moveLogReads = [AT_LIMIT];
-      candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+      standing();
       candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
       const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
       expect(res).toMatchObject({ changed: 0, skipped: 1 });
@@ -1335,6 +1341,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
   // Codex #6253 r1 P1: a qualifying move that a grouped sibling's guard
   // refuses leaves the visit in conflict; a person is told.
   test('a conflict visit whose grouped sibling refuses the move raises the notice', async () => {
+    standing();
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
     apply.previewGroupMove.mockResolvedValueOnce({ code: 'GROUP_MEMBER_GUARD', description: 'a sibling reached the move limit' });
     await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
@@ -1351,6 +1358,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
 
   test('a conflict visit whose write fails raises the notice', async () => {
     await applyMode(async () => {
+      standing();
       candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
       apply.applyAutoDispatchMove.mockRejectedValue(new Error('refused by the writer'));
       const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
@@ -1417,6 +1425,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     });
 
     test('a dry run moves nothing, so a conflict with a recommended move is told too', async () => {
+      standing();
       candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
       const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
       expect(res).toMatchObject({ changed: 0 });
@@ -1454,13 +1463,15 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     });
 
     test('a visit still in conflict is not proof; a visit the run moved is', async () => {
+      standing();
       candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
       await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
       expect(provenClear()).toEqual([]);
       expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
       raiseAdminAlert.mockClear();
       await applyMode(async () => {
-        rowReads();
+        // After the move the conflict reads clear.
+        candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
         candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [CAND_SMALL] });
         const res = await runAutoDispatch({ mode: 'apply', conflictMovesEnabled: true });
         expect(res).toMatchObject({ changed: 1 });
@@ -1472,6 +1483,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
 
   test('a conflict visit whose every slot adds too much drive raises the notice (CONFLICT_NO_NEAR_SLOT)', async () => {
     const FAR = { ...CAND_SMALL, detour_minutes: 60 };
+    standing();
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [FAR] });
     await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
     expect(lastDecision('no_change').reason_code).toBe('CONFLICT_NO_NEAR_SLOT');
@@ -1480,6 +1492,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
   });
 
   test('a conflict visit with no valid slot at all raises the notice; one that is not in conflict does not', async () => {
+    standing({ kind: 'closed_day', date: CURRENT.date });
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: { kind: 'closed_day', date: CURRENT.date } }, candidates: [] });
     await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
     expect(lastDecision('no_change').reason_code).toBe('NO_VALID_SLOT');
@@ -1492,7 +1505,23 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
+  // Codex #6253 r3: nothing moved in the run, but a person cancelled the
+  // visit (or moved it clear) while the run worked.
+  test('a conflict a person fixed during the run raises nothing, even when the run moved nothing', async () => {
+    rowReads();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
+    // The end-of-run read finds the visit clear.
+    expect(await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true })).toMatchObject({ changed: 0 });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    // ...or cancelled: no notice, and no proof of a clear conflict either.
+    servicesResult = [svc({ status: 'cancelled' })];
+    standing();
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
   test('a failing notice never fails the run', async () => {
+    standing();
     raiseAdminAlert.mockRejectedValueOnce(new Error('notifications down'));
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT_GOOD, conflict: OVERLAP }, candidates: [] });
     const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
