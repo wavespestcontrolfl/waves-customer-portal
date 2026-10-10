@@ -808,7 +808,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   }
   // send_invoice / charge_invoice: invoice, money, card and who is contacted.
   if ((toolName === 'send_invoice' || toolName === 'charge_invoice') && preview?.preview === true) {
-    for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+    // Lines flagged `more` (every invoice line past the first few) ride in full under "Show more".
+    for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
   }
   // correct_invoice_address: what the rewrite does and does not touch.
   if (toolName === 'correct_invoice_address' && preview?.does) {
