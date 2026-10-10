@@ -20,6 +20,7 @@ const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
+const { applyStage1Fixes } = require('./lawn-report-stage1');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { waterPolishFields, snapshotForCard } = require('./lawn-report-polish');
 const { withCappedRain, rainCardAllowed, applyRainCard, waterStatusFor, deficitRootCause } = require('./lawn-water-rain');
@@ -938,10 +939,12 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
 }
 
 // The exported builder: the lawn reportV2 above, then (GATE_LAWN_REPORT_COPY_FIXES live) the copy
-// fixes. The builder above carries none of the gate's decisions; lawn-report-copy-fixes.js owns them.
+// fixes, then (GATE_LAWN_REPORT_STAGE1_FIXES live) the stage 1 fixes. The builder above carries none of the gate's decisions; lawn-report-copy-fixes.js owns them.
 function buildLawnReportV2WithCopyFixes(args) {
   const v2 = buildLawnReportV2(args);
-  return v2 && copyFixesLive() ? applyLawnCopyFixes(v2, args) : v2;
+  const fixed = v2 && copyFixesLive() ? applyLawnCopyFixes(v2, args) : v2;
+  // GATE_LAWN_REPORT_STAGE1_FIXES: the damage finding names the targeted pest (a no-op while the gate is off).
+  return applyStage1Fixes(fixed, args, classifyProduct);
 }
 
 module.exports = { buildLawnReportV2: buildLawnReportV2WithCopyFixes, monthLabel, classifyProduct, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };

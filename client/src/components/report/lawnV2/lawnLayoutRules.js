@@ -284,6 +284,52 @@ export function withoutRepeatedApplied(text, applied) {
   return withoutSentences(text, (sentence) => APPLIED_SENTENCE.test(sentence) && appliedCovered(sentence, applied));
 }
 
+// What the applied text may carry after the result sentence and still say nothing more (treatment-summary.js summarySentence):
+// the products' recorded targets (", targeting chinch bugs") and the surfactant clause. Anything else after the result
+// sentence (another product, another clause, a second sentence) is information the card owns, so the card stays.
+const APPLIED_SUFFIX = /^(?:, targeting [^.]+?)?(?:, with a surfactant added so the treatment coats the foliage evenly)?$/;
+
+/**
+ * GATE_LAWN_REPORT_STAGE1_FIXES: the "What we applied today" text repeats the hero's Today's result when it IS that sentence
+ * (final period aside) or that sentence plus only the known targeting / surfactant suffix. A text that lists more ("...weed
+ * control and insect control." against "...weed control.") is not a repeat.
+ */
+export function appliedRepeatsResult(applied, result) {
+  const head = norm(result);
+  if (!head || !isText(applied)) return false;
+  const text = norm(applied);
+  return text.startsWith(head) && APPLIED_SUFFIX.test(text.slice(head.length));
+}
+
+// One stable object per payload, so a re-render does not hand the page a new `data` each time.
+const appliedCardCache = new WeakMap();
+
+/**
+ * GATE_LAWN_REPORT_STAGE1_FIXES (payload key lawnStage1Fixes, lawn only): the web page leaves out the "What we applied
+ * today" card, on the standard page and on the lawn layout, when it repeats Today's result (reportV2.todaysResult).
+ * Nothing else moves: the Visit Summary paragraph is frozen text and stays, and the PDF reads its own payload.
+ * Returns the same object when nothing changes.
+ */
+export function withoutRepeatedAppliedCard(data) {
+  if (data?.lawnStage1Fixes !== true || data.serviceLine !== 'lawn' || !data.reportV2) return data;
+  if (appliedCardCache.has(data)) return appliedCardCache.get(data);
+  const v2 = data.reportV2;
+  const dropLead = appliedRepeatsResult(v2.lead?.applied, v2.todaysResult);
+  const dropSnapshot = appliedRepeatsResult(v2.snapshot?.treatmentSummary, v2.todaysResult);
+  const next = dropLead || dropSnapshot
+    ? {
+      ...data,
+      reportV2: {
+        ...v2,
+        ...(dropLead ? { lead: { ...v2.lead, applied: null } } : {}),
+        ...(dropSnapshot ? { snapshot: { ...v2.snapshot, treatmentSummary: null } } : {}),
+      },
+    }
+    : data;
+  appliedCardCache.set(data, next);
+  return next;
+}
+
 // ── Next visit ──────────────────────────────────────────────────────────────
 const longDay = (ymd, withYear) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
   weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC', ...(withYear ? { year: 'numeric' } : {}),
