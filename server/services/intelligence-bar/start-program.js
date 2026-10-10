@@ -144,7 +144,7 @@ async function openEstimateForFamily(customerId, family, conn = db) {
   // its status but is no longer an offer.
   const { OPEN_ESTIMATE_STATUSES } = require('../estimate-conversion-agent');
   const rows = await conn('estimates').where({ customer_id: customerId })
-    .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').select('id', 'status', 'estimate_data');
+    .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').select('id', 'status', 'estimate_data', 'service_interest');
   if (!rows.length) return null;
   const { acceptedRecurringBillingLines } = require('../plan-rate-ledger');
   const { serviceFamilyKeyForAdoption } = require('../../routes/estimate-public');
@@ -155,6 +155,10 @@ async function openEstimateForFamily(customerId, family, conn = db) {
     }
     const lines = acceptedRecurringBillingLines(data || {});
     if (lines.some((line) => serviceFamilyKeyForAdoption(line) === family)) return est;
+    // A draft with no priced recurring lines yet (a lead or booking draft) still names
+    // its service: fall back to service_interest, classified by the same family
+    // classifier the adoption code uses, so such an open estimate refuses too.
+    if (!lines.length && est.service_interest && serviceFamilyKeyForAdoption({ service: est.service_interest }) === family) return est;
   }
   return null;
 }
@@ -435,6 +439,24 @@ async function seriesOverlap(visitDates, window, customerId, propertyId) {
   return facts.sort((a, b) => (a.fact < b.fact ? -1 : a.fact > b.fact ? 1 : 0));
 }
 
+// The same date-scoped eligibility the booking transaction enforces (a rail,
+// assertAssignableTechnician): the technician must be active, field-dispatchable
+// and not marked out on ANY planned visit date. Refused at the card so the
+// operator never confirms a series the booking would refuse. Returns a refusal
+// naming the first unavailable date, or null.
+async function firstUnavailableTechnicianDate(technicianId, visitDates) {
+  const { assertAssignableTechnician } = require('../technician-eligibility');
+  for (const date of visitDates) {
+    try {
+      await assertAssignableTechnician(technicianId, { conn: db, date });
+    } catch (err) {
+      if (err.code !== 'TECH_NOT_ASSIGNABLE') throw err;
+      return refusal(`${err.message} (first problem: ${dateLabel(date)}). Pick another technician or first date. Nothing was proposed.`, 'program_technician_unavailable');
+    }
+  }
+  return null;
+}
+
 // The first four visit dates, by the handler's own planning functions
 // (admin-schedule.js nextRecurringDate / seasonalSafeShift /
 // recurringCandidateTooCloseToAnchor / recurrenceOrdinalOptions /
@@ -525,6 +547,8 @@ async function buildProgramPlan(input, actionContext) {
   const window = firstVisitWindow(args.firstDate, args.start, catalogRow);
   if (window.error) return window;
   const visitDates = await plannedVisitDates(args.customerId, args.firstDate, args.cadence);
+  const unavailable = await firstUnavailableTechnicianDate(tech.id, visitDates);
+  if (unavailable) return unavailable;
   const overlap = await seriesOverlap(visitDates, window, args.customerId, propertyId)
     .catch(() => refusal('Could not check the schedule for visits that overlap the booked visits. Try again in a moment. Nothing was proposed.'));
   if (overlap.error) return overlap;

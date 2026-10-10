@@ -212,6 +212,17 @@ describe('codex r45', () => {
   });
 });
 
+describe('estimate reactivations take the per-customer estimate lock (booking open-estimate guard, #6100)', () => {
+  test('the wizard draft refresh (archived_at: null) locks before its write, after the transaction opens', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    const lock = src.indexOf('lockCustomerEstimates(trx, estFields.customer_id)');
+    const write = src.indexOf("const refreshedExisting = await trx('estimates')");
+    expect(lock).toBeGreaterThan(-1);
+    expect(lock).toBeLessThan(write);
+    expect(src.slice(lock, write)).not.toMatch(/archived_at/);
+  });
+});
+
 describe('pre-push audit after r45: draft refreshes never overwrite a live delivery claim', () => {
   test('both refresh writes carry the not-live predicate and a refused refresh is retryable with no handoff', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');

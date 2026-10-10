@@ -2934,7 +2934,8 @@ function getToolsForContext(context, isAdmin = false, fullAccess = false) {
     .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
     .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
   return (mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers'))
-    .filter(t => t.name !== 'start_program' || startProgramLive());
+    // start_program rides the same page allowlist the registry uses (legacy lists included).
+    .filter(t => t.name !== 'start_program' || (startProgramLive() && ActionRegistry.START_PROGRAM_CONTEXTS.includes(context)));
 }
 
 function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {

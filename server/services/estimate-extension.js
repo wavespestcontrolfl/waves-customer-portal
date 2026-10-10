@@ -314,6 +314,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       err.code = 'FIXED_BID_VALIDITY';
       throw err;
     }
+    // An expired or send_failed row revived to sent/viewed becomes an open estimate: take the
+    // per-customer estimate lock, after the row locks above (it is a leaf).
+    await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, estimate.customer_id);
     const updated = await trx('estimates')
       .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id || null })
       .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)

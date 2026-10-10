@@ -175,6 +175,21 @@ describe('extendEstimate validation (pre-write throws)', () => {
     expect(query.update).not.toHaveBeenCalled();
   });
 
+  it('takes the per-customer estimate lock before reviving a row (a reactivation makes the estimate open again)', async () => {
+    const estimate = { id: 'ordinary', customer_id: 'cust-1', status: 'expired', sent_at: PAST, expires_at: PAST, estimate_data: {} };
+    const update = jest.fn(async () => 0);
+    const query = { update, first: jest.fn(async () => ({ estimate_data: {} })) };
+    for (const method of ['where', 'whereNull', 'whereRaw', 'whereIn', 'forUpdate', 'modify']) query[method] = jest.fn(() => query);
+    const trx = jest.fn(() => query);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementationOnce(async (run) => run(trx));
+    await extendEstimate({ estimate, days: 7, silent: true }).catch(() => {});
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-estimates:cust-1']);
+    expect(update).toHaveBeenCalled();
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(update.mock.invocationCallOrder[0]);
+  });
+
   it('refuses a LIVE sending claim — in-flight finalization owns status and expiry', async () => {
     // Thrown BEFORE any DB access: an extension mid-send would either be
     // overwritten by the send's final expires_at write or steal its claim.

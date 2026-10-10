@@ -126,7 +126,7 @@ beforeEach(() => {
       { id: 'svc-mosq-seasonal', name: 'Mosquito Seasonal', service_key: 'mosquito_seasonal', billing_type: 'recurring', frequency: 'every_6_weeks', visits_per_year: 9, is_active: true },
       { id: 'svc-tree', name: 'Tree & Shrub Care', service_key: 'tree_shrub_quarterly', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, is_active: true },
     ],
-    technicians: [{ id: TECH_ID, name: 'Sam Tech' }],
+    technicians: [{ id: TECH_ID, name: 'Sam Tech', employment_status: 'active', field_dispatchable: true, active: true }],
     estimates: [],
   };
   fakeDb();
@@ -342,6 +342,32 @@ describe('refusals', () => {
     expect(estimateCalls).toContainEqual({ table: 'estimates', method: 'whereNull', args: ['archived_at'] });
     const statuses = estimateCalls.find((c) => c.method === 'whereIn').args[1];
     expect(statuses).toEqual(expect.arrayContaining(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']));
+  });
+
+  test('an open draft with no priced lines but a matching service_interest also refuses (fallback family)', async () => {
+    tables.estimates = [{ id: 'est-2', status: 'draft', estimate_data: {}, service_interest: 'Lawn Care' }];
+    jest.spyOn(PlanRateLedger, 'acceptedRecurringBillingLines').mockReturnValue([]);
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_open_estimate');
+    expect(calls.filter((c) => c.table === 'estimates' && c.method === 'select')[0].args).toContain('service_interest');
+    // A draft for a different service, or priced lines for another family, does not refuse.
+    tables.estimates = [{ id: 'est-3', status: 'draft', estimate_data: {}, service_interest: 'Pest Control' }];
+    expect((await run(BASE_INPUT)).code).toBeUndefined();
+  });
+
+  test('a technician marked out on a LATER series date is refused at the card, naming that date', async () => {
+    const Eligibility = require('../services/technician-eligibility');
+    const seen = [];
+    jest.spyOn(Eligibility, 'assertAssignableTechnician').mockImplementation(async (id, { date }) => {
+      seen.push(date);
+      if (date === '2099-05-05') throw Object.assign(new Error('Technician Sam Tech is marked out on 2099-05-05 and cannot be assigned work'), { code: 'TECH_NOT_ASSIGNABLE' });
+      return { id };
+    });
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_technician_unavailable');
+    expect(result.error).toContain('Tue, May 5, 2099');
+    expect(seen).toEqual(['2099-03-03', '2099-04-07', '2099-05-05']);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
   });
 
   test('open inspection credit: refused, book from the Schedule screen', async () => {

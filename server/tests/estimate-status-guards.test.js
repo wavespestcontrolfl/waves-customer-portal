@@ -517,18 +517,24 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
   beforeEach(() => { db.mockReset(); });
 
   test('predicates on observed status/disposition and 409s with a retry message when the row moved', async () => {
-    const estimate = { id: 'e1', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    const estimate = { id: 'e1', customer_id: 'cust-1', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
     const readBuilder = makeBuilder({ first: estimate });
     const writeBuilder = makeBuilder({});
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
     // freshness re-read: concurrent decline resolved the row
     const freshBuilder = makeBuilder({ first: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
+    // The un-archive write runs in a transaction that first takes the per-customer
+    // estimate lock (a reactivation makes the estimate open again).
+    const trx = jest.fn(() => writeBuilder);
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (cb) => cb(trx));
     db.mockImplementationOnce(() => readBuilder)
-      .mockImplementationOnce(() => writeBuilder)
       .mockImplementationOnce(() => freshBuilder);
     const res = makeRes();
     await unarchiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-estimates:cust-1']);
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(writeBuilder.update.mock.invocationCallOrder[0]);
     expect(writeBuilder.where).toHaveBeenCalledWith({ id: 'e1', status: 'viewed' });
     expect(writeBuilder.whereNotNull).toHaveBeenCalledWith('archived_at');
     expect(writeBuilder.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });

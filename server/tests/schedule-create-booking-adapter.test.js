@@ -249,9 +249,15 @@ describe('createScheduleBooking runs the POST / handler', () => {
       const EstimateLock = require('../utils/customer-estimate-lock');
       const lockSpy = jest.spyOn(EstimateLock, 'lockCustomerEstimates').mockResolvedValue(undefined);
       const readSpy = jest.spyOn(StartProgram, 'openEstimateForFamily').mockResolvedValue(null);
-      expect((await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimateFamily: 'lawn_care' })).status).toBe(201);
+      const Seeder = require('../services/recurring-appointment-seeder');
+      const seriesGuard = jest.spyOn(Seeder, 'checkActiveSeriesLocked').mockResolvedValue({ matches: [], guardError: null });
+      const recurringBody = { ...oneOff, isRecurring: true, recurringPattern: 'monthly', recurringOngoing: true, createInvoice: true };
+      expect((await createScheduleBooking({ body: recurringBody, actor, approvedNoOpenEstimateFamily: 'lawn_care' })).status).toBe(201);
       expect(lockSpy).toHaveBeenCalledWith(expect.anything(), 'cust-1');
       expect(lockSpy.mock.invocationCallOrder[0]).toBeLessThan(readSpy.mock.invocationCallOrder[0]);
+      // The estimate lock is a leaf: taken after the series lock (and so after the customer row lock).
+      expect(seriesGuard.mock.invocationCallOrder[0]).toBeLessThan(lockSpy.mock.invocationCallOrder[0]);
+      seriesGuard.mockRestore();
       lockSpy.mockClear();
       expect((await createScheduleBooking({ body: oneOff, actor })).status).toBe(201);
       expect(lockSpy).not.toHaveBeenCalled();
@@ -290,12 +296,12 @@ describe('createScheduleBooking runs the POST / handler', () => {
     const recurring = { ...oneOff, isRecurring: true, recurringPattern: 'monthly', recurringOngoing: true, createInvoice: true };
     const childClash = [{ id: 'visit-7', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Lawn Care' }];
 
-    test('a child occurrence that overlaps refuses with OVERLAP_CHANGED before the child is inserted', async () => {
+    test('a child occurrence that overlaps refuses with OVERLAP_CHANGED before any visit is inserted (the rails step)', async () => {
       findConflictingVisits.mockResolvedValueOnce([]).mockResolvedValue(childClash);
       const result = await createScheduleBooking({ body: recurring, actor, approvedOverlapFacts: [] });
       expect(result.status).toBe(409);
       expect(result.json.code).toBe('OVERLAP_CHANGED');
-      expect(inserts).toHaveLength(1); // the parent only; the transaction rolls it back
+      expect(inserts).toEqual([]);
       findConflictingVisits.mockResolvedValue([]);
     });
 

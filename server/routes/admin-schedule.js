@@ -5,6 +5,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { applyAssignable, assertAssignableTechnician, isAssignable, absentTechDays } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { runApprovedBookingRails, BILLING_FINGERPRINT_COLS } = require('../services/scheduling/approved-booking-rails');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
@@ -7930,6 +7931,168 @@ async function assertNoCallBookingConflict(guard) {
   if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
 
+// The parent visit's workflow-column stamps (column-guarded, so a database
+// mid-migration still books), moved out of the booking transaction callback
+// unchanged. Mutates insertData.
+function stampParentInsertColumns(insertData, d) {
+  const {
+    cols, serviceId, pricing, memberSeriesCovered, addonOnlyTotal, finalPrice, urgency, internalNotes, resolvedIsCallback,
+    officeCustomerRequest, parentServiceId, insertLinkId, isRecurring, recurringOngoing, monthAnchorOpts, recurringIntervalDays,
+    skipWeekends, skipWeekendsEffective, weekendShift, boosterMonths, appointmentDiscountType, appointmentDiscountAmount, createInvoiceStamp,
+  } = d;
+  // Add new workflow columns (safe — migration may not have run yet)
+  if (cols.service_id && serviceId) insertData.service_id = serviceId;
+  if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
+  if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
+  if (cols.estimated_price) {
+    if (memberSeriesCovered) {
+      const addonStamp = addonOnlyTotal(pricing.addonLines);
+      if (addonStamp > 0) insertData.estimated_price = addonStamp;
+    } else if (finalPrice != null) insertData.estimated_price = finalPrice;
+  }
+  if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
+  if (cols.urgency) insertData.urgency = urgency || 'routine';
+  if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
+  if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
+  if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
+    insertData.customer_request = officeCustomerRequest.text;
+    insertData.customer_request_source = officeCustomerRequest.source;
+  }
+  if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
+  if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
+  if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
+  if (isRecurring) {
+    if (cols.recurring_nth && monthAnchorOpts.nth != null && monthAnchorOpts.nth !== '' && !isNaN(parseInt(monthAnchorOpts.nth))) insertData.recurring_nth = parseInt(monthAnchorOpts.nth);
+    if (cols.recurring_weekday && monthAnchorOpts.weekday != null && monthAnchorOpts.weekday !== '' && !isNaN(parseInt(monthAnchorOpts.weekday))) insertData.recurring_weekday = parseInt(monthAnchorOpts.weekday);
+    if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
+    if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
+    if (cols.weekend_shift && skipWeekendsEffective) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
+    if (cols.booster_months && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
+      const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+      if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
+    }
+  }
+  if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) insertData.discount_id = pricing.appointmentDiscount.discountId;
+  if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) insertData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
+  if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
+  if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
+  if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
+  if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+  if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
+  if (pricing.appointmentDiscount && cols.discount_max_dollars) insertData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
+  stampPrimaryLineDiscount(insertData, pricing, cols);
+  // Pricing-regime provenance (GATE_DISCOUNT_STACKING) — lets a later
+  // extension's own restack tell a null primary_line_price genuinely
+  // means "no primary" apart from a legacy/unstructured row (see
+  // restackStoredVisitFinancials's own comment).
+  if (discountStackingLive()) stampPricingRegimeMarker(insertData, cols, capsSnapshotFromPricing(pricing));
+  if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
+}
+
+// The booking's post-lock revalidation (r23-r36), moved out of the booking
+// transaction callback unchanged: re-read the customer's address, contact and
+// billing fields and the linked estimate under the customer fence, abort with
+// a retryable shape when they moved. Returns the linked estimate row as the
+// transaction read it (the preflight copy when nothing is linked).
+async function revalidateBookingUnderLock(trx, {
+  customerId, customer, linkedEstimateId, linkedEstimate, bookingProperty, bookingBillingTerm, scheduledDate, pricing,
+}) {
+  let lockedLinkedEstimate = linkedEstimate;
+  const CONTACT_SLOT_COLS = [1, 2, 3].flatMap((n) => {
+    const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
+    return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
+  });
+  // Billing/pricing inputs join the fingerprint (r35): the booking's
+  // series-coverage, invoice-on-complete stamp, and pricing were
+  // computed from the pre-lock customer, and completion resolves
+  // payer/billing LIVE — a cleared inherited payer/mode/fee must
+  // retry the booking, not commit stale price state.
+  const freshCustomer = await trx('customers')
+    .where({ id: customerId })
+    .first('address_line1', 'address_line2', 'city', 'state', 'zip', ...CONTACT_SLOT_COLS, ...BILLING_FINGERPRINT_COLS);
+  // The COMPLETE address tuple (r24): a merge can backfill ONLY
+  // address_line2 (a street-only winner absorbing the loser's
+  // apartment/unit), so a line1/city/zip comparison passes while the
+  // undo clears the unit out from under the visit — dispatch would
+  // go to the wrong unit.
+  // ALL FOUR members of every slot (r30): email-only service contacts
+  // are supported, and name/email/role can move while the phones stay
+  // identical — a phones-only fingerprint let the undo clear an
+  // email-only slot out from under the new visit's report recipients.
+  const commsDep = (row) => [
+    row?.address_line1 || '', row?.address_line2 || '', row?.city || '', row?.state || '', row?.zip || '',
+    ...CONTACT_SLOT_COLS.map((c) => row?.[c] || ''),
+    ...BILLING_FINGERPRINT_COLS.map((c) => String(row?.[c] ?? '')),
+  ].join('|');
+  if (!freshCustomer || commsDep(freshCustomer) !== commsDep(customer)) {
+    const err = new Error('The customer record changed while booking (address or service contacts moved) — reload the customer and book again.');
+    err.statusCode = 409;
+    err.isOperational = true;
+    err.code = 'CUSTOMER_CHANGED_RETRY';
+    throw err;
+  }
+  // Linked-estimate ownership revalidates under the fence too (r36):
+  // a journaled estimate a merge-undo just returned would stamp the
+  // restored loser's source_estimate_id onto a kept-customer visit.
+  if (linkedEstimateId) {
+    const freshLinkedEstimate = await trx('estimates')
+      .where({ id: linkedEstimateId }).forShare().first(...LINKED_ESTIMATE_COLUMNS);
+    if (!freshLinkedEstimate
+      || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
+      const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
+      estErr.statusCode = 409;
+      estErr.isOperational = true;
+      estErr.code = 'CUSTOMER_CHANGED_RETRY';
+      throw estErr;
+    }
+    // The preflight property compare re-runs under the fence (codex
+    // #4015 r2 P2): a quote re-pointed at another property while this
+    // booking waited on its locks must not be linked to a visit at the
+    // operator's chosen address.
+    if (bookingProperty && freshLinkedEstimate.property_id
+      && String(freshLinkedEstimate.property_id) !== String(bookingProperty.property_id)) {
+      throw Object.assign(httpError(422, 'This estimate was quoted for a different property. Choose that address or book without the estimate.'), { code: 'ESTIMATE_PROPERTY_MISMATCH' });
+    }
+    // Every add-on decision again, on the row this transaction now holds FOR SHARE (an estimator save waits behind it),
+    // never on the preflight copy: the gated and recurring-plan refusals and the yearly limits under the customer lock.
+    // The scope writer below reads the same row.
+    lockedLinkedEstimate = freshLinkedEstimate;
+    // Lock order: the estimate's add-on lock first, then the place locks the limit recheck takes (the order
+    // Update Details takes them in), so the two paths never wait on each other in a cycle.
+    await require('../services/area-addon-visit-rows').lockEstimateAddOns(trx, freshLinkedEstimate.id);
+    await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {
+      billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,
+      postedServiceKeys: postedAreaAddOnLines(pricing).map((line) => line.key).filter(Boolean),
+    });
+  }
+  return lockedLinkedEstimate;
+}
+
+// The race-safe duplicate-series backstop, moved out of the booking
+// transaction callback unchanged (see the comment at its call site).
+async function assertNoActiveSeriesLocked(trx, {
+  isRecurring, allowDuplicateSeries, separateProgram, customerId, serviceId, serviceType, bookingSeriesScope,
+}) {
+  if (!(isRecurring && (!allowDuplicateSeries || separateProgram))) return;
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+    customerId,
+    serviceId: serviceId || null,
+    serviceType,
+    serviceAddressScope: bookingSeriesScope,
+  });
+  if (separateProgram && guardError) throw guardError;
+  if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
+  const canCreate = separateProgram
+    ? RecurringAppointmentSeeder.separateProgramMatches(matches, separateProgram.existingSeriesIds)
+    : matches.length === 0;
+  if (!canCreate) {
+    const dupErr = new Error('duplicate_recurring_series');
+    dupErr.duplicateRecurringSeries = matches;
+    throw dupErr;
+  }
+}
+
 router.post('/', requireAdmin, scheduleCreateHandler);
 async function scheduleCreateHandler(req, res, next) {
   try {
@@ -8731,14 +8894,6 @@ async function scheduleCreateHandler(req, res, next) {
         bookingWarnings.push(`Recurring plan requested ${plannedCount} visits but only ${placed} could be placed — the remaining dates fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`);
       }
     }
-    // Intelligence Bar start_program (approvedVisitDates, set only by
-    // createScheduleBooking): the series dates must be the ones its card
-    // showed. Nothing is written yet.
-    if (Array.isArray(req.approvedVisitDates)
-      && [dateOnly(scheduledDate), ...plannedChildDates].join(',') !== req.approvedVisitDates.join(',')) {
-      throw Object.assign(httpError(409, 'The visit dates changed since the card was shown. Nothing was booked.'), { code: 'DATES_CHANGED' });
-    }
-
     // Booster months — extra one-off visits on top of the base series
     // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
     // months from the initial date.
@@ -8859,30 +9014,10 @@ async function scheduleCreateHandler(req, res, next) {
       await lockCustomerComms(trx, customerId);
       // Intelligence Bar start_program (a card that promised no inspection
       // credit, set only by createScheduleBooking's creditFreeCard): the
-      // credit lock and locked re-projection create_appointment runs, in the
-      // same comms -> credit -> customer-row order. An offer recorded since
-      // the card aborts the booking. The Schedule screen never sets it.
+      // credit lock create_appointment takes, in the same comms -> credit ->
+      // customer-row order. The locked re-projection is a rail (below).
       if (req.creditFreeCard === true) {
-        const InspectionCreditLock = require('../services/inspection-credit');
-        await InspectionCreditLock.lockInspectionCreditCustomer(trx, customerId);
-        const projectedCredit = await InspectionCreditLock.projectRedeemableOfferAmount(customerId, { dbh: trx, includePaused: true });
-        if ((Number(projectedCredit?.amount ?? projectedCredit) || 0) > 0) {
-          throw Object.assign(httpError(409, 'This customer now has an open inspection credit the card did not show. Nothing was booked.'), { code: 'INSPECTION_CREDIT_CHANGED' });
-        }
-      }
-      // start_program (approvedNoOpenEstimateFamily): the card's open-estimate
-      // check re-run inside this transaction. Every estimate insert for a
-      // known customer takes the per-customer estimate lock
-      // (utils/customer-estimate-lock.js) before its INSERT, so taking it here
-      // makes this read wait for an in-flight creator and see its row (or
-      // makes the creator wait for this booking to commit).
-      if (req.approvedNoOpenEstimateFamily) {
-        await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, customerId);
-        const openEstimate = await require('../services/intelligence-bar/start-program')
-          .openEstimateForFamily(customerId, req.approvedNoOpenEstimateFamily, trx);
-        if (openEstimate) {
-          throw Object.assign(httpError(409, 'This customer now has an open estimate for this service. Mark the estimate accepted on the estimate page. Nothing was booked.'), { code: 'ESTIMATE_OPENED' });
-        }
+        await require('../services/inspection-credit').lockInspectionCreditCustomer(trx, customerId);
       }
       // Phone-agent double-booking backstop: the call pipeline inserts its
       // booking under this same customer lock, so re-checking here — not
@@ -8900,84 +9035,9 @@ async function scheduleCreateHandler(req, res, next) {
       // undo just removed. The lock alone proves nothing; re-read and
       // abort with a retryable shape when the booking-relevant fields
       // moved (an admin reloads and re-books against the live record).
-      {
-        const CONTACT_SLOT_COLS = [1, 2, 3].flatMap((n) => {
-          const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
-          return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
-        });
-        // Billing/pricing inputs join the fingerprint (r35): the booking's
-        // series-coverage, invoice-on-complete stamp, and pricing were
-        // computed from the pre-lock customer, and completion resolves
-        // payer/billing LIVE — a cleared inherited payer/mode/fee must
-        // retry the booking, not commit stale price state.
-        const BILLING_FINGERPRINT_COLS = ['payer_id', 'billing_mode', 'per_application_fee', 'waveguard_tier', 'monthly_rate'];
-        const freshCustomer = await trx('customers')
-          .where({ id: customerId })
-          .first('address_line1', 'address_line2', 'city', 'state', 'zip', ...CONTACT_SLOT_COLS, ...BILLING_FINGERPRINT_COLS);
-        // The COMPLETE address tuple (r24): a merge can backfill ONLY
-        // address_line2 (a street-only winner absorbing the loser's
-        // apartment/unit), so a line1/city/zip comparison passes while the
-        // undo clears the unit out from under the visit — dispatch would
-        // go to the wrong unit.
-        // ALL FOUR members of every slot (r30): email-only service contacts
-        // are supported, and name/email/role can move while the phones stay
-        // identical — a phones-only fingerprint let the undo clear an
-        // email-only slot out from under the new visit's report recipients.
-        const commsDep = (row) => [
-          row?.address_line1 || '', row?.address_line2 || '', row?.city || '', row?.state || '', row?.zip || '',
-          ...CONTACT_SLOT_COLS.map((c) => row?.[c] || ''),
-          ...BILLING_FINGERPRINT_COLS.map((c) => String(row?.[c] ?? '')),
-        ].join('|');
-        if (!freshCustomer || commsDep(freshCustomer) !== commsDep(customer)) {
-          const err = new Error('The customer record changed while booking (address or service contacts moved) — reload the customer and book again.');
-          err.statusCode = 409;
-          err.isOperational = true;
-          err.code = 'CUSTOMER_CHANGED_RETRY';
-          throw err;
-        }
-        // Intelligence Bar start_program (approvedBilling, set only by
-        // createScheduleBooking): the billing state the card was built on
-        // (dues-covered visits) must still hold under this lock, or the
-        // series would book priced visits the card said carry no price.
-        if (req.approvedBilling
-          && BILLING_FINGERPRINT_COLS.some((c) => String(freshCustomer[c] ?? '') !== String(req.approvedBilling[c] ?? ''))) {
-          throw Object.assign(httpError(409, 'The customer\'s billing changed since the card was shown. Nothing was booked.'), { code: 'BILLING_CHANGED' });
-        }
-        // Linked-estimate ownership revalidates under the fence too (r36):
-        // a journaled estimate a merge-undo just returned would stamp the
-        // restored loser's source_estimate_id onto a kept-customer visit.
-        if (linkedEstimateId) {
-          const freshLinkedEstimate = await trx('estimates')
-            .where({ id: linkedEstimateId }).forShare().first(...LINKED_ESTIMATE_COLUMNS);
-          if (!freshLinkedEstimate
-            || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
-            const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
-            estErr.statusCode = 409;
-            estErr.isOperational = true;
-            estErr.code = 'CUSTOMER_CHANGED_RETRY';
-            throw estErr;
-          }
-          // The preflight property compare re-runs under the fence (codex
-          // #4015 r2 P2): a quote re-pointed at another property while this
-          // booking waited on its locks must not be linked to a visit at the
-          // operator's chosen address.
-          if (bookingProperty && freshLinkedEstimate.property_id
-            && String(freshLinkedEstimate.property_id) !== String(bookingProperty.property_id)) {
-            throw Object.assign(httpError(422, 'This estimate was quoted for a different property. Choose that address or book without the estimate.'), { code: 'ESTIMATE_PROPERTY_MISMATCH' });
-          }
-          // Every add-on decision again, on the row this transaction now holds FOR SHARE (an estimator save waits behind it),
-          // never on the preflight copy: the gated and recurring-plan refusals and the yearly limits under the customer lock.
-          // The scope writer below reads the same row.
-          lockedLinkedEstimate = freshLinkedEstimate;
-          // Lock order: the estimate's add-on lock first, then the place locks the limit recheck takes (the order
-          // Update Details takes them in), so the two paths never wait on each other in a cycle.
-          await require('../services/area-addon-visit-rows').lockEstimateAddOns(trx, freshLinkedEstimate.id);
-          await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {
-            billingTerm: bookingBillingTerm, customerId, property: bookingProperty, appliedOn: scheduledDate,
-            postedServiceKeys: postedAreaAddOnLines(pricing).map((line) => line.key).filter(Boolean),
-          });
-        }
-      }
+      lockedLinkedEstimate = await revalidateBookingUnderLock(trx, {
+        customerId, customer, linkedEstimateId, linkedEstimate: lockedLinkedEstimate, bookingProperty, bookingBillingTerm, scheduledDate, pricing,
+      });
       // The area add-ons the posted lines carry, against the estimate row this transaction holds locked (an estimate revised after
       // the modal built its request is refused here, with nothing inserted): a posted add-on the estimate does not sell, or sells at
       // another price, never books; fewer than sold is the office's choice. None posted: no query. A repeating series never carries one.
@@ -9007,42 +9067,31 @@ async function scheduleCreateHandler(req, res, next) {
       // its savepoint keeps a failed guard query from aborting this
       // transaction). A hit throws a tagged error the route catch maps to
       // the same 409 the preflight returns.
-      if (isRecurring && (req.body.allowDuplicateSeries !== true || separateProgram)) {
-        const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
-        const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
-          customerId,
-          serviceId: serviceId || null,
-          serviceType,
-          serviceAddressScope: bookingSeriesScope,
-        });
-        if (separateProgram && guardError) throw guardError;
-        if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
-        const canCreate = separateProgram
-          ? RecurringAppointmentSeeder.separateProgramMatches(matches, separateProgram.existingSeriesIds)
-          : matches.length === 0;
-        if (!canCreate) {
-          const dupErr = new Error('duplicate_recurring_series');
-          dupErr.duplicateRecurringSeries = matches;
-          throw dupErr;
-        }
-      }
-      // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE) —
-      // covers a stale picker and the auto-assign path alike; recurring
-      // children below inherit this row's tech, so one check fences both.
-      await assertAssignableTechnician(resolvedTechId, { conn: trx, date: String(scheduledDate).slice(0, 10) });
-      // The recurring-child and booster loops below insert this SAME
-      // resolvedTechId on OTHER dates (tech-out P1) — the parent-date check
-      // above can't see a tech marked out on one of those occurrence dates.
-      // plannedChildDates/plannedBoosterDates are fully computed (and
-      // locked) above, so every distinct destination date is checked once,
-      // here, before either insert loop runs — an absence on any occurrence
-      // date refuses the whole create instead of partially inserting a series.
-      if (resolvedTechId) {
-        const childBoosterDates = new Set([...plannedChildDates, ...plannedBoosterDates].filter(Boolean));
-        for (const occDate of childBoosterDates) {
-          await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
-        }
-      }
+      await assertNoActiveSeriesLocked(trx, {
+        isRecurring, allowDuplicateSeries: req.body.allowDuplicateSeries === true, separateProgram, customerId, serviceId, serviceType, bookingSeriesScope,
+      });
+      // Every approved-card check and the save-time technician eligibility
+      // (422 TECH_NOT_ASSIGNABLE) run here, in one step, after the customer
+      // row, comms, credit and series locks and before the first insert
+      // (services/scheduling/approved-booking-rails.js). The technician is
+      // checked on every date the series writes (recurring children inherit
+      // the parent's technician; plannedChildDates/plannedBoosterDates are
+      // fully computed and locked above), so an absence on any occurrence date
+      // refuses the whole create instead of partially inserting a series.
+      const seriesDates = [dateOnly(scheduledDate), ...plannedChildDates];
+      await runApprovedBookingRails(trx, {
+        req, customerId, seriesDates,
+        techDates: resolvedTechId ? [...new Set([dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates].filter(Boolean))] : [],
+        assertTech: (conn, date) => assertAssignableTechnician(resolvedTechId, { conn, date: String(date).slice(0, 10) }),
+        probeOverlap: (conn, date) => (windowStart && computedEnd ? findConflictingVisits({
+          db: conn, date, windowStart, windowEnd: computedEnd, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES, technicianId: resolvedTechId || null,
+        }) : []),
+        resolveAnchorPropertyId: async (conn) => {
+          if (bookingProperty) return bookingProperty.property_id;
+          if (!cols.property_id || propertyOwnedByEstimateLinkage) return null;
+          return require('../services/customer-properties').soleActivePropertyId(customerId, conn);
+        },
+      });
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -9084,69 +9133,11 @@ async function scheduleCreateHandler(req, res, next) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
       }
-      // Intelligence Bar start_program (approvedServiceAnchor, set only by
-      // createScheduleBooking): the anchor resolved here must be the address
-      // the card showed. A lazily created primary (no property before) is the
-      // customer address, so only a pinned property id is compared by id.
-      if (req.approvedServiceAnchor) {
-        const anchorId = insertData.property_id ?? null;
-        const ADDRESS_COLS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
-        const place = anchorId
-          ? await trx('customer_properties').where({ id: anchorId }).first(ADDRESS_COLS)
-          : await trx('customers').where({ id: customerId }).first(ADDRESS_COLS);
-        const approved = req.approvedServiceAnchor;
-        if ((approved.propertyId && String(anchorId || '') !== String(approved.propertyId))
-          || require('../services/intelligence-bar/start-program').serviceAnchorAddress(place) !== approved.address) {
-          throw Object.assign(httpError(409, 'The service address changed since the card was shown. Nothing was booked.'), { code: 'ADDRESS_CHANGED' });
-        }
-      }
-      // Add new workflow columns (safe — migration may not have run yet)
-      if (cols.service_id && serviceId) insertData.service_id = serviceId;
-      if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
-      if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
-      if (cols.estimated_price) {
-        if (memberSeriesCovered) {
-          const addonStamp = addonOnlyTotal(pricing.addonLines);
-          if (addonStamp > 0) insertData.estimated_price = addonStamp;
-        } else if (finalPrice != null) insertData.estimated_price = finalPrice;
-      }
-      if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
-      if (cols.urgency) insertData.urgency = urgency || 'routine';
-      if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
-      if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
-      if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
-        insertData.customer_request = officeCustomerRequest.text;
-        insertData.customer_request_source = officeCustomerRequest.source;
-      }
-      if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
-      if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
-      if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
-      if (isRecurring) {
-        if (cols.recurring_nth && monthAnchorOpts.nth != null && monthAnchorOpts.nth !== '' && !isNaN(parseInt(monthAnchorOpts.nth))) insertData.recurring_nth = parseInt(monthAnchorOpts.nth);
-        if (cols.recurring_weekday && monthAnchorOpts.weekday != null && monthAnchorOpts.weekday !== '' && !isNaN(parseInt(monthAnchorOpts.weekday))) insertData.recurring_weekday = parseInt(monthAnchorOpts.weekday);
-        if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
-        if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
-        if (cols.weekend_shift && skipWeekendsEffective) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
-        if (cols.booster_months && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
-          const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
-          if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
-        }
-      }
-      if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) insertData.discount_id = pricing.appointmentDiscount.discountId;
-      if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) insertData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
-      if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
-      if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
-      if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
-      if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
-      if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
-      if (pricing.appointmentDiscount && cols.discount_max_dollars) insertData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
-      stampPrimaryLineDiscount(insertData, pricing, cols);
-      // Pricing-regime provenance (GATE_DISCOUNT_STACKING) — lets a later
-      // extension's own restack tell a null primary_line_price genuinely
-      // means "no primary" apart from a legacy/unstructured row (see
-      // restackStoredVisitFinancials's own comment).
-      if (discountStackingLive()) stampPricingRegimeMarker(insertData, cols, capsSnapshotFromPricing(pricing));
-      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
+      stampParentInsertColumns(insertData, {
+        cols, serviceId, pricing, memberSeriesCovered, addonOnlyTotal, finalPrice, urgency, internalNotes, resolvedIsCallback,
+        officeCustomerRequest, parentServiceId, insertLinkId, isRecurring, recurringOngoing, monthAnchorOpts, recurringIntervalDays,
+        skipWeekends, skipWeekendsEffective, weekendShift, boosterMonths, appointmentDiscountType, appointmentDiscountAmount, createInvoiceStamp,
+      });
 
       // Global occupancy probe under rung 1 (the contract's second half):
       // tech-blind, counts live estimate holds, same predicate the customer
@@ -9170,16 +9161,6 @@ async function scheduleCreateHandler(req, res, next) {
         });
         if (adminCreateClash.length) {
           bookingWarnings.push(slotOverlapWarning(dateOnly(scheduledDate)));
-        }
-        // Intelligence Bar start_program (approvedOverlapFacts, set only by
-        // createScheduleBooking): an overlapping visit the card did not show
-        // refuses under this lock. The Schedule screen never sets it.
-        if (Array.isArray(req.approvedOverlapFacts) && adminCreateClash.length) {
-          const approvedFacts = new Set(req.approvedOverlapFacts);
-          const liveFacts = await require('../services/intelligence-bar/tools').bookingOverlapFacts(trx, adminCreateClash, dateOnly(scheduledDate));
-          if (liveFacts.some((f) => !approvedFacts.has(f.fact))) {
-            throw Object.assign(httpError(409, 'Another visit now overlaps the first visit. Nothing was booked.'), { code: 'OVERLAP_CHANGED' });
-          }
         }
       }
 
@@ -9359,17 +9340,6 @@ async function scheduleCreateHandler(req, res, next) {
           });
           if (childClash.length) {
             bookingWarnings.push(slotOverlapWarning(nextDateStr));
-            // Intelligence Bar start_program: its card showed every overlap
-            // on every series date, so a child overlap the card did not show
-            // refuses (pre-commit, same transaction). The Schedule screen
-            // keeps the warning.
-            if (Array.isArray(req.approvedOverlapFacts)) {
-              const approvedFacts = new Set(req.approvedOverlapFacts);
-              const liveFacts = await require('../services/intelligence-bar/tools').bookingOverlapFacts(trx, childClash, nextDateStr);
-              if (liveFacts.some((f) => !approvedFacts.has(f.fact))) {
-                throw Object.assign(httpError(409, `Another visit overlaps the ${nextDateStr} visit. Nothing was booked.`), { code: 'OVERLAP_CHANGED' });
-              }
-            }
           }
         }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');

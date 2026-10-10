@@ -5080,39 +5080,44 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
-    const [updated] = await db('estimates')
-      .where({ id: req.params.id, status: estimate.status })
-      // Observed-state guard, mirroring the archive route (codex pre-push
-      // P1 TOCTOU): a concurrent decline/accept that resolved the archived
-      // row owns its disposition — unarchiving from a stale pre-read must
-      // not erase it.
-      .whereNotNull('archived_at')
-      .modify((q) => (estimate.disposition
-        ? q.where({ disposition: estimate.disposition })
-        : q.whereNull('disposition')))
-      .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
-      .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
-      .update({
-        archived_at: null,
-        updated_at: db.fn.now(),
-        // A LIVE (sent/viewed) row can only have gotten its disposition from
-        // the archive action — reviving the courtship un-classifies it, or a
-        // later expiry would COALESCE-preserve a stale "archived" loss
-        // (codex pre-push P1). Terminal rows (declined/expired/accepted)
-        // keep theirs: those were stamped by their own resolution.
-        ...(['sent', 'viewed'].includes(estimate.status) ? {
-          disposition: null,
-          disposition_source: null,
-          disposition_at: null,
-          disposition_note: null,
-          competitor_name: null,
-          competitor_price: null,
-          // The archive path also wrote the legacy badge label — a revived
-          // live row must not keep displaying a stale loss (codex P1).
-          decline_reason: null,
-        } : {}),
-      })
-      .returning('*');
+    // Un-archiving makes the estimate open again: take the per-customer estimate lock (a reactivation,
+    // like an insert) so the booking's open-estimate check cannot miss it.
+    const [updated] = await db.transaction(async (trx) => {
+      await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, estimate.customer_id);
+      return trx('estimates')
+        .where({ id: req.params.id, status: estimate.status })
+        // Observed-state guard, mirroring the archive route (codex pre-push
+        // P1 TOCTOU): a concurrent decline/accept that resolved the archived
+        // row owns its disposition — unarchiving from a stale pre-read must
+        // not erase it.
+        .whereNotNull('archived_at')
+        .modify((q) => (estimate.disposition
+          ? q.where({ disposition: estimate.disposition })
+          : q.whereNull('disposition')))
+        .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
+        .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
+        .update({
+          archived_at: null,
+          updated_at: db.fn.now(),
+          // A LIVE (sent/viewed) row can only have gotten its disposition from
+          // the archive action — reviving the courtship un-classifies it, or a
+          // later expiry would COALESCE-preserve a stale "archived" loss
+          // (codex pre-push P1). Terminal rows (declined/expired/accepted)
+          // keep theirs: those were stamped by their own resolution.
+          ...(['sent', 'viewed'].includes(estimate.status) ? {
+            disposition: null,
+            disposition_source: null,
+            disposition_at: null,
+            disposition_note: null,
+            competitor_name: null,
+            competitor_price: null,
+            // The archive path also wrote the legacy badge label — a revived
+            // live row must not keep displaying a stale loss (codex P1).
+            decline_reason: null,
+          } : {}),
+        })
+        .returning('*');
+    });
     if (!updated) {
       // Zero rows: either a linkage marker (permanent) or a concurrent
       // writer moved the row. Re-read once to say which.
