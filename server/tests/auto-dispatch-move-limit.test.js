@@ -154,10 +154,8 @@ describe('needs-a-person notice', () => {
     // No proof (a degraded run, a skipped visit): nothing closes by evaluation.
     await notice.raiseNotices(bucket, {});
     expect(clearedOf().cleared).toEqual([]);
-    // The visit's own row decides the rest: its date, its status, and for a
-    // visit with no arrival time, whether it has one now.
+    // The visit's own row decides the rest: its date and its status.
     expect(clearedOf().sql).toMatch(/scheduled_date::text = notifications\.metadata->>'scheduledDate'/);
-    expect(clearedOf().sql).toMatch(/<> 'unplaced' OR s\.window_start IS NULL/);
   });
 
   test('an empty run still closes what its proof allows, and raises nothing', async () => {
@@ -176,11 +174,12 @@ describe('needs-a-person notice', () => {
 
   test('every wording passes the admin-notification rules, with and without a customer name', async () => {
     const bucket = new Map();
-    const conflicts = [{ kind: 'overlap' }, { kind: 'closed_day' }, null];
+    const conflicts = [{ kind: 'overlap' }, { kind: 'closed_day' }];
     let n = 0;
+    // No conflict, no notice: a visit with no arrival time is not this lane's.
+    notice.collect(bucket, visit('unplaced', '2026-11-26'), 'move_limit', null);
     for (const kind of ['move_limit', 'no_near_slot', 'no_slot', 'not_moved']) {
       for (const conflict of conflicts) {
-        if (!conflict && kind !== 'move_limit') continue;
         n += 1;
         notice.collect(bucket, { ...visit(`s${n}`, '2026-11-26'), first_name: 'Pat', last_name: 'Example' }, kind, conflict);
       }

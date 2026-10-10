@@ -1,21 +1,23 @@
 /**
- * NEEDS A PERSON — the admin notice for a visit auto-dispatch cannot fix by
- * itself (owner 2026-10-09: a forced move past the move limit raises an alert,
- * never moves silently).
+ * NEEDS A PERSON — the admin notice for a visit in conflict that
+ * auto-dispatch leaves where it is (owner 2026-10-09: a forced move past the
+ * move limit raises an alert, never moves silently).
  *
- * A notice is raised for:
- *   - a visit with no arrival time yet that has used all its automatic moves;
- *   - EVERY visit still in conflict (it overlaps another stop, or sits on a
- *     closed day) when the run ends, whatever path left it there. The run
- *     keeps one ledger and decides once (index.js settleConflicts). The
- *     reason only picks the wording:
+ * A notice is raised for EVERY loaded visit still in conflict (it overlaps
+ * another stop, or sits on a closed day) when the run ends, whatever path
+ * left it there, a visit a guard skipped before any evaluation included. The
+ * run decides once (index.js settleConflicts). A visit with no arrival time
+ * is NOT this lane's: the recurring-placement alert (`recurring-dispatch:*`,
+ * flagUnplacedVisits) already tells a person, and a second bell for the same
+ * visit would be noise (Codex #6253 r5). The reason only picks the wording:
  *       move_limit    it has used all its automatic moves (move-limit.js);
  *       no_near_slot  every free slot adds more drive than
  *                     config.conflictMaxAddedDriveMinutes;
  *       no_slot       no valid slot exists;
- *       not_moved     anything else: a guard on a grouped sibling, the
- *                     per-run cap, a refused, failed or partial write, a dry
- *                     run. One rule for all, so a new path cannot leave a
+ *       not_moved     anything else: a freeze, a person-placed visit, a
+ *                     guard on a grouped sibling, the per-run cap, a
+ *                     refused, failed or partial write, a dry run. One rule
+ *                     for all, so a new path cannot leave a
  *                     conflict unseen (Codex #6253 r1 and r2: lists of
  *                     reasons and of call sites each missed some).
  *
@@ -25,8 +27,8 @@
  * first; a standing notice is refreshed free and the rest wait for the next
  * run. Raising is best effort: a failure is logged and never fails the run.
  *
- * A notice closes when its visit is cancelled, leaves the date or (no
- * arrival time) gets a time, or when the run has PROOF the conflict is gone:
+ * A notice closes when its visit is cancelled or leaves the date, or when
+ * the run has PROOF the conflict is gone:
  * it read the visit with the conflict read on and found none (closeResolved).
  * A run that could not look at the visit closes nothing.
  */
@@ -52,16 +54,15 @@ const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
 const PROBLEM = {
   overlap: ['overlaps another stop', 'still overlaps another stop'],
   closed_day: ['is on a closed day', 'is still on a closed day'],
-  unplaced: ['has no arrival time', 'still has no arrival time'],
 };
 
 function problemOf(conflict) {
-  if (!conflict) return 'unplaced';
   return conflict.kind === 'closed_day' ? 'closed_day' : 'overlap';
 }
 
-// Remember a visit for the end-of-run notice. `bucket` is the run's Map.
+// Remember a visit in conflict for the end-of-run notice. `bucket` is the run's Map.
 function collect(bucket, service, kind, conflict) {
+  if (!conflict) return;
   const date = toDateStr(service.scheduled_date);
   const key = noticeKey(service.id, date);
   if (!date || bucket.has(key)) return;
@@ -120,14 +121,12 @@ async function raiseOne(item, raiseAdminAlert, shortDateET) {
 }
 
 // Close the notices that no longer apply. A notice stays open while its visit
-// is still live on the notice's date (and, for a visit with no arrival time,
-// still has none), unless the run has proof the conflict is gone: `clearedIds`
+// is still live on the notice's date, unless the run has proof the conflict is gone: `clearedIds`
 // holds the visits it read with the conflict read on and found clear. That
 // read covers every visit with an open notice, evaluated this run or not
 // (index.js settleConflicts), so a person's same-day fix closes the notice.
 // A visit whose read failed keeps its notice, and so does every visit of a
-// run whose guard reads failed (Codex #6253 r1 P2). The visit's own row
-// decides the "no arrival time" case, so it needs no proof.
+// run whose guard reads failed (Codex #6253 r1 P2).
 async function closeResolved(bucket, { nowDate, clearedIds }) {
   try {
     const audit = require('./audit');
@@ -135,8 +134,7 @@ async function closeResolved(bucket, { nowDate, clearedIds }) {
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
-        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed'])
-          .whereRaw("(COALESCE(notifications.metadata->>'problem', '') <> 'unplaced' OR s.window_start IS NULL)");
+        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed']);
         if (cleared.length) q.whereNotIn('s.id', cleared);
       },
       resolvedTitle: RESOLVED_TITLE,

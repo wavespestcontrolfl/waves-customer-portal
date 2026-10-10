@@ -297,7 +297,10 @@ async function standingConflict(seen, id) {
 }
 
 // Every visit whose conflict the run must read at its end: the ledger (each
-// visit the run evaluated in conflict), the members a partial group move
+// visit the run evaluated in conflict), every other loaded visit the run has
+// no clear read for (a freeze, an inactive plan, a person-placed visit or a
+// missing preference skips it before any conflict read, and an evaluation
+// can fail: Codex #6253 r5 P1), the members a partial group move
 // left behind (a one-time add-on is never loaded by the scan, so it has no
 // ledger entry: Codex #6253 r4 P1), and the visits of the notices still open
 // (a person-placed visit is skipped before the conflict read, so a person's
@@ -307,6 +310,10 @@ async function conflictsToSettle(run) {
   const pending = new Map(run.conflicts);
   if (run.config.conflictMovesEnabled !== true) return pending;
   const unseen = (extra) => ({ service: null, conflict: null, ctx: { db, conflictMoves: true }, ...extra });
+  for (const service of run.loaded) {
+    const id = String(service.id);
+    if (!pending.has(id) && !run.clearedIds.has(id)) pending.set(id, unseen({ service, reason: 'SKIPPED' }));
+  }
   for (const id of run.strandedIds) if (!pending.has(id)) pending.set(id, unseen({ reason: 'ERROR' }));
   for (const id of await needsPerson.standingVisitIds()) {
     if (!pending.has(id) && !run.clearedIds.has(id)) pending.set(id, unseen({ noticeOnly: true }));
@@ -786,11 +793,10 @@ async function moveLimitGate(service, ctx, run, counts) {
   if (!skip.unknown) {
     // Required lazily, like apply.js's conflict re-read.
     const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, ctx);
-    // In conflict: the ledger (settleConflicts raises it). No arrival time
-    // and no conflict: only this gate knows, so it is collected here.
+    // In conflict: the ledger (settleConflicts raises it). A visit with no
+    // arrival time is the recurring-placement alert's (flagUnplacedVisits).
     if (conflict) run.conflicts.set(String(service.id), { service, conflict, ctx, reason: skip.reason_code });
-    else if (moveRules.isUnplacedDueDate(service)) needsPerson.collect(run.needsPerson, service, 'move_limit', null);
-    else if (ctx.conflictMoves === true) run.clearedIds.add(String(service.id));
+    else if (ctx.conflictMoves === true && service.window_start) run.clearedIds.add(String(service.id));
   }
   return skip;
 }
@@ -1350,12 +1356,14 @@ async function runAutoDispatch(opts = {}) {
     conflicts: new Map(), // id -> { service, conflict, ctx, reason }: every visit read in conflict (settleConflicts)
     clearedIds: new Set(), // visits read placed and clear with the conflict read on (notice close)
     strandedIds: new Set(), // members a partial group move left behind (settleConflicts)
+    loaded: [], // every visit the scan loaded (settleConflicts reads the ones with no clear read)
   };
 
   try {
     run.capabilityFor = makeCapabilityFn(await loadCapabilityMap());
     const loadBoundary = resolveLoadBoundary(run.guardMode, nowDate, lockBoundary, today);
     const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
+    run.loaded = services;
 
     // Guard-mode bulk context: reminder-freeze + (tiers') drift anchors or
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a

@@ -1332,14 +1332,36 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     });
   });
 
-  test('an unplaced due-date visit at the limit is not placed and a person is told', async () => {
+  // Codex #6253 r5: the recurring-placement alert already tells a person
+  // about a visit with no arrival time; this lane adds no second bell.
+  test('an unplaced due-date visit at the limit is not placed, and this lane raises no notice for it', async () => {
     moveLogReads = [AT_LIMIT];
     servicesResult = [svc({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-06' })];
-    const res = await runAutoDispatch({ mode: 'dry_run' });
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
     expect(res).toMatchObject({ skipped: 1, recommended: 0 });
     expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
-    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
-    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/no arrival time/);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  // Codex #6253 r5 P1: a guard skips the visit before any conflict read.
+  test('a visit a guard skipped before evaluation (person-placed) still raises the notice when it is in conflict', async () => {
+    rowReads();
+    const placed = { placed: true, reason_code: 'PERSON_PLACED', reason_description: 'placed by a person' };
+    eligibility.isPersonPlacedVisit.mockResolvedValueOnce(placed).mockResolvedValueOnce(placed).mockResolvedValueOnce(placed);
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ skipped: 1, evaluated: 0 });
+    expect(noticedIds()).toEqual(['s1']);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/overlaps another stop, and auto-dispatch did not move it/);
+    // Clear: nothing raised, and its standing notice may close.
+    raiseAdminAlert.mockClear();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    // Gate off: no conflict is read for anyone.
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+    await runAutoDispatch({ mode: 'dry_run' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   // Codex #6253 r1 P1: a qualifying move that a grouped sibling's guard
