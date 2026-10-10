@@ -828,9 +828,11 @@ module.exports = {
 // tiers. Listed here only as a breadcrumb so they're discoverable:
 //
 //   OPENAI_TRANSCRIPTION_MODEL     primary call transcription/diarization
-//                                  default: gpt-4o-transcribe-diarize
+//                                  default: gpt-4o-transcribe-diarize (production sets
+//                                  gpt-transcribe, no diarization: the Agent/Caller labels
+//                                  then come from OPENAI_TRANSCRIPT_LABEL_MODEL)
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
-//                                  default: gemini-2.5-flash
+//                                  default: gemini-3.5-flash (call-recording-processor.js)
 //   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
 //                                  (services/fast-complete-voice-fill.js; goes through
 //                                  call-recording-processor's transcribeWithOpenAI)
