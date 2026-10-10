@@ -906,7 +906,23 @@ describe('GATE_LAWN_WATER_IN_RAIN on the report payload', () => {
   const rotor = () => JSON.parse(JSON.stringify(buildWateringInstruction({
     rules: [{ name: 'p', rule: HALF }], completedAt: COMPLETED, runtime: { headTypes: ['rotor'] },
   })));
-  const render = (service) => buildReportV1Data(service, 'token-w1', makeKnex(fixtures()));
+  // The /data and PDF renders opt in (lawnWaterInRain); the Q&A and map builds do not.
+  const render = (service, options = { lawnWaterInRain: true }) => buildReportV1Data(service, 'token-w1', makeKnex(fixtures()), options);
+
+  test('a build that does not opt in (the Q&A call, /map.svg) reads no rain and leaves the banner as frozen', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 4.68;
+    const frozenGeneric = generic();
+    for (const options of [{}, { mode: 'live' }, { mode: 'live', lawnWaterInRain: false }]) {
+      const data = await render(serviceFor(frozenGeneric), options);
+      expect(data.reportV2.banner.state).toBe('water_in');
+      expect(data.reportV2.banner.lines[1]).toBe('Run spray heads about 30 minutes a zone and rotors about 80 minutes.');
+      expect(data.reportV2.aftercare.watering).not.toMatch(/Rain since|about ½ inch — around/);
+    }
+    expect(spy).not.toHaveBeenCalled();
+    // The same record, opted in, does change.
+    expect((await render(serviceFor(frozenGeneric))).reportV2.banner.state).toBe('water_in_by_rain');
+  });
 
   test('gate off: the payload is exactly what it was and no rain is read', async () => {
     rainTotal = 4.68;
@@ -1109,6 +1125,27 @@ describe('GATE_LAWN_WATER_IN_RAIN on the report payload', () => {
       expect(covered).not.toBe(amountLine);
       expect(covered).not.toBe(off);
       expect(await signatureFor(record(generic()))).toBe(covered);
+    });
+
+    test('gate on: the key reads the location from the frozen identity map center, like the render', async () => {
+      process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+      rainTotal = 0.1;
+      const withCenter = (center) => {
+        const base = record(generic());
+        const data = JSON.parse(base.service_data);
+        data.reportIdentitySnapshot.mapCenter = center;
+        return { ...base, service_data: JSON.stringify(data) };
+      };
+      await signatureFor(withCenter({ lat: 28.25, lng: -81.75 }));
+      expect(spy.mock.calls[0][0]).toMatchObject({ latitude: 28.25, longitude: -81.75 });
+      spy.mockClear();
+      // A snapshot with no map center (resolved to none) reads no location, as the render does.
+      await signatureFor(withCenter(null));
+      expect(spy.mock.calls[0][0].latitude).toBeNull();
+      spy.mockClear();
+      // No snapshot map center at all: the live join's coordinates.
+      await signatureFor(record(generic()));
+      expect(spy.mock.calls[0][0]).toMatchObject({ latitude: 27.5, longitude: -82.5 });
     });
 
     test('gate on: a visit this gate does not change keeps its gate-off key', async () => {

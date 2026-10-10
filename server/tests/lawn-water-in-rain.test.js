@@ -226,3 +226,26 @@ describe('withAmountLine (the one rate table)', () => {
     expect(JSON.stringify(frozen)).toBe(before);
   });
 });
+
+describe('the caller opt-in (lawnWaterInRain)', () => {
+  const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
+  const routes = read('../routes/reports-public.js');
+  const queue = read('../services/service-report/pdf-queue.js');
+  const builder = read('../services/service-report/report-data.js');
+
+  test('defaults off, is forwarded on its own line, and only the /data render and the PDF renders pass it', () => {
+    expect(routes).toMatch(/lawnWaterInRain = false,/);
+    expect(routes).toMatch(/lawnRainfastWatch,\n\s*lawnWaterInRain,\n/);
+    expect(routes.match(/lawnWaterInRain: true/g) || []).toHaveLength(2);
+    expect(routes).toMatch(/lawnWateringCloseOut: true,\n\s*lawnRainfastWatch: true,\n\s*lawnWaterInRain: true,\n/);
+    expect(routes).toMatch(/lawnPhotoFindings: true,\n\s*lawnWaterInRain: true,\n/);
+    expect(queue).toMatch(/lawnPhotoFindings: true,\n\s*lawnWaterInRain: true,\n/);
+    // The Q&A call and the map build pass nothing.
+    expect(routes).toMatch(/buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\)/);
+    expect(routes).toMatch(/buildReportV1Data\(service, req\.params\.token\);/);
+  });
+
+  test('the builder reads rain only for an opted-in build', () => {
+    expect(builder).toMatch(/opts\.lawnWaterInRain === true && typeof featureGates\.lawnWaterInRainLive/);
+  });
+});

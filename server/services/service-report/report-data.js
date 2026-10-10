@@ -3984,12 +3984,14 @@ async function lawnWaterInRainStamp(service, knex) {
     const products = await attachApprovedReportProductFacts(knex, rawProducts, {
       frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
     });
+    // The render reads the location through the frozen identity (its map center wins over the live join), so the key does too.
+    const located = applyReportIdentitySnapshot({ ...row });
     const coverage = await lawnWaterInRain.resolveRainCoverage({
       instruction,
       products,
       now: new Date(),
-      latitude: row.customer_latitude,
-      longitude: row.customer_longitude,
+      latitude: located.customer_latitude,
+      longitude: located.customer_longitude,
       fetchForecast: require('./application-conditions').fetchPropertyForecast,
     });
     return lawnWaterInRain.waterInRainStamp(instruction, coverage);
@@ -5750,7 +5752,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
         // GATE_LAWN_WATER_IN_RAIN: the frozen instruction as it reads now (after the write gate's copy above, so the
         // freeze and the completion text never see it). A replay only.
-        if (wateringInstruction && !opts.wateringInstructionOut && typeof featureGates.lawnWaterInRainLive === 'function' && featureGates.lawnWaterInRainLive() && readFrozenWateringInstruction(structured)) {
+        if (wateringInstruction && !opts.wateringInstructionOut && opts.lawnWaterInRain === true && typeof featureGates.lawnWaterInRainLive === 'function' && featureGates.lawnWaterInRainLive() && readFrozenWateringInstruction(structured)) {
           wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service });
         }
         // In place, so the lawnAssessment the payload returns never carries
