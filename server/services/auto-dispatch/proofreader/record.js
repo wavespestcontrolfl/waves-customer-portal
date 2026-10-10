@@ -31,7 +31,7 @@ const contextAggregator = require('../../context-aggregator');
 
 const { redactAccessCodes } = contextAggregator;
 const { excludeUnresolvedSendReservations } = require('../../messaging/review-ask-reservation');
-const { resolveEmailCustomerLink, personSentFilter } = require('../../email/email-customer-link');
+const { resolveEmailCustomerLink, personSentFilter, extractEmailAddresses } = require('../../email/email-customer-link');
 const { emailPlainText, stripQuotedAndSignature, ownReplySubject } = require('../../email/email-strip');
 const { operatorReply, smsContactSelects } = require('../../staff-contact');
 const { etOffsetIso } = require('../../../utils/datetime-et');
@@ -50,7 +50,9 @@ const MAX_RECORD_CHARS = 300000;
 // source table, and the 'call' row the recording processor writes: its body
 // is a model's summary of a call whose own words are read from call_log, and
 // a paraphrase must never stand as a quote (Codex #6258 r4).
-const INTERACTION_COPIES = ['sms_outbound', 'email_outbound', 'call'];
+// 'inbound_call' is the raw transcript copied again when staff tag a call
+// (admin-call-recordings.js), dated at the tagging (r8).
+const INTERACTION_COPIES = ['sms_outbound', 'email_outbound', 'call', 'inbound_call'];
 // A call the voice webhook linked by caller ID and the extractor then found
 // was not this customer (context-aggregator.js isExcludedCall is the rule).
 const NOT_THIS_CUSTOMER_OUTCOMES = ['wrong_number', 'spam'];
@@ -174,7 +176,16 @@ async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
   // row's own created_at is bounded too (Codex #6258 r5).
   const live = (query) => query.where('received_at', '<', asOf).where('created_at', '<', asOf).whereNull('quarantined_at')
     .whereRaw("COALESCE(classification, '') <> 'spam'");
-  const linked = await live(conn('emails').where({ customer_id: customerId })).select(columns);
+  // The mail sync also links an inbound mail by the sender's display name
+  // alone (email-actions.js), and a display name is whatever the sender
+  // typed. Only a mail FROM the customer's own address is the customer's
+  // words; any other linked mail is unread, never quoted (r8).
+  const stored = await live(conn('emails').where({ customer_id: customerId })).select(columns);
+  const own = clean(customerEmail).toLowerCase();
+  const linked = stored.filter((row) => own && extractEmailAddresses(row.from_address).includes(own));
+  for (const row of stored) {
+    if (!linked.includes(row)) unread.push({ channel: 'email', at: eastern(row.received_at), reason: 'sender_not_verified' });
+  }
   const threads = new Set(linked.map((row) => row.gmail_thread_id).filter(Boolean));
   const address = clean(customerEmail).toLowerCase();
   let candidates = [];
@@ -236,7 +247,8 @@ async function readInteractions(conn, { customerId, asOf }) {
 async function readStaffNotes(conn, { customerId, asOf }, unread) {
   const rows = await conn('admin_notes').where({ customer_id: customerId }).where('created_at', '<', asOf)
     .select('note_text', 'created_at', 'updated_at');
-  return rows.map((row) => (clean(row.note_text) && revisedLater(row, asOf, 'note', unread)
+  // Before any content test: a note cleared after the move reads empty today (r8).
+  return rows.map((row) => (revisedLater(row, asOf, 'note', unread)
     ? [] : entry('note', 'staff', row.created_at, row.note_text)));
 }
 
@@ -244,7 +256,7 @@ async function readStaffNotes(conn, { customerId, asOf }, unread) {
 async function readTechNotes(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_records').where({ customer_id: customerId }).where('created_at', '<', asOf)
     .select('technician_notes', 'created_at', 'updated_at');
-  return rows.map((row) => (clean(row.technician_notes) && revisedLater(row, asOf, 'technician_note', unread)
+  return rows.map((row) => (revisedLater(row, asOf, 'technician_note', unread)
     ? [] : entry('technician_note', 'staff', row.created_at, row.technician_notes)));
 }
 
@@ -266,10 +278,14 @@ async function readRescheduleReplies(conn, { customerId, asOf }) {
 // open request can be revised in place (routes/schedule.js appends to it).
 async function readPortalRequests(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_requests').where({ customer_id: customerId }).where('created_at', '<', asOf)
+    // source 'admin' is an operator's own record (admin-cancellation.js): staff
+    // words in the same table, never the customer's (r8).
+    .whereRaw("COALESCE(source, '') <> 'admin'")
     .select('category', 'subject', 'description', 'created_at', 'updated_at');
-  // A request revised before the move states its words at the revision: it
-  // is dated there, so "the newest statement wins" reads it in order (r7).
-  const statedAt = (row) => (row.updated_at && msOf(row.updated_at) > msOf(row.created_at) ? row.updated_at : row.created_at);
+  // updated_at moves on a status or assignment change too, so it does not
+  // say when the customer's words were written. A row touched since it was
+  // made carries no date: undated, it is never "the newest statement" (r8).
+  const statedAt = (row) => (row.updated_at && msOf(row.updated_at) > msOf(row.created_at) ? null : row.created_at);
   return rows.map((row) => (revisedLater(row, asOf, 'portal_request', unread) ? [] : entry(
     'portal_request', 'customer', statedAt(row),
     [clean(row.category), clean(row.subject), clean(row.description)].filter(Boolean).join(': '),
@@ -294,13 +310,15 @@ async function readAssistantChat(conn, { customerId, asOf }) {
 // enforces only the structured day/time fields of this row (preferences.js);
 // a "never Fridays" in the free text is for the proofreader. One row per
 // customer, edited in place, so it is undated like the file notes.
+// Every free-text field of the row that can hold a day or time rule (r8).
+const PROPERTY_NOTE_FIELDS = ['special_instructions', 'access_notes', 'hoa_timing_restrictions', 'hoa_restrictions', 'mowing_notes', 'irrigation_schedule_notes'];
+
 async function readPropertyNotes(conn, { customerId, asOf }, unread) {
-  const row = await conn('property_preferences').where({ customer_id: customerId }).first('special_instructions', 'access_notes', 'created_at', 'updated_at');
+  const row = await conn('property_preferences').where({ customer_id: customerId }).first(...PROPERTY_NOTE_FIELDS, 'created_at', 'updated_at');
   if (!row) return [];
   // Before the content test: a note cleared after the move reads empty today (r6).
   if (revisedLater(row, asOf, 'property_note', unread)) return [];
-  if (!(clean(row.special_instructions) || clean(row.access_notes))) return [];
-  return [entry('property_note', 'customer', null, row.special_instructions), entry('property_note', 'customer', null, row.access_notes)];
+  return PROPERTY_NOTE_FIELDS.map((field) => entry('property_note', 'customer', null, clean(row[field]) ? `${field.replace(/_/g, ' ')}: ${row[field]}` : ''));
 }
 
 // The customer's file notes and the notes on the visit and its series. A
@@ -327,8 +345,10 @@ async function readUndatedNotes(conn, args, unread) {
   const unit = members.length ? members : [visit];
   args.serviceTypes = [...new Set(unit.map((row) => clean(row.service_type)).filter(Boolean))];
   const parentIds = [...new Set(unit.map((row) => row.recurring_parent_id || row.id))];
+  // The moved rows and their series parents only. A note on another
+  // occurrence of the series is about that visit, not this one (r8).
   const series = await conn('scheduled_services')
-    .where(function sameSeries() { this.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds); })
+    .whereIn('id', [...new Set([...parentIds, ...unit.map((row) => row.id)])])
     .select('notes', 'internal_notes');
   const texts = new Set();
   for (const row of series) for (const text of [row.notes, row.internal_notes]) if (clean(text)) texts.add(clean(text));

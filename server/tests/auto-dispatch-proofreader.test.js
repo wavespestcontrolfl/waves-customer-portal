@@ -6,6 +6,7 @@ jest.mock('../models/db', () => jest.fn());
 // The one mail linkage rule (email-customer-link.js) has its own suites; here
 // it answers from the row: `links_to` names the customer a send belongs to.
 jest.mock('../services/email/email-customer-link', () => ({
+  extractEmailAddresses: jest.requireActual('../services/email/email-customer-link').extractEmailAddresses,
   resolveEmailCustomerLink: jest.fn(async (_conn, row) => row.links_to || null),
   personSentFilter: (alias) => `SENT_ONLY(${alias})`,
 }));
@@ -197,8 +198,8 @@ describe('the customer record', () => {
   });
 
   test('an email entry holds only the words that mail added: no quoted thread, no inherited subject', async () => {
-    const reply = { id: 'r1', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Re: Schedule', body_text: 'Any day works now.\n\nOn Fri, May 1, 2026 at 10:00 AM Office <office@example.test> wrote:\n> Tuesdays only, as you asked.', received_at: '2026-06-01T10:00:00.000Z' };
-    const first = { id: 'a0', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Schedule', body_text: 'Hello.', received_at: '2026-05-01T09:00:00.000Z' };
+    const reply = { id: 'r1', gmail_thread_id: 'th1', customer_id: 'c1', from_address: 'pat@example.test', subject: 'Re: Schedule', body_text: 'Any day works now.\n\nOn Fri, May 1, 2026 at 10:00 AM Office <office@example.test> wrote:\n> Tuesdays only, as you asked.', received_at: '2026-06-01T10:00:00.000Z' };
+    const first = { id: 'a0', gmail_thread_id: 'th1', customer_id: 'c1', from_address: 'pat@example.test', subject: 'Schedule', body_text: 'Hello.', received_at: '2026-05-01T09:00:00.000Z' };
     const withFirst = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [first, reply] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(withFirst.entries.filter((e) => e.channel === 'email').map((e) => e.text)).toEqual(['Schedule: Hello.', 'Any day works now.']);
     // The thread is read as it stood at the move: stored and received before it.
@@ -225,15 +226,32 @@ describe('the customer record', () => {
     expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'text', at: '2026-10-05T04:05:00-04:00', reason: 'delivery_not_settled' }]));
   });
 
-  test('a portal request revised before the move is dated at its revision; our sent mail is linked as the thread stood then', async () => {
+  test('a portal request touched since it was made carries no date; our sent mail is linked as the thread stood then', async () => {
     const record = await buildCustomerRecord(fakeConn({ ...TABLES,
       service_requests: [{ category: 'schedule_change', subject: 'Day', description: 'Mondays now.', created_at: '2026-01-10T10:00:00.000Z', updated_at: '2026-10-01T10:00:00.000Z' }],
-      emails: [{ id: 'e1', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Hi', body_text: 'Hello.', received_at: '2026-06-01T10:00:00.000Z' },
+      emails: [{ id: 'e1', gmail_thread_id: 'th1', customer_id: 'c1', from_address: 'pat@example.test', subject: 'Hi', body_text: 'Hello.', received_at: '2026-06-01T10:00:00.000Z' },
         { id: 'e2', gmail_thread_id: 'th1', customer_id: null, to_address: 'a@example.test', cc_address: '', bcc_address: '', subject: 'Re: Hi', body_text: 'Tuesdays, as agreed.', received_at: '2026-06-02T10:00:00.000Z', links_to: 'c1' }],
     }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-    expect(record.entries.find((e) => e.channel === 'portal_request').at).toBe('2026-10-01T06:00:00-04:00');
+    expect(record.entries.find((e) => e.channel === 'portal_request').at).toBeNull();
+    expect(record.unread.some((u) => u.reason === 'sender_not_verified')).toBe(false);
     const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
     expect(resolveEmailCustomerLink).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ id: 'e2' }), { asOf: AS_OF });
+  });
+
+  test('a linked mail not from the customer\'s own address is unread; an operator\'s request row and a tagged call copy are not read', async () => {
+    const conn = fakeConn({ ...TABLES,
+      emails: [{ id: 'n1', gmail_thread_id: 'th5', customer_id: 'c1', from_address: 'Pat <someone@elsewhere.test>', subject: 'Days', body_text: 'Tuesdays only.', received_at: '2026-06-01T10:00:00.000Z' }],
+      property_preferences: [{ hoa_timing_restrictions: 'Vendors Tuesdays only.', created_at: '2026-05-01T10:00:00.000Z', updated_at: '2026-05-01T10:00:00.000Z' }],
+      admin_notes: [{ note_text: null, created_at: '2026-05-01T10:00:00.000Z', updated_at: '2026-10-06T10:00:00.000Z' }] });
+    const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'email')).toEqual([]);
+    expect(record.unread).toEqual(expect.arrayContaining([
+      { channel: 'email', at: '2026-06-01T06:00:00-04:00', reason: 'sender_not_verified' },
+      { channel: 'note', at: '2026-05-01T06:00:00-04:00', reason: 'revised_later' }, // cleared after the move
+    ]));
+    expect(record.entries.filter((e) => e.channel === 'property_note').map((e) => e.text)).toEqual(['hoa timing restrictions: Vendors Tuesdays only.']);
+    expect(conn.calls.some(([t, method, sql]) => t === 'service_requests' && method === 'whereRaw' && /source.*admin/.test(sql))).toBe(true);
+    expect(conn.calls.some(([t, method, col, values]) => t === 'customer_interactions' && method === 'whereNotIn' && col === 'interaction_type' && values.includes('inbound_call'))).toBe(true);
   });
 
   test('a property note cleared after the as-of time is unread, not absent', async () => {
@@ -276,14 +294,14 @@ describe('the customer record', () => {
       property_preferences: [{ special_instructions: 'Never Fridays, the gardener is here.', access_notes: null, updated_at: '2026-05-01T10:00:00.000Z' }] });
     const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(conn.calls.some(([t, method, col, values]) => t === 'customer_interactions' && method === 'whereNotIn' && col === 'interaction_type' && values.includes('call'))).toBe(true);
-    expect(record.entries.filter((e) => e.channel === 'property_note')).toEqual([expect.objectContaining({ from: 'customer', at: null, text: 'Never Fridays, the gardener is here.' })]);
+    expect(record.entries.filter((e) => e.channel === 'property_note')).toEqual([expect.objectContaining({ from: 'customer', at: null, text: 'special instructions: Never Fridays, the gardener is here.' })]);
     const later = await buildCustomerRecord(fakeConn({ ...TABLES, property_preferences: [{ special_instructions: 'Edited later.', created_at: '2026-05-01T10:00:00.000Z', updated_at: '2026-10-06T10:00:00.000Z' }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(later.entries.some((e) => e.channel === 'property_note')).toBe(false);
     expect(later.unread).toEqual(expect.arrayContaining([expect.objectContaining({ channel: 'property_note', reason: 'revised_later' })]));
   });
 
   test('a mail stored in the 15 minutes before the move has an unsettled subject: the record is incomplete', async () => {
-    const fresh = { id: 'f1', gmail_thread_id: 'th7', customer_id: 'c1', subject: 'Never schedule Fridays', body_text: '', received_at: '2026-10-05T08:00:00.000Z', created_at: new Date(new Date(AS_OF).getTime() - 5 * 60 * 1000).toISOString() };
+    const fresh = { id: 'f1', gmail_thread_id: 'th7', customer_id: 'c1', from_address: 'pat@example.test', subject: 'Never schedule Fridays', body_text: '', received_at: '2026-10-05T08:00:00.000Z', created_at: new Date(new Date(AS_OF).getTime() - 5 * 60 * 1000).toISOString() };
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [fresh] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'email', at: '2026-10-05T04:00:00-04:00', reason: 'subject_not_settled' }]));
   });
@@ -307,7 +325,9 @@ describe('the customer record', () => {
     const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.serviceTypes).toEqual(['Pest', 'Lawn']);
     expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text)).toEqual(['Pest note', 'Lawn: Tuesdays only']);
-    expect(conn.calls.some(([t, method, col, ids]) => t === 'scheduled_services' && method === 'whereIn' && col === 'id' && ids.join() === 'p1,p2')).toBe(true);
+    expect(conn.calls.some(([t, method, col, ids]) => t === 'scheduled_services' && method === 'whereIn' && col === 'id' && ids.join() === 'p1,p2,s1,s2')).toBe(true);
+    // Another occurrence's note is about that visit: the series' other rows are never read.
+    expect(conn.calls.some(([t, method, col]) => t === 'scheduled_services' && method === 'orWhereIn' && col === 'recurring_parent_id')).toBe(false);
     expect(record.entries.filter((e) => e.channel === 'note').map((e) => e.text)).toContain('Afternoons only');
   });
 
