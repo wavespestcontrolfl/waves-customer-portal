@@ -216,6 +216,26 @@ describe('the customer record', () => {
     expect(record.entries.filter((e) => e.channel === 'text').map((e) => e.from)).toEqual(['system', 'staff', 'staff']);
   });
 
+  test('an outbound text created in the minutes before the move may not have been sent yet: unread', async () => {
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, sms_log: [
+      { direction: 'outbound', message_body: 'We will come Friday.', message_type: 'manual', operator_sent: true, created_at: '2026-10-05T08:05:00.000Z' },
+      { direction: 'inbound', message_body: 'Fridays never work.', message_type: 'inbound', created_at: '2026-10-05T08:06:00.000Z' },
+    ] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'text').map((e) => e.text)).toEqual(['Fridays never work.']);
+    expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'text', at: '2026-10-05T04:05:00-04:00', reason: 'delivery_not_settled' }]));
+  });
+
+  test('a portal request revised before the move is dated at its revision; our sent mail is linked as the thread stood then', async () => {
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES,
+      service_requests: [{ category: 'schedule_change', subject: 'Day', description: 'Mondays now.', created_at: '2026-01-10T10:00:00.000Z', updated_at: '2026-10-01T10:00:00.000Z' }],
+      emails: [{ id: 'e1', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Hi', body_text: 'Hello.', received_at: '2026-06-01T10:00:00.000Z' },
+        { id: 'e2', gmail_thread_id: 'th1', customer_id: null, to_address: 'a@example.test', cc_address: '', bcc_address: '', subject: 'Re: Hi', body_text: 'Tuesdays, as agreed.', received_at: '2026-06-02T10:00:00.000Z', links_to: 'c1' }],
+    }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.find((e) => e.channel === 'portal_request').at).toBe('2026-10-01T06:00:00-04:00');
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    expect(resolveEmailCustomerLink).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ id: 'e2' }), { asOf: AS_OF });
+  });
+
   test('a property note cleared after the as-of time is unread, not absent', async () => {
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, property_preferences: [{ special_instructions: null, access_notes: '', created_at: '2026-05-01T10:00:00.000Z', updated_at: '2026-10-06T10:00:00.000Z' }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'property_note', at: '2026-05-01T06:00:00-04:00', reason: 'revised_later' }]));

@@ -95,7 +95,12 @@ function entry(channel, from, at, text) {
   }));
 }
 
-async function readTexts(conn, { customerId, asOf }) {
+// sms_log keeps no time for its status changes. An outbound text created in
+// the minutes before the move may have been only reserved then and sent
+// after: whether the customer had it at the move is unknown (r7).
+const SMS_SETTLE_MS = 10 * 60 * 1000;
+
+async function readTexts(conn, { customerId, asOf }, unread) {
   const rows = await excludeUnresolvedSendReservations(conn('sms_log'))
     .where({ customer_id: customerId })
     .where('created_at', '<', asOf)
@@ -105,6 +110,10 @@ async function readTexts(conn, { customerId, asOf }) {
     .orderBy('created_at')
     .select('direction', 'message_body', 'message_type', 'created_at', ...smsContactSelects(conn));
   return rows.map((row) => {
+    if (row.direction !== 'inbound' && msOf(asOf) - msOf(row.created_at) < SMS_SETTLE_MS) {
+      unread.push({ channel: 'text', at: eastern(row.created_at), reason: 'delivery_not_settled' });
+      return [];
+    }
     // The one operator-provenance rule (staff-contact.js): message_type
     // 'manual' alone is reused by automated senders (Codex #6258 r6).
     const from = row.direction === 'inbound' ? 'customer' : (operatorReply(row) ? 'staff' : 'system');
@@ -184,7 +193,7 @@ async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
       if (threads.has(row.gmail_thread_id)) unread.push({ channel: 'email', at: eastern(row.received_at), reason: 'recipients_not_captured' });
       continue;
     }
-    const owner = await resolveEmailCustomerLink(conn, row);
+    const owner = await resolveEmailCustomerLink(conn, row, { asOf });
     if (owner != null && String(owner) === String(customerId)) replies.push(row);
   }
   const subjects = await ownSubjectsAsOf(conn, [...linked, ...replies], asOf, live, unread);
@@ -258,8 +267,11 @@ async function readRescheduleReplies(conn, { customerId, asOf }) {
 async function readPortalRequests(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_requests').where({ customer_id: customerId }).where('created_at', '<', asOf)
     .select('category', 'subject', 'description', 'created_at', 'updated_at');
+  // A request revised before the move states its words at the revision: it
+  // is dated there, so "the newest statement wins" reads it in order (r7).
+  const statedAt = (row) => (row.updated_at && msOf(row.updated_at) > msOf(row.created_at) ? row.updated_at : row.created_at);
   return rows.map((row) => (revisedLater(row, asOf, 'portal_request', unread) ? [] : entry(
-    'portal_request', 'customer', row.created_at,
+    'portal_request', 'customer', statedAt(row),
     [clean(row.category), clean(row.subject), clean(row.description)].filter(Boolean).join(': '),
   )));
 }

@@ -128,6 +128,7 @@ async function loadMoves(db) {
       // sync, so its time is later than the move. The reschedule_log row the
       // move's own transaction wrote carries the move time (Codex #6258 r6).
       db.raw(`(select max(r.created_at) from reschedule_log r where r.scheduled_service_id = l.scheduled_service_id
+        and r.initiated_by = 'auto_dispatch' and r.new_date = l.new_scheduled_date
         and r.created_at <= l.created_at and r.created_at >= l.created_at - interval '1 hour') as moved_at`),
     );
   if (LIMIT) query = query.limit(LIMIT);
@@ -198,11 +199,13 @@ function printMoves(rows, arms) {
   const proofreader = require('../services/auto-dispatch/proofreader');
   const { toDateStr } = require('../services/auto-dispatch/dates');
   const arms = resolveArms(MODELS);
-  fs.mkdirSync(OUT, { recursive: true });
+  // Customer words are in these files: owner-only, whatever the umask.
+  fs.mkdirSync(OUT, { recursive: true, mode: 0o700 });
+  fs.chmodSync(OUT, 0o700);
   console.log(`Move proofreader replay · prompt ${proofreader.PROMPT_VERSION} · arms: ${arms.map((a) => a.label).join(' vs ')}\nOutput: ${OUT}`);
   try {
     const hard = flag('--skip-hard') ? [] : await runHardCases(arms, proofreader);
-    fs.writeFileSync(path.join(OUT, 'hard-cases.json'), JSON.stringify(hard, null, 2));
+    fs.writeFileSync(path.join(OUT, 'hard-cases.json'), JSON.stringify(hard, null, 2), { mode: 0o600 });
     if (!flag('--hard-only')) {
       const moves = await loadMoves(db);
       let done = 0;
@@ -212,7 +215,7 @@ function printMoves(rows, arms) {
         if (done % 10 === 0) console.log(`  ... ${done}/${moves.length}`);
         return out;
       });
-      fs.writeFileSync(path.join(OUT, 'moves.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n'));
+      fs.writeFileSync(path.join(OUT, 'moves.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n'), { mode: 0o600 });
       printMoves(rows, arms);
     }
   } finally {
