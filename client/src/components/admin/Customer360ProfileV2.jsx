@@ -7089,6 +7089,7 @@ function AccessPrefsSodReadBlock({ p, sodInfo }) {
       <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
       <AccessPrefRow label="Covers" value={covers} />
       <AccessPrefsSodLines sodInfo={sodInfo} />
+      <AccessPrefsLastPreEmergent info={sodInfo?.lastPreEmergent} />
     </>
   );
 }
@@ -7251,6 +7252,28 @@ function AccessPrefsSodHoldLines({ lines }) {
   );
 }
 
+// The last pre-emergent Waves put on this home's lawn (one entry for each product of that day), and the warning when
+// it is too recent for sod (every string comes from GET /new-sod). Nothing shows while the answer is loading, stale, failed or empty.
+function AccessPrefsLastPreEmergent({ info }) {
+  const entries = Array.isArray(info) ? info.filter((entry) => entry?.line) : [];
+  if (!entries.length) return null;
+  return (
+    <div className="mt-1 space-y-1" data-testid="sod-last-pre-emergent">
+      {entries.map((entry) => (
+        <div key={entry.line} className="space-y-1">
+          <div className="text-ui-label text-ink-secondary">{entry.line}</div>
+          {entry.warning && (
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label" data-testid="sod-pre-emergent-warning">
+              {entry.warning}
+            </div>
+          )}
+          {entry.note && <div className="text-ui-label text-ink-secondary" data-testid="sod-pre-emergent-note">{entry.note}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod, sodUnchanged }) {
   const clearRecord = () =>
     setDraft((prev) => ({ ...prev, sodLaidOn: "", sodCovers: "", sodArea: "" }));
@@ -7293,6 +7316,8 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
           Save to see the hold dates for this change.
         </div>
       )}
+      {/* Judged against the saved sod date (today when none is saved), so it is hidden while a sod field is being edited. */}
+      {sodUnchanged && <AccessPrefsLastPreEmergent info={sodInfo?.lastPreEmergent} />}
     </div>
   );
 }
