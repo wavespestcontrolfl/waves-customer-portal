@@ -115,12 +115,29 @@ describe('late-move limit', () => {
     expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: null, recurring_parent_id: 'p-1' })).toBe(21);
   });
 
-  test('a visit staff placed or hold (auto-dispatch lock): the customer\'s earlier moves do not stand', async () => {
-    const database = dbFor({ rows: twoMoves });
-    const limit = await loadMoveLimit(onOct30({ auto_dispatch_locked: true }), { database, now: NOW });
-    expect(limit).toEqual({ dueDate: '2026-10-30', lastDate: '2026-11-20', firstVisitBlocked: false });
-    expect(customerMovesSince(twoMoves, onOct30({ auto_dispatch_locked: true }))).toEqual([]);
-    expect(customerMovesSince(twoMoves, onOct30())).toHaveLength(2);
+  test('a chain of picks cannot extend the correction window: it is measured from the start of a move', async () => {
+    const at = (iso, from, to) => move({ original_date: from, new_date: to, created_at: iso });
+    const chain = [
+      at('2026-10-01T14:00:00Z', '2026-10-15', '2026-10-22'),
+      at('2026-10-03T14:00:00Z', '2026-10-22', '2026-10-23'),
+      at('2026-10-03T14:10:00Z', '2026-10-23', '2026-10-24'), // corrects move 2
+      at('2026-10-03T14:20:00Z', '2026-10-24', '2026-10-30'), // 20 min after move 2 began: move 3
+    ];
+    expect(countedMoves(chain.slice(0, 3))).toBe(2);
+    expect(countedMoves(chain)).toBe(3);
+    // Inside 15 min of the START of move 2: still correcting.
+    const early = await loadMoveLimit(visit({ scheduled_date: '2026-10-24' }), {
+      database: dbFor({ rows: chain.slice(0, 3) }), now: new Date('2026-10-03T14:12:00Z'),
+    });
+    expect(early.firstVisitBlocked).toBe(false);
+    // 5 min after the last pick, but 16 min after move 2 began: blocked.
+    const late = await loadMoveLimit(visit({ scheduled_date: '2026-10-24' }), {
+      database: dbFor({ rows: chain.slice(0, 3) }), now: new Date('2026-10-03T14:16:00Z'),
+    });
+    expect(late.firstVisitBlocked).toBe(true);
+    // A third counted move is blocked at once, with no new window.
+    const third = await loadMoveLimit(onOct30(), { database: dbFor({ rows: chain }), now: new Date('2026-10-03T14:21:00Z') });
+    expect(third.firstVisitBlocked).toBe(true);
   });
 
   test('the due date is the date before the customer\'s first move, not the date the visit is on now', async () => {

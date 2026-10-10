@@ -429,8 +429,6 @@ function selectSvc(column, value, database = db) {
       's.visit_id',
       's.recurring_pattern',
       's.recurring_interval_days',
-      // Staff placed or hold this visit (move limits: the history resets).
-      's.auto_dispatch_locked',
       // A legacy plan row's cadence (move limits: catalogCadence).
       'sv.frequency as catalog_frequency',
       's.recurring_parent_id',

@@ -19,8 +19,9 @@
 //     staff, weather, dispatch, the phone or text agent);
 //   - the visit is not where the customer's last move put it, or a move does
 //     not start where the move before it ended (the staff edit screen writes
-//     the row with no log row), or staff set the visit's auto-dispatch lock
-//     (the edit screen sets it when staff choose a recurring visit's slot);
+//     the row with no log row). Known limit: a staff edit that moves the
+//     visit away and back to the customer's exact slot leaves no trace, so
+//     the history stands; the effect is a hand-off to the office;
 //   - the customer rebooks a MISSED visit (a rebook, not a move: that row
 //     sets the appointment, and its date is the new due date).
 //
@@ -137,11 +138,6 @@ function wasMissedRebook(row) {
 //   - When the visit is not where the last remaining move put it, Waves
 //     placed it since with no log row: nothing stands.
 function customerMovesSince(rows, svc) {
-  // Staff placed this visit on the edit screen (it sets the visit's
-  // auto_dispatch_locked and writes no log row), or staff hold it: the
-  // customer's earlier moves do not stand. This also covers a staff move away
-  // and back to the same slot, which the slot comparisons below cannot see.
-  if (svc?.auto_dispatch_locked === true) return [];
   let from = 0;
   rows.forEach((row, idx) => {
     if (!slotChanged(row)) return;
@@ -149,10 +145,12 @@ function customerMovesSince(rows, svc) {
   });
   // A pick inside CORRECTION_MINUTES of a missed rebook corrects the rebook:
   // it belongs to it, is not a move, and its date is the appointment's date.
-  while (from > 0 && from < rows.length
-    && rows[from - 1].initiated_by === SELF_SERVE_INITIATOR
+  // The window is measured from the rebook itself, not from the last pick,
+  // so a chain of picks cannot extend it.
+  const rebook = from > 0 && rows[from - 1].initiated_by === SELF_SERVE_INITIATOR ? rows[from - 1] : null;
+  while (rebook && from < rows.length
     && rows[from].initiated_by === SELF_SERVE_INITIATOR
-    && new Date(rows[from].created_at).getTime() - new Date(rows[from - 1].created_at).getTime() <= CORRECTION_MINUTES * 60 * 1000) {
+    && new Date(rows[from].created_at).getTime() - new Date(rebook.created_at).getTime() <= CORRECTION_MINUTES * 60 * 1000) {
     from += 1;
   }
   let moves = rows.slice(from).filter((row) => row.initiated_by === SELF_SERVE_INITIATOR && slotChanged(row));
@@ -170,17 +168,20 @@ function customerMovesSince(rows, svc) {
   return sameSlot(last.new_date, last.new_window, svc?.scheduled_date, svc?.window_start) ? moves : [];
 }
 
-// Moves that count: a pick inside CORRECTION_MINUTES of the one before it is
-// the same move.
-function countedMoves(moves) {
-  let count = 0;
-  let last = null;
+// The start time (ms) of each move that counts. A pick inside
+// CORRECTION_MINUTES of the START of a move is a correction of that move;
+// measured from the start, so a chain of picks cannot extend the window.
+function moveStarts(moves) {
+  const starts = [];
   for (const move of moves) {
     const at = new Date(move.created_at).getTime();
-    if (last === null || at - last > CORRECTION_MINUTES * 60 * 1000) count += 1;
-    last = at;
+    if (!starts.length || at - starts[starts.length - 1] > CORRECTION_MINUTES * 60 * 1000) starts.push(at);
   }
-  return count;
+  return starts;
+}
+
+function countedMoves(moves) {
+  return moveStarts(moves).length;
 }
 
 // { dueDate, lastDate, firstVisitBlocked } for this visit, or null when no
@@ -202,10 +203,12 @@ async function loadMoveLimit(svc, { database, missed = false, now = new Date() }
     const lastDate = allowance ? addDays(dueDate, allowance) : null;
 
     let firstVisitBlocked = false;
-    const counted = countedMoves(moves);
-    if (counted >= FIRST_VISIT_ONLINE_MOVES) {
-      const lastMoveAt = new Date(moves[moves.length - 1].created_at).getTime();
-      const correcting = now.getTime() - lastMoveAt <= CORRECTION_MINUTES * 60 * 1000;
+    const starts = moveStarts(moves);
+    if (starts.length >= FIRST_VISIT_ONLINE_MOVES) {
+      // The last allowed move may still be corrected, for CORRECTION_MINUTES
+      // from its start. A move past the allowance has no such window.
+      const correcting = starts.length === FIRST_VISIT_ONLINE_MOVES
+        && now.getTime() - starts[starts.length - 1] <= CORRECTION_MINUTES * 60 * 1000;
       if (!correcting) {
         const completed = await database('scheduled_services')
           .where({ customer_id: svc.customer_id, status: 'completed' })
