@@ -4050,17 +4050,36 @@ function nameSpellingCallExcluded({ customerId, extraction, v2Result }) {
   return !!customerId && (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property) || thirdPartyCallNatureFromV2(v2Result));
 }
 
-// An OPEN card is stale only when the live stored name now equals the spelling the card itself
-// recorded. Retired as an auto close; an operator's in_progress card is never touched.
-async function retireStaleNameSpellingCard(trx, callLogId, card) {
+// An OPEN card is stale when the live stored name now equals the spelling the card itself recorded,
+// or when the caller is now known not to be the account holder. Retired as an auto close; an
+// operator's in_progress card is never touched.
+async function retireStaleNameSpellingCard(trx, callLogId, card, note = 'Superseded — the customer name now matches the spelling.') {
   await trx('triage_items').where({ id: card.id }).update({
     status: 'resolved',
     resolution_source: 'auto',
-    resolution_note: 'Superseded — the customer name now matches the spelling.',
+    resolution_note: note,
     resolved_at: new Date(),
     updated_at: new Date(),
   });
   await syncCallReviewStatus(trx, callLogId);
+}
+
+// A reprocess that now classifies a LINKED caller as a third party (not the account holder) retires the
+// open card an earlier pass filed: it would still tell staff to rename the account holder. Same lock
+// order as the writer (customer row, call lock, claim fence). A pass with simply NO usable spelling
+// does not come here and leaves the card alone: inconclusive evidence never retires.
+async function retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken }) {
+  const open = { call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' };
+  if (!(await conn('triage_items').where(open).first('id'))) return false;
+  return conn.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    await lockTriageCall(trx, callLogId);
+    if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+    const card = await trx('triage_items').where(open).forUpdate().first('id');
+    if (!card) return false;
+    await retireStaleNameSpellingCard(trx, callLogId, card, 'Superseded — the caller is not the account holder.');
+    return false; // no card filed
+  });
 }
 
 // The thin writer, inside the card transaction. Lock order is the customer row FIRST, then the
@@ -4114,8 +4133,11 @@ async function fileNameSpellingCard(conn, {
   try {
     if (isOutbound) return false;
     const extraction = v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } };
-    if (nameSpellingCallExcluded({ customerId, extraction, v2Result })) return false;
-    // No caller spelling in this pass: nothing to compare and no evidence to refresh or retire.
+    if (nameSpellingCallExcluded({ customerId, extraction, v2Result })) {
+      return await retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken });
+    }
+    // No usable caller spelling in this pass: nothing to compare, and inconclusive evidence neither
+    // refreshes nor retires a card an earlier pass filed.
     if (!(dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)) return false;
     return await conn.transaction((trx) => writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, procToken }));
   } catch (err) {

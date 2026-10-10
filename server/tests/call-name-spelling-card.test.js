@@ -64,6 +64,7 @@ function makeConn({ customer = null, settled = [], claimHeld = true, openCard = 
           whereIn: () => ({ select: async () => settled }),
           whereIn2: null,
           count: () => ({ first: async () => ({ n: 1 }) }),
+          first: async () => openCard,
           forUpdate: () => ({ first: async () => openCard }),
           update: async (u) => { conn.retired.push({ where: w, update: u }); return 1; },
         };
@@ -245,6 +246,51 @@ describe('fileNameSpellingCard', () => {
     expect(conn.retired[0].where).toEqual({ id: 'card-1' });
     expect(conn.retired[0].update).toMatchObject({ status: 'resolved', resolution_source: 'auto' });
     expect(mockSyncStatus).toHaveBeenCalledWith(conn, 'call-1');
+  });
+
+  test('a refresh with evidence for one field keeps the other unresolved entry; an entry whose live value now matches is dropped', async () => {
+    const cardPayload = {
+      field: 'first_name', spelled_value: 'Kwentrell', saved_value: 'Quentrell', quote: 'Caller: K-W-E-N-T-R-E-L-L',
+      also: [{ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', quote: TURN, confidence: 0.9 }],
+    };
+    const firstOnly = dictationFor([
+      { raw_spoken: 'K-W-E-N-T-R-E-L-L', spelled_value: 'Kwentrell', field: 'first_name', whose: 'caller', confidence: 0.9 },
+    ], 'Caller: my first name is K-W-E-N-T-R-E-L-L');
+    const stillWrong = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' }, openCard: { id: 'card-1', payload: cardPayload } });
+    expect(await file(stillWrong, { customerId: 'cust-1', dictation: firstOnly })).toBe(true);
+    const payload = JSON.parse(stillWrong.writes[0].row.payload);
+    expect(payload).toMatchObject({ field: 'first_name', spelled_value: 'Kwentrell' });
+    expect(payload.also).toEqual([expect.objectContaining({ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' })]);
+    // The last name was corrected meanwhile: that entry is dropped.
+    const fixed = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Serov' }, openCard: { id: 'card-1', payload: cardPayload } });
+    expect(await file(fixed, { customerId: 'cust-1', dictation: firstOnly })).toBe(true);
+    expect(JSON.parse(fixed.writes[0].row.payload).also).toEqual([]);
+  });
+
+  test('a reprocess that now classifies the linked caller as a vendor retires the open card; one with no spelling leaves it', async () => {
+    const openCard = { id: 'card-1', payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' } };
+    const vendor = { status: 'valid', extraction: { call_nature: 'vendor_or_partner', caller: { relationship_to_property: 'unknown' }, meta: { call_summary: 'x' } } };
+    const reclassified = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' }, openCard });
+    expect(await file(reclassified, { customerId: 'cust-1', v2Result: vendor, procToken: 'tok-1' })).toBe(false);
+    expect(reclassified.retired).toHaveLength(1);
+    expect(reclassified.retired[0].where).toEqual({ id: 'card-1' });
+    expect(reclassified.retired[0].update).toMatchObject({ status: 'resolved', resolution_source: 'auto', resolution_note: 'Superseded — the caller is not the account holder.' });
+    expect(callOrder).toEqual(['customer-row', 'call-lock']);
+    expect(reclassified.writes).toEqual([]);
+    // Relationship-based exclusion retires too; no open card means no transaction at all.
+    const tenant = { extraction: { caller: { relationship_to_property: 'tenant' }, meta: { call_summary: 'x' } } };
+    const second = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' }, openCard });
+    await file(second, { customerId: 'cust-1', v2Result: tenant });
+    expect(second.retired).toHaveLength(1);
+    const none = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+    await file(none, { customerId: 'cust-1', v2Result: vendor });
+    expect(none.retired).toEqual([]);
+    expect(none.locked).toBeUndefined();
+    // No usable spelling this pass: inconclusive evidence leaves the open card alone.
+    const quiet = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' }, openCard });
+    expect(await file(quiet, { customerId: 'cust-1', dictation: { emails: [], addresses: [], names: [] } })).toBe(false);
+    expect(quiet.retired).toEqual([]);
+    expect(quiet.writes).toEqual([]);
   });
 
   test('a reprocess with a conflicting pair and an unchanged stored name leaves the open card open', async () => {

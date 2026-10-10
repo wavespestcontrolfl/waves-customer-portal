@@ -430,7 +430,8 @@ function nameSpellingDifferences({ dictation = null, saved = {} } = {}) {
  * STORED fields only (a blank stays blank), else the extracted caller name. `differences` are the
  * spelling differences to file. `retire` is true only when there is nothing to file AND the open
  * card's own recorded spellings (the main entry AND every `also` entry) ALL equal the live stored value of their field;
- * a pass that merely lost confidence or found a conflicting pair leaves that card alone. Pure.
+ * a pass that merely lost confidence or found a conflicting pair leaves that card alone.
+ * `differences` is what to file: this pass's evidence plus the card's still-unresolved entries. Pure.
  */
 function nameSpellingCardDecision({ dictation = null, live = null, extracted = {}, openCardPayload = null } = {}) {
   const saved = Object.fromEntries(NAME_FIELDS.map((f) => [f, live
@@ -438,9 +439,17 @@ function nameSpellingCardDecision({ dictation = null, live = null, extracted = {
     : (extracted?.[f] || null)]));
   const differences = nameSpellingDifferences({ dictation, saved });
   const recorded = openCardPayload ? [openCardPayload, ...(Array.isArray(openCardPayload.also) ? openCardPayload.also : [])] : [];
+  // A refresh keeps every unresolved entry the open card already carries (its live stored value still
+  // differs from the recorded spelling) for a field this pass has no new evidence for; an entry whose
+  // live value now matches is dropped. Evidence from this pass replaces the card's entry for its field.
+  const carried = differences.length
+    ? recorded.filter((d) => d && NAME_FIELDS.includes(d.field) && d.spelled_value && saved[d.field]
+      && !differences.some((n) => n.field === d.field) && nameKey(saved[d.field]) !== nameKey(d.spelled_value))
+      .map((d) => ({ field: d.field, spelled_value: d.spelled_value, saved_value: saved[d.field], quote: d.quote ?? null, confidence: d.confidence ?? null }))
+    : [];
   const retire = !differences.length && recorded.length > 0 && recorded.every((d) => d && NAME_FIELDS.includes(d.field)
     && d.spelled_value && saved[d.field] && nameKey(saved[d.field]) === nameKey(d.spelled_value));
-  return { saved, differences, retire };
+  return { saved, differences: [...differences, ...carried], retire };
 }
 
 /**
