@@ -110,9 +110,16 @@ maybeDescribe('releaseInFlightForShutdown with the gate on (live Postgres)', () 
     expect(afterPass.metadata.shutdown_released_at).toEqual(released.metadata.shutdown_released_at);
     expect(processor.inFlightPassCount()).toBe(0);
 
-    // The draining process itself refuses a new claim.
+    // The draining process itself refuses a new claim — and stamps the
+    // unclaimed row so the replacing pod's sweep takes it at once (r3 P1).
+    await db('call_log').where({ twilio_call_sid: SID }).update({ metadata: JSON.stringify({ fixture: 'shutdown-release' }) });
     const refused = await processor.processRecording(SID);
     expect(refused).toEqual({ success: false, skipped: true, reason: 'shutting_down' });
+    const stampedOnRefusal = await readRow();
+    expect(stampedOnRefusal.processing_status).toBeNull();
+    expect(stampedOnRefusal.processing_token).toBeNull();
+    expect(stampedOnRefusal.metadata.shutdown_released_at).toEqual(expect.any(String));
+    expect(Number(stampedOnRefusal.processing_generation)).toBe(1);
 
     // The replacing pod (same module, drain flag reset) sweeps: updated_at is
     // seconds old, so only the stamp lets the row in; the claim clears the

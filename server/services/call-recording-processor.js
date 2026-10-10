@@ -9251,13 +9251,6 @@ const CallRecordingProcessor = {
    * Called from recording-status webhook or manually from admin.
    */
   async processRecording(callSid, opts = {}) {
-    // A draining process takes no new claim: a pass started seconds before
-    // the kill would only have to be released again, and the pod replacing
-    // this one owns the sweep from here (releaseInFlightForShutdown).
-    if (shuttingDown && isEnabled('callProcShutdownRelease')) {
-      logger.info(`[call-proc] Not claiming ${maskSid(callSid)} — process is shutting down`);
-      return { success: false, skipped: true, reason: 'shutting_down' };
-    }
     const processingStartedAt = new Date();
     // Per-stage wall clock for this pass, stamped into
     // metadata.processing_timings at finalization so "which stage is slow"
@@ -9378,8 +9371,29 @@ const CallRecordingProcessor = {
       // side-effect-heavy pipeline over and over (codex P1). `operator` does
       // one thing and one thing only: it shortens the heartbeat-quiet window
       // INSIDE this predicate, below.
+      // A draining process takes no new claim: a pass started seconds before
+      // the kill would only have to be released again, and the pod replacing
+      // this one owns the sweep from here (releaseInFlightForShutdown). The
+      // refused row is stamped the same way a released one is, so that sweep
+      // takes it on its next tick instead of after the 10-minute age gate —
+      // the recording-status timer retries only recording_not_ready, so
+      // without the stamp a refusal would cost the whole deploy delay
+      // (Codex #6260 r3 P1). Unclaimed rows only (token fence): a peer's
+      // claim is the peer's to release.
       if (shuttingDown && isEnabled('callProcShutdownRelease')) {
         refusedForShutdown = true;
+        const preClaimStatus = call.processing_status === 'processing' ? null : (call.processing_status || null);
+        if (RELEASABLE_PRE_CLAIM_STATUSES.has(preClaimStatus)) {
+          await trx('call_log')
+            .where({ id: call.id })
+            .whereNull('processing_token')
+            .update({
+              metadata: trx.raw(
+                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{shutdown_released_at}', to_jsonb(?::text), true)",
+                [new Date().toISOString()],
+              ),
+            });
+        }
         return;
       }
       if (!opts.force) {
@@ -22877,19 +22891,29 @@ const CallRecordingProcessor = {
     const summary = { enabled, inFlight, finished: 0, released: 0, kept: 0, lost: 0 };
     if (!enabled) return summary;
     shuttingDown = true;
+    // One grace budget for both waits, so a claim transaction blocked on an
+    // unrelated lock (the customer FOR UPDATE taken before the claim) can
+    // never hold the release of the passes already registered past the
+    // 25-second shutdown deadline (Codex #6260 r3 P1).
+    const deadline = Date.now() + Math.max(0, graceMs);
+    const untilDeadline = () => new Promise((resolve) => {
+      const t = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+      if (typeof t.unref === 'function') t.unref();
+    });
     // A claim transaction already past its in-transaction drain check commits
-    // and registers its entry inside the transaction; wait for every such
-    // transaction to settle so the registry read below is complete. New
-    // transactions refuse at the recheck, so this set only drains.
-    while (pendingClaims.size) await Promise.allSettled([...pendingClaims]);
-    // The passes held at this moment get the grace. The loop below reads the
-    // registry AFTER the grace and again until nothing new appears.
+    // and registers its entry inside the transaction; wait (bounded) for such
+    // transactions to settle so the registry read below is complete. New
+    // transactions refuse at the recheck and stamp their row, so this set only
+    // drains. One still open at the deadline keeps its claim and the stale
+    // reclaim resumes it, as before this change.
+    while (pendingClaims.size && Date.now() < deadline) {
+      await Promise.race([Promise.allSettled([...pendingClaims]), untilDeadline()]);
+    }
+    // The passes held at this moment get the rest of the grace. The loop below
+    // reads the registry AFTER the grace and again until nothing new appears.
     const atStart = new Set(inFlightPasses.values());
     if (atStart.size) {
-      await Promise.race([
-        Promise.all([...atStart].map((e) => e.done)),
-        new Promise((resolve) => { const t = setTimeout(resolve, Math.max(0, graceMs)); if (typeof t.unref === 'function') t.unref(); }),
-      ]);
+      await Promise.race([Promise.all([...atStart].map((e) => e.done)), untilDeadline()]);
     }
     const handled = new Set();
     for (;;) {
