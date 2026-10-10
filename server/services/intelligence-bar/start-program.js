@@ -511,56 +511,72 @@ async function openInspectionCredit(customerId) {
   return { amount };
 }
 
+// The planner's checks, in order. Each step reads the results of the steps
+// before it (o) and returns its result, or a refusal ({ error, code }) that
+// stops the plan with nothing proposed.
+const PLAN_STEPS = [
+  ['args', (o, input) => parseProgramInput(input)],
+  ['loaded', (o) => loadProgramCustomer(o.args.customerId)],
+  ['service', (o) => resolveProgramService(o.args.serviceText, o.args.cadence)],
+  ['ledger', async (o) => {
+    const PlanRateLedger = require('../plan-rate-ledger');
+    const { customer } = o.loaded;
+    const components = await PlanRateLedger.loadComponents(db, o.args.customerId);
+    const currentLines = PlanRateLedger.billLines(components, customer.monthly_rate);
+    const { catalogRow, family } = o.service;
+    const conflict = await programConflict({ customerId: o.args.customerId, catalogRow, family, components, currentLines, rate: customer.monthly_rate });
+    return conflict || { components, currentLines };
+  }],
+  ['repriced', (o, input) => resolveRepriceLines(input.reprice_lines, o.ledger.components, o.ledger.currentLines)],
+  ['bill', (o) => {
+    const bill = planBill({
+      components: o.ledger.components, previousScalar: o.loaded.customer.monthly_rate, family: o.service.family,
+      monthly: o.args.monthly, monthlyTotal: o.args.monthlyTotal, reprice: o.repriced.reprice,
+    });
+    return bill.error ? refusal(`${bill.error} Today the bill is ${describeLines(o.ledger.currentLines)}. Nothing was proposed.`, bill.code) : bill;
+  }],
+  ['tech', async (o, input) => {
+    const tech = await resolveTechnician(input);
+    if (!tech) return refusal('No active technician matches. Nothing was proposed.', 'program_technician_required');
+    return tech.error ? { ...tech } : tech;
+  }],
+  ['window', (o) => firstVisitWindow(o.args.firstDate, o.args.start, o.service.catalogRow)],
+  ['visitDates', (o) => plannedVisitDates(o.args.customerId, o.args.firstDate, o.args.cadence)],
+  ['unavailable', (o) => firstUnavailableTechnicianDate(o.tech.id, o.visitDates)],
+  ['overlap', (o) => seriesOverlap(o.visitDates, o.window, o.args.customerId, o.loaded.propertyId)
+    .catch(() => refusal('Could not check the schedule for visits that overlap the booked visits. Try again in a moment. Nothing was proposed.'))],
+  ['planSync', (o) => predictPlanSync(o.loaded.customer, o.service.catalogRow, o.args.firstDate, o.args.cadence)],
+  ['welcome', (o) => welcomeVerdict(o.args)],
+  ['credit', (o) => openInspectionCredit(o.args.customerId)],
+];
+
+async function runPlanSteps(steps, ...extra) {
+  const out = {};
+  for (const [name, step] of steps) {
+    const result = await step(out, ...extra);
+    if (result && result.error) return { failed: result };
+    out[name] = result;
+  }
+  return { out };
+}
+
 /**
  * Everything the card shows and the commit needs, read without writing.
  * Returns { error, code } to refuse, or { plan } for the card and commit.
  */
 async function buildProgramPlan(input, actionContext) {
-  const PlanRateLedger = require('../plan-rate-ledger');
   const RateChange = require('./rate-change');
   const { impliedMonthlyStampForWrite } = require('../billing-lane');
 
-  const args = parseProgramInput(input);
-  if (args.error) return args;
-  const loaded = await loadProgramCustomer(args.customerId);
-  if (loaded.error) return loaded;
-  const { customer, propertyIds, propertyId, serviceAddress } = loaded;
-  const service = await resolveProgramService(args.serviceText, args.cadence);
-  if (service.error) return service;
-  const { catalogRow, family } = service;
-
-  const components = await PlanRateLedger.loadComponents(db, args.customerId);
-  const currentLines = PlanRateLedger.billLines(components, customer.monthly_rate);
-  const conflict = await programConflict({ customerId: args.customerId, catalogRow, family, components, currentLines, rate: customer.monthly_rate });
-  if (conflict) return conflict;
-  const repriced = resolveRepriceLines(input.reprice_lines, components, currentLines);
-  if (repriced.error) return repriced;
-  const { reprice } = repriced;
-  const bill = planBill({
-    components, previousScalar: customer.monthly_rate, family, monthly: args.monthly, monthlyTotal: args.monthlyTotal, reprice,
-  });
-  if (bill.error) return refusal(`${bill.error} Today the bill is ${describeLines(currentLines)}. Nothing was proposed.`, bill.code);
-
-  const tech = await resolveTechnician(input);
-  if (!tech) return refusal('No active technician matches. Nothing was proposed.', 'program_technician_required');
-  if (tech.error) return { ...tech };
-  const window = firstVisitWindow(args.firstDate, args.start, catalogRow);
-  if (window.error) return window;
-  const visitDates = await plannedVisitDates(args.customerId, args.firstDate, args.cadence);
-  const unavailable = await firstUnavailableTechnicianDate(tech.id, visitDates);
-  if (unavailable) return unavailable;
-  const overlap = await seriesOverlap(visitDates, window, args.customerId, propertyId)
-    .catch(() => refusal('Could not check the schedule for visits that overlap the booked visits. Try again in a moment. Nothing was proposed.'));
-  if (overlap.error) return overlap;
-  const planSync = await predictPlanSync(customer, catalogRow, args.firstDate, args.cadence);
-  if (planSync.error) return planSync;
-
-  const welcome = await welcomeVerdict(args);
-  if (welcome.error) return welcome;
+  const { failed, out } = await runPlanSteps(PLAN_STEPS, input);
+  if (failed) return failed;
+  const { args, bill, tech, window, visitDates, overlap, planSync, welcome } = out;
+  const { customer, propertyIds, propertyId, serviceAddress } = out.loaded;
+  const { catalogRow, family } = out.service;
+  const { components } = out.ledger;
+  const { reprice } = out.repriced;
   const { welcomeCandidate } = welcome;
-  const credit = await openInspectionCredit(args.customerId);
-  if (credit.error) return credit;
-  const inspectionCredit = credit.amount;
+  const inspectionCredit = out.credit.amount;
 
   // update_customer's implied-lane rule (#3140): a write that turns a row
   // into an inferred monthly member stamps the lane. A customer this tool

@@ -7931,62 +7931,107 @@ async function assertNoCallBookingConflict(guard) {
   if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
 
-// The parent visit's workflow-column stamps (column-guarded, so a database
-// mid-migration still books), moved out of the booking transaction callback
-// unchanged. Mutates insertData.
-function stampParentInsertColumns(insertData, d) {
-  const {
-    cols, serviceId, pricing, memberSeriesCovered, addonOnlyTotal, finalPrice, urgency, internalNotes, resolvedIsCallback,
-    officeCustomerRequest, parentServiceId, insertLinkId, isRecurring, recurringOngoing, monthAnchorOpts, recurringIntervalDays,
-    skipWeekends, skipWeekendsEffective, weekendShift, boosterMonths, appointmentDiscountType, appointmentDiscountAmount, createInvoiceStamp,
-  } = d;
-  // Add new workflow columns (safe — migration may not have run yet)
-  if (cols.service_id && serviceId) insertData.service_id = serviceId;
-  if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
-  if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
-  if (cols.estimated_price) {
-    if (memberSeriesCovered) {
-      const addonStamp = addonOnlyTotal(pricing.addonLines);
-      if (addonStamp > 0) insertData.estimated_price = addonStamp;
-    } else if (finalPrice != null) insertData.estimated_price = finalPrice;
+// The parent visit's workflow-column stamps, as data. Each group is a list of
+// columns (stamped only when the column exists, so a database mid-migration
+// still books) whose value function returns STAMP_SKIP to leave the column
+// out, or an `apply` hook for the existing stamp helpers. Groups run in order
+// over insertData (see stampParentInsertColumns).
+const STAMP_SKIP = Symbol('skip');
+const intOrSkip = (value) => (value != null && value !== '' && !Number.isNaN(parseInt(value)) ? parseInt(value) : STAMP_SKIP);
+const orSkip = (value) => (value || STAMP_SKIP);
+const boosterMonthsJson = (months) => {
+  if (!Array.isArray(months) || months.length === 0) return STAMP_SKIP;
+  const cleaned = Array.from(new Set(months.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+  return cleaned.length > 0 ? JSON.stringify(cleaned) : STAMP_SKIP;
+};
+const estimatedPriceStamp = (d) => {
+  if (d.memberSeriesCovered) {
+    const addonStamp = d.addonOnlyTotal(d.pricing.addonLines);
+    return addonStamp > 0 ? addonStamp : STAMP_SKIP;
   }
-  if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
-  if (cols.urgency) insertData.urgency = urgency || 'routine';
-  if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
-  if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
-  if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
-    insertData.customer_request = officeCustomerRequest.text;
-    insertData.customer_request_source = officeCustomerRequest.source;
-  }
-  if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
-  if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
-  if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
-  if (isRecurring) {
-    if (cols.recurring_nth && monthAnchorOpts.nth != null && monthAnchorOpts.nth !== '' && !isNaN(parseInt(monthAnchorOpts.nth))) insertData.recurring_nth = parseInt(monthAnchorOpts.nth);
-    if (cols.recurring_weekday && monthAnchorOpts.weekday != null && monthAnchorOpts.weekday !== '' && !isNaN(parseInt(monthAnchorOpts.weekday))) insertData.recurring_weekday = parseInt(monthAnchorOpts.weekday);
-    if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
-    if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
-    if (cols.weekend_shift && skipWeekendsEffective) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
-    if (cols.booster_months && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
-      const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
-      if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
-    }
-  }
-  if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) insertData.discount_id = pricing.appointmentDiscount.discountId;
-  if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) insertData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
-  if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
-  if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
-  if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
-  if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
-  if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
-  if (pricing.appointmentDiscount && cols.discount_max_dollars) insertData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
-  stampPrimaryLineDiscount(insertData, pricing, cols);
+  return d.finalPrice != null ? d.finalPrice : STAMP_SKIP;
+};
+// A column that needs the appointment discount: skipped without one.
+const discountCol = (fn) => (d) => (d.pricing.appointmentDiscount ? fn(d.pricing.appointmentDiscount) : STAMP_SKIP);
+const always = () => true;
+
+const PARENT_STAMP_GROUPS = [
+  { // service identity
+    when: always,
+    columns: {
+      service_id: (d) => orSkip(d.serviceId),
+      service_key_snapshot: (d) => d.pricing.primaryServiceKey || null,
+      service_category_snapshot: (d) => d.pricing.primaryServiceCategory || null,
+    },
+  },
+  { // the visit's own price
+    when: always,
+    columns: {
+      estimated_price: estimatedPriceStamp,
+      primary_line_price: (d) => (d.pricing.primaryBase != null ? d.pricing.primaryBase : STAMP_SKIP),
+    },
+  },
+  { // how the office entered the visit
+    when: always,
+    columns: {
+      urgency: (d) => d.urgency || 'routine',
+      internal_notes: (d) => orSkip(d.internalNotes),
+      is_callback: (d) => d.resolvedIsCallback || false,
+      customer_request: (d) => (d.officeCustomerRequest && d.cols.customer_request_source ? d.officeCustomerRequest.text : STAMP_SKIP),
+      customer_request_source: (d) => (d.officeCustomerRequest && d.cols.customer_request ? d.officeCustomerRequest.source : STAMP_SKIP),
+    },
+  },
+  { // linkage to a parent service or an estimate
+    when: always,
+    columns: {
+      parent_service_id: (d) => orSkip(d.parentServiceId),
+      source_estimate_id: (d) => orSkip(d.insertLinkId),
+    },
+  },
+  { // recurring series settings
+    when: (d) => d.isRecurring,
+    columns: {
+      recurring_ongoing: (d) => !!d.recurringOngoing,
+      recurring_nth: (d) => intOrSkip(d.monthAnchorOpts.nth),
+      recurring_weekday: (d) => intOrSkip(d.monthAnchorOpts.weekday),
+      recurring_interval_days: (d) => intOrSkip(d.recurringIntervalDays),
+      skip_weekends: (d) => !!d.skipWeekends,
+      weekend_shift: (d) => (d.skipWeekendsEffective ? (d.weekendShift === 'back' ? 'back' : 'forward') : STAMP_SKIP),
+      booster_months: (d) => boosterMonthsJson(d.boosterMonths),
+    },
+  },
+  { // the appointment discount
+    when: always,
+    columns: {
+      discount_id: discountCol((ad) => orSkip(ad.discountId)),
+      discount_name: discountCol((ad) => (ad.discountName ? String(ad.discountName).slice(0, 200) : STAMP_SKIP)),
+      discount_type: (d) => orSkip(d.appointmentDiscountType),
+      discount_amount: (d) => (d.appointmentDiscountAmount != null ? Number(d.appointmentDiscountAmount) : STAMP_SKIP),
+      discount_dollars: discountCol((ad) => (ad.discountDollars != null ? Number(ad.discountDollars) : STAMP_SKIP)),
+      discount_service_key_filter: discountCol((ad) => ad.serviceKeyFilter || null),
+      discount_service_category_filter: discountCol((ad) => ad.serviceCategoryFilter || null),
+      discount_max_dollars: discountCol((ad) => ad.maxDiscountDollars ?? null),
+    },
+  },
+  { when: always, apply: (row, d) => stampPrimaryLineDiscount(row, d.pricing, d.cols) },
   // Pricing-regime provenance (GATE_DISCOUNT_STACKING) — lets a later
   // extension's own restack tell a null primary_line_price genuinely
   // means "no primary" apart from a legacy/unstructured row (see
   // restackStoredVisitFinancials's own comment).
-  if (discountStackingLive()) stampPricingRegimeMarker(insertData, cols, capsSnapshotFromPricing(pricing));
-  if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
+  { when: () => discountStackingLive(), apply: (row, d) => stampPricingRegimeMarker(row, d.cols, capsSnapshotFromPricing(d.pricing)) },
+  { when: always, columns: { create_invoice_on_complete: (d) => d.createInvoiceStamp } },
+];
+
+function stampParentInsertColumns(insertData, d) {
+  for (const group of PARENT_STAMP_GROUPS) {
+    if (!group.when(d)) continue;
+    if (group.apply) group.apply(insertData, d);
+    for (const [column, valueOf] of Object.entries(group.columns || {})) {
+      if (!d.cols[column]) continue;
+      const value = valueOf(d);
+      if (value !== STAMP_SKIP) insertData[column] = value;
+    }
+  }
 }
 
 // The booking's post-lock revalidation (r23-r36), moved out of the booking
