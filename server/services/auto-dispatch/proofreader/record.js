@@ -30,7 +30,7 @@ const logger = require('../../logger');
 const { redactAccessCodes } = require('../../context-aggregator');
 const { excludeUnresolvedSendReservations } = require('../../messaging/review-ask-reservation');
 const { resolveEmailCustomerLink, personSentFilter } = require('../../email/email-customer-link');
-const { emailPlainText } = require('../../email/email-strip');
+const { emailPlainText, stripQuotedAndSignature, ownSubjectsInThreads } = require('../../email/email-strip');
 const { etOffsetIso } = require('../../../utils/datetime-et');
 
 // One entry's longest text. A longer one is split into parts, never cut
@@ -54,6 +54,16 @@ const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ')
 // so "this Friday" in an evening text is read against the right day.
 const eastern = (value) => (value ? etOffsetIso(value) : null);
 const msOf = (value) => (value ? new Date(value).getTime() : null);
+
+// A row whose text can be edited in place carries the time of its last edit.
+// Edited at or after `asOf`, its text is not the text that existed then: the
+// replay lists it as unread instead of reading it (Codex #6258 r2, r3). The
+// nightly run passes its own time, so nothing is ever "later" there.
+function revisedLater(row, asOf, channel, unread) {
+  if (!row.updated_at || msOf(row.updated_at) < msOf(asOf)) return false;
+  unread.push({ channel, at: eastern(row.created_at), reason: 'revised_later' });
+  return true;
+}
 
 function partsOf(body) {
   if (body.length <= MAX_ENTRY_CHARS) return [body];
@@ -109,6 +119,10 @@ async function readTexts(conn, { customerId, asOf }) {
 //
 // The body is the shared reader's (email-strip.js emailPlainText): an
 // HTML-only mail is converted, never replaced by Gmail's short snippet.
+// Each entry holds only the words that mail added: the quoted thread and the
+// signature are stripped, and a subject counts only when it is new in its
+// thread (stripQuotedAndSignature, ownSubjectsInThreads). Otherwise an old
+// "Tuesdays only" would be read again at the date of every later reply (r3).
 async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
   const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'snippet', 'received_at'];
   const live = (query) => query.where('received_at', '<', asOf).whereNull('quarantined_at')
@@ -135,10 +149,11 @@ async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
     const owner = await resolveEmailCustomerLink(conn, row);
     if (owner != null && String(owner) === String(customerId)) replies.push(row);
   }
-  const mail = (row, from) => {
-    const body = clean(emailPlainText(row));
-    return entry('email', from, row.received_at, body ? `${clean(row.subject)}: ${body}` : '');
-  };
+  const subjects = await ownSubjectsInThreads(conn, [...linked, ...replies]);
+  const mail = (row, from) => entry(
+    'email', from, row.received_at,
+    [clean(subjects.get(row.id)), clean(stripQuotedAndSignature(emailPlainText(row)))].filter(Boolean).join(': '),
+  );
   return [...linked.map((row) => mail(row, 'customer')), ...replies.map((row) => mail(row, 'staff'))];
 }
 
@@ -168,16 +183,19 @@ async function readInteractions(conn, { customerId, asOf }) {
   ));
 }
 
-async function readStaffNotes(conn, { customerId, asOf }) {
+async function readStaffNotes(conn, { customerId, asOf }, unread) {
   const rows = await conn('admin_notes').where({ customer_id: customerId }).where('created_at', '<', asOf)
-    .select('note_text', 'created_at');
-  return rows.map((row) => entry('note', 'staff', row.created_at, row.note_text));
+    .select('note_text', 'created_at', 'updated_at');
+  return rows.map((row) => (clean(row.note_text) && revisedLater(row, asOf, 'note', unread)
+    ? [] : entry('note', 'staff', row.created_at, row.note_text)));
 }
 
-async function readTechNotes(conn, { customerId, asOf }) {
+// A recap edit overwrites technician_notes and stamps updated_at.
+async function readTechNotes(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_records').where({ customer_id: customerId }).where('created_at', '<', asOf)
-    .select('technician_notes', 'created_at');
-  return rows.map((row) => entry('technician_note', 'staff', row.created_at, row.technician_notes));
+    .select('technician_notes', 'created_at', 'updated_at');
+  return rows.map((row) => (clean(row.technician_notes) && revisedLater(row, asOf, 'technician_note', unread)
+    ? [] : entry('technician_note', 'staff', row.created_at, row.technician_notes)));
 }
 
 // The offer row is written when the offer is sent; the customer's reply
@@ -195,23 +213,14 @@ async function readRescheduleReplies(conn, { customerId, asOf }) {
 
 // What the customer wrote in the portal's request form ("schedule_change"
 // is one of its categories). These rows are not copied anywhere else. An
-// open request can be revised in place (routes/schedule.js appends to it and
-// stamps updated_at), so a request changed at or after `asOf` is not the text
-// that existed then: it is unread, not read (Codex #6258 r2). The nightly
-// run passes its own time, so nothing is ever "later" there.
+// open request can be revised in place (routes/schedule.js appends to it).
 async function readPortalRequests(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_requests').where({ customer_id: customerId }).where('created_at', '<', asOf)
     .select('category', 'subject', 'description', 'created_at', 'updated_at');
-  return rows.map((row) => {
-    if (row.updated_at && new Date(row.updated_at).getTime() >= new Date(asOf).getTime()) {
-      unread.push({ channel: 'portal_request', at: eastern(row.created_at), reason: 'revised_later' });
-      return [];
-    }
-    return entry(
-      'portal_request', 'customer', row.created_at,
-      [clean(row.category), clean(row.subject), clean(row.description)].filter(Boolean).join(': '),
-    );
-  });
+  return rows.map((row) => (revisedLater(row, asOf, 'portal_request', unread) ? [] : entry(
+    'portal_request', 'customer', row.created_at,
+    [clean(row.category), clean(row.subject), clean(row.description)].filter(Boolean).join(': '),
+  )));
 }
 
 // What the customer told the portal assistant, and what it answered. A
@@ -228,17 +237,21 @@ async function readAssistantChat(conn, { customerId, asOf }) {
   return rows.map((row) => entry('portal_chat', row.role === 'user' ? 'customer' : 'system', row.created_at, row.content));
 }
 
-// The customer's file notes and the notes on the visit and its series.
-async function readUndatedNotes(conn, { customer, serviceId }) {
+// The customer's file notes and the notes on the visit and its series. A
+// visit that is not given, or is gone (a replay of a move whose visit was
+// deleted since), has notes nobody can read: the record says so (r3).
+async function readUndatedNotes(conn, { customer, serviceId }, unread) {
   const out = [
     entry('customer_file_note', 'staff', null, customer && customer.crm_notes),
     entry('customer_file_note', 'staff', null, customer && customer.internal_notes),
     entry('customer_file_note', 'staff', null, customer && customer.follow_up_notes),
     entry('customer_file_note', 'staff', null, customer && customer.access_notes),
   ];
-  if (!serviceId) return out;
-  const visit = await conn('scheduled_services').where({ id: serviceId }).first('id', 'recurring_parent_id');
-  if (!visit) return out;
+  const visit = serviceId ? await conn('scheduled_services').where({ id: serviceId }).first('id', 'recurring_parent_id') : null;
+  if (!visit) {
+    unread.push({ channel: 'visit_note', reason: 'visit_not_found' });
+    return out;
+  }
   const parentId = visit.recurring_parent_id || visit.id;
   const series = await conn('scheduled_services')
     .where(function sameSeries() { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })

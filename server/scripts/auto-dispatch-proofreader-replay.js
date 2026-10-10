@@ -131,7 +131,10 @@ async function loadMoves(db) {
 
 async function replayMove(row, arms, { db, proofreader, toDateStr }) {
   const move = proofreader.moveFacts({
-    serviceType: row.service_type || 'Service visit',
+    // The audit row keeps no service type: it is read from the visit as it is
+    // today. A visit deleted since has none (the prompt then says only
+    // "recurring service visit"), and its notes make the record incomplete.
+    serviceType: row.service_type,
     from: { date: toDateStr(row.old_scheduled_date), windowStart: row.old_window_start, windowEnd: row.old_window_end, technician: firstName(row.old_tech) },
     to: { date: toDateStr(row.new_scheduled_date), windowStart: row.new_window_start, windowEnd: row.new_window_end, technician: firstName(row.new_tech) },
   });

@@ -10,6 +10,13 @@ jest.mock('../services/email/email-customer-link', () => ({
   personSentFilter: (alias) => `SENT_ONLY(${alias})`,
 }));
 
+// The thread-subject rule has its own suites; here a subject is its own
+// words unless it only repeats the thread's behind "Re:".
+jest.mock('../services/email/email-strip', () => {
+  const actual = jest.requireActual('../services/email/email-strip');
+  return { ...actual, ownSubjectsInThreads: jest.fn(async (_conn, rows) => new Map(rows.map((row) => [row.id, actual.ownReplySubject(row.subject, ['Schedule'].filter((subject) => subject !== row.subject))]))) };
+});
+
 const {
   proofreadMove, judge, buildCustomerRecord, moveFacts, PROMPT_VERSION,
 } = require('../services/auto-dispatch/proofreader');
@@ -172,7 +179,7 @@ describe('the customer record', () => {
     // Ours to this customer is read; a send the rule gives to another
     // customer, or to nobody (a mixed thread, an internal forward), is not.
     // m2 is HTML only: the whole body is read, not Gmail's short snippet.
-    expect(staffMail).toEqual(['Re: Schedule: We will keep you on Wednesdays.']);
+    expect(staffMail).toEqual(['We will keep you on Wednesdays.']);
     // Only sent mail is a candidate: never a draft.
     expect(emailCalls.some(([, method, sql]) => method === 'whereRaw' && sql === 'SENT_ONLY(emails)')).toBe(true);
     expect(record.unread.filter((u) => u.channel === 'email')).toEqual([]);
@@ -193,6 +200,28 @@ describe('the customer record', () => {
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, service_requests: [request('Old words.', '2026-08-11T10:00:00.000Z'), request('Words added later.', '2026-10-06T10:00:00.000Z')] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.entries.filter((e) => e.channel === 'portal_request').map((e) => e.text)).toEqual(['schedule_change: Day: Old words.']);
     expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'portal_request', at: '2026-08-10T06:00:00-04:00', reason: 'revised_later' }]));
+  });
+
+  test('an email entry holds only the words that mail added: no quoted thread, no inherited subject', async () => {
+    const reply = { id: 'r1', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Re: Schedule', body_text: 'Any day works now.\n\nOn Fri, May 1, 2026 at 10:00 AM Office <office@example.test> wrote:\n> Tuesdays only, as you asked.', received_at: '2026-06-01T10:00:00.000Z' };
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [reply] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'email').map((e) => e.text)).toEqual(['Any day works now.']);
+  });
+
+  test('a staff or technician note edited after the as-of time is unread; the visit\'s notes are unread when the visit is gone', async () => {
+    const tables = { ...TABLES,
+      admin_notes: [{ note_text: 'Edited later.', created_at: '2026-07-01T10:00:00.000Z', updated_at: '2026-10-06T10:00:00.000Z' }],
+      service_records: [{ technician_notes: 'Afternoons only (added later).', created_at: '2026-07-07T16:00:00.000Z', updated_at: '2026-10-06T10:00:00.000Z' }],
+      scheduled_services: [] };
+    const record = await buildCustomerRecord(fakeConn(tables), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(JSON.stringify(record.entries)).not.toMatch(/later/);
+    expect(record.unread).toEqual(expect.arrayContaining([
+      { channel: 'note', at: '2026-07-01T06:00:00-04:00', reason: 'revised_later' },
+      { channel: 'technician_note', at: '2026-07-07T12:00:00-04:00', reason: 'revised_later' },
+      { channel: 'visit_note', reason: 'visit_not_found' },
+    ]));
+    const noVisit = await buildCustomerRecord(fakeConn(TABLES), { customerId: 'c1', serviceId: null, asOf: AS_OF });
+    expect(noVisit.unread).toEqual(expect.arrayContaining([{ channel: 'visit_note', reason: 'visit_not_found' }]));
   });
 
   test('what the customer told the portal assistant is in the record', async () => {
