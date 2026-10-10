@@ -6320,14 +6320,23 @@ function hasPreSlabTermiteContext(text) {
 // "Waves Pest Control and lawn care was requested" keeps its lawn request.
 const OWN_BUSINESS_NAME_RE = /\bwaves\s+pest\s+control(?!\s+appointment\s+service\b)(?:\s*&\s*lawn\s*care\b)?/g;
 
+// Non-pre-treat termite cues, shared by canonicalWavesService (first match
+// wins there) and the unit-card pre-treat proof (any cue anywhere keeps the
+// card). One source of truth: do not copy these patterns.
+const TERMITE_WOOD_TREATMENT_CUE_RE = /\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/;
+const TERMITE_FOAM_DRILL_CUE_RE = /\bfoam\b.{0,40}\bdrill\b|\bdrill\b.{0,40}\bfoam\b|\bvoid treatment\b|\bspot termite\b/;
+// Termidor is NOT in this one: it also names the pre-slab product.
+const TERMITE_LIQUID_PERIMETER_CUE_RE = /\btrench(?:ing)?\b|\brod(?:ding)?\b|\bliquid(?:\s+termite)?\s+perimeter\b/;
+const TERMITE_WDO_CUE_RE = /\bwdo\b|wood destroying organism/;
+
 function canonicalWavesService(value) {
   const text = String(value || '').toLowerCase().replace(OWN_BUSINESS_NAME_RE, ' ').trim();
   if (!text) return null;
   if (hasPreSlabTermiteContext(text)) return 'Pre-Slab Termidor';
-  if (/\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/.test(text)) return 'Termite Wood Treatment';
-  if (/\bfoam\b.{0,40}\bdrill\b|\bdrill\b.{0,40}\bfoam\b|\bvoid treatment\b|\bspot termite\b/.test(text)) return 'Termite Foam Drill';
-  if (/\btrench(?:ing)?\b|\brod(?:ding)?\b|\bliquid(?:\s+termite)?\s+perimeter\b|\btermidor\b/.test(text)) return 'Liquid Termite Perimeter';
-  if (/\bwdo\b|wood destroying organism/.test(text)) return 'WDO Inspection';
+  if (TERMITE_WOOD_TREATMENT_CUE_RE.test(text)) return 'Termite Wood Treatment';
+  if (TERMITE_FOAM_DRILL_CUE_RE.test(text)) return 'Termite Foam Drill';
+  if (TERMITE_LIQUID_PERIMETER_CUE_RE.test(text) || /\btermidor\b/.test(text)) return 'Liquid Termite Perimeter';
+  if (TERMITE_WDO_CUE_RE.test(text)) return 'WDO Inspection';
   if (/\bbed\s*bugs?\b|\bbedbugs?\b/.test(text)) return 'Bed Bug Treatment';
   if (/\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|\bbait stations?\b/.test(text)) return 'Rodent Control';
   if (/\bmosquito(?:es|s)?\b/.test(text)) return 'Mosquito Control';
@@ -6984,19 +6993,27 @@ function existingStructureTermiteWork(words) {
   return LIQUID_TERMITE_WORK_RE.test(words) && LIQUID_EXISTING_CONTEXT_RE.test(words)
     && !LIQUID_NEW_CONSTRUCTION_RE.test(words);
 }
-// Positive proof (Codex r11): a word list can never name every existing-
-// structure treatment (Bora-Care, borate, wood treatment, monitoring, bond),
-// so the service words are split into fragments and each fragment is
-// canonicalized. The pre-treat is proven the ONLY termite work when every
-// fragment that canonicalizes to a termite service is the pre-slab one (or a
-// plain "pre-treat" wording the pre-slab rule does not match, such as
-// "Termite Pretreatment Service"), and no fragment carries add-on wording.
-// A fragment that is some other termite service, or carries add-on wording,
-// keeps the unit card.
-const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also)\s+/i;
+// Positive proof, independent of how the text is split (Codex r11, r12). A
+// word list can never name every existing-structure treatment, and one
+// fragment can hold two services ("slab pre-treat with Bora-Care"), where
+// canonicalWavesService returns the pre-slab label first. So:
+//  1. NO fragment, and not the joined service words, may carry any
+//     non-pre-treat termite cue (the shared cue patterns above, the add-on
+//     wording, or the existing-structure backstop). Any cue anywhere keeps
+//     the unit card.
+//  2. At least one fragment must be the pre-slab service (canonicalWavesService)
+//     or plain "pre-treat" wording, and no fragment may canonicalize to
+//     another termite service.
+const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
 const PRETREAT_WORDING_RE = /\bpre[-\s]?treat(?:ment)?\b/i;
 const TERMITE_ADDON_WORDING_RE = /\b(?:monitor\w*|protection|bond|warranty|renewal|bait\w*|stations?)\b/i;
 const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
+function hasNonPretreatTermiteCue(text) {
+  const value = String(text || '').toLowerCase();
+  return TERMITE_WOOD_TREATMENT_CUE_RE.test(value) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
+    || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
+    || TERMITE_ADDON_WORDING_RE.test(value) || existingStructureTermiteWork(value);
+}
 function serviceFragmentsOf(view) {
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
   const out = [view.requested_service, view.matched_service, view.specific_service_name];
@@ -7006,13 +7023,16 @@ function serviceFragmentsOf(view) {
   return out.map((f) => String(f || '').trim()).filter(Boolean);
 }
 function pretreatIsOnlyTermiteWork(view) {
-  return serviceFragmentsOf(view).every((fragment) => {
-    if (TERMITE_ADDON_WORDING_RE.test(fragment)) return false;
+  const fragments = serviceFragmentsOf(view);
+  if (hasNonPretreatTermiteCue(fragments.join('. ')) || fragments.some(hasNonPretreatTermiteCue)) return false;
+  let provenPretreat = false;
+  for (const fragment of fragments) {
     const label = canonicalWavesService(fragment);
-    if (!label || !TERMITE_SERVICE_LABELS.has(label)) return true;
-    if (label === 'Pre-Slab Termidor') return true;
-    return PRETREAT_WORDING_RE.test(fragment) && label === 'Termite Inspection';
-  });
+    if (label === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment)) provenPretreat = true;
+    if (label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
+      && !(label === 'Termite Inspection' && PRETREAT_WORDING_RE.test(fragment))) return false;
+  }
+  return provenPretreat;
 }
 
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);

@@ -461,7 +461,14 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, call_summary: 'Slab pre-treat and termite monitoring afterward' }, commercial)).toBe(false);
     expect(run({ ...slab, specific_service_name: 'Termite Wood Treatment' }, commercial)).toBe(false);
     expect(run({ ...slab, matched_service: 'Wood Treatment' }, commercial)).toBe(false);
+    // Two services in one fragment (r12): the split must not matter.
+    expect(run({ ...slab, call_summary: 'Slab pre-treat with Bora-Care on the existing framing' }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'slab pretreat & wood treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'pre-treat / WDO' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['slab pre-treat + trenching'] }, commercial)).toBe(false);
     // Plain pre-treat wording still drops the card.
+    expect(run({ specific_service_name: 'Termite Pretreatment Service' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Termidor pre-slab treatment' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'Apply liquid termiticide before the slab pour' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, commercial)).toBe(true);
   });
