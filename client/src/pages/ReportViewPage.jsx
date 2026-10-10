@@ -2240,6 +2240,13 @@ function LawnTrendChart({ trend = [], summary }) {
   );
 }
 
+// Alt text for a lawn photo in the strip. GATE_LAWN_PHOTO_LABEL_PICK: a technician-chosen customer label
+// (labelPicked, present only while the gate is live) names the photo; otherwise the legacy type wording, as before.
+export function lawnPhotoAlt(photo) {
+  if (photo?.labelPicked) return `Lawn ${String(photo.labelPicked).toLowerCase()}`;
+  return photo?.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo';
+}
+
 function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   useEffect(() => {
     if (mode !== 'live' || !assessment) return;
@@ -2312,7 +2319,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
         <div className="lawn-photo-strip">
           {visiblePhotos.map((photo) => (
             <figure key={photo.id}>
-              <img src={photo.url} alt={photo.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo'} />
+              <img src={photo.url} alt={lawnPhotoAlt(photo)} />
               <figcaption>{photo.labelPicked || photo.zoneLabel || formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
             </figure>
           ))}

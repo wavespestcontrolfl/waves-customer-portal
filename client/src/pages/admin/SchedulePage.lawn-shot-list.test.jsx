@@ -5,6 +5,8 @@
 // photo tagged with its shot key, and a soft-minimum hint that never blocks.
 // Gate off: the original three slots and 3-photo cap. Synthetic data only.
 // CompletionPanel renders through a portal, so queries go through `screen`.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import React from 'react';
 import { afterEach, beforeEach, expect, it, vi, describe } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -472,5 +474,22 @@ describe('GATE_LAWN_PHOTO_LABEL_PICK (labelPickEnabled from the lookup)', () => 
     fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
     await waitFor(() => expect(assessRequests).toHaveLength(1));
     expect(assessRequests[0].photos).toEqual([{ data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'hot_edge' }]);
+  });
+
+  it('gate on: once Analyze has produced a result the photo tiles, and so the chooser, are gone (a later pick would not reach the saved photo)', async () => {
+    labelPickEnabled = true;
+    mount();
+    await addFiles(['a']);
+    fireEvent.change(await screen.findByLabelText('Slot for photo 1'), { target: { value: 'shade' } });
+    const chooser = await screen.findByLabelText('Shown to the customer as, photo 1');
+    expect(chooser.disabled).toBe(false);
+    fireEvent.change(chooser, { target: { value: 'close_up' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await waitFor(() => expect(assessRequests).toHaveLength(1));
+    await screen.findByRole('button', { name: 'Confirm assessment' });
+    expect(screen.queryByLabelText(/Shown to the customer as/)).toBeNull();
+    // The disabled guard also holds while a result exists (hasResult, confirmed or confirming).
+    expect(readFileSync(resolve(process.cwd(), 'src/components/lawn/LawnAssessmentCompletionBlock.jsx'), 'utf8'))
+      .toContain('disabled={disabled || analyzing || hasResult || confirmed || confirming}');
   });
 });

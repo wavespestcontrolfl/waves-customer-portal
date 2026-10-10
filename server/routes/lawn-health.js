@@ -14,6 +14,7 @@ const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-he
 const { buildMowingHeightContext } = require('../services/service-report/turf-height');
 const logger = require('../services/logger');
 const { pairBeforeAfterPhotos } = require('../services/lawn-visit-input');
+const { labelPicksFromStored, pickedReportLabel } = require('../services/lawn-photo-shots');
 const { resolvePropertyCoordinates } = require('../services/property-coordinates');
 
 const CARD_PRIORITY_RANK = { high: 1, medium: 2, low: 3 };
@@ -25,6 +26,15 @@ let LawnIntel;
 try { LawnIntel = require('../services/lawn-intelligence'); } catch { LawnIntel = null; }
 
 router.use(authenticate);
+
+// GATE_LAWN_PHOTO_LABEL_PICK: the customer wording the technician chose for each photo of an assessment, stored beside
+// it at capture (lawn_assessments.photos[photo_order].labelKey). Returns a function from a photo row to the wording, or
+// null. Gate off = never reads the stored picks, so no `labelPicked` key is added and the payload is unchanged.
+function pickedLabelReader(assessment) {
+  if (!require('../config/feature-gates').lawnPhotoLabelPickLive()) return () => null;
+  const picks = labelPicksFromStored(assessment?.photos);
+  return (photo) => pickedReportLabel(picks[Number(photo.photo_order)]);
+}
 
 // =========================================================================
 // Helper: generate signed URL for a photo record
@@ -176,12 +186,14 @@ router.get('/:customerId', async (req, res, next) => {
       .limit(5);
 
     // Sign photo URLs
+    const pickedLabelFor = pickedLabelReader(latest);
     const photosWithUrls = await Promise.all(
       latestPhotos.map(async (p) => ({
         id: p.id,
         url: await signedUrl(p.s3_key),
         type: p.photo_type,
         zone: p.zone,
+        ...(pickedLabelFor(p) ? { labelPicked: pickedLabelFor(p) } : {}),
         isBest: p.is_best_photo,
         qualityScore: p.quality_score,
         scores: {
@@ -400,12 +412,14 @@ router.get('/:customerId/photos/:assessmentId', async (req, res, next) => {
       .where({ assessment_id: assessmentId, customer_visible: true })
       .orderByRaw('is_best_photo DESC, photo_order ASC');
 
+    const pickedLabelFor = pickedLabelReader(assessment);
     const photosWithUrls = await Promise.all(
       photos.map(async (p) => ({
         id: p.id,
         url: await signedUrl(p.s3_key),
         type: p.photo_type,
         zone: p.zone,
+        ...(pickedLabelFor(p) ? { labelPicked: pickedLabelFor(p) } : {}),
         isBest: p.is_best_photo,
         scores: {
           turfDensity: p.turf_density,

@@ -250,6 +250,7 @@ function LawnAssessmentCompletionBlock({
     let cancelled = false;
     setPhotos([]);
     setShotList(false);
+    setLabelPickOn(false);
     setModeKnown(false);
     pendingShotRef.current = null;
     setReadingShots([]);
@@ -271,7 +272,7 @@ function LawnAssessmentCompletionBlock({
     request(`/admin/lawn-assessment/service/${service.id}`)
       .then((data) => {
         if (!cancelled && data?.shotListEnabled === true) setShotList(true);
-        if (!cancelled && data?.labelPickEnabled === true) setLabelPickOn(true);
+        if (!cancelled) setLabelPickOn(data?.labelPickEnabled === true);
         if (cancelled || !data?.assessment) return;
         const assessment = data.assessment;
         const scores = parseAssessmentScores(assessment);
@@ -699,7 +700,7 @@ function LawnAssessmentCompletionBlock({
                   {labelPick && shotList && photo.zone && (
                     <Select
                       value={pickedKey(photo)}
-                      disabled={disabled || analyzing}
+                      disabled={disabled || analyzing || hasResult || confirmed || confirming}
                       onChange={(e) => setPhotos((prev) => setLabelPick(prev, index, e.target.value))}
                       aria-label={`Shown to the customer as, photo ${index + 1}`}
                       className={`!pl-2 !pr-6 !text-14 ${FIELD}`}
