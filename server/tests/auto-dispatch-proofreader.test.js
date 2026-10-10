@@ -224,6 +224,49 @@ describe('the customer record', () => {
     expect(noVisit.unread).toEqual(expect.arrayContaining([{ channel: 'visit_note', reason: 'visit_not_found' }]));
   });
 
+  test('a call that was not this customer, and a transcript written after the as-of time, are not evidence', async () => {
+    const call = (extra) => ({ direction: 'inbound', recording_sid: 'RE9', created_at: '2026-06-01T10:00:00.000Z', updated_at: '2026-06-01T10:05:00.000Z', ...extra });
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, call_log: [
+      call({ transcription: 'Mine: afternoons only.' }),
+      call({ transcription: 'Wrong number outcome.', call_outcome: 'wrong_number' }),
+      call({ transcription: 'Spam status.', processing_status: 'spam' }),
+      call({ transcription: 'Vendor by V2.', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }) }),
+      call({ transcription: 'Misdial by extraction.', ai_extraction: JSON.stringify({ call_type: 'wrong_number' }) }),
+      call({ transcription: 'Transcribed later.', updated_at: '2026-10-06T10:00:00.000Z' }),
+    ] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'call').map((e) => e.text)).toEqual(['Mine: afternoons only.']);
+    expect(record.unread).toEqual([{ channel: 'call', at: '2026-06-01T06:00:00-04:00', reason: 'revised_later' }]);
+  });
+
+  test('a model-written call summary on the timeline is not read; the customer\'s portal property notes are', async () => {
+    const conn = fakeConn({ ...TABLES,
+      property_preferences: [{ special_instructions: 'Never Fridays, the gardener is here.', access_notes: null, updated_at: '2026-05-01T10:00:00.000Z' }] });
+    const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(conn.calls.some(([t, method, col, values]) => t === 'customer_interactions' && method === 'whereNotIn' && col === 'interaction_type' && values.includes('call'))).toBe(true);
+    expect(record.entries.filter((e) => e.channel === 'property_note')).toEqual([expect.objectContaining({ from: 'customer', at: null, text: 'Never Fridays, the gardener is here.' })]);
+    const later = await buildCustomerRecord(fakeConn({ ...TABLES, property_preferences: [{ special_instructions: 'Edited later.', created_at: '2026-05-01T10:00:00.000Z', updated_at: '2026-10-06T10:00:00.000Z' }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(later.entries.some((e) => e.channel === 'property_note')).toBe(false);
+    expect(later.unread).toEqual(expect.arrayContaining([expect.objectContaining({ channel: 'property_note', reason: 'revised_later' })]));
+  });
+
+  test('a mail stored in the last 15 minutes has an unsettled subject: the record is incomplete', async () => {
+    const fresh = { id: 'f1', gmail_thread_id: 'th7', customer_id: 'c1', subject: 'Never schedule Fridays', body_text: '', received_at: '2026-10-05T08:00:00.000Z', created_at: new Date().toISOString() };
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [fresh] }), { customerId: 'c1', serviceId: 's1', asOf: new Date() });
+    expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'email', at: '2026-10-05T04:00:00-04:00', reason: 'subject_not_settled' }]));
+  });
+
+  test('the move facts: the promised two-hour arrival window, and a technician-only change says so', () => {
+    const slot = (date, windowStart, windowEnd, technician) => ({ date, windowStart, windowEnd, technician });
+    // A three-hour job at 09:00 is still promised 09:00-11:00.
+    const long = moveFacts({ serviceType: 'Lawn', from: slot('2026-10-07', '09:00', '12:00', 'Sam'), to: slot('2026-10-08', '13:00:00', '16:00:00', 'Sam') });
+    expect([long.from.arrival_window, long.to.arrival_window, long.change]).toEqual(['09:00-11:00', '13:00-15:00', 'different day']);
+    const sameDay = moveFacts({ from: slot('2026-10-07', '09:00', '11:00', 'Sam'), to: slot('2026-10-07', '13:00', '15:00', 'Sam') });
+    expect(sameDay.change).toBe('same day, different time');
+    const techOnly = moveFacts({ from: slot('2026-10-07', '09:00', '11:00', 'Sam'), to: slot('2026-10-07', '09:00', '12:00', 'Alex') });
+    expect(techOnly.change).toBe('same day and same time, different technician');
+    expect(moveFacts({ from: slot('2026-10-07', null, null, null), to: slot('2026-10-08', '09:00', '11:00', 'Sam') }).from.arrival_window).toBe('no time set');
+  });
+
   test('what the customer told the portal assistant is in the record', async () => {
     const conn = fakeConn({ ...TABLES, agent_messages: [
       { role: 'user', content: 'Never schedule me on Tuesdays.', created_at: '2026-09-01T15:00:00.000Z' },

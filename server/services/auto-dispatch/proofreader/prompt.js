@@ -59,18 +59,21 @@ const SYSTEM_PROMPT = [
   '- reason: one sentence of at most 30 words. For hold, say what the new slot breaks.',
 ].join('\n');
 
+const { arrivalWindowRange } = require('../../../utils/sms-time-format');
+
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const weekdayOf = (date) => WEEKDAYS[new Date(`${String(date).slice(0, 10)}T12:00:00Z`).getUTCDay()] || null;
 const hhmm = (time) => (time ? String(time).slice(0, 5) : null);
 
-function slotFacts({ date, windowStart, windowEnd, technician }) {
+// The arrival window is the one the customer is told (sms-time-format.js
+// arrivalWindowRange, from the start alone). The stored window_end is the
+// job's length: a three-hour job at 09:00 is still promised 09:00-11:00.
+function slotFacts({ date, windowStart, technician }) {
   const day = String(date).slice(0, 10);
-  const start = hhmm(windowStart);
-  const end = hhmm(windowEnd);
   return {
     date: day,
     weekday: weekdayOf(day),
-    arrival_window: start ? `${start}-${end || '?'}` : 'no time set',
+    arrival_window: arrivalWindowRange(hhmm(windowStart)) || 'no time set',
     technician: technician || 'not assigned',
   };
 }
@@ -86,8 +89,13 @@ function moveFacts({ serviceType, from, to }) {
     service: serviceType || 'recurring service visit',
     from: a,
     to: b,
-    change: a.date === b.date ? 'same day, different time' : 'different day',
+    change: changeOf(a, b),
   };
+}
+
+function changeOf(a, b) {
+  if (a.date !== b.date) return 'different day';
+  return a.arrival_window === b.arrival_window ? 'same day and same time, different technician' : 'same day, different time';
 }
 
 // The user turn: the move and the record as one JSON document.

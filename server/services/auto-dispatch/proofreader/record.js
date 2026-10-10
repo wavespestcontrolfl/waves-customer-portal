@@ -27,7 +27,9 @@
  * (redactAccessCodes).
  */
 const logger = require('../../logger');
-const { redactAccessCodes } = require('../../context-aggregator');
+const contextAggregator = require('../../context-aggregator');
+
+const { redactAccessCodes } = contextAggregator;
 const { excludeUnresolvedSendReservations } = require('../../messaging/review-ask-reservation');
 const { resolveEmailCustomerLink, personSentFilter } = require('../../email/email-customer-link');
 const { emailPlainText, stripQuotedAndSignature, ownSubjectsInThreads } = require('../../email/email-strip');
@@ -43,9 +45,15 @@ const PART_OVERLAP_CHARS = 600;
 // "unknown" (measured 2026-10-09 over 112 customers: median 6k, max 56k).
 const MAX_RECORD_CHARS = 300000;
 
-// Our own interaction rows that only repeat a text or an email already read
-// from its source table.
-const INTERACTION_COPIES = ['sms_outbound', 'email_outbound'];
+// Interaction rows that only repeat a text or an email already read from its
+// source table, and the 'call' row the recording processor writes: its body
+// is a model's summary of a call whose own words are read from call_log, and
+// a paraphrase must never stand as a quote (Codex #6258 r4).
+const INTERACTION_COPIES = ['sms_outbound', 'email_outbound', 'call'];
+// A call the voice webhook linked by caller ID and the extractor then found
+// was not this customer (context-aggregator.js isExcludedCall is the rule).
+const NOT_THIS_CUSTOMER_OUTCOMES = ['wrong_number', 'spam'];
+const SUBJECT_SETTLE_MS = 15 * 60 * 1000;
 // reschedule_log rows written by code: their notes are program text.
 const PROGRAM_RESCHEDULERS = ['system', 'auto_dispatch'];
 
@@ -124,7 +132,7 @@ async function readTexts(conn, { customerId, asOf }) {
 // thread (stripQuotedAndSignature, ownSubjectsInThreads). Otherwise an old
 // "Tuesdays only" would be read again at the date of every later reply (r3).
 async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
-  const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'snippet', 'received_at'];
+  const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'snippet', 'received_at', 'created_at'];
   const live = (query) => query.where('received_at', '<', asOf).whereNull('quarantined_at')
     .whereRaw("COALESCE(classification, '') <> 'spam'");
   const linked = await live(conn('emails').where({ customer_id: customerId })).select(columns);
@@ -150,6 +158,13 @@ async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
     if (owner != null && String(owner) === String(customerId)) replies.push(row);
   }
   const subjects = await ownSubjectsInThreads(conn, [...linked, ...replies]);
+  // A mail stored in the last 15 minutes has no settled subject yet (the
+  // helper answers '' for it): its subject is unread, not absent.
+  for (const row of [...linked, ...replies]) {
+    if (clean(row.subject) && row.created_at && Date.now() - msOf(row.created_at) < SUBJECT_SETTLE_MS) {
+      unread.push({ channel: 'email', at: eastern(row.received_at), reason: 'subject_not_settled' });
+    }
+  }
   const mail = (row, from) => entry(
     'email', from, row.received_at,
     [clean(subjects.get(row.id)), clean(stripQuotedAndSignature(emailPlainText(row)))].filter(Boolean).join(': '),
@@ -161,9 +176,11 @@ async function readCalls(conn, { customerId, asOf }, unread) {
   const rows = await conn('call_log')
     .where({ customer_id: customerId })
     .where('created_at', '<', asOf)
-    .whereRaw("COALESCE(processing_status, '') <> 'spam'")
-    .select('direction', 'transcription', 'recording_sid', 'created_at');
-  return rows.map((row) => {
+    .select('direction', 'transcription', 'recording_sid', 'created_at', 'updated_at', 'call_outcome', 'processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
+  const ours = rows.filter((row) => !NOT_THIS_CUSTOMER_OUTCOMES.includes(row.call_outcome) && !contextAggregator.isExcludedCall(row));
+  return ours.map((row) => {
+    // The transcript is written, and can be replaced, after the call row.
+    if (clean(row.transcription) && revisedLater(row, asOf, 'call', unread)) return [];
     const said = entry('call', 'both', row.created_at, row.transcription);
     // A recording nobody has turned into words yet: the record is incomplete.
     if (!said.length && row.recording_sid) unread.push({ channel: 'call', at: eastern(row.created_at), reason: 'not_transcribed' });
@@ -237,6 +254,17 @@ async function readAssistantChat(conn, { customerId, asOf }) {
   return rows.map((row) => entry('portal_chat', row.role === 'user' ? 'customer' : 'system', row.created_at, row.content));
 }
 
+// What the customer wrote about the property in the portal. Auto-dispatch
+// enforces only the structured day/time fields of this row (preferences.js);
+// a "never Fridays" in the free text is for the proofreader. One row per
+// customer, edited in place, so it is undated like the file notes.
+async function readPropertyNotes(conn, { customerId, asOf }, unread) {
+  const row = await conn('property_preferences').where({ customer_id: customerId }).first('special_instructions', 'access_notes', 'created_at', 'updated_at');
+  if (!row || !(clean(row.special_instructions) || clean(row.access_notes))) return [];
+  if (revisedLater(row, asOf, 'property_note', unread)) return [];
+  return [entry('property_note', 'customer', null, row.special_instructions), entry('property_note', 'customer', null, row.access_notes)];
+}
+
 // The customer's file notes and the notes on the visit and its series. A
 // visit that is not given, or is gone (a replay of a move whose visit was
 // deleted since), has notes nobody can read: the record says so (r3).
@@ -264,7 +292,7 @@ async function readUndatedNotes(conn, { customer, serviceId }, unread) {
 const SOURCES = [
   ['text', readTexts], ['email', readEmails], ['call', readCalls], ['note', readInteractions],
   ['note', readStaffNotes], ['technician_note', readTechNotes], ['reschedule_reply', readRescheduleReplies],
-  ['portal_request', readPortalRequests], ['portal_chat', readAssistantChat], ['customer_file_note', readUndatedNotes],
+  ['portal_request', readPortalRequests], ['portal_chat', readAssistantChat], ['property_note', readPropertyNotes], ['customer_file_note', readUndatedNotes],
 ];
 
 /**
