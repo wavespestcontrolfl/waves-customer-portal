@@ -4651,6 +4651,10 @@ router.put('/:id/proposal', async (req, res, next) => {
     // refuses acceptance), so there is nothing to reconstruct when a hold
     // moves — which is why the old shrink-reconstruction pass and its
     // groupWidenFloorExpiresAt floor are deleted rather than repaired.
+    // Reviving an expired bid makes the estimate open again: take the per-customer estimate
+    // lock (a reactivation, like an insert), after this transaction's row locks, so the
+    // booking's open-estimate check cannot miss it.
+    if (revivingBid) await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, locked.customer_id || estimate.customer_id);
     const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',

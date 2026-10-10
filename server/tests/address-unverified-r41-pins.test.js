@@ -223,6 +223,19 @@ describe('estimate reactivations take the per-customer estimate lock (booking op
   });
 });
 
+describe('proposal save that revives an expired bid locks before its write (#6100)', () => {
+  test('lockCustomerEstimates is guarded by revivingBid and precedes the revival UPDATE, inside the transaction', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    const lock = src.indexOf('if (revivingBid) await require(\'../utils/customer-estimate-lock\').lockCustomerEstimates(trx,');
+    const write = src.indexOf("const count = await updateQuery.update({\n      estimate_data: JSON.stringify(nextData),\n      category: 'COMMERCIAL',");
+    expect(lock).toBeGreaterThan(-1);
+    expect(lock).toBeLessThan(write);
+    // Same transaction: no transaction boundary between the lock and the write.
+    expect(src.slice(lock, write)).not.toMatch(/db\.transaction|\.transaction\(/);
+    expect(src.lastIndexOf('db.transaction', lock)).toBeGreaterThan(src.lastIndexOf("router.", lock));
+  });
+});
+
 describe('pre-push audit after r45: draft refreshes never overwrite a live delivery claim', () => {
   test('both refresh writes carry the not-live predicate and a refused refresh is retryable with no handoff', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
