@@ -171,6 +171,27 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     expect(processor.inFlightPassCount()).toBe(0);
   });
 
+  test('a losing contender for a row in flight does not evict the owner from the registry', async () => {
+    processor._test.resetShutdownForTests();
+    await db('call_log').where({ twilio_call_sid: SID }).del();
+    await insertCall(SID);
+    let releaseDownload;
+    fetchSpy.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseDownload = () => resolve(new Response('not found', { status: 404 }));
+    }));
+    const owner = processor.processRecording(SID);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(processor.inFlightPassCount()).toBe(1);
+    // The ring-first flow's duplicate webhook: a second pass for the same
+    // row loses the claim and leaves; the owner must still be stampable.
+    expect((await processor.processRecording(SID)).reason).toBe('already_processing');
+    expect(processor.inFlightPassCount()).toBe(1);
+    expect(await processor.markInFlightForShutdown({ deadlineMs: 5000 })).toEqual({ enabled: true, inFlight: 1, stamped: 1, failed: 0 });
+    releaseDownload();
+    expect((await owner).reason).toBe('recording_not_ready');
+    expect(processor.inFlightPassCount()).toBe(0);
+  });
+
   test('a claim taken while the process is already draining stamps itself', async () => {
     processor._test.resetShutdownForTests();
     await insertCall(SID_LATE);

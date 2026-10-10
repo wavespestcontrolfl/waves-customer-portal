@@ -3824,6 +3824,9 @@ const reclaimableClaim = (quietMinutes) => "("
 // Passes this process currently holds a claim for (call_log.id → claim token),
 // so markInFlightForShutdown knows which rows to stamp. Filled right after the
 // claim, cleared in processRecording's outer finally.
+// Keyed by the pass TOKEN, not the call id: two contenders for one row (the
+// ring-first flow's duplicate webhook) register side by side, and the loser's
+// exit removes only its own entry, never the owner's (Codex r7 P1).
 const inFlightPasses = new Map();
 // Set at SIGTERM: a claim taken after this point is stamped by its own claim
 // write, since it will die with the process too.
@@ -9360,10 +9363,8 @@ const CallRecordingProcessor = {
     // an uncommitted claim it waits on the row lock and then stamps the
     // committed row; against a claim that never commits it matches 0 rows.
     // A refused or thrown claim leaves the registry below.
-    inFlightPasses.set(call.id, { callSid, procToken });
-    const unregisterClaim = () => {
-      if (inFlightPasses.get(call.id)?.procToken === procToken) inFlightPasses.delete(call.id);
-    };
+    inFlightPasses.set(procToken, { callId: call.id, callSid });
+    const unregisterClaim = () => { inFlightPasses.delete(procToken); };
     try {
     await db.transaction(async (trx) => {
       if (call.customer_id) {
@@ -22832,7 +22833,7 @@ const CallRecordingProcessor = {
       throw procErr;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (inFlightPasses.get(call.id)?.procToken === procToken) inFlightPasses.delete(call.id);
+      inFlightPasses.delete(procToken);
     }
   },
 
@@ -22865,12 +22866,12 @@ const CallRecordingProcessor = {
       const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
       if (typeof t.unref === 'function') t.unref();
     });
-    await Promise.all(entries.map(async ([callId, entry]) => {
+    await Promise.all(entries.map(async ([procToken, entry]) => {
       try {
         const rows = await Promise.race([
           db('call_log')
-            .where({ id: callId })
-            .where('processing_token', entry.procToken)
+            .where({ id: entry.callId })
+            .where('processing_token', procToken)
             // Stamp AND beat in one statement: the pass is alive right now,
             // and the 2-minute silence must start here, not at a beat that
             // went stale behind a long provider call.
