@@ -823,6 +823,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     // The parse and the availability build take time. A visit that changed
     // meanwhile (date, start, status or plan cadence) reloads the page; its
     // limit and list would be stale. Only with the move-limit gate set.
+    const fullRange = await fullRangeForLimit(svc, limit, range, config);
     if (moveLimits.moveLimitsEnabled() && await visitChangedSince(svc)) {
       return res.status(409).json({ error: 'The scheduling details for your plan just updated — please review the latest options.', code: 'SCOPE_CHANGED' });
     }
@@ -830,7 +831,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     // drops the same days, decided over the whole booking range as GET does.
     // It also returns the limit as it stands now: the search replaces the
     // day list on the page, so the line beside it must match these days.
-    const limited = applyMoveLimit(limit, await fullRangeForLimit(svc, limit, range, config), availability, range);
+    const limited = applyMoveLimit(limit, fullRange, availability, range);
     availability = limited.availability;
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -980,7 +981,15 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       // start or status changed, answer SCOPE_CHANGED: the page reloads and
       // GET gives the one current answer. An unchanged visit keeps `svc` and
       // `elig`, which are then still true.
+      // The check runs AFTER the list is rebuilt (the build takes time), so
+      // the list, the limit and the visit are read against one state.
       // Only with the move-limit gate set: unset, this path is unchanged.
+      let refreshed = null;
+      try {
+        refreshed = await buildAvailabilityForService(svc, { ...range, config });
+      } catch (err) {
+        logger.warn(`[reschedule-public] refresh availability failed for ${svc.id}: ${err.message}`);
+      }
       if (moveLimits.moveLimitsEnabled() && await visitChangedSince(svc)) {
         return res.status(409).json({
           error: 'The scheduling details for your plan just updated — please review the latest options.',
@@ -989,12 +998,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
       const { limit, blocked } = await loadMoveLimit(svc, elig);
       if (blocked) return res.status(409).json({ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' });
-      let refreshed = null;
-      try {
-        refreshed = await buildAvailabilityForService(svc, { ...range, config });
-      } catch (err) {
-        logger.warn(`[reschedule-public] refresh availability failed for ${svc.id}: ${err.message}`);
-      }
       const limited = applyMoveLimit(limit, refreshed, refreshed, range);
       refreshed = limited.availability;
       const nextVisit = refreshed ? await loadNextVisitShift(svc, refreshed) : null;

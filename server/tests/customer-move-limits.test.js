@@ -392,6 +392,8 @@ describe('reschedule-public wiring', () => {
     const body = src.slice(start, src.indexOf("router.post('/:token',", start));
     const recheck = body.indexOf('if (moveLimits.moveLimitsEnabled() && await visitChangedSince(svc)) {');
     expect(recheck).toBeGreaterThan(body.indexOf('buildAvailabilityForService(svc'));
+    // After the whole-range build too: no list is built after the check.
+    expect(recheck).toBeGreaterThan(body.indexOf('await fullRangeForLimit(svc, limit, range, config)'));
     expect(body.indexOf('applyMoveLimit(')).toBeGreaterThan(recheck);
     expect(body.slice(recheck, recheck + 300)).toMatch(/code: 'SCOPE_CHANGED'/);
   });
@@ -475,7 +477,8 @@ describe('reschedule-public wiring', () => {
 
   test('the search and the slot-taken refresh decide over the whole range and return the limit they applied', () => {
     const search = src.slice(src.indexOf("router.post('/:token/find-slots'"), src.indexOf("router.post('/:token', commitLimiter"));
-    expect(search).toMatch(/applyMoveLimit\(limit, await fullRangeForLimit\(svc, limit, range, config\), availability, range\)/);
+    expect(search).toMatch(/const fullRange = await fullRangeForLimit\(svc, limit, range, config\);/);
+    expect(search).toMatch(/applyMoveLimit\(limit, fullRange, availability, range\)/);
     expect(search).toMatch(/\.\.\.limited\.payload/);
     expect(search).toMatch(/reason: elig\.reason, code: elig\.code/);
     const taken = src.slice(src.indexOf('const slotTakenResponse = async () => {'));
@@ -488,6 +491,8 @@ describe('reschedule-public wiring', () => {
     expect(changed).toBeGreaterThan(-1);
     expect(body.slice(changed, changed + 400)).toMatch(/code: 'SCOPE_CHANGED'/);
     expect(limitRead).toBeGreaterThan(changed);
+    // The check runs after the list is rebuilt, so no build follows it.
+    expect(changed).toBeGreaterThan(body.indexOf('refreshed = await buildAvailabilityForService(svc'));
     expect(body).toMatch(/if \(blocked\) return res\.status\(409\)\.json\(\{ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' \}\);/);
   });
 });
