@@ -5282,8 +5282,7 @@ router.post('/:id/follow-up', requireAdmin, async (req, res, next) => {
 });
 
 // DELETE /api/admin/customers/:id — soft-delete a customer
-router.delete('/:id', requireAdmin, customerArchiveHandler);
-async function customerArchiveHandler(req, res, next) {
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -5330,7 +5329,6 @@ async function customerArchiveHandler(req, res, next) {
     try {
       relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
         await trx('customers').where({ id: req.params.id }).forUpdate().first();
-        if (req.archivePrecheck) await req.archivePrecheck(trx);
         const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {
           const err = new Error('customer_still_billing_or_scheduled');
@@ -5371,40 +5369,10 @@ async function customerArchiveHandler(req, res, next) {
     logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
   } catch (err) { next(err); }
-}
-
-// The customer-page delete without an HTTP request — the Intelligence Bar's
-// delete_duplicate_customer tool (owner ruling 2026-10-07) runs this so the
-// bar and the customer page soft-delete through the SAME handler (same
-// billing wind-down guard, deletion gate, newsletter relink and audit row).
-// It runs the handler with the only request fields it reads (params.id,
-// technicianId, ip, user-agent) and a capture response, and resolves the
-// reply it would send: { status, json }. An error passed to next() rejects.
-// `precheck(trx)`, when given, runs inside the archive transaction right
-// after the customer row lock and before any write; a throw rolls the
-// archive back and rejects (the bar re-checks "still empty" there). HTTP
-// requests never carry it. Restore stays PATCH /:id/restore below.
-async function archiveCustomerAsAdmin({ customerId, actor = {}, precheck = null }) {
-  const req = {
-    archivePrecheck: precheck,
-    params: { id: customerId },
-    technicianId: actor.technicianId || null,
-    ip: null,
-    get: (name) => (String(name).toLowerCase() === 'user-agent' ? (actor.userAgent || 'intelligence-bar') : undefined),
-  };
-  return new Promise((resolve, reject) => {
-    const res = {
-      statusCode: 200,
-      status(code) { this.statusCode = code; return this; },
-      json(json) { resolve({ status: this.statusCode, json }); return this; },
-    };
-    customerArchiveHandler(req, res, reject).catch(reject);
-  });
-}
+});
 
 // PATCH /api/admin/customers/:id/restore — restore a soft-deleted customer (admin only)
-router.patch('/:id/restore', requireAdmin, customerRestoreHandler);
-async function customerRestoreHandler(req, res, next) {
+router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers').where({ id: req.params.id }).whereNotNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found or not deleted' });
@@ -5459,30 +5427,7 @@ async function customerRestoreHandler(req, res, next) {
     if (err && err.restoreNotDeleted) return res.status(404).json({ error: err.message });
     next(err);
   }
-}
-
-// The customer-page restore without an HTTP request — the Intelligence Bar's
-// delete_duplicate_customer undoes its own delete with this when history
-// landed on the record after the emptiness check. Same pattern as
-// archiveCustomerAsAdmin: it runs the route's own handler above and resolves
-// the reply it would send, { status, json }; an error passed to next()
-// rejects.
-async function restoreCustomerAsAdmin({ customerId, actor = {} }) {
-  const req = {
-    params: { id: customerId },
-    technicianId: actor.technicianId || null,
-    ip: null,
-    get: (name) => (String(name).toLowerCase() === 'user-agent' ? (actor.userAgent || 'intelligence-bar') : undefined),
-  };
-  return new Promise((resolve, reject) => {
-    const res = {
-      statusCode: 200,
-      status(code) { this.statusCode = code; return this; },
-      json(json) { resolve({ status: this.statusCode, json }); return this; },
-    };
-    customerRestoreHandler(req, res, reject).catch(reject);
-  });
-}
+});
 
 // GET /api/admin/customers/:id/deposit-credit — the customer's open
 // (unapplied, unrefunded) estimate-deposit balance, if any. Used by the
@@ -6741,9 +6686,6 @@ router._private = {
 
 router.ensureCustomerAccount = ensureCustomerAccount;
 router.findAccountByContact = findAccountByContact;
-// Same handler as DELETE /:id — see archiveCustomerAsAdmin above.
-router.archiveCustomerAsAdmin = archiveCustomerAsAdmin;
-router.restoreCustomerAsAdmin = restoreCustomerAsAdmin;
 // Canonical membership predicate — consumers (estimate edit-source) must
 // classify sentinel tiers (One-Time/Commercial/...) the same way this file
 // does rather than re-deriving from raw tier truthiness.

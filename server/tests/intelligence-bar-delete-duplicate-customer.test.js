@@ -2,16 +2,19 @@
  * delete_duplicate_customer — owner ruling 2026-10-07 (Q3): "soft-delete for
  * empty stubs only (no visits, invoices, payments), carded, restorable."
  *
- * The emptiness readers (customer-dedupe.js loserAutoBlockers +
- * previewMergeEffects) and the route adapter (admin-customers.js
- * archiveCustomerAsAdmin) are mocked: this suite proves the tool reads ONLY
- * them, refuses on anything they report, and commits through the adapter
- * with the stub's id. The adapter itself is proven against the real route
- * handler in admin-customers-archive-relink.test.js. All names synthetic.
+ * The tool is a thin preset of the merge engine: the commit is
+ * customer-dedupe.js executeMerge (mocked here) called with the stub as the
+ * loser, the record ONE queue build names as the winner, the locked queue
+ * re-check and requireEmptyLoser. The emptiness readers (loserAutoBlockers,
+ * previewMergeEffects, nonFkMergeRewrites) are mocked: this suite proves the
+ * card reads ONLY them, refuses on anything they report, and commits only
+ * through executeMerge. The engine's own locked behavior (requireEmptyLoser
+ * under the row and pair locks, before any write) is proven in
+ * customer-merge-require-empty-loser.test.js. All names synthetic.
  */
 
 jest.mock('../models/db', () => {
-  const state = { stub: null, twins: [], counts: {}, properties: [], sibling: null };
+  const state = { stub: null, winner: null, twins: [], counts: {}, properties: [], sibling: null };
   const builder = (table) => {
     const q = { _table: table, _single: false, _count: false, _where: {} };
     q.where = (arg) => { if (arg && typeof arg === 'object') Object.assign(q._where, arg); else if (typeof arg === 'function') arg({ orWhereRaw: () => null, orWhere: () => null }); return q; };
@@ -26,6 +29,7 @@ jest.mock('../models/db', () => {
     q.limit = async () => (table === 'customers' ? state.twins : []);
     q.first = async () => {
       if (table === 'customers' && q._where.account_id) return state.sibling;
+      if (table === 'customers' && state.winner && q._where.id === state.winner.id) return state.winner;
       if (table === 'customers') return state.stub;
       if (q._count) return { n: state.counts[table] || 0 };
       return null;
@@ -44,27 +48,25 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockLoserAutoBlockers = jest.fn();
 const mockPreviewMergeEffects = jest.fn();
-const mockPairEligibility = jest.fn();
+const mockNonFkMergeRewrites = jest.fn();
+const mockDuplicateWinnerFor = jest.fn();
 const mockRowConflict = jest.fn();
 const mockDbConflict = jest.fn();
+const mockExecuteMerge = jest.fn();
 jest.mock('../services/customer-dedupe', () => ({
   loserAutoBlockers: (...args) => mockLoserAutoBlockers(...args),
   previewMergeEffects: (...args) => mockPreviewMergeEffects(...args),
-  // The duplicate queue's own pair verdict and the merge executor's other
-  // refusals (the real rules are proven in the customer-dedupe suites).
-  duplicatePairEligibility: (...args) => mockPairEligibility(...args),
+  nonFkMergeRewrites: (...args) => mockNonFkMergeRewrites(...args),
+  // The duplicate queue's own answer from ONE queue build, and the merge
+  // executor itself (the real rules are proven in the customer-dedupe suites).
+  duplicateWinnerFor: (...args) => mockDuplicateWinnerFor(...args),
   rowLevelMergeConflict: (...args) => mockRowConflict(...args),
   dbLevelMergeConflict: (...args) => mockDbConflict(...args),
+  executeMerge: (...args) => mockExecuteMerge(...args),
   // The REAL note-append rule: its column list decides what is customer text.
   predictNoteAppends: jest.requireActual('../services/customer-dedupe').predictNoteAppends,
   // The REAL exclusion list: every table the merge reader skips is counted.
   REPOINT_EXCLUDED_TABLES: jest.requireActual('../services/customer-dedupe').REPOINT_EXCLUDED_TABLES,
-}));
-const mockArchiveCustomerAsAdmin = jest.fn();
-const mockRestoreCustomerAsAdmin = jest.fn();
-jest.mock('../routes/admin-customers', () => ({
-  archiveCustomerAsAdmin: (...args) => mockArchiveCustomerAsAdmin(...args),
-  restoreCustomerAsAdmin: (...args) => mockRestoreCustomerAsAdmin(...args),
 }));
 
 const fs = require('fs');
@@ -82,7 +84,10 @@ const baseStub = () => ({
   waveguard_tier: null, monthly_rate: '0', account_credits: '0', crm_notes: null, technician_notes: '',
   service_contact_name: null, service_contact2_phone: '',
 });
-const twin = { id: TWIN_ID, first_name: 'Jordan', last_name: 'Sample', phone: '9415550199', email: 'jordan.sample@example.com', created_at: '2025-03-14T15:00:00Z' };
+const baseWinner = () => ({
+  id: TWIN_ID, first_name: 'Jordan', last_name: 'Sample', phone: '9415550199', email: 'jordan.sample@example.com',
+  deleted_at: null, version: '2026-09-01 08:00:00.000001+00', created_at: '2025-03-14T15:00:00Z',
+});
 // The untouched primary the backfill (ensurePrimaryCore) creates from the
 // customer's own address.
 const autoPrimary = () => ({
@@ -93,6 +98,7 @@ const autoPrimary = () => ({
   neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null,
   created_at: new Date('2026-10-01'), updated_at: new Date('2026-10-01'),
 });
+const eligibleVerdict = (winnerId = TWIN_ID) => ({ winnerId, eligible: true, code: 'eligible', reason: null, candidate: {} });
 
 const run = (input, ctx = {}) => executeCustomerLifecycleTool('delete_duplicate_customer', input, ctx);
 const preview = () => run({ customer_id: STUB_ID });
@@ -102,25 +108,20 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
   db.__state.stub = baseStub();
-  db.__state.twins = [twin];
+  db.__state.winner = baseWinner();
+  db.__state.twins = [];
   db.__state.sibling = null;
   db.__state.counts = {};
   db.__state.properties = [autoPrimary()];
   mockLoserAutoBlockers.mockResolvedValue([]);
+  mockNonFkMergeRewrites.mockResolvedValue({});
   // Default: the duplicate queue lists the stub as a mergeable duplicate of the twin.
-  mockPairEligibility.mockResolvedValue({ eligible: true, code: 'eligible', reason: null, candidate: {} });
+  mockDuplicateWinnerFor.mockResolvedValue(eligibleVerdict());
   mockRowConflict.mockReturnValue(null);
   mockDbConflict.mockResolvedValue(null);
-  mockRestoreCustomerAsAdmin.mockResolvedValue({ status: 200, json: { success: true } });
+  mockExecuteMerge.mockResolvedValue({ journalId: 'journal-1', repointed: {}, backfills: {} });
   // One auto-created primary property and the nightly health score: allowed.
   mockPreviewMergeEffects.mockResolvedValue({ moving: { customer_properties: 1, customer_health_scores: 1, total_rows: 2 }, referral: { loser_enrolled: false } });
-  // The real adapter runs `precheck` inside the archive transaction before
-  // any write (proven in admin-customers-archive-relink.test.js); here the
-  // transaction is the db mock and a precheck throw rejects, writing nothing.
-  mockArchiveCustomerAsAdmin.mockImplementation(async ({ precheck }) => {
-    if (precheck) await precheck(db);
-    return { status: 200, json: { success: true } };
-  });
 });
 afterAll(() => { delete process.env.GATE_IB_DELETE_CUSTOMER; });
 
@@ -130,48 +131,38 @@ describe('gate', () => {
     expect(await preview()).toMatchObject({ code: 'gate_off', error: expect.stringMatching(/GATE_IB_DELETE_CUSTOMER/) });
     expect(await commit()).toMatchObject({ code: 'gate_off' });
     expect(db).not.toHaveBeenCalled();
-    expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
 });
 
 describe('preview (empty stub)', () => {
-  test('returns the card: the stub, the record sharing its phone, every check, restore, no customer message', async () => {
+  test('returns the card: the stub, the record it is archived into, every check, the undo line, no customer message', async () => {
     const result = await preview();
     expect(result.error).toBeUndefined();
     expect(result).toMatchObject({
       preview: true,
       customer_id: STUB_ID,
       stub: { name: 'Unknown', phone_masked: '(***) ***-0199', email_masked: null, created_on: '2026-10-01' },
-      duplicate_of: [{ customer_id: TWIN_ID, name: 'Jordan Sample', phone_masked: '(***) ***-0199', email_masked: 'j***@example.com', created_on: '2025-03-14', shares: 'phone' }],
+      archived_into: { customer_id: TWIN_ID, name: 'Jordan Sample', phone_masked: '(***) ***-0199', email_masked: 'j***@example.com', created_on: '2025-03-14' },
       customer_message: 'No customer message is sent',
       _version: '2026-10-01 12:00:00.000001+00',
     });
-    expect(result.restore).toMatch(/PATCH \/api\/admin\/customers\/:id\/restore/);
+    expect(result.undo).toMatch(/duplicate queue's undo/);
     expect(Object.values(result.checks).every((v) => v === 'none')).toBe(true);
     expect(Object.keys(result.checks)).toEqual(expect.arrayContaining(['Visits', 'Service records', 'Invoices', 'Payments, saved cards, Stripe profile',
-      'Estimates', 'Leads', 'Calls, texts, emails', 'Plan-rate ledger', 'Monthly rate, plan, billing', 'Portal login', 'Referral or credit balance']));
+      'Estimates', 'Leads', 'Calls, texts, emails', 'Plan-rate ledger', 'Monthly rate, plan, billing', 'Portal login', 'Referral or credit balance',
+      'Other live members of its account']));
     expect(result.card).toMatchObject({
-      delete: 'Unknown (phone (***) ***-0199), created 2026-10-01',
-      duplicate_of: 'Jordan Sample (phone (***) ***-0199, email j***@example.com), created 2025-03-14 — shares phone; the duplicate queue keeps this one; stays as is',
+      delete: 'Delete the empty duplicate record Unknown (phone (***) ***-0199), created 2026-10-01',
+      archived_into: 'Jordan Sample (phone (***) ***-0199, email j***@example.com), created 2025-03-14; stays as is',
+      how: 'It is archived into the record above through the merge engine; nothing moves because the record holds nothing.',
       customer_message: 'No customer message is sent',
     });
     // The merge engine's own readers, keyed on the stub only.
     expect(mockLoserAutoBlockers).toHaveBeenCalledWith(db, expect.objectContaining({ id: STUB_ID }));
-    expect(mockPreviewMergeEffects).toHaveBeenCalledWith(db, STUB_ID, STUB_ID);
-    // The duplicate queue's own verdict on (retained twin, stub), then the merge refusals.
-    expect(mockPairEligibility).toHaveBeenCalledWith(TWIN_ID, STUB_ID, db);
-    expect(mockRowConflict).toHaveBeenCalledWith(expect.objectContaining({ id: TWIN_ID }), expect.objectContaining({ id: STUB_ID }));
-    expect(mockDbConflict).toHaveBeenCalledWith(db, expect.objectContaining({ id: TWIN_ID }), expect.objectContaining({ id: STUB_ID }));
-    expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
-  });
-
-  test('two blank stubs read differently: masked phone and email on both sides', async () => {
-    db.__state.stub = { ...baseStub(), email: 'kit.example@example.org' };
-    db.__state.twins = [{ id: TWIN_ID, first_name: 'Unknown', last_name: '', phone: '9415550199', email: 'pat.example@example.net', created_at: '2026-09-02T15:00:00Z' }];
-    const result = await preview();
-    expect(result.card.delete).toBe('Unknown (phone (***) ***-0199, email k***@example.org), created 2026-10-01');
-    expect(result.card.duplicate_of).toBe('Unknown (phone (***) ***-0199, email p***@example.net), created 2026-09-02 — shares phone; the duplicate queue keeps this one; stays as is');
-    expect(result.card.delete).not.toBe(result.card.duplicate_of.split(' — ')[0]);
+    expect(mockPreviewMergeEffects).toHaveBeenCalledWith(db, TWIN_ID, STUB_ID);
+    expect(mockNonFkMergeRewrites).toHaveBeenCalledWith(db, expect.objectContaining({ id: TWIN_ID }), expect.objectContaining({ id: STUB_ID }));
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
 
   test('missing or already-deleted record refuses as unavailable', async () => {
@@ -183,83 +174,81 @@ describe('preview (empty stub)', () => {
   });
 });
 
+describe('the retained record comes from ONE queue build (finding 5)', () => {
+  test('one duplicateWinnerFor call per preview, however many records share the phone; the winner it names is the card record', async () => {
+    db.__state.twins = Array.from({ length: 24 }, (_, i) => ({ id: `t-${i}`, phone: '9415550199', email: null }));
+    const result = await preview();
+    expect(result.archived_into.customer_id).toBe(TWIN_ID);
+    expect(mockDuplicateWinnerFor).toHaveBeenCalledTimes(1);
+    expect(mockDuplicateWinnerFor).toHaveBeenCalledWith(STUB_ID, db);
+  });
+
+  test('the commit also builds the queue once to name the winner', async () => {
+    await commit();
+    expect(mockDuplicateWinnerFor).toHaveBeenCalledTimes(1);
+  });
+
+  test('the engine no longer exports decideWinner, and nothing in the tool reads it', () => {
+    const dedupe = jest.requireActual('../services/customer-dedupe');
+    expect(dedupe.decideWinner).toBeUndefined();
+    for (const file of ['duplicate-customer-delete.js', 'customer-empty-loser.js']) {
+      expect(fs.readFileSync(path.join(__dirname, '..', 'services', file), 'utf8')).not.toContain('decideWinner');
+    }
+    expect(fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-dedupe.js'), 'utf8')).not.toContain('decideWinner');
+  });
+});
+
 describe('the selected record must be a duplicate the merge machinery accepts', () => {
   test('no live record shares its phone or email: refused', async () => {
+    mockDuplicateWinnerFor.mockResolvedValue({ winnerId: null, eligible: false, code: 'not_in_queue', reason: 'x', candidate: null });
     db.__state.twins = [];
     expect(await preview()).toMatchObject({ code: 'no_duplicate', error: expect.stringMatching(/No live duplicate found/) });
   });
 
-  test('finding 1: the duplicate queue does not list the pair (losing a keep/discard comparison is not enough): refused', async () => {
-    mockPairEligibility.mockResolvedValue({ eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate: {} });
-    const result = await preview();
-    expect(result).toMatchObject({ code: 'not_a_mergeable_duplicate', pair_code: 'red_pair' });
-    expect(result.error).toMatch(/red_pair/);
-    expect(result.error).not.toMatch(/Jordan|Sample/);
-    expect(mockPairEligibility).toHaveBeenCalledWith(TWIN_ID, STUB_ID, db);
-    // Every other queue refusal reads the same way.
-    for (const code of ['not_in_queue', 'address_conflict', 'dismissals_unreadable']) {
-      mockPairEligibility.mockResolvedValue({ eligible: false, code, reason: 'x', candidate: null });
-      expect(await preview()).toMatchObject({ code: 'not_a_mergeable_duplicate', pair_code: code });
+  test('the queue lists the pair but refuses it (red, address conflict, unreadable dismissals): refused, naming no one', async () => {
+    for (const code of ['red_pair', 'address_conflict', 'dismissals_unreadable']) {
+      mockDuplicateWinnerFor.mockResolvedValue({ winnerId: code === 'dismissals_unreadable' ? null : TWIN_ID, eligible: false, code, reason: `reason ${code}`, candidate: {} });
+      db.__state.twins = [{ id: TWIN_ID, phone: '9415550199', email: null }];
+      const result = await preview();
+      expect(result).toMatchObject({ code: 'not_a_mergeable_duplicate', pair_code: code });
+      expect(result.error).not.toMatch(/Jordan|Sample/);
     }
   });
 
-  test('finding 1: with two phone twins the eligible one is the retained record; none eligible refuses', async () => {
-    const other = { id: '20000000-0000-4000-8000-000000000003', first_name: 'Unknown', phone: '9415550199', email: null, created_at: '2026-10-05T15:00:00Z' };
-    db.__state.twins = [other, twin];
-    mockPairEligibility.mockImplementation(async (winnerId) => (winnerId === TWIN_ID
-      ? { eligible: true, code: 'eligible', candidate: {} } : { eligible: false, code: 'not_in_queue', reason: 'x', candidate: null }));
-    const result = await preview();
-    expect(result.duplicate_of.map((t) => [t.customer_id, t.retained])).toEqual([[other.id, false], [TWIN_ID, true]]);
-    expect(mockRowConflict).toHaveBeenCalledWith(expect.objectContaining({ id: TWIN_ID }), expect.anything());
-    mockPairEligibility.mockResolvedValue({ eligible: false, code: 'not_in_queue', reason: 'x', candidate: null });
-    expect(await preview()).toMatchObject({ code: 'not_a_mergeable_duplicate' });
+  test('the queue keeps this record (it is not a loser in any group): refused', async () => {
+    mockDuplicateWinnerFor.mockResolvedValue({ winnerId: null, eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null });
+    db.__state.twins = [{ id: TWIN_ID, phone: '9415550199', email: null }];
+    expect(await preview()).toMatchObject({ code: 'not_a_mergeable_duplicate', pair_code: 'not_in_queue' });
   });
 
-  test('finding 1: a record linked only by a shared email is refused (no email pair check exists)', async () => {
+  test('a record linked only by a shared email is refused (no email pair check exists)', async () => {
+    mockDuplicateWinnerFor.mockResolvedValue({ winnerId: null, eligible: false, code: 'not_in_queue', reason: 'x', candidate: null });
     db.__state.stub = { ...baseStub(), email: 'kit.example@example.org' };
-    db.__state.twins = [{ ...twin, phone: '9415550111', email: 'kit.example@example.org' }];
-    const result = await preview();
-    expect(result).toMatchObject({ code: 'email_only_duplicate', error: expect.stringMatching(/shares an email, not a phone/) });
-    expect(mockPairEligibility).not.toHaveBeenCalled();
+    db.__state.twins = [{ id: TWIN_ID, phone: '9415550111', email: 'kit.example@example.org' }];
+    expect(await preview()).toMatchObject({ code: 'email_only_duplicate', error: expect.stringMatching(/shares an email, not a phone/) });
     // A stub with no phone at all is the same case.
     db.__state.stub = { ...baseStub(), phone: null, email: 'kit.example@example.org' };
     expect(await preview()).toMatchObject({ code: 'email_only_duplicate' });
   });
 
-  test('finding 2: the merge path would refuse the pair (e.g. a different multi-property account with other live members): refused', async () => {
+  test('the merge path would refuse the pair (e.g. a different multi-property account with other live members): refused', async () => {
     mockDbConflict.mockResolvedValue({ code: 'multi_property_account_conflict', message: 'the duplicate belongs to a multi-property account with other live members — reconcile accounts first' });
     expect(await preview()).toMatchObject({ code: 'merge_conflict', merge_code: 'multi_property_account_conflict', error: expect.stringMatching(/multi-property account/) });
     mockDbConflict.mockResolvedValue(null);
     mockRowConflict.mockReturnValue({ code: 'payer_conflict', message: 'customers have different third-party payers' });
     expect(await preview()).toMatchObject({ code: 'merge_conflict', merge_code: 'payer_conflict' });
   });
-
-  test('finding 2: an account primary profile with other live members is refused; alone, or not the primary, passes', async () => {
-    db.__state.stub = { ...baseStub(), account_id: 'acct-1', is_primary_profile: true };
-    db.__state.sibling = { id: '20000000-0000-4000-8000-000000000009' };
-    expect(await preview()).toMatchObject({ code: 'account_primary_has_members', error: expect.stringMatching(/other live members/) });
-    db.__state.sibling = null;
-    expect((await preview()).preview).toBe(true);
-    db.__state.stub = { ...baseStub(), account_id: 'acct-1', is_primary_profile: false };
-    db.__state.sibling = { id: '20000000-0000-4000-8000-000000000009' };
-    expect((await preview()).preview).toBe(true);
-  });
-
-  test('too many records share the contact: refused', async () => {
-    db.__state.twins = Array.from({ length: 25 }, (_, i) => ({ ...twin, id: `t-${i}` }));
-    expect(await preview()).toMatchObject({ code: 'too_many_duplicates' });
-  });
 });
 
-describe('finding 4: the created date is the Eastern calendar date', () => {
-  test('a record created 22:30 ET on Sep 30 (02:30 UTC Oct 1) reads Sep 30, for the stub and the retained twin', async () => {
+describe('the created date is the Eastern calendar date', () => {
+  test('a record created 22:30 ET on Sep 30 (02:30 UTC Oct 1) reads Sep 30, for the stub and the retained record', async () => {
     db.__state.stub = { ...baseStub(), created_at: '2026-10-01T02:30:00Z' };
-    db.__state.twins = [{ ...twin, created_at: '2026-10-01T02:45:00Z' }];
+    db.__state.winner = { ...baseWinner(), created_at: '2026-10-01T02:45:00Z' };
     const result = await preview();
     expect(result.stub.created_on).toBe('2026-09-30');
-    expect(result.duplicate_of[0].created_on).toBe('2026-09-30');
+    expect(result.archived_into.created_on).toBe('2026-09-30');
     expect(result.card.delete).toMatch(/created 2026-09-30$/);
-    expect(result.card.duplicate_of).toMatch(/created 2026-09-30 —/);
+    expect(result.card.archived_into).toMatch(/created 2026-09-30;/);
   });
 
   test('the dates are not computed in SQL (a UTC session would shift an evening record)', () => {
@@ -310,6 +299,13 @@ describe('refuses any record that is not empty, naming what it found and pointin
     ['an account credit', () => { db.__state.stub.account_credits = '15.00'; }, 'Referral or credit balance', /\$15\.00 account credit/],
     ['a credit allocation', () => { db.__state.counts.field_credit_allocations = 1; }, 'Referral or credit balance', /1 field_credit_allocations/],
     ['any other linked row', moving({ customer_tags: 1 }), 'Other linked records', /1 customer_tags/],
+    // Finding 1: history a merge rewrites that no customer_id column names.
+    ['a call whose customer link was overridden by an operator (non-FK)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'call_log.customer_link_override': 1 }), 'Calls, texts, emails', /1 call_log\.customer_link_override/],
+    ['an irrigation weekly email identity (non-FK)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'email_messages.trigger_event_id': 2 }), 'Calls, texts, emails', /2 email_messages\.trigger_event_id/],
+    ['an unstamped visit address (non-FK)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'scheduled_services.service_address_stamp': 1 }), 'Visits', /1 scheduled_services\.service_address_stamp/],
+    ['a non-FK count that could not be read (fail closed)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'call_log.customer_link_override': 'unknown' }), 'Calls, texts, emails', /could not be checked/],
+    // Finding 2 (account ownership): a primary profile with other live members.
+    ['an account primary profile with other live members', () => { db.__state.stub = { ...baseStub(), account_id: 'acct-1', is_primary_profile: true }; db.__state.sibling = { id: 'sibling-1' }; }, 'Other live members of its account', /other live members in its account/],
     ['a count that could not be read (fail closed)', moving({ sms_log: 'unknown' }), 'Calls, texts, emails', /sms_log \(could not be checked\)/],
     ['a blocker table that could not be read (fail closed)', blockers(['payments (check failed)']), 'Payments, saved cards, Stripe profile', /payments \(could not be checked\)/],
     ['the linked-table sweep failing (fail closed)', moving({ fk_sweep: 'unknown' }), 'Other linked records', /could not be checked/],
@@ -339,133 +335,94 @@ describe('refuses any record that is not empty, naming what it found and pointin
     // A refusal never names the person (the route runs the preview before
     // validating the target).
     expect(result.error).not.toMatch(/Jordan|Sample/);
-    expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
+  });
+  test('the sprinkler home-changed stamp is a premise about two addresses, not history', async () => {
+    mockNonFkMergeRewrites.mockResolvedValue({ 'property_preferences.irrigation_home_changed_at': 'stamped' });
+    expect((await preview()).preview).toBe(true);
+  });
+
+  test('an account primary alone in its account, or a non-primary member, passes', async () => {
+    db.__state.stub = { ...baseStub(), account_id: 'acct-1', is_primary_profile: true };
+    db.__state.sibling = null;
+    expect((await preview()).preview).toBe(true);
+    db.__state.stub = { ...baseStub(), account_id: 'acct-1', is_primary_profile: false };
+    db.__state.sibling = { id: 'sibling-1' };
+    expect((await preview()).preview).toBe(true);
   });
 });
 
-describe('commit', () => {
-  test('confirmed: runs the customer page delete handler with the stub id, the operator, and the locked re-check', async () => {
+describe('commit: a thin preset of executeMerge', () => {
+  test('confirmed: calls executeMerge with the stub as loser, the queue winner as winner, the locked queue re-check and requireEmptyLoser', async () => {
     const result = await commit();
-    expect(mockArchiveCustomerAsAdmin).toHaveBeenCalledTimes(1);
-    expect(mockArchiveCustomerAsAdmin).toHaveBeenCalledWith({
-      customerId: STUB_ID,
-      actor: { technicianId: 'admin-7', userAgent: 'intelligence-bar:delete_duplicate_customer' },
-      precheck: expect.any(Function),
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(1);
+    expect(mockExecuteMerge).toHaveBeenCalledWith({
+      winnerId: TWIN_ID,
+      loserId: STUB_ID,
+      performedBy: 'ib:admin-7',
+      performedById: 'admin-7',
+      mode: 'intelligence_bar',
+      evidence: { via: 'intelligence_bar', preset: 'delete_duplicate_customer' },
+      expectedVersions: { loser: '2026-10-01 12:00:00.000001+00' },
+      requireQueueEligibility: true,
+      requireEmptyLoser: true,
     });
-    expect(result).toMatchObject({ success: true, customer_id: STUB_ID, deleted: true, customer_message: 'No customer message is sent' });
-    expect(result.restore).toMatch(/restore/);
-    // The emptiness readers ran on the archive transaction (the precheck's conn).
-    expect(mockLoserAutoBlockers).toHaveBeenCalledWith(db, expect.objectContaining({ id: STUB_ID }));
-    expect(mockPreviewMergeEffects).toHaveBeenCalledWith(db, STUB_ID, STUB_ID);
+    expect(result).toMatchObject({ success: true, customer_id: STUB_ID, deleted: true, archived_into: TWIN_ID, journal_id: 'journal-1', customer_message: 'No customer message is sent' });
+    expect(result.undo).toMatch(/duplicate queue's undo/);
+    // The tool itself scans nothing at commit: the engine does, under its locks.
+    expect(mockLoserAutoBlockers).not.toHaveBeenCalled();
+    expect(mockPreviewMergeEffects).not.toHaveBeenCalled();
+    expect(mockNonFkMergeRewrites).not.toHaveBeenCalled();
   });
 
-  test('history landed before the lock: the locked re-check throws, preview_changed, nothing deleted', async () => {
-    mockPreviewMergeEffects.mockResolvedValue({ moving: { sms_log: 1, total_rows: 1 } });
-    mockArchiveCustomerAsAdmin.mockImplementationOnce(async ({ precheck }) => {
-      await precheck(db);
-      throw new Error('unreachable: the delete must not run');
-    });
-    const result = await commit();
-    expect(result).toMatchObject({ code: 'not_empty', preview_changed: true });
-    expect(result.error).toMatch(/1 sms_log/);
+  test('the approved card version (route pin) is what the engine validates under its locks', async () => {
+    await run({ customer_id: STUB_ID, _approved_version: '2026-09-30 08:00:00+00' }, { confirmed: true, technicianId: 'admin-7' });
+    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ expectedVersions: { loser: '2026-09-30 08:00:00+00' } }));
   });
 
-  test('the engine role, notes and the primary property are re-asserted inside the transaction', async () => {
-    const cases = [
-      () => mockPairEligibility.mockResolvedValue({ eligible: false, code: 'not_in_queue', reason: 'x', candidate: null }),
-      () => mockDbConflict.mockResolvedValue({ code: 'multi_property_account_conflict', message: 'other live members' }),
-      () => { db.__state.twins = []; },
-      () => { db.__state.stub.crm_notes = 'Added after the card'; },
-      () => { db.__state.properties = [{ ...autoPrimary(), source: 'manual' }]; },
-    ];
-    for (const arrange of cases) {
-      mockArchiveCustomerAsAdmin.mockImplementationOnce(async ({ precheck }) => {
-        arrange();
-        await precheck(db);
-        throw new Error('unreachable: the delete must not run');
-      });
-      expect(await commit()).toMatchObject({ preview_changed: true });
-      db.__state.stub = baseStub();
-      db.__state.twins = [twin];
-      db.__state.properties = [autoPrimary()];
-      mockPairEligibility.mockResolvedValue({ eligible: true, code: 'eligible', reason: null, candidate: {} });
-      mockDbConflict.mockResolvedValue(null);
-    }
+  test('the engine finds the loser no longer empty under its locks: preview_changed with what it found, nothing deleted', async () => {
+    mockExecuteMerge.mockRejectedValueOnce(Object.assign(new Error('executeMerge: This record is not empty'), {
+      previewChanged: true,
+      emptyLoserRefusal: { error: 'This record is not empty, so the bar will not delete it. Found — Calls, texts, emails: 1 call_log.customer_link_override.', code: 'not_empty', found: { messages: ['1 call_log.customer_link_override'] } },
+    }));
+    expect(await commit()).toMatchObject({ code: 'not_empty', preview_changed: true, error: expect.stringMatching(/call_log\.customer_link_override/), found: { messages: expect.any(Array) } });
   });
 
-  test('finding 3: history that attaches after the archive commits is caught, the record is restored, and the operator is told', async () => {
-    mockArchiveCustomerAsAdmin.mockImplementationOnce(async ({ precheck }) => {
-      await precheck(db);
-      // A writer with no foreign-key lock slips a text in after the scan.
-      mockPreviewMergeEffects.mockResolvedValue({ moving: { sms_log: 1, total_rows: 1 } });
-      return { status: 200, json: { success: true } };
-    });
-    const result = await commit();
-    expect(result).toMatchObject({ code: 'history_appeared_restored', deleted: false, restored: true });
-    expect(result.error).toMatch(/^Not deleted: history appeared/);
-    expect(result.error).toMatch(/1 sms_log/);
-    expect(result.error).toMatch(/merge_customers/);
-    expect(result.success).toBeUndefined();
-    expect(mockRestoreCustomerAsAdmin).toHaveBeenCalledWith({
-      customerId: STUB_ID,
-      actor: { technicianId: 'admin-7', userAgent: 'intelligence-bar:delete_duplicate_customer' },
-    });
+  test("the engine's other refusals are relayed (pair no longer mergeable, version moved, billing conflict); drift reads as preview_changed", async () => {
+    mockExecuteMerge.mockRejectedValueOnce(Object.assign(new Error('executeMerge: the pair is no longer mergeable (dismissed) — review a fresh proposal'), { previewChanged: true }));
+    expect(await commit()).toEqual({ error: 'executeMerge: the pair is no longer mergeable (dismissed) — review a fresh proposal', preview_changed: true });
+    mockExecuteMerge.mockRejectedValueOnce(Object.assign(new Error('executeMerge: the loser customer changed since this merge was approved — review a fresh proposal'), { previewChanged: true }));
+    expect(await commit()).toMatchObject({ preview_changed: true });
+    mockExecuteMerge.mockRejectedValueOnce(Object.assign(new Error('executeMerge: customers have different billing modes'), { mergeConflictCode: 'billing_mode_conflict' }));
+    expect(await commit()).toEqual({ error: 'executeMerge: customers have different billing modes', code: 'billing_mode_conflict' });
   });
 
-  test('finding 3: a failed automatic restore says so and gives the restore route', async () => {
-    mockArchiveCustomerAsAdmin.mockImplementationOnce(async ({ precheck }) => {
-      await precheck(db);
-      mockPreviewMergeEffects.mockResolvedValue({ moving: { scheduled_services: 1, total_rows: 1 } });
-      return { status: 200, json: { success: true } };
-    });
-    mockRestoreCustomerAsAdmin.mockRejectedValueOnce(new Error('db down'));
-    const result = await commit();
-    expect(result).toMatchObject({ code: 'history_appeared_restore_failed', deleted: true });
-    expect(result.error).toContain(`PATCH /api/admin/customers/${STUB_ID}/restore`);
-  });
-
-  test('finding 3: a clean post-delete check never restores', async () => {
-    expect(await commit()).toMatchObject({ success: true, deleted: true });
-    expect(mockRestoreCustomerAsAdmin).not.toHaveBeenCalled();
-    // The check ran twice: inside the archive, then again on committed state.
-    expect(mockPreviewMergeEffects).toHaveBeenCalledTimes(2);
-  });
-
-  test('finding 3: the card says the record is restorable and the bar restores it itself on late history', async () => {
-    const p = await preview();
-    expect(p.restore).toMatch(/restore/);
-    expect(p.restore).toMatch(/bar restores it at once/);
-  });
-
-  test('the record version moved after the card: preview_changed (the route pins _approved_version)', async () => {
-    const result = await run({ customer_id: STUB_ID, _approved_version: '2026-09-30 08:00:00+00' }, { confirmed: true, technicianId: 'admin-7' });
-    expect(result).toMatchObject({ code: 'version_changed', preview_changed: true });
-    // The approved version itself passes.
-    expect(await run({ customer_id: STUB_ID, _approved_version: baseStub().version }, { confirmed: true, technicianId: 'admin-7' }))
-      .toMatchObject({ success: true });
-  });
-
-  test('deleted elsewhere after the card: preview_changed', async () => {
+  test('deleted elsewhere after the card, or the queue no longer lists the pair: preview_changed, the engine never runs', async () => {
     db.__state.stub = { ...baseStub(), deleted_at: new Date() };
     expect(await commit()).toMatchObject({ code: 'record_unavailable', preview_changed: true });
+    db.__state.stub = baseStub();
+    mockDuplicateWinnerFor.mockResolvedValue({ winnerId: null, eligible: false, code: 'not_in_queue', reason: 'x', candidate: null });
+    expect(await commit()).toMatchObject({ preview_changed: true });
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
 
-  test("the route's own refusal is relayed (409 still billing); a 404 reads as preview_changed", async () => {
-    mockArchiveCustomerAsAdmin.mockResolvedValueOnce({ status: 409, json: { error: 'customer_still_billing_or_scheduled', message: 'This customer still has an active prepay term. Cancel the plan before archiving.' } });
-    expect(await commit()).toEqual({ error: 'This customer still has an active prepay term. Cancel the plan before archiving.' });
-    mockArchiveCustomerAsAdmin.mockResolvedValueOnce({ status: 404, json: { error: 'Customer not found' } });
-    expect(await commit()).toEqual({ error: 'Customer not found', preview_changed: true });
-  });
-
-  test('an unrelated failure in the delete surfaces as a tool error', async () => {
-    mockArchiveCustomerAsAdmin.mockRejectedValueOnce(new Error('relink exploded'));
+  test('a failure with no message surfaces as a tool error', async () => {
+    mockExecuteMerge.mockRejectedValueOnce(new Error('relink exploded'));
     expect(await commit()).toEqual({ error: 'relink exploded' });
   });
 
   test('a model-supplied confirmed field never commits', async () => {
     const result = await run({ customer_id: STUB_ID, confirmed: true }, {});
     expect(result.preview).toBe(true);
-    expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
+  });
+
+  test('no customer-page archive/restore route, no own scan, no auto-restore remain in the tool', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'duplicate-customer-delete.js'), 'utf8');
+    for (const gone of ['archiveCustomerAsAdmin', 'restoreCustomerAsAdmin', 'historyAppearedAfterCommit', 'restoreAfterLateHistory', 'duplicatePairEligibility']) {
+      expect(src).not.toContain(gone);
+    }
+    expect(src).toContain('requireEmptyLoser: true');
   });
 });
 
@@ -477,17 +434,20 @@ describe('allowed: the untouched automatic primary', () => {
 });
 
 describe('pins and card contract', () => {
-  test('the route pin (preview fingerprint) binds the stub version, the checks and the shared-phone record', async () => {
+  test('the route pin (preview fingerprint) binds the stub version, the checks and the record it is archived into', async () => {
     const a = await preview();
     const same = await preview();
     expect(AuthorizationContract.previewFingerprint(same)).toBe(AuthorizationContract.previewFingerprint(a));
     db.__state.stub = { ...baseStub(), version: '2026-10-01 12:05:00.000001+00' };
     expect(AuthorizationContract.previewFingerprint(await preview())).not.toBe(AuthorizationContract.previewFingerprint(a));
     db.__state.stub = baseStub();
-    db.__state.twins = [{ ...twin, email: 'other.sample@example.com' }];
+    db.__state.winner = { ...baseWinner(), email: 'other.sample@example.com' };
     const twinChanged = await preview();
     expect(twinChanged.preview).toBe(true);
     expect(AuthorizationContract.previewFingerprint(twinChanged)).not.toBe(AuthorizationContract.previewFingerprint(a));
+    // A different retained record, or a new version of it, also changes the card.
+    db.__state.winner = { ...baseWinner(), version: '2026-09-02 08:00:00.000001+00' };
+    expect(AuthorizationContract.previewFingerprint(await preview())).not.toBe(AuthorizationContract.previewFingerprint(a));
   });
 
   test('the contract: labelled, reversible, no customer contact, card lines only', async () => {
@@ -496,11 +456,11 @@ describe('pins and card contract', () => {
     expect(contract).toMatchObject({ action_label: 'Delete empty duplicate customer', tier: 'yellow', irreversible: false, notifies_customer: false });
     const labels = contract.effects.map((e) => e.label);
     expect(labels).toEqual(expect.arrayContaining([
-      'delete: Unknown (phone (***) ***-0199), created 2026-10-01',
+      'delete: Delete the empty duplicate record Unknown (phone (***) ***-0199), created 2026-10-01',
       'customer message: No customer message is sent',
       'visits: none',
       'invoices: none',
-      expect.stringMatching(/^restore: Restorable/),
+      expect.stringMatching(/^undo: Reversible/),
     ]));
     // The raw uuid never reaches the card.
     expect(labels.join(' ')).not.toContain(STUB_ID);
@@ -536,16 +496,15 @@ describe('wiring', () => {
     expect(src).toContain("if (action.tool_name === 'delete_duplicate_customer' && livePreview?._version) execParams._approved_version = String(livePreview._version);");
   });
 
-  test('the canonical delete and its restore route exist; the adapter runs the named delete handler', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
-    expect(src).toContain("router.delete('/:id', requireAdmin, customerArchiveHandler);");
-    expect(src).toContain("router.patch('/:id/restore', requireAdmin, customerRestoreHandler);");
-    expect(src).toMatch(/async function restoreCustomerAsAdmin\([\s\S]*?customerRestoreHandler\(req, res, reject\)/);
-    expect(src).toContain('router.restoreCustomerAsAdmin = restoreCustomerAsAdmin;');
-    expect(src).toMatch(/async function archiveCustomerAsAdmin\([\s\S]*?customerArchiveHandler\(req, res, reject\)/);
-    // The precheck runs right after the archive's row lock, before any write.
-    expect(src).toContain("await trx('customers').where({ id: req.params.id }).forUpdate().first();\n        if (req.archivePrecheck) await req.archivePrecheck(trx);");
-    expect(src).toContain('router.archiveCustomerAsAdmin = archiveCustomerAsAdmin;');
+  test('executeMerge takes requireEmptyLoser and checks it after the pair lock, before any write', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-dedupe.js'), 'utf8');
+    expect(src).toMatch(/pairKind = 'phone', requireEmptyLoser = false \}\) \{/);
+    const pairLock = src.indexOf('await acquirePairAdjudicationLock(trx, winnerId, loserId);');
+    const emptyCheck = src.indexOf('await emptyLoserRefusal(trx, winner, loser)');
+    const firstWrite = src.indexOf("await trx('customers').where({ id: loserId }).update({\n      phone: `merged-");
+    expect(pairLock).toBeGreaterThan(-1);
+    expect(emptyCheck).toBeGreaterThan(pairLock);
+    expect(firstWrite).toBeGreaterThan(emptyCheck);
   });
 
   test('find_duplicates never suggests a deleted record (every grouping filters deleted_at)', () => {

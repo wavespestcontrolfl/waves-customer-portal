@@ -1041,6 +1041,79 @@ describe('executeMerge', () => {
       .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
   });
 
+  describe('requireEmptyLoser (the IB delete_duplicate_customer preset)', () => {
+    // A live green pair: the winner's Stripe profile pins it as the cluster
+    // winner; the loser is an addressless shell sharing the phone.
+    const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003', stripe_customer_id: 'cus_winner', pipeline_stage: 'active_customer', created_at: '2026-07-08' };
+    const loser = { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003', pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+    const emptyLoserModule = () => require('../services/customer-empty-loser');
+    const base = { winnerId: WINNER, loserId: LOSER, performedBy: 'test', mode: 'intelligence_bar', requireQueueEligibility: true, requireEmptyLoser: true };
+
+    afterEach(() => { jest.restoreAllMocks(); });
+
+    it('needs the locked queue re-check and a manual merge: refused before any transaction opens', async () => {
+      await expect(dedupe.executeMerge({ ...base, requireQueueEligibility: false })).rejects.toThrow(/requireEmptyLoser needs a manual merge with the queue re-check/);
+      await expect(dedupe.executeMerge({ ...base, mode: 'auto' })).rejects.toThrow(/requireEmptyLoser needs a manual merge/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    it('checks the loser UNDER the locks: after the row lock and the pair adjudication lock, before any write; a refusal rolls everything back', async () => {
+      const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS, queueCustomers: [winner, loser] });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const spy = jest.spyOn(emptyLoserModule(), 'emptyLoserRefusal').mockResolvedValue({
+        error: 'This record is not empty, so the bar will not delete it.', code: 'not_empty', found: { messages: ['1 call_log.customer_link_override'] },
+      });
+      await expect(dedupe.executeMerge(base)).rejects.toMatchObject({
+        previewChanged: true,
+        mergeConflictCode: 'loser_not_empty',
+        emptyLoserRefusal: expect.objectContaining({ code: 'not_empty' }),
+        message: expect.stringMatching(/not empty/),
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      // Handed the TRANSACTION and the two locked rows.
+      expect(spy.mock.calls[0][0]).toBe(trx);
+      expect(spy.mock.calls[0][1]).toMatchObject({ id: WINNER });
+      expect(spy.mock.calls[0][2]).toMatchObject({ id: LOSER });
+      // The pair adjudication lock was taken before the check ran.
+      const lockIdx = trx.raw.mock.calls.findIndex(([sql, bindings]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql))
+        && bindings?.[0] === `customer-duplicate-pair:${[WINNER, LOSER].sort().join(':')}`);
+      expect(lockIdx).toBeGreaterThan(-1);
+      expect(trx.raw.mock.invocationCallOrder[lockIdx]).toBeLessThan(spy.mock.invocationCallOrder[0]);
+      // Nothing was written: no retire, no journal, no repoint, no backfill.
+      expect(state.retired).toBeNull();
+      expect(state.journal).toBeNull();
+      expect(state.backfilled).toBeNull();
+      expect(state.repointUpdates).toEqual([]);
+    });
+
+    it('a pair the queue no longer lists is refused BEFORE the empty check runs (the pair verdict comes first, under the pair lock)', async () => {
+      const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS, queueCustomers: [] });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const spy = jest.spyOn(emptyLoserModule(), 'emptyLoserRefusal');
+      await expect(dedupe.executeMerge(base)).rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('an empty loser merges (nothing to move): archived and journaled like any merge', async () => {
+      const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS, queueCustomers: [winner, loser] });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const spy = jest.spyOn(emptyLoserModule(), 'emptyLoserRefusal').mockResolvedValue(null);
+      const result = await dedupe.executeMerge(base);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(result.journalId).toBe('j1');
+      expect(state.retired).toMatchObject({ phone: `merged-${LOSER.slice(0, 8)}`, email: null, active: false });
+      expect(state.retired.deleted_at).toBeTruthy();
+    });
+
+    it('every other executeMerge caller is unchanged: without the option the empty check never runs', async () => {
+      const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS, queueCustomers: [winner, loser] });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const spy = jest.spyOn(emptyLoserModule(), 'emptyLoserRefusal');
+      await dedupe.executeMerge({ ...base, requireEmptyLoser: false });
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
   it('refuses when both rows have Stripe profiles', async () => {
     const { trx } = buildTrx({
       winner: { id: WINNER, stripe_customer_id: 'cus_a', phone: '+19995550003' },
@@ -3889,3 +3962,79 @@ describe('merge carries the per-phone consent boundary (service_preferences)', (
   });
 });
 
+
+
+// ---------------------------------------------------------------------------
+// duplicateWinnerFor — the retained record from ONE queue build
+// ---------------------------------------------------------------------------
+describe('duplicateWinnerFor', () => {
+  const winner = {
+    id: 'dddddddd-0000-0000-0000-000000000001',
+    first_name: 'Synthetic', last_name: 'Winner', phone: '+15550100123',
+    address_line1: '100 Test Street', zip: '34207',
+    stripe_customer_id: 'cus_winner', pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shell = { id: 'dddddddd-0000-0000-0000-000000000002', first_name: 'Synthetic', last_name: null, phone: '5550100123', address_line1: null, zip: null, pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+  const addressConflict = { id: 'dddddddd-0000-0000-0000-000000000003', first_name: 'Synthetic', last_name: null, phone: '5550100123', address_line1: '999 Different St', zip: '34211', pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+  const stranger = { id: 'dddddddd-0000-0000-0000-000000000004', first_name: 'Other', last_name: 'Person', phone: '+15550100123', address_line1: '200 Different Test Street', zip: '34211', pipeline_stage: 'active_customer', created_at: '2026-07-01' };
+
+  const route = ({ customers = [], dismissals = [] }) => (table) => {
+    if (table === 'customers') return customers;
+    if (table === 'customer_duplicate_dismissals') return dismissals;
+    return [];
+  };
+
+  it('names the queue winner and the eligible verdict from a single queue scan', async () => {
+    const seen = [];
+    const inner = route({ customers: [winner, shell] });
+    installDb((table, q) => { seen.push(table); return inner(table, q); });
+    const result = await dedupe.duplicateWinnerFor(shell.id);
+    expect(result).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+    // ONE read of the customers table, however many records share the phone.
+    expect(seen.filter((t) => t === 'customers')).toHaveLength(1);
+  });
+
+  it('one scan with several records on the phone still names the one winner', async () => {
+    const extra = Array.from({ length: 6 }, (_, i) => ({ ...shell, id: `dddddddd-0000-0000-0000-0000000001${i}0` }));
+    const seen = [];
+    const inner = route({ customers: [winner, shell, ...extra] });
+    installDb((table, q) => { seen.push(table); return inner(table, q); });
+    const result = await dedupe.duplicateWinnerFor(shell.id);
+    expect(result).toMatchObject({ winnerId: winner.id, eligible: true });
+    expect(seen.filter((t) => t === 'customers')).toHaveLength(1);
+  });
+
+  it('reads a refused candidate the way duplicatePairEligibility does (address conflict, red pair) and still names its winner', async () => {
+    installDb(route({ customers: [winner, addressConflict] }));
+    expect(await dedupe.duplicateWinnerFor(addressConflict.id)).toMatchObject({ winnerId: winner.id, eligible: false, code: 'address_conflict' });
+    installDb(route({ customers: [winner, stranger] }));
+    expect(await dedupe.duplicateWinnerFor(stranger.id)).toMatchObject({ winnerId: winner.id, eligible: false, code: 'red_pair' });
+  });
+
+  it('a record the queue keeps (the winner itself) or does not list gets no winner', async () => {
+    installDb(route({ customers: [winner, shell] }));
+    expect(await dedupe.duplicateWinnerFor(winner.id)).toMatchObject({ winnerId: null, eligible: false, code: 'not_in_queue' });
+    expect(await dedupe.duplicateWinnerFor('dddddddd-0000-0000-0000-000000000099')).toMatchObject({ winnerId: null, code: 'not_in_queue' });
+  });
+
+  it('a dismissed pair is not listed; unreadable dismissals fail CLOSED', async () => {
+    installDb(route({ customers: [winner, shell], dismissals: [{ customer_id_a: winner.id, customer_id_b: shell.id, reason: 'not_duplicates' }] }));
+    expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ winnerId: null, eligible: false, code: 'not_in_queue' });
+    const inner = route({ customers: [winner, shell] });
+    installDb((table, q) => { if (table === 'customer_duplicate_dismissals') throw new Error('relation unreadable'); return inner(table, q); });
+    expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ winnerId: null, eligible: false, code: 'dismissals_unreadable' });
+  });
+
+  it('agrees with duplicatePairEligibility on the same fixtures', async () => {
+    installDb(route({ customers: [winner, shell] }));
+    const single = await dedupe.duplicatePairEligibility(winner.id, shell.id);
+    const once = await dedupe.duplicateWinnerFor(shell.id);
+    expect({ eligible: once.eligible, code: once.code, reason: once.reason }).toEqual({ eligible: single.eligible, code: single.code, reason: single.reason });
+  });
+
+  it('decideWinner is gone from the engine (it had no caller once the tool stopped scanning)', () => {
+    expect(dedupe.decideWinner).toBeUndefined();
+    expect(dedupe.loserAutoBlockers).toEqual(expect.any(Function));
+    expect(dedupe.REPOINT_EXCLUDED_TABLES).toBeInstanceOf(Set);
+  });
+});

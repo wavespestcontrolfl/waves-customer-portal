@@ -282,24 +282,6 @@ function pickWinner(rows, extraScore = () => 0) {
     || String(a.id).localeCompare(String(b.id)))[0];
 }
 
-// Business-signal weight for winner selection: COUNT of business signals
-// (billing tables + active stage), excluding stripe/portal which winnerScore
-// already weighs — one definition for every queue and decideWinner.
-function businessBoostFor(blockersById) {
-  return (r) => 16 * (blockersById.get(r.id) || [])
-    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
-}
-
-// The engine's keep/discard decision for customer rows read outside the
-// queue scan (whole rows: winnerScore reads stripe_customer_id,
-// password_hash, pipeline_stage, created_at, id) — the same pickWinner and
-// business weight every queue uses (sameAddressPairEligibility decides a
-// pair the same way). Returns the row the engine keeps.
-async function decideWinner(database, rows) {
-  const blockersById = await batchAutoBlockers(database, rows);
-  return pickWinner(rows, businessBoostFor(blockersById));
-}
-
 function pairKey(idA, idB) {
   return idA < idB ? [idA, idB] : [idB, idA];
 }
@@ -377,7 +359,8 @@ function buildPhoneGroupCandidates(members, blockersById) {
   // excluding stripe/portal which winnerScore already weighs — a Stripe-only
   // shell (24 under a binary boost) must never outrank a row with actual
   // invoices/services.
-  const businessBoost = businessBoostFor(blockersById);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
   const hasKnownName = (m) => !!(normName(m.first_name) || normName(m.last_name));
   let pool = members.filter(hasKnownName);
   const unnamed = members.filter((m) => !hasKnownName(m));
@@ -645,7 +628,8 @@ function sameAddressEdges({ customers, properties = [], dismissed = new Set() })
 
 function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = new Map(), upcomingVisits = null } = {}) {
   const edges = new Map(allEdges);
-  const businessBoost = businessBoostFor(blockersById);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
   const groups = [];
   // Each round: the strongest remaining row wins, its direct neighbours are
   // the candidates, and every edge among the group's own members is spent
@@ -840,7 +824,8 @@ async function sameAddressPairEligibility(winnerId, loserId, database = db) {
   const winner = detected.byId.get(String(winnerId));
   const loser = detected.byId.get(String(loserId));
   const blockersById = await batchAutoBlockers(database, [winner, loser]);
-  const businessBoost = businessBoostFor(blockersById);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((x) => x !== 'stripe_customer_id' && x !== 'portal_login').length;
   if (pickWinner([winner, loser], businessBoost).id !== winner.id) return gone;
   const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
   const phonesMissing = !phone10(winner.phone) || !phone10(loser.phone);
@@ -1015,7 +1000,8 @@ function sameNameEdges({ customers, properties = [], dismissed = new Set() }) {
 
 function assembleSameNameGroups({ byId, edges: allEdges }, { blockersById = new Map(), upcomingVisits = null } = {}) {
   const edges = new Map(allEdges);
-  const businessBoost = businessBoostFor(blockersById);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
   const addressOf = (r) => ({ address_line1: r.address_line1 || null, address_line2: r.address_line2 || null, city: r.city || null, zip: r.zip || null });
   const groups = [];
   // Same round structure as assembleSameAddressGroups: the strongest remaining
@@ -1233,6 +1219,13 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { kind
   }
   const group = groups.find((g) => g.winner.id === winnerId);
   const candidate = group?.candidates.find((c) => c.loser.id === loserId);
+  return phoneCandidateVerdict(candidate);
+}
+
+// The verdict on ONE phone-queue candidate (null = the pair is not listed).
+// Shared by duplicatePairEligibility and duplicateWinnerFor so both read a
+// candidate the same way.
+function phoneCandidateVerdict(candidate) {
   if (!candidate) {
     return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
   }
@@ -1243,6 +1236,31 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { kind
     return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
   }
   return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
+// The queue's own answer to "which live record is this one a duplicate of?",
+// from ONE queue build (a single findDuplicateGroups scan, however many
+// records share the phone). Returns { winnerId, ...verdict } for the group
+// that lists `loserId` as a candidate (an eligible one wins over a refused
+// one), or { winnerId: null, eligible: false, code: 'not_in_queue' } when no
+// group lists it. Same dismissal fail-closed rule as duplicatePairEligibility.
+async function duplicateWinnerFor(loserId, database = db) {
+  let groups;
+  try {
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] duplicateWinnerFor: dismissals unreadable, refusing: ${e.message}`);
+    return { winnerId: null, eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this record as a mergeable duplicate right now', candidate: null };
+  }
+  let refused = null;
+  for (const group of groups) {
+    const candidate = group.candidates.find((c) => c.loser.id === loserId);
+    if (!candidate) continue;
+    const verdict = { winnerId: group.winner.id, ...phoneCandidateVerdict(candidate) };
+    if (verdict.eligible) return verdict;
+    refused = refused || verdict;
+  }
+  return refused || { winnerId: null, ...phoneCandidateVerdict(null) };
 }
 
 // The auto sweep's under-lock eligibility recheck, scoped to ONE pair: the
@@ -2868,7 +2886,7 @@ async function lockSameNameGroupRows(trx, winnerId, loserId) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false, pairKind = 'phone' }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false, pairKind = 'phone', requireEmptyLoser = false }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -2881,6 +2899,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   // Same for a same-name pair (no shared phone, usually no shared address).
   if (pairKind === SAME_NAME_KIND && (mode === 'auto' || !requireQueueEligibility)) {
     throw new Error('executeMerge: a same-name pair is review-only — it needs a manual merge with the queue re-check');
+  }
+  // requireEmptyLoser (the IB delete_duplicate_customer preset): the loser
+  // must hold nothing at all, decided UNDER this transaction's locks (after
+  // the row locks and the pair adjudication lock, before the first write).
+  // It only makes sense with the locked queue re-check, so it needs one.
+  if (requireEmptyLoser && (!requireQueueEligibility || mode === 'auto')) {
+    throw new Error('executeMerge: requireEmptyLoser needs a manual merge with the queue re-check');
   }
   // Locked winner snapshot + lock-held timestamp, hoisted for the
   // post-commit contact audit event.
@@ -3107,6 +3132,21 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       const err = new Error(`executeMerge: ${dbConflict.message}`);
       err.mergeConflictCode = dbConflict.code;
       throw err;
+    }
+    // The empty-loser precondition (delete_duplicate_customer only): read on
+    // THIS transaction, under the row locks taken above and the pair lock,
+    // before any write. The scan lives in customer-empty-loser.js (the card's
+    // check list); a throw rolls the whole merge back.
+    if (requireEmptyLoser) {
+      const { emptyLoserRefusal } = require('./customer-empty-loser');
+      const notEmpty = await emptyLoserRefusal(trx, winner, loser);
+      if (notEmpty) {
+        const err = new Error(`executeMerge: ${notEmpty.error}`);
+        err.previewChanged = true;
+        err.mergeConflictCode = 'loser_not_empty';
+        err.emptyLoserRefusal = notEmpty;
+        throw err;
+      }
     }
     // Same-account primary handoff (shared notification/channel prefs
     // resolve via (account_id, is_primary_profile=true)) is decided by
@@ -7181,14 +7221,12 @@ module.exports = {
   findSameNameGroups,
   SAME_NAME_KIND,
   duplicatePairEligibility,
-  // The "not a shell" blocker list — the IB delete_duplicate_customer
-  // emptiness check reads the same list the auto-merge refuses on.
+  duplicateWinnerFor,
+  // The "not a shell" blocker list and the tables previewMergeEffects never
+  // counts — customer-empty-loser.js (the delete_duplicate_customer
+  // emptiness scan, run under executeMerge's locks) reads the same lists.
   loserAutoBlockers,
-  // The tables previewMergeEffects never counts — the same check counts them
-  // itself so a table excluded here can never read as "empty".
   REPOINT_EXCLUDED_TABLES,
-  // Which of a set of records the engine keeps (the rest are the duplicates).
-  decideWinner,
   executeMerge,
   lockSeriesCreateForMerge,
   runAutoMergeSweep,

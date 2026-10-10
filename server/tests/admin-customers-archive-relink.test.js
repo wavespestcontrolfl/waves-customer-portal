@@ -132,84 +132,8 @@ describe('DELETE /admin/customers/:id (archive)', () => {
   });
 });
 
-// The Intelligence Bar's delete_duplicate_customer runs the SAME handler
-// without an HTTP request (owner ruling 2026-10-07): same writes, same
-// relink, same audit row, the operator as the actor.
-describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
-  beforeEach(() => { mockState.customer = { id: 'cust-1', email: 'Household@Example.com', deleted_at: null }; });
-
-  test('resolves the reply the route sends and makes the same writes + audit as DELETE /:id', async () => {
-    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9', userAgent: 'intelligence-bar:delete_duplicate_customer' } }))
-      .resolves.toEqual({ status: 200, json: { success: true } });
-    expect(mockState.updates).toEqual([
-      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
-      expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
-      expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
-      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
-    ]);
-    expect(relinkSubscribersFromArchivedCustomer).toHaveBeenCalledWith(mockTrx, 'cust-1');
-    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'customer.archive', resource_id: 'cust-1', actor_id: 'admin-9', critical: true, trx: mockTrx,
-      user_agent: 'intelligence-bar:delete_duplicate_customer',
-    }));
-  });
-
-  test('a missing or already-deleted customer resolves the route\'s 404, writing nothing', async () => {
-    mockState.customer = null;
-    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' } }))
-      .resolves.toEqual({ status: 404, json: { error: 'Customer not found' } });
-    expect(mockState.updates).toEqual([]);
-    expect(recordAuditEvent).not.toHaveBeenCalled();
-  });
-
-  test('precheck runs inside the archive transaction after the row lock; a throw rolls back before any write', async () => {
-    const precheck = jest.fn(async (trx) => {
-      expect(trx).toBe(mockTrx);
-      throw Object.assign(new Error('no longer empty'), { previewChanged: true });
-    });
-    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' }, precheck }))
-      .rejects.toMatchObject({ message: 'no longer empty', previewChanged: true });
-    expect(precheck).toHaveBeenCalledTimes(1);
-    expect(mockState.updates).toEqual([]);
-    expect(relinkSubscribersFromArchivedCustomer).not.toHaveBeenCalled();
-    expect(recordAuditEvent).not.toHaveBeenCalled();
-  });
-
-  test('a passing precheck lets the same archive run', async () => {
-    const precheck = jest.fn(async () => {});
-    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' }, precheck }))
-      .resolves.toEqual({ status: 200, json: { success: true } });
-    expect(precheck).toHaveBeenCalledWith(mockTrx);
-    expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customers', patch: { deleted_at: expect.any(Date) } }));
-  });
-
-  test('an error the handler passes to next() rejects', async () => {
-    relinkSubscribersFromArchivedCustomer.mockRejectedValueOnce(new Error('relink exploded'));
-    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: {} })).rejects.toThrow('relink exploded');
-  });
-});
-
 describe('PATCH /admin/customers/:id/restore', () => {
   beforeEach(() => { mockState.customer = { id: 'cust-1', email: 'Household@Example.com', deleted_at: new Date('2026-08-01') }; });
-
-  // The Intelligence Bar undoes its own delete with this when history landed
-  // on the record after its emptiness check (commit-then-verify).
-  test('restoreCustomerAsAdmin runs the same handler without HTTP: same writes, same audit, the operator as actor', async () => {
-    await expect(router.restoreCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9', userAgent: 'intelligence-bar:delete_duplicate_customer' } }))
-      .resolves.toMatchObject({ status: 200, json: { success: true, billing_rearmed: false } });
-    expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customers', viaTrx: true, patch: { deleted_at: null } }));
-    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'customer.restore', resource_id: 'cust-1', actor_id: 'admin-9', critical: true, trx: mockTrx,
-      user_agent: 'intelligence-bar:delete_duplicate_customer',
-    }));
-  });
-
-  test('restoreCustomerAsAdmin on a record that is not deleted resolves the route\'s 404', async () => {
-    mockState.customer = null;
-    await expect(router.restoreCustomerAsAdmin({ customerId: 'cust-1', actor: {} }))
-      .resolves.toMatchObject({ status: 404 });
-    expect(mockState.updates).toEqual([]);
-  });
 
   test('clears deleted_at, re-runs the email-keyed relink on the trx, audits on the same trx', async () => {
     await withServer(async (baseUrl) => {
