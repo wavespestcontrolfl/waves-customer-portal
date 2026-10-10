@@ -204,11 +204,14 @@ function printMoves(rows, arms) {
 // a worktree can be staged by accident). A directory that exists is refused:
 // its mode is not this script's to change (Codex #6258 r9).
 function prepareOutputDir(dir) {
-  const target = path.resolve(dir);
-  const repo = path.resolve(__dirname, '..', '..');
+  const asked = path.resolve(dir);
+  if (fs.existsSync(asked)) throw new Error(`--out must name a directory that does not exist yet: ${asked}`);
+  // Real paths on both sides: a symlinked parent that points into the
+  // repository is inside it (r10). The parent must exist to be resolved.
+  if (!fs.existsSync(path.dirname(asked))) throw new Error(`--out: the parent directory does not exist: ${path.dirname(asked)}`);
+  const target = path.join(fs.realpathSync(path.dirname(asked)), path.basename(asked));
+  const repo = fs.realpathSync(path.resolve(__dirname, '..', '..'));
   if (target === repo || target.startsWith(`${repo}${path.sep}`)) throw new Error(`--out must be outside the repository: ${target}`);
-  if (fs.existsSync(target)) throw new Error(`--out must name a directory that does not exist yet: ${target}`);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.mkdirSync(target, { mode: 0o700 });
 }
 

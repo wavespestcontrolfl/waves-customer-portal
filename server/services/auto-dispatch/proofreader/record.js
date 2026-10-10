@@ -223,8 +223,9 @@ async function readCalls(conn, { customerId, asOf }, unread) {
     .select('direction', 'transcription', 'recording_sid', 'created_at', 'updated_at', 'call_outcome', 'processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
   const ours = rows.filter((row) => !NOT_THIS_CUSTOMER_OUTCOMES.includes(row.call_outcome) && !contextAggregator.isExcludedCall(row));
   return ours.map((row) => {
-    // The transcript is written, and can be replaced, after the call row.
-    if (clean(row.transcription) && revisedLater(row, asOf, 'call', unread)) return [];
+    // The transcript is written, and can be replaced or purged, after the
+    // call row: a row touched after the move is unread whatever it holds now (r10).
+    if (revisedLater(row, asOf, 'call', unread)) return [];
     const said = entry('call', 'both', row.created_at, row.transcription);
     // A recording nobody has turned into words yet: the record is incomplete.
     if (!said.length && row.recording_sid) unread.push({ channel: 'call', at: eastern(row.created_at), reason: 'not_transcribed' });
