@@ -205,6 +205,26 @@ function visitPrediction(customer, v) {
   });
 }
 
+// Upcoming visits with their own positive price that completion will collect
+// under `customer`'s lane: { date, service, price, prepaid, due }.
+function pricedVisitCharges(customer, visits) {
+  const out = [];
+  for (const v of visits || []) {
+    if (!(Number(v.estimated_price) > 0)) continue;
+    const p = visitPrediction(customer, v);
+    const due = stillDue(p);
+    if (!(due > 0)) continue;
+    out.push({
+      date: v.scheduled_date instanceof Date ? v.scheduled_date.toISOString().slice(0, 10) : String(v.scheduled_date ?? '').slice(0, 10),
+      service: v.service_type || 'Visit',
+      price: Number(v.estimated_price),
+      prepaid: Number(v.prepaid_amount) > 0 ? Number(v.prepaid_amount) : 0,
+      due,
+    });
+  }
+  return out;
+}
+
 function balanceChanges(row, fields, visits) {
   const after = { ...row, ...fields };
   const out = [];
@@ -377,6 +397,19 @@ function nextVisitLines(row, fields, visits, dues = null) {
       c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} fully prepaid`,
     ].filter(Boolean);
     lines.push(parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.');
+    // Each explicitly priced visit with its price: the visit's own price wins
+    // over the fee and is collected at completion (auto-charged to the saved
+    // card when Auto Pay is on), so the office sees the dollars. Amounts are
+    // predictCompletionBilling's, from fields the card pin already carries
+    // (estimated_price and the prepayment).
+    const priced = pricedVisitCharges(after, visits);
+    for (const v of priced.slice(0, BALANCE_LINES)) {
+      lines.push(`Priced visit on ${v.date} (${v.service}): ${money(v.price)} is collected at completion${v.prepaid > 0 ? ` (${money(v.due)} after ${money(v.prepaid)} paid)` : ''}.`);
+    }
+    if (priced.length > BALANCE_LINES) {
+      const rest = priced.slice(BALANCE_LINES);
+      lines.push(`${plural(rest.length, 'more priced visit', 'more priced visits')}: ${money(rest.reduce((n, v) => n + v.due, 0))} collected at completion in all.`);
+    }
   } else if (laneAfter === 'monthly_membership') {
     // Promised only when the dues run really charges this customer
     // (monthly-dues-eligibility.js). A move into monthly is refused unless

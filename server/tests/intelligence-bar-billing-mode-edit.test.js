@@ -226,7 +226,7 @@ describe('card text', () => {
     mockState.visits = [
       { id: 'v1', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
       { id: 'v2', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
-      { estimated_price: '120.00', primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Lawn Care' },
+      { scheduled_date: '2099-01-06', estimated_price: '120.00', primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Lawn Care' },
       { estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: true, service_type: 'Pest Control' },
       // $100 paid in cash against the new $147 fee: $47 still collects.
       { estimated_price: null, primary_line_price: null, prepaid_amount: '100.00', prepaid_method: 'cash', is_callback: false, service_type: 'Pest Control' },
@@ -248,6 +248,8 @@ describe('card text', () => {
     expect(labels).toContain('Per-application fee: none on file → $147.00');
     expect(labels).toContain('Each completed visit is charged its own scheduled price, or $147.00 when it has none — auto-charged to the saved card when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.');
     expect(labels).toContain('Upcoming visits now on the schedule: 2 visits at $147.00, 1 visit at its own price, 1 visit is partly prepaid (the rest is charged), 1 visit bills nothing, 1 visit is fully prepaid.');
+    // The $120 visit's own price is listed, not just counted.
+    expect(labels).toContain('Priced visit on 2099-01-06 (Lawn Care): $120.00 is collected at completion.');
     expect(labels).toContain('Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.');
     expect(labels).toContain('No customer message is sent');
   });
@@ -586,6 +588,23 @@ describe('Codex round 4 on #6118', () => {
       customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
     });
     expect(stale).toMatchObject({ preview_changed: true });
+  });
+
+  test('priced visits are listed up to five, then one exact aggregate line; a partial prepayment shows what is left', async () => {
+    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+    const priced = (n, price, extra = {}) => ({ id: `p${n}`, status: 'confirmed', scheduled_date: `2099-02-0${n}`, estimated_price: price, prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null, ...extra });
+    mockState.visits = [1, 2, 3, 4, 5].map((n) => priced(n, '100.00')).concat([priced(6, '90.00'), priced(7, '60.00', { prepaid_amount: '20.00', prepaid_method: 'cash' })]);
+    const proposal = await propose(LEAVE);
+    const lines = proposal.display.next_visits;
+    expect(lines.filter((l) => l.startsWith('Priced visit'))).toHaveLength(5);
+    expect(lines).toContain('Priced visit on 2099-02-01 (Pest Control): $100.00 is collected at completion.');
+    expect(lines).toContain('2 more priced visits: $130.00 collected at completion in all.');
+    // A partial prepayment on a priced visit shows the amount left.
+    mockState.visits = [priced(7, '60.00', { prepaid_amount: '20.00', prepaid_method: 'cash' })];
+    expect((await propose(LEAVE)).display.next_visits).toContain('Priced visit on 2099-02-07 (Pest Control): $60.00 is collected at completion ($40.00 after $20.00 paid).');
+    // The price is pinned: a visit price edit changes the pin.
+    expect(BillingModeChange.cardPin(mockState.customer, [priced(1, '100.00')], LEAVE))
+      .not.toBe(BillingModeChange.cardPin(mockState.customer, [priced(1, '110.00')], LEAVE));
   });
 
   test('a priced visit with a partial prepayment shows no balance line (its own price wins in every lane)', async () => {
