@@ -66,6 +66,7 @@ const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
+const { CUSTOMER_LINK_TOOLS, executeCustomerLinkTool } = require('../services/intelligence-bar/customer-link-tools');
 const { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, repriceVisitsLive } = require('../services/intelligence-bar/reprice-visits-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
@@ -156,6 +157,7 @@ const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
 const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name));
+const CUSTOMER_LINK_TOOL_NAMES = new Set(CUSTOMER_LINK_TOOLS.map(t => t.name));
 const REPRICE_VISITS_TOOL_NAMES = new Set(REPRICE_VISITS_TOOLS.map(t => t.name));
 const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
@@ -181,6 +183,9 @@ const INFRA_TOOLS = [
   // Resend a paid receipt: the Invoices page button as a carded write, offered
   // beside the invoice readers on every admin context (admin-only below).
   ...RECEIPT_RESEND_TOOLS,
+  // The composer's Insert Link kinds and the Auto Pay setup link: carded
+  // writes a customer link is asked for from any page (admin-only below).
+  ...CUSTOMER_LINK_TOOLS,
   // Saved-card removal (with the Auto Pay-off step) and invoice address
   // correction: admin-only writes, both always behind the confirm card.
   ...BILLING_WRITE_TOOLS,
@@ -235,6 +240,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Resending a receipt contacts the customer — admin only, like the
   // requireAdmin send-receipt route it mirrors.
   ...RECEIPT_RESEND_TOOL_NAMES,
+  // Customer links mirror the requireAdmin /customer-link, /reschedule-link,
+  // /reservice-link and autopay-setup-link routes — admin only.
+  ...CUSTOMER_LINK_TOOL_NAMES,
   // Repricing visits runs the requireAdmin visit edit — admin only.
   ...REPRICE_VISITS_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
@@ -906,6 +914,11 @@ const VERIFIED_VERSION_PARAMS = {
   // reprice_future_visits binds every listed visit's id, date, status, price
   // and row version (reprice-visits-tools.js plan version).
   reprice_future_visits: '_verified_reprice_version',
+  // The customer-link writes bind the customer, kind/delivery and the
+  // contact (phone last ten, email) the card showed; a contact changed since
+  // is refused at commit (customer-link-tools.js pinnedVersionRefusal).
+  create_customer_link: '_verified_link_version',
+  send_autopay_setup_link: '_verified_autopay_version',
 };
 
 // The overlapping visits a booking card names, or [] when the lookup fails
@@ -3127,6 +3140,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (RECEIPT_RESEND_TOOL_NAMES.has(toolName)) {
     return executeReceiptResendTool(toolName, input, actionContext);
   }
+  if (CUSTOMER_LINK_TOOL_NAMES.has(toolName)) {
+    return executeCustomerLinkTool(toolName, input, actionContext);
+  }
   if (REPRICE_VISITS_TOOL_NAMES.has(toolName)) {
     return executeRepriceVisitsTool(toolName, input, actionContext);
   }
@@ -3231,6 +3247,7 @@ CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
+- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, card request, project report, consultation) for a customer and returns the url + a ready line; send_autopay_setup_link texts, emails or hands back the Auto Pay setup link. Both show a confirmation card. Never say there is no link tool. Payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
 
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days

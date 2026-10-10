@@ -25,6 +25,7 @@ const MODULES = [
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
   ['closeout-repair-tools', 'CLOSEOUT_REPAIR_TOOLS', 'executeCloseoutRepairTool'],
   ['receipt-resend-tools', 'RECEIPT_RESEND_TOOLS', 'executeReceiptResendTool'],
+  ['customer-link-tools', 'CUSTOMER_LINK_TOOLS', 'executeCustomerLinkTool'],
   ['reprice-visits-tools', 'REPRICE_VISITS_TOOLS', 'executeRepriceVisitsTool'],
   ['dashboard-tools', 'DASHBOARD_TOOLS', 'executeDashboardTool'],
   ['seo-tools', 'SEO_TOOLS', 'executeSeoTool'],

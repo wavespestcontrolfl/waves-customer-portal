@@ -2903,7 +2903,7 @@ async function officeRescheduleLink(svc) {
 // Final eligibility stays owned by the public /reschedule/:token page (e.g.
 // a missed same-day visit still rebooks there) — this endpoint only picks
 // WHICH visit the link points to.
-router.post('/reschedule-link', requireAdmin, async (req, res) => {
+async function rescheduleLinkHandler(req, res) {
   try {
     const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
@@ -2982,7 +2982,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     logger.error(`reschedule-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/reschedule-link', requireAdmin, (req, res) => rescheduleLinkHandler(req, res));
 
 // POST /api/admin/communications/reservice-link  { phone, customerId? }
 // Composer helper: resolve the recipient's self-serve /reservice/:token short
@@ -2997,7 +2998,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 //     (services/reservice-scheduler.js) so the composer can't text a
 //     link that lands on the not-eligible page. Final eligibility stays
 //     owned by the public page — plan state can change after the text.
-router.post('/reservice-link', requireAdmin, async (req, res) => {
+async function reserviceLinkHandler(req, res) {
   try {
     const { reserviceSelfServeEnabled, loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
     if (!reserviceSelfServeEnabled()) {
@@ -3098,7 +3099,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
 // Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
 // a link build — the gate-wrapped engine path emails the ask now and nothing
@@ -3578,7 +3580,7 @@ async function consultationLeadOnlyResponse(kind, last10, leadId) {
   return { status: 200, body: customerLinkResponse(kind, undefined, result, leadOnly.lead.first_name || '') };
 }
 
-router.post('/customer-link', requireAdmin, async (req, res) => {
+async function customerLinkHandler(req, res) {
   try {
     const body = req.body || {};
     const kind = String(body.kind || '');
@@ -3644,7 +3646,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     logger.error(`customer-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/customer-link', requireAdmin, (req, res) => customerLinkHandler(req, res));
 
 // GET /api/admin/communications/link-library
 // The Insert Link sheet's full searchable list (office review links computed
@@ -4777,5 +4780,26 @@ router._internals = {
 };
 
 module.exports = router;
+
+// The Insert Link builders, callable without an HTTP request: the Intelligence
+// Bar's create_customer_link runs the SAME handler the composer's Insert Link
+// sheet posts to (recipient resolution, owner rules, per-kind builders) and
+// reads its answer as { status, body } instead of an Express response.
+function collectedReply() {
+  const out = { status: 200, body: null };
+  const res = {
+    status(code) { out.status = code; return res; },
+    json(body) { out.body = body; return out; },
+  };
+  return { res, out };
+}
+async function runLinkHandler(handler, body) {
+  const { res, out } = collectedReply();
+  await handler({ body: body || {} }, res);
+  return out;
+}
+module.exports.customerLinkInsert = (body) => runLinkHandler(customerLinkHandler, body);
+module.exports.rescheduleLinkInsert = (body) => runLinkHandler(rescheduleLinkHandler, body);
+module.exports.reserviceLinkInsert = (body) => runLinkHandler(reserviceLinkHandler, body);
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;

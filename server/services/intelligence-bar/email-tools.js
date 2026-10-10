@@ -464,6 +464,28 @@ Return ONLY the email body text, no subject line, no metadata.`
   }
 }
 
+// What an HTML-sent reply body reads as once a mail client renders it: HTML
+// entities decoded with the repo's own `entities` (every named, decimal and
+// hex form a client knows — &Tab; and &NewLine; included, Codex r6 on
+// #6266), then every host-shaped token — including one sitting inside a tag
+// attribute — appended as its own whitespace-separated run so the link check
+// sees it as a link.
+function renderedTextForLinkCheck(body) {
+  const { decodeHTML } = require('entities');
+  let decoded = String(body || '');
+  // Nested encodings (&amp;#58;) unwrap in a couple of passes; bounded.
+  for (let i = 0; i < 3; i += 1) {
+    const next = decodeHTML(decoded);
+    if (next === decoded) break;
+    decoded = next;
+  }
+  // A URL parser drops tab, CR and LF anywhere in its input (WHATWG), so a
+  // host token is read with those removed too (Codex r5 on #6266 P2).
+  const hostTokenRe = /[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\/[^\s"'<>]*)?/g;
+  const hostTokens = [...(decoded.match(hostTokenRe) || []), ...(decoded.replace(/[\t\r\n]/g, '').match(hostTokenRe) || [])];
+  return hostTokens.length ? `${decoded} ${[...new Set(hostTokens)].join(' ')}` : decoded;
+}
+
 async function sendEmailReply({ email_id, body, _pinned_email }) {
   try {
     const email = await db('emails').where('id', email_id).first();
@@ -476,6 +498,18 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
         return { error: 'This email changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
       }
     }
+
+    // No customer bearer rides an email reply (comms-tools
+    // customerLinkSendRefusal, 'email' phase): the reply goes to the sender's
+    // address, which the email's customer attribution does not prove is the
+    // customer's, so appointment/report/receipt links are refused along with
+    // the composer-only kinds (an emailed prepared-contract token would also
+    // be a dead link — the composer's send activates it). The body goes out
+    // as HTML, so it is judged as the mail client will render it: entities
+    // decoded and host-shaped tokens inside markup surfaced (Codex security
+    // review on #6266: `https&#58;&#47;&#47;…` decodes to a live link).
+    const linkRefusal = await require('./comms-tools').customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' });
+    if (linkRefusal) return linkRefusal;
 
     const gmailClient = require('../../services/email/gmail-client');
     // ADMIN-BUG-R22 (same class): relayed mail (contact forms, lead
@@ -581,6 +615,11 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
     if (_pinned_phone && String(phone) !== String(_pinned_phone)) {
       return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
     }
+
+    // A customer link only the Communications composer may send (see
+    // comms-tools customerLinkSendRefusal) is refused here too.
+    const linkRefusal = await require('./comms-tools').customerLinkSendRefusal(message, phone, custId || null);
+    if (linkRefusal) return linkRefusal;
 
     // Operator-confirmed reply: the interlocked wrapper, so it never crosses an automatic reply.
     const smsResult = await sendManualCustomerSms({
@@ -844,4 +883,4 @@ async function executeEmailTool(toolName, input, actionContext = {}) {
   }
 }
 
-module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply };
+module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply, renderedTextForLinkCheck };
