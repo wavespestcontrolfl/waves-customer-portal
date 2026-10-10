@@ -1769,12 +1769,27 @@ function shutdown(signal) {
     .then((count) => { if (count) logger.info(`[shutdown] sent ${count} pending lead fallback reply(ies)`); })
     .catch(err => logger.warn(`[shutdown] lead fallback flush failed: ${err.message}`));
   const leadFallbacksFlushed = flushLeadFallbacks();
+  // A call-processing pass in flight (transcription + extraction run for
+  // minutes) would die with this process and leave its claim on the row for
+  // the 10-minute quiet reclaim. Give it a short grace, then hand the claim
+  // back so the next pod's sweep takes the row at once. Gated
+  // (GATE_CALL_PROC_SHUTDOWN_RELEASE); fail-soft; done before the pool closes.
+  const callPassesReleased = (async () => {
+    try {
+      const processor = require('./services/call-recording-processor');
+      const r = await processor.releaseInFlightForShutdown({ graceMs: 10000 });
+      if (r.inFlight) logger.info(`[shutdown] call passes: ${r.inFlight} in flight, ${r.released} released, ${r.lost} finished or taken, gate ${r.enabled ? 'on' : 'off'}`);
+    } catch (err) {
+      logger.warn(`[shutdown] call pass release failed: ${err.message}`);
+    }
+  })();
   io.close(() => {
     logger.info('[shutdown] Socket.io closed');
     httpServer.close(async () => {
       logger.info('[shutdown] HTTP server closed, exiting');
       await leadFallbacksFlushed;
       await flushLeadFallbacks();
+      await callPassesReleased;
       try {
         const db = require('./models/db');
         await Promise.race([

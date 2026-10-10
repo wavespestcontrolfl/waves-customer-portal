@@ -3782,6 +3782,14 @@ function summarizeBatch(results) {
 const LEGACY_CLAIM_QUIET_MINUTES = 10;
 // What a human forcing a reprocess waits for a claim that IS beating.
 const FORCE_CLAIM_QUIET_MINUTES = 3;
+// Passes this process currently holds a claim for, keyed by call_log.id.
+// Each entry carries the claim token and the status the row had BEFORE the
+// claim, so a SIGTERM (every production deploy) can hand the claim back the
+// same way the recording-not-ready release does — token-fenced, status
+// restored — instead of leaving the row to the 10-minute quiet reclaim.
+// Behind GATE_CALL_PROC_SHUTDOWN_RELEASE; see releaseInFlightForShutdown.
+const inFlightPasses = new Map();
+let shuttingDown = false;
 // COALESCE, not a bare comparison: with a NULL processing_started_at the
 // comparison yields NULL, NOT(NULL) is NULL, and the row would match NEITHER
 // branch — permanently unreclaimable, the worst possible bug in a lock.
@@ -9228,6 +9236,13 @@ const CallRecordingProcessor = {
    * Called from recording-status webhook or manually from admin.
    */
   async processRecording(callSid, opts = {}) {
+    // A draining process takes no new claim: a pass started seconds before
+    // the kill would only have to be released again, and the pod replacing
+    // this one owns the sweep from here (releaseInFlightForShutdown).
+    if (shuttingDown && isEnabled('callProcShutdownRelease')) {
+      logger.info(`[call-proc] Not claiming ${maskSid(callSid)} — process is shutting down`);
+      return { success: false, skipped: true, reason: 'shutting_down' };
+    }
     const processingStartedAt = new Date();
     // Per-stage wall clock for this pass, stamped into
     // metadata.processing_timings at finalization so "which stage is slow"
@@ -9382,6 +9397,9 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // A shutdown-release stamp bypasses the sweep's 10-minute age
+            // gate exactly once: the claim that honours it clears it.
+            metadata: trx.raw("metadata - 'shutdown_released_at'"),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -9442,6 +9460,9 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // A shutdown-release stamp bypasses the sweep's 10-minute age
+            // gate exactly once: the claim that honours it clears it.
+            metadata: trx.raw("metadata - 'shutdown_released_at'"),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -9489,7 +9510,19 @@ const CallRecordingProcessor = {
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
-    // The claim is ours from here. Beat while we work: transcription of a
+    // The claim is ours from here: register it so a SIGTERM can hand it back
+    // (releaseInFlightForShutdown). The pre-claim status is what that release
+    // restores — 'processing' (a dead pass we took over) maps to NULL, the
+    // same rule as the recording-not-ready release below.
+    const inFlightEntry = {
+      callSid,
+      procToken,
+      preClaimStatus: call.processing_status === 'processing' ? null : (call.processing_status || null),
+      settled: null,
+    };
+    inFlightEntry.done = new Promise((resolve) => { inFlightEntry.settled = resolve; });
+    inFlightPasses.set(call.id, inFlightEntry);
+    // Beat while we work: transcription of a
     // long recording is one multi-minute await with no natural checkpoints,
     // and without a beat the reclaim predicates cannot tell that pass from a
     // wedged one. unref() so a draining process never lingers for the timer.
@@ -22762,7 +22795,72 @@ const CallRecordingProcessor = {
       throw procErr;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      // Only this pass's own entry: after a shutdown release the row may be
+      // claimed again by a peer, but never by this process (it refuses new
+      // claims while draining), so a token check is belt-and-suspenders.
+      if (inFlightPasses.get(call.id)?.procToken === procToken) inFlightPasses.delete(call.id);
+      inFlightEntry.settled();
     }
+  },
+
+  /** How many passes this process currently holds a claim for (tests, shutdown log). */
+  inFlightPassCount() {
+    return inFlightPasses.size;
+  },
+
+  /**
+   * SIGTERM path (server/index.js shutdown). Stops this process taking new
+   * claims, gives the passes in flight `graceMs` to finish on their own, then
+   * hands back every claim still held: a token-fenced UPDATE that restores the
+   * row's pre-claim processing_status, clears the token and stamps
+   * metadata.shutdown_released_at so processAllPending on the pod replacing
+   * this one takes the row on its next 5-minute tick instead of after the
+   * 10-minute quiet window. The dying pass keeps running until the kill; its
+   * later writes are token-fenced and no-op, the same as a peer takeover.
+   *
+   * No-op (counts only) while GATE_CALL_PROC_SHUTDOWN_RELEASE is off.
+   */
+  async releaseInFlightForShutdown({ graceMs = 10000 } = {}) {
+    const enabled = isEnabled('callProcShutdownRelease');
+    const inFlight = inFlightPasses.size;
+    const summary = { enabled, inFlight, finished: 0, released: 0, lost: 0 };
+    if (!enabled) return summary;
+    shuttingDown = true;
+    if (!inFlight) return summary;
+    const snapshot = [...inFlightPasses.entries()];
+    await Promise.race([
+      Promise.all(snapshot.map(([, e]) => e.done)),
+      new Promise((resolve) => { const t = setTimeout(resolve, Math.max(0, graceMs)); if (typeof t.unref === 'function') t.unref(); }),
+    ]);
+    for (const [callId, entry] of snapshot) {
+      // A pass that finished during the grace removed its own entry.
+      if (inFlightPasses.get(callId) !== entry) { summary.finished += 1; continue; }
+      try {
+        const rows = await db('call_log')
+          .where({ id: callId })
+          .where('processing_token', entry.procToken)
+          .update({
+            processing_status: entry.preClaimStatus,
+            processing_token: null,
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{shutdown_released_at}', to_jsonb(?::text), true)",
+              [new Date().toISOString()],
+            ),
+            updated_at: new Date(),
+          });
+        if (rows) {
+          summary.released += 1;
+          logger.info(`[call-proc] shutdown: released claim on ${maskSid(entry.callSid)} (status restored to ${entry.preClaimStatus || 'pending'})`);
+        } else {
+          // The pass finished (or a peer took the row) between the grace and
+          // this write — nothing to hand back.
+          summary.lost += 1;
+        }
+      } catch (err) {
+        logger.warn(`[call-proc] shutdown: release failed for ${maskSid(entry.callSid)}: ${err.message}`);
+      }
+    }
+    return summary;
   },
 
   /**
@@ -22836,7 +22934,13 @@ const CallRecordingProcessor = {
                 this.where('transcription_status', 'pending').whereNull('transcription');
               });
           })
-          .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+          .andWhere(function () {
+            this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+              // A claim handed back at a deploy (releaseInFlightForShutdown)
+              // already waited out the CDN window once; take it now. The
+              // claim clears the stamp, so this bypass applies exactly once.
+              .orWhereRaw("metadata ->> 'shutdown_released_at' IS NOT NULL");
+          });
         })
         .orWhere('processing_status', 'no_transcription')
         .orWhere(function () {
@@ -23413,6 +23517,9 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  // Tests only: the drain flag is process-wide, so a suite that exercised the
+  // shutdown path resets it to play the replacing pod.
+  resetShutdownForTests() { shuttingDown = false; },
   legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,
