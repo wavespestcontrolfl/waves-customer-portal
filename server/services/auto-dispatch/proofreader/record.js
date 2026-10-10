@@ -32,7 +32,8 @@ const contextAggregator = require('../../context-aggregator');
 const { redactAccessCodes } = contextAggregator;
 const { excludeUnresolvedSendReservations } = require('../../messaging/review-ask-reservation');
 const { resolveEmailCustomerLink, personSentFilter } = require('../../email/email-customer-link');
-const { emailPlainText, stripQuotedAndSignature, ownSubjectsInThreads } = require('../../email/email-strip');
+const { emailPlainText, stripQuotedAndSignature, ownReplySubject } = require('../../email/email-strip');
+const { operatorReply, smsContactSelects } = require('../../staff-contact');
 const { etOffsetIso } = require('../../../utils/datetime-et');
 
 // One entry's longest text. A longer one is split into parts, never cut
@@ -102,10 +103,11 @@ async function readTexts(conn, { customerId, asOf }) {
     // Only a text that reached the customer can have promised anything.
     .where(function reached() { this.where('direction', 'inbound').orWhereIn('status', ['sent', 'delivered']); })
     .orderBy('created_at')
-    .select('direction', 'message_body', 'message_type', 'admin_user_id', 'created_at');
+    .select('direction', 'message_body', 'message_type', 'created_at', ...smsContactSelects(conn));
   return rows.map((row) => {
-    const person = row.message_type === 'manual' || !!row.admin_user_id;
-    const from = row.direction === 'inbound' ? 'customer' : (person ? 'staff' : 'system');
+    // The one operator-provenance rule (staff-contact.js): message_type
+    // 'manual' alone is reused by automated senders (Codex #6258 r6).
+    const from = row.direction === 'inbound' ? 'customer' : (operatorReply(row) ? 'staff' : 'system');
     return entry('text', from, row.created_at, row.message_body);
   });
 }
@@ -131,6 +133,32 @@ async function readTexts(conn, { customerId, asOf }) {
 // signature are stripped, and a subject counts only when it is new in its
 // thread (stripQuotedAndSignature, ownSubjectsInThreads). Otherwise an old
 // "Tuesdays only" would be read again at the date of every later reply (r3).
+// Which subjects are new words in their thread, judged as the thread stood at
+// `asOf` (email-strip.js ownSubjectsInThreads asks the same of the thread as
+// it stands NOW, on the database clock: a replay needs the move's clock, r6).
+// Only mail stored and received before `asOf` counts as a thread partner. A
+// mail stored in the 15 minutes before `asOf` had no settled thread yet (its
+// partners could still be syncing): its subject is unread, not absent.
+async function ownSubjectsAsOf(conn, rows, asOf, live, unread) {
+  const own = new Map();
+  const withSubject = rows.filter((row) => clean(row.subject));
+  const threadIds = [...new Set(withSubject.map((row) => row.gmail_thread_id).filter(Boolean))];
+  const stored = threadIds.length ? await live(conn('emails').whereIn('gmail_thread_id', threadIds)).whereNotNull('subject')
+    .whereRaw("NOT COALESCE(jsonb_exists(label_ids::jsonb, 'DRAFT'), false)")
+    .select('id', 'gmail_thread_id', 'subject', 'received_at') : [];
+  for (const row of withSubject) {
+    if (row.created_at && msOf(asOf) - msOf(row.created_at) < SUBJECT_SETTLE_MS) {
+      unread.push({ channel: 'email', at: eastern(row.received_at), reason: 'subject_not_settled' });
+      continue;
+    }
+    const at = msOf(row.received_at);
+    const earlier = stored.filter((o) => o.gmail_thread_id && o.gmail_thread_id === row.gmail_thread_id && String(o.id) !== String(row.id)
+      && (msOf(o.received_at) < at || (msOf(o.received_at) === at && String(o.id) < String(row.id))));
+    own.set(row.id, ownReplySubject(row.subject, earlier.map((o) => o.subject)));
+  }
+  return own;
+}
+
 async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
   const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'snippet', 'received_at', 'created_at'];
   // received_at is Gmail's time; a backfill stores an old mail later, so the
@@ -159,14 +187,7 @@ async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
     const owner = await resolveEmailCustomerLink(conn, row);
     if (owner != null && String(owner) === String(customerId)) replies.push(row);
   }
-  const subjects = await ownSubjectsInThreads(conn, [...linked, ...replies]);
-  // A mail stored in the last 15 minutes has no settled subject yet (the
-  // helper answers '' for it): its subject is unread, not absent.
-  for (const row of [...linked, ...replies]) {
-    if (clean(row.subject) && row.created_at && Date.now() - msOf(row.created_at) < SUBJECT_SETTLE_MS) {
-      unread.push({ channel: 'email', at: eastern(row.received_at), reason: 'subject_not_settled' });
-    }
-  }
+  const subjects = await ownSubjectsAsOf(conn, [...linked, ...replies], asOf, live, unread);
   const mail = (row, from) => entry(
     'email', from, row.received_at,
     [clean(subjects.get(row.id)), clean(stripQuotedAndSignature(emailPlainText(row)))].filter(Boolean).join(': '),
@@ -263,8 +284,10 @@ async function readAssistantChat(conn, { customerId, asOf }) {
 // customer, edited in place, so it is undated like the file notes.
 async function readPropertyNotes(conn, { customerId, asOf }, unread) {
   const row = await conn('property_preferences').where({ customer_id: customerId }).first('special_instructions', 'access_notes', 'created_at', 'updated_at');
-  if (!row || !(clean(row.special_instructions) || clean(row.access_notes))) return [];
+  if (!row) return [];
+  // Before the content test: a note cleared after the move reads empty today (r6).
   if (revisedLater(row, asOf, 'property_note', unread)) return [];
+  if (!(clean(row.special_instructions) || clean(row.access_notes))) return [];
   return [entry('property_note', 'customer', null, row.special_instructions), entry('property_note', 'customer', null, row.access_notes)];
 }
 

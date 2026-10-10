@@ -10,13 +10,6 @@ jest.mock('../services/email/email-customer-link', () => ({
   personSentFilter: (alias) => `SENT_ONLY(${alias})`,
 }));
 
-// The thread-subject rule has its own suites; here a subject is its own
-// words unless it only repeats the thread's behind "Re:".
-jest.mock('../services/email/email-strip', () => {
-  const actual = jest.requireActual('../services/email/email-strip');
-  return { ...actual, ownSubjectsInThreads: jest.fn(async (_conn, rows) => new Map(rows.map((row) => [row.id, actual.ownReplySubject(row.subject, ['Schedule'].filter((subject) => subject !== row.subject))]))) };
-});
-
 const {
   proofreadMove, judge, buildCustomerRecord, moveFacts, PROMPT_VERSION,
 } = require('../services/auto-dispatch/proofreader');
@@ -57,6 +50,7 @@ function fakeConn(tables, { fail = [] } = {}) {
     return chain;
   };
   conn.calls = calls;
+  conn.raw = (sql) => sql;
   return conn;
 }
 
@@ -65,7 +59,7 @@ const TABLES = {
   customers: [{ email: 'pat@example.test', crm_notes: null, internal_notes: 'Prefers a text before arrival.', follow_up_notes: null, access_notes: 'Side gate code 4821, latch sticks.' }],
   sms_log: [
     { direction: 'inbound', message_body: 'Please always come on  Wednesdays.', message_type: 'inbound', admin_user_id: null, created_at: '2026-03-02T15:10:00.000Z' },
-    { direction: 'outbound', message_body: 'No problem, Wednesdays it is.', message_type: 'manual', admin_user_id: 'u1', created_at: '2026-03-02T15:22:00.000Z' },
+    { direction: 'outbound', message_body: 'No problem, Wednesdays it is.', message_type: 'manual', operator_sent: true, created_at: '2026-03-02T15:22:00.000Z' },
     { direction: 'outbound', message_body: 'Your technician is on the way.', message_type: 'tech_en_route', admin_user_id: null, created_at: '2026-04-01T13:00:00.000Z' },
   ],
   emails: [
@@ -205,7 +199,27 @@ describe('the customer record', () => {
   test('an email entry holds only the words that mail added: no quoted thread, no inherited subject', async () => {
     const reply = { id: 'r1', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Re: Schedule', body_text: 'Any day works now.\n\nOn Fri, May 1, 2026 at 10:00 AM Office <office@example.test> wrote:\n> Tuesdays only, as you asked.', received_at: '2026-06-01T10:00:00.000Z' };
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [reply] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-    expect(record.entries.filter((e) => e.channel === 'email').map((e) => e.text)).toEqual(['Any day works now.']);
+    const first = { id: 'a0', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Schedule', body_text: 'Hello.', received_at: '2026-05-01T09:00:00.000Z' };
+    const withFirst = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [first, reply] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(withFirst.entries.filter((e) => e.channel === 'email').map((e) => e.text)).toEqual(['Schedule: Hello.', 'Any day works now.']);
+    // The thread is read as it stood at the move: stored and received before it.
+    const threadRead = fakeConn({ ...TABLES, emails: [first, reply] });
+    await buildCustomerRecord(threadRead, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    const bounds = threadRead.calls.filter(([table, method, , op]) => table === 'emails' && method === 'where' && op === '<').map(([, , column]) => column);
+    expect(bounds.filter((column) => column === 'created_at').length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a text is staff words only by the operator provenance rule, never by message_type manual alone', async () => {
+    const text = (extra) => ({ direction: 'outbound', message_body: 'See you Tuesday.', created_at: '2026-04-02T13:00:00.000Z', ...extra });
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, sms_log: [
+      text({ message_type: 'manual', operator_sent: false }), text({ message_type: 'ai_approved', operator_sent: false }), text({ message_type: 'manual', operator_sent: true }),
+    ] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'text').map((e) => e.from)).toEqual(['system', 'staff', 'staff']);
+  });
+
+  test('a property note cleared after the as-of time is unread, not absent', async () => {
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, property_preferences: [{ special_instructions: null, access_notes: '', created_at: '2026-05-01T10:00:00.000Z', updated_at: '2026-10-06T10:00:00.000Z' }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'property_note', at: '2026-05-01T06:00:00-04:00', reason: 'revised_later' }]));
   });
 
   test('a staff or technician note edited after the as-of time is unread; the visit\'s notes are unread when the visit is gone', async () => {
@@ -249,9 +263,9 @@ describe('the customer record', () => {
     expect(later.unread).toEqual(expect.arrayContaining([expect.objectContaining({ channel: 'property_note', reason: 'revised_later' })]));
   });
 
-  test('a mail stored in the last 15 minutes has an unsettled subject: the record is incomplete', async () => {
-    const fresh = { id: 'f1', gmail_thread_id: 'th7', customer_id: 'c1', subject: 'Never schedule Fridays', body_text: '', received_at: '2026-10-05T08:00:00.000Z', created_at: new Date().toISOString() };
-    const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [fresh] }), { customerId: 'c1', serviceId: 's1', asOf: new Date() });
+  test('a mail stored in the 15 minutes before the move has an unsettled subject: the record is incomplete', async () => {
+    const fresh = { id: 'f1', gmail_thread_id: 'th7', customer_id: 'c1', subject: 'Never schedule Fridays', body_text: '', received_at: '2026-10-05T08:00:00.000Z', created_at: new Date(new Date(AS_OF).getTime() - 5 * 60 * 1000).toISOString() };
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [fresh] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'email', at: '2026-10-05T04:00:00-04:00', reason: 'subject_not_settled' }]));
   });
 

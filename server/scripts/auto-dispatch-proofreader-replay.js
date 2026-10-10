@@ -124,6 +124,11 @@ async function loadMoves(db) {
       'l.id as audit_id', 'l.scheduled_service_id', 'l.customer_id', 's.service_type', 'l.created_at', 'l.reason_code',
       'l.old_scheduled_date', 'l.old_window_start', 'l.old_window_end', 'l.new_scheduled_date', 'l.new_window_start', 'l.new_window_end',
       't0.name as old_tech', 't1.name as new_tech', 'c.first_name', 'c.last_name',
+      // The audit row is written after the move commits and its reminders
+      // sync, so its time is later than the move. The reschedule_log row the
+      // move's own transaction wrote carries the move time (Codex #6258 r6).
+      db.raw(`(select max(r.created_at) from reschedule_log r where r.scheduled_service_id = l.scheduled_service_id
+        and r.created_at <= l.created_at and r.created_at >= l.created_at - interval '1 hour') as moved_at`),
     );
   if (LIMIT) query = query.limit(LIMIT);
   return query;
@@ -131,7 +136,7 @@ async function loadMoves(db) {
 
 async function replayMove(row, arms, { db, proofreader, toDateStr }) {
   const record = await proofreader.buildCustomerRecord(db, {
-    customerId: row.customer_id, serviceId: row.scheduled_service_id, asOf: new Date(row.created_at),
+    customerId: row.customer_id, serviceId: row.scheduled_service_id, asOf: new Date(row.moved_at || row.created_at),
   });
   const move = proofreader.moveFacts({
     // The audit row keeps no service type: it is read from the visit as it is
