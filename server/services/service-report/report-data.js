@@ -5,7 +5,7 @@ const { irrigationRateOptions, storedRateTable, liveRateTable } = require('../ir
 const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
-const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
+const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker, labelPicksFromStored, pickedReportLabel } = require('../lawn-photo-shots');
 const { buildLawnPhotoSet } = require('./lawn-photo-set');
 const { frozenCoverageDefaultsOnly, coverageVerdictStamp } = require('./lawn-coverage-verdict');
 const reportFacts = require('./lawn-report-facts');
@@ -2654,6 +2654,11 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
     .filter(Boolean);
 }
 
+// GATE_LAWN_PHOTO_LABEL_PICK, guarded like its neighbors so a test double of feature-gates without the reader reads it as off.
+function lawnPhotoLabelPickLive() {
+  return typeof featureGates.lawnPhotoLabelPickLive === 'function' && featureGates.lawnPhotoLabelPickLive();
+}
+
 // Read at call time; a partial feature-gates mock (or a missing export) means off.
 function lawnReportPhotoSetLive() {
   return typeof featureGates.lawnReportPhotoSetLive === 'function' && featureGates.lawnReportPhotoSetLive();
@@ -2899,6 +2904,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
+  // GATE_LAWN_PHOTO_LABEL_PICK prints the label the technician chose under a photo (stored per assessment, so the
+  // assessment id already moves the key); the stamp rides only while the gate is live, so gate off leaves every key unchanged.
+  if (lawnPhotoLabelPickLive()) irrigationStamp += ':labelpick=1';
   // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES drops the PDF's coverage list, map and
   // zone legend for a lawn visit whose coverage verdict, frozen at completion
   // (structured_notes.lawnCoverageVerdict), says defaults only. The key reads
@@ -3346,12 +3354,18 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .limit(shotListLive || photoSetEligible ? LAWN_SHOT_LIST_CAP : 5)
     // read-failure-exempt: gallery photos only; no insight or memory entry reads them
     .catch(() => { photoReadFailed = true; return []; });
+  // GATE_LAWN_PHOTO_LABEL_PICK: the label the technician chose for a photo, stored beside it at capture
+  // (lawn_assessments.photos[photo_order].labelKey). Read only while the gate is live; a stored value that is not
+  // a shot key falls back to the slot's own label. Off = no read and no key below.
+  const labelPicks = lawnPhotoLabelPickLive() ? labelPicksFromStored(assessment.photos) : [];
+  const pickedLabelFor = (photo) => pickedReportLabel(labelPicks[Number(photo.photo_order)]);
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
     url: await lawnPhotoUrl(photo),
     type: photo.photo_type || 'general',
     zone: photo.zone || null,
     ...(shotListLive ? { zoneLabel: photoZoneLabel(photo.zone) } : {}),
+    ...(pickedLabelFor(photo) ? { labelPicked: pickedLabelFor(photo) } : {}),
     isBest: !!photo.is_best_photo,
     qualityScore: photo.quality_score ?? null,
     scores: {
@@ -3376,7 +3390,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // partial set would hide the one photo whose second signing may succeed in the
   // gallery copy the document suppresses.
   const photoSetRows = photoSetEligible
-    ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order }))
+    ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order, ...(pickedLabelFor(photo) ? { pickedLabel: pickedLabelFor(photo) } : {}) }))
     : [];
   const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length + (photoSetEligible && photoReadFailed ? 1 : 0);
   const photoSet = photoSetUnresolved ? [] : buildLawnPhotoSet(photoSetRows);

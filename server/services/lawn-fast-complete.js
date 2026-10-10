@@ -30,6 +30,7 @@ const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 const bermudaRemoval = require('./lawn-bermuda-removal');
+const { FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
@@ -517,6 +518,13 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
+// GATE_LAWN_NOV_LARGE_PATCH_N: a nitrogen line the plan sized for the reduced target keeps the plan's note on the sheet (the planned row
+// prints its gateNotes). Only that note is carried: every other planned row is the payload it was. `{}` when the plan did not cut the bag.
+function fungusNitrogenNoteOf(item) {
+  const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => note?.key === FUNGUS_NITROGEN_NOTE_KEY && note.text).map((note) => note.text);
+  return texts.length ? { gateNotes: texts } : {};
+}
+
 // GATE_LAWN_TROUBLE_AREAS: the places the yearly limits are judged at (lawn-trouble-areas.js), or null (gate off: every
 // decision is the lawn-wide one, as before).
 const limitPlaces = async (svc, knex) => (featureGates.lawnTroubleAreasLive() && await require('./lawn-trouble-areas').propertyOf(knex, svc) ? require('./lawn-trouble-areas').PLACE_IDS : null);
@@ -707,6 +715,7 @@ async function sheetPlanned({ plan, items, addOns }, knex) {
       ratePer1000: item.mix?.ratePer1000 ?? null,
       rateUnit: item.mix?.rateUnit ?? null,
       ...programRateFor(item, programRows),
+      ...fungusNitrogenNoteOf(item),
       approvedForReport: entry.approvedForReport,
       wateringRule: entry.rule,
       wateringSummary: entry.ruleSummary,

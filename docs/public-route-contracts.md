@@ -2914,6 +2914,8 @@ cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
 PDFs in both directions. Nothing else in the payload changes, and with the gate
 off the payload and the signature are byte-identical to before.
 
+`GATE_LAWN_PHOTO_LABEL_PICK` (dark; needs `GATE_LAWN_SHOT_LIST` at capture): a lawn photo whose technician chose another customer label carries one extra payload key, `lawnAssessment.photos[].labelPicked` (the shot list's customer wording, for example "Close-up" on a photo shot in the Shaded area slot), and `reportV2.photos[].label`, the labeled photo set's `label` and the web strip caption print it instead of the slot's wording. The key is absent for a photo with no pick and for every photo while the gate is off; `zone` and `zoneLabel` never change.
+
 `GATE_LAWN_REPORT_PHOTO_SET` (dark): for a lawn visit captured under the shot
 list (`lawn_assessments.photos[].photoVocabulary` is `shot_list_v1`; a visit
 without that marker is untouched), the service-report payload gains
