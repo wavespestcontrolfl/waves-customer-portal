@@ -481,9 +481,13 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
     out.waterInByLabel = long.label;
   }
 
+  // The live banner lasts until the LAST deadline it names: after a short
+  // water-in's deadline, the long line still has days to run.
+  const lastDeadline = long ? long.by.toISOString() : out.waterInBy;
+
   if (!holds.length) {
     out.state = 'water_in';
-    out.expiresAt = out.waterInBy;
+    out.expiresAt = lastDeadline;
     out.lines = waterInDetail
       ? [...waterInLines(waterInDetail, out.waterInByLabel, false), ANY_DAY_LINE, ...longLines]
       : longLines;
@@ -510,7 +514,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
     out.state = 'hold_then_water_in';
     // A hold that waits for drying keeps the whole note live past the water-in
     // deadline: the drying condition never ends by the clock.
-    out.expiresAt = dryHolds.length ? null : out.waterInBy;
+    out.expiresAt = dryHolds.length ? null : lastDeadline;
     out.lines = [
       `Skip your turf watering until ${holdLabel}.`,
       ...(waterInDetail ? [...waterInLines(waterInDetail, out.waterInByLabel, true), ANY_DAY_LINE] : []),

@@ -294,6 +294,9 @@ describe('rule D: a pre-emergent window over 7 days follows the label (owner 202
       'Run it even if it is not your usual day.',
       'In all, it needs about ½ inch of water by Wed, Oct 14 at 2 PM. Rain and your regular watering both count.',
     ]);
+    // The live banner stays until the long deadline, not the short one.
+    expect(r.expiresAt).toBe('2026-10-14T18:00:00.000Z');
+    expect(build([HOLD(24), ARENA(), PRE_EM()]).expiresAt).toBe('2026-10-14T18:00:00.000Z');
   });
 
   test('the October visit: Celsius hold, Arena water-in after it, the Stonewall total last', () => {
