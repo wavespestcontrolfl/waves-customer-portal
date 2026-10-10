@@ -6965,11 +6965,25 @@ const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|
 const PRE_CONSTRUCTION_SERVICE_KEYS = new Set(['termite_slab_pretreat', 'termite_pretreatment']);
 // Existing-structure termite work: localized treatments (spot, foam, bait,
 // drill, station) and the treatments an existing building gets (trenching,
-// rodding, liquid or perimeter treatment, WDO or other inspection, retreat).
-// Any of these in the view's service words means the pre-treat is NOT the only
+// rodding, perimeter treatment, WDO or other inspection, retreat). Any of
+// these in the view's service words means the pre-treat is NOT the only
 // requested work, so the unit card stays. Soil treatment and barrier are not
-// listed: a pre-construction pre-treat is itself a soil barrier.
-const EXISTING_STRUCTURE_TERMITE_WORK_RE = /\b(?:spot|foam\w*|bait\w*|drill\w*|stations?|sentricon|localized|fumigat\w*|tent(?:ing|ed)?|trench\w*|rodd?(?:ing|ed)?|rods?|liquid|perimeter|wdo|wood[- ]destroying|inspect\w*|existing|re-?treat\w*)\b/i;
+// listed alone: a pre-construction pre-treat is itself a soil barrier. The
+// bare words "liquid" and "existing" are not listed either: "liquid
+// termiticide before the slab pour" and "existing customer needs a slab
+// pre-treat" are plain pre-treat jobs. "Liquid" vetoes only through
+// existingStructureTermiteWork below.
+const EXISTING_STRUCTURE_TERMITE_WORK_RE = /\b(?:spot|foam\w*|bait\w*|drill\w*|stations?|sentricon|localized|fumigat\w*|tent(?:ing|ed)?|trench\w*|rodd?(?:ing|ed)?|rods?|perimeter|wdo|wood[- ]destroying|inspect\w*|re-?treat\w*)\b/i;
+const LIQUID_TERMITE_WORK_RE = /\bliquid\b/i;
+const LIQUID_EXISTING_CONTEXT_RE = /\b(?:perimeter|barrier|foundation|around (?:the )?(?:home|house|structure))\b/i;
+const LIQUID_NEW_CONSTRUCTION_RE = /\b(?:pour|before the slab|new construction)\b/i;
+function existingStructureTermiteWork(words) {
+  if (EXISTING_STRUCTURE_TERMITE_WORK_RE.test(words)) return true;
+  // Fail closed for a mixed call: liquid work tied to the building's
+  // perimeter or foundation, with no new-construction wording to explain it.
+  return LIQUID_TERMITE_WORK_RE.test(words) && LIQUID_EXISTING_CONTEXT_RE.test(words)
+    && !LIQUID_NEW_CONSTRUCTION_RE.test(words);
+}
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
 
 // Card-only companion to the waiver above (owner 2026-10-07), narrowed to
@@ -7012,14 +7026,14 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
     // Pre-construction pre-treats only (PRE_CONSTRUCTION_SERVICE_KEYS): a new
     // slab has no unit. The view's own service words may name only the
     // termite family and no existing-structure termite work (spot, foam, bait,
-    // drill, station, trenching, rodding, liquid, perimeter, inspection) — anything else heard on the call may target one unit.
+    // drill, station, trenching, rodding, perimeter or liquid-perimeter, inspection) — anything else heard on the call may target one unit.
     // pain_points is the extractor's own list of what the caller wants fixed.
     // The raw transcript is NOT family-scanned: on the audited slab calls a
     // transcript-wide scan read stray words as another service family. It is
     // scanned in full for unit/suite wording below.
     const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
     const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
-    const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !EXISTING_STRUCTURE_TERMITE_WORK_RE.test(serviceWords);
+    const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords);
     return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });

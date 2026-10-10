@@ -453,6 +453,9 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, pain_points: ['Slab pre-treat', 'rodding along the existing wall'] }, commercial)).toBe(false);
     expect(run({ ...slab, requested_service: 'slab pre-treat plus a liquid perimeter treatment' }, commercial)).toBe(false);
     expect(run({ ...slab, call_summary: 'Slab pre-treat and a termite inspection of the office' }, commercial)).toBe(false);
+    // Plain pre-treat wording still drops the card.
+    expect(run({ ...slab, call_summary: 'Apply liquid termiticide before the slab pour' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, commercial)).toBe(true);
   });
 
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
