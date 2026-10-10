@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { CompletionPanel } from "./SchedulePage";
 import pageSource from "./SchedulePage.jsx?raw";
+import estimatePageSource from "../EstimateViewPage.jsx?raw";
 import { isLawnFastCompleteEligible } from "../../lib/lawn-fast-complete";
 import { isFastCompleteReportEligible } from "../../lib/pest-fast-complete";
 import { areaAddOnRowServiceType, hostAreaAddOns, soldAreaText } from "../../lib/areaAddOns";
@@ -167,6 +168,17 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
     expect(screen.getAllByLabelText("Remove product")).toHaveLength(1);
     expect(within(blockText()).queryByText(/^Recorded:/)).not.toBeInTheDocument();
     expect(within(blockText()).getByLabelText("Product used for Bed Pre-Emergent Weed Control")).toBeInTheDocument();
+  });
+
+  // Codex round 58: the customer estimate page must not report an add-on refusal as a taken slot.
+  it("the estimate page routes the add-on no-booking codes to the reload recovery, on accept and on hold extension", () => {
+    const fn = estimatePageSource.slice(estimatePageSource.indexOf("export function isAreaAddOnNoBookingCode(code) {"));
+    for (const code of ["AREA_ADDONS_GATED", "AREA_ADDON_YEARLY_LIMIT_REACHED", "AREA_ADDON_HISTORY_UNAVAILABLE", "AREA_ADDONS_ONE_TIME_ACCEPT_ONLY"]) {
+      expect(fn).toContain(`'${code}'`);
+    }
+    // a visit that needs a new slot IS a pick-another-time case
+    expect(fn).not.toContain("AREA_ADDON_VISIT_NEEDS_NEW_SLOT");
+    expect(estimatePageSource.split("|| body.code === 'BERMUDA_SUPPRESSION_GATED' || isAreaAddOnNoBookingCode(body.code)) {").length - 1).toBe(2);
   });
 
   // Codex round 44.

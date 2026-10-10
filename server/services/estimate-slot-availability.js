@@ -675,9 +675,12 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   // The area add-ons the estimate sells NOW, by its row's pricing authority (estimate-result-container storedAreaAddOnRows:
   // a SERVER reprice can leave an empty `result` beside a stale `engineResult` that still lists an add-on). The gate and
   // the limit recheck read this set; the booking profile must not carry an add-on they do not see.
-  const currentAddOnKeys = new Set(require('./estimate-result-container')
-    .storedAreaAddOnRows(estData, { pricingAuthority: estimate.pricing_authority ?? estimate.pricingAuthority ?? null })
-    .map((row) => row.addOnKey));
+  // An enabled, itemized authored proposal that sells no add-on sells none, whatever engine rows it retains (the
+  // persisted detector's rule, v1-legacy-mapper estimateDataCarriesAreaAddOns): then the set is empty.
+  const rowAuthority = { pricingAuthority: estimate.pricing_authority ?? estimate.pricingAuthority ?? null };
+  const currentAddOnKeys = new Set(require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estData, rowAuthority)
+    ? require('./estimate-result-container').storedAreaAddOnRows(estData, rowAuthority).map((row) => row.addOnKey)
+    : []);
   for (const item of (normalizeOneTimeBreakdown(estData).items || [])) {
     if (!item || typeof item !== 'object') continue;
     if (item.service === AREA_ADDON_ENGINE_KEY && !currentAddOnKeys.has(item.addOnKey)) continue;

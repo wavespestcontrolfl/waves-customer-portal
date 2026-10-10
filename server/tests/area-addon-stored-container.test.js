@@ -193,6 +193,14 @@ describe('the slot profile follows the row\'s pricing authority for add-ons', ()
   const row = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', addOnCategory: 'pest_control', name: 'Web Sweep', price: 89 };
   const stale = { result: {}, engineResult: { oneTime: { total: 89, items: [row] } } };
   const addOnsOf = (estimate) => availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' }).services.filter((svc) => svc.engineKey === 'area_addon');
+  // Codex round 58: an authored proposal that no longer sells the add-on, beside another one-time service it keeps.
+  test('an authored proposal that sells no add-on: the retained engine row is not profiled', () => {
+    const retained = { result: { oneTime: { total: 239, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 150 }, row] } } };
+    const proposal = { enabled: true, buildings: [{ lineItems: [{ description: 'One-Time Pest Control', unitPrice: 150, frequency: 'one_time' }] }] };
+    expect(addOnsOf({ id: 'e-3', estimate_data: retained }).map((svc) => svc.catalogServiceKey)).toEqual(['area_addon_web_sweep']);
+    expect(addOnsOf({ id: 'e-4', estimate_data: { ...retained, proposal } })).toEqual([]);
+  });
+
   test('a SERVER reprice with an empty result drops the stale add-on from the profile; without that authority the retained row still books', () => {
     expect(addOnsOf({ id: 'e-1', pricing_authority: 'SERVER', estimate_data: stale })).toEqual([]);
     expect(addOnsOf({ id: 'e-2', pricing_authority: null, estimate_data: stale }).map((svc) => svc.catalogServiceKey)).toEqual(['area_addon_web_sweep']);
