@@ -90,6 +90,8 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     expect(notes).toMatch(/do not quote a treatment on symptoms/);
     expect(notes).toMatch(/Lethal-bronzing injections are preventive only/);
     expect(treeShrubText()).not.toMatch(/÷ 85|8-2-12/);
+    // Owner 2026-10-09: the divisor stays 105 (÷ 85 would put 1.2 lb N on 1,000 sq ft; the Sarasota County code caps one application at 1 lb).
+    expect(notes).toMatch(/÷ 105 keeps one application under the 1 lb nitrogen per 1,000 sq ft limit in the Sarasota County fertilizer codes\. Do not raise the rate\./);
     expect(visit('Jul').primary).toMatch(/0-0-16 #510513/);
 
   });
@@ -103,6 +105,22 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
       expect(line).toMatch(/refer for diagnosis/);
       expect(line).toMatch(/only after a diagnosis supports it and the palm is eligible/);
     }
+  });
+
+  test('freeze, joint-mosquito and tier text (owner 2026-10-09)', () => {
+    const notes = protocols.tree_shrub.notes.join('\n');
+    const freeze = notes.match(/After a freeze:[^\n]*/)[0];
+    expect(freeze).toMatch(/no extra palm feeding and no foliar micronutrient spray\. Leave brown fronds until the cold season ends\./);
+    // The kit copper label is not verified for a palm bud drench, so the rule
+    // is a hold and an office call, never a drench procedure (Codex r1 #6185).
+    expect(freeze).toMatch(/Spear pulls out: photo, note and call the office; do not drench the bud/);
+    expect(freeze).not.toMatch(/drench the bud once|repeat once|badge|southern ag|banner/i);
+    expect(notes).toMatch(/Account that also has mosquito service: check for scale, sooty mold and mites at every visit; photo any find\./);
+    expect(protocols.mosquito.notes.join('\n')).toMatch(/Account that also has tree and shrub service: barrier spray at most monthly, aimed at low shaded foliage; no spray on blooming plants or on sago, ficus, camellia, holly or magnolia\./);
+    // The quarterly 4x tier is retired: sold tiers are 6 and 9 visits.
+    expect(Object.keys(protocols.tree_shrub.tiers)).toEqual(['six_x', 'nine_x']);
+    expect(protocols.tree_shrub.tiers.six_x).toMatch(/^6 visits a year, about every 60 days\./);
+    expect(protocols.tree_shrub.tiers.nine_x).toMatch(/^9 visits a year, about every 40 days\./);
   });
 
   test('omits plan-only labels and scheduling filler from the reference', () => {

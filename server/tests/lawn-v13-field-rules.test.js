@@ -17,7 +17,8 @@ describe('recipe text', () => {
   test.each(TRACKS)('%s: Dismiss is retired and the jug note replaces it', (grass) => {
     const track = v13[grass];
     for (const v of track.visits) expect({ month: v.month, dismiss: /dismiss/i.test(v.primary + v.secondary + v.notes) }).toEqual({ month: v.month, dismiss: false });
-    const note = 'Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.';
+    // The 24-hour hold rides on the jug note (owner 2026-10-09: every post-emergent herbicide holds 24 hours).
+    const note = 'Dismiss: use up the jug on green kyllinga under 85°F, no rain or irrigation for 24 hours after (owner 2026-10-09: every post-emergent herbicide holds 24 hours); do not reorder.';
     expect(track.safety_rules).toContain(note);
     expect(track.notes.some((line) => line.endsWith(note))).toBe(true);
     expect(everything(grass)).not.toMatch(/November to March/);
@@ -28,10 +29,10 @@ describe('recipe text', () => {
     const rule = track.notes.find((line) => line.startsWith('Never use the same chemical group'));
     expect(rule).toMatch(/twice in a row\. Two exceptions/);
     expect(rule).toMatch(/Group 3 pre-emergents \(all of them are Group 3 this season/);
-    expect(rule).toMatch(/take-all Artavia pair \(two applications 28 days apart, both recorded for take-all\)/);
+    expect(rule).toMatch(/take-all pair \(Artavia, then Headway 30 days later, or Artavia twice; both recorded for take-all\)/);
     expect(JSON.stringify(track)).not.toMatch(/same target|on one lawn/);
     expect(track.safety_rules.some((line) => /Never repeat a chemical group on the next application/.test(line))).toBe(false);
-    expect(track.safety_rules.find((line) => /chemical group/.test(line))).toMatch(/Exceptions: Group 3 pre-emergents .* take-all Artavia pair, both recorded for take-all/);
+    expect(track.safety_rules.find((line) => /chemical group/.test(line))).toMatch(/Exceptions: Group 3 pre-emergents .* take-all pair \(Artavia, then Headway or Artavia\), both recorded for take-all/);
   });
 
   test.each(TRACKS)('%s: Acelepryn carries the label wait of 24 hours for watering (irrigation) or mowing, on every line', (grass) => {
@@ -91,7 +92,8 @@ describe('recipe text', () => {
   });
 
   test('the tracks stay one program (identical but for the name)', () => {
-    const body = ({ name, ...rest }) => JSON.stringify(rest);
+    // The bermuda removal add-on (visit.addOns, St. Augustine and Zoysia only) is set aside.
+    const body = ({ name, visits, ...rest }) => JSON.stringify({ ...rest, visits: visits.map(({ addOns, ...visit }) => visit) });
     for (const grass of TRACKS) expect(body(v13[grass])).toBe(body(v13.st_augustine));
   });
 });

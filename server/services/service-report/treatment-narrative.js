@@ -298,6 +298,9 @@ async function buildTreatmentNarrative({
 async function treatmentNarrativePdfSignature(serviceRecordId, knex = db, { serviceLine } = {}) {
   try {
     if (!serviceRecordId) return '';
+    // A lawn report under GATE_LAWN_REPORT_COPY_FIXES uses no model paragraph (lawnTreatmentNarrative
+    // in lawn-report-copy-fixes.js): the render's part of the key is the sentinel, so the lookup says the same.
+    if (serviceLine === 'lawn' && require('./lawn-report-copy-fixes').copyFixesLive()) return '-tn0';
     const row = await knex('service_report_ai_summaries')
       .where({ service_record_id: serviceRecordId })
       // Only the version this record's render reads now (the caller resolves

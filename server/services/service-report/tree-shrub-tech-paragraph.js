@@ -36,8 +36,7 @@
  * gate read: callers decide.
  */
 
-const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
-const { customerCopyViolations } = require('./technician-report-copy');
+const { createTechParagraphEngine, clean, copyScreenProblem } = require('./tech-paragraph-engine');
 
 const PROMPT_VERSION = 'ts_tech_paragraph_v4';
 const FREEZE_KEY = 'treeShrubTechParagraph';
@@ -47,10 +46,12 @@ const MAX_NOTE_CHARS = 1500;
 const MAX_OBSERVATIONS = 3;
 const MAX_MAYBE = 2;
 const MAX_PRODUCTS = 5;
-const MAX_PRODUCT_NAME_CHARS = 80;
+// The applied product's full display name, never cut: palm fertilizer rows in the
+// catalog run to 144 characters (owner 2026-10-08, "fix T&S names").
+const MAX_PRODUCT_NAME_CHARS = 200;
 // The longest text any valid slots can render (pinned by a test): the read-time
 // guard must never reject a paragraph the renderer can legally write (Codex r10).
-const MAX_TEXT_CHARS = 1200;
+const MAX_TEXT_CHARS = 2000;
 
 /**
  * EVERY sentence the paragraph can contain. Draft wording for the owner to read
@@ -265,7 +266,7 @@ function renderSentences(slots) {
   if (maybe.length) out.push(fill(TS_SENTENCES.maybe, { labels: joinList(maybe) }));
   const confirmed = labels(s.confirmed, MAX_CONFIRMED);
   if (confirmed.length) out.push(fill(TS_SENTENCES.confirmed, { labels: joinList(confirmed) }));
-  const products = (Array.isArray(s.products) ? s.products : []).map((n) => clean(n)).filter(Boolean).slice(0, MAX_PRODUCTS);
+  const products = productNames(s);
   if (products.length) out.push(fill(TS_SENTENCES.products, { products: joinList(products) }));
   if (typeof s.allClear === 'string' && Object.values(ALL_CLEAR_RATINGS).includes(s.allClear)) {
     out.push(fill(TS_SENTENCES.allClear, { rating: s.allClear }));
@@ -273,15 +274,21 @@ function renderSentences(slots) {
   return out;
 }
 
-// A sentence that fails the customer-copy screen or the palm rules is dropped on
-// its own (a catalog product name is the only free string in any template).
-function sentenceProblem(sentence) {
-  return PALM_NAME_RE.test(sentence) || PALM_CROWN_RE.test(sentence) || customerCopyViolations(sentence).length > 0;
+// The product names a slots object renders (the one free string in any template).
+const productNames = (slots) => (Array.isArray(slots && slots.products) ? slots.products : []).map((n) => clean(n)).filter(Boolean).slice(0, MAX_PRODUCTS);
+
+// A sentence that fails the palm rules or the customer-copy screen is dropped on
+// its own. The screen is the shared copyScreenProblem (tech-paragraph-engine.js):
+// the sentence in full with the catalog names masked, each name in full, and one
+// exact catalog name that only looks like an access code.
+function sentenceProblem(sentence, products) {
+  return PALM_NAME_RE.test(sentence) || PALM_CROWN_RE.test(sentence) || copyScreenProblem(sentence, products);
 }
 
 /** Slots -> the paragraph text (guarded sentences joined), or '' when none. Pure. */
 function render(slots) {
-  return renderSentences(slots).filter((sentence) => !sentenceProblem(sentence)).join(' ');
+  const products = productNames(slots);
+  return renderSentences(slots).filter((sentence) => !sentenceProblem(sentence, products)).join(' ');
 }
 
 // ── Model call (extraction only) ──────────────────────────────────────────
@@ -365,7 +372,7 @@ function frozenEntryProblem(entry) {
   if (!text || text.length > MAX_TEXT_CHARS) return 'shape';
   if (!entry.slots || typeof entry.slots !== 'object' || Array.isArray(entry.slots)) return 'no_slots';
   if (render(entry.slots) !== text) return 'drift';
-  if (PALM_NAME_RE.test(text) || PALM_CROWN_RE.test(text) || customerCopyViolations(text).length) return 'copy';
+  if (sentenceProblem(text, productNames(entry.slots))) return 'copy';
   return null;
 }
 
@@ -422,6 +429,7 @@ module.exports = {
   PLANTS,
   FINDING_LABELS,
   MAX_TEXT_CHARS,
+  MAX_PRODUCT_NAME_CHARS,
   SYSTEM_PROMPT,
   normalizeInputs,
   buildPrompt,

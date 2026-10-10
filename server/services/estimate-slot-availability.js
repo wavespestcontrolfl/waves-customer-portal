@@ -45,9 +45,11 @@ const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRou
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
+  customerLastStart16Enabled,
 } = require('./scheduling/customer-windows');
 const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
 const { isEnabled } = require('../config/feature-gates');
+const { slotRainTierOf, demoteByRainTier } = require('./scheduling/customer-rain-rank');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -83,6 +85,8 @@ const SERVICE_LABELS = {
 };
 
 const MAX_ESTIMATE_SLOT_DURATION_MINUTES = 180;
+// Engine key of an area add-on row (GATE_AREA_ADDONS) in a one-time profile.
+const AREA_ADDON_ENGINE_KEY = 'area_addon';
 // Working-day start for customer-facing slots — mirrors DAY_START_HOUR (8:00)
 // in scheduling/find-time.js, which generates every route-derived offer.
 // Keep the two in sync.
@@ -539,6 +543,25 @@ function formatServiceProfileLabel(services) {
   return parts.join(' + ');
 }
 
+// An area add-on row's profile fields: its engine on-site minutes and its price
+// (only the positive ones). Any other service has none.
+function areaAddOnProfileFields(service, item, amount) {
+  if (service !== AREA_ADDON_ENGINE_KEY) return {};
+  const minutes = Math.ceil(Number(item.onSiteMinutes));
+  const area = Number(item.areaSqFt);
+  const tier = Number(item.tierSqFt);
+  return {
+    ...(minutes > 0 ? { durationMinutes: minutes } : {}),
+    ...(amount > 0 ? { addOnPrice: Math.round(amount * 100) / 100 } : {}),
+    // The sold scope: the booking writes it onto the visit (area_addon_scope), so the job card
+    // can say how much was sold and which grass authorized the rate.
+    ...(item.addOnKey ? { addOnKey: String(item.addOnKey) } : {}),
+    ...(area > 0 ? { areaSqFt: area } : {}),
+    ...(tier > 0 ? { tierSqFt: tier } : {}),
+    ...(item.grassType ? { grassType: String(item.grassType) } : {}),
+  };
+}
+
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
@@ -558,7 +581,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   const seen = new Set();
   const seenEngineKeys = new Map();
   // `service` is the category (used for the row's service field + label dedup).
-  const add = (service, label, engineKey = null, catalogServiceKey = null) => {
+  const add = (service, label, engineKey = null, catalogServiceKey = null, extraFields = {}) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
@@ -598,6 +621,12 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // for products whose engine key is deliberately unaliased
     // (cockroach_control / pest_initial_roach; codex #3842 r3 P1).
     const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null, catalogServiceKey: catalogServiceKey || null };
+    // An area add-on carries the engine's on-site minutes as a duration
+    // floor (the capacity pass books max(catalog default, these minutes)) and
+    // its price, which becomes the visit's add-on row at accept
+    // (area-addon-visit-rows.js). The price is internal: the public profile
+    // drops it.
+    Object.assign(row, extraFields);
     rows.push(row);
     if (engineKey && !seenEngineKeys.has(engineKey)) seenEngineKeys.set(engineKey, row);
   };
@@ -643,8 +672,18 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   // rodent_guarantee_combo bundle is NOT excluded — it carries real field
   // work.
   const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee'];
+  // The area add-ons the estimate sells NOW, by its row's pricing authority (estimate-result-container storedAreaAddOnRows:
+  // a SERVER reprice can leave an empty `result` beside a stale `engineResult` that still lists an add-on). The gate and
+  // the limit recheck read this set; the booking profile must not carry an add-on they do not see.
+  // An enabled, itemized authored proposal that sells no add-on sells none, whatever engine rows it retains (the
+  // persisted detector's rule, v1-legacy-mapper estimateDataCarriesAreaAddOns): then the set is empty.
+  const rowAuthority = { pricingAuthority: estimate.pricing_authority ?? estimate.pricingAuthority ?? null };
+  const currentAddOnKeys = new Set(require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estData, rowAuthority)
+    ? require('./estimate-result-container').storedAreaAddOnRows(estData, rowAuthority).map((row) => row.addOnKey)
+    : []);
   for (const item of (normalizeOneTimeBreakdown(estData).items || [])) {
     if (!item || typeof item !== 'object') continue;
+    if (item.service === AREA_ADDON_ENGINE_KEY && !currentAddOnKeys.has(item.addOnKey)) continue;
     if (item.quoteRequired === true || item.kind === 'discount') continue;
     const service = String(item.service || '').toLowerCase();
     if (NON_SERVICE.includes(service)) continue;
@@ -669,7 +708,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null);
+    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null, areaAddOnProfileFields(service, item, amount));
   }
   return rows;
 }
@@ -777,6 +816,24 @@ function seasonalDateSegments(dateFrom, dateTo, seasonal) {
   return segments.length ? segments : [[from, to]];
 }
 
+// A one-time visit that carries area add-ons reserves at least the sum of their
+// engine on-site minutes, whatever the capacity gate says (the default 60 would
+// book a three-add-on visit into one hour). The add-ons ride the visit's
+// primary service: when a non-add-on service is also sold it keeps the minutes
+// today's rule gives it (`base`) and the add-ons come on top; add-ons alone are
+// sized by the larger of `base` and their sum. No add-on, no change. The result
+// is not capped at MAX_ESTIMATE_SLOT_DURATION_MINUTES: a floor the cap lowered
+// would not be a floor. With the capacity gate on the catalog pass sums the same
+// minutes per service (resolveCatalogSlotProfile).
+function oneTimeVisitDurationMinutes(base, services, serviceMode) {
+  if (serviceMode !== 'one_time') return base;
+  const addOns = services.filter((row) => row.engineKey === AREA_ADDON_ENGINE_KEY);
+  const addOnMinutes = addOns.reduce((sum, row) => sum + (Number(row.durationMinutes) || 0), 0);
+  if (!(addOnMinutes > 0)) return base;
+  const floor = addOns.length < services.length ? base + addOnMinutes : Math.max(base, addOnMinutes);
+  return capacityEnabled() ? Math.ceil(floor) : Math.ceil(floor / 15) * 15;
+}
+
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
@@ -859,7 +916,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   }
   const durationMinutes = reservationServiceMix
     ? reservationServiceMix.durationMinutes
-    : clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);
+    : oneTimeVisitDurationMinutes(clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes), services, serviceMode);
   const serviceLabel = formatServiceProfileLabel(services)
     || estimate.service_interest
     || (serviceMode === 'one_time' ? 'One-time service' : 'Estimate service');
@@ -875,6 +932,24 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   };
 }
 
+// The services THIS appointment performs. Without a combined recurring
+// allocation the held appointment belongs to the converter's primary
+// service and companion programs book separately; one-time paid add-ons
+// remain work on this same appointment. Shared by the catalog resolution
+// below and the rain ranking, which must judge only the work done in the
+// slot (Codex #6127 r3). Idempotent on an already-narrowed profile.
+function appointmentServicesFor(profile = {}) {
+  const services = Array.isArray(profile.services) ? profile.services : [];
+  if (profile.reservationServiceMix || profile.serviceMode === 'one_time') return services;
+  return [services.find((service) => service.service === 'pest_control') || services[0]].filter(Boolean);
+}
+
+// { resolvedServiceKey } for a resolved catalog row; nothing when the lookup
+// found none, so a profile without one keeps today's exact shape.
+function resolvedKeyOf(catalog) {
+  return catalog && catalog.service_key ? { resolvedServiceKey: catalog.service_key } : {};
+}
+
 /** Keep classification synchronous; resolve catalog allowances once at every
  * booking boundary. This is also used inside reserve/commit transactions. */
 async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
@@ -882,11 +957,7 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
   if (!capacityEnabled() && !userOpts.preserveCapacity) return profile;
   const { catalogLinkForProfile } = require('./slot-reservation');
   const { serviceDurationMinutes } = require('./service-library');
-  // Without a combined recurring allocation, the held appointment belongs
-  // to the converter's primary service; companion programs book separately.
-  // One-time paid add-ons remain work on this same appointment.
-  const appointmentServices = profile.reservationServiceMix || profile.serviceMode === 'one_time' ? profile.services
-    : [profile.services.find(service => service.service === 'pest_control') || profile.services[0]].filter(Boolean);
+  const appointmentServices = appointmentServicesFor(profile);
   const services = [];
   for (const service of appointmentServices) {
     let catalog;
@@ -901,7 +972,10 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
       throw unavailable;
     }
     const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes, { preserveCapacity: userOpts.preserveCapacity });
-    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
+    // resolvedServiceKey: the catalog row this lookup resolved (cadence or
+    // engine key), kept for the rain ranking, which classifies by catalog
+    // identity (Codex #6127 r1). Internal: stripped from the public profile.
+    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0), ...resolvedKeyOf(catalog) });
   }
   const capacity = profile.reservationServiceMix
     ? require('./combined-visit-capacity').capacityForServices(services, services.map(service => service.durationMinutes)) : null;
@@ -1401,7 +1475,13 @@ function routeFirstOrder(sorted) {
   return [soonest, ...routeFit, ...rest];
 }
 
-function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
+// `rainTierOf` (GATE_CUSTOMER_RAIN_RANK, scheduling/customer-rain-rank.js):
+// a stable reorder by rain fit of everything BEHIND the lead cards. The
+// soonest opening stays the first card, and a scarce first day's pinned
+// cards stay pinned (the "N openings today" badge counts them), so every
+// promise above holds at any gate setting; only the spread after them
+// changes, before the display slice.
+function selectCustomerFacingSlots(slots, limit, { routeFirst = false, rainTierOf = null } = {}) {
   const safeLimit = Math.max(0, Number(limit) || 0);
   if (!safeLimit) return [];
 
@@ -1430,10 +1510,10 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
   const firstDaySlots = sorted.filter((s) => s?.date === firstDay);
   if (firstDaySlots.length > 1 && firstDaySlots.length <= SCARCE_FIRST_DAY_MAX) {
     const rest = diversified.filter((s) => s?.date !== firstDay);
-    return [...firstDaySlots, ...rest].slice(0, safeLimit);
+    return demoteByRainTier([...firstDaySlots, ...rest], rainTierOf, firstDaySlots.length).slice(0, safeLimit);
   }
 
-  return diversified.slice(0, safeLimit);
+  return demoteByRainTier(diversified, rainTierOf, 1).slice(0, safeLimit);
 }
 
 // Drop any candidate the reserve gate would reject, so every offered slot is
@@ -1832,6 +1912,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       const publicService = { ...service };
       delete publicService.engineKey;
       delete publicService.catalogServiceKey;
+      delete publicService.resolvedServiceKey;
+      delete publicService.addOnPrice;
+      delete publicService.addOnKey;
+      delete publicService.areaSqFt;
+      delete publicService.tierSqFt;
+      delete publicService.grassType;
       return publicService;
     }),
   };
@@ -1853,6 +1939,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // 2026-09-23): a result computed while noon was offerable must never be
     // served after the gate flips on (or vice versa) for the TTL's length.
     lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
+    // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
+    customerLastStart16Enabled() ? 'last_start_16' : 'last_start_17',
     // The RESOLVED bounds, not just the gate flag (Codex push-audit P1 on
     // #4663): booking_config's lunch interval / day-end override refreshes
     // on its own 60s TTL (customer-windows.js), independent of this 5-min
@@ -2185,8 +2273,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
+  // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
+  // the gate off, no slot inside the next 3 dates, or any failure.
+  const rainTierOf = await slotRainTierOf(funneledBookable, {
+    profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
+  });
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
+    rainTierOf,
   });
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
@@ -2470,6 +2564,7 @@ module.exports = {
     filterPastSlotsForToday,
     splitSlotResults,
     selectCustomerFacingSlots,
+    appointmentServicesFor,
     diversifyByDay,
     compareCustomerFacingSlots,
     resolveEstimateSlotProfile,

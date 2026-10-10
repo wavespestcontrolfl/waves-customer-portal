@@ -8,6 +8,12 @@
  * component's props/state. Never write it into conversationHistory, a
  * prompt, or anything else that reaches the model.
  *
+ * A "choose the product" card (contract.product_choices, owner 2026-10-07)
+ * lists the server's shortlist; the operator picks one and the server makes a
+ * normal card for it. An expired stock card offers "Show again", which asks
+ * the server to propose the same action afresh. Both render the new card right
+ * below the old one; neither ever writes anything by itself.
+ *
  * variant="dark"  — D-palette inline styles (legacy IB surfaces)
  * variant="light" — Tailwind zinc (V2 IntelligenceBarShell)
  */
@@ -73,6 +79,17 @@ function receiptState(receipt) {
 function detailIsNeutral(body, state) {
   return state === 'confirmed'
     && !(body?.warning || body?.result?.warning || body?.result?.error) && Boolean(body?.result?.message);
+}
+
+function countdownLabel(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// The server's shortlist on a "choose the product" card, or null.
+function productChoicesOf(action) {
+  const choices = action.contract?.product_choices;
+  return Array.isArray(choices) ? choices : null;
 }
 
 function groupEffects(effects) {
@@ -151,7 +168,144 @@ function ContractView({ contract, dark, showApproval = true }) {
   );
 }
 
-export default function PendingActionsCard({ actions, variant = "dark", onResolved, touchFriendly = false }) {
+// Stock cards (an adjust_stock card or its product picker) can be shown again.
+const SHOW_AGAIN_TOOLS = new Set(["adjust_stock"]);
+
+// An expired card that was never decided. A stock card can be proposed afresh
+// by the server (Show again). A task's card is proposed afresh by continuing
+// its task, so it points at the task's Continue action. Every other card
+// keeps the earlier rule: ask again.
+function ExpiredControls({ dark, tool, reshowing, onShowAgain, inTask }) {
+  if (inTask || !SHOW_AGAIN_TOOLS.has(tool)) {
+    return (
+      <div style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
+        className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}>
+        {inTask
+          ? "Expired — this proposal is no longer confirmable. Continue the request to get a fresh card."
+          : "Expired — this proposal is no longer confirmable. Ask again to re-propose it."}
+      </div>
+    );
+  }
+  return (
+    <div style={dark ? { display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" } : undefined}
+      className={dark ? undefined : "flex flex-col gap-2 items-start"}>
+      <div
+        style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
+        className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}
+      >
+        Expired — this proposal is no longer confirmable.
+      </div>
+      <button
+        type="button"
+        disabled={reshowing}
+        onClick={onShowAgain}
+        style={dark ? {
+          background: "transparent", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8,
+          padding: "7px 16px", fontSize: 14, minHeight: 44,
+          cursor: reshowing ? "wait" : "pointer", opacity: reshowing ? 0.6 : 1,
+        } : undefined}
+        className={dark ? undefined : "min-h-11 bg-white text-zinc-900 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60"}
+      >
+        {reshowing ? "Showing again…" : "Show again"}
+      </button>
+    </div>
+  );
+}
+
+// One shortlist row: name, size, on hand before -> after; an unfit product
+// shows why and cannot be picked.
+function ProductChoiceRow({ dark, actionId, choice, picked, busy, onPick }) {
+  const onHand = choice.on_hand == null ? "not counted yet" : `${choice.on_hand} ${choice.unit || ""}`.trimEnd();
+  const after = choice.stock_after == null ? null : `${choice.stock_after} ${choice.unit || ""}`.trimEnd();
+  return (
+    <label
+      style={dark ? {
+        display: "flex", alignItems: "flex-start", gap: 8, minHeight: 44, padding: "6px 0", fontSize: 14,
+        color: choice.selectable ? D.text : D.muted, cursor: choice.selectable ? "pointer" : "default",
+      } : undefined}
+      className={dark ? undefined : `flex items-start gap-2 min-h-11 py-1.5 text-[14px] ${choice.selectable ? "text-zinc-900 cursor-pointer" : "text-zinc-500"}`}>
+      <input
+        type="radio"
+        name={`product-choice-${actionId}`}
+        value={choice.product_id}
+        disabled={!choice.selectable || busy}
+        checked={picked === choice.product_id}
+        onChange={() => onPick(choice.product_id)}
+        style={dark ? { marginTop: 3, width: 18, height: 18 } : undefined}
+        className={dark ? undefined : "mt-0.5 h-[18px] w-[18px]"}
+      />
+      <span>
+        <span style={dark ? { fontWeight: 500 } : undefined} className={dark ? undefined : "font-medium"}>{choice.name}</span>
+        {choice.container_size ? ` · ${choice.container_size}` : ""}
+        {` · on hand ${onHand}`}
+        {choice.selectable && after ? ` → ${after}` : ""}
+        {!choice.selectable && choice.reason ? ` · ${choice.reason}` : ""}
+      </span>
+    </label>
+  );
+}
+
+// A "choose the product" card (owner 2026-10-07): the server's shortlist, a
+// pick, and "Use this product". Nothing is written here; the server answers
+// with a normal card for the picked product.
+function ProductPickerControls({ dark, actionId, choices, picked, busy, status, touchFriendly, remaining, onPick, onChoose, onCancel }) {
+  return (
+    <div style={dark ? { display: "flex", flexDirection: "column", gap: 8 } : undefined} className={dark ? undefined : "flex flex-col gap-2"}>
+      {remaining !== null && (
+        <div style={dark ? { fontSize: 14, color: D.muted } : undefined} className={dark ? undefined : "text-[14px] text-zinc-500"}>
+          {countdownLabel(remaining)}
+        </div>
+      )}
+      <fieldset style={dark ? { border: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 } : undefined}
+        className={dark ? undefined : "border-0 m-0 p-0 flex flex-col gap-1"}>
+        <legend style={dark ? { fontSize: 14, color: D.text, marginBottom: 4 } : undefined}
+          className={dark ? undefined : "text-[14px] text-zinc-900 mb-1"}>
+          Which product?
+        </legend>
+        {choices.map((choice) => (
+          <ProductChoiceRow key={choice.product_id} dark={dark} actionId={actionId} choice={choice} picked={picked} busy={busy} onPick={onPick} />
+        ))}
+      </fieldset>
+      <PickerButtons dark={dark} picked={picked} busy={busy} status={status} touchFriendly={touchFriendly} onChoose={onChoose} onCancel={onCancel} />
+    </div>
+  );
+}
+
+// "Use this product" (enabled once a product is picked) and Cancel.
+function PickerButtons({ dark, picked, busy, status, touchFriendly, onChoose, onCancel }) {
+  return (
+    <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
+      <button
+        type="button"
+        disabled={busy || !picked}
+        onClick={onChoose}
+        style={dark ? {
+          background: D.green, color: D.white, border: "none", borderRadius: 8,
+          padding: "7px 16px", fontSize: 14, fontWeight: 500,
+          cursor: busy ? "wait" : picked ? "pointer" : "not-allowed", opacity: busy || !picked ? 0.6 : 1,
+        } : undefined}
+        className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
+      >
+        {status === "choosing" ? "Choosing…" : "Use this product"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onCancel}
+        style={dark ? {
+          background: "transparent", color: D.muted, border: `1px solid ${D.border}`,
+          borderRadius: 8, padding: "7px 16px", fontSize: 14,
+          cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
+        } : undefined}
+        className={dark ? undefined : `bg-white text-zinc-600 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
+      >
+        {status === "cancelling" ? "Cancelling…" : "Cancel"}
+      </button>
+    </div>
+  );
+}
+
+export default function PendingActionsCard({ actions, variant = "dark", onResolved, touchFriendly = false, inTask = false }) {
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
@@ -161,6 +315,13 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const [neutralById, setNeutralById] = useState({});
   const [receiptById, setReceiptById] = useState({});
   const inFlightRef = useRef(new Set());
+  // The product picked on a "choose the product" card, per card id.
+  const [pickedById, setPickedById] = useState({});
+  // Expired cards whose Show again request is in flight.
+  const [reshowingById, setReshowingById] = useState({});
+  // Cards the server made from this list (a chosen product, Show again):
+  // { afterId, action }, rendered right after the card they came from.
+  const [followUps, setFollowUps] = useState([]);
 
   // Preserve existing card outcomes and expiry across clarification turns. Countdown
   // deadlines anchor on RECEIPT TIME + the server-computed expiresInMs, so a
@@ -200,10 +361,6 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const msLeft = (action) => (
     deadlineById[action.id] != null ? deadlineById[action.id] - now : null
   );
-  const countdownLabel = (ms) => {
-    const s = Math.max(0, Math.floor(ms / 1000));
-    return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  };
 
   const setStatus = (id, status, error, neutral = false) => {
     setStatusById((prev) => ({ ...prev, [id]: status }));
@@ -264,6 +421,82 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     }
   };
 
+  // A new card from the server, placed under the card it came from. Its
+  // countdown anchors on receipt time, like every other card.
+  const addFollowUp = (source, next) => {
+    if (!next?.id) return;
+    const received = Date.now();
+    setFollowUps((previous) => (previous.some((f) => f.action.id === next.id) ? previous
+      : [...previous, { afterId: source.id, action: { ...next, receivedAt: received } }]));
+    if (typeof next.expiresInMs === "number") {
+      setDeadlineById((previous) => ({ ...previous, [next.id]: received + next.expiresInMs }));
+    }
+  };
+
+  // Product picker: the server accepts only an id it listed on this card,
+  // then answers with a new card for that product (nothing is written yet).
+  const chooseProduct = async (action) => {
+    const productId = pickedById[action.id];
+    if (!productId || inFlightRef.current.has(action.id)) return;
+    inFlightRef.current.add(action.id);
+    setStatus(action.id, "choosing");
+    try {
+      // A lost response may follow a choice the server already made: the same
+      // request is replayable and answers with the card that choice made, so a
+      // network failure is retried once.
+      let body;
+      for (let attempt = 0; !body; attempt += 1) {
+        try {
+          body = await adminFetch("/admin/intelligence-bar/choose-product", {
+            method: "POST",
+            body: JSON.stringify({
+              pending_action_id: action.id,
+              product_id: productId,
+              ...(action.contract_hash ? { contract_hash: action.contract_hash } : {}),
+            }),
+          });
+        } catch (err) {
+          if (!(err instanceof TypeError) || attempt > 0) throw err;
+        }
+      }
+      setStatus(action.id, "chosen");
+      addFollowUp(action, body.pendingAction);
+    } catch (err) {
+      setStatus(action.id, undefined, err.message || "The product could not be chosen. Ask again for a fresh card.");
+    } finally {
+      inFlightRef.current.delete(action.id);
+    }
+  };
+
+  // Show again: the server proposes the same action afresh (new numbers, new
+  // card) or answers with the refusal a fresh request would get.
+  const showAgain = async (action) => {
+    if (inFlightRef.current.has(action.id)) return;
+    inFlightRef.current.add(action.id);
+    setReshowingById((previous) => ({ ...previous, [action.id]: true }));
+    try {
+      const body = await adminFetch("/admin/intelligence-bar/show-again", {
+        method: "POST",
+        body: JSON.stringify({ pending_action_id: action.id }),
+      });
+      setStatus(action.id, "reshown");
+      addFollowUp(action, body.pendingAction);
+    } catch (err) {
+      setStatus(action.id, "expired", err.message || "This card could not be shown again. Ask again instead.");
+    } finally {
+      inFlightRef.current.delete(action.id);
+      setReshowingById((previous) => ({ ...previous, [action.id]: false }));
+    }
+  };
+
+  // A refreshed host list can also carry a follow-up card: its entry is the
+  // authoritative one (a receipt from another tab), shown once, under its source.
+  const hostById = new Map(actions.map((a) => [a.id, a]));
+  const withFollowUps = (action) => [action,
+    ...followUps.filter((f) => f.afterId === action.id).flatMap((f) => withFollowUps(hostById.get(f.action.id) || f.action))];
+  const seen = new Set();
+  const shown = actions.flatMap(withFollowUps).filter((a) => !seen.has(a.id) && seen.add(a.id));
+
   const dark = variant === "dark";
 
   const statusLabel = {
@@ -274,6 +507,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     partial: "Partially completed",
     unknown: "Outcome unknown",
     cancelled: "Cancelled",
+    chosen: "Product chosen. Confirm the new card below.",
+    reshown: "Shown again below.",
   };
 
   return (
@@ -286,7 +521,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       } : undefined}
       className={dark ? undefined : "mt-2 mb-3 flex flex-col gap-2"}
     >
-      {actions.map((action) => {
+      {shown.map((action) => {
         const status = statusById[action.id] || action.resolvedStatus || (action.receipt ? receiptState(action.receipt) : undefined);
         const receiptBody = receiptById[action.id] || action.receipt;
         const receiptResult = receiptBody?.result;
@@ -301,10 +536,14 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         const detailNeutral = errorById[action.id] != null
           ? Boolean(neutralById[action.id])
           : !action.resolvedWarning && detailIsNeutral(receiptBody, status);
-        const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
-        const busy = status === "confirming" || status === "cancelling";
+        const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown", "chosen", "reshown"].includes(status);
+        const busy = ["confirming", "cancelling", "choosing"].includes(status);
         const remaining = msLeft(action);
-        const expired = status === 'expired' || (!settled && !busy && remaining !== null && remaining <= 0);
+        const expired = status === 'expired'
+          || (!settled && !busy && remaining !== null && remaining <= 0);
+        // The server's shortlist; only a selectable product can be picked.
+        const choices = productChoicesOf(action);
+        const picked = pickedById[action.id];
         // A card minted as preview-only before the switches' commit path
         // deployed is never confirmable (the server refuses it too).
         const previewOnly = action.contract?.preview_only === true;
@@ -386,12 +625,12 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             )}
 
             {expired ? (
-              <div
-                style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
-                className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}
-              >
-                Expired — this proposal is no longer confirmable. Ask again to re-propose it.
-              </div>
+              <ExpiredControls dark={dark} tool={action.tool} inTask={inTask} reshowing={reshowingById[action.id] === true} onShowAgain={() => showAgain(action)} />
+            ) : !settled && choices ? (
+              <ProductPickerControls dark={dark} actionId={action.id} choices={choices} picked={picked} busy={busy} status={status}
+                touchFriendly={touchFriendly} remaining={remaining}
+                onPick={(productId) => setPickedById((previous) => ({ ...previous, [action.id]: productId }))}
+                onChoose={() => chooseProduct(action)} onCancel={() => decide(action, "cancel")} />
             ) : !settled ? (
               <div style={dark ? { display: "flex", flexDirection: "column", gap: 8 } : undefined} className={dark ? undefined : "flex flex-col gap-2"}>
                 {remaining !== null && (

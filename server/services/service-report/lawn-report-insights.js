@@ -16,6 +16,8 @@
 
 const { hasCreditableWaterIn, normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
 const { lawnReportLeadLive } = require('../../config/feature-gates');
+const { deficitAction } = require('./lawn-water-rain');
+const { surplusAdvice: SURPLUS_ADVICE } = require('../../../shared/watering-copy.json');
 
 // The water/damp cards below phrase a CREDITED watering-in generically
 // ("Water in today's application as directed…") rather than quoting the
@@ -26,6 +28,12 @@ const { lawnReportLeadLive } = require('../../config/feature-gates');
 // #5033 r8). This marker lets the hero recognize the generic phrasing
 // without hardcoding the sentence in two files.
 const CREDITED_WATER_IN_PHRASE = 'Water in today’s application as directed';
+
+// The no-plan deficit action. GATE_LAWN_WATER_RAIN (water.rainCard): the card's own advice (the amount per run stays
+// fixed; the wilt signs decide), so the card and the insight never differ.
+function deficitAdvice(water, grassLabel) {
+  return water.rainCard ? deficitAction() : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`;
+}
 
 const STATUS_RANK = { needs_attention: 0, urgent: 0, watch: 1, healthy: 2, strong: 2, tracking: 3 };
 
@@ -88,7 +96,8 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
           : 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.')
         : (waterInRequired
           ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
-          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.')),
+          // GATE_LAWN_WATER_RAIN: the card's own surplus advice (skip a day, never shorten the runs), so the two never differ.
+          : (water.rainCard ? SURPLUS_ADVICE : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'))),
       nextVisitPlan: hasPlan
         ? 'Recheck moisture and fungus signs next visit against this week’s watering plan.'
         : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
@@ -110,8 +119,10 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
           ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
           : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
-        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`),
-      nextVisitPlan: hasPlan
+        // GATE_LAWN_WATER_RAIN: the same advice as the card (the amount per run stays fixed; the wilt signs decide).
+        : deficitAdvice(water, grassLabel)),
+      // A rain card does not add water (the wilt signs decide), so there is no added water to confirm.
+      nextVisitPlan: hasPlan || water.rainCard
         ? 'Recheck moisture and color next visit.'
         : 'Recheck moisture and color next visit to confirm the added water is landing.',
     });
@@ -148,6 +159,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
     // signals, never technician confirmation; 'tech_confirmed' here rendered
     // "Confirmed by your technician" with false provenance (codex P1 r9).
     const damp = !!(water && water.overwatering);
+    const rainCovered = !!(water && water.status === 'rain_covered');
     cards.push({
       category: 'water', status: 'watch', confidence: damp ? 'ai_supported' : 'area_estimated',
       headline: damp ? 'Damp areas are the thing to watch' : 'Moisture balance is the thing to watch',
@@ -171,8 +183,12 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
           // advice — name the exception instead (codex P1 r32).
           ? (waterInRequired
             ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
-            : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
-          : (water && water.scheduleOnFile
+            // GATE_LAWN_WATER_RAIN: a rain-covered card says to leave the sprinklers off until the wilt signs show, so
+            // no cycle count and no "keep your schedule" beside it (the existing neutral sentences, no new copy).
+            : (rainCovered
+              ? 'Let the damp areas dry out between waterings.'
+              : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.'))
+          : (water && water.scheduleOnFile && !rainCovered
             ? 'Keep your current watering schedule unless we flag a change.'
             : 'We’ll keep watching moisture balance at upcoming visits.')),
       nextVisitPlan: 'Recheck the moisture balance next visit.',

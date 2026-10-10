@@ -30,6 +30,12 @@ const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
+// What the update_customer description tells the model about price notices.
+// Read once at load, like the rest of the description: the gate is an
+// environment variable, and setting it restarts the server.
+const PRICE_NOTICE_DISCLOSURE = require('../../config/feature-gates').ibTierUpgradeEmailLive?.()
+  ? 'No price-change notice is sent to the customer, with one exception: a card that changes only waveguard_tier and monthly_rate, moves the customer to a higher tier, and leaves a monthly-billed rate above zero emails the customer the tier upgrade notice after Confirm. The preview result and the card say when that email applies; tell the operator.'
+  : 'No price-change notice is sent to the customer.';
 const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../customer-contact-fanout');
 const {
   normalizeContactName,
@@ -215,7 +221,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
 Billing type and per-application fee (only when the office has turned this on; otherwise refused): updates.billing_mode (per_application, per_visit, one_time or monthly_membership) and updates.per_application_fee (dollars per visit, e.g. 147). Send them alone, with no other field; the card shows what the next visits are charged. Annual prepay and clearing the billing type are done elsewhere.
-monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. No price-change notice is sent to the customer.
+monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. ${PRICE_NOTICE_DISCLOSURE}
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
       type: 'object',
@@ -413,6 +419,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
         Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
         input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null,
+        input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null,
         input._ib_billing_pin);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
@@ -1333,7 +1340,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, billingPin) {
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null, billingPin) {
   // Billing type + per-application fee (GATE_IB_BILLING_MODE_EDIT, owner D5
   // 2026-10-06): only from a card that pinned them (billing-mode-change.js).
   const BillingModeChange = require('./billing-mode-change');
@@ -1416,6 +1423,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // transaction's arrow function since its own `decision` const is local to
   // that scope.
   let churnRepairDecision = null;
+  // The rows this write commits, for the tier-upgrade email's own recheck
+  // after commit (tier-upgrade-email.js): the locked row, and that row with
+  // every field the UPDATE below writes.
+  let committedRows = null;
   try {
     await db.transaction(async (trx) => {
       // Membership-affecting writes join the customer-comms serialization
@@ -1524,6 +1535,7 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
+      committedRows = { before: lockedBefore, after: { ...lockedBefore, ...clean } };
       // Coords cleared atomically with the address/move-stamp write — never
       // the former home's lat/lng beside the new address (codex #3565 gh-r46).
       if (addressSubmitted) {
@@ -1655,6 +1667,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   const logChanges = changes.notes ? { ...changes, notes: '[redacted]' } : changes;
   logger.info(`[intelligence-bar] Updated customer ${customerId}:`, logChanges);
 
+  // Tier-upgrade email the card promised (GATE_IB_TIER_UPGRADE_EMAIL): sent
+  // after commit, fire-and-forget, only when the committed rows still pass the
+  // rules the card was built on. null = this card promised no email.
+  const tierEmailResult = tierEmailPin
+    ? require('./tier-upgrade-email').afterCommit({ ...tierEmailPin, customerId, ...committedRows })
+    : null;
+
   if (impliedLaneStamp) {
     // Post-commit review card for the auto-stamped lane — the shape a
     // mis-keyed duplicate takes, so the owner eyeballs it before the next
@@ -1717,6 +1736,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       billing_wound_down_fields: ['active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at'],
       message: 'Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.',
     }) : {}),
+    // The card promised a tier-upgrade email: 'sending', or 'not_sent' with a
+    // `warning` the card shows, so the operator never assumes an email that
+    // did not go. The record update itself stands either way.
+    ...tierEmailResult,
   };
 }
 
@@ -2933,6 +2956,11 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
   }
   const catalogRow = match.row;
+  // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
+  // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
+  if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
+    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
+  }
   const stated = statedPrice !== undefined && statedPrice !== null;
   if (isAlwaysFreeServiceType(serviceType)) {
     if (stated) {
@@ -3998,6 +4026,9 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // above is only a fast refusal).
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
         'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
+      // A visit carrying a limited area add-on is judged for the new day at its place (a limit reached refuses the move; nothing
+      // is changed). A same-day change and a visit with no limited add-on cost nothing.
+      await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: appointment_id, visit: appt, scheduledDate: dateStr, staff: true });
       const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
@@ -4749,4 +4780,6 @@ module.exports = {
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.
   CARD_CANCEL_REFUSED_MESSAGE,
+  // Test hook: the bar's one booking pricer (every create path asks it before anything is booked).
+  _ibBookingPricing: ibBookingPricing,
 };

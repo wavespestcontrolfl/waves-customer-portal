@@ -56,7 +56,12 @@ const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 }
 // visit — and ONLY visit 1; an included follow-up completing must not mint
 // a third (Codex r3 on #3078-era rounds). Trapping programs deliberately
 // chain and are excluded.
-const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment', 'flea_tick']);
+// vehicle_german_roach joined 2026-10-06 (owner: $199 covers two visits).
+const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment', 'flea_tick', 'vehicle_german_roach']);
+
+// Roach packages sold for German roaches only: the species check below does
+// not apply to them. The car job joined with the 2-treatment set.
+const GERMAN_ONLY_PACKAGE_KEYS = new Set(['cockroach_control', 'vehicle_german_roach']);
 
 // A linked follow-up child in any of these states does NOT cover the
 // obligation: cancelled/skipped never happened, and a no_show means the
@@ -106,7 +111,7 @@ function typedFollowupVerdict({ scheduledService = {}, profile = {}, findingsTyp
   const vals = values || {};
 
   if (suggestion?.required && findingsType === 'cockroach'
-    && profile?.serviceKey !== 'cockroach_control'
+    && !GERMAN_ONLY_PACKAGE_KEYS.has(profile?.serviceKey)
     && String(vals.species || '') !== 'German') {
     suggestion = { ...suggestion, required: false, reason: 'species_not_german' };
   }

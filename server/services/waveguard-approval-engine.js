@@ -35,6 +35,26 @@ function collectProductIds(sections) {
   return ids;
 }
 
+// GATE_LAWN_V13, read at call time (a suite that mocks feature-gates without the reader reads as off). The composite
+// rotation handling below, the Artavia-then-Headway pair, the protocol-row evidence and the property-scoped pair
+// lookup belong to the v13 lawn program: with the gate off the engine and the job card note behave as they did
+// before it (one group string compared as a whole, the Artavia-twice pair on recorded targets only).
+const v13Rotation = () => require('../config/feature-gates').lawnV13Live?.() === true;
+
+// A group field can name several groups: "3 + 11", "3/11", "11, 3", "28+3A" (a mixed product such as
+// Headway: FRAC 3 and 11). With the gate on every comparison is by set intersection, so a group is in the set or not;
+// off, the field is one string.
+const GROUP_SPLIT = /\s*(?:[+/,;&]|\band\b)\s*/i;
+function groupSet(value) {
+  if (!v13Rotation()) return [String(value ?? '')].filter(Boolean);
+  return String(value ?? '').split(GROUP_SPLIT).map((part) => part.trim()).filter(Boolean);
+}
+// Gate off: the exact string comparison the engine always made.
+const groupInValue = (value, group) => (v13Rotation()
+  ? groupSet(value).some((member) => member.toLowerCase() === String(group).toLowerCase())
+  : String(value || '') === String(group));
+const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 function productGroups(product) {
   const groups = [
     ['moa', product?.moa_group],
@@ -42,7 +62,7 @@ function productGroups(product) {
     ['irac', product?.irac_group],
     ['hrac', product?.hrac_group],
     ['hrac', product?.hrac_group_secondary],
-  ].filter(([, value]) => value);
+  ].filter(([, value]) => value).flatMap(([type, value]) => groupSet(value).map((member) => [type, member]));
   const seen = new Set();
   return groups.filter(([type, value]) => {
     const key = `${type}:${value}`;
@@ -55,26 +75,52 @@ function productGroups(product) {
 // strict: a failed read throws instead of reading as "no prior application"
 // (the job card's mix helper withholds a dose on missing safety data; the
 // closeout and plan engine keep their lenient default).
-async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false } = {}) {
+// scopeToProperty: judge only the applications at `propertyId` (null = visits with no property); the default reads
+// the customer's whole history, which is what the repeat rule itself uses.
+// Scoped by the property FROZEN on the application's ledger row (property_application_history.property_id, written at
+// completion: a later address correction on the visit must not move it); a legacy row with no frozen property falls
+// back to its visit's property (the same rule application-limits.js scopeHistoryToTreatment applies). The query
+// needs `sp` and `sr`; `joinVisit` adds the visit when the query has not joined it.
+// includeUnplaced: an application with no property at all (no frozen property, no visit property) also counts at
+// `propertyId`. It may have been made there, so a count that withholds an exemption takes it (the safe side).
+function scopeToTreatedProperty(query, propertyId, { joinVisit = false, includeUnplaced = false } = {}) {
+  if (joinVisit) query.leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id');
+  query.leftJoin('property_application_history as pah_scope', 'pah_scope.service_product_id', 'sp.id');
+  if (propertyId && includeUnplaced) query.whereRaw('(COALESCE(pah_scope.property_id, ss.property_id) = ? OR COALESCE(pah_scope.property_id, ss.property_id) IS NULL)', [propertyId]);
+  else if (propertyId) query.whereRaw('COALESCE(pah_scope.property_id, ss.property_id) = ?', [propertyId]);
+  else query.whereRaw('COALESCE(pah_scope.property_id, ss.property_id) IS NULL');
+  return query;
+}
+
+async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false, scopeToProperty = false, propertyId = null } = {}) {
   const groupColumn = `${groupType}_group`;
+  const tokens = groupSet(groupValue);
+  if (!tokens.length) return null;
   const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('products_catalog as pc', function () {
       this.on('sp.product_name', '=', 'pc.name');
     })
+    .modify((query) => { if (scopeToProperty) scopeToTreatedProperty(query, propertyId, { joinVisit: true }); })
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
     .where(function () {
-      this.where(`pc.${groupColumn}`, groupValue);
-      if (groupType === 'hrac') this.orWhere('pc.hrac_group_secondary', groupValue);
-      if (groupType === 'moa') this.orWhere('sp.moa_group', groupValue);
+      // The caller may hand a composite value ("3 + 11", the job card passes the product's whole field): every
+      // caller gets the tokens, and a prior application matches on any one of them.
+      for (const token of tokens) {
+        this.orWhere(`pc.${groupColumn}`, token);
+        // A mixed product's field holds several groups ("3 + 11"): the group is one token of the value.
+        if (v13Rotation()) this.orWhereRaw('?? ~* ?', [`pc.${groupColumn}`, `(^|[^0-9a-z])${escapeRegex(token)}($|[^0-9a-z])`]);
+        if (groupType === 'hrac') this.orWhere('pc.hrac_group_secondary', token);
+        if (groupType === 'moa') this.orWhere('sp.moa_group', token);
+      }
     })
     .modify((query) => {
       if (product?.category) query.where('sp.product_category', product.category);
     })
     .orderBy('sr.service_date', 'desc')
-    .select('sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group', 'sp.targets')
+    .select('sp.id as service_product_id', 'sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group', 'sp.targets')
     .limit(1))
     .catch((err) => { if (strict) throw err; return []; });
   return rows[0] || null;
@@ -83,17 +129,25 @@ async function latestComparableGroupApplication(knex, customerId, product, group
 // The repeat-group rule (never the same chemical group twice in a row) has two named exemptions
 // (owner 2026-10-06); every other same-group repeat behaves as before:
 //   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
-//   take_all_artavia_pair: the labeled take-all pair is Artavia twice, 28 days apart (label spacing:
+//   take_all_artavia_pair: the planned take-all pair is Artavia, then Headway 28 days later (Headway adds
+//     propiconazole, group 3, to the same group 11 azoxystrobin, so group 11 repeats once: this is the
+//     named exception for it, 30 to 45 days apart); Artavia twice, 28 days apart, stays allowed (label spacing:
 //     TAKE_ALL_PAIR_MIN_DAYS to TAKE_ALL_PAIR_MAX_DAYS between visits; an earlier repeat is a normal
 //     repeat), ONLY when both applications recorded a take-all target (no target evidence, no
 //     exemption), and ONLY for the SECOND application of the seasonal pair: exactly one take-all
 //     Artavia in the season window before this one, and it is the 28 to 45 day one. A third is a
 //     normal review.
 const TAKE_ALL_PAIR_MIN_DAYS = 28;
+// Artavia then HEADWAY: 30 days on every grass. The Headway label limits bermudagrass to 3 fl oz per 1,000 sq ft
+// every 30 days, so the pair is label-safe everywhere at 30 (Artavia twice keeps the 28 of its own label).
+const TAKE_ALL_HEADWAY_MIN_DAYS = 30;
 const TAKE_ALL_PAIR_MAX_DAYS = 45;
 // Two spacings of 45 days at most, so a third application still sees the first.
 const TAKE_ALL_SEASON_DAYS = 90;
 const TAKE_ALL_TARGET = /\btake all\b/;
+// The pair is Artavia then Headway (or Artavia twice): the second product, and the first one, by name.
+const TAKE_ALL_SECOND = /\b(artavia|headway)\b/;
+const TAKE_ALL_FIRST = /\bartavia\b/;
 
 function dayNumber(value) {
   const time = Date.parse(`${String(value instanceof Date ? value.toISOString() : value || '').slice(0, 10)}T00:00:00Z`);
@@ -106,46 +160,130 @@ function targetList(value) {
 
 const hasTakeAllTarget = (value) => targetList(value).some((target) => TAKE_ALL_TARGET.test(target));
 
+// Words a take-all trigger may carry besides "take all" itself ("mapped_take_all_spring_2", "active_take_all").
+const TAKE_ALL_TRIGGER_FILLER = new Set(['mapped', 'active', 'take', 'all', 'spring', 'fall', 'first', 'second', 'application']);
+
+// Is this trigger or role text EXCLUSIVELY take-all? A row that serves other uses too (a compound trigger such as
+// "mapped_take_all_fall_1_pythium_root_rot", "..._large_patch_...") cannot prove that an application under it
+// was for take-all, so it is no evidence. Only the take-all phrase plus filler words and numbers qualify.
+function textIsExclusivelyTakeAll(text) {
+  const normalized = normalizeText(text);
+  if (!TAKE_ALL_TARGET.test(normalized)) return false;
+  return normalized.split(' ').every((word) => !word || TAKE_ALL_TRIGGER_FILLER.has(word) || /^\d+$/.test(word));
+}
+
+// Does an applied protocol row (its trigger or its role) name take-all, and only take-all?
+function rowNamesTakeAll(row) {
+  const gates = typeof row?.gates === 'string' ? (() => { try { return JSON.parse(row.gates) || {}; } catch { return {}; } })() : (row?.gates || {});
+  return [gates.trigger, row?.role].some(textIsExclusivelyTakeAll);
+}
+
+// The staged protocol row a PRIOR application was applied under: the ledger actual of its service_products row
+// (protocol_product_id -> lawn_protocol_products). null when it has none or the ledger is not there. A failed
+// read throws when strict, else reads as no row.
+async function priorProtocolRow(knex, serviceProductId, { strict = false } = {}) {
+  if (!serviceProductId) return null;
+  try {
+    const rows = await savepointRead(knex, (k) => k('lawn_protocol_product_actuals as a')
+      .join('lawn_protocol_products as p', 'a.protocol_product_id', 'p.id')
+      .where('a.service_product_id', serviceProductId)
+      .select('p.gates', 'p.role'));
+    return (rows || []).length ? rows : null;
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+}
+
+// Target evidence for a PRIOR application. Recorded targets decide when there are any (a non-take-all target
+// is not take-all evidence). Fast Complete records none, so then the protocol row it was applied under decides;
+// with neither there is no evidence.
+async function takeAllEvidence(knex, { targets, serviceProductId, strict }) {
+  if (targetList(targets).length) return hasTakeAllTarget(targets);
+  const rows = await priorProtocolRow(knex, serviceProductId, { strict });
+  return Boolean(rows && rows.some(rowNamesTakeAll));
+}
+
+// The same for the application being judged: its recorded targets, else the plan's staged row for the product
+// (plan.protocol.structured.products, the rows the visit is applied under).
+function currentTakeAllEvidence({ input, product, plan }) {
+  if (targetList(input.targets).length) return hasTakeAllTarget(input.targets);
+  const rows = (plan?.protocol?.structured?.products || []).filter((row) => String(row?.productId) === String(product?.id));
+  return rows.some(rowNamesTakeAll);
+}
+
 function productIsPreEmergent(product, plan) {
   const rows = plan?.protocol?.structured?.products || [];
   return rows.some((row) => String(row?.productId) === String(product?.id) && /pre_emergent/.test(String(row?.role || '')))
     || isPreEmergent(product || {});
 }
 
-// The customer's take-all Artavia applications in the season window before this one (completed
-// visits only, the same product, a take-all target recorded). A failed read throws when strict, else
+// The customer's take-all pair applications in the season window before this one (completed
+// visits only, this product or the last one's, a take-all target recorded). A failed read throws when strict, else
 // reads as none, so no exemption.
 // Scoped to the visit's property: a spray at another of the customer's properties is not this
 // property's pair. A visit with no property counts only history that also names none.
-async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict = false, propertyId = null } = {}) {
+async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate, { strict = false, propertyId = null, v13 = true } = {}) {
   const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-    .modify((query) => (propertyId ? query.where('ss.property_id', propertyId) : query.whereNull('ss.property_id')))
+    // v13: unplaced history counts at every property (it can only withhold the exemption). Gate off: as before.
+    .modify((query) => scopeToTreatedProperty(query, propertyId, { includeUnplaced: v13 }))
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
-    .where('sp.product_name', product.name)
+    .whereIn('sp.product_name', productNames)
     .orderBy('sr.service_date', 'desc')
-    .select('sr.service_date', 'sp.product_name', 'sp.targets'))
+    .select('sp.id as service_product_id', 'sr.service_date', 'sp.product_name', 'sp.targets'))
     .catch((err) => { if (strict) throw err; return []; });
   const today = dayNumber(serviceDate);
-  return rows.filter((row) => today - dayNumber(row.service_date) <= TAKE_ALL_SEASON_DAYS && hasTakeAllTarget(row.targets));
+  const inSeason = rows.filter((row) => today - dayNumber(row.service_date) <= TAKE_ALL_SEASON_DAYS);
+  const found = [];
+  for (const row of inSeason) {
+    // Gate off: recorded targets only (the evidence fallback to the applied protocol row is the v13 program's).
+    const evidence = v13 ? await takeAllEvidence(knex, { targets: row.targets, serviceProductId: row.service_product_id, strict }) : hasTakeAllTarget(row.targets);
+    if (evidence) found.push(row);
+  }
+  return found;
 }
 
-async function isTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) {
+// The pair exemption as it was before the v13 program: Artavia after the same Artavia, both applications with a
+// recorded take-all target, 28 to 45 days apart, the second application of the pair only.
+async function isLegacyTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) {
   if (!/\bartavia\b/.test(normalizeText(product.name)) || normalizeText(last.product_name) !== normalizeText(product.name)) return false;
   if (!hasTakeAllTarget(input.targets) || !hasTakeAllTarget(last.targets)) return false;
-  const history = await takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict, propertyId });
+  const history = await takeAllArtaviaHistory(knex, customerId, [product.name], serviceDate, { strict, propertyId, v13: false });
   if (history.length !== 1) return false;
   const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
   return apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
     && dayNumber(history[0].service_date) === dayNumber(last.service_date);
 }
 
+async function isTakeAllPair(knex, ctx) {
+  return v13Rotation() ? isV13TakeAllPair(knex, ctx) : isLegacyTakeAllPair(knex, ctx);
+}
+
+async function isV13TakeAllPair(knex, { customerId, propertyId, product, plan, groupType, groupValue, input, serviceDate, strict }) {
+  // The pair is judged at this property: the customer-wide latest application of the group may be another
+  // property's, which must not break a valid pair here (the repeat finding itself stays customer-wide).
+  const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict, scopeToProperty: true, propertyId });
+  if (!last) return false;
+  // Artavia after Artavia, or Headway after Artavia; the first of the pair is always Artavia.
+  if (!TAKE_ALL_SECOND.test(normalizeText(product.name)) || !TAKE_ALL_FIRST.test(normalizeText(last.product_name))) return false;
+  if (TAKE_ALL_FIRST.test(normalizeText(product.name)) && normalizeText(last.product_name) !== normalizeText(product.name)) return false;
+  if (!currentTakeAllEvidence({ input, product, plan })) return false;
+  if (!(await takeAllEvidence(knex, { targets: last.targets, serviceProductId: last.service_product_id, strict }))) return false;
+  const history = await takeAllArtaviaHistory(knex, customerId, [...new Set([product.name, last.product_name])], serviceDate, { strict, propertyId });
+  if (history.length !== 1 || !TAKE_ALL_FIRST.test(normalizeText(history[0].product_name))) return false;
+  const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
+  const minDays = /\bheadway\b/.test(normalizeText(product.name)) ? TAKE_ALL_HEADWAY_MIN_DAYS : TAKE_ALL_PAIR_MIN_DAYS;
+  return apart >= minDays && apart <= TAKE_ALL_PAIR_MAX_DAYS
+    && dayNumber(history[0].service_date) === dayNumber(last.service_date);
+}
+
 async function rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) {
   if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
-  return await isTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
+  return await isTakeAllPair(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
 }
 
 function latestAssessmentStressed(plan) {
@@ -207,11 +345,37 @@ async function repeatGroupFindings(knex, { customerId, propertyId, product, inpu
   const findings = [];
   for (const [groupType, groupValue] of productGroups(product)) {
     const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict });
-    if (!last || !lastApplicationGroups(last, groupType).some((lastGroup) => String(lastGroup || '') === String(groupValue))) continue;
+    if (!last || !lastApplicationGroups(last, groupType).some((lastGroup) => groupInValue(lastGroup, groupValue))) continue;
     if (await rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict })) continue;
     findings.push(repeatGroupFinding({ product, input, groupType, groupValue, last }));
   }
-  return findings;
+  return oneFindingPerGroup(product, findings);
+}
+
+// A catalog row can hold one group twice: in the older free-text column (moa_group "Group 11") and in the typed column
+// of the label's system (frac_group "11"). Each column has its own history lookup (an earlier product may hold the
+// group in only one of them), so one resistance group could raise two findings, naming one earlier application or two
+// different ones. The technician gets ONE finding for the group: the one whose earlier application is the latest;
+// on the same day the typed finding stays (it carries the fungicide code). A free-text group with no typed twin on
+// this product is its own group. Not behind the v13 gate: the catalog rows keep both columns when the gate is off.
+const bareGroup = (value) => String(value ?? '').trim().replace(/^group\s+/i, '').toLowerCase();
+function oneFindingPerGroup(product, findings) {
+  const typedGroups = productGroups(product).filter(([type]) => type !== 'moa');
+  const keyOf = ({ evidence }) => {
+    const bare = bareGroup(evidence.groupValue);
+    if (evidence.groupType !== 'moa') return `${evidence.groupType}:${bare}`;
+    const twin = typedGroups.find(([, value]) => bareGroup(value) === bare);
+    return twin ? `${twin[0]}:${bare}` : `moa:${bare}`;
+  };
+  const best = new Map();
+  for (const finding of findings) {
+    const key = keyOf(finding);
+    const held = best.get(key);
+    const newer = held && (finding.evidence.lastDate > held.evidence.lastDate
+      || (finding.evidence.lastDate === held.evidence.lastDate && held.evidence.groupType === 'moa'));
+    if (!held || newer) best.set(key, finding);
+  }
+  return findings.filter((finding) => best.get(keyOf(finding)) === finding);
 }
 
 async function evaluateWaveGuardManagerApprovals(knex, {
@@ -346,6 +510,9 @@ function managerApprovalSummary(approval, blocks, actor) {
 
 module.exports = {
   evaluateWaveGuardManagerApprovals,
+  rateUnitsMatch,
   managerApprovalSummary,
   latestComparableGroupApplication,
+  productGroups,
+  priorProtocolRow,
 };

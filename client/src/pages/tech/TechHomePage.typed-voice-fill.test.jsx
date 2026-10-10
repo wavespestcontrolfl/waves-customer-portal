@@ -14,7 +14,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), stationMap: { enabled: false, ready: true } }));
+const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), stationMap: { enabled: false, ready: true, known: true } }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlag: () => false,
@@ -81,7 +81,7 @@ function mount(path = '/admin/today/tools') {
 
 beforeEach(() => {
   mocks.navigationBusy.mockClear();
-  mocks.stationMap = { enabled: false, ready: true };
+  mocks.stationMap = { enabled: false, ready: true, known: true };
   assign = vi.fn();
   vi.stubGlobal('location', { ...window.location, assign });
   vi.stubGlobal('fetch', vi.fn(async (path) => {
@@ -167,8 +167,10 @@ it.each(STATION_VISITS)('%s opens the sheet, reading its own form, while the tec
 });
 
 it.each([
-  ['on', { enabled: true, ready: true }],
-  ['not yet loaded', { enabled: false, ready: false }],
+  ['on', { enabled: true, ready: true, known: true }],
+  ['not yet loaded', { enabled: false, ready: false, known: false }],
+  // A failed flag load answers off, fail closed: not the server saying off (Codex P1 on #6140).
+  ['unread (the flag load failed)', { enabled: false, ready: true, known: false }],
 ])('with the tech\'s station map %s, a station visit keeps the typed form, which records every station (Codex P1 on #5638)', async (_label, stationMap) => {
   mocks.stationMap = stationMap;
   for (const [, overrides] of STATION_VISITS) {

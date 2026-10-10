@@ -2,7 +2,12 @@
 # For the spike we keep it out of git — once the app needs hand-edited native
 # files (entitlements, custom Info.plist, native plugins), commit client/ios/
 # and instead ignore only ios/App/Pods/ and ios/App/build/.
-ios/
+# The one tracked folder is ios/App/ci_scripts: Xcode Cloud runs
+# ci_post_clone.sh from beside the workspace, and that script generates the rest.
+ios/*
+!ios/App/
+ios/App/*
+!ios/App/ci_scripts/
 
 # Capacitor-generated native Android project (regenerate with scripts/mobile/bootstrap-android.sh).
 # Same policy as ios/ — keep generated output out of git for now. Once it needs
@@ -13,4 +18,5 @@ android/
 
 # Capacitor CLI scratch
 .capacitor/
+.ios-ci-scripts-hold/
 public/__stub/

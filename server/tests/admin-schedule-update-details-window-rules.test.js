@@ -126,6 +126,22 @@ describe('rung-1 wiring (source-pattern guards)', () => {
     // The rewrite's own per-row probes already exclude the whole participant set.
     expect(ud).toMatch(/const rewriteProbeExcludeIds = \[parent\.id, \.\.\.pendingRewriteIds\]/);
   });
+
+  // A save that only flips the "Keep auto-dispatch off this visit" box must
+  // count as a change (detailsChanged gates the row update), and the
+  // slot-change lock must be merged on the locked row before that update.
+  // The patch rules themselves: auto-dispatch-staff-edit-lock.test.js.
+  test('update-details seeds the box flip before detailsChanged and merges the slot-change lock on the locked row', () => {
+    const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+    const seedIdx = ud.indexOf('const updates = { ...autoDispatchBoxPatch({ now: autoDispatchLocked, was: autoDispatchLockedWas }) };');
+    const changedIdx = ud.indexOf('const detailsChanged = Object.keys(updates).length > 0;');
+    const lockIdx = ud.indexOf('Object.assign(updates, staffEditLockPatch(occRow, updates));');
+    const writeIdx = ud.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
+    expect(seedIdx).toBeGreaterThan(-1);
+    expect(seedIdx).toBeLessThan(changedIdx);
+    expect(lockIdx).toBeGreaterThan(changedIdx);
+    expect(lockIdx).toBeLessThan(writeIdx);
+  });
 });
 
 describe('adminMoveProbeExcludeIds — batch-move exclusion for the admin move probe', () => {

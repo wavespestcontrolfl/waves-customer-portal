@@ -312,6 +312,41 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.amount).toBeUndefined();
   });
 
+  describe('an estimate carrying an area add-on is never suggested, gate on or off (Codex round 5 P2)', () => {
+    const saved = process.env.GATE_AREA_ADDONS;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.GATE_AREA_ADDONS;
+      else process.env.GATE_AREA_ADDONS = saved;
+    });
+    // The add-on rides only in the replayable engine inputs, so no other guard
+    // (billable one-time rows, quote requirement) can be what blocks it.
+    const withAddOn = () => pestEstimate({
+      estimate_data: {
+        result: { recurring: { services: [PEST_LINE] } },
+        engineInputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } },
+      },
+    });
+
+    test.each([['on', 'true'], ['off', undefined]])('gate %s: blocked with no amount, while the same estimate without the add-on suggests', async (_state, gate) => {
+      if (gate === undefined) delete process.env.GATE_AREA_ADDONS;
+      else process.env.GATE_AREA_ADDONS = gate;
+      const suggestion = await buildSuggestion([withAddOn()]);
+      expect(suggestion).toMatchObject({ blocked: true, blockReason: 'estimate carries an area add-on' });
+      expect(suggestion.amount).toBeUndefined();
+      expect((await buildSuggestion([pestEstimate()])).blocked).toBeUndefined();
+    });
+
+    test('an add-on row on the mapped result blocks it too', async () => {
+      process.env.GATE_AREA_ADDONS = 'true';
+      const rowOnly = pestEstimate({
+        estimate_data: { result: { recurring: { services: [PEST_LINE] }, oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', price: 0 }] } } },
+      });
+      const suggestion = await buildSuggestion([rowOnly]);
+      expect(suggestion.blocked).toBe(true);
+      expect(suggestion.amount).toBeUndefined();
+    });
+  });
+
   test('no credible estimate → null (modal renders exactly as before)', async () => {
     expect(await buildAnnualPrepayEstimateSuggestion([])).toBeNull();
     expect(await buildAnnualPrepayEstimateSuggestion([pestEstimate({ status: 'draft' })])).toBeNull();

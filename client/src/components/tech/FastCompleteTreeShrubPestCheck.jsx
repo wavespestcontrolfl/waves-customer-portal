@@ -28,14 +28,14 @@ export function usePestCheck({ context, rows }) {
   const toggleType = useCallback((key) => setPicked((prev) => toggleInSet(prev, key)), []);
   const answer = useMemo(() => ({ found, types: [...picked] }), [found, picked]);
   const evaluation = useMemo(
-    () => (enabled ? evaluatePestCheck(answer, rows) : { blockMessage: '', noteMessages: [], meritRows: [] }),
+    () => (enabled ? evaluatePestCheck(answer, rows) : { blockMessage: '', noteMessages: [], blockedRows: [], blockedLabel: '' }),
     [enabled, answer, rows],
   );
   const payload = enabled ? pestCheckPayload(answer) : null;
   return { enabled, found, picked, types, evaluation, payload, setFound, toggleType };
 }
 
-export function PestCheckSection({ state, locked, onRemoveMerit }) {
+export function PestCheckSection({ state, locked, onRemoveBlocked }) {
   if (!state.enabled) return null;
   const { found, picked, types, evaluation } = state;
   return (
@@ -54,8 +54,8 @@ export function PestCheckSection({ state, locked, onRemoveMerit }) {
       {evaluation.blockMessage && (
         <>
           <p className="tech-visit-muted tech-visit-status--warn" role="alert">{evaluation.blockMessage}</p>
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={() => onRemoveMerit(evaluation.meritRows)}>
-            Remove Merit from this visit
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={() => onRemoveBlocked(evaluation.blockedRows)}>
+            Remove {evaluation.blockedLabel} from this visit
           </Button>
         </>
       )}

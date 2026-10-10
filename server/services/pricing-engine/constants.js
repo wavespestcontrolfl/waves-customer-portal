@@ -272,6 +272,38 @@ const LAWN_TIERS = {
   premium:  { freq: 12, index: 2, label: '12x applications/yr' },
 };
 const LAWN_SOLD_TIERS = ['standard', 'enhanced', 'premium'];
+// Bermuda removal add-on cost (GATE_LAWN_BERMUDA_REMOVAL, owner 2026-10-06): what the
+// two yearly sprays cost to do, for margin REPORTING only (never a cost floor: add-on
+// revenue must not satisfy floors, and these dollars never raise one). Per spray:
+// product $/1,000 sq ft x the whole lawn (a conservative worst case: the real mix goes
+// on mapped areas plus a 3 ft border) plus labor at LAWN_PRICING_V2.laborRateLoaded for
+// mixMinutes + minutesPer1000 x lawn sq ft / 1,000. These are the code defaults of
+// LAWN_PRICING_V2.bermudaSuppression.cost: the pricing_config lawn_pricing_v2 row can
+// overlay it (db-bridge deep-merges and rebases to these on every sync), so an edit
+// there changes the cost with no deploy. The engine reads it at call time.
+// Product prices are owner-provided, dated 2026-10-06, NOT read from products_catalog
+// (priceLawnCare is synchronous and database-free):
+//   Recognition 0.03 oz/1,000: SiteOne $183.30 per 1.95 oz bottle = $94.00/oz = $2.82
+//   Fusilade II 0.55 fl oz/1,000: DoMyOwn $93.88 per 32 fl oz = $2.934/fl oz = $1.61
+//     (owner's pick; the SiteOne quart is $135.29 and the 2.5 gal jug $4.63/fl oz)
+//   LESCO 90/10 surfactant 0.32 fl oz/1,000: about $0.07
+// (Not frozen: db-bridge snapshots and restores every export of this module in place.)
+const BERMUDA_SUPPRESSION_COST_DEFAULTS = {
+  recognitionPer1000: 2.82,
+  fusiladePer1000: 1.61,
+  surfactantPer1000: 0.07,
+  mixMinutes: 10,
+  minutesPer1000: 2.5,
+};
+// Label ceiling, not a price: at most 2 sprays a calendar year.
+const LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR = 2;
+
+const LAWN_COST_PLUS_LIST_DEFAULTS = {
+  listMargin: 0.45,
+  minimumPerVisit: 55,
+  spotMinutesPerVisit: 10,
+  materialPer1000SqftPerYear: { 6: 16.33, 9: 24.5, 12: 29.84 },
+};
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
   // Program minimum DISARMED (owner ruling 2026-07-17: "forget all floors").
@@ -344,7 +376,18 @@ const LAWN_PRICING_V2 = {
   // behind GATE_BERMUDA_SUPPRESSION. Both knobs are DB-editable on the
   // pricing_config lawn_pricing_v2 row (deepMerge); adder =
   // perAppBase + perAppPer1000Sqft * (turf sqft / 1000).
-  bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 },
+  bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2, cost: { ...BERMUDA_SUPPRESSION_COST_DEFAULTS } },
+  // Cost-plus list price for residential recurring lawn care (owner ruling
+  // 2026-10-09), behind GATE_LAWN_COST_PLUS_LIST (ships OFF). List price =
+  // annual cost / (1 - listMargin), never below the market table nor
+  // minimumPerVisit; discounts still stop at targetCollectedMarginFloor.
+  // Cost = the v13 whole-lawn product at SiteOne account prices 2026-10-05
+  // (9 visits $17.73, 12 visits $20.84 per 1,000 sq ft a year) plus a $0.75
+  // per 1,000 sq ft per visit spot-work reserve, and spotMinutesPerVisit
+  // more labor. One program for every grass, so no per-track table; 6 is the
+  // hidden anchor cadence at the 9-visit per-visit average. DB-editable on
+  // the lawn_pricing_v2 row (deepMerge); db-bridge rebases it every sync.
+  costPlusList: JSON.parse(JSON.stringify(LAWN_COST_PLUS_LIST_DEFAULTS)),
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: {
     DENSE: 5,
@@ -1519,6 +1562,186 @@ const ONE_TIME = {
 };
 
 // ============================================================
+// AREA ADD-ON TREATMENTS (owner rulings 2026-10-08)
+// ============================================================
+// One-time treatments sold on top of (or next to) a base program, mainly to
+// pest-only customers: priceAreaAddOn in service-pricing.js prices every row
+// with one cost-plus formula —
+//   cost  = material at the tier's top area + labor + drive (own visit only)
+//           + adminPerJob
+// The drive and adminPerJob are the cost of ONE visit and ONE booking, so the
+// group pays each once: the first priced add-on carries them (priceAreaAddOnList).
+//   price = cost / (1 - targetMargin), rounded UP to a price ending in 9
+// Pricing at the tier's top edge makes targetMargin the LOWEST margin in the
+// tier. Own visit is the default (most asks arrive between pest visits); a
+// same-trip add-on drops the drive cost. No recurring-customer perk applies
+// (the same-trip price is already the lower one).
+//
+// materialPer1000 = product cost at the rate used, $ per 1,000 sq ft
+// (SiteOne catalog prices, 2026-10-08). Labor minutes are ESTIMATES, not
+// measured times — recalibrate against completed jobs before re-pricing.
+// Version 1 sells ONE application per estimate (owner ruling 2026-10-08): a
+// second application is a new estimate.
+// YEARLY LIMITS (owner ruling 2026-10-08, add-on-only): maxPerYear is the most
+// applications of the add-on's product at one property in any 12 months,
+// program applications and add-on applications both counting, and
+// minDaysApart the days required between two of them; limitProduct is the
+// catalog product the history is read for (the name the governed protocol
+// area_addon hints). The limit only ever blocks the ADD-ON, never a program
+// visit. This table is the ONE source: the pricer (area-addon-limits.js), the
+// catalog payload, the job card and the accept recheck all read it, and a test
+// pins the protocol's label text to it. No limit (maxPerYear null) = unlimited.
+// serviceKey is the add-on's own `services` catalog key (migration
+// 20261008200000): the engine line and the mapped row carry it so nothing
+// downstream guesses a service from the display name. category is the
+// service family (web sweep = pest control, the rest = lawn maintenance, owner
+// ruling 2026-10-08): it drives tax, the invoice label and the service mix.
+const AREA_ADDONS = {
+  targetMargin: 0.60,
+  adminPerJob: 8,             // booking + invoicing of ONE job (the whole add-on group), charged once
+  items: {
+    // Snapshot 2.5TG at 3.45 lb/1,000 ($2.99/lb). Label: 600 lb/acre = 13.8 lb per
+    // 1,000 sq ft in 12 months, at least 60 days apart (owner ruling 2026-10-08).
+    bed_pre_emergent: {
+      name: 'Bed Pre-Emergent Weed Control',
+      serviceKey: 'area_addon_bed_pre_emergent',
+      category: 'lawn_care',
+      areaLabel: 'bed',
+      materialPer1000: 10.32,
+      setupMin: 6,
+      minPer1000: 8,
+      tiers: [1000, 2000, 3500],
+      // 4 x 3.45 lb = the label's 13.8 lb per 1,000 sq ft in 12 months, program applications counted.
+      maxPerYear: 4,
+      minDaysApart: 60,
+      limitProduct: 'Snapshot 2.5TG',
+    },
+    // Arena 50 WDG at 0.147 oz/1,000 (6.4 oz/acre, $9.87/oz): the Florida
+    // 2(ee) rate for southern chinch bug on St. Augustine (sheet expires
+    // 2028-12-31, on file in Staff documents; the applicator carries it).
+    // Two applications 8 weeks apart equal the season limit of 12.8 oz/acre.
+    // St. Augustine only: another grass needs the main-label rate. Area is
+    // the TREATED area (damage plus the green edge), not the dead patch.
+    lawn_insect_spot: {
+      name: 'Lawn Insect Spot Treatment',
+      serviceKey: 'area_addon_lawn_insect_spot',
+      category: 'lawn_care',
+      areaLabel: 'treated lawn',
+      materialPer1000: 1.45,
+      setupMin: 8,
+      minPer1000: 6,
+      tiers: [1000, 2000, 3500],
+      // Same as the v13 lawn program's own Arena cap (lawn-v13-count-caps.js): 2 a year, 56 days (8 weeks) apart.
+      maxPerYear: 2,
+      minDaysApart: 56,
+      limitProduct: 'Arena 50 WDG',
+      // The 2(ee) rate and its two-application ceiling cover St. Augustine
+      // only: any other or unknown grass is a custom quote, never this price.
+      requiresGrassTrack: 'st_augustine',
+    },
+    // Topchoice at 2 lb/1,000 ($1.83/lb), broadcast once a year.
+    fire_ant_yard: {
+      name: 'Fire Ant Yard Treatment',
+      serviceKey: 'area_addon_fire_ant_yard',
+      category: 'lawn_care',
+      areaLabel: 'lawn',
+      materialPer1000: 3.66,
+      setupMin: 6,
+      minPer1000: 2.5,
+      tiers: [3000, 5000, 8000],
+      maxPerYear: 1,
+      limitProduct: 'Topchoice Granular Insecticide',
+    },
+    // Acelepryn at 0.184 fl oz/1,000 ($14.14/fl oz), once in 12 months (April is the best time, not a limit: the
+    // label ties the product to no month; the protocol note says so).
+    lawn_insect_preventive: {
+      name: 'Yearly Lawn Insect Preventive',
+      serviceKey: 'area_addon_lawn_insect_preventive',
+      category: 'lawn_care',
+      areaLabel: 'lawn',
+      materialPer1000: 2.60,
+      setupMin: 8,
+      minPer1000: 2.5,
+      tiers: [3000, 5000, 8000],
+      maxPerYear: 1,
+      limitProduct: 'Acelepryn Insecticide',
+    },
+    // Weed kill on shell, rock beds, pavers and fence lines. Roundup QuikPro
+    // SC Total at the label rate, 16 fl oz/1,000 ($1.155/fl oz). Label limit
+    // 32 fl oz/1,000 per 12 months = 2 applications. The product carries a
+    // 6-month soil residual (indaziflam): hard surfaces and bare ground only.
+    hardscape_weed: {
+      name: 'Shell, Rock & Paver Weed Control',
+      serviceKey: 'area_addon_hardscape_weed',
+      category: 'lawn_care',
+      areaLabel: 'treated',
+      materialPer1000: 18.48,
+      setupMin: 8,
+      minPer1000: 6,
+      tiers: [1000, 2000, 3500],
+      maxPerYear: 2,
+      limitProduct: 'Roundup QuikPro SC',
+    },
+    // Web sweep of pool cage, lanai and eaves between visits: labor only,
+    // one flat job (no area tiers).
+    web_sweep: {
+      name: 'Web Sweep',
+      serviceKey: 'area_addon_web_sweep',
+      category: 'pest_control',
+      areaLabel: null,
+      materialPer1000: 0,
+      setupMin: 25,
+      minPer1000: 0,
+      tiers: null,
+      maxPerYear: null,
+      limitProduct: null,
+    },
+  },
+};
+
+// The in-code defaults of the DB-editable knobs (pricing_config key `area_addon_pricing`): the group's target margin and
+// admin charge, and per add-on the material cost, setup minutes, minutes per 1,000 sq ft and the area tiers. Frozen at load
+// from the table above and NEVER mutated: db-bridge rebases AREA_ADDONS onto it on every sync (a row that is deleted or
+// malformed leaves the code defaults), and a stored estimate without a stamp replays it. The label-bound fields (maxPerYear,
+// minDaysApart, requiresGrassTrack, limitProduct, serviceKey, name, category, areaLabel) are NOT here and no row can edit them.
+const AREA_ADDON_PRICING_DEFAULTS = Object.freeze({
+  targetMargin: AREA_ADDONS.targetMargin,
+  adminPerJob: AREA_ADDONS.adminPerJob,
+  items: Object.freeze(Object.fromEntries(Object.entries(AREA_ADDONS.items).map(([key, cfg]) => [key, Object.freeze({
+    materialPer1000: cfg.materialPer1000,
+    setupMin: cfg.setupMin,
+    minPer1000: cfg.minPer1000,
+    tiers: cfg.tiers ? Object.freeze([...cfg.tiers]) : null,
+  })]))),
+});
+
+// The frozen defaults are exported through a function, never as an object: db-bridge snapshots and restores every object
+// export in place, and these must never be touched by that. (A plain export, so the public-route scanner can trust
+// module.exports.)
+function areaAddOnPricingDefaults() {
+  return AREA_ADDON_PRICING_DEFAULTS;
+}
+
+// The AREA_ADDONS item a priced or mapped row stands for, or null. Rows are
+// identified by their add-on key, never by display name: "Fire Ant Yard
+// Treatment" reads as a pest job to every name matcher. Own-property lookup
+// so a key like "constructor" is not an add-on.
+function areaAddOnConfig(row) {
+  if (!row || typeof row !== 'object' || row.service !== 'area_addon') return null;
+  const key = typeof row.addOnKey === 'string' ? row.addOnKey : null;
+  return key && Object.prototype.hasOwnProperty.call(AREA_ADDONS.items, key) ? AREA_ADDONS.items[key] : null;
+}
+
+// Is this catalog service_key one of the area add-on rows (area_addon_<key>)?
+// The completion routes (lawn / pest fast complete, the pest recap) decide
+// by this key, never by the add-on's name or its lawn / pest category: an add-on
+// is generic one-time work, whatever its name says.
+function isAreaAddOnCatalogKey(serviceKey) {
+  return typeof serviceKey === 'string'
+    && Object.values(AREA_ADDONS.items).some((cfg) => cfg.serviceKey === serviceKey);
+}
+
+// ============================================================
 // SPECIALTY SERVICES
 // ============================================================
 //
@@ -2312,6 +2535,13 @@ const WAVEGUARD = {
     // Active German Roach Cleanout is a 3-visit specialty/cost-recovery line,
     // not a recurring-service benefit or one-time perk candidate.
     german_roach: true,
+    // Vehicle German roach rows (owner 2026-10-06, migration
+    // 20261008190000): a flat $199 two-visit car job and a flat $99 rider on a
+    // home roach job. Admin Schedule's lineExcludedFromPercentDiscount and the
+    // client picker read this map (the catalog rows carry no engine_keys), not
+    // service_discount_rules (codex #6162 r1 P1).
+    vehicle_german_roach: true,
+    vehicle_roach_addon: true,
     // pest_initial_roach is a non-waivable first-visit cost-recovery charge
     // (auto-fired when recurring pest is booked with a non-none roachType).
     // The whole point is to recover the heavier visit-1 product + labor
@@ -2319,6 +2549,12 @@ const WAVEGUARD = {
     // apply — otherwise the fee is silently discounted in exactly the case
     // where we need full capture.
     pest_initial_roach: true,
+    // Area add-on treatments (owner ruling 2026-10-08): a priced one-time job with its own cost-plus margin, never cut by a
+    // percentage. The engine line says so itself (`discountable: false`), but the catalog rows carry no engine_keys, so the
+    // scheduler, the completion pricing and the invoice paths judge them by THESE keys: the engine key and each add-on's catalog
+    // service_key, taken from the one AREA_ADDONS table (a new add-on cannot be added without being excluded).
+    area_addon: true,
+    ...Object.fromEntries(Object.values(AREA_ADDONS.items).map((item) => [item.serviceKey, true])),
   },
   // One-time service perk for recurring customers. Flat 15% off one-time
   // services only. Does NOT stack with WaveGuard tier discount (recurring
@@ -2382,13 +2618,14 @@ const INSPECTION_CREDIT = {
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, TURF_FACTORS,
-  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_COST_PLUS_LIST_DEFAULTS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
-  ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
+  ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, areaAddOnPricingDefaults, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,
 };
+

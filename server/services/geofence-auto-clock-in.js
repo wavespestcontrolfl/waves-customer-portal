@@ -10,6 +10,7 @@
 const db = require('../models/db');
 const matcher = require('./geofence-matcher');
 const featureGates = require('../config/feature-gates');
+const { hasCompletedIssuedRecord, VEHICLE_AGREEMENT_KEY } = require('./staff-onboarding');
 const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 
 const SOURCE = 'geofence_auto';
@@ -46,6 +47,24 @@ function isAutoClockInJobEligible(job, technicianId, now = new Date()) {
   if (!isLiveVisit(job) || job.technician_id == null) return false;
   if (String(job.technician_id) !== String(technicianId)) return false;
   return !!job.scheduled_date && etCalendarDayOf(job.scheduled_date) === etDateString(now);
+}
+
+/**
+ * Pay-compliance precondition (owner 2026-10-08): no auto clock-in until the tech has a
+ * COMPLETED record on an issued version of the vehicle use and commuting agreement (any
+ * issued version: a wording re-issue must not silently switch the commute to paid time).
+ * One plain query, run by the pre-check (db) and again, as the last gate before a shift
+ * is opened, by time-tracking.openAutoClockInShift (trx). It does not depend on
+ * GATE_STAFF_ONBOARDING_DOCS. An unreadable answer is a "no": the tech gets the
+ * "Start timer?" reminder instead. Inside a transaction a failed query aborts it; the
+ * caller's throw on "no" rolls it back, so nothing is written either way.
+ */
+async function hasVehicleAgreement(conn, technicianId) {
+  try {
+    return await hasCompletedIssuedRecord(conn, technicianId, VEHICLE_AGREEMENT_KEY);
+  } catch {
+    return false;
+  }
 }
 
 function isFreshEvent(eventTime, now = Date.now()) {
@@ -115,6 +134,7 @@ async function requestAutoClockIn({ tech, job, eventTime }) {
   if (!tech || !isAutoClockInJobEligible(job, tech.id) || !isFreshEvent(eventTime)) return null;
   const state = await matcher.getShiftStateToday(tech.id, new Date());
   if (!state || state.active || state.anyToday) return null;
+  if (!(await hasVehicleAgreement(db, tech.id))) return null;
   let visits;
   try {
     visits = await liveVisitsAtCustomer(db, tech.id, job.customer_id);
@@ -153,6 +173,7 @@ module.exports = {
   isLiveVisit,
   isAutoClockInJobEligible,
   isFreshEvent,
+  hasVehicleAgreement,
   requestAutoClockIn,
   arrivalStartOptions,
 };

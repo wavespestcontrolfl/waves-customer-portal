@@ -47,6 +47,7 @@ import {
   lawnComplexityMinutes,
   computeLawnCostFloor,
 } from '@waves/lawn-cost-floor';
+import { assertNoAreaAddOns } from './areaAddOns';
 
 /* ── helpers ────────────────────────────────────────────────── */
 
@@ -1792,6 +1793,7 @@ function calcLawnFloorPrice(sf, grassType, visits, opts = {}) {
 /* ── main engine ────────────────────────────────────────────── */
 
 export function calculateEstimate(inputs) {
+  assertNoAreaAddOns(inputs);
   const {
     homeSqFt: _homeSqFt,
     stories: _stories,

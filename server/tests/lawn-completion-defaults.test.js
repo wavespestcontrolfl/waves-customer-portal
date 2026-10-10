@@ -32,6 +32,7 @@ test('completion defaults require both owner gates', () => {
 test('verified plan math is projected unchanged with an editable method', () => {
   const { plan, context } = fixture();
   const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.eligible).toBe(true);
   expect(result.items[0].mix).toEqual(plan.mixCalculator.items[0].mix);
   expect(result.items[0].applicationMethod).toBe('broadcast_spray');
   expect(result.history).toBe(context.history);
@@ -105,7 +106,10 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   // withdrawn so the tier is the only claim.
   if (reason === 'nonmember_lane') { plan.propertyGate.billingMode = 'one_time'; plan.appointmentAssignment = {}; }
   if (reason === 'nonlawn') context.isLawn = false;
-  expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
+  const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.items).toEqual([]);
+  // Readers that offer a product beyond the add-ons stand behind the same verdict.
+  expect(result.eligible).toBe(false);
 });
 
 test('every option carries the protocol row\'s application mode, so an added herbicide records the prescribed broadcast, not the catalog\'s spot default', () => {
@@ -255,6 +259,73 @@ test.each([
   expect(lawnPlanAttributesVisit(null)).toBe(false);
 });
 
+// GATE_LAWN_BERMUDA_REMOVAL: the bermuda removal step's three options carry one
+// group id so the client adds and removes them together; no other option has one.
+test('the bermuda removal step options share one group id in the completion projection', () => {
+  const { plan, context } = fixture();
+  const step = (id, name) => ({
+    selected: false, role: 'conditional', bermudaStep: true,
+    product: { id, name, active: true, labelVerifiedAt: '2026-01-01' }, mix: null,
+  });
+  plan.protocol.structured.products.push(
+    { productId: 'rec', defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } },
+    { productId: 'fus', defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } },
+    { productId: 'nis', defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } },
+  );
+  plan.mixCalculator.conditionalOptions = [step('rec', 'Recognition'), step('fus', 'Fusilade'), step('nis', 'Surfactant')];
+  const { options, items } = buildLawnCompletionDefaults(plan, context);
+  expect(options.filter((o) => o.group === 'bermuda_removal').map((o) => o.product.id).sort()).toEqual(['fus', 'nis', 'rec']);
+  // No test-patch note on the plan items: no note on the options.
+  expect(options.some((o) => 'gateNotes' in o)).toBe(false);
+  // Every step option is a spot line with no catalog-derived amount; other options say nothing of it.
+  for (const option of options.filter((o) => o.group === 'bermuda_removal')) expect(option).toMatchObject({ applicationMode: 'spot', prefillAmount: false });
+  expect(options.find((o) => o.product.id === 'product')).not.toHaveProperty('prefillAmount');
+  expect(options.find((o) => o.product.id === 'product')).not.toHaveProperty('group');
+  expect(items.map((i) => i.product.id)).toEqual(['product']);
+});
+
+// A visit whose assigned window is May (the ordinary Celsius weed mix, LESCO 90/10 as its surfactant) and
+// whose appointment is in June: the plan's product list holds May's rows and the June step's three tagged
+// rows (lawn-bermuda-removal.js withStepProducts). The completion defaults must offer all three step
+// lines, each on its June row, and the ordinary surfactant line must keep its May row (codex #6229 r2 P2).
+test('May window, June appointment: all three step lines are offered as one group on their June rows; the ordinary surfactant keeps its May row', () => {
+  const { plan, context } = fixture();
+  const may = (productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { weedMix: true } });
+  const june = (productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } });
+  plan.protocol.structured.products.push(may('nis'), june('rec'), june('fus'), june('nis'));
+  const line = (id, extra = {}) => ({ role: 'conditional', selected: false, product: { id, name: id, active: true }, ...extra });
+  plan.mixCalculator.conditionalOptions = [line('nis'), line('rec', { bermudaStep: true }), line('fus', { bermudaStep: true }), line('nis', { bermudaStep: true })];
+  const { options, addOns } = buildLawnCompletionDefaults(plan, context);
+  expect(options.filter((o) => o.group === 'bermuda_removal').map((o) => o.product.id).sort()).toEqual(['fus', 'nis', 'rec']);
+  // The ordinary surfactant line is a plain option and an ordinary add-on (its May row), outside the group.
+  expect(options.filter((o) => o.product.id === 'nis' && !o.group)).toHaveLength(1);
+  expect(addOns.map((item) => item.product.id)).toEqual(['nis']);
+});
+
+test('a step line whose product has only an ordinary row in the plan\'s product list is not offered (the step is withheld, never read on May\'s row)', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'nis', defaultInPlan: false, applicationMode: 'spot', gates: { weedMix: true } });
+  plan.mixCalculator.conditionalOptions = [{ role: 'conditional', selected: false, bermudaStep: true, product: { id: 'nis', name: 'nis', active: true } }];
+  expect(buildLawnCompletionDefaults(plan, context).options.filter((o) => o.group === 'bermuda_removal')).toEqual([]);
+});
+
+// A CitraBlue or unconfirmed cultivar: the step lines carry the hard test-patch note, and it
+// rides each bermuda option through the completion projection (the same { key, text } shape).
+test('the spray conditions and the test-patch note ride each bermuda option; other notes and other options carry none', () => {
+  const { plan, context } = fixture();
+  const note = { key: 'testPatchFirst', severity: 'required', text: 'Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot.' };
+  const step = (id) => ({
+    selected: false, role: 'conditional', bermudaStep: true,
+    gateNotes: [note, { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow.' }, { key: 'bermudaRemoval', severity: 'note', text: 'Recipe.' }, { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip the Celsius weed spot in the bermuda area today.' }, { key: 'morningUnderF', severity: 'required', text: 'Morning.' }, { key: 'zoysia2eeOnHand', severity: 'required', text: 'Zoysia: 2(ee) on hand.' }],
+    product: { id, name: id, active: true, labelVerifiedAt: '2026-01-01' }, mix: null,
+  });
+  plan.protocol.structured.products.push(...['rec', 'fus', 'nis'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } })));
+  plan.mixCalculator.conditionalOptions = [step('rec'), step('fus'), step('nis')];
+  const { options } = buildLawnCompletionDefaults(plan, context);
+  for (const option of options.filter((o) => o.group === 'bermuda_removal')) expect(option.gateNotes.map((n) => n.key)).toEqual(['morningUnderF', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea', 'zoysia2eeOnHand', 'testPatchFirst']);
+  expect(options.find((o) => o.product.id === 'product')).not.toHaveProperty('gateNotes');
+});
+
 test('addOns are the window\'s opt-in products as the plan built them: substitute, mix and gate notes; never a default, an inactive product, an unlisted one, or one product twice', () => {
   const { plan, context } = fixture();
   plan.protocol.structured.products.push(
@@ -277,6 +348,22 @@ test('addOns are the window\'s opt-in products as the plan built them: substitut
   expect(addOns.map((item) => item.product.id)).toEqual(['celsius', 'sub']);
   expect(addOns[0]).toMatchObject({ applicationMethod: 'spot_treatment', raw: 'If sedge: Celsius WG', gateNotes: [{ text: 'Tank mix with NIS.' }], mix: { amount: 0.4, ratePer1000: 0.085 } });
   expect(addOns[1]).toMatchObject({ product: { id: 'sub' }, substitution: { originalProductName: 'Talak 7.9%' }, mix: { amount: 8, ratePer1000: 2 } });
+});
+
+test('the bermuda removal step lines are grouped options, never ordinary add-ons', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push(
+    ...['rec', 'fus', 'nis'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: { bermudaRemoval: true } })),
+    { productId: 'celsius', defaultInPlan: false, applicationMode: 'spot', gates: {} },
+  );
+  const line = (id, extra = {}) => ({ role: 'conditional', selected: false, product: { id, name: id, active: true }, ...extra });
+  plan.mixCalculator.conditionalOptions = [line('rec', { bermudaStep: true }), line('fus', { bermudaStep: true }), line('nis', { bermudaStep: true }), line('celsius')];
+  const { addOns, options } = buildLawnCompletionDefaults(plan, context);
+  expect(addOns.map((item) => item.product.id)).toEqual(['celsius']);
+  expect(options.filter((o) => o.group === 'bermuda_removal').map((o) => o.product.id).sort()).toEqual(['fus', 'nis', 'rec']);
+  // A selected step line (in the mix items) is excluded the same way.
+  plan.mixCalculator.items.push(line('rec', { bermudaStep: true, selected: true }));
+  expect(buildLawnCompletionDefaults(plan, context).addOns.map((item) => item.product.id)).toEqual(['celsius']);
 });
 
 test('no addOns when the plan is not eligible (no program on the visit)', () => {

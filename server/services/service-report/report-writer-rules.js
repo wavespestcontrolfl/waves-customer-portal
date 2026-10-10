@@ -11,7 +11,7 @@
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 
-const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v3';
+const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v4';
 
 // Remaining-service modules that belong to the lawn and tree/shrub/palm lanes.
 const WRITER_RULES_EXCLUDED_MODULES = new Set(['physical_lawn', 'palm_care']);
@@ -24,10 +24,10 @@ WHAT WE DID AND WHY: each piece of work, where it went, and why it fits what was
 WHAT TO EXPECT: how today's work should change what the customer sees, from the EXPECTATIONS lines only.
 WHAT'S NEXT: what we will check or do next, what the customer can do, and when to contact us.
 
-1. Shape. Exactly the four titles above, in that order, each on its own line and followed by exactly ONE line of plain text (one to four sentences, no line breaks inside a section). No bullets, no greeting, no sign-off, no customer-name header. Length follows the record: a visit with history, several treatments or open questions gets more; a thin record gets a sentence or two per section. Never pad, and never make the same point in two sections. If a section has nothing grounded to say, write one short sentence that only invites the customer to tell us what they notice; never invent an inspection, a check or a follow-up.
+1. Shape. Exactly the four titles above, in that order, each on its own line and followed by exactly ONE line of plain text (one to four sentences, no line breaks inside a section). No bullets, no greeting, no sign-off, no customer-name header. Length follows the record: a visit with history, several treatments or open questions gets more; a thin record gets a sentence or two per section. Never pad, and never make the same point in two sections. If a section has nothing recorded to say, write one sentence from the record itself (the place worked, the service type, or the customer's own words). Never invent an inspection, a check or a follow-up, and never fill the gap with an invitation to "let us know".
 2. Only what was recorded. Every statement must trace to the technician note, a recorded field, a structured finding line, a technician-reviewed photo caption, or a supplied record (EXPECTATIONS, HOW IT WORKS, SERVICE TYPE, REACH-OUT DATE, PROMISES, prior visits). Keep the technician's own words and hedges: never upgrade a general word to a species ("roaches" stays "roaches"), a suspicion to a diagnosis, or one room to the whole house. Keep conditions the technician recorded ("dry and calm") when they bear on the work. If a dictated word looks like a transcription error, leave it out rather than guess.
 3. The customer's words. The booked reason, the customer's concern, and any calls, texts or emails are what the customer said, never a finding. Attribute them ("You mentioned…") and keep each remark with its own place and time: never merge two remarks into one. Never quote their messages, never say we read them, and never state that the technician confirmed something only the customer reported.
-4. Every "none" stays local. State an absence only for the place and day the technician checked ("none were seen at the dishwasher today"). Never "all clear", "no problems", "nothing to worry about", or no activity for the whole property.
+4. Every "none" stays local, written as a place and a day. State an absence only for the place the technician checked, naming that place in the same clause ("none were seen under the kitchen sink today", "the stations along the back fence showed no feeding"). Never "no issues", "no problems", "all clear", "nothing to worry about", or an absence for the whole property, or for "inside" or "outside" alone. When the technician note says "no issues" or "no problems", write what it means instead of the words: if the customer said it, attribute it ("You told us the inside has been quiet"); if the technician checked named rooms, name them; if the note names no room, say where the technician worked and leave the rest unstated.
 5. Products by job, and why. Never name a product, brand, trade name or active ingredient, and never use the word "chemical". Describe each product by its job (bait, an insect-control treatment, an insect growth regulator, a larvicide). For each piece of work, give one plain clause on why it fits what was found, taken from HOW IT WORKS or EXPECTATIONS; when neither covers it, describe the work without a reason. Those lines explain how a product works, never where or how it was applied today: the place and method come only from the record. Never add a mechanism, pest, residual period or effect they do not state.
 6. No amounts or measurements: no mL, cc, teaspoons, tablespoons, fluid ounces, ounces, gallons, pounds, grams, rates, mix strength, percentages, linear feet, square feet or acreage.
 7. Never the word "safe" in any form ("safe once dry", "pet-safe", "safely"), and never "non-toxic" or "harmless". Give no re-entry, drying, rainfast or waiting time and no aftercare or safety instructions: the report's own sections cover them.
@@ -55,6 +55,25 @@ The technician's own hedges ("possible", "looks like") record how certain the te
 const PROMPT_REWRITES = Object.freeze([
   // v4 hard constraint 3: the coverage block it names is never built.
   ['A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. ', ''],
+  // v4 hard constraint 1 banned "sweep" as a war word; a web sweep is
+  // recorded work the report describes (owner 2026-10-09).
+  ['chemical barrier, vectors, sweep, recon,', 'chemical barrier, vectors, recon,'],
+  // v4 hard constraint 2 supplied the filler the owner calls weak.
+  [
+    'Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.',
+    'Say plainly what the recorded work is for; do not reach for stock phrases about pressure or long-term control.',
+  ],
+  // v4 hard constraint 10 told the writer to use an absence rule 4 refuses.
+  [
+    'a 0 means no visible activity noted — do not imply a problem.',
+    'a 0 is an absence: state it only for a place the technician checked, named in the same clause (OWNER RULES rule 4), and do not imply a problem. When the record names no checked place, leave a 0 rating out of the report; it is the one rating the report does not have to reflect.',
+  ],
+  ['("light activity", "no visible activity")', '("light activity", "moderate activity")'],
+  // Recurring pest module: the same absence wording.
+  [
+    'A recorded zero means no visible activity was noted within the assessed scope; it is not a property-wide all-clear.',
+    'A recorded zero is an absence for the places the technician checked only, each named in the same clause (OWNER RULES rule 4); with no checked place recorded, leave the zero out.',
+  ],
   // v4 hard constraint 4 invited active-ingredient names.
   [
     '4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today\'s grub treatment", never "water in the clothianidin".',
@@ -180,6 +199,38 @@ const PROMPT_REWRITES = Object.freeze([
 function composeWriterRulesPrompt([header, ...parts]) {
   const joined = [header, `# ${REPORT_WRITER_RULES_VERSION}`, OWNER_RULES, ...parts].filter(Boolean).join('\n\n');
   return PROMPT_REWRITES.reduce((text, [from, to]) => text.split(from).join(to), joined);
+}
+
+// The recurring pest writer's own block, after the shared constraints and the
+// pest module (owner 2026-10-09: "the prompt that creates the end result is
+// weak"). The rules above say what the report refuses; this says what to put
+// in each section, from which input, so a thin dictated note still gives four
+// sentences from the record and not an invitation to "let us know".
+const PEST_WRITER_ADAPTER = `RECURRING PEST VISIT: HOW TO FILL THE FOUR SECTIONS
+
+First sort every sentence of the TECHNICIAN NOTE into one of: work done, seen today, what the customer said, advice for later. A sentence stays in its category.
+
+WHAT WE FOUND. Fill from, in this order: the customer's words (BOOKED REASON, Customer concern, WHAT THE CUSTOMER TOLD US, note sentences about what the customer said), attributed to the customer; then what the technician saw today (Observations, note sentences about what was seen, the Pest activity rating in words only, "Findings observed" lines); then one earlier visit, with its date and marked as past, only when the prior visits show the same pest or the same place. Lead with the customer's concern when there is one. Name the pest as the technician named it and the place as recorded. A target tagged on a product that the technician did not record seeing is not a finding.
+
+WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: what it was by its job (an insect-control treatment, a bait, an insect growth regulator, a sweep of webs), where (Areas serviced, the APPLICATION DETAILS area, the note), how (the APPLICATION DETAILS method), and why it fits what was found, taken from HOW IT WORKS. A sweep of webs is work: describe it with only the places the record names for it, and add none. A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
+
+WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line. With no EXPECTATIONS lines there is no recorded outcome: write the one sentence rule 1 gives an empty section (from the record: the place worked or the service type), and claim no result, no effect on the pest and no timeframe.
+
+WHAT'S NEXT. In this order: what the note or the Recommendations say we will check or do next (never a visit, a day or a window); what the customer can do that the record names (never aftercare, cleaning, watering or re-entry); and when to contact us, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of the pest found today that the customer can notice. With none of these recorded (no next step, no pest found, no customer concern, no EXPECTATIONS, no REACH-OUT DATE), write the one sentence rule 1 gives an empty section, and invent no sign, no contact trigger and no follow-up.
+
+A thin record gets one sentence per section, each one from the record. Write as the technician who was there would say it to the homeowner at the door.
+
+BEFORE YOU ANSWER, read your draft for these. The report is rejected if any appears: "no issues", "no problems", "all clear", "nothing to worry about"; an absence with no place named in the same clause; infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guarantee, bond, the word "map"; safe, safely, unsafe, non-toxic, harmless, toxic, poison, dangerous, chemical; a product, brand or active ingredient name; an amount, rate, percentage or footage; a price, "free" or "included"; a timeframe that is not copied from an EXPECTATIONS line; a date, weekday or clock time other than an earlier visit's date and the REACH-OUT DATE; the activity rating as a number; a quotation of the customer's message; an instruction to leave, clean, water or avoid a treated area or a bait.`;
+
+// A note that says "no issues" / "no problems" pulls those words into every
+// draft, and the screen refuses them (2026-10-09: four drafts in a row, then
+// the standard report). The line goes under the note itself.
+const NOTE_ABSENCE_RE = /\bno\s+(?:issues?|problems?)\b/i;
+function noteAbsenceHint(note) {
+  const match = NOTE_ABSENCE_RE.exec(String(note || ''));
+  return match
+    ? `\n(The note says "${match[0].toLowerCase()}". The report refuses those words: write what the technician means, attributed to the customer or at a named place, as OWNER RULES rule 4 says.)`
+    : '';
 }
 
 // User-message labels the route uses while the rules apply.
@@ -630,7 +681,14 @@ function withinAllowanceSections(copy, fn) {
 // it states recorded re-entry instructions, timeframes, dates and the gauge
 // from the report's own facts. Every other rule, and every rule added later,
 // applies to it unchanged.
-function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [], allowedDates = [], skip = [] } = {}) {
+function writerRulesRejection(text, options = {}) {
+  return writerRulesRejectionDetail(text, options)?.reason || null;
+}
+
+// The same verdict with the words that tripped it, when the screen is a
+// pattern (`match` is null for a screen that reads the whole copy). The words
+// are located in the copy as screened, so a supplied phrase is never named.
+function writerRulesRejectionDetail(text, { activeIngredients = [], allowedPhrases = [], allowedDates = [], skip = [] } = {}) {
   const skipped = new Set(skip);
   // Supplied timeframes (an EXPECTATIONS line's own words) pass exactly as
   // supplied, and a supplied date (the reach-out date) passes only in a
@@ -650,7 +708,7 @@ function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [
     const durationEnd = new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
     if (sentences.some((sentence) => datePattern.test(sentence)
       && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
-      return 'date';
+      return { reason: 'date', match: String(date).trim() };
     }
   }
   // An allowed phrase passes only where it belongs: inside WHAT TO EXPECT
@@ -667,12 +725,66 @@ function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [
   }
   const hit = WRITER_RULE_SCREENS.find(([check, reason]) => !skipped.has(reason)
     && (typeof check === 'function' ? check(copy) : check.test(copy)));
-  if (hit) return hit[1];
+  if (hit) return { reason: hit[1], match: typeof hit[0] === 'function' ? null : matchedWords(hit[0], copy) };
   if (skipped.has('active_ingredient')) return null;
   const patterns = [...new Set([...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
     .filter(Boolean))];
-  return new RegExp(`\\b(?:${patterns.join('|')})\\b`, 'i').test(copy) ? 'active_ingredient' : null;
+  const ingredient = new RegExp(`\\b(?:${patterns.join('|')})\\b`, 'i').exec(copy);
+  return ingredient ? { reason: 'active_ingredient', match: ingredient[0] } : null;
+}
+
+function matchedWords(pattern, copy) {
+  const found = new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, '')).exec(copy);
+  const words = found ? found[0].replace(/\s+/g, ' ').trim() : '';
+  return words && words.length <= 80 ? words : null;
+}
+
+// What a rejected draft broke, in words the writer can act on. A reason not
+// listed here still gets the general line.
+const REPAIR_REASONS = Object.freeze({
+  owner_phrase: 'it uses a phrase the report refuses ("no issues", "no problems", "nothing to worry about", "infested", "map", "bond", a "-proof" word)',
+  unscoped_absence: 'it states an absence ("none", "no activity", "nothing seen") without naming the place the technician checked in the same clause',
+  safe_word: 'it uses "safe", "non-toxic" or "harmless"',
+  chemical: 'it uses the word "chemical"',
+  company_name: 'it names the company other than "Waves Pest Control" or "we"',
+  amount: 'it states an amount or a unit of measure',
+  footage: 'it states a footage or an area',
+  percent: 'it states a percentage',
+  rate: 'it states an application rate',
+  per_visit: 'it says "per visit"',
+  aftercare: 'it tells the customer to leave, clean, water or avoid something',
+  reentry: 'it gives re-entry, drying or waiting wording',
+  timeframe: 'it gives a timeframe that is not the exact words of an EXPECTATIONS line, or gives one outside WHAT TO EXPECT and WHAT\'S NEXT',
+  gauge: 'it states the activity rating as a number or a scale',
+  quote: 'it quotes the customer\'s message',
+  price: 'it mentions a price, "free", "included" or coverage',
+  date: 'it gives a date or weekday that is not an earlier visit\'s date or the supplied REACH-OUT DATE used to ask the customer to contact us',
+  time: 'it gives a clock time, a part of the day or an arrival window',
+  active_ingredient: 'it names an active ingredient',
+  trade_name: 'it names a product or brand',
+  malformed_shape: 'it is not the four titles, each on its own line and followed by exactly one line of text',
+  sweep_not_done: 'it says the eaves or webs were swept, and the technician marked that as not done',
+});
+const REPAIR_DRAFT_MAX = 4000;
+
+// The note a rejected draft sends back to the writer: what the draft broke,
+// the words that tripped it when known, and (for the provider that wrote it)
+// the draft itself. `detail` is writerRulesRejectionDetail of that draft. A
+// draft refused for an access code is never sent anywhere again.
+function rejectedDraftRepairNote({ draft, rejection, detail = null, includeDraft = true } = {}) {
+  if (!rejection) return '';
+  const code = String(rejection);
+  // The report's older word screen names its own words ("banned:gone,cleared").
+  const bannedWords = code.startsWith('banned:') ? code.slice(7).split(',').filter(Boolean).slice(0, 6) : [];
+  const why = bannedWords.length
+    ? `it uses words the report refuses (${bannedWords.map((word) => `"${word}"`).join(', ')})`
+    : (REPAIR_REASONS[code] || 'it broke one of the OWNER RULES');
+  const words = detail && detail.reason === code && detail.match ? ` The words that tripped it: "${detail.match}".` : '';
+  const shown = includeDraft && code !== 'access_code' && draft
+    ? `\n\nPREVIOUS DRAFT (rejected; never reuse its wording where it broke the rule):\n${String(draft).slice(0, REPAIR_DRAFT_MAX)}`
+    : '';
+  return `${shown}\n\nA PREVIOUS DRAFT OF THIS REPORT WAS REJECTED because ${why}.${words} Write the whole report again from the inputs above. The rejected draft is not a source: keep only what the inputs record, leave out anything the draft added, fix what the reason names, and check the new draft against the OWNER RULES before you answer.`;
 }
 
 module.exports = {
@@ -681,6 +793,10 @@ module.exports = {
   OWNER_RULES,
   PROMPT_REWRITES,
   composeWriterRulesPrompt,
+  PEST_WRITER_ADAPTER,
+  noteAbsenceHint,
+  writerRulesRejectionDetail,
+  rejectedDraftRepairNote,
   TECHNICIAN_NOTE_HEADER,
   CUSTOMER_WORDS_HEADER,
   withheldProductsLine,

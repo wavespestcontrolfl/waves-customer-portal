@@ -1057,7 +1057,10 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // mutated in place across syncs, so deleting the DB key (or the row)
     // after an admin edit must restore the in-code defaults on the next
     // sync, never leave the edited values resident until restart.
-    constants.LAWN_PRICING_V2.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2 };
+    constants.LAWN_PRICING_V2.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2, cost: { ...constants.BERMUDA_SUPPRESSION_COST_DEFAULTS } };
+    // Cost-plus list knobs rebase the same way; a row without the key keeps
+    // the in-code defaults, a row with it deep-merges over them.
+    constants.LAWN_PRICING_V2.costPlusList = JSON.parse(JSON.stringify(constants.LAWN_COST_PLUS_LIST_DEFAULTS));
     // Tier sellability rebases too: a row that drops tiers.<key> (or the
     // row itself) must restore the in-code default — standard hidden since
     // 2026-09-24 — never leave a temporary DB re-enable resident.
@@ -1806,6 +1809,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
       constants.ONE_TIME.mosquito = next;
     }
+
+    // Area add-on treatments (pricing_config `area_addon_pricing`): rebased onto the in-code defaults on EVERY sync, then the
+    // row applied only when the whole row is valid. A deleted or malformed row leaves the defaults (never the previous edit,
+    // never half a row); the label-bound fields (yearly limits, grass, product) are not in the row's reach.
+    require('./area-addon-config').syncAreaAddOnPricingConfig(config.area_addon_pricing, constants.AREA_ADDONS);
 
     // ── One-Time / Specialty ─────────────────────────────────
     if (config.onetime_urgency) {

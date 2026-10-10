@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
 import { apiErrorMessage } from './seriesMove';
+import AutoDispatchLockBox, { autoDispatchLockSeed } from './AutoDispatchLockBox';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -80,6 +81,10 @@ export default function MobileServiceEditModal({
   const [error, setError] = useState(null);
   const [sharedStopAsk, setSharedStopAsk] = useState(false);
   const [showStaffPicker, setShowStaffPicker] = useState(false);
+  // Auto-dispatch lock: recurring occurrences only. Sent with the save as the
+  // box's value and the value it opened with; the server acts only on a flip.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
 
   const baseName = useMemo(() => baseServiceName(service?.serviceType), [service?.serviceType]);
   const headerTitle = service?.serviceType || 'Service';
@@ -122,6 +127,8 @@ export default function MobileServiceEditModal({
             : undefined,
           windowStart: service.windowStart,
           windowEnd: service.windowEnd,
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
           serviceType: nextServiceType,
           estimatedDuration: Number(duration) || 30,
           technicianId: technicianId || null,
@@ -407,6 +414,16 @@ export default function MobileServiceEditModal({
             mins
           </span>
         </div>
+
+        <AutoDispatchLockBox
+          service={service}
+          checked={autoDispatchLocked}
+          onChange={setAutoDispatchLocked}
+          disabled={saving}
+          boxSize={22}
+          helperColor="#71717A"
+          rowProps={{ className: 'bg-white border-b border-hairline border-zinc-200 text-zinc-900', style: { padding: '14px 16px' } }}
+        />
 
         {/* Notes */}
         <div

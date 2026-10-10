@@ -75,6 +75,8 @@
   border-bottom: 0.5px solid var(--tech-border);
   background: var(--tech-bg);
 }
+.tech-visit-header-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.tech-visit-header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .tech-visit-title { margin: 0; font-family: inherit; font-size: 18px; font-weight: 500; line-height: 1.35; letter-spacing: -0.005em; }
 /* An UPPERCASE section label like the Today page's overlines, at the 14px floor
    (the portal-brand gate bans smaller text in this stylesheet). */
@@ -143,10 +145,15 @@
 /* Fast Complete: the visit note leads the sheet, mic beside a multi-line box. */
 .tech-visit-note-row { display: flex; align-items: flex-start; gap: 10px; }
 .tech-visit-note-row .ui-control.tech-visit-control { flex: 1; min-width: 0; }
+/* The tip's own line: the same mic beside a one-line box. */
+.tech-visit-tip-own-row { align-items: center; }
 /* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the words and the photos
    share one box. */
 .tech-visit-note-box { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 0.5px solid var(--tech-border-strong); border-radius: 4px; background: var(--tech-card); }
-.tech-visit-note-box .ui-control.tech-visit-control { border: none; border-radius: 4px 4px 0 0; background: transparent; }
+/* The box stacks the words over the photos, so the row rule's `flex: 1` would
+   size the words on the vertical axis and ignore the height the note grows to
+   (useAutoGrowTextarea): the words keep their own height here. */
+.tech-visit-note-box .ui-control.tech-visit-control { flex: none; border: none; border-radius: 4px 4px 0 0; background: transparent; }
 .tech-note-photo-after { display: grid; gap: 8px; padding: 0 12px 12px; }
 .tech-note-photo-confirm { display: grid; gap: 8px; }
 .tech-note-photo-confirm p { margin: 0; }
@@ -223,6 +230,15 @@
 .tech-visit-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tech-visit-amount-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 88px; align-items: center; gap: 8px; margin: 8px 0; }
 .tech-visit-amount-label { font-size: 14px; color: var(--tech-text); overflow-wrap: anywhere; }
+
+/* A Fast Complete sheet as one part of a stop (the combo container, GATE_COMBO_FAST_COMPLETE): the container's one scroll
+   carries every part, so the part's own header is hidden and its body and footer flow with the page. */
+.tech-visit-embedded-part { display: flex; flex-direction: column; margin-bottom: 16px; border: 0.5px solid var(--tech-border-strong); border-radius: 6px; background: var(--tech-page); }
+.tech-visit-embedded-part .tech-visit-header,
+.tech-visit-embedded-part.tech-visit-embedded-part .tech-lawn-header { display: none; }
+.tech-visit-embedded-part .tech-visit-form-area { flex: none; min-height: 0; }
+.tech-visit-embedded-part .tech-visit-body { flex: none; overflow: visible; }
+.tech-visit-embedded-part .tech-visit-footer { position: static; }
 
 /* Fast Complete "+ Other product" (slice 1b). The form area under the sheet
    header holds the phone picker, so the header stays in view above it. */
@@ -404,6 +420,7 @@
 .tech-lawn-sheet .ui-action.tech-visit-action:hover:where(:not(:disabled)) { background: #f5f5f5; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-product-remove { color: #111111; }
 /* "Also in this month's protocol": the window's products as one hairline list. */
+.tech-spot-area { display: flex; flex-direction: column; gap: 8px; }
 .tech-lawn-sheet .tech-protocol-addons { border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; overflow: hidden; }
 .tech-lawn-sheet .tech-protocol-addons-head { padding: 12px 14px 10px; border-bottom: 1px solid #e5e5e5; }
 .tech-lawn-sheet .tech-protocol-addons-title { margin: 0; font-size: 14px; font-weight: 600; }
@@ -414,6 +431,17 @@
 .tech-lawn-sheet .tech-protocol-addon-name { font-size: 14px; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add { flex-shrink: 0; min-height: 40px; padding: 0 16px; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add:disabled { border-color: #e5e5e5; opacity: 1; }
+.tech-lawn-sheet .tech-guide-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; }
+.tech-lawn-sheet .tech-guide-card + .tech-guide-card { border-top: 1px solid #e5e5e5; }
+/* New sod (GATE_LAWN_NEW_SOD_NOTE): the banner at the top of the lawn sheet, and the lines the holds keep off it, greyed. */
+.tech-lawn-sheet .tech-sod-banner { margin: 0 0 16px; padding: 12px 14px; border: 1px solid #e5e5e5; border-radius: 12px; background: #fafafa; }
+.tech-lawn-sheet .tech-sod-banner-title { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.3; }
+.tech-lawn-sheet .tech-sod-tick { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 6px; }
+.tech-lawn-sheet .tech-sod-tick input { width: 20px; height: 20px; flex-shrink: 0; }
+.tech-lawn-sheet .tech-sod-held-line .tech-protocol-addon-name { color: #737373; }
+.tech-lawn-sheet .tech-guide-check { margin: 0; padding: 6px 8px; border: 1px solid #e5e5e5; border-radius: 8px; background: #fafafa; color: #171717; font-size: 14px; font-weight: 500; }
+.tech-lawn-sheet .tech-guide-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tech-lawn-sheet .tech-guide-empty { margin: 0; padding: 10px 14px; }
 /* Catalog search results stay a plain list inside one hairline card: the pill
    rule above would otherwise give each row its own ink pill and uppercase it. */
 .tech-lawn-sheet .tech-product-list { border: 1px solid #e5e5e5; border-radius: 12px; }

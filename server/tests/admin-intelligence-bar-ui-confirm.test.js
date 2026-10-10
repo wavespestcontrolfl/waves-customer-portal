@@ -36,6 +36,7 @@ const mockIbBookingOverlapProposal = jest.fn(async () => null);
 // Who the overlapping visit is (card text only): nobody named by default.
 const mockIbBookingOverlapWho = jest.fn(async () => []);
 const mockRateChangeProposal = jest.fn(async () => null);
+const mockTierEmailProposal = jest.fn(async () => null);
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -52,6 +53,12 @@ jest.mock('../services/intelligence-bar/billing-mode-change', () => ({
 jest.mock('../services/intelligence-bar/rate-change', () => ({
   rateChangeProposal: (...a) => mockRateChangeProposal(...a),
   money: (n) => `$${Number(n || 0).toFixed(2)}`,
+}));
+// The tier-upgrade email decision (GATE_IB_TIER_UPGRADE_EMAIL): null = not
+// promised, which is also what the real module answers while its gate is off.
+jest.mock('../services/intelligence-bar/tier-upgrade-email', () => ({
+  ...jest.requireActual('../services/intelligence-bar/tier-upgrade-email'),
+  proposal: (...a) => mockTierEmailProposal(...a),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
@@ -1593,6 +1600,89 @@ describe('update_customer monthly-rate proposals', () => {
       const labels = contract.effects.map((e) => e.label);
       expect(labels).toContain('Lawn care: $0.00 → $61.33 a month');
       expect(labels).toContain('Monthly bill total: $41.33 → $102.66');
+    });
+  });
+
+  // Tier-upgrade email (owner 2026-10-08, GATE_IB_TIER_UPGRADE_EMAIL): the
+  // card names the email before Confirm and the decision is a server pin.
+  describe('tier-upgrade email on an update_customer card', () => {
+    const RATE = {
+      family: 'whole_bill',
+      pin: '100.00|pest_control=100.00',
+      display: {
+        billing_mode: 'monthly_membership', replaces_whole_bill: true,
+        lines: [{ label: 'Pest control', before: 100, after: 90 }],
+        total_before: 100, total_after: 90,
+      },
+    };
+    const NO_NOTICE = 'No price-change notice is sent to the customer';
+    const EMAIL_LINE = "Emails Taylor the Silver upgrade notice after the update is saved (plan moved up from Bronze, with the new monthly rate). Attempted, not guaranteed: it does not go if their email is turned off or the send fails, and the customer's interaction history records the result";
+    const propose = async (input) => {
+      scriptModelTurns([
+        [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input }],
+        [{ type: 'text', text: 'Proposed.' }],
+      ]);
+      let response;
+      await withServer(async (baseUrl) => {
+        response = await postQuery(baseUrl, { prompt: 'move her up to Silver at $90', context: 'customers' });
+      });
+      return response;
+    };
+    const UPGRADE = { customer_id: 'c1', updates: { waveguard_tier: 'Silver', monthly_rate: 90 }, rate_service: 'whole_bill' };
+
+    test('promised: the pin is stored, the card shows the email line in place of the no-notice line, and the model is told', async () => {
+      mockRateChangeProposal.mockResolvedValueOnce(RATE);
+      mockTierEmailProposal.mockResolvedValueOnce({
+        pin: { from: 'bronze', to: 'silver' },
+        display: { first_name: 'Taylor', from_tier: 'Bronze', to_tier: 'Silver', note: 'After Confirm, the customer is emailed.' },
+      });
+      const { body } = await propose(UPGRADE);
+      expect(mockTierEmailProposal).toHaveBeenCalledWith('c1', { waveguard_tier: 'Silver', monthly_rate: 90 });
+      const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
+      expect(params._tier_upgrade_email).toEqual({ from: 'bronze', to: 'silver' });
+      expect(contract.effects).toContainEqual({ kind: 'comms', label: EMAIL_LINE });
+      expect(contract.effects.map((e) => e.label)).not.toContain(NO_NOTICE);
+      expect(contract.notifies_customer).toBe(true);
+      // An email cannot be taken back.
+      expect(contract.irreversible).toBe(true);
+      // The pin is a server guard: never among the card's listed params.
+      expect(JSON.stringify(body.pendingActions[0].params)).not.toContain('_tier_upgrade_email');
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.tier_upgrade_email).toMatchObject({ to_tier: 'Silver' });
+    });
+
+    test('not promised (gate off, or the card does not qualify): no pin, no email line, the card is today\'s card', async () => {
+      mockRateChangeProposal.mockResolvedValueOnce(RATE);
+      await propose(UPGRADE);
+      const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
+      expect(params).not.toHaveProperty('_tier_upgrade_email');
+      expect(contract.effects.filter((e) => e.kind === 'comms')).toEqual([]);
+      expect(contract.effects.map((e) => e.label)).toContain(NO_NOTICE);
+      expect(contract.notifies_customer).toBe(false);
+    });
+
+    test('a pin supplied by the model is dropped: only the server decision can set it', async () => {
+      mockRateChangeProposal.mockResolvedValueOnce(RATE);
+      await propose({ ...UPGRADE, _tier_upgrade_email: { from: 'bronze', to: 'silver' } });
+      const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
+      expect(params).not.toHaveProperty('_tier_upgrade_email');
+      expect(contract.notifies_customer).toBe(false);
+    });
+
+    test('a tier change with no rate change on the card never asks for the email', async () => {
+      await propose({ customer_id: 'c1', updates: { waveguard_tier: 'Silver' }, _tier_upgrade_email: { from: 'bronze', to: 'silver' } });
+      expect(mockTierEmailProposal).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction.mock.calls[0][0].params).not.toHaveProperty('_tier_upgrade_email');
+    });
+
+    test('an unreadable customer at proposal time: the card is still made, with no email promised', async () => {
+      mockRateChangeProposal.mockResolvedValueOnce(RATE);
+      mockTierEmailProposal.mockRejectedValueOnce(new Error('read failed'));
+      await propose(UPGRADE);
+      const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
+      expect(params).not.toHaveProperty('_tier_upgrade_email');
+      expect(contract.effects.map((e) => e.label)).toContain(NO_NOTICE);
     });
   });
 });

@@ -14,6 +14,8 @@
 // only what has its own lane or sheet: the lawn re-service (own sheet), the
 // Waves Assessment visit, and a typed visit whose findings are not the lawn
 // ones (Tree & Shrub carries the same lawn_care category).
+import { carriesAreaAddOnWork } from './areaAddOns';
+
 const TERMINAL_SERVICE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 const OWN_LANE_SERVICE_KEYS = new Set(['lawn_re_service', 'lawn_inspection']);
 // The only typed findings a lawn visit carries.
@@ -23,7 +25,24 @@ export function isLawnFastCompleteEligible(service) {
   const profile = service?.completionProfile;
   return service?.lawnFastCompleteEnabled === true
     && profile?.category === 'lawn_care'
+    // An area add-on (lawn care by family) is generic one-time work, not a lawn visit,
+    // and a visit with an add-on row has work this sheet cannot record.
+    && !carriesAreaAddOnWork(service)
     && !OWN_LANE_SERVICE_KEYS.has(String(profile?.serviceKey || ''))
     && (!profile?.findingsType || profile.findingsType === LAWN_FINDINGS_TYPE)
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
+// Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
+// `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
+// open lawn re-service (completionProfile.serviceKey === 'lawn_re_service', a
+// TYPED one_time_lawn_treatment visit) then opens its own one-screen sheet
+// instead of the Dispatch completion form. Shared by the technician home and,
+// since owner 2026-10-08, admin Dispatch. Gate off, or any other service,
+// routes exactly as before.
+export function isLawnReserviceFastCompleteEligible(service) {
+  return service?.lawnReserviceFastCompleteEnabled === true
+    && !carriesAreaAddOnWork(service)
+    && service?.completionProfile?.serviceKey === 'lawn_re_service'
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }

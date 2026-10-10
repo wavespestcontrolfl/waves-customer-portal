@@ -61,7 +61,7 @@ describe('v13 monthly program line', () => {
   const EVIDENCE = {
     pre_emergent: /stonewall|dimension|pre-emergent/i,
     micros: /nutra-tech/i,
-    feed: /24-0-11|dimension 0\.21/i,
+    feed: /24-0-11|10-0-22|dimension 0\.21/i,
     fungicide: /artavia|velista|gravex/i,
     broadleaf: /celsius|dismiss/i,
     insect_spot: /arena|talak|acelepryn|dylox/i,

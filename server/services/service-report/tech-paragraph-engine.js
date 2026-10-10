@@ -24,8 +24,28 @@
 const crypto = require('crypto');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { customerCopyViolations } = require('./technician-report-copy');
 
 const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+
+// The copy screen for a rendered sentence, shared by both paragraphs, with one
+// exact exception. A real catalog name reads to the screen as an access code
+// ("... Combo AM 1% ..."), so the known names in CATALOG_NAMES_NOT_CODES are screened
+// with "combo" neutralized; every other name, "Security Combo 1234" included, is
+// screened in full (Codex r2, r3, r5 on #6067). The sentence around a name is
+// always screened in full with the names masked. Read-only checks of prod
+// (2026-10-06, 2026-10-08): of 238 catalog rows this is the only name the screen
+// flags. A new such name stays out of the paragraph until it is added here.
+const CATALOG_NAMES_NOT_CODES = new Set([
+  'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
+]);
+const screenedName = (name) => (CATALOG_NAMES_NOT_CODES.has(name) ? name.replace(/\bcombo\b/gi, 'blend') : name);
+const maskProducts = (text, products) => products.reduce((t, name) => t.split(name).join('the product'), text);
+function copyScreenProblem(text, products) {
+  const named = products.filter((name) => text.includes(name));
+  return customerCopyViolations(maskProducts(text, named)).length > 0
+    || named.some((name) => customerCopyViolations(screenedName(name)).length > 0);
+}
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -40,7 +60,9 @@ function parseJsonObject(value) {
  * @param {string} cfg.laneId            LLM ledger / switchboard lane
  * @param {string} cfg.promptVersion
  * @param {string} cfg.freezeKey         top-level structured_notes key (never changes once shipped)
- * @param {number} cfg.freezeVersion
+ * @param {number} cfg.freezeVersion     the version a new entry is written with
+ * @param {number[]} [cfg.readVersions]   versions a render accepts (default: just freezeVersion);
+ *   a composer that bumps its version keeps older entries rendering as they always did
  * @param {number} cfg.budgetMs          the technician is waiting at Complete: ONE deadline for the step
  * @param {Function} cfg.normalizeInputs (raw) => canonical inputs (idempotent)
  * @param {Function} cfg.buildPrompt     (inputs) => { system, text, jsonSchema, promptVersion }
@@ -53,7 +75,7 @@ function parseJsonObject(value) {
  */
 function createTechParagraphEngine(cfg) {
   const {
-    logTag, laneId, promptVersion, freezeKey, freezeVersion, budgetMs: BUDGET_MS,
+    logTag, laneId, promptVersion, freezeKey, freezeVersion, readVersions = [freezeVersion], budgetMs: BUDGET_MS,
     normalizeInputs, buildPrompt, validateParagraph, frozenEntryProblem,
     precheck, reserveMs = 0, freezeNothing = false,
   } = cfg;
@@ -130,7 +152,7 @@ function createTechParagraphEngine(cfg) {
     if (!map || typeof map !== 'object' || Array.isArray(map)) return null;
     const entry = map[assessmentId];
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-    if (entry.v !== freezeVersion || String(entry.assessmentId) !== String(assessmentId)) return null;
+    if (!readVersions.includes(entry.v) || String(entry.assessmentId) !== String(assessmentId)) return null;
     if (typeof entry.text !== 'string' || !entry.text.trim()) return null;
     return entry;
   }
@@ -205,7 +227,7 @@ function createTechParagraphEngine(cfg) {
    * Returns { status, entry? }; entry is the frozen entry, for the caller's in-memory notes.
    */
   async function createAndFreezeTechParagraph({
-    serviceRecordId, assessmentId, structuredNotes, getStructuredNotes, gatherInputs, knex, deps = {}, budgetMs,
+    serviceRecordId, assessmentId, structuredNotes, getStructuredNotes, gatherInputs, knex, deps = {}, budgetMs, version = freezeVersion,
   }) {
     if (!serviceRecordId || !assessmentId || typeof gatherInputs !== 'function') return { status: 'skipped' };
     // A caller that spent part of the step's one deadline before this point (the T&S
@@ -239,14 +261,14 @@ function createTechParagraphEngine(cfg) {
       if (!generated.ok && freezeNothing && generated.reason === 'nothing_to_say') {
         // A marker, never printed (storedTechParagraphFor needs text): the step ran.
         await freezeTechParagraph(serviceRecordId, {
-          v: freezeVersion, promptVersion, assessmentId: String(assessmentId), text: '', nothingToSay: true,
+          v: version, promptVersion, assessmentId: String(assessmentId), text: '', nothingToSay: true,
           frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
         }, knex);
         return { status: 'nothing_to_say' };
       }
       if (!generated.ok) return { status: generated.reason || 'no_paragraph', problems: generated.problems };
       const entry = {
-        v: freezeVersion,
+        v: version,
         promptVersion,
         assessmentId: String(assessmentId),
         text: generated.paragraph,
@@ -286,4 +308,4 @@ function createTechParagraphEngine(cfg) {
   };
 }
 
-module.exports = { createTechParagraphEngine, clean, parseJsonObject };
+module.exports = { createTechParagraphEngine, clean, parseJsonObject, copyScreenProblem, CATALOG_NAMES_NOT_CODES };

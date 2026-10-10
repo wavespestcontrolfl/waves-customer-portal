@@ -5,17 +5,26 @@ const LimitChecker = require('../services/application-limits');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etParts } = require('../utils/datetime-et');
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 router.use(adminAuthenticate, requireAdmin);
 
 // POST /api/admin/compliance/check-limits — check proposed products
 router.post('/check-limits', async (req, res, next) => {
   try {
-    const { customerId, products } = req.body;
+    const { customerId, products, propertyId = null } = req.body;
     if (!customerId || !products?.length) return res.status(400).json({ error: 'customerId and products required' });
+    // A named property must be a UUID and one of THIS customer's properties: a yearly count is that
+    // lawn's, and another customer's property would read as its own history.
+    if (propertyId != null) {
+      if (typeof propertyId !== 'string' || !UUID.test(propertyId) || !UUID.test(String(customerId))) return res.status(400).json({ error: 'propertyId must be a UUID', code: 'invalid_property_id' });
+      const owned = await db('customer_properties').where({ id: propertyId, customer_id: customerId }).first('id');
+      if (!owned) return res.status(404).json({ error: 'That property does not belong to this customer', code: 'property_not_found' });
+    }
 
     const results = [];
     for (const p of products) {
-      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date());
+      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date(), undefined, { propertyId: propertyId || null, proposal: true });
       results.push({ productId: p.productId, productName: p.name, ...check });
     }
 

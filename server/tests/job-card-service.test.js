@@ -706,6 +706,24 @@ describe('mixForProduct', () => {
     expect(evaluateApprovals).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ plan: cleanPlan, products: [{ productId: 'p1', name: 'Celsius WG', rate: 0.113, rateUnit: 'oz' }] }));
     // Approved by every guard → doses normally under the same plan.
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: approve() }, ...at })).amount).toBe(6.215);
+    // A chemical-group repeat is a warning (owner 2026-10-09, "show the mix amount"): the amount is given and the
+    // finding stays in planBlocks. Any other finding beside it still withholds the amount, with its own reason.
+    const repeat = { code: 'repeat_hrac_group', message: 'Celsius WG repeats HRAC 2; last matching application was Celsius WG on 2026-03-01.' };
+    const fracRepeat = { code: 'fungicide_frac_rotation_approval', message: 'Celsius WG repeats FRAC 11; last matching application was Artavia on 2026-03-01.' };
+    for (const finding of [repeat, fracRepeat]) {
+      const warned = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: jest.fn().mockResolvedValue({ blocks: [finding], warnings: [] }) }, ...at });
+      expect(warned).toMatchObject({ amount: 6.215, rotationWarnings: [finding.message], planBlocks: [{ code: finding.code, message: finding.message }] });
+    }
+    const both = jest.fn().mockResolvedValue({ blocks: [repeat, { code: 'off_protocol_product', message: 'Celsius WG is not part of the current WaveGuard protocol card.' }], warnings: [] });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: both }, ...at }))
+      .toMatchObject({ amount: null, reason: 'Celsius WG is not part of the current WaveGuard protocol card.', rotationWarnings: [], planBlocks: [{ code: 'repeat_hrac_group' }, { code: 'off_protocol_product' }] });
+    // A product that repeats two groups (Headway: FRAC 3 and FRAC 11) shows both warnings.
+    const two = jest.fn().mockResolvedValue({ blocks: [fracRepeat, { ...fracRepeat, message: 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.' }], warnings: [] });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: two }, ...at })).rotationWarnings)
+      .toEqual([fracRepeat.message, 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.']);
+    // A failed approval read is not a group repeat: it still withholds.
+    const failed = jest.fn().mockRejectedValue(new Error('rotation read failed'));
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: failed }, ...at })).amount).toBeNull();
   });
 
   test('a per-gallon pest product dilutes straight into the tank, range and all (PR r1 P2)', async () => {
@@ -725,6 +743,29 @@ describe('mixForProduct', () => {
     // Not on the plan → catalog rate.
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [], conditionalOptions: [] } });
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at })).toMatchObject({ amount: 6.215, rateSource: 'catalog' });
+  });
+
+  test('a v13 spot row (Arena in the May and June windows) is dosed at its own rate over its own carrier: a 4-gallon fill is 1,000 sq ft and 0.147 oz; a row with no carrier falls back as before', async () => {
+    const arena = { id: 'p1', name: 'Arena 50 WDG', category: 'insecticide', default_rate_per_1000: 0.29, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const planWith = (spot, windowCarrier = 1) => jest.fn().mockResolvedValue({
+      propertyGate: { blocks: [] },
+      mixCalculator: { carrierGalPer1000: windowCarrier, items: [], conditionalOptions: [{ product: { id: 'p1' }, selected: false, spot }] },
+    });
+    const dose = (rows, buildPlan) => jobCard.mixForProduct('p1', 4, { serviceId: 'svc1', dbh: makeDb({ scheduled_services: [lawnVisit], products_catalog: [arena], equipment_calibrations: rows }), deps: { buildPlan, evaluateApprovals: approve() }, ...at });
+    const row = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: 4 };
+    // May and June windows carry 1 gal per 1,000 sq ft; the rig (2 gal) is not the product's carrier either.
+    for (const [month, windowCarrier] of [['May', 1], ['June', 1]]) {
+      for (const rig of [[], [live]]) {
+        const out = await dose(rig, planWith(row, windowCarrier));
+        expect({ month, rig: rig.length, amount: out.amount, unit: out.unit, coversSqft: out.coversSqft, ratePer1000: out.ratePer1000 }).toEqual({ month, rig: rig.length, amount: 0.147, unit: 'oz', coversSqft: 1000, ratePer1000: 0.147 });
+      }
+    }
+    // No carrier on the row: the window's carrier (no rig) or the rig's, as before.
+    const noCarrier = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: null };
+    expect(await dose([], planWith(noCarrier, 1))).toMatchObject({ amount: 0.588, coversSqft: 4000 });
+    expect(await dose([live], planWith(noCarrier, 1))).toMatchObject({ amount: 0.294, coversSqft: 2000 });
+    // A spot row with no stated rate keeps the catalog rate over the usual carrier.
+    expect(await dose([live], planWith({ ratePer1000: null, rateUnit: null, carrierGalPer1000: 4 }))).toMatchObject({ amount: 0.58, ratePer1000: 0.29 });
   });
 
   test('a rig pick doses a full tank of that rig on its own carrier and volume; without one the visit\'s rig resolves as the card does', async () => {
@@ -1602,6 +1643,29 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out).toMatchObject({ amount: 0.4, amountMax: null, rateSource: 'protocol' });
   });
 
+  test('an area add-on product is never dosed off the catalog default in the tank search: the label rate on the card governs (Codex round 6)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    // A per-gallon catalog default that would dose 110 gal x 2 fl oz if the search were open.
+    const product = { id: 'r', name: 'Roundup QuikPro SC', default_rate: '2', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' };
+    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], scheduled_service_addons: [{ service_name: 'Shell, Rock & Paver Weed Control', category: 'lawn_care', service_key: 'area_addon_hardscape_weed' }], product_aliases: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, area_addon: require('../config/protocols.json').area_addon };
+    const out = await jobCard.mixForProduct('r', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out.context).toEqual({ line: 'Shell, Rock & Paver Weed Control', conditional: false });
+    expect(out.amount).toBeNull();
+    expect(out.reason).toBe('Area add-on — apply the label rate on the card over the area sold; no tank amount');
+  });
+
   test('a product the add-on protocol lists as "if needed" is withheld in the tank search, not dosed off the catalog (r3 P1)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'h', name: 'Headway', default_rate: '0.5-1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
@@ -1855,6 +1919,295 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
       { name: 'Rodent Sanitation — Light', products: 0, visit: null, note: 'No treatment protocol for this add-on (rodent)' },
     ]);
+  });
+
+  describe('area add-ons: the governed protocol program, never the recurring program (Codex round 5 P1, round 6 P1)', () => {
+    const { AREA_ADDONS } = require('../services/pricing-engine/constants');
+    // The real area_addon program (protocols.json) beside stand-in pest and lawn programs.
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] },
+      lawn: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] },
+      area_addon: require('../config/protocols.json').area_addon,
+    };
+    const PRODUCT_BY_KEY = {
+      area_addon_bed_pre_emergent: 'Snapshot 2.5TG',
+      area_addon_lawn_insect_spot: 'Arena 50 WDG',
+      area_addon_fire_ant_yard: 'Topchoice Granular Insecticide',
+      area_addon_lawn_insect_preventive: 'Acelepryn Insecticide',
+      area_addon_hardscape_weed: 'Roundup QuikPro SC',
+    };
+    const catalog = [
+      { id: 'd', name: 'Demand CS' }, { id: 'c', name: 'Celsius WG' },
+      ...Object.values(PRODUCT_BY_KEY).map((name, n) => ({ id: `gov${n}`, name, rate_unit: 'lb', label_verified_at: '2026-08-01' })),
+    ];
+    const chemical = Object.values(AREA_ADDONS.items).filter((cfg) => PRODUCT_BY_KEY[cfg.serviceKey]);
+    // A sold scope with the grass the estimate priced: the insect spot's rate needs it to show.
+    const SCOPE = { areaSqFt: 900, tierSqFt: 1000, grassType: 'st_augustine' };
+    const cardsFor = (lines) => jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines, verdicts: [], packSizes: {} });
+
+    test('the five chemical keys are exactly the catalog items that are not the web sweep', () => {
+      expect(chemical.map((cfg) => cfg.serviceKey).sort()).toEqual(Object.keys(PRODUCT_BY_KEY).sort());
+      expect(Object.keys(AREA_ADDONS.items)).toHaveLength(6);
+    });
+
+    test.each(Object.keys(PRODUCT_BY_KEY))('%s as the booked visit: only its governed product, rate, area, limit and safety line', async (key) => {
+      const cfg = chemical.find((c) => c.serviceKey === key);
+      const buildPlan = jest.fn();
+      const facts = { isLawn: true, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: key, areaAddOnScope: SCOPE, scheduledDate: '2026-09-04', addons: [] };
+      const out = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
+      expect(buildPlan).not.toHaveBeenCalled();
+      expect(out.lines.map((l) => l.product.name)).toEqual([PRODUCT_BY_KEY[key]]);
+      expect(out.lines.map((l) => l.product.id)).not.toContain('d');
+      expect(out.lines.map((l) => l.product.id)).not.toContain('c');
+      const [card] = await cardsFor(out.lines);
+      expect(card.name).toBe(PRODUCT_BY_KEY[key]);
+      expect(card.conditional).toBe(false);
+      expect(card.governed).toMatchObject({ rate: expect.stringMatching(/\d/), area: expect.stringMatching(/square feet/), limit: expect.any(String), rateNote: null });
+    });
+
+    test('the text a technician reads for each chemical add-on', async () => {
+      const text = {};
+      for (const cfg of chemical) {
+        const out = await jobCard.resolveVisitLines({ facts: { serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, areaAddOnScope: SCOPE, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+        const [card] = await cardsFor(out.lines);
+        // The completion form's numbers (ratePer1000, rateUnit) are not card text.
+        expect(Object.keys(card.governed)).not.toEqual(expect.arrayContaining(['ratePer1000']));
+        expect(card.governed).not.toHaveProperty('rateUnit');
+        text[cfg.serviceKey] = [card.name, card.line, card.governed.rate, card.governed.area, card.governed.limit, card.governed.safety];
+      }
+      expect(text).toEqual({
+        area_addon_bed_pre_emergent: ['Snapshot 2.5TG', 'Granular pre-emergent on the beds, then water in.', '3.45 lb per 1,000 sq ft of bed (label range 2.3 to 4.6). Granular; water in.', 'Bed square feet treated.', 'Label limit 600 lb per acre (13.8 lb per 1,000 sq ft) in 12 months: 4 applications, counting any lawn or Tree & Shrub program application. At least 60 days between applications.', 'Technician instruction: clear existing weeds from the beds before you apply. Snapshot does not kill weeds that are already up.'],
+        area_addon_lawn_insect_spot: ['Arena 50 WDG', 'Spray the damaged area and the green edge into the thatch.', '0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal of water per 1,000 sq ft. St. Augustine only.', 'Treated square feet: the damaged area plus the green edge.', 'Repeat no sooner than 8 weeks. Season limit 12.8 oz per acre (0.29 oz per 1,000 sq ft): 2 applications.', 'Technician instruction: carry the Florida FIFRA 2(ee) sheet when you apply (it expires 2028-12-31 and is on file in Staff documents).'],
+        area_addon_fire_ant_yard: ['Topchoice Granular Insecticide', 'Broadcast the granules over the lawn.', '2 lb per 1,000 sq ft (87 lb per acre), broadcast.', 'Lawn square feet treated.', 'Once per 12 months.', 'Restricted-use product: only a certified applicator applies it. Closeout checks the technician\'s license after the visit.'],
+        area_addon_lawn_insect_preventive: ['Acelepryn Insecticide', 'Yearly preventive spray over the lawn.', '0.184 fl oz per 1,000 sq ft (8 fl oz per acre).', 'Lawn square feet treated.', 'Once in 12 months.', null],
+        area_addon_hardscape_weed: ['Roundup QuikPro SC', 'Spray weeds on hard surfaces and bare ground.', '16 fl oz in 1 gal of water per 1,000 sq ft.', 'Hard-surface and bare-ground square feet treated.', 'Label limit 32 fl oz per 1,000 sq ft in 12 months: 2 applications.', 'Carries indaziflam, up to 6 months of soil residual. Technician instruction: apply to hard surfaces and bare ground only, and keep it off lawn, planted beds and the root zones of trees and shrubs. Do not walk on it until dry.'],
+      });
+    });
+
+    test.each(Object.keys(PRODUCT_BY_KEY))('%s as an add-on on a pest visit: the pest program keeps its own lines, the add-on adds only its recipe product', async (key) => {
+      const cfg = chemical.find((c) => c.serviceKey === key);
+      const out = await jobCard.resolveVisitLines({
+        facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: cfg.name, category: cfg.category, serviceKey: key }] },
+        protocols, catalog, dbh: () => ({}),
+      });
+      expect(out.lines.filter((l) => l.source === cfg.name).map((l) => l.product.name)).toEqual([PRODUCT_BY_KEY[key]]);
+      expect(out.lines.filter((l) => l.source !== cfg.name).map((l) => l.product.name)).toEqual(['Demand CS']);
+      expect(out.addons).toMatchObject([{ name: cfg.name, products: 1, visit: { month: 'Any' }, note: null }]);
+    });
+
+    test('a multi-add-on visit shows EVERY add-on\'s own recipe: the visit is a web sweep, the others are rows the accept wrote', async () => {
+      const keys = ['area_addon_bed_pre_emergent', 'area_addon_fire_ant_yard', 'area_addon_hardscape_weed'];
+      const rows = keys.map((key) => {
+        const cfg = chemical.find((c) => c.serviceKey === key);
+        return { service_name: cfg.name, category: cfg.category, service_key: key };
+      });
+      const ok = () => { const chain = {}; for (const m of ['leftJoin', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = async () => rows; return chain; };
+      ok.raw = (sql) => sql;
+      const addons = await jobCard._test.loadAddons(ok, 'svc1');
+      expect(addons.map((a) => a.serviceKey)).toEqual(keys);
+      const webSweep = AREA_ADDONS.items.web_sweep;
+      const out = await jobCard.resolveVisitLines({
+        facts: { isLawn: false, serviceId: 'svc1', serviceType: webSweep.name, serviceCategory: webSweep.category, serviceKey: webSweep.serviceKey, scheduledDate: '2026-09-04', addons },
+        protocols, catalog, dbh: () => ({}),
+      });
+      // One recipe product per add-on row, none from the pest or lawn programs.
+      expect(out.lines.map((l) => l.product.name).sort()).toEqual([PRODUCT_BY_KEY.area_addon_bed_pre_emergent, PRODUCT_BY_KEY.area_addon_fire_ant_yard, PRODUCT_BY_KEY.area_addon_hardscape_weed].sort());
+      expect(out.addons.map((a) => [a.name, a.products, a.note])).toEqual(addons.map((a) => [a.name, 1, null]));
+      const cards = await cardsFor(out.lines);
+      expect(cards).toHaveLength(3);
+      for (const card of cards) expect(card.governed).toMatchObject({ rate: expect.stringMatching(/\d/), area: expect.any(String), limit: expect.any(String) });
+    });
+
+    test('the web sweep applies no product: no program lines, no recipe, as primary or add-on', async () => {
+      const cfg = AREA_ADDONS.items.web_sweep;
+      const buildPlan = jest.fn();
+      const primary = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
+      expect(primary.lines).toEqual([]);
+      expect(primary.note).toBe('No treatment protocol for this service (pest_control)');
+      const hosted = await jobCard.resolveVisitLines({
+        facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: cfg.name, category: cfg.category, serviceKey: cfg.serviceKey }] },
+        protocols, catalog, dbh: () => ({}),
+      });
+      expect(hosted.lines.map((l) => l.product.name)).toEqual(['Demand CS']);
+      expect(hosted.addons).toMatchObject([{ name: cfg.name, products: 0, visit: null, note: 'No treatment protocol for this add-on (pest_control)' }]);
+      expect(buildPlan).not.toHaveBeenCalled();
+    });
+
+    test('an unverified catalog label withholds the rate and keeps area, limit and safety', async () => {
+      const key = 'area_addon_lawn_insect_preventive';
+      const unverified = catalog.map((row) => (row.name === PRODUCT_BY_KEY[key] ? { ...row, label_verified_at: null } : row));
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: unverified, dbh: () => ({}) });
+      const [card] = await cardsFor(out.lines);
+      expect(card.governed).toMatchObject({ rate: null, rateNote: 'Label rate not yet verified — rate withheld', area: expect.any(String), limit: expect.any(String) });
+      // A Hold on an unverified label reports the Hold.
+      const [held] = await jobCard._test.buildProductCards({
+        facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
+        verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
+      });
+      expect(held.governed).toMatchObject({ rate: null, rateNote: 'Spray check: wind over 10 mph — rate withheld' });
+    });
+
+    test('a spray-check Hold withholds the rate and keeps area, limit and safety', async () => {
+      const key = 'area_addon_hardscape_weed';
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+      const [card] = await jobCard._test.buildProductCards({
+        facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
+        verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
+      });
+      expect(card.governed).toMatchObject({ rate: null, rateNote: 'Spray check: wind over 10 mph — rate withheld', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('indaziflam') });
+    });
+
+    test('a protocol product missing from the catalog adds no line (the card reports no products resolved)', async () => {
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: [{ id: 'd', name: 'Demand CS' }], dbh: () => ({}) });
+      expect(out.lines).toEqual([]);
+      expect(out.visit).toMatchObject({ visit: 3 });
+    });
+
+    // What the estimate sold rides on the visit (area_addon_scope) and shows on the card; the
+    // 2(ee) rate never shows without the grass evidence (Codex round 6 P1).
+    describe('the sold scope on the card', () => {
+      const spot = 'area_addon_lawn_insect_spot';
+      const cardFor = async (key, scope) => {
+        const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, areaAddOnScope: scope, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+        return (await cardsFor(out.lines))[0];
+      };
+
+      test('the card says what was sold and, for the insect spot, the grass on the estimate', async () => {
+        const bed = await cardFor('area_addon_bed_pre_emergent', { areaSqFt: 1450, tierSqFt: 2000, grassType: null });
+        expect(bed.governed).toMatchObject({ sold: 'Sold: up to 2,000 sq ft of bed', grass: null, rate: expect.stringMatching(/3\.45/) });
+        const stAug = await cardFor(spot, { areaSqFt: 800, tierSqFt: 1000, grassType: 'st_augustine' });
+        expect(stAug.governed).toMatchObject({ sold: 'Sold: up to 1,000 sq ft of treated lawn', grass: 'Grass on the estimate: St. Augustine', rate: expect.stringMatching(/0\.147/), rateNote: null });
+      });
+
+      test.each([
+        ['no grass on the visit', { tierSqFt: 1000 }, 'Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld'],
+        ['no scope at all', null, 'Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld'],
+        ['another grass', { tierSqFt: 1000, grassType: 'bermuda' }, 'Grass on the estimate is bermuda, not St. Augustine — rate withheld'],
+        ['an unknown grass', { tierSqFt: 1000, grassType: 'unknown' }, 'Grass on the estimate is unknown, not St. Augustine — rate withheld'],
+      ])('the insect spot withholds the 2(ee) rate: %s', async (_name, scope, reason) => {
+        const card = await cardFor(spot, scope);
+        expect(card.governed).toMatchObject({ rate: null, rateNote: reason, grass: null, area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('2(ee)') });
+      });
+
+      test('an add-on row carries its own scope onto the same card path', async () => {
+        const out = await jobCard.resolveVisitLines({
+          facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Fire Ant Yard Treatment', category: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', areaAddOnScope: { areaSqFt: 4200, tierSqFt: 5000 } }] },
+          protocols, catalog, dbh: () => ({}),
+        });
+        const fireAnt = (await cardsFor(out.lines)).find((card) => card.name === PRODUCT_BY_KEY.area_addon_fire_ant_yard);
+        expect(fireAnt.governed).toMatchObject({ sold: 'Sold: up to 5,000 sq ft of lawn', rate: expect.stringMatching(/2 lb/) });
+      });
+
+      test('a booked row stored as a JSON string reads the same (soldScopeOf)', async () => {
+        const ok = () => { const chain = {}; for (const m of ['leftJoin', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = async () => [{ service_name: 'Fire Ant Yard Treatment', category: 'lawn_care', service_key: 'area_addon_fire_ant_yard', area_addon_scope: '{"tierSqFt":3000}' }]; return chain; };
+        ok.raw = (sql) => sql;
+        expect((await jobCard._test.loadAddons(ok, 'svc1'))[0].areaAddOnScope).toEqual({ tierSqFt: 3000 });
+      });
+    });
+
+    // Codex round 12 on #6135: a host and a sold add-on of the SAME product are two applications, so two cards.
+    describe('a host card and an add-on card of one product are separate cards', () => {
+      const all = require('../config/protocols.json');
+      const fullProtocols = { tree_shrub: all.tree_shrub, pest: all.pest, area_addon: all.area_addon };
+      const BED = 'area_addon_bed_pre_emergent';
+      const bedAddOn = { name: 'Bed Pre-Emergent Treatment', category: 'lawn_care', serviceKey: BED, areaAddOnScope: { areaSqFt: 1450, tierSqFt: 2000 } };
+      const cardsOf = async (facts, deps = {}, protocolSet = fullProtocols, cat = catalog) => {
+        const out = await jobCard.resolveVisitLines({ facts, protocols: protocolSet, catalog: cat, dbh: () => ({}), deps });
+        return { out, cards: await cardsFor(out.lines) };
+      };
+
+      test('Tree & Shrub host that selects Snapshot plus the Bed Pre-Emergent add-on: two cards, the add-on one governed', async () => {
+        const { out, cards } = await cardsOf({ isLawn: false, serviceType: 'Tree & Shrub Care', serviceCategory: 'tree_shrub', scheduledDate: '2026-01-15', addons: [bedAddOn] });
+        const snapshot = cards.filter((card) => card.id === 'gov0');
+        expect(snapshot.map((card) => card.rowId)).toEqual(['gov0', `gov0::${BED}`]);
+        const [host, addOn] = snapshot;
+        // The host card: the plan's line, no governed block, no add-on identity.
+        expect(host.governed).toBeUndefined();
+        expect(host.addOnKey).toBeNull();
+        expect(host.source).toBeNull();
+        expect(host.line).toMatch(/^Snapshot 2\.5TG/);
+        // The add-on card: its governed rate, the sold scope, its source label.
+        expect(addOn.governed).toMatchObject({ sold: 'Sold: up to 2,000 sq ft of bed', rate: expect.stringMatching(/3\.45 lb/), area: expect.any(String), limit: expect.any(String) });
+        expect(addOn.addOnKey).toBe(BED);
+        expect(addOn.source).toBe('Bed Pre-Emergent Treatment');
+        expect(addOn.line).toMatch(/^Bed Pre-Emergent Treatment: /);
+        expect(out.addons).toMatchObject([{ name: 'Bed Pre-Emergent Treatment', products: 1, note: null }]);
+      });
+
+      test('lawn host that plans Arena plus the lawn insect spot: two cards, the host card keeps the plan amount', async () => {
+        const spot = { name: 'Lawn Insect Spot Treatment', category: 'lawn_care', serviceKey: 'area_addon_lawn_insect_spot', areaAddOnScope: { areaSqFt: 800, tierSqFt: 1000, grassType: 'st_augustine' } };
+        const buildPlan = jest.fn().mockResolvedValue({
+          propertyGate: { month: 'Sep', visit: 9, blocks: [] },
+          mixCalculator: { items: [{ raw: 'Arena 50 WDG', role: 'base', selected: true, product: { id: 'gov1' }, mix: { amount: 4, amountUnit: 'oz' } }], conditionalOptions: [] },
+        });
+        const { cards } = await cardsOf({ isLawn: true, serviceId: 'svc1', serviceType: 'WaveGuard Lawn Care', serviceCategory: 'lawn_care', scheduledDate: '2026-09-04', addons: [spot] }, { buildPlan });
+        const arena = cards.filter((card) => card.id === 'gov1');
+        expect(arena.map((card) => card.rowId)).toEqual(['gov1', 'gov1::area_addon_lawn_insect_spot']);
+        expect(arena[0]).toMatchObject({ planned: { amount: 4, unit: 'oz' } });
+        expect(arena[0].governed).toBeUndefined();
+        expect(arena[1].planned).toBeNull();
+        expect(arena[1].governed).toMatchObject({ sold: 'Sold: up to 1,000 sq ft of treated lawn', grass: 'Grass on the estimate: St. Augustine', rate: expect.stringMatching(/0\.147/) });
+      });
+
+      test('an add-on whose product the host does not use is one card, still apart from any host card', async () => {
+        const fireAnt = { name: 'Fire Ant Yard Treatment', category: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', areaAddOnScope: { tierSqFt: 5000 } };
+        const { cards } = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [fireAnt] });
+        expect(cards.filter((card) => card.id === 'gov2')).toEqual([expect.objectContaining({ rowId: 'gov2::area_addon_fire_ant_yard', addOnKey: 'area_addon_fire_ant_yard' })]);
+        expect(cards.find((card) => card.id === 'd').rowId).toBe('d');
+      });
+
+      test('the add-on that IS the visit has no host: its card is the product alone, carrying its key', async () => {
+        const { cards } = await cardsOf({ isLawn: true, serviceId: 'svc1', serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: BED, areaAddOnScope: { tierSqFt: 2000 }, scheduledDate: '2026-09-04', addons: [] });
+        expect(cards).toEqual([expect.objectContaining({ rowId: 'gov0', addOnKey: BED, source: null })]);
+      });
+
+      test('two base lines of one product on a plain visit still merge into one card, exactly as before', () => {
+        const merged = jobCard.mergeProductLines([
+          { raw: 'Alpine WSG perimeter', role: 'base', selected: true, product: { id: 'p' } },
+          { raw: 'Alpine WSG interior', role: 'base', selected: true, product: { id: 'p' } },
+          { raw: 'Alpine WSG if needed', role: 'conditional', selected: false, product: { id: 'p' } },
+        ]);
+        expect(merged).toEqual([expect.objectContaining({ raw: 'Alpine WSG perimeter', extraLines: ['Alpine WSG interior', 'Alpine WSG if needed'] })]);
+      });
+
+      test('a hosted add-on line never merges into the host line, and two lines of the same hosted add-on do', () => {
+        const host = { raw: 'host', role: 'base', selected: true, product: { id: 'p' } };
+        const hosted = (raw, selected) => ({ raw, role: 'base', selected, product: { id: 'p' }, governed: { rate: 'r' }, addOnKey: BED, hosted: true, source: 'Bed' });
+        const merged = jobCard.mergeProductLines([host, hosted('a', false), hosted('b', true)]);
+        expect(merged).toHaveLength(2);
+        expect(merged[0]).toMatchObject({ raw: 'host', extraLines: [] });
+        expect(merged[0].governed).toBeUndefined();
+        expect(merged[1]).toMatchObject({ raw: 'b', extraLines: ['a'], addOnKey: BED });
+      });
+
+      test('a product with no selectable catalog row says so plainly, as an add-on and as the visit', async () => {
+        const without = catalog.filter((row) => row.id !== 'gov0');
+        const hosted = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [bedAddOn] }, {}, fullProtocols, without);
+        const sentence = 'Snapshot 2.5TG is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office.';
+        expect(hosted.out.addons).toMatchObject([{ products: 0, note: sentence }]);
+        const own = await cardsOf({ isLawn: true, serviceId: 'svc1', serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: BED, scheduledDate: '2026-09-04', addons: [] }, {}, fullProtocols, without);
+        expect(own.out.note).toBe(sentence);
+        expect(own.cards).toEqual([]);
+      });
+
+      test('a product renamed with its old name kept as an alias is still the add-on line (the one resolver)', async () => {
+        const renamed = catalog.map((row) => (row.id === 'gov0' ? { ...row, name: 'Snapshot Pro Granular', aliases: ['Snapshot 2.5TG'] } : row));
+        const { cards } = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [bedAddOn] }, {}, fullProtocols, renamed);
+        expect(cards.find((card) => card.addOnKey === BED)).toMatchObject({ id: 'gov0', name: 'Snapshot Pro Granular', rowId: `gov0::${BED}` });
+      });
+
+      test('the readiness strip asks no carrier rate for a governed add-on line (it is never a tank amount)', () => {
+        const base = { facts: { serviceId: 's' }, blocks: [], sprayCheck: { hold: false, verdicts: [] }, tank: { calibrated: false }, isToday: true, now: new Date('2026-09-04T12:00:00Z') };
+        const line = (extra) => ({ raw: 'x', role: 'base', selected: true, product: { id: 'a', name: 'Arena', formulation: 'WDG', application_method: 'foliar', default_rate_per_1000: 0.29 }, ...extra });
+        const kinds = (lines) => jobCard._test.dispatchReadiness({ ...base, lines }).issues.map((issue) => issue.kind);
+        expect(kinds([line({ governed: { rate: 'r' }, addOnKey: BED, hosted: true })])).not.toContain('carrier');
+      });
+    });
+
+    test('a card for an ordinary product carries no governed field', async () => {
+      const [card] = await cardsFor([{ raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P' } }]);
+      expect(card.governed).toBeUndefined();
+    });
   });
 
   test('the misting-system NAME alone (no serviceKey) suppresses the barrier program, primary and add-on; barrier rows are unchanged (Codex round-2 P1)', async () => {
