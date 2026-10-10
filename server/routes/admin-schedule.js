@@ -75,7 +75,12 @@ async function areaAddOnVisitIdsForFeed(serviceRows) {
 }
 // What a visit of a batch whose add-on lookup failed carries: every lightweight flow off (as for a visit with an add-on),
 // and the marker the completion form reads. It does NOT claim an add-on row is attached.
-const AREA_ADDON_LOOKUP_FAILED = Object.freeze({ ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOnRowsAttached: false, areaAddOnsLookupFailed: true });
+const AREA_ADDON_LOOKUP_FAILED = Object.freeze({
+  ...LIGHT_COMPLETION_FLOWS_OFF,
+  // The two routing shortcuts Tech Home reads directly (the bait-station sheet and the grouped-stop sheet): off as well.
+  stationFastCompleteEnabled: false, comboFastCompleteEnabled: false,
+  areaAddOnRowsAttached: false, areaAddOnsLookupFailed: true,
+});
 // The report flow needs a plain untyped, uncombined profile (the typed forms and
 // companion sections are required at completion and the flow has none).
 function fastCompleteReportOffered(completionProfile) {
@@ -2057,8 +2062,8 @@ async function requestedAreaAddOnServiceKeys(database, serviceId, serviceAddons)
 // The visit's own service and each add-on line of a staff booking as the area add-on guard reads them (catalog key; the gross
 // price of the line, the visit's own included: a primary add-on booked at a stale price is refused too): area-addon-visit-rows assertPostedAreaAddOnsSold.
 const postedAreaAddOnLines = (pricing) => [
-  { key: pricing.primaryServiceKey, price: pricing.primaryBase ?? null },
-  ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base })),
+  { key: pricing.primaryServiceKey, price: pricing.primaryBase ?? null, discount: pricing.primaryDiscount || undefined },
+  ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base, discount: line.discount || undefined })),
 ];
 
 // The Update Details save and the area add-ons (Codex round 18 P1): what the edit ADDS must be sold by the visit's source estimate
@@ -2068,7 +2073,7 @@ const postedAreaAddOnLines = (pricing) => [
 async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addressPlan }) {
   const { keys, added } = await areaAddOnRows.assertEditedAreaAddOns(trx, visitId, {
     // Each posted row with its gross price: an added add-on must carry the estimate's price, a kept one its stored price.
-    updates, rowLines: Array.isArray(replaceAddons) ? replaceAddons.map((line) => ({ key: line && line.serviceKey, price: line ? line.base : undefined })) : null,
+    updates, rowLines: Array.isArray(replaceAddons) ? replaceAddons.map((line) => ({ key: line && line.serviceKey, price: line ? line.base : undefined, discount: line ? line.discount : undefined })) : null,
   });
   if (!keys.length) return;
   await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, {
@@ -6513,6 +6518,8 @@ router.get('/', async (req, res, next) => {
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
+        // The add-on lookup failed for this batch: the completion form refuses a completed visit until the schedule reloads.
+        areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,
         areaAddOns: projectCompletionContext.areaAddOns,
         areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
         assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
@@ -7163,6 +7170,7 @@ router.get('/week', async (req, res, next) => {
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
+          areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,
           areaAddOns: projectCompletionContext.areaAddOns,
           areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
           assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,

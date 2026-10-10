@@ -97,6 +97,15 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
     });
   });
 
+  // Codex round 52: the gross can equal the estimate while a line discount bills less.
+  test('a discounted add-on line is refused, at booking and when Update Details keeps or adds it; a discount on another service is not its concern', () => {
+    const message = 'Web Sweep is priced by its estimate and is never discounted. Remove the discount from its line.';
+    const off = { discountType: 'fixed', discountAmount: 10, discountDollars: 10 };
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB, price: both.prices[WEB], discount: off }])).toThrow(expect.objectContaining({ status: 409, code: 'AREA_ADDON_NO_DISCOUNT', message }));
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: 'one_time_pest', price: 150, discount: off }, { key: WEB, price: both.prices[WEB] }])).not.toThrow();
+    expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB, price: both.prices[WEB], discount: { discountDollars: 0, discountAmount: 0 } }])).not.toThrow();
+  });
+
   // Codex round 28: one estimate sells one application of an add-on.
   test('the same add-on twice (two lines, or the visit\'s own service and a line) is refused', () => {
     const message = 'Bed Pre-Emergent Weed Control is on this appointment more than once. An estimate sells one application: remove the extra line.';
@@ -164,9 +173,13 @@ describe('the staff booking transaction asks it of the locked row, before anythi
 
   test('the posted lines are the visit\'s own service and each add-on line with its gross price', () => {
     expect(postedAreaAddOnLines({ primaryServiceKey: WEB, addonLines: [{ serviceKey: BED, base: 99, price: 89 }, { serviceKey: null, base: null }] }))
-      .toEqual([{ key: WEB, price: null }, { key: BED, price: 99 }, { key: null, price: null }]);
+      .toEqual([{ key: WEB, price: null, discount: undefined }, { key: BED, price: 99, discount: undefined }, { key: null, price: null, discount: undefined }]);
     // Codex round 20: the visit's own service carries its gross price too, so a primary add-on at a stale price is refused.
-    expect(postedAreaAddOnLines({ primaryServiceKey: WEB, primaryBase: 89, addonLines: [] })).toEqual([{ key: WEB, price: 89 }]);
+    expect(postedAreaAddOnLines({ primaryServiceKey: WEB, primaryBase: 89, addonLines: [] })).toEqual([{ key: WEB, price: 89, discount: undefined }]);
+    // Codex round 52: each line's own discount rides along, so the guard can refuse a discounted add-on.
+    const lineDiscount = { discountType: 'fixed', discountAmount: 10, discountDollars: 10 };
+    expect(postedAreaAddOnLines({ primaryServiceKey: 'one_time_pest', primaryBase: 150, primaryDiscount: lineDiscount, addonLines: [{ serviceKey: WEB, base: 59, price: 49, discount: lineDiscount }] }))
+      .toEqual([{ key: 'one_time_pest', price: 150, discount: lineDiscount }, { key: WEB, price: 59, discount: lineDiscount }]);
   });
 
   test('source order: the locked read, then the guard, then the first insert; the locked row carries pricing_authority', () => {
@@ -258,6 +271,10 @@ describe('Update Details: what the edit adds', () => {
         .resolves.toEqual({ keys: [WEB, BED], added: [BED] });
       await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }, { key: BED, price: 5 }] }))
         .rejects.toMatchObject({ code: 'AREA_ADDON_PRICE_CHANGED' });
+    });
+    test('a kept add-on row cannot be discounted by hand', async () => {
+      await expect(edit({ visit: visit(), rowKeys: [WEB], rowPrices: { [WEB]: both.prices[WEB] }, estimate: both }, { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB], discount: { discountDollars: 5 } }] }))
+        .rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_NO_DISCOUNT' });
     });
     test('a kept add-on row cannot be repriced by hand', async () => {
       const message = 'Web Sweep is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.';
@@ -375,6 +392,9 @@ describe('the schedule feed when the add-on row lookup fails', () => {
     } finally { spy.mockRestore(); }
     const marker = router._test.AREA_ADDON_LOOKUP_FAILED;
     expect(marker).toMatchObject({ areaAddOnsLookupFailed: true, areaAddOnRowsAttached: false, lawnFastCompleteEnabled: false, fastCompleteReportEnabled: false, treeShrubFastCompleteEnabled: false });
+    // Codex round 52: the two routing shortcuts Tech Home reads are off too, and both schedule payloads forward the marker.
+    expect(marker).toMatchObject({ stationFastCompleteEnabled: false, comboFastCompleteEnabled: false });
+    expect(fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8').split('areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,').length - 1).toBe(2);
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(src).toContain('...(addOnVisits.failed ? AREA_ADDON_LOOKUP_FAILED : {}),');
   });
@@ -411,6 +431,14 @@ describe('assertAreaAddOnsNotYetBooked', () => {
     }
     await expect(ask({ own: [{ key: WEB }] }, [BED])).resolves.toBeUndefined();
     await expect(ask({ own: [{ key: WEB, estimateId: 'est-other' }] }, [WEB])).resolves.toBeUndefined();
+  });
+
+  test('the reads run under a transaction lock keyed on the estimate (two bookings of one estimate are serialized)', async () => {
+    const locks = [];
+    const trx = trxWith({ own: [] });
+    trx.raw = async (sql, bindings) => { locks.push([sql, bindings]); };
+    await rows.assertAreaAddOnsNotYetBooked(trx, estimate, [WEB]);
+    expect(locks).toEqual([["SELECT pg_advisory_xact_lock(hashtext('area-addon-estimate'), hashtext(?::text))", ['est-1']]]);
   });
 
   test('the visit an edit is saving is left out; no add-on key or no estimate reads nothing', async () => {

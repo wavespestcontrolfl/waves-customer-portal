@@ -391,6 +391,10 @@ function soldAreaAddOnPrices(estimate) {
   return prices;
 }
 
+// A posted line that carries a discount of its own (`discount`: the route's line discount object).
+const lineIsDiscounted = (line) => Boolean(line && line.discount
+  && [line.discount.discountDollars, line.discount.discountAmount].some((value) => Number(value) > 0));
+
 const samePrice = (posted, sold) => Number.isFinite(Number(posted)) && posted !== null && Math.round(Number(posted) * 100) === Math.round(Number(sold) * 100);
 
 /**
@@ -418,6 +422,10 @@ function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, 
         ? `${lineName} is not sold on the linked estimate any more. The estimate changed after this appointment was built: reopen the estimate and build the appointment again.`
         : `${lineName} is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate.`);
     }
+    // An add-on is never discounted: a line discount would leave the gross equal to the estimate and bill less.
+    if (lineIsDiscounted(line)) {
+      throw postedRefusal('AREA_ADDON_NO_DISCOUNT', `${lineName} is priced by its estimate and is never discounted. Remove the discount from its line.`);
+    }
     if (line.price !== undefined && sold.get(line.key) !== null && !samePrice(line.price, sold.get(line.key))) {
       throw postedRefusal('AREA_ADDON_PRICE_CHANGED', `The price of ${lineName} on the estimate changed after this appointment was built: reopen the estimate and build the appointment again.`);
     }
@@ -438,6 +446,9 @@ const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
 async function assertAreaAddOnsNotYetBooked(trx, estimate, keys, { exceptVisitId = null } = {}) {
   const wanted = [...new Set((keys || []).filter(isAreaAddOnCatalogKey))];
   if (!wanted.length || !estimate || !estimate.id) return;
+  // One estimate at a time: a transaction lock keyed on the estimate, held to commit, so two bookings of one estimate
+  // cannot both read "not booked yet" (they may hold different customer locks, and a web sweep takes no place lock).
+  if (typeof trx.raw === 'function') await trx.raw("SELECT pg_advisory_xact_lock(hashtext('area-addon-estimate'), hashtext(?::text))", [String(estimate.id)]);
   const live = (query) => {
     query.where('s.source_estimate_id', estimate.id).whereNotIn('s.status', DEAD_VISIT_STATUSES);
     if (exceptVisitId) query.whereNot('s.id', exceptVisitId);
@@ -561,7 +572,7 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   const storedRowKeys = (await areaAddOnKeysByVisit(trx, [visitId])).get(String(visitId)) || [];
   // The posted rows with their gross prices (`rowLines`), or their keys alone (`rowKeys`); null = the save keeps the rows.
   const keysOnly = rowKeys === null ? null : rowKeys.map((key) => ({ key }));
-  const posted = Array.isArray(rowLines) ? rowLines.map((line) => ({ key: line && line.key, price: line ? line.price : undefined })) : keysOnly;
+  const posted = Array.isArray(rowLines) ? rowLines.map((line) => ({ key: line && line.key, price: line ? line.price : undefined, discount: line ? line.discount : undefined })) : keysOnly;
   const plan = editedAddOnPlan(visit, storedRowKeys, updates, posted);
   const result = { keys: plan.finalKeys, added: plan.added };
   if (!plan.finalKeys.length) return { keys: [], added: [] };
@@ -601,6 +612,7 @@ async function assertKeptAddOnRowPrices(trx, visitId, keptLines, sold = new Map(
     .whereIn('service_key_snapshot', keptLines.map((line) => line.key)).select('service_key_snapshot', 'base_price', 'estimated_price');
   const storedPrice = new Map((Array.isArray(stored) ? stored : []).map((row) => [row.service_key_snapshot, row.base_price ?? row.estimated_price]));
   for (const line of keptLines) {
+    if (lineIsDiscounted(line)) throw postedRefusal('AREA_ADDON_NO_DISCOUNT', `${nameOfServiceKey(line.key)} is priced by its estimate and is never discounted. Remove the discount from its line.`);
     const reference = storedPrice.get(line.key) ?? sold.get(line.key) ?? null;
     if (reference == null) continue;
     if (!samePrice(line.price, reference)) {
