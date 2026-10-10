@@ -39,11 +39,14 @@ const dictation = (over = {}, ...sources) => ({
 });
 
 // Minimal knex stand-in: customers.first, triage_items settled-lookup, and the insert upsert.
-function makeConn({ customer = null, settled = [], claimHeld = true } = {}) {
+function makeConn({ customer = null, settled = [], claimHeld = true, openCards = 0 } = {}) {
   const writes = [];
   const settledWheres = [];
   const conn = (table) => {
-    if (table === 'customers') return { where: () => ({ first: async () => customer }) };
+    if (table === 'customers') {
+      const read = async () => { conn.customerReads.push({ inTx: !!conn.locked, lockedRow: !!conn.rowLocked }); return customer; };
+      return { where: () => ({ first: read, forUpdate: () => { conn.rowLocked = true; return { first: read }; } }) };
+    }
     if (table === 'call_log') {
       return {
         where: (w) => ({
@@ -54,7 +57,15 @@ function makeConn({ customer = null, settled = [], claimHeld = true } = {}) {
       };
     }
     return {
-      where: (w) => { settledWheres.push(w); return { whereIn: () => ({ select: async () => settled }), whereIn2: null, count: () => ({ first: async () => ({ n: 1 }) }) }; },
+      where: (w) => {
+        settledWheres.push(w);
+        return {
+          whereIn: () => ({ select: async () => settled }),
+          whereIn2: null,
+          count: () => ({ first: async () => ({ n: 1 }) }),
+          update: async (u) => { conn.retired.push({ where: w, update: u }); return openCards; },
+        };
+      },
       insert: (row) => ({
         onConflict: (target) => ({
           merge: (cols) => ({ where: async (col, val) => { writes.push({ row, target, cols, mergeWhere: [col, val] }); } }),
@@ -66,6 +77,8 @@ function makeConn({ customer = null, settled = [], claimHeld = true } = {}) {
   conn.raw = (sql) => sql;
   conn.transaction = async (fn) => { conn.locked = true; return fn(conn); };
   conn.writes = writes;
+  conn.customerReads = [];
+  conn.retired = [];
   return conn;
 }
 const dictationFor = (entries, ...sources) => ({ emails: [], addresses: [], names: sanitizeNameEntries(entries, sources) });
@@ -192,6 +205,38 @@ describe('fileNameSpellingCard', () => {
     expect(await file(unlinked)).toBe(true);
     expect(JSON.parse(unlinked.writes[0].row.payload).compared_against.source).toBe('extracted');
   });
+  test.each(['job_applicant', 'vendor_or_partner'])(
+    'a linked %s call (relationship unknown) is never compared with the prelinked customer', async (callNature) => {
+      const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+      const v2Result = { status: 'valid', extraction: { call_nature: callNature, caller: { relationship_to_property: 'unknown' }, meta: { call_summary: 'x' } } };
+      expect(await file(conn, { customerId: 'cust-1', v2Result })).toBe(false);
+      expect(conn.writes).toEqual([]);
+      expect(conn.customerReads).toEqual([]);
+      // The same call with an ordinary nature still compares.
+      const ordinary = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+      const okResult = { status: 'valid', extraction: { call_nature: 'existing_customer', caller: { relationship_to_property: 'unknown' }, meta: { call_summary: 'x' } } };
+      expect(await file(ordinary, { customerId: 'cust-1', v2Result: okResult })).toBe(true);
+    },
+  );
+
+  test('the customer name is read live inside the card transaction, with the row locked', async () => {
+    const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+    expect(await file(conn, { customerId: 'cust-1' })).toBe(true);
+    expect(conn.customerReads).toEqual([{ inTx: true, lockedRow: true }]);
+    // The card carries the live stored value, not the extraction's.
+    expect(JSON.parse(conn.writes[0].row.payload).saved_value).toBe('Sirov');
+  });
+
+  test('a live name that already matches files nothing and retires the open card', async () => {
+    const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Serov' }, openCards: 1 });
+    expect(await file(conn, { customerId: 'cust-1' })).toBe(false);
+    expect(conn.writes).toEqual([]);
+    expect(conn.retired).toHaveLength(1);
+    expect(conn.retired[0].where).toEqual({ call_log_id: 'call-1', reason_code: 'name_spelling_differs', status: 'open' });
+    expect(conn.retired[0].update).toMatchObject({ status: 'resolved', resolution_source: 'auto' });
+    expect(mockSyncStatus).toHaveBeenCalledWith(conn, 'call-1');
+  });
+
   test('a linked customer\'s name is the saved name: the record is right, so no card; the record is wrong, a card', async () => {
     const right = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Serov' } });
     expect(await file(right, { customerId: 'cust-1' })).toBe(false);

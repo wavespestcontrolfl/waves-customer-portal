@@ -411,6 +411,15 @@ describe('spelled names — card-only', () => {
       expect(diffs([entry(), entry({ spelled_value: 'Serav', raw_spoken: 'S-E-R-A-V' })], saved, src)).toEqual([]);
       expect(diffs([entry(), entry({ confidence: 0.8 })], saved, src)).toHaveLength(1);
     });
+    test('a weak alternate still counts as disagreement; the agreed spelling needs strong support', () => {
+      const src = 'Caller: my last name is S-E-R-O-V or maybe S-E-R-A-V';
+      const serav = (confidence) => entry({ spelled_value: 'Serav', raw_spoken: 'S-E-R-A-V', confidence });
+      expect(diffs([entry(), serav(0.7)], saved, src)).toEqual([]);
+      expect(diffs([entry(), entry({ confidence: 0.7 })], saved, src)).toEqual([
+        { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', quote: src, confidence: 0.92 },
+      ]);
+      expect(diffs([entry({ confidence: 0.7 })], saved)).toEqual([]);
+    });
     test('no saved name is the missing-name cards\' job; both fields can differ', () => {
       expect(diffs([entry()], { first_name: 'Quentrell', last_name: null })).toEqual([]);
       const out = diffs(

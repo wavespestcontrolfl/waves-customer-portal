@@ -4061,18 +4061,38 @@ async function fileNameSpellingCard(conn, {
     // spelling is never compared with the linked customer's record. An unlinked call still compares
     // against the extracted caller name.
     if (customerId && isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return false;
-    const customer = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
-    const saved = Object.fromEntries(['first_name', 'last_name']
-      // A linked customer is compared on the stored fields only: a blank stored field stays blank (the
-      // missing-name cards cover it) and is never filled from the extraction. The extracted name is used
-      // only when the call has no linked customer.
-      .map((f) => [f, customer ? (String(customer[f] || '').trim() || null) : (extracted[f] || null)]));
-    const differences = nameSpellingDifferences({ dictation, saved });
-    if (!differences.length) return false;
-    const filingCustomer = customer && customerId ? String(customerId) : null;
+    // An applicant or vendor can be prelinked to a customer by the inbound number: their spelling is
+    // never compared with that customer's record, whatever relationship_to_property says.
+    if (customerId && thirdPartyCallNatureFromV2(v2Result)) return false;
+    // No caller spelling in this pass: nothing to compare and no evidence to refresh or retire.
+    if (!(dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)) return false;
     return await conn.transaction(async (trx) => {
       await lockTriageCall(trx, callLogId);
       if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+      // The customer's name is read HERE, under the per-call lock and the claim fence, with the row
+      // locked: a staff correction made while this pass ran is seen, and the card never carries a
+      // name the record no longer has. A linked customer is compared on stored fields only (a blank
+      // stays blank); the extracted name is used only for an unlinked call.
+      const customer = customerId ? await trx('customers').where({ id: customerId }).forUpdate().first('first_name', 'last_name') : null;
+      const saved = Object.fromEntries(['first_name', 'last_name']
+        .map((f) => [f, customer ? (String(customer[f] || '').trim() || null) : (extracted[f] || null)]));
+      const differences = nameSpellingDifferences({ dictation, saved });
+      if (!differences.length) {
+        // The live name already matches (or has no stored value): an OPEN card from an earlier pass is
+        // stale. Retire it; an operator's in_progress card is never touched.
+        const retired = await trx('triage_items')
+          .where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' })
+          .update({
+            status: 'resolved',
+            resolution_source: 'auto',
+            resolution_note: 'Superseded — the customer name now matches the spelling.',
+            resolved_at: new Date(),
+            updated_at: new Date(),
+          });
+        if (retired) await syncCallReviewStatus(trx, callLogId);
+        return false;
+      }
+      const filingCustomer = customer && customerId ? String(customerId) : null;
       const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
         .whereIn('status', ['resolved', 'dismissed']).select('payload');
       const asObject = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));

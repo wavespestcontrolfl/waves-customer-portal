@@ -386,10 +386,12 @@ function sanitizeNameEntries(entries, sources = []) {
 function nameSpellingDifferences({ dictation = null, saved = {} } = {}) {
   const out = [];
   for (const field of NAME_FIELDS) {
-    const entries = (dictation?.names || []).filter((n) => n.field === field && n.whose === 'caller'
-      && n.confidence >= ADOPT_CONFIDENCE && n.turn);
+    // Disagreement is judged across EVERY grounded caller-turn spelling, whatever its confidence: a
+    // weak alternate still means the caller did not give one unambiguous spelling.
+    const entries = (dictation?.names || []).filter((n) => n.field === field && n.whose === 'caller' && n.turn);
     if (new Set(entries.map((n) => nameKey(n.spelled_value))).size !== 1) continue;
     const best = entries.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+    if (best.confidence < ADOPT_CONFIDENCE) continue; // the agreed spelling needs strong support
     const savedValue = String(saved[field] || '').trim();
     if (!savedValue || nameKey(savedValue) === nameKey(best.spelled_value)) continue;
     out.push({ field, spelled_value: best.spelled_value, saved_value: savedValue, quote: best.turn, confidence: best.confidence });
