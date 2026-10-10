@@ -841,7 +841,7 @@ describe('amount-only water-in on the report payload', () => {
       completedAt: out.instruction.completedAt, nowMs: Date.parse(out.instruction.completedAt) + 60000,
     });
     expect(plan.send).toBe(true);
-    expect(plan.vars.watering_lines).toBe("Water in today's treatment with about ¼ inch by Thu 2 PM. Run it even if it is not your usual day.");
+    expect(plan.vars.watering_lines).toBe("Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day.");
     expect(plan.vars.watering_lines).not.toMatch(/minute|sprinkler setup/);
   });
 
