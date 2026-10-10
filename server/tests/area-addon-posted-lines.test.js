@@ -348,6 +348,22 @@ describe('Update Details: what the edit adds', () => {
       await expect(edit({ visit: discounted, rowKeys: [WEB], rowPrices: only.prices, estimate: only }, { updates: {}, rowLines: [{ key: WEB, price: only.prices[WEB] }] })).resolves.toEqual({ keys: [WEB], added: [] });
     });
 
+    // Codex round 56: the booking's appointment-discount rule on an edited HOST visit that carries an add-on row.
+    test('an appointment discount on a host visit must leave its add-on rows billed in full', async () => {
+      const host = (over = {}) => visit({ estimated_price: 150 + both.prices[WEB], discount_dollars: null, ...over });
+      const carried = (v) => ({ visit: v, rowKeys: [WEB], rowPrices: both.prices, estimate: both });
+      // the host bears it: allowed
+      await expect(edit(carried(host()), { updates: { discount_dollars: 20, estimated_price: 130 + both.prices[WEB] }, rowKeys: null })).resolves.toEqual({ keys: [WEB], added: [] });
+      // larger than the host: it eats into the add-on
+      await expect(edit(carried(host()), { updates: { discount_dollars: 160, estimated_price: both.prices[WEB] - 10 }, rowKeys: null })).rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_NO_DISCOUNT' });
+      // a share allocated to the add-on row by the save
+      await expect(edit(carried(host()), { updates: { discount_dollars: 20, estimated_price: 130 + both.prices[WEB] }, rowLines: [{ key: WEB, price: both.prices[WEB], credit: 4 }] })).rejects.toMatchObject({ code: 'AREA_ADDON_NO_DISCOUNT' });
+      // a stored appointment discount is judged when the save replaces the rows
+      await expect(edit(carried(host({ discount_dollars: '160.00', estimated_price: both.prices[WEB] - 10 })), { updates: {}, rowLines: [{ key: WEB, price: both.prices[WEB] }] })).rejects.toMatchObject({ code: 'AREA_ADDON_NO_DISCOUNT' });
+      // no appointment discount: nothing is judged
+      await expect(edit(carried(host()), { updates: { estimated_price: 1 }, rowLines: [{ key: WEB, price: both.prices[WEB] }] })).resolves.toEqual({ keys: [WEB], added: [] });
+    });
+
     // Codex round 36: a price-only edit, and a visit the accept booked (no stored primary price: the estimate is the reference).
     test('a price-only edit of a visit whose own service is an add-on is judged, against the estimate when no primary price is stored', async () => {
       const only = estimateSelling([{ key: 'web_sweep' }]);

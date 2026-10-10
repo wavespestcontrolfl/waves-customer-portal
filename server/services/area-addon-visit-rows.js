@@ -536,9 +536,10 @@ function editedAddOnPlan(visit, storedRowKeys, updates, posted) {
   const finalKeys = [ownKey, ...rowsAfter.map((line) => line.key)].filter(isAreaAddOnCatalogKey);
   const before = new Set([visit.service_key_snapshot, ...storedRowKeys]);
   const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
-  // A save that writes a primary price for a visit whose own service is an add-on touches the add-on too (a price-only edit).
-  const ownPriced = isAreaAddOnCatalogKey(ownKey)
-    && (updates.primary_line_price !== undefined || Number(updates.line_discount_dollars) > 0 || Number(updates.discount_dollars) > 0);
+  // A save that writes a primary price for a visit whose own service is an add-on touches the add-on too (a price-only edit),
+  // and so does a save that writes an appointment discount on any visit that carries an add-on.
+  const ownPriced = (isAreaAddOnCatalogKey(ownKey) && (updates.primary_line_price !== undefined || Number(updates.line_discount_dollars) > 0))
+    || (finalKeys.length > 0 && Number(updates.discount_dollars) > 0);
   // A host: the visit's own service is a field service a same-visit add-on can ride (isSameVisitHostKey). A non-add-on
   // ROW is an extra line, not the visit's host.
   const hasHost = isSameVisitHostKey(ownKey);
@@ -579,6 +580,24 @@ function ownAddOnDiscounted(plan, visit, updates) {
   return Number(written('line_discount_dollars')) > 0 || Number(written('discount_dollars')) > 0;
 }
 
+// The appointment discount of the edited visit (what the save writes, else what the visit stores) against the add-ons it will
+// carry: each at its gross (the posted row price, else the stored row's, else the estimate's), the visit's own add-on
+// included; the total is the save's `estimated_price`, else the stored one. No appointment discount: nothing is read.
+async function assertEditedAppointmentDiscount(trx, visitId, plan, visit, updates, sold) {
+  const written = (column) => (updates[column] !== undefined ? updates[column] : visit[column]);
+  const dollars = Number(written('discount_dollars'));
+  if (!(dollars > 0) || !plan.finalKeys.length) return;
+  const unpriced = plan.rowsAfter.filter((line) => line.price === undefined || line.price === null).map((line) => line.key);
+  const stored = unpriced.length
+    ? await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).whereIn('service_key_snapshot', unpriced).select('service_key_snapshot', 'base_price', 'estimated_price')
+    : [];
+  const storedPrice = new Map((Array.isArray(stored) ? stored : []).map((row) => [row.service_key_snapshot, row.base_price ?? row.estimated_price]));
+  const grossOf = (line) => line.price ?? storedPrice.get(line.key) ?? sold.get(line.key) ?? 0;
+  const lines = plan.rowsAfter.map((line) => ({ key: line.key, price: grossOf(line), credit: line.credit }));
+  if (isAreaAddOnCatalogKey(plan.ownKey)) lines.unshift({ key: plan.ownKey, price: written('primary_line_price') ?? sold.get(plan.ownKey) ?? 0 });
+  assertNoAppointmentDiscountOnAddOns(lines, { finalPrice: written('estimated_price'), appointmentDiscountDollars: dollars });
+}
+
 const priceLocked = (key) => postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(key)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
 
 // What an edit ADDS to a visit: the kill switch first (with the gate off no NEW add-on is put on a visit; what it already
@@ -597,7 +616,7 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   const storedRowKeys = (await areaAddOnKeysByVisit(trx, [visitId])).get(String(visitId)) || [];
   // The posted rows with their gross prices (`rowLines`), or their keys alone (`rowKeys`); null = the save keeps the rows.
   const keysOnly = rowKeys === null ? null : rowKeys.map((key) => ({ key }));
-  const posted = Array.isArray(rowLines) ? rowLines.map((line) => ({ key: line && line.key, price: line ? line.price : undefined, discount: line ? line.discount : undefined })) : keysOnly;
+  const posted = Array.isArray(rowLines) ? rowLines.map((line) => ({ key: line && line.key, price: line ? line.price : undefined, discount: line ? line.discount : undefined, credit: line ? line.credit : undefined })) : keysOnly;
   const plan = editedAddOnPlan(visit, storedRowKeys, updates, posted);
   const result = { keys: plan.finalKeys, added: plan.added };
   if (!plan.finalKeys.length) return { keys: [], added: [] };
@@ -626,6 +645,8 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   if (ownAddOnDiscounted(plan, visit, updates)) {
     throw postedRefusal('AREA_ADDON_NO_DISCOUNT', `${nameOfServiceKey(plan.ownKey)} is priced by its estimate and is never discounted. Remove the discount from its line.`);
   }
+  // ... and no APPOINTMENT discount reaches an add-on the visit carries (the booking's own rule, on the edited visit).
+  await assertEditedAppointmentDiscount(trx, visitId, plan, visit, updates, sold);
   // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
   if (estimate) assertCostCarrierKept(estimate, plan.finalKeys.map((key) => ({ key })), sold);
   // ... and a same-visit add-on stays on a visit whose own service is a host.

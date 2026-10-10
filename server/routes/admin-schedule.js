@@ -2080,7 +2080,7 @@ const postedAreaAddOnTotals = (pricing) => ({
 async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addressPlan }) {
   const { keys, added } = await areaAddOnRows.assertEditedAreaAddOns(trx, visitId, {
     // Each posted row with its gross price: an added add-on must carry the estimate's price, a kept one its stored price.
-    updates, rowLines: Array.isArray(replaceAddons) ? replaceAddons.map((line) => ({ key: line && line.serviceKey, price: line ? line.base : undefined, discount: line ? line.discount : undefined })) : null,
+    updates, rowLines: Array.isArray(replaceAddons) ? replaceAddons.map((line) => ({ key: line && line.serviceKey, price: line ? line.base : undefined, discount: line ? line.discount : undefined, credit: line ? line.appointmentCreditDollars : undefined })) : null,
   });
   if (!keys.length) return;
   await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, {
