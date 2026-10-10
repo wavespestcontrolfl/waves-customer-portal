@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import {
   applyTankDose, clearTankOnUnitChange, derivedTankTotal, followTank, isPerGallonUnit,
-  isTankCalculation, joinTankOnUnitChange, markTankEntry, promoteTankOwner, tankOwnerRow, tankPropagates,
+  isTankCalculation, joinTankOnUnitChange, markTankEntry, productRowId, promoteTankOwner, tankOwnerRow, tankPropagates,
 } from './product-rate-prefill';
 
 const row = (over = {}) => ({ productId: 'p', rateUnit: 'fl_oz/gal', rate: '0.8', carrierGallons: '', amountUnit: 'fl_oz', ...over });
@@ -114,4 +114,19 @@ it('a stated carrier volume replaces a seeded house total, but never an entered 
   });
   // A total the technician typed is untouchable either way.
   expect(applyTankDose(row({ carrierGallons: '10', totalAmount: 4, totalAmountManual: true })).totalAmount).toBe(4);
+});
+
+// A host row and an area add-on row of the SAME product are two rows (Codex round 9 on #6135).
+it('a row is identified by its product AND its add-on: the host and the add-on of one product never share a tank or an edit', () => {
+  const host = row({ productId: 'snap' });
+  const addOn = row({ productId: 'snap', areaAddOnKey: 'area_addon_bed_pre_emergent' });
+  expect(productRowId(host)).toBe('snap');
+  expect(productRowId(addOn)).toBe('snap::area_addon_bed_pre_emergent');
+  expect(productRowId(null)).toBeUndefined();
+  const owner = { ...addOn, carrierGallons: '25', carrierGallonsManual: true, tankOwner: true };
+  // The add-on row owns the tank: the host's gallons are its own, not the tank's.
+  expect(tankPropagates([host, owner], productRowId(owner), 'carrierGallons')).toBe(true);
+  expect(tankPropagates([host, owner], productRowId(host), 'carrierGallons')).toBe(false);
+  expect(markTankEntry({ ...host, carrierGallons: '' }, owner)).toMatchObject({ carrierGallons: '25', tankOwner: false });
+  expect(markTankEntry({ ...host, carrierGallons: '10' }, owner)).toMatchObject({ carrierGallonsManual: true, tankOwner: false });
 });

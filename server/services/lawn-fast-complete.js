@@ -23,6 +23,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
@@ -97,9 +98,24 @@ function lawnFastVisitType(profile, billingMode, isCallback = false) {
  * `allowStatuses` lists visit statuses NOT treated as terminal (the submit
  * preflight passes ['completed'], see preflightLawnFastCompletion).
  */
+// A lawn visit by its completion profile. An area add-on (lawn care by family)
+// is generic one-time work with its own governed recipe: never the lawn
+// program's sheet, whatever its name says.
+function isLawnProgramProfile(profile) {
+  return profile.category === LAWN_CATEGORY && !isAreaAddOnCatalogKey(profile.serviceKey);
+}
+
+// Why this is not a lawn-program visit for the sheet, or null: not a lawn visit at all, or a visit
+// with an attached area add-on row (work this sheet cannot record: its product and treated area).
+function lawnProgramRefusal(svc, profile) {
+  if (!isLawnProgramProfile(profile)) return 'not_lawn';
+  return svc?.hasAreaAddOnRows ? 'area_addon_attached' : null;
+}
+
 function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
   if (!profile) return 'profile_unavailable';
-  if (profile.category !== LAWN_CATEGORY) return 'not_lawn';
+  const notLawnProgram = lawnProgramRefusal(svc, profile);
+  if (notLawnProgram) return notLawnProgram;
   // The three lawn_care sheets partition the visits: the lawn re-service and Tree & Shrub
   // (which shares the lawn_care category) are decided by their OWN sheets' predicates, and
   // the Waves Assessment visit is its own diagnostic lane. Derived from the completion
@@ -1125,6 +1141,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  *   profile_unavailable                          503 (retry, same key; a transient lookup failure)
  *   not_lawn, lawn_re_service, assessment_visit,
  *   project_backed, has_companions, grouped_visit,
+ *   area_addon_attached (the visit carries an area add-on row),
  *   terminal_status (cancelled, skipped, no_show,
  *     incomplete, rescheduled)                   409 lawn_fast_not_eligible (terminal)
  *   terminal_status when status is 'completed'   allowed (see above)

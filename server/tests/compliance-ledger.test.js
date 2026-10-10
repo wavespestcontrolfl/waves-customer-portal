@@ -104,6 +104,38 @@ describe('ComplianceService.createComplianceRecords (corrected writer)', () => {
     db.transaction = jest.fn(async (fn) => fn(db));
   });
 
+  // Codex round 37 on #6135: a host row and an attached add-on's row of the SAME product are two applications.
+  test('a host row and an add-on row of one product are both written; the add-on row carries its key, the host row none', async () => {
+    const host = { ...V2_SERVICE_PRODUCT, id: 'sp-host' };
+    const addOn = { ...V2_SERVICE_PRODUCT, id: 'sp-addon', area_addon_key: 'area_addon_bed_pre_emergent' };
+    const inserts = [chain(), chain()];
+    db
+      .mockReturnValueOnce(chain({ first: SERVICE_RECORD }))
+      .mockReturnValueOnce(chain({ rows: [host, addOn] }))
+      .mockReturnValueOnce(chain({ first: TECH }))
+      .mockReturnValueOnce(chain({ rows: [] }))
+      .mockReturnValueOnce(chain({ first: CATALOG_PRODUCT }))
+      .mockReturnValueOnce(inserts[0])
+      .mockReturnValueOnce(chain({ first: CATALOG_PRODUCT }))
+      .mockReturnValueOnce(inserts[1]);
+    db.schema = { hasColumn: jest.fn(async () => true) };
+    const records = await ComplianceService.createComplianceRecords('rec-1');
+    expect(records).toHaveLength(2);
+    expect(db.schema.hasColumn).toHaveBeenCalledWith('property_application_history', 'area_addon_key');
+    const [hostRow, addOnRow] = inserts.map((q) => q.insert.mock.calls[0][0]);
+    expect(hostRow).not.toHaveProperty('area_addon_key');
+    expect(addOnRow).toMatchObject({ service_product_id: 'sp-addon', product_id: 'prod-1', area_addon_key: 'area_addon_bed_pre_emergent' });
+    delete db.schema;
+  });
+
+  test('the ledger identity migration widens the unique index by the add-on and never drops a tagged column on rollback (source)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'models', 'migrations', '20261010210000_application_ledger_area_addon_identity.js'), 'utf8');
+    expect(src).toContain("(service_record_id, product_id, (COALESCE(${COL}, '')))");
+    expect(src.indexOf('CREATE UNIQUE INDEX IF NOT EXISTS ${NEW_INDEX}')).toBeLessThan(src.indexOf('DROP INDEX IF EXISTS ${OLD_INDEX}'));
+    expect(src).toContain('const tagged = await knex(TABLE).whereNotNull(COL).first(\'id\');');
+    expect(src).toContain('HAVING COUNT(*) > 1');
+  });
+
   test('live-path write carries the full DACS column set the export reads', async () => {
     const insertChain = chain();
     db

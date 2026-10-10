@@ -24,6 +24,7 @@ const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
+const { storedEstimateContainer } = require('../services/estimate-result-container');
 const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
 const {
   computeContactGaps,
@@ -91,7 +92,7 @@ const slotReservation = require('../services/slot-reservation');
 const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
-const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS } = require('../services/pricing-engine/constants');
+const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -639,6 +640,18 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
   return verdict;
 }
 
+// The ids of these rows (null and id-less rows skipped).
+function rowIds(...rows) {
+  return rows.map((row) => row && row.id).filter(Boolean);
+}
+
+// The customer the add-on limit recheck reads for an accept with no customer named yet: the phone match the account step below
+// makes (authoritative, in the accept transaction).
+async function resolveAcceptLimitCustomer(trx, estimate) {
+  const { match } = await matchAcceptCustomerByPhone(estimate, trx, { authoritative: true, afterSiblingResolution: true });
+  return match ? match.id : null;
+}
+
 // B18 park: the accept cannot complete self-serve when the estimate's phone belongs to another customer, so
 // nothing is created, taken or captured; the office is told and the person sees the page's EXISTING
 // review-before-booking state ("A Waves specialist reviews this quote with you ..."), whose sentence is reused
@@ -746,8 +759,8 @@ async function releaseHoldsIfStillParked(estimate) {
     if (!row) return { released: 0 };
     // A Bermuda-suppression estimate (gate off) is never priced: its park was decided with suppressionGated, so
     // the recheck uses the same semantics, or the gate-disabled pricing path throws and the hold is never released.
-    const suppressionGated = !!(require('../services/pricing-engine/v1-legacy-mapper').estimateDataCarriesBermudaSuppression(row.estimate_data)
-      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+    // A gated area add-on estimate is never priced either (the replay would throw AREA_ADDONS_GATED).
+    const suppressionGated = !!require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(row.estimate_data, { pricingAuthority: row.pricing_authority });
     const state = await estimatePublicBlockingState(row, { database: trx, lock: true, fresh: true, suppressionGated });
     if (state?.state !== 'contact_review') return { released: 0 };
     return slotReservation.releaseEstimateHolds({ estimateId: estimate.id, database: trx });
@@ -1286,6 +1299,8 @@ function oneTimeItemFamilyKeys(item = {}) {
   const fields = [
     item?.service, item?.service_key, item?.key, item?.kind,
     item?.name, item?.label, item?.displayName,
+    // The stable catalog key (an area add-on's `area_addon_<key>`): adoption stays key-based after a Service Library rename.
+    item?.catalogServiceKey,
   ];
   const category = serviceCategoryForOneTimeItem(item);
   // A SPECIALTY in a broad category must never make an ordinary visit of
@@ -1298,7 +1313,9 @@ function oneTimeItemFamilyKeys(item = {}) {
     || String(item?.service || '').toLowerCase() === 'one_time_pest'
     || isPestServiceName(item?.name || item?.label || '');
   const specialtyText = fields.filter(Boolean).join(' ').toLowerCase();
-  const lawnSpecialty = /top[ -_]?dress|dethatch|\bplugging\b/.test(specialtyText);
+  // An area add-on is specialty work too: its own visit must never adopt the
+  // customer's ordinary lawn visit and drop the sold treatment from dispatch.
+  const lawnSpecialty = /top[ -_]?dress|dethatch|\bplugging\b|\barea_addon\b/.test(specialtyText);
   if ((category === 'pest_control' && !genericPest) || lawnSpecialty) {
     // Specific identities ONLY — no BROAD families, whose pest/roach and
     // lawn tokens would re-add them through the field union (codex r17).
@@ -2733,12 +2750,49 @@ function detectPestRecurring(recurring) {
   return { count: pest.length, visitsPerYear: vpy, monthlyBase, pricingVersion: pestPricingVersionOf(...pest) };
 }
 
+// Area add-on rows (GATE_AREA_ADDONS) are identified by service key, never by
+// display name: the name tests below read "Fire Ant Yard Treatment" as a pest
+// job and "Web Sweep" as nothing. Their family comes from the add-on key
+// (web sweep = pest control, the rest = lawn care); a row with the add-on
+// service key but an unknown add-on key has no family (null), never a guess.
+function isAreaAddOnItem(item = {}) {
+  return String(item?.service || '').toLowerCase() === 'area_addon';
+}
+function areaAddOnCategoryForItem(item = {}) {
+  return isAreaAddOnItem(item) ? (areaAddOnConfig(item)?.category || null) : null;
+}
+// The add-on identity fields every re-shaping of a one-time row must keep, so
+// the key and tier survive normalize, render, choice and acceptance copies
+// (a copy that drops addOnKey loses the family and the catalog service).
+const AREA_ADDON_ROW_FIELDS = ['addOnKey', 'catalogServiceKey', 'addOnCategory', 'areaSqFt', 'tierSqFt', 'grassType', 'visitContext', 'carriesVisitDrive', 'carriesJobAdmin', 'onSiteMinutes'];
+// priceUnit is the billing-unit marker: an area add-on's price is one application, and every customer
+// estimate surface reads it as "$X per application". Set here for every re-shaping, so a row that
+// lost the mapper's marker still carries it.
+function areaAddOnRowFields(item = {}) {
+  if (!isAreaAddOnItem(item)) return {};
+  return {
+    ...Object.fromEntries(AREA_ADDON_ROW_FIELDS
+      .filter((field) => item[field] !== undefined && item[field] !== null)
+      .map((field) => [field, item[field]])),
+    priceUnit: require('../services/pricing-engine/v1-legacy-mapper').AREA_ADDON_PRICE_UNIT,
+  };
+}
+// " per application" after a one-time row's price when the row is priced per application.
+const ONE_TIME_PER_APPLICATION_SUFFIX = ' per application';
+function oneTimePriceUnitSuffix(item = {}) {
+  return item?.priceUnit === require('../services/pricing-engine/v1-legacy-mapper').AREA_ADDON_PRICE_UNIT
+    ? ONE_TIME_PER_APPLICATION_SUFFIX : '';
+}
+
 // The interior-spray / exterior-eave-sweep preference toggles describe the
 // GENERAL pest-control visit. They do not apply to specialty one-time services
 // (German Roach Cleanout, standalone cockroach, wasp/stinging, exclusion, etc.),
 // so only a general one-time pest line should surface them.
 function isGeneralPestOneTimeItem(it = {}) {
   const service = String(it.service || '').toLowerCase();
+  // An area add-on is never the general pest visit, whatever its name says
+  // ("Fire Ant Yard Treatment" reads as a pest job to the name test below).
+  if (isAreaAddOnItem(it)) return false;
   // Commercial pest is flat (no interior/exterior opt-out) — never a general
   // residential pest item, even though its name contains "Pest".
   if (service.startsWith('commercial_')) return false;
@@ -3852,6 +3906,7 @@ function recurringServiceDisplayName(key) {
 }
 
 function isLawnCareOneTimeItem(item = {}) {
+  if (isAreaAddOnItem(item)) return areaAddOnCategoryForItem(item) === 'lawn_care';
   const raw = [item.service, item.name, item.label]
     .filter(Boolean)
     .join(' ')
@@ -6426,7 +6481,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const detail = copyAllowedInScope(rawDetail, rowScope)
       ? rawDetail
       : withoutClaimsOutsideScope(rawDetail, rowScope, preSlabSelectedWarrantyPart(it));
-    const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
+    const priceCell = includedByServiceCredit ? 'Included' : `${fmtMoney(price)}${oneTimePriceUnitSuffix(it)}`;
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
     const rowCopy = oneTimeRowCopies[rowIndex] || null;
@@ -10023,14 +10078,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // per attempt (episode-deduped), after the decision with no transaction open. A failed lookup just leaves no verdict:
     // the in-transaction match decides. A Bermuda-suppression estimate (refused below with its own gated 409) is never
     // priced for it (`suppressionGated`: only the park is judged).
-    const bermudaSuppressionGated = (() => {
-      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-      return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
-        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
-    })();
+    // A persisted area add-on (GATE_AREA_ADDONS off) is refused the same way and never priced for the park check
+    // either (its replay would throw AREA_ADDONS_GATED).
+    const gatedAddOn = require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
     if (!estimate.customer_id && estimate.customer_phone) {
       let blocking = null;
-      try { blocking = await estimatePublicBlockingState(estimate, { suppressionGated: bermudaSuppressionGated }); } catch { /* the authoritative in-transaction match decides */ }
+      try { blocking = await estimatePublicBlockingState(estimate, { suppressionGated: !!gatedAddOn }); } catch { /* the authoritative in-transaction match decides */ }
       if (blocking?.state === 'contact_review') {
         // A stale tab can have captured a recurring SetupIntent before the customer record turned
         // contradictory. Retire the one this request submits with main's own helper - the same one the
@@ -10056,12 +10109,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // without re-entering priceLawnCare, so a save-then-gate-off sequence
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
-    if (bermudaSuppressionGated) {
-      return res.status(409).json({
-        error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
-        code: 'BERMUDA_SUPPRESSION_GATED',
-      });
-    }
+    if (gatedAddOn) return res.status(409).json(gatedAddOn);
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right
     // above the Accept button. Only sanitize/validate here (a malformed
@@ -10481,6 +10529,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+    // Area add-ons are booked and billed only by the one-time accept; a recurring-mode accept would convert the
+    // plan and drop the sold add-on. Refused before any write (the staff books it by hand): the 409 below.
+    assertAreaAddOnsAcceptedOneTime(estimate, treatAsOneTime);
 
     // Acceptance terms scope (codex #5434 r1 P0): the record must carry the
     // Services line this tab rendered. Re-derived here from the SAME rule
@@ -10590,6 +10641,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptLinkedSsId = (existingAppointmentId && existingAppointmentRow?.id)
       ? String(existingAppointmentRow.id)
       : (slotId ? null : await linkedScheduledServiceId(estimate));
+    // A sold area add-on needs a visit to ride on: the /book fallback link creates none of its add-on rows.
+    // A visit only linked to the estimate (the fallback above) is financial scope, not an adopted visit: it gets no add-on rows,
+    // so it does not count. The page sends existingAppointmentId for a visit it shows.
+    assertAreaAddOnsHaveAppointment(estimate, Boolean(slotId || existingAppointmentId));
     // resolveDepositPolicyForEstimate adds the LIVE plan-customer fallback
     // (legacy customer-linked estimates have no membershipSnapshot) and
     // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
@@ -11992,6 +12047,24 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         err.status = 409;
         throw err;
       }
+      // The add-ons' yearly limits, rechecked HERE: after the estimate row lock above (the order the reserve takes its locks in)
+      // and under the lock that serializes this person's bookings: the customer lock taken at the top of this transaction, else,
+      // for a customer who does not exist yet, the prospective-identity lock the recheck takes itself. Two accepts by one brand-new
+      // customer cannot both read an empty history, and history may have changed since the quote. The customer it resolves to
+      // under that lock is the phone match the account step below makes. Left out: only the hold this accept graduates and the
+      // appointment it adopts, never the estimate's other bookings.
+      // The add-on GATE first, read again here: the update above proved the estimate row is the one this request read, but the
+      // gate can turn off between the unlocked check at the top of the route and this point, and the limit recheck reads nothing
+      // with the gate off. A gated add-on rolls the accept back with the same 409 the unlocked check answers.
+      assertAreaAddOnGateOpenAtCommit(estimate);
+      await require('../services/area-addon-limits').assertAreaAddOnLimitsOpen(trx, {
+        estimate,
+        customerId: acceptPreLockedCommsId,
+        appliedOn: acceptPreLockedDate,
+        excludeVisitIds: rowIds(capacityHold, existingAppointmentRow),
+        resolveCustomer: () => resolveAcceptLimitCustomer(trx, estimate),
+        fenceCustomer: (id) => require('../services/area-addon-limits').fenceCustomerBookings(trx, id),
+      });
       // Bind the accept to the SetupIntent it verified (Codex #3723 r2 P1):
       // the setup_intent.succeeded backstop enrolls ONLY this intent — a
       // superseded capture (e.g. a bank intent refused by the kill switch,
@@ -12924,6 +12997,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             .update(updates);
           assertExistingAppointmentUpdateApplied(updatedCount);
           reservationCommitted = true;
+          await writeAdoptedAreaAddOnRows(trx, {
+            treatAsOneTime, appointmentId: existingAppointmentRow.id, estimate: acceptedEstimateForScheduling, updates, lockedAdoptRow,
+          });
           // The adopted appointment is a REAL booking committed by THIS
           // accept — record the inspection-credit evidence in the same trx
           // (Codex #3178 r25 P1). The post-commit redeemer and the sweep
@@ -19521,6 +19597,8 @@ function savedFloorReplayOverrides(estData) {
   const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
+  // Area add-on price knobs (pricing_config area_addon_pricing): a sent add-on keeps the price it was quoted at.
+  Object.assign(overrides, require('../services/estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estData));
   // Termite station-cost snapshot (plan 2026-09-03 §A1) — same home, same
   // tri-state: stamped replays verbatim, unstamped termite replays the
   // pre-stamp constant, no termite line injects nothing.
@@ -19789,6 +19867,7 @@ function oneTimeItemsForRender(estResult, estData) {
     retainerBilling: row.retainerBilling || null,
     atticSqFt: row.atticSqFt ?? null,
     surfaceSqFt: row.surfaceSqFt ?? null,
+    ...areaAddOnRowFields(row),
   }));
 }
 
@@ -19836,6 +19915,45 @@ function oneTimeItemLooksPestSpecialty(item = {}) {
     || /\b(roach|cockroach|ant|spider|flea|wasp|bee|hornet|stinging|bed\s*bug|bedbug)\b/.test(text);
 }
 
+// Sold area add-ons an adopted (already booked) visit does not carry become its
+// add-on rows, in the accept transaction: a one-time accept only, and no add-on
+// on the estimate means no query. The visit's own identity is whatever it is.
+async function writeAdoptedAreaAddOnRows(trx, { treatAsOneTime, appointmentId, estimate, updates, lockedAdoptRow }) {
+  if (!treatAsOneTime) return 0;
+  return require('../services/area-addon-visit-rows').writeAdoptedAreaAddOns(trx, {
+    scheduledServiceId: appointmentId,
+    estimate,
+    ownServiceKey: updates.service_key_snapshot || lockedAdoptRow.service_key_snapshot || lockedAdoptRow.catalog_service_key || null,
+    // The window this accept writes wins over the row's stored one.
+    adoptedRow: { ...lockedAdoptRow, ...updates },
+  });
+}
+
+// Throws the 409 AREA_ADDONS_ONE_TIME_ACCEPT_ONLY (the accept's catch sends it as { error, code }) for a
+// recurring-mode accept of an estimate that carries an area add-on; nothing otherwise.
+function assertAreaAddOnsAcceptedOneTime(estimate, treatAsOneTime) {
+  const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+  if (treatAsOneTime || !mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) return;
+  logger.warn(`[estimate-accept] estimate ${estimate.id} carries area add-ons and was accepted in recurring mode - ${mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE}; office books the add-on by hand`);
+  throw Object.assign(new Error(mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE), { status: 409, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE });
+}
+
+// Throws the gated add-on 409 ({ error, code: AREA_ADDONS_GATED }) inside the accept transaction when the estimate carries an
+// area add-on and the gate is off now; nothing otherwise (no add-on, or gate on).
+function assertAreaAddOnGateOpenAtCommit(estimate) {
+  const refusal = require('../services/pricing-engine/v1-legacy-mapper').gatedAddOnCustomerRefusal(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
+  if (refusal) throw Object.assign(new Error(refusal.error), { status: 409, code: refusal.code });
+}
+
+// Throws the 400 AREA_ADDON_APPOINTMENT_REQUIRED for an accept of an estimate that carries an area add-on and
+// names no appointment (no slot, no adopted visit). Without a visit this accept books or adopts, the sold
+// add-on gets no add-on row, so its limit recheck, governed rate and closeout would never run.
+function assertAreaAddOnsHaveAppointment(estimate, hasAppointment) {
+  const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+  if (hasAppointment || !mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) return;
+  throw Object.assign(new Error('Please pick your appointment time to finish booking.'), { status: 400, code: 'AREA_ADDON_APPOINTMENT_REQUIRED' });
+}
+
 function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
   if (category === 'pest_control') return isOneTimePestChoiceItem(item);
   const itemCategory = serviceCategoryForOneTimeItem(item);
@@ -19845,6 +19963,9 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
   return !isWaveGuardSetupOneTimeItem(item) && String(item.service || '').toLowerCase() !== 'one_time_adjustment';
 }
 
+// Area add-ons (GATE_AREA_ADDONS) are excluded the same way: they ride alongside
+// the picked cadence, and their family would otherwise turn a pest estimate into
+// a mixed "bundle" with no one-time pest choice.
 // Bora-Care is a separately-billed add-on that rides alongside whichever cadence
 // the customer picks. It must not contribute to the one-time-choice classification,
 // or a recurring pest estimate with a Bora-Care add-on classifies as "bundle" and
@@ -19852,7 +19973,7 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
 // to the add-on total instead of the selected pest visit).
 function oneTimeChoiceClassificationItems(items = []) {
   return (Array.isArray(items) ? items : []).filter(
-    (item) => serviceCategoryForOneTimeItem(item) !== 'bora_care',
+    (item) => serviceCategoryForOneTimeItem(item) !== 'bora_care' && !isAreaAddOnItem(item),
   );
 }
 
@@ -19969,10 +20090,13 @@ function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricing
 // total drives the accept/charge amount — never quotes or bills the gross fee.
 // PERCENT recomputes exactly on the carried subtotal; FIXED uses the engine's
 // one-time slice capped to that subtotal. Rows are reduced proportionally with
-// the last row absorbing the rounding remainder.
+// the last row absorbing the rounding remainder. An area add-on row is never
+// discountable (the engine stamps it discountable:false): it stays out of the
+// subtotal and the redistribution and keeps the engine's price.
 function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null) {
   if (!Array.isArray(rows) || rows.length === 0 || !manualDiscount) return rows;
-  const subtotal = rows.reduce((sum, r) => Math.round((sum + Number(r.price || 0)) * 100) / 100, 0);
+  const targets = rows.filter((row) => !isAreaAddOnItem(row));
+  const subtotal = targets.reduce((sum, r) => Math.round((sum + Number(r.price || 0)) * 100) / 100, 0);
   if (!(subtotal > 0)) return rows;
   const value = Number(manualDiscount.value);
   let discount = 0;
@@ -19985,9 +20109,10 @@ function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null
   discount = Math.min(subtotal, discount);
   if (!(discount > 0)) return rows;
   let remaining = discount;
-  return rows.map((row, i) => {
+  return rows.map((row) => {
+    if (isAreaAddOnItem(row)) return row;
     const price = Number(row.price || 0);
-    const cut = i === rows.length - 1
+    const cut = row === targets[targets.length - 1]
       ? remaining
       : Math.round(discount * (price / subtotal) * 100) / 100;
     remaining = Math.round((remaining - cut) * 100) / 100;
@@ -20006,6 +20131,12 @@ function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null
 // choice, so dropping them under-bills the customer. The manual one-time discount
 // is applied ONCE across the combined set, so a fixed one-time slice isn't
 // distributed twice (which separate per-category calls would do).
+// A one-time row that rides alongside whichever cadence the customer picks: pest specialty work, Bora-Care,
+// and area add-ons (whatever family they belong to).
+function ridesAlongsideCadence(item = {}) {
+  return oneTimeItemLooksPestSpecialty(item) || isBoraCareOneTimeItem(item) || isAreaAddOnItem(item);
+}
+
 function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount = null) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const rows = items.map((item) => {
@@ -20015,7 +20146,7 @@ function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount =
     if (isOneTimePestChoiceItem(item)) return null;
     if (String(item.service || '').toLowerCase() === 'one_time_adjustment') return null;
     const isBoraCare = isBoraCareOneTimeItem(item);
-    if (!oneTimeItemLooksPestSpecialty(item) && !isBoraCare) return null;
+    if (!ridesAlongsideCadence(item)) return null;
     const amount = oneTimeItemAmount(item);
     if (!Number.isFinite(amount) || amount <= 0) return null;
     let label = item.label || item.name || 'Pest treatment';
@@ -20032,6 +20163,7 @@ function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount =
       label,
       price: Math.round(amount * 100) / 100,
       detail: item.detail || null,
+      ...areaAddOnRowFields(item),
     };
   }).filter(Boolean);
   return applyManualOneTimeDiscountToChoiceRows(rows, manualDiscount);
@@ -20098,6 +20230,7 @@ function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingB
     amount: Number(item.price || 0),
     detail: item.detail || 'Single treatment',
     kind: 'charge',
+    ...areaAddOnRowFields(item),
   }));
   const total = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   return {
@@ -20167,9 +20300,8 @@ function findInitialRoachItem(_pestTiers, estData) {
 }
 
 function normalizeOneTimeBreakdown(estData) {
-  const result = estData?.result && typeof estData.result === 'object'
-    ? estData.result
-    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
+  // The authoritative container (estimate-result-container.js), the one the area add-on readers use.
+  const result = storedEstimateContainer(estData);
   if (!result) return { items: [], total: 0, quoteRequired: false, quoteRequiredItems: [] };
 
   const rows = [];
@@ -20272,6 +20404,7 @@ function normalizeOneTimeBreakdown(estData) {
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
         surfaceSqFt: Number(item.surfaceSqFt) > 0 ? Number(item.surfaceSqFt) : null,
+        ...areaAddOnRowFields(item),
       });
     }
   };
@@ -21091,6 +21224,7 @@ function acceptanceServiceLists(estData, { preserveDuplicates = false } = {}) {
         service: item.service,
         name: item.label,
         price: item.amount,
+        ...areaAddOnRowFields(item),
       }));
 
   const sourceResult = estData?.result || estData?.engineResult || estData || {};
@@ -22643,19 +22777,29 @@ function isNonServiceOneTimeItem(item = {}) {
   return false;
 }
 
+const EXACT_ONE_TIME_SERVICE_CATEGORY = new Map([
+  ['wdo', 'wdo_inspection'],
+  ['wdo_inspection', 'wdo_inspection'],
+  ['termite_slab_pretreat', 'pre_slab_termiticide'],
+  ['termite_foam', 'termite_foam'],
+  ['foam_drill', 'termite_foam'],
+]);
+
 function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
+  // Area add-ons take their family from the add-on key, before any name test; the other
+  // exact service keys below map straight to theirs.
+  if (service === 'area_addon') return areaAddOnCategoryForItem(item);
   // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:
   // "not for real-estate transactions — use WDO for those") and stays OFF the
   // regulated certificate surface; only the WDO report itself maps here.
-  if (service === 'wdo' || service === 'wdo_inspection') return 'wdo_inspection';
+  if (EXACT_ONE_TIME_SERVICE_CATEGORY.has(service)) return EXACT_ONE_TIME_SERVICE_CATEGORY.get(service);
   // Canonical catalog key for the slab pre-treat (completion-lane-registry routes
   // it to pre_treatment_termite_certificate); the name-based matcher below
   // covers its "Slab Pre-Treat Termite Service" label.
-  if (service === 'termite_slab_pretreat' || service.includes('slab_pretreat')) return 'pre_slab_termiticide';
-  if (service === 'termite_foam' || service === 'foam_drill') return 'termite_foam';
+  if (service.includes('slab_pretreat')) return 'pre_slab_termiticide';
   if (service.startsWith('trap_only_')) return 'trap_only';
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
@@ -27894,7 +28038,11 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // boundary keeps the review lane server-side. Quote-required items keep the
 // full set: quoteRequiredReasonCandidates humanizes them into the customer's
 // reason note (client lib quoteDisplay.js).
-const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings'];
+// onSiteMinutes (area add-on rows) is the engine's internal labor estimate: the
+// booking path reads it from the unsanitized breakdown, the customer never sees it.
+// pricingKnobs (area add-on rows) holds the target margin and the cost knobs the row was priced with (the replay reads
+// them from the stored estimate); the customer never sees them either.
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'pricingKnobs'];
 function sanitizePublicOneTimeBreakdown(breakdown) {
   if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
   return {
@@ -27915,6 +28063,8 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
   const out = {};
   for (const [key, nested] of Object.entries(value)) {
     if (key === 'marginFloorMonthly') continue;
+    // An area add-on row's price knobs include the target margin: internal, like the margin floor.
+    if (key === 'pricingKnobs' && value.service === 'area_addon') continue;
     out[key] = stripInternalMarginFieldsDeep(nested, depth + 1);
   }
   return out;
@@ -31315,3 +31465,11 @@ module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
 module.exports.buildOfferTiersBlock = buildOfferTiersBlock;
 module.exports.offerTierMemberBlock = offerTierMemberBlock;
 module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
+// Area add-on classification seams (GATE_AREA_ADDONS), exported for server/tests/area-addon-flow.test.js.
+module.exports.collectServiceCategories = collectServiceCategories;
+module.exports.hasOnlyLawnCareServiceMix = hasOnlyLawnCareServiceMix;
+module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
+module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
+module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;
+module.exports.oneTimeChoiceClassificationItems = oneTimeChoiceClassificationItems;
