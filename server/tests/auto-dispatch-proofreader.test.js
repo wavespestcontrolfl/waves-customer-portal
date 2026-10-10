@@ -250,8 +250,16 @@ describe('the customer record', () => {
       { channel: 'note', at: '2026-05-01T06:00:00-04:00', reason: 'revised_later' }, // cleared after the move
     ]));
     expect(record.entries.filter((e) => e.channel === 'property_note').map((e) => e.text)).toEqual(['hoa timing restrictions: Vendors Tuesdays only.']);
-    expect(conn.calls.some(([t, method, sql]) => t === 'service_requests' && method === 'whereRaw' && /source.*admin/.test(sql))).toBe(true);
+    expect(conn.calls.some(([t, method, sql]) => t === 'service_requests' && method === 'whereRaw' && /source.*'admin', 'voice_agent'/.test(sql))).toBe(true);
     expect(conn.calls.some(([t, method, col, values]) => t === 'customer_interactions' && method === 'whereNotIn' && col === 'interaction_type' && values.includes('inbound_call'))).toBe(true);
+  });
+
+  test('a technician note names the service it was written on; a visit\'s history-only members are not part of the move', async () => {
+    const conn = fakeConn({ ...TABLES, service_records: [{ technician_notes: 'Customer requests Tuesdays.', service_type: 'Lawn', created_at: '2026-07-07T16:00:00.000Z' }],
+      scheduled_services: [{ id: 's1', recurring_parent_id: 'p1', visit_id: 'v1', service_type: 'Pest', notes: null, internal_notes: null }] });
+    const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'technician_note').map((e) => e.text)).toEqual(['[Lawn visit] Customer requests Tuesdays.']);
+    expect(conn.calls.some(([t, method, col, values]) => t === 'scheduled_services' && method === 'whereNotIn' && col === 'status' && ['cancelled', 'skipped', 'no_show', 'rescheduled'].every((status) => values.includes(status)))).toBe(true);
   });
 
   test('a property note cleared after the as-of time is unread, not absent', async () => {

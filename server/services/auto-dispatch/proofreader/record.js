@@ -35,6 +35,7 @@ const { resolveEmailCustomerLink, personSentFilter, extractEmailAddresses } = re
 const { emailPlainText, stripQuotedAndSignature, ownReplySubject } = require('../../email/email-strip');
 const { operatorReply, smsContactSelects } = require('../../staff-contact');
 const { etOffsetIso } = require('../../../utils/datetime-et');
+const { RETAINED_HISTORY_STATUSES } = require('../../visit-context/statuses');
 
 // One entry's longest text. A longer one is split into parts, never cut
 // (Codex #6258 r1: a restriction near the end of a long call was dropped).
@@ -255,9 +256,11 @@ async function readStaffNotes(conn, { customerId, asOf }, unread) {
 // A recap edit overwrites technician_notes and stamps updated_at.
 async function readTechNotes(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_records').where({ customer_id: customerId }).where('created_at', '<', asOf)
-    .select('technician_notes', 'created_at', 'updated_at');
+    .select('technician_notes', 'service_type', 'created_at', 'updated_at');
+  // The note names the service it was written on: a statement about another
+  // service is not a hold (prompt.js), and the model needs to see which (r9).
   return rows.map((row) => (revisedLater(row, asOf, 'technician_note', unread)
-    ? [] : entry('technician_note', 'staff', row.created_at, row.technician_notes)));
+    ? [] : entry('technician_note', 'staff', row.created_at, clean(row.technician_notes) && clean(row.service_type) ? `[${clean(row.service_type)} visit] ${row.technician_notes}` : row.technician_notes)));
 }
 
 // The offer row is written when the offer is sent; the customer's reply
@@ -280,7 +283,9 @@ async function readPortalRequests(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_requests').where({ customer_id: customerId }).where('created_at', '<', asOf)
     // source 'admin' is an operator's own record (admin-cancellation.js): staff
     // words in the same table, never the customer's (r8).
-    .whereRaw("COALESCE(source, '') <> 'admin'")
+    // 'voice_agent' is the phone assistant's paraphrase of a call whose own
+    // words are read from call_log (r9).
+    .whereRaw("COALESCE(source, '') NOT IN ('admin', 'voice_agent')")
     .select('category', 'subject', 'description', 'created_at', 'updated_at');
   // updated_at moves on a status or assignment change too, so it does not
   // say when the customer's words were written. A row touched since it was
@@ -340,7 +345,8 @@ async function readUndatedNotes(conn, args, unread) {
     return out;
   }
   const members = visit.visit_id
-    ? await conn('scheduled_services').where({ visit_id: visit.visit_id }).whereNot('status', 'cancelled').select('id', 'recurring_parent_id', 'service_type')
+    // Not the rows a frozen visit keeps only as history (statuses.js): they did not move.
+    ? await conn('scheduled_services').where({ visit_id: visit.visit_id }).whereNotIn('status', RETAINED_HISTORY_STATUSES).select('id', 'recurring_parent_id', 'service_type')
     : [visit];
   const unit = members.length ? members : [visit];
   args.serviceTypes = [...new Set(unit.map((row) => clean(row.service_type)).filter(Boolean))];

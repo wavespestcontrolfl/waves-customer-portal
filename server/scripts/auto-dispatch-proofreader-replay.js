@@ -130,6 +130,11 @@ async function loadMoves(db) {
       db.raw(`(select max(r.created_at) from reschedule_log r where r.scheduled_service_id = l.scheduled_service_id
         and r.initiated_by = 'auto_dispatch' and r.new_date = l.new_scheduled_date
         and r.created_at <= l.created_at and r.created_at >= l.created_at - interval '1 hour') as moved_at`),
+      // The service the moved row had at the move, frozen on that same row.
+      db.raw(`(select r.occurrence_service_type from reschedule_log r where r.scheduled_service_id = l.scheduled_service_id
+        and r.initiated_by = 'auto_dispatch' and r.new_date = l.new_scheduled_date
+        and r.created_at <= l.created_at and r.created_at >= l.created_at - interval '1 hour'
+        order by r.created_at desc limit 1) as moved_service_type`),
     );
   if (LIMIT) query = query.limit(LIMIT);
   return query;
@@ -140,11 +145,11 @@ async function replayMove(row, arms, { db, proofreader, toDateStr }) {
     customerId: row.customer_id, serviceId: row.scheduled_service_id, asOf: new Date(row.moved_at || row.created_at),
   });
   const move = proofreader.moveFacts({
-    // The audit row keeps no service type: it is read from the visit as it is
-    // today, every member of a grouped stop included (the whole stop moved).
-    // A visit deleted since has none (the prompt then says only "recurring
-    // service visit"), and its notes make the record incomplete.
-    serviceType: record.serviceTypes.join(' + ') || row.service_type,
+    // A grouped stop moved whole: every member's service, as the visit
+    // stands today. One service alone: the type frozen on the move's own
+    // reschedule_log row, then today's. A visit deleted since has none (the
+    // prompt then says only "recurring service visit").
+    serviceType: record.serviceTypes.length > 1 ? record.serviceTypes.join(' + ') : (row.moved_service_type || record.serviceTypes[0] || row.service_type),
     from: { date: toDateStr(row.old_scheduled_date), windowStart: row.old_window_start, windowEnd: row.old_window_end, technician: firstName(row.old_tech) },
     to: { date: toDateStr(row.new_scheduled_date), windowStart: row.new_window_start, windowEnd: row.new_window_end, technician: firstName(row.new_tech) },
   });
@@ -194,15 +199,26 @@ function printMoves(rows, arms) {
   });
 }
 
+// Customer words are in these files. The directory is one this run makes
+// itself, owner-only, and never inside the repository (a results folder in
+// a worktree can be staged by accident). A directory that exists is refused:
+// its mode is not this script's to change (Codex #6258 r9).
+function prepareOutputDir(dir) {
+  const target = path.resolve(dir);
+  const repo = path.resolve(__dirname, '..', '..');
+  if (target === repo || target.startsWith(`${repo}${path.sep}`)) throw new Error(`--out must be outside the repository: ${target}`);
+  if (fs.existsSync(target)) throw new Error(`--out must name a directory that does not exist yet: ${target}`);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.mkdirSync(target, { mode: 0o700 });
+}
+
 (async () => {
   const db = require('../models/db');
   const MODELS = require('../config/models');
   const proofreader = require('../services/auto-dispatch/proofreader');
   const { toDateStr } = require('../services/auto-dispatch/dates');
   const arms = resolveArms(MODELS);
-  // Customer words are in these files: owner-only, whatever the umask.
-  fs.mkdirSync(OUT, { recursive: true, mode: 0o700 });
-  fs.chmodSync(OUT, 0o700);
+  prepareOutputDir(OUT);
   console.log(`Move proofreader replay · prompt ${proofreader.PROMPT_VERSION} · arms: ${arms.map((a) => a.label).join(' vs ')}\nOutput: ${OUT}`);
   try {
     const hard = flag('--skip-hard') ? [] : await runHardCases(arms, proofreader);
