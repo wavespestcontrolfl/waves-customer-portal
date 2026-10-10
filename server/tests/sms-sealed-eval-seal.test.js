@@ -85,6 +85,9 @@ const VL_BINDINGS = ['\nVISIT STATUS & OPEN LOOPS:\n', D_, '\nUPCOMING SERVICES:
 // contract order SLA, CF, LBL, VL, Payment options, MISSED VISIT scope line, FREE RE-SERVICE
 const { MISSED_VISIT_SCOPE_LINE } = require('../services/visit-loops-facts');
 const MV_BINDINGS = [`\n${MISSED_VISIT_SCOPE_LINE}\n`, D_, '\nUPCOMING SERVICES:\n'];
+// 'n' (2026-10-09): the PORTAL SELF-CANCEL line, a generic line-start marker like Payment options;
+// contract order SLA, CF, LBL, VL, Payment options, MISSED VISIT scope line, PORTAL SELF-CANCEL, FREE RE-SERVICE
+const PC_BINDING = pattern_('PORTAL SELF-CANCEL:');
 const CONTRACT_BINDINGS = [
   pattern_('FOLLOW-UP SLA RIGHT NOW:'),
   D_, D_, exactStructureRegexSource('optional'),
@@ -92,6 +95,7 @@ const CONTRACT_BINDINGS = [
   ...VL_BINDINGS,
   pattern_('- Payment options:'),
   ...MV_BINDINGS,
+  PC_BINDING,
   ...RS_BINDINGS,
 ];
 
@@ -277,17 +281,17 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers7_m+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers11_n+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /~ \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
-    // the current identity (7_m) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS, LABEL FACTS,
-    // VISIT STATUS & OPEN LOOPS (header at its rendered position), Payment options, the MISSED VISIT scope line
-    const CURRENT_BINDINGS = [pattern_('FOLLOW-UP SLA RIGHT NOW:'), ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required'), ...VL_BINDINGS, pattern_('- Payment options:'), ...MV_BINDINGS];
+    // the current identity (11_n) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS, LABEL FACTS,
+    // VISIT STATUS & OPEN LOOPS (header at its rendered position), Payment options, the MISSED VISIT scope line, PORTAL SELF-CANCEL
+    const CURRENT_BINDINGS = [pattern_('FOLLOW-UP SLA RIGHT NOW:'), ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required'), ...VL_BINDINGS, pattern_('- Payment options:'), ...MV_BINDINGS, PC_BINDING];
     for (const [, args] of likeRaws) {
       expect(args[1]).toEqual(CURRENT_BINDINGS);
-      expect(String(args[0])).not.toMatch(/!~ \?/); // 7_m+c: every fact the version carries is required, none forbidden
+      expect(String(args[0])).not.toMatch(/!~ \?/); // 11_n+c: every fact the version carries is required, none forbidden
       expect(String(args[0])).not.toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
@@ -301,8 +305,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(likeRaws.length).toBeGreaterThanOrEqual(2);
     for (const [, args] of likeRaws) {
       expect(String(args[0])).toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
-      // forbidden in contract order: VISIT STATUS & OPEN LOOPS, Payment options (PR #5331), the MISSED VISIT scope line (#5610)
-      expect(args[1].slice(-(VL_BINDINGS.length + 1 + MV_BINDINGS.length))).toEqual([...VL_BINDINGS, pattern_('- Payment options:'), ...MV_BINDINGS]);
+      // forbidden in contract order: VISIT STATUS & OPEN LOOPS, Payment options (PR #5331), the MISSED VISIT scope line (#5610), PORTAL SELF-CANCEL
+      expect(args[1].slice(-(VL_BINDINGS.length + 1 + MV_BINDINGS.length + 1))).toEqual([...VL_BINDINGS, pattern_('- Payment options:'), ...MV_BINDINGS, PC_BINDING]);
     }
   });
 
@@ -414,10 +418,10 @@ test('v12 without +c, _cf or _p: the compatibility SQL requires the SLA line AND
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /~ \?/.test(String(args[0])));
     // Computed via the shared compatibleWhereRaw, so this tracks the real contract rather than a
     // frozen snapshot of its SQL shape: bare v12 requires SLA and forbids COMPANY FACTS,
-    // LABEL FACTS, Payment options and FREE RE-SERVICE.
+    // LABEL FACTS, Payment options, the PORTAL SELF-CANCEL line and FREE RE-SERVICE.
     const contract = require('../services/sms-sealed-eval')._test.compatibleWhereRaw(
       ['FOLLOW-UP SLA RIGHT NOW:'],
-      [require('../services/sms-company-facts').COMPANY_FACTS_HEADER, require('../services/sms-label-facts').LABEL_FACTS_MARKER, 'VISIT STATUS & OPEN LOOPS:', '- Payment options:', MISSED_VISIT_SCOPE_LINE, 'FREE RE-SERVICE:'],
+      [require('../services/sms-company-facts').COMPANY_FACTS_HEADER, require('../services/sms-label-facts').LABEL_FACTS_MARKER, 'VISIT STATUS & OPEN LOOPS:', '- Payment options:', MISSED_VISIT_SCOPE_LINE, 'PORTAL SELF-CANCEL:', 'FREE RE-SERVICE:'],
     );
     expect(compat[1][0]).toBe(contract.sql);
     expect(compat[1][1]).toEqual(contract.bindings);

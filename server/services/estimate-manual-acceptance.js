@@ -419,10 +419,10 @@ function httpError(message, statusCode = 400) {
 }
 
 function throwRefusal(refusal) {
-  if (refusal) throw httpError(refusal.message, refusal.statusCode);
+  if (refusal) throw Object.assign(httpError(refusal.message, refusal.statusCode), refusal.code ? { code: refusal.code } : {});
 }
 
-const refusal = (message, statusCode) => ({ message, statusCode });
+const refusal = (message, statusCode, code) => (code ? { message, statusCode, code } : { message, statusCode });
 
 // The estimate-row refusals of a manual Mark accepted, as { message,
 // statusCode } or null. markEstimateManuallyAccepted throws them at their
@@ -442,7 +442,7 @@ function oneTapPurchaseRefusal(estimate) {
 }
 
 // Checked after the already-accepted return, on the row as first read.
-function manualAcceptRowRefusal(estimate) {
+function manualAcceptRowRefusal(estimate, { billingTerm = 'standard' } = {}) {
   if (!MANUAL_ACCEPTABLE_STATUSES.has(estimate.status)) {
     return refusal(`Only sent or viewed estimates can be manually marked accepted. Current status: ${estimate.status}.`, 400);
   }
@@ -455,19 +455,10 @@ function manualAcceptRowRefusal(estimate) {
   if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
     return refusal('Manager approval is required before this estimate can be manually accepted.', 400);
   }
-  // Same live-gate rule as the public accept route (codex #3272 r5): the
-  // canonical manual-acceptance path (admin Mark Won + linked-estimate
-  // booking) converts from stored rows without re-entering priceLawnCare,
-  // so a persisted suppression estimate must not be accepted/billed/
-  // scheduled while GATE_BERMUDA_SUPPRESSION is off. Already-accepted
-  // retries returned above stay untouched.
-  {
-    const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
-    if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
-      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-      return refusal('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before accepting.', 409);
-    }
-  }
+  // Gated add-ons and a recurring accept that would drop a sold area add-on
+  // (the same rule the public accept route and the schedule preflight use).
+  const addOnRefusal = persistedAddOnRefusal(estimate, { action: 'accepting', billingTerm });
+  if (addOnRefusal) return refusal(addOnRefusal.message, 409, addOnRefusal.code);
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
     return refusal('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
   }
@@ -643,6 +634,57 @@ async function logManualAcceptance(database, {
   }
 }
 
+// A sold area add-on is booked and billed only by the one-time accept. Marking
+// a RECURRING estimate that carries one as won converts the plan and has no
+// step that books the add-on, so it would be dropped while the estimate reads
+// accepted (the public accept's AREA_ADDONS_ONE_TIME_ACCEPT_ONLY rule). True
+// when this accept would do that; the caller refuses before any write.
+const AREA_ADDON_RECURRING_MARK_WON_MESSAGE = 'This estimate carries an area add-on treatment alongside a recurring plan. Marking it won would convert the plan and drop the add-on. Remove the add-on from this estimate and sell it on its own one-time estimate, then mark this one won.';
+function recurringAcceptWouldDropAreaAddOns(estimate = {}, billingTerm = 'standard') {
+  const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  if (!require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estimateData, { pricingAuthority: estimate.pricing_authority })) return false;
+  return !EstimateConverter.shouldSuppressRecurringConversion({
+    billingTerm,
+    monthlyRate: parseFloat(estimate.monthly_total || 0),
+    annualTotal: estimate.annual_total,
+    oneTimeTotal: estimate.onetime_total,
+    recurringServices: [],
+    estimateData,
+  });
+}
+
+// Why a stored estimate cannot be accepted, or booked from, because of the add-ons it carries:
+// a gated add-on whose gate is off, or (checkRecurring) an area add-on a recurring accept would
+// drop. { code, message } or null. The one rule for Mark Won and the schedule's booking preflight.
+function persistedAddOnRefusal(estimate = {}, { action, billingTerm = 'standard', checkRecurring = true } = {}) {
+  const mapper = require('./pricing-engine/v1-legacy-mapper');
+  const gated = mapper.gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, action, { pricingAuthority: estimate.pricing_authority });
+  if (gated) return gated;
+  return checkRecurring && recurringAcceptWouldDropAreaAddOns(estimate, billingTerm)
+    ? { code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE, message: AREA_ADDON_RECURRING_MARK_WON_MESSAGE } : null;
+}
+
+// The refusals a stored estimate's add-ons give an acceptance, thrown as the 409 the staff see: a gated add-on whose gate
+// is off, and a recurring accept that would drop a sold area add-on.
+function assertAddOnRefusalsClear(estimate, billingTerm) {
+  const addOnRefusal = persistedAddOnRefusal(estimate, { action: 'accepting', billingTerm });
+  if (addOnRefusal) throw Object.assign(httpError(addOnRefusal.message, 409), { code: addOnRefusal.code });
+}
+
+// Every add-on decision of an acceptance, on the estimate row the transaction holds locked: the refusals above, and the
+// yearly-limit recheck (an add-on whose limit is now reached, or whose history cannot be read, is not marked won either).
+// The visits this call books (the staff booking's own rows) ARE this acceptance: left out of the count, and their day is the
+// day judged. Any other booking of the estimate counts. A customer the check finds for itself (an unowned estimate's group
+// owner or linked appointment) is fenced like the public accept's, without waiting: the estimate's own customer is already
+// locked and so is the estimate row.
+async function assertAddOnsAcceptable(trx, estimate, { billingTerm, bookedAppointmentIds }) {
+  assertAddOnRefusalsClear(estimate, billingTerm);
+  const addOnLimits = require('./area-addon-limits');
+  await addOnLimits.assertAreaAddOnLimitsOpen(trx, {
+    estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer: (id) => addOnLimits.fenceCustomerBookings(trx, id),
+  });
+}
+
 async function markEstimateManuallyAccepted({
   estimateId,
   adminUserId,
@@ -719,7 +761,7 @@ async function markEstimateManuallyAccepted({
       return { acceptedEstimate: estimate, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: estimate };
     }
 
-    throwRefusal(manualAcceptRowRefusal(estimate));
+    throwRefusal(manualAcceptRowRefusal(estimate, { billingTerm: normalizedBillingTerm }));
 
     // SERIALIZED with call-linkage corrections, mirroring the public
     // accept protocol (pre-push P0, PR #3304 — an unlocked read here let
@@ -733,15 +775,18 @@ async function markEstimateManuallyAccepted({
     // for this transaction's terminal write and its reconcile applies the
     // marker-only terminal invalidation.
     {
-      const freshLinkRow = await trx('estimates').where({ id: estimateId })
-        .forUpdate().first('estimate_data', 'archived_at', 'status');
+      const freshLinkRow = await trx('estimates').where({ id: estimateId }).forUpdate().first();
       // Propagate the LOCKED re-read back onto `estimate` (codex P1): every
       // check below this point — including the existing-member prepay guard
       // — read `estimate.estimate_data` from the earlier UNLOCKED select, so
       // a membershipSnapshot that flipped to isExistingCustomer between the
       // two reads (e.g. a concurrent reprice/save) was invisible here even
       // though the row is, from this line on, held FOR UPDATE.
-      if (freshLinkRow) estimate = { ...estimate, estimate_data: freshLinkRow.estimate_data };
+      if (freshLinkRow) estimate = { ...estimate, ...freshLinkRow };
+      // Every add-on decision of this acceptance reads the LOCKED row: the gated and recurring-plan refusals and the
+      // yearly-limit recheck. A concurrent estimator save that added or replaced a limited add-on waits behind this
+      // lock, so what is judged here is what is converted below.
+      await assertAddOnsAcceptable(trx, estimate, { billingTerm: normalizedBillingTerm, bookedAppointmentIds });
       const manualAcceptData = (() => {
         const raw = freshLinkRow?.estimate_data;
         if (!raw) return null;
@@ -1376,6 +1421,9 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   oneTapPurchaseRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,
+  persistedAddOnRefusal,
+  recurringAcceptWouldDropAreaAddOns,
+  AREA_ADDON_RECURRING_MARK_WON_MESSAGE,
   normalizeManualBillingTerm,
   resolveAnnualPrepayAmount,
   annualPrepayInvoiceTotalForEstimate,

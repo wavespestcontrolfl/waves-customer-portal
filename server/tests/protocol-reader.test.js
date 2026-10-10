@@ -8,6 +8,7 @@ const {
 describe('shared protocol reader', () => {
   test('exposes every estimator program family', () => {
     expect(availablePrograms().sort()).toEqual([
+      'area_addon',
       'bed_bug',
       'cockroach',
       'lawn',

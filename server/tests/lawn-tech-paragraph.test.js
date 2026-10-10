@@ -69,6 +69,20 @@ describe('LAWN_SENTENCES is the only source of words (owner approved 2026-10-06)
   });
 });
 
+describe('problems are grouped by place (owner trial 2026-10-06)', () => {
+  test('several problems at one place share one phrase', () => {
+    const text = tech.render({ observed: [{ condition: 'clover', place: 'back_lawn' }, { condition: 'spurge', place: 'back_lawn' }, { condition: 'goosegrass', place: 'back_lawn' }], maybe: [], products: [] });
+    expect(text).toBe('Our technician saw clover, spurge and goosegrass in the back lawn.');
+  });
+
+  test('places keep their first-seen order; problems with no place come last and are never placed', () => {
+    expect(tech.render({ observed: [{ condition: 'gray_leaf_spot', place: 'back_lawn' }, { condition: 'grubs', place: 'front_lawn' }, { condition: 'thin_turf', place: 'front_lawn' }], maybe: [], products: [] }))
+      .toBe('Our technician saw gray leaf spot in the back lawn and grubs and thin turf in the front lawn.');
+    expect(tech.render({ observed: [{ condition: 'dollarweed', place: 'none' }, { condition: 'nutsedge', place: 'side_yard' }], maybe: [], products: [] }))
+      .toBe('Our technician saw nutsedge in the side yard and dollarweed.');
+  });
+});
+
 describe('free text can never reach the output', () => {
   const HOSTILE = [
     { condition: 'It went on the front lawn.', place: 'front_lawn', seenToday: true, quote: 'It went on the front lawn.' },

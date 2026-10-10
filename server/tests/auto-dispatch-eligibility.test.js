@@ -203,9 +203,13 @@ describe('isPersonPlacedVisit', () => {
   // An in-memory reschedule_log. Rows are filtered by the predicates the
   // query sends, so a wrong column or value makes a test miss the row; the
   // newest-placement subquery is evaluated like PostgreSQL would.
-  function fakeDb({ log = [], fail = false } = {}) {
+  function fakeDb({ log = [], fail = false, row = null } = {}) {
     const slotChanged = (r) => r.original_date !== r.new_date || r.original_window !== r.new_window;
     return (table) => {
+      if (table === 'scheduled_services') {
+        const read = { forShare: () => read, first: async () => { if (fail) throw new Error('connection reset'); return row; } };
+        return { where: () => read };
+      }
       if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
       const preds = [];
       const chain = {
@@ -326,7 +330,65 @@ describe('isPersonPlacedVisit', () => {
       .toMatchObject({ placed: true });
   });
 
+  test('a staff lock on the row protects the visit', async () => {
+    expect(await isPersonPlacedVisit({ ...visit, auto_dispatch_locked: true }, fakeDb({ log: [] })))
+      .toMatchObject({ placed: true, reason_code: 'MANUALLY_LOCKED' });
+  });
+
+  test('refresh re-reads the lock and stamp the snapshot does not have (edit screen after pass 1)', async () => {
+    const locked = fakeDb({ log: [], row: { auto_dispatch_locked: true } });
+    expect(await isPersonPlacedVisit(visit, locked)).toEqual({ placed: false }); // snapshot only
+    expect(await isPersonPlacedVisit(visit, locked, { refresh: true })).toMatchObject({ placed: true, reason_code: 'MANUALLY_LOCKED' });
+    const stamped = fakeDb({ log: [], row: { auto_dispatch_locked: false, date_exception: true, date_exception_source: 'admin', date_exception_at: '2026-10-07T01:00:00Z' } });
+    expect(await isPersonPlacedVisit(visit, stamped, { refresh: true })).toMatchObject({ placed: true, reason_description: 'Date chosen by staff (date edit)' });
+  });
+
+  test('refresh sees a confirmation that landed after the snapshot (Codex #6207 r3 P2)', async () => {
+    const confirmed = fakeDb({ log: [], row: { auto_dispatch_locked: false, customer_confirmed: true } });
+    expect(await isPersonPlacedVisit(visit, confirmed)).toEqual({ placed: false }); // snapshot only
+    expect(await isPersonPlacedVisit(visit, confirmed, { refresh: true })).toMatchObject({ placed: true, reason_code: 'CUSTOMER_CONFIRMED' });
+  });
+
+  test('refresh fails closed and degraded on a read error', async () => {
+    expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }), { refresh: true })).toMatchObject({ placed: true, degraded: true });
+  });
+
   test('fails closed and degraded on a read error', async () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }))).toMatchObject({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
+  });
+});
+
+test('a visit the customer confirmed is never eligible, with or without a due date (owner 2026-10-09)', () => {
+  expect(isEligibleForAutoDispatch(svc({ status: 'confirmed', customer_confirmed: true }), CTX))
+    .toMatchObject({ eligible: false, reason_code: 'CUSTOMER_CONFIRMED' });
+  expect(isEligibleForAutoDispatch(svc({ status: 'confirmed', customer_confirmed: false }), CTX))
+    .toMatchObject({ eligible: true });
+});
+
+// One read for many series (Codex #6208 r21 P2).
+describe('lapsedPlanKeys', () => {
+  const { lapsedPlanKeys, planKey } = require('../services/auto-dispatch/eligibility');
+  const rows = [{ id: 'a', customer_id: 'c1', recurring_parent_id: 'p1' }, { id: 'b', customer_id: 'c2', recurring_parent_id: 'p2' }, { id: 'c', customer_id: 'c1', recurring_parent_id: 'p1' }];
+  const dbWith = (select) => {
+    const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), whereNull: jest.fn(() => q), select };
+    const db = jest.fn(() => q);
+    db.q = q;
+    return db;
+  };
+
+  test('reads every series once and keys a lapse by customer and series', async () => {
+    const db = dbWith(jest.fn(async () => [{ recurring_parent_id: 'p1', customer_id: 'c1' }, { recurring_parent_id: 'p2', customer_id: 'other' }]));
+    const lapsed = await lapsedPlanKeys(rows, db);
+    expect(db).toHaveBeenCalledTimes(1);
+    expect(db.q.whereIn).toHaveBeenCalledWith('recurring_parent_id', ['p1', 'p2']);
+    expect(db.q.where).toHaveBeenCalledWith('alert_type', 'plan_lapsed');
+    expect(rows.map((r) => lapsed.has(planKey(r)))).toEqual([true, false, true]);
+  });
+
+  test('an unreadable table lapses nothing, and no rows reads nothing', async () => {
+    expect((await lapsedPlanKeys(rows, dbWith(jest.fn(async () => { throw new Error('no table'); })))).size).toBe(0);
+    const db = dbWith(jest.fn());
+    expect((await lapsedPlanKeys([], db)).size).toBe(0);
+    expect(db).not.toHaveBeenCalled();
   });
 });

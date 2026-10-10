@@ -133,7 +133,9 @@ async function main({ aps = false, apsPass = null } = {}) {
   const bookableCallServices = await loadBookableCallServices(db);
   const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
   const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
-  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
+  // GATE_CALL_EXTRACTION_SYSTEM_PROMPT: with the gate on the processor stamps the system-layout
+  // cohort (`s`), so that is the live main cohort this run must match.
+  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames, { systemLayout: systemLayoutLive() });
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', aps ? [apsCohortVersion(liveCatalogNames)] : [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
@@ -542,8 +544,13 @@ async function main({ aps = false, apsPass = null } = {}) {
 // The EXACT version the processor stamps on a gate-on call under the live catalog (the same
 // computation as LIVE_PROMPT_VERSION, with the cohort mark): with an empty catalog that is
 // the bare APS version. No prefix match, so a stale catalog's cohort never folds in.
+// The same live read the processor makes once per call (GATE_CALL_EXTRACTION_SYSTEM_PROMPT).
+function systemLayoutLive() {
+  return require('../config/feature-gates').callExtractionSystemPromptLive() === true;
+}
+
 function apsCohortVersion(liveCatalogNames) {
-  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true });
+  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true, systemLayout: systemLayoutLive() });
 }
 
 // The whole run: with the gate on, the -aps cohort is evaluated first (its own full report) and

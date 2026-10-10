@@ -5,6 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { costLineFromUsage } = require('../services/product-costing');
 const { BED_BUG, TERMITE } = require('../services/pricing-engine/constants');
+const { costPlusListKnobError } = require('../services/pricing-engine/lawn-cost-plus-knobs');
 
 // Reads and the calculators (margin-check / estimate / quick-quote) stay
 // tech-or-admin — the tech portal estimators price off them. WRITES are
@@ -228,12 +229,53 @@ function strictPricingNumber(v) {
   return typeof v === 'number' ? v : NaN;
 }
 
+// The area add-on price knobs: bounded, plain JSON numbers, and no label-bound field (yearly limits, grass, product,
+// identity) - those stay in code. The same validator the sync applies, here strict about keys it does not own.
+function validateAreaAddOnPricing(data) {
+  const config = require('../services/pricing-engine/area-addon-config');
+  const verdict = config.normalizeAreaAddOnPricingConfig(data);
+  if (!verdict.ok) return { ok: false, error: `area_addon_pricing: ${verdict.error}` };
+  // The PUT replaces the whole stored object, and the sync fills anything absent from the code defaults: a partial payload
+  // would silently reset every tuned value it leaves out. The whole shape is required (the panel always sends it).
+  const missing = missingPricingKey(config.defaultAreaAddOnPricingData(), data);
+  return missing ? { ok: false, error: `area_addon_pricing: ${missing} is missing. Send the whole object.` } : { ok: true };
+}
+
+// The first key path of `shape` (objects only; arrays and values are leaves) that `data` does not carry, or null.
+function missingPricingKey(shape, data, path = '') {
+  for (const key of Object.keys(shape)) {
+    const here = path ? `${path}.${key}` : key;
+    if (!data || typeof data !== 'object' || !Object.prototype.hasOwnProperty.call(data, key)) return here;
+    const child = shape[key];
+    if (child && typeof child === 'object' && !Array.isArray(child)) {
+      const deeper = missingPricingKey(child, data[key], here);
+      if (deeper) return deeper;
+    }
+  }
+  return null;
+}
+
+// PUT /:key's validator: a key with its own validator module first, then the shared per-key checks below.
+const OWN_VALIDATORS = { area_addon_pricing: validateAreaAddOnPricing };
+function validatePricingConfigFor(configKey, data, oldConfig) {
+  return OWN_VALIDATORS[configKey] ? OWN_VALIDATORS[configKey](data) : validatePricingConfigData(configKey, data, oldConfig);
+}
+
 function validatePricingConfigData(configKey, data, oldConfig) {
   const fail = (error) => ({ ok: false, error });
   const num = strictPricingNumber;
   const isRatio01 = (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) < 1;
   const isPositive = (v) => Number.isFinite(num(v)) && num(v) > 0;
   const isNonNegative = (v) => Number.isFinite(num(v)) && num(v) >= 0;
+
+  // lawn_pricing_v2.costPlusList (GATE_LAWN_COST_PLUS_LIST knobs) is checked on
+  // its own, ahead of the key-specific chain below, so a sibling key (such as
+  // bermudaSuppression) in the same save can never skip it. One validator with
+  // the pricer: a save that passes here prices.
+  if (configKey === 'lawn_pricing_v2' && data?.costPlusList !== undefined) {
+    const problem = costPlusListKnobError(data.costPlusList);
+    if (problem) return fail(`lawn_pricing_v2.${problem}`);
+  }
 
   // The global_* singles must be STRICTLY positive: syncConstantsFromDB
   // applies them through truthy `?.value` checks, so a stored 0 would return
@@ -530,6 +572,32 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!(base + per1000 > 0)) {
       return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — these knobs only tune the price; to disable the add-on, turn off GATE_BERMUDA_SUPPRESSION');
     }
+    // The optional spray-cost block (margin reporting for GATE_LAWN_BERMUDA_REMOVAL): every
+    // key a positive number, and no unknown key, so a typo never reads as a silent default.
+    // Nested drop protection, as for pest_base.initial_roach: PUT replaces the whole blob and the
+    // top-level drop check cannot see inside bermudaSuppression, so a payload that omits a stored
+    // cost block would silently delete tuned spray costs (db-bridge then prices margins from the
+    // code defaults). A row that never carried the block may still be saved without it.
+    const storedCost = parseConfigData(oldConfig?.data)?.bermudaSuppression?.cost;
+    if (bs.cost === undefined && storedCost && typeof storedCost === 'object') {
+      return fail('lawn_pricing_v2.bermudaSuppression drops the stored cost block: include bermudaSuppression.cost with every stored key');
+    }
+    if (bs.cost !== undefined) {
+      const cost = bs.cost;
+      const costKeys = ['recognitionPer1000', 'fusiladePer1000', 'surfactantPer1000', 'mixMinutes', 'minutesPer1000'];
+      if (!cost || typeof cost !== 'object' || Array.isArray(cost)) {
+        return fail(`lawn_pricing_v2.bermudaSuppression.cost must be an object with ${costKeys.join(', ')}`);
+      }
+      for (const key of Object.keys(cost)) {
+        if (!costKeys.includes(key)) return fail(`lawn_pricing_v2.bermudaSuppression.cost.${key} is not a known cost key`);
+      }
+      for (const key of costKeys) {
+        const value = num(cost[key]);
+        if (!Number.isFinite(value) || !(value > 0) || value > 1000) {
+          return fail(`lawn_pricing_v2.bermudaSuppression.cost.${key} must be a positive number up to 1000`);
+        }
+      }
+    }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
     // { base: 117, floor: -1 } would otherwise persist, then
@@ -730,6 +798,7 @@ async function ensureTable() {
       { config_key: 'rodent_waveguard', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 10, data: JSON.stringify({ tier_qualifier: true, exclude_from_pct_discount: false, setup_credit: 0, note: 'Owner directive 2026-08-29: rodent bait is a full WaveGuard member — counts toward the tier and receives the tier discount.' }) },
 
       // One-time
+      { config_key: 'area_addon_pricing', name: 'Area Add-On Treatment Pricing', category: 'one_time', sort_order: 40, data: JSON.stringify(require('../services/pricing-engine/area-addon-config').defaultAreaAddOnPricingData()) },
       { config_key: 'onetime_urgency', name: 'Urgency Multipliers', category: 'one_time', sort_order: 1, data: JSON.stringify({ routine: 1.0, soon: 1.25, soon_after_hours: 1.50, urgent: 1.50, urgent_after_hours: 2.0 }) },
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
       { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 2.2 }) },
@@ -1293,6 +1362,21 @@ const CONFIG_KEY_SUB_FEATURE_GATES = {
 // and engine enforcement can never disagree on what counts as "on".
 const { gateEnvValue: gateEnvOn, termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 
+// Area add-on treatments (GATE_AREA_ADDONS, read at request time like the
+// sub-feature gates above): the estimator learns from the SAME lawn_pricing_v2
+// read that carries bermudaSuppression whether the add-ons are offered and
+// which ones, so the screen never hardcodes the table. `items` is the pricer's
+// own table (areaAddOnCatalog); `enabled` false means hide the whole section.
+function areaAddOnsAvailability() {
+  return {
+    enabled: gateEnvOn('GATE_AREA_ADDONS'),
+    // The values of the ONE group-level options.areaAddOnVisit (the visit is
+    // chosen once for all selected add-ons, never per add-on).
+    visitContexts: ['standalone', 'sameTripAddOn'],
+    items: require('../services/pricing-engine/service-pricing').areaAddOnCatalog(),
+  };
+}
+
 function configKeyFeatureAvailable(key) {
   if (key === 'termite_annual_plan') return termiteAnnualPlanSelectionEnabled();
   const gate = CONFIG_KEY_FEATURE_GATES[key];
@@ -1303,7 +1387,10 @@ function configKeyFeatureAvailable(key) {
 function configKeySubFeaturesAvailable(key) {
   const subs = CONFIG_KEY_SUB_FEATURE_GATES[key];
   if (!subs) return undefined;
-  return Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
+  const available = Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
+  // Bahia is offered as a NEW lawn plan only while the v13 program (which has no bahia track) is off.
+  if (key === 'lawn_pricing_v2') available.bahiaOffered = !require('../services/lawn-program').lawnV13NoBahiaProgram();
+  return available;
 }
 
 // The station/cartridge cost the ENGINE is pricing with right now: the
@@ -1368,6 +1455,7 @@ router.get('/:key', async (req, res, next) => {
       // Read at request time so a gate flip needs no redeploy of the client.
       featureAvailable: configKeyFeatureAvailable(req.params.key),
       ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
+      ...(req.params.key === 'lawn_pricing_v2' ? { areaAddOns: areaAddOnsAvailability() } : {}),
       ...(req.params.key === 'termite_install' ? { effective: await effectiveTermiteInstallBasis() } : {}),
     });
   } catch (err) { next(err); }
@@ -1413,7 +1501,7 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
       // row over the in-code constants, so a bad commit immediately poisons
       // live pricing rather than waiting for someone to notice.
       if (normalizedData !== undefined) {
-        const verdict = validatePricingConfigData(req.params.key, normalizedData, oldConfig);
+        const verdict = validatePricingConfigFor(req.params.key, normalizedData, oldConfig);
         if (!verdict.ok) { validationError = verdict.error; return true; }
         updates.data = JSON.stringify(normalizedData);
       }
@@ -1591,5 +1679,6 @@ module.exports.resolvePricingQuoteInput = resolvePricingQuoteInput;
 // to the same billing-authoritative rows — it must run the SAME key-specific
 // validation on the prospective row before writing.
 module.exports.validatePricingConfigData = validatePricingConfigData;
+module.exports.validatePricingConfigFor = validatePricingConfigFor;
 module.exports.normalizeIncomingConfigData = normalizeIncomingConfigData;
 module.exports.parseConfigData = parseConfigData;

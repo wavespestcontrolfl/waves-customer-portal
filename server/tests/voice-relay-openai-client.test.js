@@ -349,6 +349,49 @@ describe('OpenAIRelayClient.messages.stream — full SSE round trips', () => {
     expect(msg.usage).toEqual({ input_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 5 });
   });
 
+  test('a completed response the relay cannot use rejects with what OpenAI billed for it', async () => {
+    const fetchImpl = fetchStub([
+      { type: 'response.completed', response: { id: 'r9', model: 'gpt-6-sol', status: 'completed', output: [{ type: 'reasoning', summary: [] }], usage: { input_tokens: 500, input_tokens_details: { cached_tokens: 100 }, output_tokens: 256, output_tokens_details: { reasoning_tokens: 256 } } } },
+    ]);
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const stream = client.messages.stream({ model: 'gpt-6-sol', max_tokens: 100, system: [], tools: [], messages: [{ role: 'user', content: 'hi' }] }, {});
+    const err = await stream.finalMessage().catch((e) => e);
+    expect(err.message).toMatch(/no usable output/);
+    expect(err.billedRound).toEqual({
+      id: 'r9', model: 'gpt-6-sol', errorCode: 'empty_text',
+      usage: { input_tokens: 400, cache_read_input_tokens: 100, cache_creation_input_tokens: 0, output_tokens: 256, reasoning_tokens: 256 },
+    });
+  });
+
+  test('a failed response rejects with the usage OpenAI reported for it', async () => {
+    const fetchImpl = fetchStub([
+      { type: 'response.failed', response: { id: 'r10', model: 'gpt-6-sol', status: 'failed', error: { code: 'server_error' }, usage: { input_tokens: 300, output_tokens: 12 } } },
+    ]);
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const stream = client.messages.stream({ model: 'gpt-6-sol', max_tokens: 100, system: [], tools: [], messages: [{ role: 'user', content: 'hi' }] }, {});
+    const err = await stream.finalMessage().catch((e) => e);
+    expect(err.message).toMatch(/OpenAI Responses API error/);
+    expect(err.billedRound).toEqual({
+      id: 'r10', model: 'gpt-6-sol', errorCode: 'openai_failed',
+      usage: { input_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 12 },
+    });
+    expect(require('../services/agent-control/taxonomy').classifyFailure('openai_failed')).toBe('provider');
+  });
+
+  // The ledger files a billed round under the reason the response was unusable,
+  // and the taxonomy turns that into a quality class, not a plumbing fault.
+  test.each([
+    ['cut off by max_output_tokens', { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [{ type: 'reasoning', summary: [] }] }, 'openai_incomplete', 'incomplete'],
+    ['a refusal', { status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] }, 'openai_refusal', 'instruction'],
+    ['nothing usable', { status: 'completed', output: [] }, 'empty_text', 'incomplete'],
+    ['tool arguments that are not JSON', { status: 'completed', output: [{ type: 'function_call', id: 'f1', call_id: 'c1', name: 'lookup', status: 'completed', arguments: '{nope' }] }, 'function_arguments_invalid', 'instruction'],
+  ])('%s carries its own ledger code', (_label, response, code, failureClass) => {
+    let thrown;
+    try { mapResponseToMessage(response, 'gpt-6-sol'); } catch (e) { thrown = e; }
+    expect(thrown.ledgerCode).toBe(code);
+    expect(require('../services/agent-control/taxonomy').classifyFailure(code)).toBe(failureClass);
+  });
+
   test('a tool_use round: content_block_start fires with type tool_use, finalMessage resolves the tool_use block', async () => {
     const fetchImpl = fetchStub([
       { type: 'response.output_item.added', item: { type: 'function_call' } },

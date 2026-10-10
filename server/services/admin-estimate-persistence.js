@@ -1156,6 +1156,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // (activeServiceKeys), so a bundle that itself buys a recurring service still
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
+  // The replay exemption of the lawn pricer's v13 bahia review is server-declared (the replay branch
+  // below): a browser-posted copy of either field is never honored.
+  delete v1Input.savedEstimateReplay;
+  delete v1Input.addedServiceKeys;
   v1Input.priorQualifyingServices = priorQualifyingServices;
   // Account-wide rodent setup-waiver evidence, server-derived by the caller
   // alongside the property-scoped tier list (codex #3591 r34 P1); set
@@ -1167,6 +1171,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   if (deps.recurringCustomer === true || priorQualifyingServices.length > 0) {
     v1Input.recurringCustomer = true;
   }
+  // Same rule for the area add-ons' yearly-limit history: server-read or none, never the posted copy.
+  require('./area-addon-limits').applyAreaAddOnHistory(v1Input, deps.areaAddOnHistory);
   v1Input = await withTrustedCatalogPricing(v1Input, {
     database: deps.database,
     readRodentAdditionalCheckPriceFromCatalog: deps.readRodentAdditionalCheckPriceFromCatalog,
@@ -1218,6 +1224,12 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // above, and every other save prices off freshly synced live config and
   // stamps the resulting server values afterward.
   if (deps.replaySavedPricingKnobs === true) {
+    // A persisted estimate re-priced as it was sold: the lawn pricer's v13 bahia review (new
+    // quotes only) must not park an estimate that was already issued. A service this very
+    // mutation ADDS (the customer add-service rail) was never sold, so it keeps the review:
+    // the caller names it in addedServiceKeys.
+    v1Input.savedEstimateReplay = true;
+    v1Input.addedServiceKeys = Array.isArray(deps.addedServiceKeys) ? deps.addedServiceKeys : [];
     // Lawn cost floor, lawn program minimum and pest program floor. The public
     // read path has threaded these since #2827 (savedFloorReplayOverrides);
     // this branch did not, so an authoritative recompute resolved them from
@@ -1230,6 +1242,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
+    // Area add-on price knobs: the same stored-row reader the public replay uses.
+    Object.assign(v1Input, require('./estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estimateData));
     // Termite station-cost snapshot (plan 2026-09-03 §A1) — same reader the
     // public replay uses, so the authoritative recompute (membership
     // reconcile, opt-out, admin re-save) keeps a sent install at its quoted
@@ -1340,7 +1354,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1357,7 +1371,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -2034,6 +2048,8 @@ async function resolveEstimateWritePayload({
     priorQualifyingServices,
     setupWaiverPriorQualifyingServices,
     recurringCustomer,
+    // The add-ons' yearly-limit history, read here from the verified customer (never from the posted data).
+    areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   const totals = pricing.totals;
@@ -2370,7 +2386,9 @@ async function createOrReuseAdminEstimate({
 
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
-        if (existingEstimate?.status === 'draft') {
+        // An ARCHIVED draft is never reused: overwriting it would leave the
+        // save hidden and unsendable. It takes the non-draft path instead.
+        if (existingEstimate?.status === 'draft' && !existingEstimate.archived_at) {
           // A linked COMMERCIAL PROPOSAL draft is never reused by the generic
           // save (GH codex P2 r6 on #3750): its proposal is server-owned and
           // its totals come from the authored line items — the generic

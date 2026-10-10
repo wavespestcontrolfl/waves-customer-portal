@@ -112,6 +112,11 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   const [turfProfile, setTurfProfile] = useState(EMPTY_TURF_PROFILE);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  // GATE_LAWN_BERMUDA_REMOVAL: the server says the switch is available only
+  // while the gate is on (the key is absent otherwise).
+  const [bermudaRemovalAvailable, setBermudaRemovalAvailable] = useState(false);
+  const bermudaRemovalEligibleGrass = ["st_augustine", "zoysia"].includes(turfProfile?.grass_type);
+  const [bermudaRemovalSaving, setBermudaRemovalSaving] = useState(false);
   // The county field was EDITED in this session. The save re-sends every
   // loaded field, so the server needs an explicit signal that the county
   // was reviewed for the current address — after a move, that review is
@@ -335,6 +340,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     try {
       const d = await adminFetch(`/admin/customers/${customerId}/turf-profile`);
       profileHomeStampRef.current = d.irrigation_home_changed_at ?? null;
+      setBermudaRemovalAvailable(d.bermudaRemovalAvailable === true);
       // Server returns { profile: row | null }. Coerce nulls to ''
       // so the form's controlled inputs don't drop to uncontrolled.
       const p = d.profile;
@@ -401,6 +407,27 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       alert("Save failed: " + e.message);
     } finally {
       setProfileSaving(false);
+    }
+  };
+
+  // The staff switch saves on its own (the server stamps who and when); the
+  // general profile save never carries it.
+  const saveBermudaRemoval = async (enabled) => {
+    if (!selectedCustomer) return;
+    setBermudaRemovalSaving(true);
+    try {
+      const d = await adminFetch(
+        `/admin/customers/${selectedCustomer.id}/turf-profile/bermuda-removal`,
+        { method: "PUT", body: JSON.stringify({ enabled }) },
+      );
+      setTurfProfile((prev) => ({
+        ...prev,
+        bermuda_removal: d.profile?.bermuda_removal === true,
+      }));
+    } catch (e) {
+      alert("Bermuda removal switch failed: " + e.message);
+    } finally {
+      setBermudaRemovalSaving(false);
     }
   };
 
@@ -1041,7 +1068,26 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                     onChange={(e) => updateProfileField(key, e.target.checked)}
                   />
                 ))}
-              </fieldset>{" "}
+              </fieldset>
+              {bermudaRemovalAvailable && (bermudaRemovalEligibleGrass || turfProfile.bermuda_removal === true) && (
+                  <div className="mb-3">
+                    <Checkbox
+                      label="Bermuda removal add-on (April and June spot spray)"
+                      checked={turfProfile.bermuda_removal === true}
+                      disabled={bermudaRemovalSaving || !turfProfile.id}
+                      // Turning it ON is only for St. Augustine and Zoysia; an already-enabled switch on any
+                      // other grass stays visible so an admin can turn it OFF (the server allows that).
+                      onChange={(e) => { if (!e.target.checked || bermudaRemovalEligibleGrass) saveBermudaRemoval(e.target.checked); }}
+                    />
+                    <div className="mt-1 text-ui-caption text-ink-secondary">
+                      {!turfProfile.id
+                        ? "Save the turf profile first."
+                        : bermudaRemovalEligibleGrass
+                          ? "Saves at once. St. Augustine and Zoysia only."
+                          : "On for a grass this add-on does not cover. Turn it off."}
+                    </div>
+                  </div>
+                )}{" "}
               <div className="mt-3 flex gap-2">
                 {" "}
                 <Button

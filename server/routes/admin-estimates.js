@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
+const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const router = express.Router();
 const db = require('../models/db');
@@ -57,7 +58,7 @@ const {
   completePendingInvalidation,
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
-const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+const { gatedAddOnStaffRefusal } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
@@ -609,15 +610,15 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
-  // A persisted bermuda-suppression estimate is only sendable while the gate
-  // is LIVE: the send path serves stored rows without re-entering
-  // priceLawnCare, so a save-then-gate-off sequence would otherwise publish
-  // a disabled add-on (codex #3272 r2). Same fail-closed rail as pricing.
-  if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
-    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-    const err = new Error('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before sending.');
+  // A persisted bermuda-suppression or area add-on estimate is only sendable while its gate
+  // is LIVE: the send path serves stored rows without re-entering the pricer, so a
+  // save-then-gate-off sequence would otherwise publish a disabled add-on (codex #3272 r2).
+  // Same fail-closed rail as pricing.
+  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending', { pricingAuthority: estimate.pricing_authority });
+  if (gatedAddOn) {
+    const err = new Error(gatedAddOn.message);
     err.statusCode = 409;
-    err.code = 'BERMUDA_SUPPRESSION_GATED';
+    err.code = gatedAddOn.code;
     throw err;
   }
   // Estimator-engine YELLOW drafts carry review reasons (fallback sqft
@@ -665,6 +666,17 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   if (!isAuthoredProposal && estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
+    throw err;
+  }
+  // GATE_LAWN_V13 has no bahia program. A recurring bahia lawn plan that was never issued is
+  // reviewed before it goes out, even when the draft was saved before the gate went live (its
+  // stored flags are absent); an estimate already sent is honored. Staff clear it through the
+  // authored-proposal path like any other review flag.
+  if (!isAuthoredProposal && require('../config/feature-gates').lawnV13Live?.() === true && estimateNeverIssued(estimate)
+    && estimateHasBahiaLawn(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
+    const err = new Error('Bahia lawn plans need manual review before they can be sent to the customer (the lawn program has no bahia track).');
+    err.statusCode = 400;
+    err.code = 'LAWN_V13_BAHIA_REVIEW_REQUIRED';
     throw err;
   }
   if (!isAuthoredProposal && estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {
@@ -5628,12 +5640,19 @@ router.patch('/:id', async (req, res, next) => {
     // the row still holds the status we validated against, so a customer
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
+    // The row must still be in the archive state this handler read: an edit
+    // that waited behind an archive (staff, or the draft-retire sweep) must
+    // not land on the now-hidden row and report success.
+    updateQuery = estimate.archived_at ? updateQuery.whereNotNull('archived_at') : updateQuery.whereNull('archived_at');
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
     const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
     if (changesDeliveryOptions) {
       updateQuery = updateQuery.whereNot({ status: 'sending' }).whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
-      updates.updated_at = db.fn.now();
     }
+    // Every staff edit stamps updated_at (priority and disposition too): the
+    // draft-retire sweep reads it to keep a draft someone touched after a
+    // newer estimate was delivered.
+    if (Object.keys(updates).length) updates.updated_at = db.fn.now();
     // Turning invoice mode OFF is predicated on the stored proposal STILL
     // having no structured payment term at write time — the pre-read guard
     // above can race a concurrent proposal PUT that saves one (the PUT's

@@ -10,7 +10,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('./MobileCustomerDetailSheet', () => ({ default: () => null }));
-vi.mock('./RainOutSheet', () => ({ default: () => null }));
+// Quick Move: a committed move that stays open on a warning, a clean move, and a plain dismiss.
+vi.mock('./RainOutSheet', () => ({ default: ({ onClose, onDone }) => (
+  <div>
+    Quick Move sheet
+    <button type="button" onClick={() => onDone({ movedCount: 1, failedCount: 0, notTexted: true, overlapCount: 0 })}>Move, not texted</button>
+    <button type="button" onClick={() => onDone({ movedCount: 1, failedCount: 0, notTexted: false, overlapCount: 0 })}>Move, clean</button>
+    <button type="button" onClick={onClose}>Dismiss Quick Move</button>
+  </div>
+) }));
 vi.mock('./EstimateProvenanceCard', () => ({ default: () => null }));
 vi.mock('../../hooks/useCustomerCards', () => ({
   useCustomerCards: () => ({ cards: [], loading: false, error: null }),
@@ -54,6 +62,55 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     await waitFor(() => expect(statusCall()).not.toBeNull());
     expect(statusCall().scope).toBe('this_only');
     expect(confirmCardHoldFeeChoice).toHaveBeenCalledWith(55, { scope: 'this_only' });
+  });
+
+  // A technician login (the tech portal passes adminActions={false}): the
+  // status route answers 403 to a non-admin following/series cancel, so the
+  // sheet offers only this appointment, even on a recurring visit.
+  it('a technician login sees no series scopes on a recurring visit and sends this_only', async () => {
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} adminActions={false} onClose={() => {}} />);
+    fireEvent.click(screen.getByText('Cancel appointment'));
+    expect(screen.queryByText('Apply changes to')).toBeNull();
+    fireEvent.click(screen.getByText('Confirm cancellation'));
+    await waitFor(() => expect(statusCall()).not.toBeNull());
+    expect(statusCall().scope).toBe('this_only');
+  });
+
+  // Opened over a Fast Complete sheet (which drops its own focus trap while suspended) or a schedule row: focus starts
+  // in this sheet, never on the trigger hidden behind it.
+  it('takes focus on open, on its Close button', () => {
+    render(<MobileAppointmentDetailSheet service={baseService} onClose={() => {}} />);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+  });
+
+  // After a move that committed but kept Quick Move open on a warning, this sheet's row is stale: dismissing the
+  // warning closes Details too, so no second move (or text) can start from the old row.
+  it('dismissing a committed Quick Move warning closes Details; a dismiss with no move does not', () => {
+    const onClose = vi.fn();
+    const onRescheduled = vi.fn();
+    // Quick Move is offered on today's visits only.
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, scheduledDate: today }} onClose={onClose} onRescheduled={onRescheduled} />);
+    fireEvent.click(screen.getByText('Quick Move Appointment'));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Quick Move' }));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Quick Move Appointment'));
+    fireEvent.click(screen.getByRole('button', { name: 'Move, not texted' }));
+    expect(onRescheduled).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Quick Move sheet')).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Quick Move' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a technician login gets no Edit or Book next (both save through admin-only routes)', () => {
+    const { unmount } = render(<MobileAppointmentDetailSheet service={baseService} onClose={() => {}} />);
+    expect(screen.getByLabelText('Edit appointment')).toBeTruthy();
+    expect(screen.getByText('Book next appointment')).toBeTruthy();
+    unmount();
+    render(<MobileAppointmentDetailSheet service={baseService} adminActions={false} onClose={() => {}} />);
+    expect(screen.queryByLabelText('Edit appointment')).toBeNull();
+    expect(screen.queryByText('Book next appointment')).toBeNull();
   });
 
   it('offers the three scopes on a recurring visit and defaults to this_only', async () => {

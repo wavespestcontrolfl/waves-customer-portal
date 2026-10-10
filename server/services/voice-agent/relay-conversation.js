@@ -134,6 +134,9 @@ const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
 const { anthropicMaxTokens } = require('../llm/anthropic-wire');
+const { recordStreamedMessage } = require('../llm-dispatch-metrics');
+// The adapters' own failure reason (`<provider>_<status>`, `<provider>_timeout`).
+const { providerErrorReason } = require('../llm/call');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -678,6 +681,15 @@ const SYSTEM_PROMPT = [
   '  once you have the service address or at least the city/ZIP.',
   '- You CANNOT confirm or reserve an appointment, and you cannot take payment. Offering a',
   '  time is not booking it — a Waves team member calls back to lock it in. Say so.',
+  // Owner 2026-10-08: a cancel call never gets a run-around. The portal's
+  // self-serve cancel (Plan → Cancel) is the fastest path, so say it exists.
+  '- You CANNOT cancel a service plan on this call, and you must never say a plan is cancelled.',
+  '  ONLY when the caller wants to end their recurring service plan altogether, do not push',
+  '  back or try to talk them out of it: tell them they can cancel the plan',
+  '  on their own at any time in the Waves customer portal, under Plan, or a',
+  '  Waves team member can do it for them. Then capture their request as usual.',
+  '  Cancelling or moving ONE visit is a different request: never point that caller to the',
+  '  portal plan cancellation — capture it so a Waves team member can change the visit.',
   PRICE_LINE_NO_CONTEXT, // ONE source: the gate-on prompt replaces this exact line
   '',
   'How to talk:',
@@ -3397,6 +3409,39 @@ class RelayConversation {
    * streamState, timedOut }` — `_runModelRound` decides what a failure
    * becomes.
    */
+  /**
+   * Cost ledger: one row per model round the provider finished (owner
+   * 2026-10-08: the voice agent's spend was invisible). Not awaited. A round
+   * that is aborted or times out has no response and records nothing. An
+   * eval-harness session records nothing either: that replay refuses every
+   * database write while a conversation runs, by construction, and its
+   * rounds are not production traffic.
+   */
+  _ledgerRound(message, modelStartAt, errorCode = null) {
+    if (this._evalHarness) return;
+    recordStreamedMessage({ provider: this._provider, requestedModel: this.model, message, latencyMs: Math.round(now() - modelStartAt), laneId: 'voice_relay', errorCode });
+  }
+
+  /**
+   * A model round that rejected, on the cost ledger, so the lane's failure
+   * rate is real (an OpenAI outage followed by a Claude retry is one failure
+   * and one success, not a success only):
+   *   - a response the provider finished and billed but the relay could not
+   *     use (relay-openai-client attaches it): failed, with its usage, under
+   *     the client's own code;
+   *   - the relay's own stream timeout: `<provider>_timeout`;
+   *   - any other provider error (429, 5xx, network): the adapters' reason.
+   * A barge-in abort is the caller talking, not a failure: nothing is filed.
+   */
+  _ledgerFailedRound(err, timedOut, modelStartAt) {
+    if (err?.billedRound) return this._ledgerRound(err.billedRound, modelStartAt, err.billedRound.errorCode);
+    if (timedOut) return this._ledgerRound(null, modelStartAt, `${this._provider}_timeout`);
+    // The round's own abort signal is the truth: the two SDKs name an abort
+    // differently (AbortError, APIUserAbortError).
+    if (this._controller?.signal?.aborted) return undefined;
+    return this._ledgerRound(null, modelStartAt, providerErrorReason(this._provider, err));
+  }
+
   async _modelAttempt(stat) {
     const client = clientFor(this._provider);
     this._controller = new AbortController();
@@ -3459,8 +3504,11 @@ class RelayConversation {
       // policy. Only wired when this session pinned the stream renderer;
       // the block path below is otherwise untouched.
       if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
-      return { msg: await stream.finalMessage(), streamState };
+      const msg = await stream.finalMessage();
+      this._ledgerRound(msg, modelStartAt);
+      return { msg, streamState };
     } catch (err) {
+      this._ledgerFailedRound(err, timedOut, modelStartAt);
       return { err, streamState, timedOut };
     } finally {
       clearTimeout(streamTimer);

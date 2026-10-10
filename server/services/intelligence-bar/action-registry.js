@@ -13,6 +13,7 @@ const {
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
 const { ibAcceptEstimateLive } = require('../../config/feature-gates');
+const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -25,6 +26,7 @@ const MODULES = [
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
   ['closeout-repair-tools', 'CLOSEOUT_REPAIR_TOOLS', 'executeCloseoutRepairTool'],
   ['receipt-resend-tools', 'RECEIPT_RESEND_TOOLS', 'executeReceiptResendTool'],
+  ['reprice-visits-tools', 'REPRICE_VISITS_TOOLS', 'executeRepriceVisitsTool'],
   ['dashboard-tools', 'DASHBOARD_TOOLS', 'executeDashboardTool'],
   ['seo-tools', 'SEO_TOOLS', 'executeSeoTool'],
   ['procurement-tools', 'PROCUREMENT_TOOLS', 'executeProcurementTool'],
@@ -65,6 +67,7 @@ const MODULES = [
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
   ['estimate-accept-tools', 'ESTIMATE_ACCEPT_TOOLS', 'executeEstimateAcceptTool'],
+  ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });
@@ -122,6 +125,7 @@ function allowed(action, { role, context, fullAccess } = {}) {
   if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
   if (context === 'tech') return action.role === 'technician_or_admin';
+  if (action.id === 'reprice_future_visits' && !repriceVisitsLive()) return false;
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
   if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
   if (action.id === 'accept_estimate' && !ibAcceptEstimateLive()) return false;
@@ -186,6 +190,9 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   'update_lead_contact', 'update_lead_status',
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',
+  // Tap-to-answer buttons for a "which value?" question (choice-tools.js):
+  // display only, reads and writes nothing.
+  'offer_choices',
 ]);
 
 // Page-specific additions beyond a page's own domain (owner ruling 2026-10-07
@@ -196,6 +203,8 @@ function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES, ...(PAGE_EXTRA_TOOL_NAMES[context] || [])]);
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
+  // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
+  if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];

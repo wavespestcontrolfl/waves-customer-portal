@@ -33,9 +33,11 @@
  */
 
 const logger = require('../logger');
-const { buildTreatmentSummary } = require('./treatment-summary');
+const { buildTreatmentSummary, buildCategoryTreatmentSummary } = require('./treatment-summary');
+const { copyFixesLive } = require('./lawn-report-copy-fixes');
 const { buildLawnExpectations } = require('./lawn-expectations');
-const { CELSIUS_YTD_CAP } = require('../../config/lawn-expectations');
+const { stage1ExpectPlan } = require('./lawn-report-stage1');
+const { celsiusYtdCap } = require('../../config/lawn-expectations');
 
 const COPY_VERSION = 'lawn_report_v6_fixed_1';
 const FREEZE_KEY = 'lawnCopyV6';
@@ -155,12 +157,14 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const built = build({
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
+    // The frozen finding-to-product tie (GATE_LAWN_REPORT_FACTS): a product that treated a finding reads curative.
+    tiedFamilies: Array.isArray(ctx.tiedFamilies) ? ctx.tiedFamilies : [],
     visitDate: ctx.visitDate || null,
     nextVisitGapDays: Number.isFinite(ctx.nextVisitGapDays) ? ctx.nextVisitGapDays : undefined,
     // Not tracked for the report yet: the cap makes a Celsius row print its
     // "a different product may be used" line, true either way, rather than
     // promise a second application that may be capped.
-    celsiusYtdCount: CELSIUS_YTD_CAP,
+    celsiusYtdCount: celsiusYtdCap(),
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
@@ -171,17 +175,23 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const kept = [];
   let rowsUsed = 0;
   let words = 0;
-  for (const row of rows) {
+  // GATE_LAWN_REPORT_STAGE1_FIXES: the print order is the engine's rows, or (live, with a second row that fits the cap) the
+  // first row followed by a second line from sentences that already exist: the curative insecticide row when a spot insecticide
+  // was applied, else the feeding row. The second row prints its visible-change sentence only, and its words are held back
+  // while the first row is read, so the first row's long by-next-visit sentence gives way when the two would pass the cap.
+  const plan = stage1ExpectPlan(rows, products, FIELD_CAPS.whatToExpect, EXPECT_SENTENCE_KEYS);
+  const order = plan || rows.map((row) => ({ row, keys: EXPECT_SENTENCE_KEYS, hold: 0 }));
+  for (const { row, keys, hold } of order) {
     if (rowsUsed >= MAX_EXPECT_ROWS) break;
     const before = kept.length;
-    for (const key of EXPECT_SENTENCE_KEYS) {
+    for (const key of keys) {
       // "By your next visit..." needs a visit the report shows: with no known
       // gap there is none, even for a row whose line is not timed by it.
       if (key === 'byNextVisit' && !visitKnown) continue;
       const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
       if (!sentence) continue;
       const w = countWords(sentence.text);
-      if (words + w > FIELD_CAPS.whatToExpect) continue;
+      if (words + w + hold > FIELD_CAPS.whatToExpect) continue;
       words += w;
       kept.push({
         id: row.id, key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
@@ -202,7 +212,8 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     else picked.push({ id: piece.id, keys: [piece.key] });
   });
   const sentences = kept.map((piece) => ({ key: piece.key, text: piece.text, needsVisit: piece.needsVisit, gapBased: piece.gapBased }));
-  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences };
+  // `stage1` marks a block built with the stage 1 second line; it freezes with the entry so the PDF key can follow it.
+  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences, ...(plan ? { stage1: true } : {}) };
 }
 
 /**
@@ -217,19 +228,25 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
   if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [], expectSentences: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
-  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
+  // GATE_LAWN_REPORT_COPY_FIXES: a copy frozen while the gate is live names the product categories,
+  // never an active ingredient or a product name. The gate decides only what a NEW freeze writes;
+  // a frozen entry replays as it was written. The builder is chosen once, here.
+  const summarize = copyFixesLive() ? buildCategoryTreatmentSummary : buildTreatmentSummary;
+  fields.whatWeDid = clean(summarize(reportV2.treatment, { noTiming: true }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   let expectSentences = [];
+  let stage1Expect = false;
   try {
     const expect = buildWhatToExpect(reportV2, ctx, deps);
     fields.whatToExpect = expect.text;
     expectRows = expect.rows;
     expectSentences = expect.sentences;
+    stage1Expect = expect.stage1 === true;
   } catch (err) {
     logger.warn(`[lawn-copy-v6] expectations failed: ${err.message}`);
   }
-  return { fields, expectRows, expectSentences };
+  return { fields, expectRows, expectSentences, ...(stage1Expect ? { stage1Expect: true } : {}) };
 }
 
 // ── Freeze (first writer wins, per assessment) ─────────────────────────────
@@ -356,6 +373,7 @@ async function resolveLawnCopyV6ForRender({
     expectRows: built.expectRows,
     // What the by-next-visit sentences were timed for (replayFields).
     expectSentences: built.expectSentences,
+    ...(built.stage1Expect ? { stage1Expect: true } : {}),
     nextVisitIso: ctx.nextVisitIso || null,
   };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);

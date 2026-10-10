@@ -4751,7 +4751,10 @@ async function writeLastServiceSnapshot(term, termStart, windowEnd, conn) {
   return updated || { ...term, ...updates };
 }
 
-async function refreshActiveTermsForCustomer(customerId, conn = db) {
+// The terms refreshActiveTermsForCustomer processes for one customer — its own
+// selection, shared with the Intelligence Bar's visit reprice guard (owner
+// ruling 2026-10-07), which refuses any customer this refresh would touch.
+async function refreshableTermsForCustomer(customerId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   if (!customerId) return [];
 
@@ -4765,7 +4768,7 @@ async function refreshActiveTermsForCustomer(customerId, conn = db) {
   } catch (err) {
     logger.warn(`[annual-prepay] cancel_disposition probe failed — end-at-term lapses skipped this refresh for ${customerId}: ${err.message}`);
   }
-  const terms = await conn('annual_prepay_terms')
+  return conn('annual_prepay_terms')
     .where({ customer_id: customerId })
     .where(function liveOrEndAtTermLapse() {
       this.whereIn('status', ACTIVE_STATUSES);
@@ -4777,6 +4780,10 @@ async function refreshActiveTermsForCustomer(customerId, conn = db) {
       }
     })
     .select('*');
+}
+
+async function refreshActiveTermsForCustomer(customerId, conn = db) {
+  const terms = await refreshableTermsForCustomer(customerId, conn);
 
   const refreshed = [];
   for (const term of terms) {
@@ -11299,6 +11306,7 @@ module.exports = {
   deferredPrepayHoldCustomerIds,
   PAF_PREPAY_HOLD_STATUSES,
   coveredTermsAsOf,
+  refreshableTermsForCustomer,
   retryPaidLapseReconciles,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,

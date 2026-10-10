@@ -49,9 +49,10 @@ function stopRow(id, windowStart, windowEnd, lat, lng, { date = '2026-08-11', te
   };
 }
 
-// Sequenced db mock: call 1 = sibling-date query, call 2 = the candidate
-// tech-days' OTHER stops (one batched read), call 3+ = the current day's
-// OTHER stops (legacy neighbors, then the shared model's loadDayStops).
+// Sequenced db mock: call 1 = sibling-date query, call 2 = the current day's
+// OTHER stops (the shared model's loadDayStops; the current placement is read
+// before the candidates are filtered so a visit in overlap can be given its
+// same-day hours), call 3+ = the candidate tech-days' OTHER stops (one batched read).
 function sequencedDb(candidateStops, currentStops) {
   let call = 0;
   return () => {
@@ -62,8 +63,8 @@ function sequencedDb(candidateStops, currentStops) {
       .forEach((m) => { c[m] = () => c; });
     c.select = async () => {
       if (n === 1) return [];
-      if (n === 2) return candidateStops;
-      return currentStops;
+      if (n === 2) return currentStops;
+      return candidateStops;
     };
     return c;
   };

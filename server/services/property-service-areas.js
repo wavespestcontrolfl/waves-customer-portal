@@ -91,11 +91,18 @@ function validateAreaChanges(input) {
   return changes;
 }
 
-async function visitProperty(visit, knex) {
+// The property a visit is for: the visit's own link, else the address or sole-property evidence (lawn-assessment-history scopeForAssessment).
+// null = it cannot be resolved. The ONE resolver: the area flow below, and the lawn places (lawn-trouble-areas.js propertyOf), use it.
+async function resolveVisitPropertyId(visit, knex) {
   const history = require('./lawn-assessment-history');
   const scope = await history.scopeForAssessment(history.visitEvidence(visit.customer_id, visit), knex);
-  if (!scope.propertyId) throw fail('The service property needs to be resolved before saving areas.', 409);
-  return scope.propertyId;
+  return scope.propertyId || null;
+}
+
+async function visitProperty(visit, knex) {
+  const propertyId = await resolveVisitPropertyId(visit, knex);
+  if (!propertyId) throw fail('The service property needs to be resolved before saving areas.', 409);
+  return propertyId;
 }
 
 async function loadAreaProperty(scope, req, knex = db, { lock = false } = {}) {
@@ -245,7 +252,7 @@ async function snapshotVisitArea(input, service, req, knex = db, { treatmentEvid
     reviewedAt: measured?.reviewedAt ?? null };
 }
 
-module.exports = { AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
+module.exports = { resolveVisitPropertyId, AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
   validateAreaChanges, lookupSuggestions, loadAreaProperty, readAreaMeasurements, saveAreaMeasurements, snapshotVisitArea,
   hasAreaMeasurementsColumn, sameCustomerAddress,
   _resetAreaColumnCache: () => { areaColumnKnown = false; } };

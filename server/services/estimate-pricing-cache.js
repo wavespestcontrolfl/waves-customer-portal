@@ -20,7 +20,10 @@ function estimatePricingCacheKey(estimateOrId) {
 
   const updatedAt = normalizeCachePart(estimateOrId.updated_at || estimateOrId.updatedAt);
   const pricingVersion = normalizeCachePart(estimateOrId.pricing_version || estimateOrId.pricingVersion);
-  const version = [updatedAt, pricingVersion].filter(Boolean).join('|');
+  // GATE_LAWN_V13 changes what a stored bahia lawn replays to (the review reason), so the gate state is
+  // part of the key: unsetting the gate takes effect on the next read, not after the 10-minute TTL.
+  const lawnV13 = require('../config/feature-gates').lawnV13Live?.() === true ? 'lawn-v13' : '';
+  const version = [updatedAt, pricingVersion, lawnV13].filter(Boolean).join('|');
   return version ? `${id}:${version}` : String(id);
 }
 

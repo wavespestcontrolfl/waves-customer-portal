@@ -330,11 +330,11 @@ describe('tipsForVisit', () => {
     expect(bedBug.groups[0].tips.map((tip) => tip.id)).toEqual(['bb_dryer_heat', 'bb_stay_put', 'bb_no_foggers', 'bb_encasements', 'bb_travel', 'bb_clutter']);
     expect(bedBug.groups.slice(1).flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
     const quarterly = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-02' });
-    expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+    expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains', 'gp_sprinkler_off_wall', 'gp_first_days', 'gp_garage_dusk', 'gp_pressure_wash_first', 'gp_garage_floor_edge']);
     // The one-time pest identity is one_time_pest_control in prod and
     // pest_initial_cleanout in migration-built databases (Codex #5582).
     for (const serviceKey of ['one_time_pest_control', 'pest_initial_cleanout']) {
-      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains', 'gp_sprinkler_off_wall', 'gp_first_days', 'gp_garage_dusk', 'gp_pressure_wash_first', 'gp_garage_floor_edge']);
     }
     for (const serviceKey of [null, 'lawn_care', 'not_a_service']) {
       const visit = tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' });
@@ -407,7 +407,7 @@ describe('tipsForVisit', () => {
 
   test('every service tip names catalog-shaped service keys', () => {
     const withServices = TIPS.filter((tip) => tip.services);
-    expect(withServices).toHaveLength(50);
+    expect(withServices).toHaveLength(88);
     for (const tip of withServices) {
       expect(tip.services.length).toBeGreaterThan(0);
       expect(new Set(tip.services).size).toBe(tip.services.length);
@@ -430,6 +430,14 @@ describe('resolveTipIds', () => {
       expect(entry.source).toBe('library');
       expect(entry.copy).toBe(TIPS.find((t) => t.id === entry.id).copy);
     }
+  });
+
+  test('an aftercare tip freezes its flag; an advice tip carries none (owner 2026-10-09)', () => {
+    const [after, advice] = resolveTipIds(['dt_thin_is_normal', 'light_warm_bulbs']);
+    expect(after.aftercare).toBe(true);
+    expect(advice).not.toHaveProperty('aftercare');
+    expect(TIPS.filter((tip) => tip.aftercare).length).toBeGreaterThanOrEqual(10);
+    for (const tip of TIPS) if ('aftercare' in tip) expect(tip.aftercare).toBe(true);
   });
 
   test('never carries client-supplied copy', () => {
@@ -483,7 +491,11 @@ describe('lawn tip library', () => {
   // timelines, no watering or mowing-height numbers beyond the seed's two
   // (a third; half an inch), and the business is Waves Pest Control.
   // (The portal tip is the pre-existing, separately approved one: "about two minutes" is the form, not a result.)
-  test.each(LAWN.filter((t) => t.id !== 'lawn_irrigation_portal').map((t) => [t.id, t.copy]))('%s keeps to the lawn copy rulings', (id, copy) => {
+  // These are the lawn PROGRAM's tips. A tip written for a one-off job
+  // (`services`: plugging, top dressing, dethatching, pest knockdown; owner
+  // approved the wording 2026-10-09) is that job's aftercare: it names the
+  // job and how long the lawn takes to recover from it.
+  test.each(LAWN.filter((t) => t.id !== 'lawn_irrigation_portal' && !t.services).map((t) => [t.id, t.copy]))('%s keeps to the lawn copy rulings', (id, copy) => {
     expect(copy).not.toMatch(/\b(?:sod(?!\s+webworm)|aerat\w*|dethatch\w*|track [A-D]|Lawn Care)\b/i);
     expect(copy).not.toMatch(/\b\d+(?:\.\d+)?\s*(?:-|to)?\s*\d*\s*(?:days?|weeks?|months?|hours?|minutes?|inch(?:es)?|in\b|")/i);
     expect(copy).not.toMatch(/\b(?:two|three|four|five|six|seven|ten|fourteen|twenty)\s+(?:days?|weeks?|months?|hours?|minutes?)\b/i);
@@ -582,5 +594,61 @@ describe('lawn tip library', () => {
       }
       expect(lawnFindingsFromRun({ reviewed_findings: [{ label: 'constructor', keep: true }, { label: '__proto__' }] })).toEqual([]);
     });
+  });
+});
+
+describe('open search and pest tags (owner 2026-10-09)', () => {
+  const { TIP_PESTS } = require('../services/service-report/tip-library');
+
+  test('more holds every tip the list leaves out, and nothing twice', () => {
+    for (const [serviceLine, serviceKey] of [['pest', 'pest_general_quarterly'], ['pest', 'german_roach'], ['lawn', null], ['termite', 'termite_bait']]) {
+      const visit = tipsForVisit({ serviceLine, serviceKey, date: '2026-10-09' });
+      const listed = visit.groups.flatMap((group) => group.tips).map((tip) => tip.id);
+      const more = visit.more.map((tip) => tip.id);
+      expect([...listed, ...more].sort()).toEqual(TIPS.map((tip) => tip.id).sort());
+      expect(new Set([...listed, ...more]).size).toBe(TIPS.length);
+    }
+  });
+
+  test('a recurring pest visit can reach roach and flea advice, but never lists it unasked', () => {
+    const visit = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-09' });
+    const listed = visit.groups.flatMap((group) => group.tips).map((tip) => tip.id);
+    const more = visit.more.map((tip) => tip.id);
+    for (const id of ['gr_hitchhikers', 'flea_shady_spots', 'fa_leave_mounds']) {
+      expect(listed).not.toContain(id);
+      expect(more).toContain(id);
+    }
+  });
+
+  test('every pest tag is a pest chip, with no repeats', () => {
+    const tagged = TIPS.filter((tip) => tip.pests);
+    expect(tagged.length).toBeGreaterThan(0);
+    for (const tip of tagged) {
+      expect(tip.pests.length).toBeGreaterThan(0);
+      expect(new Set(tip.pests).size).toBe(tip.pests.length);
+      for (const pest of tip.pests) expect(TIP_PESTS).toContain(pest);
+    }
+    for (const pest of TIP_PESTS) expect(tagged.some((tip) => tip.pests.includes(pest))).toBe(true);
+  });
+
+  test('a general tip that names the treatment says so, and is never pest-tagged', () => {
+    const NAMES_WORK = /\b(treated|the treatment|I treat|where I worked|what I put down)\b/i;
+    for (const tip of TIPS.filter((t) => !t.services)) {
+      expect([tip.id, tip.namesWork === true]).toEqual([tip.id, NAMES_WORK.test(tip.copy)]);
+      if (tip.namesWork) expect(tip.pests).toBeUndefined();
+    }
+    expect(TIPS.filter((t) => t.namesWork).map((t) => t.id).sort()).toEqual(['ant_wipe_trail', 'ext_shrub_clearance', 'lawn_mow_after_weed_treatment', 'lawn_treated_weeds_leave', 'seal_screen_tears']);
+  });
+
+  test('the inspection tips lead both rodent inspection identities', () => {
+    for (const serviceKey of ['rodent_inspection', 'rodent_general_one_time']) {
+      expect(tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-09' }).groups[0].tips.map((tip) => tip.id)).toEqual(['ri_listen', 'ri_no_store_poison']);
+    }
+  });
+
+  test('a pest-tagged tip claims no work, so it is true on a visit that did none of it', () => {
+    for (const tip of TIPS.filter((t) => t.pests)) {
+      expect(tip.copy).not.toMatch(/\b(bait|traps|stations?|treated|the treatment|I treat|where I worked|what I put down)\b/i);
+    }
   });
 });

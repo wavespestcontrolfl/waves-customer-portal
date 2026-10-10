@@ -273,7 +273,13 @@ const LAWN_V13_TAG = 'lawn-v13';
 // were rewritten still reads as stale on the next tick. An absent marker is unknown and reads as stale
 // (the corpus may hold either program), so the first tick after deploy syncs it once.
 const LAWN_CORPUS_MARKERS = { protocol: 'lawn_knowledge.protocol_corpus', kb: 'lawn_knowledge.kb_corpus' };
+// Every slug a lawn program has ever filed an entry under. The old program has four tracks; v13 has no
+// bahia track (owner 2026-10-06), so the entries a program holds are lawnTrackSlugs(), a subset of this.
 const LAWN_TRACK_SLUGS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'].map((trackId) => `protocol-${slugify(trackId)}`);
+function lawnTrackSlugs() {
+  const { lawnProtocols } = require('./lawn-program');
+  return Object.keys(lawnProtocols() || {}).map((trackId) => `protocol-${slugify(trackId)}`);
+}
 
 // Upsert one auto-synced entry by slug: 'created' | 'updated' | 'skipped' (unchanged,
 // or an insert that lost a race). The one writer both the full sync and the lawn-only
@@ -339,23 +345,35 @@ function protocolCostLine(v) {
   return '  Materials: inventory/rate-based (see admin protocols for product detail)';
 }
 
+// A one-time program (area add-on treatments) is not a yearly cycle and carries no legacy costs or
+// tiers: list its treatments, not "Visits/Year".
+function oneTimeTreatmentLines(track) {
+  return [
+    `**${track.visits.length} one-time treatments (each sold on an estimate; not a yearly cycle):**\n`,
+    ...track.visits.map((v) => `Treatment ${v.visit}: ${v.visit_type || v.primary?.split('\n')[0] || ''}`),
+  ];
+}
+
+function yearlyVisitLines(track) {
+  const lines = [`**${track.visits.length} Visits/Year:**\n`];
+  for (const v of track.visits) {
+    const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
+    lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
+    lines.push(`${protocolCostLine(v)}${tierList ? ` | Tiers: ${tierList}` : ''}`);
+    if (v.notes) lines.push(`  Notes: ${v.notes}`);
+  }
+  return lines;
+}
+
 function protocolEntry(programKey, track, tags) {
   if (!track || typeof track !== 'object') return null;
   const lines = [`**${track.name || programKey}**\n`];
   if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
-  if (track.visits?.length) {
-    lines.push(`**${track.visits.length} Visits/Year:**\n`);
-    for (const v of track.visits) {
-      const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
-      lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
-      lines.push(`${protocolCostLine(v)}${tierList ? ` | Tiers: ${tierList}` : ''}`);
-      if (v.notes) lines.push(`  Notes: ${v.notes}`);
-    }
-  }
+  if (track.visits?.length) lines.push(...(track.one_time === true ? oneTimeTreatmentLines(track) : yearlyVisitLines(track)));
   return { slug: `protocol-${slugify(programKey)}`, title: track.name || programKey, content: lines.join('\n'), category: 'protocols', tags };
 }
 
-// The four lawn entries from lawnProtocols(). They carry a 'lawn-v13' tag while they
+// The lawn entries (one per track) from lawnProtocols(). They carry a 'lawn-v13' tag while they
 // hold the v13 program, so a sync after the gate flips either way replaces them (the
 // tag is part of what the upsert compares) and lawnKnowledgeStale can tell which
 // program they hold.
@@ -367,9 +385,18 @@ function lawnProtocolEntries() {
     .filter(Boolean);
 }
 
+// What a corpus marker says its chunks hold: 'legacy' for the old program, or 'v13:' plus the sorted
+// track keys of the v13 recipe. The track set is part of the marker so a recipe that gains or loses a
+// track (v13 dropped bahia) marks an already-indexed corpus stale, and the next 15-minute reconcile
+// rebuilds it, instead of waiting for the nightly sync with the removed text still searchable.
+function lawnCorpusMarker(v13) {
+  if (!v13) return 'legacy';
+  return `v13:${Object.keys(require('../config/lawn-protocol-v13.json')).sort().join(',')}`;
+}
+
 // The index corpora still on the other program (a corpus with no chunks is never stale).
 async function staleCorpora(gateOn) {
-  const want = gateOn ? 'v13' : 'legacy';
+  const want = lawnCorpusMarker(gateOn);
   const keys = Object.values(LAWN_CORPUS_MARKERS);
   const stored = Object.fromEntries((await db('system_settings').whereIn('key', keys).select('key', 'value')).map((row) => [row.key, row.value]));
   const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => stored[LAWN_CORPUS_MARKERS[source]] !== want);
@@ -954,7 +981,8 @@ const KnowledgeBaseService = {
         '**Lawn Care Pricing**',
         `Version: ${LAWN_PRICING_V2?.pricingVersion || 'LAWN_PRICING_V2'} — market bracket table (grass track × turf sqft × tier), DB-authoritative via lawn_pricing_brackets`,
         `Tiers: ${Object.values(LAWN_TIERS || {}).map((t) => `${t.label}${t.hidden ? ' (retired/hidden)' : ''}`).join(' | ')}`,
-        'Tracks: St. Augustine | Bermuda | Zoysia | Bahia',
+        // The tracks the live lawn program holds (v13 has no bahia track: those lawns are reviewed by the office).
+        ...require('./lawn-program').lawnTrackKnowledgeLines(),
         'Turf area: fixed hardscape (800sf base + 3% excess) + complexity scoring + smoothed turf factor',
       ].join('\n');
       await upsert('pricing-engine-current', 'Pest & Lawn Pricing Engine', pricingContent, 'pricing', ['pest', 'lawn', 'modifiers']);
@@ -1004,8 +1032,13 @@ const KnowledgeBaseService = {
       tally[await upsertKnowledgeEntry(entry.slug, entry.title, entry.content, entry.category, entry.tags)] += 1;
     }
     // An insert that failed reports 'skipped': never advance the corpora on a partial set.
-    const stored = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug');
-    if (stored.length < LAWN_TRACK_SLUGS.length) throw new Error(`lawn KB entries incomplete (${stored.length} of ${LAWN_TRACK_SLUGS.length})`);
+    const slugs = lawnTrackSlugs();
+    const stored = await db('knowledge_base').whereIn('slug', slugs).select('slug');
+    if (stored.length < slugs.length) throw new Error(`lawn KB entries incomplete (${stored.length} of ${slugs.length})`);
+    // A track the program no longer has (the old bahia entry, once v13 is live) leaves the KB; the
+    // sync that returns the old program files it again.
+    const dropped = LAWN_TRACK_SLUGS.filter((slug) => !slugs.includes(slug));
+    if (dropped.length) await db('knowledge_base').whereIn('slug', dropped).where({ source: 'auto-sync' }).del();
     return tally;
   },
 
@@ -1016,8 +1049,12 @@ const KnowledgeBaseService = {
   // the four missing) is. Two small reads when nothing changed.
   async lawnKnowledgeStale() {
     const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
+    const slugs = lawnTrackSlugs();
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
-    if (rows.length && rows.length < LAWN_TRACK_SLUGS.length) return true;
+    const held = rows.filter((row) => slugs.includes(row.slug));
+    if (held.length && held.length < slugs.length) return true;
+    // An entry for a track this program does not have (bahia once v13 is live) is the other program's.
+    if (held.length < rows.length) return true;
     if (rows.some((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG) !== gateOn)) return true;
     return (await staleCorpora(gateOn)).length > 0;
   },
@@ -1026,9 +1063,11 @@ const KnowledgeBaseService = {
   // mid-sync can only make the marker conservative: 'protocol' loads lawnProtocols() (the
   // gate); 'kb' loads the stored KB entries (what their tags say they hold).
   async lawnCorpusProgram(source) {
-    if (source === 'protocol') return require('../config/feature-gates').lawnV13Live?.() === true ? 'v13' : 'legacy';
+    if (source === 'protocol') return lawnCorpusMarker(require('../config/feature-gates').lawnV13Live?.() === true);
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
-    return rows.length === LAWN_TRACK_SLUGS.length && rows.every((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG)) ? 'v13' : 'legacy';
+    // What the stored entries hold does not depend on the gate: the complete v13 set (its own tracks) all tagged v13.
+    const v13Slugs = Object.keys(require('../config/lawn-protocol-v13.json')).map((trackId) => `protocol-${slugify(trackId)}`);
+    return lawnCorpusMarker(rows.length === v13Slugs.length && rows.every((row) => v13Slugs.includes(row.slug) && normalizeTags(row.tags).includes(LAWN_V13_TAG)));
   },
 
   // Called by syncCorpus for the 'protocol' and 'kb' corpora after a sync that really ran
@@ -1081,4 +1120,4 @@ const KnowledgeBaseService = {
 };
 
 module.exports = KnowledgeBaseService;
-module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };
+module.exports._internals = { protocolEntry, auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };

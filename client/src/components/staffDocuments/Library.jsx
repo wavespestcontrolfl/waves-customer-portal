@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import DocumentEditor from './DocumentEditor';
 import DocumentReader from './DocumentReader';
+import OnboardingStatus from './OnboardingStatus';
 import PolicyValuesEditor from './PolicyValuesEditor';
 import { box, row, D, inputStyle, buttonStyle, primaryStyle, Field, request, reviewLabel } from './common';
 
@@ -74,6 +75,7 @@ export default function StaffDocumentLibrary({ manage = false }) {
         <button style={{ ...buttonStyle, justifySelf: 'start' }} onClick={() => select(null)}>← All controlled documents</button>
         {errors.detail || errors.profile ? null : !detail || !profile ? <p>Loading document…</p> : <DocumentReader key={detail.version.id} detail={detail} people={profile.people} selfId={profile.self_id} manage={canManage} onVersion={id => select(selected, id)} onEdit={editCurrent} onSaved={saved} />}
       </> : <>
+        <OnboardingStatus enabled={canManage} key={reload} />
         <div style={{ ...box, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 230px), 1fr))', gap: 16 }}>
           <Field label="Search document wording"><input type="search" style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="PTO, vehicle release, complaints…" /></Field>
           <Field label="Document type"><select style={inputStyle} value={kind} onChange={e => setKind(e.target.value)}><option value="all">All types</option><option value="policy">Policies</option><option value="procedure">Procedures / SOPs</option><option value="form">Forms / records</option></select></Field>
@@ -81,7 +83,7 @@ export default function StaffDocumentLibrary({ manage = false }) {
         </div>
         {errors.list ? null : !items ? <p>Loading documents…</p> : <div style={{ display: 'grid', gap: 12 }}>
           {!items.filter(item => kind === 'all' || item.staff_kind === kind).length && <p style={box}>{canManage ? 'No matching documents. Start a reviewed draft or create a document above.' : 'No issued documents are available for this view.'}</p>}
-          {items.filter(item => kind === 'all' || item.staff_kind === kind).map(item => <button key={item.id} style={{ ...box, cursor: 'pointer', textAlign: 'left', width: '100%', color: D.text, fontSize: 14 }} onClick={() => select(item.id, item.version_id)}><div style={{ ...row, justifyContent: 'space-between' }}><strong style={{ fontSize: 18 }}>{item.title}</strong><span style={{ textTransform: 'capitalize' }}>{item.staff_kind} · v{item.version_number} · {item.issued ? 'Issued' : 'Draft'}</span></div><div style={{ marginTop: 8 }}>Owner role: {item.owner_role || 'Unassigned'} · Review: {reviewLabel(item.review_on)}</div></button>)}
+          {items.filter(item => kind === 'all' || item.staff_kind === kind).map(item => <button key={item.id} style={{ ...box, cursor: 'pointer', textAlign: 'left', width: '100%', color: D.text, fontSize: 14 }} onClick={() => select(item.id, item.version_id)}><div style={{ ...row, justifyContent: 'space-between' }}><strong style={{ fontSize: 18 }}>{item.title}</strong><span style={{ textTransform: 'capitalize' }}>{item.staff_kind} · v{item.version_number} · {item.issued ? 'Issued' : 'Draft'}{item.onboarding_required ? ' · Required at onboarding' : ''}</span></div><div style={{ marginTop: 8 }}>Owner role: {item.owner_role || 'Unassigned'} · Review: {reviewLabel(item.review_on)}</div></button>)}
         </div>}
       </>}
     </>}

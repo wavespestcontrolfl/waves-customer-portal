@@ -104,6 +104,8 @@ async function createOrUpdateDraftEstimate(customer, interest) {
   // shell, the create path's phone duplicate guard decides.
   const existingDraft = await db('estimates')
     .where({ customer_id: customer.id, status: 'draft' })
+    // An archived shell is retired work, never the intake's live draft.
+    .whereNull('archived_at')
     .whereIn('source', ['sms_intake', 'lead_webhook'])
     .where(function unpriced() {
       this.whereNull('monthly_total').orWhere('monthly_total', 0);
@@ -121,14 +123,19 @@ async function createOrUpdateDraftEstimate(customer, interest) {
   const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Lead';
 
   if (existingDraft) {
+    // updated_at is stamped: a customer completing this shell is fresh work
+    // (the draft-retire sweep reads it to keep drafts touched after a send).
     const updates = {
       service_interest: serviceLabel,
+      updated_at: new Date(),
     };
     if (!existingDraft.address && customer.address_line1) updates.address = customer.address_line1;
     if (!existingDraft.customer_phone && customer.phone) updates.customer_phone = customer.phone;
     if (!existingDraft.customer_email && customer.email) updates.customer_email = customer.email;
-    await db('estimates').where({ id: existingDraft.id }).update(updates);
-    return existingDraft;
+    // Conditional on still being live: if an archive won the race, fall
+    // through to the create path and its duplicate guard.
+    const updated = await db('estimates').where({ id: existingDraft.id }).whereNull('archived_at').update(updates);
+    if (updated) return existingDraft;
   }
 
   // 128-bit bearer token, matching every other estimate creation path
@@ -339,6 +346,7 @@ async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
       // lane is for shell-less SMS-origin leads only.
       const existingShell = await db('estimates')
         .where({ customer_id: customer.id, status: 'draft' })
+        .whereNull('archived_at')
         // Only true SHELLS bypass the engine: unpriced intake/webhook rows.
         // An unrelated priced draft (existing customer) must not disable
         // the lane — the engine's address-aware duplicate guard owns that.
@@ -449,6 +457,7 @@ async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
     // engine only runs when no open shell would block its priced draft.
     const existingShell = await db('estimates')
       .where({ customer_id: customer.id, status: 'draft' })
+      .whereNull('archived_at')
       .whereIn('source', ['sms_intake', 'lead_webhook'])
       .where(function unpriced() {
         this.whereNull('monthly_total').orWhere('monthly_total', 0);
