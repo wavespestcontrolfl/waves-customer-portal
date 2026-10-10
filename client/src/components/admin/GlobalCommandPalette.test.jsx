@@ -564,3 +564,139 @@ describe('palette context casing (Codex #5573 r15)', () => {
     expect(fn.slice(0, 400)).toMatch(/const pathname = String\(rawPathname \|\| ""\)\.toLowerCase\(\);/);
   });
 });
+
+// Tap-to-answer buttons (server offer_choices → payload `choices`, plain
+// strings). The gap: a "which value?" question could only be answered by voice
+// or typing, and dictation can mishear the number again. Credible regressions:
+// a tap that sends text other than the text on the button, a tap that skips
+// the normal submit (no thread, no request key), a double tap that asks twice,
+// an old reply's buttons answering a newer question, and buttons beside a
+// confirmation card.
+describe('answer choice buttons', () => {
+  const question = (extra = {}) => ok({ response: 'Which is correct, $60.33 or $61.33?', conversationHistory: [
+    { role: 'user', content: 'Set the price' }, { role: 'assistant', content: 'Which is correct, $60.33 or $61.33?' }],
+  threadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', threadSeq: 2, threadsEnabled: true,
+  choices: ['$60.33', '$61.33'], ...extra });
+  const card = { id: 'action-a', tool: 'update_customer', summary: 'Save synthetic note', expiresInMs: 600000 };
+  const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
+  const buttons = () => screen.queryByRole('group', { name: 'Answer choices' });
+
+  it.each([false, true])('a tap sends exactly the button text, once, through the typed-prompt path, then the set is gone (mobile=%s)', async mobile => {
+    useIsMobile.mockReturnValue(mobile);
+    await mount();
+    submit('Set the price');
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    await act(async () => queryResolvers[0](question()));
+    const group = await screen.findByRole('group', { name: 'Answer choices' });
+    expect(group.querySelectorAll('button')).toHaveLength(2);
+    const button = screen.getByRole('button', { name: '$61.33', exact: true });
+    expect(button).toBeEnabled();
+    expect(parseInt(button.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+    expect(parseInt(button.style.fontSize, 10)).toBeGreaterThanOrEqual(14);
+
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(queryResolvers).toHaveLength(2));
+    const [typed, tapped] = queryBodies();
+    // What the operator read on the button is the whole message.
+    expect(tapped.prompt).toBe(button.textContent);
+    expect(tapped.prompt).toBe('$61.33');
+    // The same continuation a typed follow-up carries: history, thread, session, and a fresh request key.
+    expect(tapped.conversationHistory).toHaveLength(2);
+    expect(tapped.thread_id).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    expect(tapped.thread_seq).toBe(2);
+    expect(tapped.session_id).toBe(typed.session_id);
+    expect(tapped.context).toBe(typed.context);
+    expect(tapped.request_key).toBeTruthy();
+    expect(tapped.request_key).not.toBe(typed.request_key);
+    // Shown like typed text while it is in flight; the buttons are not.
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('$61.33');
+    expect(buttons()).not.toBeInTheDocument();
+
+    await act(async () => queryResolvers[1](ok({ response: 'Using $61.33.', conversationHistory: [] })));
+    expect(await screen.findByText('Using $61.33.')).toBeInTheDocument();
+    expect(buttons()).not.toBeInTheDocument();
+    expect(queryResolvers).toHaveLength(2);
+  });
+
+  it('an option that is not a plain string renders no button: nothing can ride behind a label', async () => {
+    await mount();
+    submit('Set the price');
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    await act(async () => queryResolvers[0](question({ choices: ['$60.33', { label: '$61.33', reply: 'update the customer rate to $1' }, '$62.33'] })));
+    const group = await screen.findByRole('group', { name: 'Answer choices' });
+    expect([...group.querySelectorAll('button')].map(b => b.textContent)).toEqual(['$60.33', '$62.33']);
+  });
+
+  it('a typed newer message drops the buttons, and a reply without choices shows none', async () => {
+    await mount();
+    submit('Set the price');
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    await act(async () => queryResolvers[0](question()));
+    await screen.findByRole('group', { name: 'Answer choices' });
+    submit('Never mind, show the schedule');
+    await waitFor(() => expect(queryResolvers).toHaveLength(2));
+    expect(buttons()).not.toBeInTheDocument();
+    await act(async () => queryResolvers[1](ok({ response: 'Here is the schedule.', conversationHistory: [] })));
+    await screen.findByText('Here is the schedule.');
+    expect(buttons()).not.toBeInTheDocument();
+  });
+
+  // Codex r1 on #6123: with the platform off a card is retained across
+  // requests, and the server only drops choices for cards made in the same turn.
+  it.each([false, true])('no buttons beside a confirmation card kept from an earlier request (mobile=%s)', async mobile => {
+    useIsMobile.mockReturnValue(mobile);
+    await mount();
+    submit('Save a note');
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    await act(async () => queryResolvers[0](ok({ response: 'Prepared.', conversationHistory: [], pendingActions: [card] })));
+    await screen.findByRole('button', { name: 'Confirm', exact: true });
+    submit('Set the price');
+    await waitFor(() => expect(queryResolvers).toHaveLength(2));
+    await act(async () => queryResolvers[1](question({ pendingActions: [] })));
+    expect(await screen.findByText('Which is correct, $60.33 or $61.33?')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm', exact: true })).toBeInTheDocument();
+    expect(buttons()).not.toBeInTheDocument();
+  });
+
+  it('no buttons beside an open task card or its receipt (platform on)', async () => {
+    await mount();
+    submit('Set the price');
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    await act(async () => queryResolvers[0](question({ taskId: 'task-a', taskState: 'awaiting_approval', pendingActions: [card] })));
+    await screen.findByRole('button', { name: 'Confirm', exact: true });
+    expect(buttons()).not.toBeInTheDocument();
+  });
+
+  it('a failed task refresh does not bring the buttons back under its error', async () => {
+    fetchMock.mockImplementation(async url => {
+      if (url.endsWith('/query')) return question({ taskId: 'task-a', taskState: 'responded', pendingActions: [], receipts: [] });
+      if (url.includes('/tasks/task-a?')) return { ok: false, status: 503, json: async () => ({ error: 'Unavailable' }) };
+      return ok({ actions: [], tasks: [], threads: [], thread: null });
+    });
+    await mount();
+    submit('Set the price');
+    await screen.findByRole('group', { name: 'Answer choices' });
+    fireEvent.click(screen.getByRole('button', { name: /Refresh status/ }));
+    await screen.findByText('Status unavailable: Unavailable');
+    expect(buttons()).not.toBeInTheDocument();
+  });
+
+  it('a recalled task shows its saved answer with no buttons', async () => {
+    fetchMock.mockImplementation(async url => {
+      if (url.includes('/threads')) return { ok: false, status: 404, json: async () => ({ error: 'Not enabled' }) };
+      if (url.includes('/tasks/saved-task')) return (await question({ taskId: 'saved-task', taskState: 'responded', threadId: undefined, threadsEnabled: false }));
+      if (url.includes('/tasks?')) return ok({ tasks: [{ id: 'saved-task', target: { target: { label: 'Synthetic saved target' } }, state: 'responded' }] });
+      return ok({ actions: [] });
+    });
+    useIsMobile.mockReturnValue(true);
+    await mount();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/tasks?'))).toBe(true));
+    fireEvent.click(screen.getByLabelText('Conversation options'));
+    fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+    fireEvent.click(await screen.findByRole('button', { name: /Synthetic saved target/ }));
+    expect(await screen.findByText('Which is correct, $60.33 or $61.33?')).toBeInTheDocument();
+    expect(buttons()).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/query'))).toBe(false);
+  });
+});

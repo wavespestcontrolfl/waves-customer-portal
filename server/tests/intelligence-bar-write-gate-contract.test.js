@@ -69,6 +69,8 @@ const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 const ORIGINAL_CANCEL_GATE = process.env.GATE_CANCEL_FLOW_V2;
 const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
+  // reprice_future_visits is dark behind GATE_IB_REPRICE_VISITS; off, its preview refuses.
+  process.env.GATE_IB_REPRICE_VISITS = 'true';
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
@@ -82,13 +84,14 @@ afterAll(() => {
   else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_CANCEL_GATE === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
   else process.env.GATE_CANCEL_FLOW_V2 = ORIGINAL_CANCEL_GATE;
+  delete process.env.GATE_IB_REPRICE_VISITS;
 });
 
 
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -131,6 +134,7 @@ function discoverAllTools() {
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
   'save_customer_estimate',
+  'reprice_future_visits',
   'add_customer_property',
   'update_customer_property',
   'set_primary_property',
@@ -312,6 +316,9 @@ const READ_ONLY = [
   'list_gap_reports',
   // needs-me-tools.js: read-only list over open admin alerts and standing conditions.
   'needs_me',
+  // choice-tools.js: tap-to-answer buttons for a "which value?" question.
+  // Display only: reads no rows, writes nothing, creates no pending action.
+  'offer_choices',
   // billing-reader-tools.js (W9): read-only per-customer invoice list and invoice detail
   // with a payments timeline (attempts kept apart from received payments).
   'get_customer_invoices', 'get_invoice_detail',
@@ -619,6 +626,19 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['closeout-repair-tools', 'executeCloseoutRepairTool', 'repair_closeout', { service_id: '00000000-0000-0000-0000-00000000d001' }, {
       service_records: [{ id: 'rec-closeout', status: 'completed', report_template_version: 'service_report_v1', report_view_token: null, structured_notes: {} }],
     }],
+    // reprice_future_visits' preview reads the customer, the upcoming visits, their
+    // invoices and add-on lines, and the Schedule re-price block (spied below).
+    ['reprice-visits-tools', 'executeRepriceVisitsTool', 'reprice_future_visits', {
+      customer_id: '00000000-0000-0000-0000-00000000b701', service: 'pest', new_price: 49,
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000b701', first_name: 'Robin', last_name: 'Sample', billing_mode: 'per_visit', waveguard_tier: 'Gold', monthly_rate: null }],
+      scheduled_services: [{
+        id: '00000000-0000-0000-0000-00000000b702', customer_id: '00000000-0000-0000-0000-00000000b701', scheduled_date: '2099-05-04',
+        status: 'confirmed', service_type: 'Quarterly Pest Control', estimated_price: '55.00', primary_line_price: '55.00', row_version: '1:(0,1)',
+      }],
+      invoices: [],
+      scheduled_service_addons: [],
+    }],
     // resend_receipt's preview reads the paid invoice and the receipt resolvers
     // (spied below — their own paths are covered by intelligence-bar-receipt-resend.test.js).
     ['receipt-resend-tools', 'executeReceiptResendTool', 'resend_receipt', { invoice_id: '00000000-0000-0000-0000-00000000f001' }, {
@@ -833,6 +853,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
         },
       }) : null;
+    const repriceCoverage = toolName === 'reprice_future_visits'
+      ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -860,6 +882,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
+      repriceCoverage?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {

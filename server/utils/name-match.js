@@ -201,6 +201,16 @@ function payerFirstNameCompatible(payerRun, customerFirst) {
   if ((NICKNAME_GROUP_COUNT.get(payerRun) || 0) !== 1) return false;
   return sameFirstName(payerRun, customerFirst);
 }
+// Same person's first name with no guess: equal, or nickname variants where
+// NEITHER name sits in more than one nickname group. "bill"/"william" pass;
+// "pat" (patrick and patricia) matches only "pat". For evidence about someone
+// who may be a different household member (a parcel's co-owner).
+function sameFirstNameUnambiguous(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if ((NICKNAME_GROUP_COUNT.get(a) || 0) !== 1 || (NICKNAME_GROUP_COUNT.get(b) || 0) !== 1) return false;
+  return sameFirstName(a, b);
+}
 function sameFirstName(a, b) {
   if (!a || !b) return false;
   if (a === b) return true;
@@ -293,6 +303,10 @@ function payerNameCorroborates(payerName, customer = {}) {
 const SPOKEN_FIRST_NAME_GROUPS = [
   ['jason', 'jayson'], ['jennifer', 'jenifer'],
   ['debbie', 'debbi'], ['hannah', 'hanna'],
+  // 2026-10-07: a voicemail and a callback minted two leads when the two
+  // transcripts spelled one first name with c and with k.
+  ['carl', 'karl'], ['eric', 'erik'], ['marc', 'mark'], ['nick', 'nik'],
+  ['sara', 'sarah'], ['philip', 'phillip'],
 ].map(group => new Set(group.flatMap(firstNameVariants)));
 function spokenFirstNameVariants(name) {
   if (!name) return [];
@@ -311,6 +325,7 @@ module.exports = {
   normalizeNameFolded,
   firstNameVariants,
   sameFirstName,
+  sameFirstNameUnambiguous,
   sameSpokenFirstName,
   spokenFirstNameVariants,
   payerNameCorroborates,

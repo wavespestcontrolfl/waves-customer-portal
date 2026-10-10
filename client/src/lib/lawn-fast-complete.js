@@ -27,3 +27,16 @@ export function isLawnFastCompleteEligible(service) {
     && (!profile?.findingsType || profile.findingsType === LAWN_FINDINGS_TYPE)
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
+
+// Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
+// `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
+// open lawn re-service (completionProfile.serviceKey === 'lawn_re_service', a
+// TYPED one_time_lawn_treatment visit) then opens its own one-screen sheet
+// instead of the Dispatch completion form. Shared by the technician home and,
+// since owner 2026-10-08, admin Dispatch. Gate off, or any other service,
+// routes exactly as before.
+export function isLawnReserviceFastCompleteEligible(service) {
+  return service?.lawnReserviceFastCompleteEnabled === true
+    && service?.completionProfile?.serviceKey === 'lawn_re_service'
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}

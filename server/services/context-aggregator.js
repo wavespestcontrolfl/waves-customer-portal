@@ -164,6 +164,16 @@ function withScheduledServiceId(entry, id) {
   return entry;
 }
 
+// The series link of an upcoming visit for the texting AI's next-of-series
+// identity: seriesKey (seriesKeyOfRow) and seriesExclusive (stampSeriesExclusive:
+// that series is ALL of the customer's upcoming work, beyond the listed rows).
+// Non-enumerable for the same reason as the row id above.
+function withSeriesKey(entry, row) {
+  Object.defineProperty(entry, 'seriesKey', { value: seriesKeyOfRow(row), enumerable: false });
+  Object.defineProperty(entry, 'seriesExclusive', { value: row?.series_exclusive === true, enumerable: false });
+  return entry;
+}
+
 function lawnStressDamage(row = {}) {
   if (row.stress_damage != null) return row.stress_damage;
   return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
@@ -901,6 +911,8 @@ function upcomingServicesBase(customer) {
   return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
 }
 const UPCOMING_SERVICE_COLUMNS = [
+  // series link for the texting AI's next-of-series identity (withSeriesKey)
+  'ss.recurring_parent_id', 'ss.is_recurring',
   'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name',
   // LIVE ETA inputs (GATE_SMS_REAL_ANSWERS) — technician_id + the
   // tech's Bouncie IMEI to resolve a fresh GPS position, the visit's
@@ -951,11 +963,38 @@ function mergeLiveUpcoming(limited, liveRows, cap = 3) {
   }
   return merged.sort((a, b) => dateOrderKey(a) - dateOrderKey(b));
 }
+// The recurring series a visit row belongs to, by the schedule's own link (the
+// same rule admin-schedule uses: a series job has a parent id or is the
+// recurring parent itself; its key is the parent row's id). null = a one-time job.
+function seriesKeyOfRow(row) {
+  return row && (row.recurring_parent_id || row.is_recurring) ? String(row.recurring_parent_id || row.id) : null;
+}
+// The listed rows are capped at three, so "they are all one series" proves
+// nothing about a fourth visit. When the listed rows share ONE series, ask the
+// schedule itself (same base query, uncapped) whether any OTHER upcoming work
+// exists, and stamp the answer on the rows: series_exclusive true only when
+// that series is ALL of the customer's upcoming work. A failed read is false.
+async function stampSeriesExclusive(customer, rows, baseQuery = upcomingServicesBase) {
+  const key = rows.length > 1 ? seriesKeyOfRow(rows[0]) : null;
+  if (!key || rows.some((r) => seriesKeyOfRow(r) !== key)) return rows;
+  let exclusive = false;
+  try {
+    const other = await baseQuery(customer)
+      .whereNot('ss.id', key)
+      .where((q) => q.whereNull('ss.recurring_parent_id').orWhereNot('ss.recurring_parent_id', key))
+      .first('ss.id');
+    exclusive = !other;
+  } catch (err) {
+    logger.warn(`[context-aggregator] series-exclusive read failed: ${err.message}`);
+  }
+  for (const r of rows) r.series_exclusive = exclusive;
+  return rows;
+}
 async function loadUpcomingServices(customer, includeLiveEta) {
   const limited = await upcomingServicesBase(customer).orderBy('ss.scheduled_date').limit(3).select(...UPCOMING_SERVICE_COLUMNS);
-  if (!includeLiveEta) return limited;
+  if (!includeLiveEta) return stampSeriesExclusive(customer, limited);
   const liveRows = await liveServicesQuery(customer).orderBy('ss.scheduled_date').limit(10).select(...UPCOMING_SERVICE_COLUMNS);
-  return mergeLiveUpcoming(limited, liveRows);
+  return stampSeriesExclusive(customer, mergeLiveUpcoming(limited, liveRows));
 }
 
 // The send-time snapshot input: one group per distinct live STOP (Codex
@@ -1549,7 +1588,7 @@ class ContextAggregator {
         notes: customerSafeVisitNotes(s),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
-      upcomingServices: upcomingServices.map((s, i) => withScheduledServiceId({
+      upcomingServices: upcomingServices.map((s, i) => withSeriesKey(withScheduledServiceId({
         type: s.service_type,
         date: s.scheduled_date,
         window: this.deriveWindow(s),
@@ -1565,7 +1604,7 @@ class ContextAggregator {
         tech: s.technician_name || null,
         isToday: this.calendarDay(s.scheduled_date) === etDateString(),
         liveEta: liveEtas[i] || null,
-      }, s.id)),
+      }, s.id), s)),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
         unavailable: billingUnavailable,
@@ -1960,4 +1999,6 @@ module.exports.perVisitLiveEtas = perVisitLiveEtas;
 module.exports.buildLiveEtaGroups = buildLiveEtaGroups;
 module.exports.mergeLiveUpcoming = mergeLiveUpcoming;
 module.exports.loadUpcomingServices = loadUpcomingServices;
+module.exports.seriesKeyOfRow = seriesKeyOfRow;
+module.exports.stampSeriesExclusive = stampSeriesExclusive;
 module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

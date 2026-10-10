@@ -21,7 +21,7 @@ const { findBannedCustomerCopy } = require('../services/service-report/activity-
 const { FIELD_CAPS } = require('../services/service-report/lawn-copy-v6');
 
 const {
-  PRODUCT_ROWS, ISSUE_ROWS, PRODUCT_CLASS_ENTRIES, PRODUCT_CLASS, MAX_LINE_WORDS, CELSIUS_YTD_CAP, FAMILY,
+  PRODUCT_ROWS, ISSUE_ROWS, PRODUCT_CLASS_ENTRIES, PRODUCT_CLASS, MAX_LINE_WORDS, CELSIUS_YTD_CAP, CELSIUS_YTD_CAP_LEGACY, celsiusYtdCap, FAMILY,
 } = config;
 
 const PREVIEW = { includeUnapproved: true };
@@ -322,6 +322,20 @@ describe('buildLawnExpectations', () => {
 
   describe('Celsius cap swap', () => {
     const second = PRODUCT_ROWS.herbicide_celsius.secondApp;
+    const savedGate = process.env.GATE_LAWN_V13;
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+    afterEach(() => { if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate; });
+
+    it('follows the v13 kill switch: 2 with GATE_LAWN_V13 on, the legacy 3 with it off', () => {
+      expect(celsiusYtdCap()).toBe(2);
+      expect(run(2).secondApp.capped).toBe(true);
+      delete process.env.GATE_LAWN_V13;
+      expect(CELSIUS_YTD_CAP_LEGACY).toBe(3);
+      expect(celsiusYtdCap()).toBe(3);
+      expect(run(2).secondApp.capped).toBe(false);
+      expect(run(3).secondApp.capped).toBe(true);
+    });
+
     const run = (count) => buildLawnExpectations({
       ...base, applications: [{ name: 'Celsius WG' }], celsiusYtdCount: count,
     }, PREVIEW).rows[0];
@@ -342,8 +356,8 @@ describe('buildLawnExpectations', () => {
       }
     });
 
-    it('treats an unknown count as under the cap, and the cap constant is 3', () => {
-      expect(CELSIUS_YTD_CAP).toBe(3);
+    it('treats an unknown count as under the cap, and the cap constant is 2', () => {
+      expect(CELSIUS_YTD_CAP).toBe(2);
       expect(run(null).secondApp.capped).toBe(false);
       expect(run(undefined).secondApp.capped).toBe(false);
     });
@@ -998,11 +1012,15 @@ describe('buildLawnExpectations', () => {
         // P16: the prospect diagnostic prompt generates RESULT TIMING from the sourced rows; the prospect report's weed expectation reads the weed row.
         'services/lawn-diagnostic-prompt.js',
         'services/lawn-diagnostic-report.js',
+        // GATE_LAWN_SPOT_TARGET: the lawn sheet's spot target lists come from the engine's own target vocabulary (TARGET_CLASS_BY_NAME), so no target name exists outside it.
+        'services/lawn-spot-target.js',
         // P14: the v6 copy writer (GATE_LAWN_REPORT_COPY_V6, dark) offers APPROVED rows' keyed sentences for selection.
         'services/service-report/lawn-copy-v6.js',
         'services/service-report/lawn-expectations.js',
         // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
         'services/service-report/lawn-progress.js',
+        // GATE_LAWN_REPORT_FACTS: the finding-to-product tie reads the engine's modeLock classification (Acelepryn is preventive-locked), so a tie can never contradict the product's "What to expect" line.
+        'services/service-report/lawn-report-facts.js',
         // P16: the one shared seasonal-dip approval check (dormancy card, cross-season notes).
         'services/service-report/lawn-seasonality.js',
       ]);

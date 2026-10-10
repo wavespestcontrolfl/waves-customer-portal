@@ -794,6 +794,40 @@ describe('lawn bounded product section', () => {
     expect(mockWindowContext.mock.calls[0][1].grassTrack).toBe('st_augustine');
   });
 
+  describe('the city hold on the lawn brief (North Port Nutra-TECH, June to September)', () => {
+    const NUTRA = 'LESCO Nutra-TECH T&O Micronutrient Package';
+    const june = () => mockSummarize.mockReturnValue({
+      window: { key: 'jun', month: 6, title: 'June Nutra-TECH + Pre-Emergent', visitType: 'hose', goal: 'Micronutrients and pre-emergent' },
+      products: [
+        { productName: NUTRA, productId: 'nt', role: 'micronutrients', applicationMode: 'broadcast', ratePer1000: 12, rateUnit: 'fl oz', defaultInPlan: true, gates: { requiresZeroNP: true, northPortProductWindow: true } },
+        { productName: 'Dimension 2EW', productId: 'dim', role: 'pre_emergent', applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz', defaultInPlan: true, gates: {} },
+      ],
+    });
+    const briefFor = async (extra) => {
+      june();
+      const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', ...extra }] }));
+      expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+      return storedBrief(state).brief.product_guidance;
+    };
+
+    test('North Port: the product is a hold with the plan\'s text and no dose, not a conditional product', async () => {
+      const guidance = await briefFor({ service_address_city: 'North Port' });
+      expect(guidance.products.map((p) => p.name)).toEqual(['Dimension 2EW']);
+      expect(guidance.conditional_products.map((p) => p.name)).toEqual([]);
+      expect(guidance.held_products).toHaveLength(1);
+      expect(guidance.held_products[0]).toMatchObject({ name: NUTRA, hold: true });
+      expect(guidance.held_products[0].message).toBe(`${NUTRA}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`);
+      expect(JSON.stringify(guidance.held_products)).not.toMatch(/ratePer1000|rateUnit|12/);
+    });
+
+    test('another city: the product is guidance as before (conditional, with its rate) and nothing is held', async () => {
+      const guidance = await briefFor({ service_address_city: 'Sarasota' });
+      expect(guidance.held_products).toEqual([]);
+      expect(guidance.conditional_products.map((p) => [p.name, p.ratePer1000])).toEqual([[NUTRA, 12]]);
+      expect(guidance.products.map((p) => p.name)).toEqual(['Dimension 2EW']);
+    });
+  });
+
   test('a customer at an application limit demotes the fixed product to conditional (codex P1)', async () => {
     mockSummarize.mockReturnValue({
       window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },
@@ -895,6 +929,102 @@ describe('lawn bounded product section', () => {
     expect(mockWindowContext).not.toHaveBeenCalled();
   });
 
+  // GATE_LAWN_V13 has no bahia program: bahia in ANY recorded profile field leaves the lawn with no
+  // track, whichever other track the other field names, so the brief never serves another grass's window.
+  test.each([
+    [{ grass_type: 'bahia', track_key: 'st_augustine' }],
+    [{ grass_type: 'st_augustine', track_key: 'bahia' }],
+    [{ grass_type: 'bahia', track_key: null }],
+  ])('GATE_LAWN_V13: profile %j fails closed with no guessed window', async (profile) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    try {
+      mockGrassContext.mockImplementation((...args) => jest.requireActual('../services/lawn-grass-context').loadCustomerGrassContext(...args));
+      const state = useDb(baseResponses({
+        scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, ...profile }],
+      }));
+      const out = await PrevisitBrief.generateVisitBrief('svc-1');
+      expect(out.generated).toBe(true);
+      const { brief } = storedBrief(state);
+      expect(brief.product_guidance.available).toBe(false);
+      expect(brief.product_guidance.reason).toBe('lawn_v13_bahia_no_program');
+      expect(mockWindowContext).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_LAWN_V13;
+    }
+  });
+
+  // A visit assigned a protocol window keeps that window ONLY for a lawn that has a program: a bahia
+  // lawn under v13 gets no guidance from another grass's pinned assignment.
+  describe('GATE_LAWN_V13 with a pinned assignment', () => {
+    const PINNED = {
+      ...SVC, service_type: 'Lawn Care Service',
+      lawn_protocol_window_key: 'jun_blackout_stress', lawn_protocol_key: 'sa_swfl', lawn_protocol_version: 3,
+    };
+    const WINDOW = {
+      window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
+      products: [{ productName: 'Fe/Mn Micros', role: 'micronutrients', applicationMode: 'spray', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: true, gates: {} }],
+    };
+    beforeEach(() => {
+      process.env.GATE_LAWN_V13 = 'true';
+      mockGrassContext.mockImplementation((...args) => jest.requireActual('../services/lawn-grass-context').loadCustomerGrassContext(...args));
+      mockSummarize.mockReturnValue(WINDOW);
+    });
+    afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+    test.each([
+      [{ grass_type: 'bahia', track_key: null }],
+      [{ grass_type: 'bahia', track_key: 'st_augustine' }],
+      [{ grass_type: 'st_augustine', track_key: 'bahia' }],
+    ])('a bahia lawn (%j) pinned to a St. Augustine protocol shows no guidance', async (profile) => {
+      const state = useDb(baseResponses({
+        scheduled_services: [PINNED],
+        lawn_protocols: [{ id: 'proto-1' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, ...profile }],
+      }));
+      await PrevisitBrief.generateVisitBrief('svc-1');
+      const { brief } = storedBrief(state);
+      expect(brief.product_guidance.available).toBe(false);
+      expect(brief.product_guidance.reason).toBe('lawn_v13_bahia_no_program');
+      expect(brief.product_guidance.products).toEqual([]);
+      expect(mockWindowContext).not.toHaveBeenCalled();
+    });
+
+    test('a St. Augustine lawn with the same pinned assignment keeps its window guidance', async () => {
+      const state = useDb(baseResponses({
+        scheduled_services: [PINNED],
+        lawn_protocols: [{ id: 'proto-1' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, grass_type: 'st_augustine', track_key: 'st_augustine' }],
+      }));
+      await PrevisitBrief.generateVisitBrief('svc-1');
+      const { brief } = storedBrief(state);
+      expect(brief.product_guidance.available).toBe(true);
+      expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
+      expect(mockWindowContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ windowKey: 'jun_blackout_stress', protocolId: 'proto-1' }));
+    });
+
+    test('gate off, a bahia lawn keeps its pinned window as before', async () => {
+      delete process.env.GATE_LAWN_V13;
+      useDb(baseResponses({
+        scheduled_services: [PINNED],
+        lawn_protocols: [{ id: 'proto-1' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, grass_type: 'bahia' }],
+      }));
+      await PrevisitBrief.generateVisitBrief('svc-1');
+      expect(mockWindowContext).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  test('gate off, a conflicting profile keeps the old resolution (the explicit track key)', async () => {
+    mockGrassContext.mockImplementation((...args) => jest.requireActual('../services/lawn-grass-context').loadCustomerGrassContext(...args));
+    useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+      customer_turf_profiles: [{ customer_id: 'cust-1', active: true, grass_type: 'bahia', track_key: 'st_augustine' }],
+    }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(mockWindowContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ grassTrack: 'st_augustine' }));
+  });
+
   test('an assigned protocol window wins over date derivation (unknown track included)', async () => {
     mockGrassContext.mockResolvedValue({ trackKey: null });
     mockSummarize.mockReturnValue({
@@ -922,6 +1052,21 @@ describe('lawn bounded product section', () => {
     const { brief } = storedBrief(state);
     expect(brief.product_guidance.assignedWindowKey).toBe('jun_blackout_stress');
     expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
+  });
+
+  test('a staged spot row\'s broadened trigger (20261007182000) reaches the brief whole, under the 120 character cut', async () => {
+    const round2 = require('../models/migrations/20261007182000_lawn_v13_matrix_adds_round2');
+    mockSummarize.mockReturnValue({
+      window: { key: 'oct_v13_spreader_fall', month: 10, title: 'October', visitType: 'granular', goal: 'Fall feeding' },
+      products: round2.TRIGGERS.map(([, product, , trigger]) => ({
+        productName: product, role: 'fungicide_spot', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: false, gates: { trigger },
+      })),
+    });
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }] }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.conditional_products.map((p) => p.trigger)).toEqual(round2.TRIGGERS.map(([, , , trigger]) => trigger));
+    expect(brief.product_guidance.conditional_products[0].trigger).toMatch(/fairy_ring_dollar_spot_rust_leaf_spot$/);
   });
 
   test('conditional/gated products are split out, labeled, and never sent to the LLM as fixed', async () => {

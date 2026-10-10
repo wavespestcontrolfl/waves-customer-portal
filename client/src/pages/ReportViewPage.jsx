@@ -8,6 +8,9 @@ import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
+import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
+import LawnNewSodCard from '../components/report/lawnV2/LawnNewSodCard';
+import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow } from '../components/report/lawnV2/lawnLayoutRules';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -679,6 +682,14 @@ export function latestPendingReentryTarget(targets = [], nowMs = Date.now()) {
   }, null)?.target || null;
 }
 
+// A lawn visit's re-entry is a CONDITION frozen at completion (GATE_LAWN_REPORT_FACTS, server
+// lawn-report-facts.js): fixed sentences chosen by the server, no ready-at time and no countdown. A
+// payload without `reentry.condition` (every other line, every older lawn record) keeps the timed targets.
+export function reentryCondition(reentry) {
+  const condition = reentry?.condition;
+  return condition && typeof condition.text === 'string' && condition.text.trim() ? condition : null;
+}
+
 // Pest reports name no treated areas (owner 2026-10-05: "the areas treated
 // needs to be removed from the report"). The product card, the "What Waves
 // did today" cell, the status fallback line and the Ask Waves suggestions all
@@ -795,6 +806,53 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   return summary;
 }
 
+// The pieces of the status summary that belong to a frozen re-entry condition (GATE_LAWN_REPORT_FACTS). They live
+// here, outside statusSummaryCore, so that function carries no extra decisions for them.
+const visitCondition = (reentry, noTreatmentVisit) => (noTreatmentVisit ? null : reentryCondition(reentry));
+
+// The condition and the keep-off line as one string, or '' (no condition, or a callback that applied nothing).
+function conditionWarningLine(condition, reserviceNoApplication) {
+  return condition && !reserviceNoApplication ? [condition.text, condition.pets].filter(Boolean).join(' ') : '';
+}
+
+function conditionStatus(condition, completedItems, completedAreas, resultOverridden = false) {
+  return {
+    heading: 'your service is complete!',
+    status: 'Service complete',
+    statusTone: 'neutral',
+    result: condition.text,
+    completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service completed today.',
+    // GATE_LAWN_REPORT_POLISH: the keep-off line belongs right after the condition sentence; when the result line is
+    // another sentence (the page's own status headline) there is no condition above it to follow.
+    detail: resultOverridden ? '' : (condition.pets || ''),
+  };
+}
+
+// The detail line of the "we found activity that needs attention" summary.
+function findingStatusDetail({ pendingText, conditionLine, reserviceNotPerformed, reservice, noTreatmentVisit }) {
+  if (pendingText) return 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.';
+  if (conditionLine) return `${conditionLine} We also included the recommended next step below.`;
+  if (reserviceNotPerformed) {
+    // 'incomplete' can include a PARTIAL application — only the two
+    // genuinely non-performed outcomes may claim none (codex r10 P1).
+    return reservice.outcome === 'incomplete'
+      ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
+      : 'No application was made on this visit — we documented what we found and included the recommended next step below.';
+  }
+  return noTreatmentVisit
+    ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
+    : 'We treated the documented area today and included the recommended next step below.';
+}
+
+// The detail line of the "one area needs attention / could not be serviced" summary.
+function actionNeededDetail({ pendingReadyText, conditionLine, inaccessible, item }) {
+  if (pendingReadyText) return 'Keep pets and people away from treated zones until they are ready. Review the recommended next step below.';
+  if (conditionLine) return `${conditionLine} Review the recommended next step below.`;
+  return inaccessible
+    ? 'You can contact Waves if you want us to return for the inaccessible area.'
+    : (item.customerDescription || 'Review the recommended next step below.');
+}
+
 function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const coverage = normalizeServiceCoverage(data);
   const coverageItems = Array.isArray(coverage?.items) ? coverage.items : [];
@@ -816,6 +874,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // payloads without the field keep the treatment presentation.
   const noTreatmentVisit = data.treatmentPerformed === false;
   const pendingTarget = noTreatmentVisit ? null : latestPendingReentryTarget(targets, nowMs);
+  const condition = visitCondition(reentry, noTreatmentVisit);
   const pendingReadyText = pendingTarget
     ? (mode === 'live'
       ? `Ready in ${formatDuration(Date.parse(pendingTarget.readyAt) - nowMs)}`
@@ -839,6 +898,9 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const reserviceNoApplication = Boolean(reservice && ['inspection_only', 'customer_declined'].includes(reservice.outcome));
   const reserviceIncomplete = Boolean(reservice && reservice.outcome === 'incomplete');
   const reserviceNotPerformed = reserviceNoApplication || reserviceIncomplete;
+  // A frozen re-entry condition (lawn) rides every branch that used to carry the timed warning, except a callback that
+  // applied nothing: the dry / water-in condition and the keep-off line, or '' when there is none.
+  const conditionLine = conditionWarningLine(condition, reserviceNoApplication);
   const reserviceStatus = () => ({
     heading: reservice.heading || 'we came back and took care of it!',
     status: allReady ? 'Ready now' : 'Service complete',
@@ -873,17 +935,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         : (reserviceNotPerformed
           ? (reservice.completedFallback || 'No application was made today.')
           : (noTreatmentVisit ? 'No application was made today.' : 'Service areas completed today.')),
-      detail: pendingText
-        ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
-        : (reserviceNotPerformed
-          // 'incomplete' can include a PARTIAL application — only the two
-          // genuinely non-performed outcomes may claim none (codex r10 P1).
-          ? (reservice.outcome === 'incomplete'
-            ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
-            : 'No application was made on this visit — we documented what we found and included the recommended next step below.')
-          : (noTreatmentVisit
-            ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
-            : 'We treated the documented area today and included the recommended next step below.')),
+      detail: findingStatusDetail({ pendingText, conditionLine, reserviceNotPerformed, reservice, noTreatmentVisit }),
     };
   }
 
@@ -899,6 +951,8 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   if (reserviceIncomplete) {
     // Partial application possible: the standalone re-entry warning stays
     // (safety), everything else yields to the claim-nothing callback copy.
+    // (No frozen lawn condition can exist here: an incomplete closeout returns before the report path, so it mints no
+    // customer report and the lawn write gate never freezes re-entry facts for it. This branch keeps the timed warning.)
     if (pendingTarget && !allReady) {
       return {
         heading: reservice.heading || 'about your visit',
@@ -924,13 +978,12 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         ? `${pendingTarget.label || 'Treated'} areas are still drying. ${area} was marked ${coverageStatusConfig(item.status).label.toLowerCase()}.`
         : `${area} was marked ${coverageStatusConfig(item.status).label.toLowerCase()}.`,
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Accessible areas were serviced.',
-      detail: pendingReadyText
-        ? 'Keep pets and people away from treated zones until they are ready. Review the recommended next step below.'
-        : (inaccessible
-          ? 'You can contact Waves if you want us to return for the inaccessible area.'
-          : (item.customerDescription || 'Review the recommended next step below.')),
+      detail: actionNeededDetail({ pendingReadyText, conditionLine, inaccessible, item }),
     };
   }
+
+  // A frozen re-entry condition (lawn): the result line IS the condition. It never counts down.
+  if (condition) return conditionStatus(condition, completedItems, completedAreas, data.statusResultOverridden === true);
 
   if (pendingTarget) {
     return {
@@ -970,7 +1023,10 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // e.g. a mosquito/termite callback whose name contains "Re-Service");
   // the legacy pest wording would be false there (codex GH-r2 P1). The
   // regex remains only for payloads from before the gate / while dark.
-  if (!reservice && !data.reserviceGateOn && data.isCallback !== false && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+  // GATE_LAWN_REPORT_COPY_FIXES (the server sets lawnCopyFixes on a lawn report only): this header
+  // is the pest program's wording ("activity you reported", "knock activity down"), so a lawn
+  // report never takes this branch.
+  if (!reservice && !data.reserviceGateOn && data.isCallback !== false && data.lawnCopyFixes !== true && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
     return {
       heading: 'we came back and took care of it!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -1633,6 +1689,9 @@ export function lawnWateringGuidance(app = {}) {
 }
 
 function applicationZoneText(app = {}, zoneById = new Map(), serviceLine = 'pest') {
+  // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS): the server sends it only for a spot row of a
+  // lawn visit that froze it; every other row keeps the zone text below.
+  if (typeof app.areaUse === 'string' && app.areaUse.trim()) return app.areaUse.trim();
   const zones = applicationZoneIds(app).map((id) => zoneById.get(String(id))).filter(Boolean);
   if (!zones.length) return app.applicationArea || 'Treated area recorded';
   // Applied to every zone → a friendly whole-coverage phrase beats listing each one
@@ -2435,6 +2494,10 @@ const TECH_NOTE_OPENERS = {
   3: ['Three things that will make a real difference:', 'A few things I’d take care of soon:'],
 };
 
+// A note made only of aftercare tips (what to expect after this service's
+// work, owner 2026-10-09) is not "one thing to do": it gets its own opener.
+const TECH_NOTE_AFTERCARE_OPENERS = ['Here is what to expect after this visit:', 'A quick note on what comes next:'];
+
 export function techNoteSeed(value) {
   let h = 0;
   for (const ch of String(value || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -2453,7 +2516,12 @@ export function composeTechNote({ tips = [], customerName = '', firstName, seed 
   const count = Math.min(Math.max(tips.length, 1), 3);
   const first = techNoteFirstName(firstName !== undefined ? firstName : customerName);
   const greeting = first ? TECH_NOTE_GREETINGS[seed % TECH_NOTE_GREETINGS.length](first) : 'Hey there,';
-  const openers = TECH_NOTE_OPENERS[count];
+  // The technician's own line may be something they did or saw at this visit
+  // (owner 2026-10-09: advice or an observation, both), which does not read
+  // under "One thing that will make a real difference:". A note made only of
+  // their own words gets the greeting and no opener.
+  if (tips.length > 0 && tips.every((tip) => tip?.source === 'technician')) return { greeting, opener: null };
+  const openers = tips.length > 0 && tips.every((tip) => tip?.aftercare === true) ? TECH_NOTE_AFTERCARE_OPENERS : TECH_NOTE_OPENERS[count];
   return { greeting, opener: openers[Math.floor(seed / 7) % openers.length] };
 }
 
@@ -2495,7 +2563,7 @@ export function TechNoteCard({ data, mode = 'live' }) {
       <blockquote style={{ position: 'relative', margin: 0, padding: '4px 4px 0 22px' }}>
         <span aria-hidden="true" style={{ position: 'absolute', left: -2, top: -14, fontSize: 56, lineHeight: 1, color: 'var(--line-strong, rgba(4,57,94,0.35))', fontFamily: 'Georgia, serif' }}>“</span>
         <p style={{ margin: '0 0 10px', fontWeight: 600, color: 'var(--text, #04395E)' }}>{greeting}</p>
-        <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>
+        {opener && <p style={{ margin: '0 0 10px', lineHeight: 1.6 }}>{opener}</p>}
         {tips.map((tip, i) => (
           <p key={`${tip.id || 'tip'}-${i}`} style={{ margin: '0 0 10px', lineHeight: 1.6 }}>
             {tip.copy}
@@ -2569,9 +2637,28 @@ function readinessSummary(context, mode = 'live', nowMsOverride) {
   };
 }
 
+// What the readiness card and chip show. A frozen condition (lawn) has no clock: the sentence, one status word, the
+// precaution line. Anything else is the timed summary above.
+function conditionReadiness(condition) {
+  return {
+    allReady: false,
+    condition: true,
+    areaType: 'Lawn',
+    status: condition.statusLabel || 'Once dry',
+    badge: condition.statusLabel || 'Once dry',
+    headline: condition.text,
+    precautions: condition.pets || 'None listed',
+  };
+}
+
+function readinessView(context, mode, nowMsOverride) {
+  const condition = reentryCondition(context);
+  return condition ? conditionReadiness(condition) : readinessSummary(context, mode, nowMsOverride);
+}
+
 export function readinessStatusBadge(context, mode = 'live', nowMsOverride) {
   if (!context) return null;
-  const summary = readinessSummary(context, mode, nowMsOverride);
+  const summary = readinessView(context, mode, nowMsOverride);
   return {
     label: summary.badge,
     ready: summary.allReady,
@@ -2600,6 +2687,73 @@ function useReadinessNow(context, mode) {
   }, [context, mode]);
 
   return nowMs;
+}
+
+// GATE_LAWN_REPORT_LAYOUT: the "Your part" card. The re-entry sentence is the report's own (the
+// re-entry builder's customerSummary, a timed line or a condition, with its pet advisory); the
+// card prints the watering banner once and the lead's own homeowner step beside it.
+function LawnYourPart({ data, mode, token, othersCarryInstruction = false }) {
+  const context = data.dynamicContext?.reentry;
+  const nowMs = useReadinessNow(context, mode);
+  const reentry = context ? reentryRow(context, readinessView(context, mode, nowMs)) : null;
+  // The re-entry card records that the customer saw its timer; this card replaces it, so the event is sent
+  // when this card RENDERS timed readiness content (a row for timed targets), once. A condition has no timer;
+  // a finished timer with no pet advisory renders no row, so nothing was seen and nothing is recorded.
+  const timedShown = reentryIsTimed(context) && reentry !== null;
+  useEffect(() => {
+    if (mode !== 'live' || !timedShown) return;
+    trackReportEvent(token, 'reentry_timer_viewed');
+  }, [context, mode, token, timedShown]);
+  return (
+    <LawnYourPartCard
+      banner={data.reportV2?.banner}
+      reentry={reentry}
+      lines={alsoSteps(data.reportV2?.lead)}
+      othersCarryInstruction={othersCarryInstruction}
+      style={{ marginTop: 16 }}
+    />
+  );
+}
+
+// Technician recommendations (owner 2026-08-27): the completion form's recommendation lines
+// finally reach the customer. Sourced from data.recommendations (protocol recommendations +
+// findings recommendations, already banned-copy-screened upstream). Renders for every layout.
+function RecommendationsSection({ data }) {
+  if (!(data.recommendations || []).length) return null;
+  return (
+    <section data-glass="card" className="sr-section" id="recommendations">
+      <h2>What we recommend</h2>
+      <ul style={{ margin: 0, paddingLeft: 20, lineHeight: 1.6 }}>
+        {data.recommendations.map((rec, i) => (
+          <li key={`${i}-${rec}`}>{rec}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// GATE_LAWN_REPORT_POLISH: what the lawn status card prints for its result line and whether the keep-off line
+// follows. With a frozen re-entry condition the plain status prints the condition sentence as the result and the
+// keep-off line right after it. When another sentence is the result (the page's own, or, on the lawn layout, the
+// lead's status headline instead of the walk-on rule that "Your part" states) the keep-off line has no condition
+// above it, so it is left off the card. The layout hero is changed only when the lead has a headline to print.
+function polishStatusProps(data, mode, override, layout) {
+  const condition = data.lawnPolish === true ? reentryCondition(data.dynamicContext?.reentry) : null;
+  if (!condition) return { data, override };
+  // The page's own result line over the condition drops the keep-off line in every mode (live, PDF, static). Only the
+  // layout hero's headline substitution is live-only.
+  const headline = !override && layout && mode === 'live' && smartStatusSummary(data, mode, Date.now()).result === condition.text
+    ? data.reportV2?.lead?.headline || null : null;
+  const result = override || headline;
+  return result ? { data: { ...data, statusResultOverridden: true }, override: result } : { data, override };
+}
+
+// The lawn status card, standard or on the lawn layout (the layout drops "Your documents" and a next appointment the
+// plan area prints; see lawnLayoutStatusData).
+function LawnStatusCard({ data, mode, layout }) {
+  const base = layout ? lawnLayoutStatusData(data, mode) : data;
+  const props = polishStatusProps(base, mode, layout ? lawnTodaysResult(data) : (data.reportV2?.todaysResult || null), layout);
+  return <ServiceStatusCard data={props.data} mode={mode} resultOverride={props.override} />;
 }
 
 function ServiceStatusCard({ data, mode, resultOverride = null }) {
@@ -3106,12 +3260,13 @@ function RecapVideoCard({ recap, token }) {
 
 function ReentryReadinessCard({ context, mode, token }) {
   const nowMs = useReadinessNow(context, mode);
-  const readiness = readinessSummary(context, mode, nowMs);
+  const readiness = readinessView(context, mode, nowMs);
   const targets = Array.isArray(context?.targets) ? context.targets : [];
   const timezone = context?.displayTimezone || SERVICE_REPORT_TIME_ZONE;
 
   useEffect(() => {
-    if (mode !== 'live' || !context) return;
+    // A frozen condition has no timer, so there is no timer view to count.
+    if (mode !== 'live' || !context || reentryCondition(context)) return;
     trackReportEvent(token, 'reentry_timer_viewed');
   }, [context, mode, token]);
 
@@ -3126,7 +3281,13 @@ function ReentryReadinessCard({ context, mode, token }) {
         </div>
         <div className="readiness-status-chip">{readiness.status}</div>
       </div>
-      {readiness.allReady ? (
+      {readiness.condition ? (
+        /* A frozen condition: the headline already says it, so only the precaution line follows. */
+        <div className="sr-cell">
+          <div className="sr-cell-label">Precautions</div>
+          <div className="sr-cell-value">{readiness.precautions}</div>
+        </div>
+      ) : readiness.allReady ? (
         /* Everything is ready: the chip + headline already say "Ready now" —
            repeating it in a Status cell and again per-area tile said the same
            thing four times over 1.5 phone screens (audit 2026-07-28). Keep just
@@ -3205,6 +3366,11 @@ function HeroConditions({ conditions, weatherCall, applicationMade = true, live 
   );
 }
 
+// Whether the report has re-entry information to ask about: timed targets, or a frozen condition (lawn).
+function reentryInfoPresent(reentry) {
+  return (Array.isArray(reentry?.targets) && reentry.targets.length > 0) || !!reentryCondition(reentry);
+}
+
 export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   const prompts = [];
   const add = (text) => {
@@ -3212,7 +3378,7 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
     if (clean && !prompts.some((prompt) => prompt.toLowerCase() === clean.toLowerCase())) prompts.push(clean);
   };
   const product = uniqueStrings((data.applications || []).map((app) => applicationProductName(app)))[0];
-  const hasReentry = Array.isArray(data.dynamicContext?.reentry?.targets) && data.dynamicContext.reentry.targets.length > 0;
+  const hasReentry = reentryInfoPresent(data.dynamicContext?.reentry);
   const coverage = normalizeServiceCoverage(data);
   const hasCoverage = Array.isArray(coverage?.items) && coverage.items.length > 0;
   const hasPressure = data.pestPressure
@@ -3667,7 +3833,8 @@ function CompanionSectionHeader({ companion }) {
 // placements carry it (codex #3379 r2 P2): top and bottom are mutually
 // exclusive mounts — pest/V2 reports place the card high, legacy non-pest
 // reports low — so legacy reports were silently keeping the old copy.
-// placement survives for layout classes only.
+// placement survives for layout classes and the click event's metadata: 'top' and 'bottom' are the two
+// standard mounts, 'lawn-layout' is the lawn layout's mount (GATE_LAWN_REPORT_LAYOUT), mid-page.
 export function reviewRequestCopy(placement = 'top', firstName = '', techName = '') {
   const name = String(firstName || '').trim();
   const tech = String(techName || '').trim().split(/\s+/)[0];
@@ -3871,6 +4038,12 @@ function ReferralCard({ data, token, mode }) {
   );
 }
 
+// A frozen re-entry condition (lawn) is an action item of its own: the sentence, then the keep-off line.
+function addConditionAction(add, data) {
+  const condition = reentryCondition(data.dynamicContext?.reentry);
+  if (condition) add(condition.text, condition.pets);
+}
+
 export function customerActionItems({ data = {}, coverage, primaryMove, aiSummary, nowMs } = {}) {
   const actions = [];
   const add = (label, detail) => {
@@ -3905,6 +4078,7 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
       );
     }
   }
+  addConditionAction(add, data);
   if (pendingTarget) {
     add(
       `Wait until ${formatReadyTime(pendingTarget.readyAt, data.dynamicContext?.reentry?.displayTimezone)} before using treated ${String(pendingTarget.label || 'areas').toLowerCase()}.`,
@@ -3914,13 +4088,77 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
   return actions.slice(0, 3);
 }
 
+// Service Highlights: the technician-approved photos, videos, captions and locations
+// (proofMoments). Its own section so the lawn layout (GATE_LAWN_REPORT_LAYOUT) can place it too.
+function ServiceHighlightsSection({ moments }) {
+  if (!moments.length) return null;
+  return (
+      <section data-glass="card" className="sr-section" id="service-highlights">
+        <h2>Service Highlights</h2>
+        <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
+          {visualProofMomentIntro(moments)}
+        </p>
+        <div className="sr-grid-3">
+          {moments.map((moment) => (
+            <div className="sr-cell" key={moment.id}>
+              {moment.mediaUrl && moment.mediaType === 'video' && (
+                <video
+                  src={moment.mediaUrl}
+                  controls
+                  style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
+                />
+              )}
+              {moment.mediaUrl && moment.mediaType !== 'video' && (
+                <img
+                  src={moment.mediaUrl}
+                  alt={moment.tagLabel || 'Service highlight'}
+                  style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
+                />
+              )}
+              <div className="sr-cell-label">{visualProofMomentStage(moment)}</div>
+              <div className="sr-cell-value">{moment.tagLabel || 'Service highlight'}</div>
+              {moment.locationArea && (
+                <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4 }}>
+                  {moment.locationArea}
+                </div>
+              )}
+              <div style={{ fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY, marginTop: 8 }}>
+                {moment.customerCaption || 'Service highlight documented by your technician.'}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+  );
+}
+
+// Treated-point marks on the tech's own photo (GATE_PHOTO_MARKS). Own component so the lawn
+// layout places the same marks the standard page prints.
+function MarkedPhotosSection({ data, mode }) {
+  return (data.markedPhotos || []).map((marked) => (
+    <MarkedPhotoCard key={marked.photoId} marked={marked} live={mode === 'live'} />
+  ));
+}
+
+// What AppliedProductsSection prints: 'products' (the product cards and the Poison Control note),
+// 'poison' (no product rows, but something went down: the Poison Control section alone) or 'none'.
+// One verdict for the section and for the lawn layout's wrapper around it.
+function appliedProductsKind(data) {
+  const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
+  if (applications.length) return 'products';
+  const something = data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data);
+  return something ? 'poison' : 'none';
+}
+
 function AppliedProductsSection({ data, mode = 'live' }) {
   // Shared product-identity rule (lib/product-application.js) on EVERY
   // line, matching the PDF document and the header count: termite / rodent
   // monitoring devices (stations, cartridges) are checks, not products
   // applied (codex P2 #3600 r23).
   const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
-  if (!applications.length) {
+  const kind = appliedProductsKind(data);
+  if (kind === 'none') return null;
+  if (kind === 'poison') {
     // No product rows, yet something went down: the server's applicationMade
     // verdict from typed / specialty treatment evidence (product rows are
     // optional there — Codex r1 #5032), an UNKNOWN verdict (null: the product
@@ -3929,7 +4167,6 @@ function AppliedProductsSection({ data, mode = 'live' }) {
     // (owner 2026-09-26). Poison Control prints on its own; this mount is the
     // one slot both layouts share. The applicator is named only on real
     // application evidence — a station check applied nothing (Codex r4).
-    if (data.applicationMade !== true && data.applicationMade !== null && !reportHasRodenticide(data)) return null;
     return (
       <section data-glass="card" className="sr-section applied-products-section" id="poison-control">
         <h2>Poison Control</h2>
@@ -6386,6 +6623,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
   if (mode === 'sms_preview') return <SmsReportPreview data={data} />;
 
+  // The technician-traced map mount of the V2 lead layouts. A const so the lawn layout
+  // (GATE_LAWN_REPORT_LAYOUT) can place the same element; the standard page prints it where it was.
+  const tracedMapMount = isV2LeadLayout && data.treatmentMap?.traced?.snapshotUrl && (
+    <div id="map">
+      <ServiceCoverageCard
+        coverage={serviceCoverage}
+        evidenceLevel={data.evidenceLevel}
+        mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+        mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+        tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+        tracedVariant={tracedVariantFallback(data.treatmentMap?.traced, data.serviceLine)}
+        live={mode === 'live'}
+        applications={data.applications || []}
+      />
+    </div>
+  );
   return (
     <div className="service-report-v1">
       <style>{`
@@ -9508,7 +9761,44 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             document keeps the legacy section below instead. */}
         <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
-        <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
+        {/* GATE_LAWN_REPORT_LAYOUT: from the status card down to the review ask the page body is the
+            standard one, unless the payload carries the lawn layout key on a live lawn report: then
+            LawnLayoutBody prints the same sections in the phone order (LAYOUT_ORDER), built from the
+            elements in `slots`. LawnLayoutSwitch returns these children unchanged otherwise. The
+            children below are not re-indented, to keep this change reviewable. */}
+        <LawnLayoutSwitch
+          data={data}
+          mode={mode}
+          layout={(
+            <LawnLayoutBody
+              data={data}
+              slots={{
+                status: <LawnStatusCard data={data} mode={mode} layout />,
+                reservice: <ReserviceReportCard data={data} mode={mode} />,
+                plan: <PlanSummaryCard data={data} mode={mode} />,
+                upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
+                newSod: <LawnNewSodCard data={data} mode={mode} />,
+                yourPart: <LawnYourPart data={data} mode={mode} token={token} />,
+                recap: <RecapVideoCard recap={data.recap} token={token} />,
+                recordedFindings: recordedFindingsList,
+                visitSummary: { text: visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary }), sections: reportSections, nextVisitLabel: nextSameServiceLabel },
+                recommendations: <RecommendationsSection data={data} />,
+                tracedMap: tracedMapMount,
+                techNote: <TechNoteCard data={data} mode={mode} />,
+                nearYou: <NearYouCard data={data} mode={mode} />,
+                crossSell: <CrossSellCard data={data} token={token} mode={mode} />,
+                review: <ReviewRequestCard data={data} token={token} mode={mode} placement="lawn-layout" />,
+                referral: <ReferralCard data={data} token={token} mode={mode} />,
+                highlights: <ServiceHighlightsSection moments={orderedProofMoments} />,
+                markedPhotos: <MarkedPhotosSection data={data} mode={mode} />,
+                productsKind: appliedProductsKind(data),
+                poisonNote: <PoisonControlNote data={data} listsProducts showApplicator />,
+                products: <AppliedProductsSection data={data} mode={mode} />,
+              }}
+            />
+          )}
+        >
+        <LawnStatusCard data={data} mode={mode} layout={false} />
 
         {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
             under the visit status, ahead of everything else the customer
@@ -9528,6 +9818,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             <LawnLeadCard lead={data.reportV2.lead} snapshot={data.reportV2.snapshot || {}} style={{ marginTop: 16 }} />
           </LawnPrintContext.Provider>
         )}
+
+        <LawnNewSodCard data={data} mode={mode} style={{ marginTop: 16 }} />
 
         <ReserviceReportCard data={data} mode={mode} />
 
@@ -9832,16 +10124,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             from data.recommendations (protocol recommendations + findings
             recommendations, already banned-copy-screened upstream). Renders
             for every layout — V2 dashboards own the SUMMARY slot, not this. */}
-        {(data.recommendations || []).length > 0 && (
-          <section data-glass="card" className="sr-section" id="recommendations">
-            <h2>What we recommend</h2>
-            <ul style={{ margin: 0, paddingLeft: 20, lineHeight: 1.6 }}>
-              {data.recommendations.map((rec, i) => (
-                <li key={`${i}-${rec}`}>{rec}</li>
-              ))}
-            </ul>
-          </section>
-        )}
+        <RecommendationsSection data={data} />
 
         {/* V2 lead layout (lawn + tree_shrub WITH reportV2) leads with the factual
             record — products applied right after the assessment; the visit
@@ -9864,20 +10147,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             otherwise saved traces would silently vanish from these reports.
             Mutually exclusive with the !isV2LeadLayout mount below, so the
             #map id never duplicates. */}
-        {isV2LeadLayout && data.treatmentMap?.traced?.snapshotUrl && (
-          <div id="map">
-            <ServiceCoverageCard
-              coverage={serviceCoverage}
-              evidenceLevel={data.evidenceLevel}
-              mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
-              mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-              tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={tracedVariantFallback(data.treatmentMap?.traced, data.serviceLine)}
-              live={mode === 'live'}
-              applications={data.applications || []}
-            />
-          </div>
-        )}
+        {tracedMapMount}
 
         {/* Pest V2 reports: the dashboard already tells the findings story —
             the tile card duplicated it ("What we found: German cockroaches")
@@ -10018,9 +10288,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             returns ServiceReportDocument before this tree ever renders, and
             that document draws its own marked-photo block. Both read their
             wording from components/report/markedPhotoCopy.js. */}
-        {(data.markedPhotos || []).map((marked) => (
-          <MarkedPhotoCard key={marked.photoId} marked={marked} live={mode === 'live'} />
-        ))}
+        <MarkedPhotosSection data={data} mode={mode} />
 
         {/* Bait station map (station-map-v1) — live web only; pdf/static have
             no satellite basemap to pin against (provider ToS). Rodent refresh
@@ -10078,44 +10346,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             the isV2LeadLayout mount above; mutually exclusive). */}
         {!isV2LeadLayout && <ReferralCard data={data} token={token} mode={mode} />}
 
-        {orderedProofMoments.length > 0 && (
-          <section data-glass="card" className="sr-section" id="service-highlights">
-            <h2>Service Highlights</h2>
-            <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
-              {visualProofMomentIntro(orderedProofMoments)}
-            </p>
-            <div className="sr-grid-3">
-              {orderedProofMoments.map((moment) => (
-                <div className="sr-cell" key={moment.id}>
-                  {moment.mediaUrl && moment.mediaType === 'video' && (
-                    <video
-                      src={moment.mediaUrl}
-                      controls
-                      style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
-                    />
-                  )}
-                  {moment.mediaUrl && moment.mediaType !== 'video' && (
-                    <img
-                      src={moment.mediaUrl}
-                      alt={moment.tagLabel || 'Service highlight'}
-                      style={{ width: '100%', borderRadius: 6, border: '0.5px solid #d4d4d4' }}
-                    />
-                  )}
-                  <div className="sr-cell-label">{visualProofMomentStage(moment)}</div>
-                  <div className="sr-cell-value">{moment.tagLabel || 'Service highlight'}</div>
-                  {moment.locationArea && (
-                    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4 }}>
-                      {moment.locationArea}
-                    </div>
-                  )}
-                  <div style={{ fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY, marginTop: 8 }}>
-                    {moment.customerCaption || 'Service highlight documented by your technician.'}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+        <ServiceHighlightsSection moments={orderedProofMoments} />
 
         {/* Legacy field photos render each photo with its per-photo vision caption
             (which can over-diagnose). When reportV2 is present, the V2 photo strip
@@ -10142,6 +10373,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
         {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+        </LawnLayoutSwitch>
 
         {/* The Waves blog post picked at completion, at the bottom of the
             report on every layout (live only). */}
@@ -10158,14 +10390,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
             See every product we use and our safety protocol
           </a>.
-          {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
+          {/* GATE_LAWN_REPORT_COPY_FIXES: the sentence and its booking link are the pest program's
+              re-service wording; a lawn report (server sets lawnCopyFixes) prints neither. */}
+          {(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard) && data.lawnCopyFixes !== true ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {/* Pair the sentence with a "book it" path. Server-gated boolean
               only (reserviceEligible) — the standing reservice_token must
               never ride this public, forwardable report payload, so the link
               goes to the AUTHENTICATED portal Schedule tab where the picker
               card renders behind login. Live view only — PDF/static/
               sms_preview keep the print pipeline byte-identical. */}
-          {data.reserviceEligible && mode === 'live' ? (
+          {data.reserviceEligible && mode === 'live' && data.lawnCopyFixes !== true ? (
             <>
               {' '}
               <a href="/?tab=schedule" style={{ color: '#04395E', fontWeight: 600 }}>Book a free re-service in your portal</a>.

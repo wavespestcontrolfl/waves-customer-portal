@@ -81,6 +81,24 @@ function seasonalDipClaimApproved() {
   return approvedSeasonalDipRow() !== null;
 }
 
+// GATE_LAWN_REPORT_COPY_FIXES: the seasonal color lines print only when the visit month is in
+// the cool season this module defines (shoulder and dormant) AND the overall score did not rise.
+// "Did not rise" is against the prior visit and, when the line compares against a base visit,
+// against that base too. A score that is not known can not prove it, so no line (fail closed).
+function seasonalColorLineAllowed({ month, currentScore, priorScore, baseScore } = {}) {
+  const m = Number(month);
+  if (!Number.isInteger(m) || m < 1 || m > 12 || !isCoolSeason(getSeason(m))) return false;
+  const cur = Number(currentScore);
+  const prior = Number(priorScore);
+  if (currentScore == null || priorScore == null || !Number.isFinite(cur) || !Number.isFinite(prior)) return false;
+  if (cur > prior) return false;
+  if (baseScore !== undefined) {
+    const base = Number(baseScore);
+    if (baseScore === null || !Number.isFinite(base) || cur > base) return false;
+  }
+  return true;
+}
+
 // When two compared visits fall in different seasons, surface that the difference is
 // largely seasonal so the before/after wipe + trend never imply decline from dormancy.
 function crossSeasonNote(dateA, dateB) {
@@ -104,6 +122,8 @@ function crossSeasonNoteFromSeasons(seasonA, seasonB) {
 
 module.exports = {
   approvedSeasonalDipRow,
+  isCoolSeason,
+  seasonalColorLineAllowed,
   getSeason,
   seasonOfDate,
   dormancyPressure,

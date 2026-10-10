@@ -178,6 +178,78 @@ function hasNameEmailMismatch(caller = {}) {
   return false;
 }
 
+function editDistance(a, b) {
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diagonal = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const above = prev[j];
+      prev[j] = Math.min(above + 1, prev[j - 1] + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diagonal = above;
+    }
+  }
+  return prev[b.length];
+}
+
+// The model sometimes "corrects" an email that the caller only SAID so that it matches
+// the name the caller SPELLED: the transcript reads "<word> at outlook.com", the spelled
+// surname is one letter away from <word>, and the extraction carries the surname as the
+// email. hasNameEmailMismatch then sees a name and an email that agree, and the conflict
+// the transcript holds never reaches the office. On the reviewed call that showed this,
+// gpt-5.6-sol made the change in about half of its runs, and three prompt wordings (keep
+// the email as heard / use the spelled name / both with the example rewritten) did not
+// make it choose one way (3 to 5 of 8 runs each, 2026-10-09). So the server reads the
+// transcript.
+//
+// True only when ALL hold:
+//   - the transcript says the email's domain after a single word ("<word> at outlook",
+//     "<word>@outlook") at least once;
+//   - the extracted local part is NOT what stands before the domain in any of those
+//     places. Letters and digits are compared with everything else removed, so an email
+//     spelled letter by letter ("j, a, n, e at ...") counts as said;
+//   - one of those words is 1 or 2 letters away from the extracted local part, and the
+//     change is what made the email agree with the name: the extracted local part
+//     holds a caller name token that the said word does not hold.
+// The model stays free to build an email from spelled letters, from phonetic markers
+// and from "my first name dot my last name": none of those leaves a near-identical
+// word before the domain. A local part that only adds letters around the said word
+// ("j" + "smith") is not a rewrite either. Without a transcript the answer is false.
+// Measured on 60 days of stored calls (151 with an email, 2026-10-09): it fires on 2.
+// Wide enough for a surname spelled with a marker word on every letter.
+const EMAIL_SAID_CONTEXT_CHARS = 400;
+const PHONETIC_MARKER_RE = /\b([a-z0-9])[\s,]+(?:as in|like in|as|like|for)\s+[a-z]+\b[\s,.]*/g;
+function emailRewrittenFromSpoken(caller = {}, transcript = '') {
+  const email = String(caller.email || '').toLowerCase();
+  const at = email.indexOf('@');
+  if (at < 1 || !transcript) return false;
+  const local = email.slice(0, at).replace(/[^a-z0-9]/g, '');
+  const domainLabel = email.slice(at + 1).split('.')[0].replace(/[^a-z0-9-]/g, '');
+  if (local.length < 4 || domainLabel.length < 2) return false;
+  const nameTokens = [caller.first_name, caller.last_name, caller.name_full]
+    .filter(Boolean)
+    .flatMap((n) => String(n).toLowerCase().split(/\s+/))
+    .map((t) => t.replace(/[^a-z]/g, ''))
+    .filter((t) => t.length >= 3 && local.includes(t));
+  if (nameTokens.length === 0) return false;
+
+  const text = String(transcript).toLowerCase();
+  const saidDomain = new RegExp(`(?:@|\\bat\\s+)${domainLabel}\\b`, 'g');
+  let sawNearWord = false;
+  for (let m = saidDomain.exec(text); m; m = saidDomain.exec(text)) {
+    const rawBefore = text.slice(Math.max(0, m.index - EMAIL_SAID_CONTEXT_CHARS), m.index);
+    // "H as in hotel", "b like in boy", "v for victor": keep the letter, drop the marker
+    // word, so a phonetic spelling counts as said (codex #6247 r1 P2).
+    const before = rawBefore.replace(PHONETIC_MARKER_RE, '$1 ');
+    if (before.replace(/[^a-z0-9]/g, '').endsWith(local)) return false;
+    const word = (rawBefore.trim().split(/\s+/).pop() || '').replace(/[^a-z0-9]/g, '');
+    if (word.length < 4 || local.includes(word) || word.includes(local)) continue;
+    const distance = editDistance(word, local);
+    if (distance >= 1 && distance <= 2 && nameTokens.some((t) => !word.includes(t))) sawNearWord = true;
+  }
+  return sawNearWord;
+}
+
 // Normalized lookup: lowercase, " county" suffix stripped, whitespace collapsed.
 const SERVICE_AREA_COUNTIES_NORMALIZED = new Set(
   [...SERVICE_AREA_COUNTIES].map((c) => normalizeCounty(c))
@@ -513,7 +585,7 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('callback_number_needed');
   }
 
-  if (hasNameEmailMismatch(caller)) {
+  if (hasNameEmailMismatch(caller) || emailRewrittenFromSpoken(caller, opts.transcript)) {
     flags.push('name_email_mismatch');
   }
 
@@ -3291,6 +3363,7 @@ module.exports = {
   FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,
+  emailRewrittenFromSpoken,
   isDialablePhone,
   SERVICE_AREA_COUNTIES,
   normalizeCounty,

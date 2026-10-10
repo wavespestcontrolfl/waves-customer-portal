@@ -30,7 +30,7 @@
 // chosen by code from facts; no model; no re-entry or "keep off" wording.
 
 // The checkpoint label uses the same day/time formatter as waterInByLabel.
-const { _private: { formatWhen } } = require('./lawn-watering-instruction');
+const { formatInches, _private: { formatWhen } } = require('./lawn-watering-instruction');
 
 const HOUR_MS = 3600000;
 // Whole-day MRMS totals are labelled by calendar day; an hour of slack at each
@@ -56,16 +56,6 @@ function toMs(value) {
   if (value == null || value === '') return NaN;
   const t = value instanceof Date ? value.getTime() : Date.parse(value);
   return Number.isFinite(t) ? t : NaN;
-}
-
-// "¼ inch", "½ inch", "0.27 inch", "1 inch", "1.5 inches": exact quarter
-// fractions in words, otherwise up to two decimals. Singular up to one inch.
-function formatInches(value) {
-  const n = Math.round(Number(value) * 100) / 100;
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const quarters = { 0.25: '¼', 0.5: '½', 0.75: '¾' };
-  const text = quarters[n] || String(n);
-  return `${text} ${n <= 1 ? 'inch' : 'inches'}`;
 }
 
 // The fixed sentences. Every number is in inches; none is a probability.

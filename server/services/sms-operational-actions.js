@@ -986,7 +986,8 @@ function obligationWords(row, message) {
 // Thai, ...) get no edge check. Script_Extensions, not Script: shared marks
 // such as the kana prolonged-sound mark ー are Common by Script.
 const LETTER = /[\p{L}\p{N}\p{M}]/u;
-const UNSPACED = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]/u;
+const UNSPACED_SRC = '[\\p{scx=Han}\\p{scx=Hiragana}\\p{scx=Katakana}\\p{scx=Hangul}\\p{scx=Thai}\\p{scx=Lao}\\p{scx=Khmer}\\p{scx=Myanmar}]';
+const UNSPACED = new RegExp(UNSPACED_SRC, 'u');
 // The edge's base character: the first one, or the last one before any
 // trailing combining marks.
 function needsEdge(chars) {
@@ -998,16 +999,29 @@ function matchedSlice(rawQuote, description) {
   if (!LETTER.test(part)) return null;
   const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
   const chars = [...part];
-  const lead = needsEdge(chars) ? '(?<![\\p{L}\\p{N}\\p{M}_])' : '';
-  const tail = needsEdge([...chars].reverse()) ? '(?![\\p{L}\\p{N}\\p{M}_])' : '';
+  // An edge only rejects a neighbour from a SPACED script: a Japanese or
+  // Korean ending attached to a Latin word (PDFを) is still a word break.
+  const lead = needsEdge(chars) ? `(?<!(?!${UNSPACED_SRC})[\\p{L}\\p{N}\\p{M}_])` : '';
+  const tail = needsEdge([...chars].reverse()) ? `(?!(?!${UNSPACED_SRC})[\\p{L}\\p{N}\\p{M}_])` : '';
   const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(rawQuote);
   return found ? found[0] : null;
+}
+// Is the matched text one plain phrase? Judged on the ORIGINAL words, before
+// redaction rewrites them. Only two periods are allowed: inside an email
+// address (lowercase domain, so "a@b.com.Then" still ends a sentence) and
+// between two digits (2.5). Every other period, including a bare domain
+// (example.com is a URL the alert rules mean to keep out), and any ! ? or
+// CJK sentence ender, is a break.
+const EMAIL_TOKEN = /[\p{L}\p{N}._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gu;
+function isPlainPhrase(raw) {
+  const rest = raw.replace(/[.!?。！？]+$/u, '').replace(EMAIL_TOKEN, '').replace(/(?<=\p{N})\.(?=\p{N})/gu, '');
+  return !/[.!?。！？]/u.test(rest);
 }
 function headlineWords(quote, rawQuote, description, redact) {
   const compose = require('./admin-alert-compose');
   const raw = matchedSlice(rawQuote, description);
-  const slice = raw && redact(raw).replace(/\s+/g, ' ').trim();
-  if (slice && !/[.!?。！？]/u.test(slice) && !compose.breaksAlertRules(slice)) return slice;
+  const slice = raw && isPlainPhrase(raw) && redact(raw).replace(/\s+/g, ' ').trim().replace(/[.!?。！？]+$/u, '');
+  if (slice && !compose.breaksAlertRules(slice)) return slice;
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }
 

@@ -111,6 +111,30 @@ describe('PickerBestTimes ordering', () => {
   });
 });
 
+describe('PickerBestTimes rain tier (GATE_CUSTOMER_RAIN_RANK)', () => {
+  it('a recommendation with a display_tier sorts after the others, even when it is nearby with the best rank', () => {
+    const slots = [
+      { start_time: '08:00', start_label: '8:00 AM', nearby: false, rank: 3 },
+      { start_time: '10:00', start_label: '10:00 AM', nearby: false, rank: 2 },
+      // Wet hour: nearby and rank 1, but the server ranked it last for rain.
+      { start_time: '14:00', start_label: '2:00 PM', nearby: true, rank: 1 },
+    ];
+    const day = { ...DAY, slots };
+    render(
+      <SchedulePicker
+        availability={{ days: [day] }}
+        rankedSlots={slots.map((s) => ({ date: day.date, start_time: s.start_time, ...(s.start_time === '14:00' ? { display_tier: 2 } : {}) }))}
+        selectedDate={day.date}
+        onSelectDay={() => {}}
+        selectedSlot={null}
+        onSelectSlot={() => {}}
+      />,
+    );
+    const chips = screen.getAllByRole('button', { name: /Pick/ }).map((b) => b.textContent);
+    expect(chips.map((t) => t.match(/\d{1,2}:\d{2} [AP]M/)[0])).toEqual(['10:00 AM', '8:00 AM', '2:00 PM']);
+  });
+});
+
 describe('pickerRange', () => {
   it('starts the grid at a first opening that sits past the two-week window', () => {
     // A picked date 15 days out must not draw two weeks of empty cells first.

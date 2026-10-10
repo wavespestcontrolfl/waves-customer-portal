@@ -247,9 +247,17 @@ test('geometry writes (creates AND moves) take the per-customer advisory lock; s
   });
   await upsertStationsForCustomer(db, {
     customerId: CUSTOMER,
-    entries: [{ id: 'st-1', status: 'ok' }, { id: 'st-1x', retire: true }],
+    entries: [{ id: 'st-1', status: 'ok' }],
   });
   expect(state.rawCalls).toHaveLength(0);
+  // A retire changes the roster, so it takes the lock too (a station sheet
+  // completion holds it from its roster check to its commit).
+  await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [{ id: 'st-1x', retire: true }],
+  });
+  expect(state.rawCalls).toHaveLength(1);
+  state.rawCalls.length = 0;
   await upsertStationsForCustomer(db, {
     customerId: CUSTOMER,
     entries: [{ shape: pin(0.6, 0.6) }],

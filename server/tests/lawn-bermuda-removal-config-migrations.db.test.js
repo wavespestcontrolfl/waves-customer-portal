@@ -1,0 +1,480 @@
+/**
+ * Lawn bermuda removal, follow-up data migrations on a PostgreSQL built from migrations:
+ *   20261006220000 backfills the watering rule for Recognition and Fusilade II catalog rows
+ *   that did not exist when 20261006200000 ran.
+ *   20261006220100 seeds lawn_pricing_v2.bermudaSuppression.cost when absent, deep-merged.
+ * Every test runs in a transaction that is rolled back.
+ */
+const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
+
+describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
+  const db = require('../models/db');
+  const wateringBackfill = require('../models/migrations/20261006220000_watering_rule_bermuda_removal_backfill');
+  const watering = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
+  const recognitionIngredient = require('../models/migrations/20261006220400_bermuda_recognition_active_ingredient');
+  const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
+  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const mowHold = require('../models/migrations/20261006220800_bermuda_mow_hold_days');
+  const { _private: { buildMowHold } } = require('../services/service-report/lawn-watering-instruction');
+  const { approvedReportProductFacts } = require('../services/service-report/report-data');
+  const fusiladeRate = require('../models/migrations/20261006220700_bermuda_fusilade_default_rate_null');
+  const aliasBackfill = require('../models/migrations/20261006220500_watering_rule_bermuda_removal_alias_backfill');
+  const zoysiaNote = require('../models/migrations/20261006220600_bermuda_zoysia_2ee_note');
+  const surfactantToken = require('../models/migrations/20261006220300_bermuda_surfactant_unit_token');
+  const unitToken = require('../models/migrations/20261006220200_bermuda_fusilade_unit_token');
+  const RATE_UNITS = require('../../shared/rate-units.json');
+  const pricingSeed = require('../models/migrations/20261006220100_lawn_pricing_bermuda_cost_seed');
+  const ROLLBACK = new Error('rollback');
+  const rolledBack = (run) => db.transaction(async (trx) => { await run(trx); throw ROLLBACK; }).catch((err) => { if (err !== ROLLBACK) throw err; });
+  afterAll(() => db.destroy());
+
+  describe('20261006220000 watering backfill', () => {
+    const NAMES = watering.ITEMS.map((item) => item.name);
+    const row = (trx, name) => trx('products_catalog').where({ name }).first('post_application_watering');
+    const parsed = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
+
+    test('a catalog row added after 20261006200000 gets the same rule; filled rows are never touched; audited; idempotent; down is a no-op', async () => {
+      await rolledBack(async (trx) => {
+        // The two rows exist (20261006190400) with no rule: 200000 ran before they did.
+        await trx('products_catalog').whereIn('name', NAMES).update({ post_application_watering: null });
+        const audits = () => trx('audit_log').where({ action: 'migration:20261006220000_watering_rule_bermuda_removal_backfill:seeded' });
+        // An admin-filled row stays as it is.
+        const adminRule = { mode: 'water_in', hold_hours: 0, source: 'admin' };
+        await trx('products_catalog').where({ name: NAMES[1] }).update({ post_application_watering: JSON.stringify(adminRule) });
+        await wateringBackfill.up(trx);
+        expect(parsed((await row(trx, NAMES[0])).post_application_watering)).toEqual(watering.RULE);
+        expect(parsed((await row(trx, NAMES[0])).post_application_watering)).toMatchObject({ mode: 'hold', hold_hours: 3, source: 'owner' });
+        expect(parsed((await row(trx, NAMES[1])).post_application_watering)).toEqual(adminRule);
+        expect(await audits()).toHaveLength(1);
+        // Idempotent: nothing more is written.
+        await wateringBackfill.up(trx);
+        expect(await audits()).toHaveLength(1);
+        // Down changes nothing.
+        await wateringBackfill.down(trx);
+        expect(parsed((await row(trx, NAMES[0])).post_application_watering)).toEqual(watering.RULE);
+        // The second row, empty, is filled by the same rule.
+        await trx('products_catalog').where({ name: NAMES[1] }).update({ post_application_watering: null });
+        await wateringBackfill.up(trx);
+        expect(parsed((await row(trx, NAMES[1])).post_application_watering)).toEqual(watering.RULE);
+      });
+    });
+  });
+
+  describe('20261006220200 Fusilade II unit token', () => {
+    const FUS = 'Fusilade II Post Emergent Liquid Herbicide';
+    const REC = 'Recognition Post Emergent Herbicide';
+
+    test('on a database built from migrations alone, both catalog rows carry unit tokens every completion accepts, so the mix records with no unit edit', async () => {
+      const rows = await db('products_catalog').whereIn('name', [REC, FUS]).select('name', 'rate_unit', 'cost_unit', 'inventory_unit');
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        for (const unit of [row.rate_unit, row.cost_unit, row.inventory_unit].filter(Boolean)) expect(RATE_UNITS).toContain(unit);
+      }
+      expect(rows.find((row) => row.name === FUS).rate_unit).toBe('fl_oz');
+      expect(rows.find((row) => row.name === REC).rate_unit).toBe('oz');
+    });
+
+    test('changes only a row 190400 created and only while it is exactly "fl oz"; audited; down puts it back only while unedited; idempotent', async () => {
+      await rolledBack(async (trx) => {
+        const unit = async () => (await trx('products_catalog').where({ name: FUS }).first('rate_unit')).rate_unit;
+        const audits = async () => (await trx('audit_log').where({ action: 'migration:20261006220200_bermuda_fusilade_unit_token:seeded' })).length;
+        // The state 190400 left: 'fl oz'.
+        await trx('products_catalog').where({ name: FUS }).update({ rate_unit: 'fl oz' });
+        const before = await audits();
+        await unitToken.up(trx);
+        expect(await unit()).toBe('fl_oz');
+        expect(await audits()).toBe(before + 1);
+        await unitToken.up(trx);
+        expect(await audits()).toBe(before + 1);
+        // Down restores only what it changed.
+        await unitToken.down(trx);
+        expect(await unit()).toBe('fl oz');
+        await unitToken.down(trx);
+        expect(await unit()).toBe('fl oz');
+        // An edited unit is left alone by up (an admin chose 'ml') and by a later down.
+        await unitToken.up(trx);
+        await trx('products_catalog').where({ name: FUS }).update({ rate_unit: 'ml' });
+        await unitToken.down(trx);
+        expect(await unit()).toBe('ml');
+        // A row 190400 did not create is never touched: a catalog row with no seeding audit keeps 'fl oz'.
+        await trx('audit_log').where({ action: 'migration:20261006190400_lawn_bermuda_removal_catalog:seeded', resource_type: 'products_catalog' }).del();
+        await trx('products_catalog').where({ name: FUS }).update({ rate_unit: 'fl oz' });
+        await unitToken.up(trx);
+        expect(await unit()).toBe('fl oz');
+      });
+    });
+  });
+
+  describe('20261006220300 surfactant unit token', () => {
+    const NIS = 'LESCO 90/10 Nonionic Surfactant';
+    const SEEDED = 'migration:20261006220300_bermuda_surfactant_unit_token:seeded';
+    const REVERTED = 'migration:20261006220300_bermuda_surfactant_unit_token:reverted';
+    const NAMES = ['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide', NIS];
+
+    test('on a database built from migrations alone, all three products of the mix carry unit tokens every completion accepts, so the mix records with no unit edit', async () => {
+      const rows = await db('products_catalog').whereIn('name', NAMES).select('name', 'rate_unit', 'cost_unit', 'inventory_unit');
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        for (const unit of [row.rate_unit, row.cost_unit, row.inventory_unit].filter(Boolean)) expect(RATE_UNITS).toContain(unit);
+      }
+      expect(rows.find((row) => row.name === NIS).rate_unit).toBe('fl_oz');
+    });
+
+    test('changes only the row 20261005130000 created and nobody touched; audit is append-only; down appends a rollback event per original and restores only what still holds fl_oz', async () => {
+      await rolledBack(async (trx) => {
+        const row = () => trx('products_catalog').where({ name: NIS }).first('rate_unit', 'label_source_note');
+        const events = (action) => trx('audit_log').where({ action });
+        // The state 20261005130000 left.
+        await trx('products_catalog').where({ name: NIS }).update({ rate_unit: 'fl oz' });
+        const seededBefore = (await events(SEEDED)).length;
+        const original = (await events(SEEDED)).map((event) => event.id);
+        await surfactantToken.up(trx);
+        expect((await row()).rate_unit).toBe('fl_oz');
+        const seeded = await events(SEEDED);
+        expect(seeded).toHaveLength(seededBefore + 1);
+        const mine = seeded.find((event) => !original.includes(event.id));
+        // Idempotent.
+        await surfactantToken.up(trx);
+        expect(await events(SEEDED)).toHaveLength(seededBefore + 1);
+        // Down: a rollback event is appended and the original event is left exactly as it was.
+        const revertedBefore = (await events(REVERTED)).length;
+        await surfactantToken.down(trx);
+        expect((await row()).rate_unit).toBe('fl oz');
+        const reverted = await events(REVERTED);
+        // One rollback event per original event (this run's, and the one the real migration run wrote).
+        expect(reverted).toHaveLength(revertedBefore + original.length + 1);
+        // The column is restored once; the other original finds it already restored and says so.
+        expect(reverted.find((event) => event.metadata.originalAuditId === mine.id).metadata).toMatchObject({ column: 'rate_unit' });
+        expect(reverted.filter((event) => [mine.id, ...original].includes(event.metadata.originalAuditId)).filter((event) => event.metadata.restored === true)).toHaveLength(1);
+        expect((await trx('audit_log').where({ id: mine.id }).first('action')).action).toBe(SEEDED);
+        // A second down adds nothing.
+        await surfactantToken.down(trx);
+        expect(await events(REVERTED)).toHaveLength(revertedBefore + original.length + 1);
+        // A new up writes a new event; an admin change in between is not restored by the next down.
+        await surfactantToken.up(trx);
+        await trx('products_catalog').where({ name: NIS }).update({ rate_unit: 'ml' });
+        await surfactantToken.down(trx);
+        expect((await row()).rate_unit).toBe('ml');
+        expect((await events(REVERTED)).find((event) => event.metadata.column === 'rate_unit' && event.metadata.restored === false)).toBeTruthy();
+        // Rows without the migration's provenance are never touched: an edited note, an edited unit.
+        await trx('products_catalog').where({ name: NIS }).update({ rate_unit: 'fl oz', label_source_note: 'Verified from the label by the office.' });
+        const count = (await events(SEEDED)).length;
+        await surfactantToken.up(trx);
+        expect((await row()).rate_unit).toBe('fl oz');
+        expect(await events(SEEDED)).toHaveLength(count);
+      });
+    });
+  });
+
+  describe('20261006220400 Recognition active ingredient', () => {
+    const REC = 'Recognition Post Emergent Herbicide';
+    const SEEDED = 'migration:20261006220400_bermuda_recognition_active_ingredient:seeded';
+    const REVERTED = 'migration:20261006220400_bermuda_recognition_active_ingredient:reverted';
+
+    test('on a database built from migrations alone, the Recognition row carries its active ingredient', async () => {
+      const row = await db('products_catalog').where({ name: REC }).first('active_ingredient');
+      expect(row.active_ingredient).toBe('Trifloxysulfuron-sodium 20.4% + metcamifen (safener)');
+    });
+
+    test('fills only an empty field of the row 190400 created; append-only audit; down nulls only while unchanged', async () => {
+      await rolledBack(async (trx) => {
+        const value = async () => (await trx('products_catalog').where({ name: REC }).first('active_ingredient')).active_ingredient;
+        const events = (action) => trx('audit_log').where({ action });
+        const original = (await events(SEEDED)).map((event) => event.id);
+        await trx('products_catalog').where({ name: REC }).update({ active_ingredient: null });
+        await recognitionIngredient.up(trx);
+        expect(await value()).toBe(recognitionIngredient.ACTIVE_INGREDIENT);
+        const seeded = await events(SEEDED);
+        expect(seeded).toHaveLength(original.length + 1);
+        // Idempotent.
+        await recognitionIngredient.up(trx);
+        expect(await events(SEEDED)).toHaveLength(original.length + 1);
+        // Down appends a rollback event per original and leaves the originals as written.
+        await recognitionIngredient.down(trx);
+        expect(await value()).toBeNull();
+        const reverted = await events(REVERTED);
+        expect(reverted).toHaveLength(original.length + 1);
+        expect((await trx('audit_log').whereIn('id', seeded.map((event) => event.id)).select('action')).every((row) => row.action === SEEDED)).toBe(true);
+        await recognitionIngredient.down(trx);
+        expect(await events(REVERTED)).toHaveLength(original.length + 1);
+        // An admin-entered value is never overwritten by up, nor nulled by down.
+        await trx('products_catalog').where({ name: REC }).update({ active_ingredient: 'Verified by the office' });
+        await recognitionIngredient.up(trx);
+        expect(await value()).toBe('Verified by the office');
+        await recognitionIngredient.up(trx);
+        await recognitionIngredient.down(trx);
+        expect(await value()).toBe('Verified by the office');
+      });
+    });
+  });
+
+  describe('the three-product bermuda mix resolves a watering instruction on a migrations-only database', () => {
+    const NAMES = ['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide', 'LESCO 90/10 Nonionic Surfactant'];
+
+    test('the surfactant has its v13 rule, every product resolves a rule, and the mix holds watering for 3 hours', async () => {
+      const rows = await db('products_catalog').whereIn('name', NAMES).select('*');
+      expect(rows).toHaveLength(3);
+      const rules = rows.map((row) => ({ name: row.name, rule: resolveWateringRule(row) }));
+      for (const entry of rules) expect(entry.rule).not.toBeNull();
+      // The surfactant's v13 rule (20261005235500): the herbicide in the mix sets the rule.
+      expect(rules.find((entry) => entry.name === NAMES[2]).rule).toMatchObject({ mode: 'none', source: 'owner' });
+      for (const name of NAMES.slice(0, 2)) expect(rules.find((entry) => entry.name === name).rule).toMatchObject({ mode: 'hold', hold_hours: 3 });
+      // One instruction for the whole mix: skip turf watering until completion + 3 hours.
+      const completedAt = '2026-06-16T14:00:00.000Z';
+      const instruction = buildWateringInstruction({ rules, completedAt });
+      expect(instruction.state).toBe('hold');
+      expect(new Date(instruction.holdUntil).getTime() - new Date(completedAt).getTime()).toBe(3 * 3600 * 1000);
+      expect(instruction.lines[0]).toMatch(/^Skip your turf watering until/);
+    });
+  });
+
+  describe('20261006220500 watering alias backfill', () => {
+    test('fills the empty rule of an alias-linked product the staged bermuda rows point at; never a filled one, never the surfactant; audited; idempotent; down is a no-op', async () => {
+      await rolledBack(async (trx) => {
+        const ruleOf = async (id) => { const r = await trx('products_catalog').where({ id }).first('post_application_watering'); return typeof r.post_application_watering === 'string' ? JSON.parse(r.post_application_watering) : r.post_application_watering; };
+        // An alias-spelled catalog product, linked from the staged Recognition rows (not the exact catalog name).
+        const [aliased] = await trx('products_catalog').insert({ name: 'Recognition 20.4 WG (office spelling)', category: 'herbicide', active: true, rate_unit: 'oz' }).returning('*');
+        await trx('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: 'Recognition Post Emergent Herbicide' }).update({ product_id: aliased.id });
+        const exact = await trx('products_catalog').where({ name: 'Fusilade II Post Emergent Liquid Herbicide' }).first('id');
+        const surfactant = await trx('products_catalog').where({ name: 'LESCO 90/10 Nonionic Surfactant' }).first('id');
+        await trx('products_catalog').where({ id: exact.id }).update({ post_application_watering: JSON.stringify({ mode: 'water_in', source: 'admin' }) });
+        await trx('products_catalog').where({ id: surfactant.id }).update({ post_application_watering: null });
+        const audits = async () => (await trx('audit_log').where({ action: 'migration:20261006220500_watering_rule_bermuda_removal_alias_backfill:seeded' })).length;
+        const before = await audits();
+        await aliasBackfill.up(trx);
+        expect(await ruleOf(aliased.id)).toMatchObject({ mode: 'hold', hold_hours: 3, source: 'owner' });
+        expect(await ruleOf(exact.id)).toEqual({ mode: 'water_in', source: 'admin' });
+        expect(await ruleOf(surfactant.id)).toBeNull();
+        expect(await audits()).toBe(before + 1);
+        await aliasBackfill.up(trx);
+        expect(await audits()).toBe(before + 1);
+        await aliasBackfill.down(trx);
+        expect(await ruleOf(aliased.id)).toMatchObject({ mode: 'hold', hold_hours: 3 });
+      });
+    });
+  });
+
+  describe('20261006220700 Fusilade II default rate', () => {
+    const FUS = 'Fusilade II Post Emergent Liquid Herbicide';
+    const SEEDED = 'migration:20261006220700_bermuda_fusilade_default_rate_null:seeded';
+    const REVERTED = 'migration:20261006220700_bermuda_fusilade_default_rate_null:reverted';
+
+    test('on a migrations-only database the Fusilade II catalog row has no default rate; the staged rows keep the step rate; Recognition is unchanged', async () => {
+      const fus = await db('products_catalog').where({ name: FUS }).first('default_rate_per_1000');
+      expect(fus.default_rate_per_1000).toBeNull();
+      const rec = await db('products_catalog').where({ name: 'Recognition Post Emergent Herbicide' }).first('default_rate_per_1000');
+      expect(Number(rec.default_rate_per_1000)).toBe(0.03);
+      const staged = await db('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: FUS }).select('rate_per_1000');
+      expect(staged.length).toBeGreaterThan(0);
+      expect(staged.every((r) => Number(r.rate_per_1000) === 0.55)).toBe(true);
+    });
+
+    test('nulls only a default still equal to 0.55 on the row 190400 created; append-only audit; down restores only while null', async () => {
+      await rolledBack(async (trx) => {
+        const rate = async () => (await trx('products_catalog').where({ name: FUS }).first('default_rate_per_1000')).default_rate_per_1000;
+        const events = (action) => trx('audit_log').where({ action });
+        const original = (await events(SEEDED)).length;
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: 0.55 });
+        await fusiladeRate.up(trx);
+        expect(await rate()).toBeNull();
+        expect(await events(SEEDED)).toHaveLength(original + 1);
+        await fusiladeRate.up(trx);
+        expect(await events(SEEDED)).toHaveLength(original + 1);
+        // An admin value is never nulled.
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: 0.4 });
+        await fusiladeRate.up(trx);
+        expect(Number(await rate())).toBe(0.4);
+        // Down: restores 0.55 only where still null; appends events, never rewrites.
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: null });
+        const revertedBefore = (await events(REVERTED)).length;
+        await fusiladeRate.down(trx);
+        expect(Number(await rate())).toBe(0.55);
+        expect((await events(REVERTED)).length).toBeGreaterThan(revertedBefore);
+        expect((await events(SEEDED)).length).toBe(original + 1);
+        const after = (await events(REVERTED)).length;
+        await fusiladeRate.down(trx);
+        expect((await events(REVERTED)).length).toBe(after);
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: 0.3 });
+        await fusiladeRate.up(trx);
+        await fusiladeRate.down(trx);
+        expect(Number(await rate())).toBe(0.3);
+      });
+    });
+  });
+
+  describe('20261006220800 mow hold days', () => {
+    const NAMES = ['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide'];
+    const SEEDED = 'migration:20261006220800_bermuda_mow_hold_days:seeded';
+    const hold = async (trx, name) => (await trx('products_catalog').where({ name }).first('mow_hold_days')).mow_hold_days;
+
+    test('on a migrations-only database both herbicides carry a 2-day mow hold and the surfactant none', async () => {
+      for (const name of NAMES) expect(await hold(db, name)).toBe(2);
+      expect(await hold(db, 'LESCO 90/10 Nonionic Surfactant')).toBeNull();
+    });
+
+    test('fills only an empty hold on the products the staged rows link (alias-linked included); never an admin value; audited; idempotent; down is a no-op', async () => {
+      await rolledBack(async (trx) => {
+        const events = () => trx('audit_log').where({ action: SEEDED });
+        const original = (await events()).length;
+        // An alias-spelled Recognition linked from the staged rows, and an admin-set hold on Fusilade II.
+        const [aliased] = await trx('products_catalog').insert({ name: 'Recog 20.4 WG (office)', category: 'herbicide', active: true, rate_unit: 'oz' }).returning('*');
+        await trx('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: NAMES[0] }).update({ product_id: aliased.id });
+        await trx('products_catalog').where({ name: NAMES[0] }).update({ mow_hold_days: null });
+        await trx('products_catalog').where({ name: NAMES[1] }).update({ mow_hold_days: 5 });
+        await mowHold.up(trx);
+        expect((await trx('products_catalog').where({ id: aliased.id }).first('mow_hold_days')).mow_hold_days).toBe(2);
+        expect(await hold(trx, NAMES[1])).toBe(5);
+        expect((await events()).length).toBe(original + 1);
+        await mowHold.up(trx);
+        expect((await events()).length).toBe(original + 1);
+        await mowHold.down(trx);
+        expect((await trx('products_catalog').where({ id: aliased.id }).first('mow_hold_days')).mow_hold_days).toBe(2);
+      });
+    });
+
+    test('the customer report states it: the frozen product fact is 2 days and the aftercare line says 2 days after treatment', async () => {
+      const row = await db('products_catalog').where({ name: NAMES[0] }).first();
+      // The report facts builder reads the catalog column: once the product is approved for service reports it freezes mowHoldDays.
+      const facts = approvedReportProductFacts({ ...row, approved_for_service_report: true });
+      expect(facts).toBeTruthy();
+      expect(facts.mowHoldDays).toBe(2);
+      const completedAt = '2026-06-16T14:00:00.000Z';
+      const hold2 = buildMowHold([{ mowHoldDays: 2 }, { mowHoldDays: null }], completedAt);
+      expect(hold2).toMatchObject({ days: 2 });
+      expect(hold2.line).toMatch(/Mowing: hold off until .*, 2 days after today's treatment\./);
+      expect(new Date(hold2.untilAt).getTime() - new Date(completedAt).getTime()).toBeGreaterThanOrEqual(2 * 24 * 3600 * 1000);
+    });
+  });
+
+  describe('20261006220600 Zoysia 2(ee) note', () => {
+    const SEEDED = 'migration:20261006220600_bermuda_zoysia_2ee_note:seeded';
+    const REVERTED = 'migration:20261006220600_bermuda_zoysia_2ee_note:reverted';
+    const noted = (trx) => trx('lawn_protocol_products as p')
+      .join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+      .join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+      .whereRaw("p.gates->>'bermudaRemoval' = 'true'")
+      .select('l.protocol_key', 'w.window_key', knex2(trx));
+    const knex2 = (trx) => trx.raw("jsonb_exists(p.gates, 'zoysia2eeOnHand') as noted");
+
+    test('on a migrations-only database the Zoysia April and June rows (all three lines) carry the key and no St. Augustine row does', async () => {
+      const rows = await noted(db);
+      const zoysia = rows.filter((r) => r.protocol_key === 'swfl_zoysia_10_10');
+      const staug = rows.filter((r) => r.protocol_key === 'swfl_st_augustine_10_10');
+      expect(zoysia).toHaveLength(6);
+      expect(zoysia.every((r) => r.noted)).toBe(true);
+      expect(new Set(zoysia.map((r) => r.window_key))).toEqual(new Set(['apr_v13_spreader_feeding', 'jun_v13_hose_blackout']));
+      expect(staug).toHaveLength(6);
+      expect(staug.some((r) => r.noted)).toBe(false);
+    });
+
+    test('appends only where absent, other gate keys kept; append-only audit; down removes only what it added', async () => {
+      await rolledBack(async (trx) => {
+        const events = (action) => trx('audit_log').where({ action });
+        const zoysiaRows = () => trx('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+          .where('l.protocol_key', 'swfl_zoysia_10_10').whereRaw("p.gates->>'bermudaRemoval' = 'true'").select('p.id', 'p.gates');
+        const original = (await events(SEEDED)).map((e) => e.id);
+        // Strip the key from one row and an admin-set value onto another (kept as it is).
+        const [first, second] = await zoysiaRows();
+        await trx('lawn_protocol_products').where({ id: first.id }).update({ gates: trx.raw("gates - 'zoysia2eeOnHand'") });
+        const keptBefore = (await zoysiaRows()).find((r) => r.id === second.id).gates;
+        await zoysiaNote.up(trx);
+        const after = await zoysiaRows();
+        expect(after.every((r) => r.gates.zoysia2eeOnHand === true)).toBe(true);
+        expect(after.find((r) => r.id === first.id).gates).toMatchObject({ bermudaRemoval: true, activelyGrowingOnly: true });
+        expect(after.find((r) => r.id === second.id).gates).toEqual(keptBefore);
+        const seeded = await events(SEEDED);
+        expect(seeded).toHaveLength(original.length + 1);
+        await zoysiaNote.up(trx);
+        expect(await events(SEEDED)).toHaveLength(original.length + 1);
+        // Down appends a rollback event per original and leaves the originals as written.
+        await zoysiaNote.down(trx);
+        expect((await zoysiaRows()).some((r) => r.gates.zoysia2eeOnHand)).toBe(false);
+        expect((await events(REVERTED)).length).toBeGreaterThanOrEqual(original.length + 1);
+        expect((await trx('audit_log').whereIn('id', seeded.map((e) => e.id)).select('action')).every((r) => r.action === SEEDED)).toBe(true);
+        // A second down adds nothing; St. Augustine rows are untouched throughout.
+        const reverted = (await events(REVERTED)).length;
+        await zoysiaNote.down(trx);
+        expect((await events(REVERTED)).length).toBe(reverted);
+        const staug = await trx('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+          .where('l.protocol_key', 'swfl_st_augustine_10_10').whereRaw("p.gates->>'bermudaRemoval' = 'true'").select('p.gates');
+        expect(staug.some((r) => 'zoysia2eeOnHand' in r.gates)).toBe(false);
+      });
+    });
+  });
+
+  describe('20261006220100 lawn pricing cost seed', () => {
+    const CHANGELOG_SUMMARY = 'Lawn bermuda removal step cost seeded into lawn_pricing_v2 (code defaults, DB-tunable).';
+    const read = async (trx) => {
+      const found = await trx('pricing_config').where({ config_key: 'lawn_pricing_v2' }).first('data');
+      return found ? (typeof found.data === 'string' ? JSON.parse(found.data) : found.data) : null;
+    };
+    const write = (trx, data) => trx('pricing_config').where({ config_key: 'lawn_pricing_v2' }).update({ data: JSON.stringify(data) });
+    const ensureRow = async (trx) => {
+      if (!(await trx('pricing_config').where({ config_key: 'lawn_pricing_v2' }).first('config_key'))) {
+        await trx('pricing_config').insert({ config_key: 'lawn_pricing_v2', name: 'Lawn Pricing V2', category: 'lawn', sort_order: 4, data: JSON.stringify({}) });
+      }
+    };
+    // The migration already ran on this database (it may have written its own audit row): count the delta.
+    const audits = async (trx) => (await trx('pricing_config_audit').where({ config_key: 'lawn_pricing_v2', changed_by: 'migration:20261006220100' })).length;
+
+    test('adds the cost block under bermudaSuppression and keeps every other key; audited and logged; idempotent', async () => {
+      await rolledBack(async (trx) => {
+        await ensureRow(trx);
+        const before = { programMinimumMonthly: 0, tiers: { standard: { hidden: true } }, bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 }, adminOnlyKey: { nested: [1, 2] } };
+        await write(trx, before);
+        const auditsBefore = await audits(trx);
+        const changelogBefore = (await trx('pricing_changelog').where({ summary: CHANGELOG_SUMMARY })).length;
+        await pricingSeed.up(trx);
+        expect(await read(trx)).toEqual({ ...before, bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2, cost: pricingSeed.DEFAULT_COST } });
+        expect(pricingSeed.DEFAULT_COST).toEqual({ recognitionPer1000: 2.82, fusiladePer1000: 1.61, surfactantPer1000: 0.07, mixMinutes: 10, minutesPer1000: 2.5 });
+        expect(await audits(trx)).toBe(auditsBefore + 1);
+        const [latest] = await trx('pricing_config_audit').where({ config_key: 'lawn_pricing_v2', changed_by: 'migration:20261006220100' }).orderBy('id', 'desc').limit(1);
+        expect(JSON.parse(typeof latest.old_value === 'string' ? latest.old_value : JSON.stringify(latest.old_value))).toEqual(before);
+        // One changelog entry exists (the migration's own run wrote it; a repeat never adds a second).
+        expect(changelogBefore + (await trx('pricing_changelog').where({ summary: CHANGELOG_SUMMARY })).length).toBeGreaterThanOrEqual(1);
+        expect(await trx('pricing_changelog').where({ summary: CHANGELOG_SUMMARY })).toHaveLength(1);
+        // Idempotent: a second up writes nothing.
+        await pricingSeed.up(trx);
+        expect(await audits(trx)).toBe(auditsBefore + 1);
+      });
+    });
+
+    test('a row with no bermudaSuppression key gets one holding only the cost; an admin-edited cost block is left alone', async () => {
+      await rolledBack(async (trx) => {
+        await ensureRow(trx);
+        await write(trx, { tiers: {} });
+        await pricingSeed.up(trx);
+        expect(await read(trx)).toEqual({ tiers: {}, bermudaSuppression: { cost: pricingSeed.DEFAULT_COST } });
+        const edited = { bermudaSuppression: { cost: { recognitionPer1000: 3.82 } } };
+        await write(trx, edited);
+        await pricingSeed.up(trx);
+        expect(await read(trx)).toEqual(edited);
+      });
+    });
+
+    test('no lawn_pricing_v2 row: nothing is written', async () => {
+      await rolledBack(async (trx) => {
+        await trx('pricing_config').where({ config_key: 'lawn_pricing_v2' }).del();
+        const auditsBefore = await audits(trx);
+        await pricingSeed.up(trx);
+        expect(await read(trx)).toBeNull();
+        expect(await audits(trx)).toBe(auditsBefore);
+      });
+    });
+
+    test('down removes the cost key only while it still equals the defaults', async () => {
+      await rolledBack(async (trx) => {
+        await ensureRow(trx);
+        await write(trx, { bermudaSuppression: { perAppBase: 15 } });
+        await pricingSeed.up(trx);
+        await pricingSeed.down(trx);
+        expect(await read(trx)).toEqual({ bermudaSuppression: { perAppBase: 15 } });
+        // An edited block stays.
+        const edited = { bermudaSuppression: { perAppBase: 15, cost: { ...pricingSeed.DEFAULT_COST, mixMinutes: 20 } } };
+        await write(trx, edited);
+        await pricingSeed.down(trx);
+        expect(await read(trx)).toEqual(edited);
+      });
+    });
+  });
+});

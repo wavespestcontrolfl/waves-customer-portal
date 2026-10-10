@@ -67,6 +67,20 @@ function resolveDateLockDenial(service, ctx, dateStr) {
   return null;
 }
 
+// A visit a person took out of auto-dispatch, whatever its date or pin: staff
+// locked or excluded it, or the customer confirmed it. The ONE rule for the
+// eligibility check and for the missing-pin notice, which is moot for such a
+// visit (Codex #6208 r21, r24 P2). Returns the denial, or null.
+function heldOutOfAutoDispatch(service) {
+  if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
+  if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
+  // Any visit the customer confirmed holds its day and time (owner
+  // 2026-10-09; before, only a due-date occurrence was held, and two
+  // confirmed visits moved silently in one week).
+  if (service.customer_confirmed === true) return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this visit');
+  return null;
+}
+
 function isEligibleForAutoDispatch(service, ctx = {}) {
   if (!service) return deny('NOT_FOUND', 'Service row missing');
 
@@ -85,12 +99,8 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
     return deny(STATUS_REASON[status] || 'INVALID_STATUS', `Status '${status}' is not auto-dispatchable`);
   }
 
-  if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
-  if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
-
-  if (service.recurring_dispatch_due_date && service.customer_confirmed === true) {
-    return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this recurring occurrence');
-  }
+  const held = heldOutOfAutoDispatch(service);
+  if (held) return held;
 
   const dateStr = toDateStr(service.scheduled_date) || '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return deny('INVALID_DATE', 'Missing/invalid scheduled_date');
@@ -143,6 +153,29 @@ async function isRecurringPlanActive(service, db) {
   return { active: true, reason_code: null, reason_description: null };
 }
 
+// The same signal for MANY visits in one read: the `customer:series` keys
+// that carry an unresolved plan_lapsed alert (planKey of each). A scan over a
+// long horizon must not make one round trip per series (Codex #6208 r21 P2).
+// Fails open like the single check: an unreadable table lapses nothing.
+function planKey(service) {
+  return `${service.customer_id}:${service.recurring_parent_id || service.id}`;
+}
+
+async function lapsedPlanKeys(services, db) {
+  const parentIds = [...new Set(services.map((s) => s.recurring_parent_id || s.id).filter(Boolean))];
+  if (!parentIds.length) return new Set();
+  try {
+    const alerts = await db('recurring_plan_alerts')
+      .whereIn('recurring_parent_id', parentIds)
+      .where('alert_type', 'plan_lapsed')
+      .whereNull('resolved_at')
+      .select('recurring_parent_id', 'customer_id');
+    return new Set(alerts.map((a) => `${a.customer_id}:${a.recurring_parent_id}`));
+  } catch (_) {
+    return new Set();
+  }
+}
+
 /**
  * Did a person put this visit on its current date? The series-move text says
  * "visits already on your calendar won't change unless we talk with you
@@ -190,11 +223,33 @@ function personExceptionAt(service) {
   return Number.isNaN(at.getTime()) ? null : at;
 }
 
-async function isPersonPlacedVisit(service, db) {
-  const dateStr = toDateStr(service.scheduled_date);
-  if (!service.id || !dateStr) return { placed: false };
-  if (service.recurring_dispatch_due_date && !service.window_start) return { placed: false };
+// opts.refresh: re-read the row's own staff lock and date-exception columns
+// through `db` first (the apply-time move guard holds a pre-transaction
+// snapshot; an edit-screen change lands only in those columns).
+// It also reads customer_confirmed and holds the row (FOR SHARE) until the
+// caller's transaction ends: a grouped sibling's CAS carries no confirmation
+// flag, so a confirmation that lands after the mover's pre-read must either
+// be seen here or wait for the move to commit (Codex #6207 r3 P2).
+async function refreshedPlacementRow(service, db) {
+  const fresh = await db('scheduled_services').where({ id: service.id }).forShare()
+    .first('auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source', 'date_exception_at', 'customer_confirmed');
+  return fresh ? { ...service, ...fresh } : service;
+}
+
+async function isPersonPlacedVisit(input, db, opts = {}) {
+  const dateStr = toDateStr(input.scheduled_date);
+  if (!input.id || !dateStr) return { placed: false };
+  if (input.recurring_dispatch_due_date && !input.window_start) return { placed: false };
   try {
+    const service = opts.refresh ? await refreshedPlacementRow(input, db) : input;
+    if (service.auto_dispatch_locked === true || service.auto_dispatch_excluded === true) {
+      return { placed: true, reason_code: 'MANUALLY_LOCKED', reason_description: 'Locked from auto-dispatch by staff' };
+    }
+    // Only on the refreshed (apply-time) read: evaluation refuses a confirmed
+    // visit through isEligibleForAutoDispatch before it gets here.
+    if (opts.refresh && service.customer_confirmed === true) {
+      return { placed: true, reason_code: 'CUSTOMER_CONFIRMED', reason_description: 'Customer confirmed this visit' };
+    }
     // The newest placement's rows, chosen entirely in SQL: created_at has
     // microsecond precision and a JS Date keeps only milliseconds, so the
     // timestamp must never round-trip through JS as a key (Codex #6055 r5).
@@ -222,4 +277,4 @@ async function isPersonPlacedVisit(service, db) {
   }
 }
 
-module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit, VALID_STATUSES };
+module.exports = { isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES };

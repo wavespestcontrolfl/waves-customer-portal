@@ -106,6 +106,39 @@ into `priceLawnCare`.
 - MODERATE_SHADE: 0.625 lb N, 2 N-apps, Pillar
 - HEAVY_SHADE: 0.50 lb N, 2 N-apps, Pillar
 
+**Cost-plus list price (`GATE_LAWN_COST_PLUS_LIST`, ships OFF; owner 2026-10-09):**
+residential recurring lawn care only. Off, everything above is unchanged. On:
+
+- `annualCost` = v13 whole-lawn product (`LAWN_PRICING_V2.costPlusList.materialPer1000SqftPerYear`
+  by cadence, one program for every grass) + labor with `spotMinutesPerVisit` more
+  minutes a visit + the usual drive, callback and admin costs.
+- List annual = `max(market table, ceil(annualCost / (1 - listMargin) / visits) * visits, minimumPerVisit * visits)`.
+  Defaults: `listMargin` 0.45, `minimumPerVisit` $55, `spotMinutesPerVisit` 10. The lawn size is not rounded.
+- The program minimum, the cadence-ladder lift and the Bermuda adder then apply as before.
+- The mode arms the cost floor: WaveGuard and manual discounts on the lawn line stop at
+  `minimumCollectedAnnualPrice` = `annualCost / 0.65` (a 35% margin).
+- Tier rows read `pricingSource` `COST_PLUS_LIST` or `MINIMUM_PER_VISIT` (else the usual
+  labels) and carry `costPlusListApplied`, `listMargin` and `costPlusListAnnual`.
+- Cost basis: `lawn-cost-plus-knobs.js` `resolveLawnCostPlusBasis(snapshot)` returns one validated object
+  (`version` 1) with every non-property number behind the cost, list price and floor: `costPlusList`,
+  collected-margin floor, labor minutes (base and per 1,000 sq ft), loaded labor rate, drive minutes per
+  route density, callback and equipment reserves, admin cost. In this mode `priceLawnCare` takes tuning
+  numbers ONLY from the basis. The caller options `targetLawnGrossMargin`, `lawnMaterialCostPerK`,
+  `lawnLaborMinutesBase`, `lawnLaborMinutesPerK`, `routeDriveMinutes`, `adminAnnual` and
+  `annualMaterialBudget` are IGNORED, whoever sends them (an earlier "explicit caller override still wins"
+  rule is withdrawn). Property facts stay live: lawn size, complexity minutes, maintenance and pest-pressure
+  callback adders, property route density. Off mode keeps its overrides bit for bit.
+- Bounds (one table, one validator for the pricer, the replay snapshot and the admin save): `listMargin`
+  0.05 to 0.75; `minimumPerVisit` 0 to 500, 2 decimals; `spotMinutesPerVisit` 0 to 120; material above 0
+  to 500 per 1,000 sq ft a year, 2 decimals; loaded labor rate above 0 to 500; minutes 0 to 240; reserves
+  and admin 0 to 1,000.
+- Resolution: `services.lawn.costPlusList ?? input.lawnCostPlusList ?? gate` (server-set only), stamped as
+  `pricingMetadata.lawnCostPlusList` plus the full basis (`lawnCostPlusListBasis`). A saved estimate replays as
+  stamped on that basis; an ON stamp with no basis uses the live one; a priced lawn with no stamp means OFF;
+  no priced lawn pins nothing. Posted values are stripped.
+  The one-time lawn anchor stays on the market table; commercial lawn is untouched.
+- An invalid basis or `costPlusList` fails the calculation closed (400 `LAWN_COST_PLUS_LIST_KNOBS_INVALID`).
+
 ---
 
 ## 5. Tree & Shrub
@@ -124,7 +157,7 @@ allocation and before final discounts. Database pricing config can tune it.
 
 Material is a bottom-up model (`TREE_SHRUB.materialModel` in `constants.js`), not a flat $/sqft rate. Light (4x, $22 floor) remains in `constants.js` only to replay the grandfathered quarterly plan — it is not a sales tier.
 
-The 6-visit Standard program is the mandated default and the pre-selected/auto-recommended tier (matches the protocol `six_x` cadence). Light (4x/Quarterly, protocol `four_x`) is RETIRED for new sales (owner directive 2026-09-24: "remove quarterly tree and shrub care from the estimates and services") — `TREE_SHRUB.tiers.light.hidden` drops it from every offering surface, mirroring lawn's 6x/bi-monthly retirement; it stays priceable only for the one grandfathered existing quarterly customer's plan. `tier: "premium"` (12x) is likewise retired and normalizes to Standard with a warning. Enhanced (9x) is a live, customer-selectable upsell (un-retired 2026-07-23), never auto-recommended.
+The 6-visit Standard program is the mandated default and the pre-selected/auto-recommended tier (matches the protocol `six_x` cadence). Light (4x/Quarterly; the protocol's `four_x` text was removed 2026-10-09) is RETIRED for new sales (owner directive 2026-09-24: "remove quarterly tree and shrub care from the estimates and services") — `TREE_SHRUB.tiers.light.hidden` drops it from every offering surface, mirroring lawn's 6x/bi-monthly retirement; it stays priceable only for the one grandfathered existing quarterly customer's plan. `tier: "premium"` (12x) is likewise retired and normalizes to Standard with a warning. Enhanced (9x) is a live, customer-selectable upsell (un-retired 2026-07-23), never auto-recommended.
 
 **Standard positioning:** six core seasonal applications across the year.
 

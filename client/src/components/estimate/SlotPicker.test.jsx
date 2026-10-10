@@ -318,6 +318,31 @@ describe('SlotPicker', () => {
   });
 });
 
+describe('SlotPicker best times and the rain tier (GATE_CUSTOMER_RAIN_RANK)', () => {
+  it('a wet nearby slot the server moved back stays behind the dry ones in the strip', async () => {
+    // Server order: the soonest card, a dry non-nearby slot, then a wet
+    // NEARBY slot carrying display_tier. Without the tier the strip's
+    // nearby-first sort would lift the wet slot to the front.
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      primary: [
+        slot('soonest', '2026-06-01', { windowStart: '09:00', windowEnd: '11:00', routeOptimal: false }),
+        slot('dry', '2026-06-02', { windowStart: '10:00', windowEnd: '12:00', routeOptimal: false }),
+        slot('wet-nearby', '2026-06-03', { windowStart: '14:00', windowEnd: '16:00', routeOptimal: true, display_tier: 2 }),
+      ],
+      expander: [],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <SlotPicker token="estimate-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} serviceMode="recurring" selectedFrequency="quarterly" />,
+    );
+    await screen.findByText('Monday, June 1');
+    const chips = screen.getAllByRole('button', { name: /Pick/ }).map((b) => b.textContent);
+    expect(chips).toHaveLength(3);
+    expect(chips[2]).toMatch(/2:00 PM/);
+    expect(chips[0]).not.toMatch(/2:00 PM/);
+  });
+});
+
 describe('date availability failures', () => {
   it.each(['http', 'network'])('shows a retryable error instead of an empty day on %s failure', async (failure) => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [], expander: [] }));

@@ -19,6 +19,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const inventory = require('../inventory-operations');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 const { analysesIn } = require('../../utils/fertilizer-analysis');
+const { isToolFailure } = require('./outcomes');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -905,18 +906,19 @@ function stockFields(p) {
 async function resolveProduct(input) {
   if (input.product_id) {
     const product = await db('products_catalog').where('id', input.product_id).first();
-    return product ? { product } : { error: 'Product not found' };
+    return product ? { product } : { error: 'Product not found', code: 'product_not_found' };
   }
   const name = String(input.product_name || '').trim();
-  if (!name) return { error: 'product_name or product_id is required' };
+  if (!name) return { error: 'product_name or product_id is required', code: 'product_unspecified' };
   const exact = await db('products_catalog').whereRaw('lower(btrim(name)) = ?', [name.toLowerCase()]).limit(2);
   if (exact.length === 1) return { product: exact[0] };
   const literal = name.replace(/[\\%_]/g, '\\$&');
   const matches = exact.length ? exact : await db('products_catalog').whereILike('name', `%${literal}%`).limit(6);
-  if (!matches.length) return { error: `Product "${name}" not found in catalog` };
+  if (!matches.length) return { error: `Product "${name}" not found in catalog`, code: 'product_not_found' };
   if (matches.length > 1) {
     return {
       error: `Multiple products match "${name}" — retry with product_id`,
+      code: 'product_ambiguous',
       candidates: matches.map(inventory.productIdentity),
     };
   }
@@ -1654,6 +1656,193 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   return { productId: resolved.product.id };
 }
 
+// ─── PRODUCT PICKER (owner 2026-10-07) ─────────────────────────
+//
+// When adjust_stock cannot tell which product the operator meant, the bar
+// never guesses: it shows a card that lists the possible products and the
+// operator picks one. Free-text guessing did not converge (#6097, four Codex
+// rounds), so this list is only a SHORTLIST. The operator's click is what
+// names the product, and the server accepts only an id it listed here.
+//
+// WHETHER a picker is offered depends only on the OPERATOR's text, never on
+// model-supplied words (Codex #6111 r1; #5941 and #6097 showed that letting
+// model text steer the grounding never converges):
+//   - the text is an instruction, not a question (isNotAnInstruction);
+//   - it asks for a receipt of a restock, the same operationMatches check the
+//     exact-name grounding uses ("Order 78 oz of X" gets no picker);
+//   - once every word that belongs to an ACTIVE catalog product name or alias
+//     is removed, the rest is stock vocabulary (CLOSED_VOCAB). The removed
+//     words come from the server's catalog, not the model, so a note or
+//     message body ("Add notes for this customer: ...") still refuses.
+// The SEARCH may use the model's product_name too: the operator picks from
+// the list and then confirms a second card that names one exact product.
+const PRODUCT_CHOICE_LIMIT = 8;
+
+function adjustmentFields(input) {
+  return { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
+    unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
+}
+
+// Active catalog identity words (product names and aliases), normalized.
+async function catalogIdentityWords() {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
+  const aliases = await db('product_aliases as pa').join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true).select('pa.alias_name');
+  const words = new Set([...products.map((p) => p.name), ...aliases.map((a) => a.alias_name)]
+    .flatMap((name) => normalizeForMatch(name).split(' ')).filter(Boolean));
+  return { products, words };
+}
+
+// Spans of the operator's words that are catalog identity words.
+function identitySpans(text, words) {
+  return [...text.matchAll(/[A-Za-z0-9]+/g)].filter((m) => words.has(m[0].toLowerCase()))
+    .map((m) => ({ start: m.index, end: m.index + m[0].length }));
+}
+
+// The product ids to list, best first, or null when the operator's text does
+// not qualify for a picker (see the note above). Products the text names
+// outright come first, then active products ranked by how many distinctive
+// operator-typed catalog words (x2) and model phrase words they share.
+async function operatorShortlist(prompt, input, phraseSource) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const text = String(prompt);
+  if (!text.trim() || isNotAnInstruction(text)) return null;
+  if (!operationMatches('adjust_stock', [text], { movement_type: input.movement_type ?? null })) return null;
+  const { products, words } = await catalogIdentityWords();
+  if (!isClosedVocabResidual(text, identitySpans(text, words))) return null;
+  const operatorTokens = [...new Set(normalizeForMatch(text).split(' '))].filter((w) => words.has(w) && isCandidateToken(w));
+  const modelTokens = [...new Set(normalizeForMatch(phraseSource).split(' '))].filter(isCandidateToken);
+  const ids = [...(await productsNamedIn(text)).named].map((id) => String(id).toLowerCase());
+  products
+    .map((p) => {
+      const nameWords = new Set(normalizeForMatch(p.name).split(' '));
+      const score = 2 * operatorTokens.filter((t) => nameWords.has(t)).length + modelTokens.filter((t) => nameWords.has(t)).length;
+      return { id: String(p.id).toLowerCase(), name: p.name, score };
+    })
+    .filter((p) => p.score > 0)
+    .sort((a, b) => (b.score - a.score) || a.name.localeCompare(b.name))
+    .forEach((p) => ids.push(p.id));
+  return { phrase: phraseSource || operatorTokens.join(' '), ids };
+}
+
+// One shortlist row with this amount's fresh before -> after. A product the
+// amount cannot fit (a unit it cannot convert, an unchanged count) is shown
+// with the reason and cannot be picked.
+async function productChoiceRow(row, fields) {
+  const base = { product_id: String(row.id).toLowerCase(), name: row.name, container_size: row.container_size || null };
+  try {
+    const preview = await inventory.previewStockAdjustment(row.id, fields);
+    return { ...base, unit: preview.unit || null, on_hand: preview.was_untracked ? null : toNumber(preview.stock_before),
+      stock_after: toNumber(preview.stock_after), selectable: true };
+  } catch (err) {
+    if (!err.isOperational) throw err;
+    return { ...base, unit: row.inventory_unit || null, on_hand: toNumber(row.inventory_on_hand),
+      stock_after: null, selectable: false, reason: String(err.message || 'This amount does not fit this product.') };
+  }
+}
+
+const MISSING_AMOUNT_REFUSAL = Object.freeze({ success: false, code: 'unit_required',
+  error: 'The amount or the unit is missing, so no stock was changed and no card was made. Ask the operator one short question for the amount and its unit, then call again with what they say. Never guess either.' });
+
+// Returns null (no picker: the caller keeps its refusal), { error, code } (a
+// refusal that names what is missing), or { phrase, choices }. `seedIds` are
+// ids a previous card already listed (Show again re-lists them with fresh
+// on-hand numbers); with seeds and no prompt, no new products are searched.
+async function productChoicesFor({ input = {}, prompt = null, previewProductName = null, seedIds = [] } = {}) {
+  let phrase = String(input.product_name || previewProductName || '').trim();
+  const ids = seedIds.map((id) => String(id).toLowerCase());
+  if (prompt != null) {
+    const found = await operatorShortlist(prompt, input, phrase);
+    if (!found) return null;
+    phrase = found.phrase;
+    ids.push(...found.ids);
+  }
+  const shortlist = [...new Set(ids)].slice(0, PRODUCT_CHOICE_LIMIT);
+  if (!shortlist.length) return null;
+  // The picker never builds on an assumed amount or unit (the same rule as adjustStock's own refusal).
+  if (!String(input.unit ?? '').trim() || (input.quantity == null && input.set_total == null)) return { ...MISSING_AMOUNT_REFUSAL };
+  const rows = await db('products_catalog').whereIn('id', shortlist).where({ active: true });
+  const byId = new Map(rows.map((row) => [String(row.id).toLowerCase(), row]));
+  const fields = adjustmentFields(input);
+  const choices = [];
+  for (const id of shortlist.filter((candidate) => byId.has(candidate))) choices.push(await productChoiceRow(byId.get(id), fields));
+  return choices.some((choice) => choice.selectable) ? { phrase, choices } : null;
+}
+
+// ─── STOCK PROPOSAL TARGET (the route's one call per stock card) ───
+
+const NOT_WRITTEN = ' Nothing was written and no confirmation card was created.';
+// Refusals that mean "which product?" — the only ones the picker replaces.
+const PRODUCT_IDENTITY_REFUSALS = new Set(['product_ambiguous', 'product_not_found', 'product_unspecified',
+  'target_clarification_required', 'target_relationship_mismatch']);
+const PICKER_NOTE = 'Nothing was written. The card lists the products that could match and the operator picks one, then confirms a second card that shows the exact before and after. Do NOT retry this tool, do NOT pick a product yourself, and do NOT claim stock changed; tell the operator to pick the product on the card.';
+
+// The "choose the product" card body: its stored params (the shortlist is
+// pinned in _ib_product_choices), its preview, its display line and the
+// model note. null when the operator's words give no shortlist (the caller
+// keeps its refusal), or a { failed } refusal.
+async function productChoiceCard({ params, prompt = null, previewProductName = null, seedIds = [] }) {
+  const picked = await productChoicesFor({ input: params, prompt, previewProductName, seedIds });
+  if (!picked) return null;
+  if (picked.error) return { failed: true, modelResult: picked };
+  const stored = {};
+  for (const key of ['product_name', 'movement_type', 'quantity', 'set_total', 'unit', 'lot_number', 'reason', 'note']) {
+    if (params[key] !== undefined) stored[key] = params[key];
+  }
+  if (!stored.product_name && picked.phrase) stored.product_name = picked.phrase;
+  // Only the products the card lets the operator pick can ever be chosen.
+  stored._ib_product_choices = picked.choices.filter((choice) => choice.selectable).map((choice) => choice.product_id);
+  return {
+    params: stored,
+    preview: { preview: true, choose_product: true, tool: 'adjust_stock', movement_type: params.movement_type || null,
+      entered_quantity: params.set_total ?? params.quantity ?? null, entered_unit: params.unit || null,
+      product_choices: picked.choices },
+    displayParams: { product_words: picked.phrase || '(not stated)' },
+    note: PICKER_NOTE,
+  };
+}
+
+// Whether a product may still be picked: the same active filter the
+// shortlist is built with, read again at the moment of the choice.
+async function productIsActive(productId, q = db) {
+  return !!(await q('products_catalog').where({ id: productId, active: true }).first('id'));
+}
+
+// A product-identity refusal of adjust_stock becomes a picker card when the
+// operator's words qualify (productChoicesFor); otherwise null.
+async function offerProductChoice(toolName, refusal, params, prompt, previewProductName = null) {
+  if (toolName !== 'adjust_stock' || !PRODUCT_IDENTITY_REFUSALS.has(refusal.code)) return null;
+  const card = await productChoiceCard({ params, prompt, previewProductName });
+  if (!card) return null;
+  return card.failed ? card : { productChoice: card };
+}
+
+// A re-proposed adjust_stock card's product is the one the server stored or
+// listed (a picked product, a Show again card): the fresh preview must
+// resolve to exactly that product.
+function groundedStockTarget(preview, grounded) {
+  const previewId = preview?.product?.id;
+  if (previewId && grounded.productId && String(previewId).toLowerCase() === String(grounded.productId).toLowerCase()) return { productId: previewId };
+  return { failed: true, modelResult: { error: `This product no longer matches the earlier card.${NOT_WRITTEN}`, code: 'target_relationship_mismatch' } };
+}
+
+// What a stock write proposal acts on, from its (possibly failed) preview:
+//   { productId, requestId? }  the target to pin;
+//   { productChoice }          a "choose the product" card instead (adjust_stock);
+//   { failed, modelResult }    a refusal: no card, nothing written.
+// `grounded` (a re-proposal) skips every reading of operator text.
+async function stockProposalTarget({ toolName, params, preview, prompt, pageData, actorId, threadId, threadSeq, grounded = null }) {
+  if (grounded) return isToolFailure(preview) ? { failed: true, modelResult: preview } : groundedStockTarget(preview, grounded);
+  if (isToolFailure(preview)) return (await offerProductChoice(toolName, preview, params, prompt)) || { failed: true, modelResult: preview };
+  const target = await resolveInventoryWriteTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq });
+  if (!target.error) return target;
+  // A refused target leaves no card and writes nothing; the model is told so
+  // in plain words, so its reply can never read as a recorded change.
+  return (await offerProductChoice(toolName, target, params, prompt, preview?.product?.name || null))
+    || { failed: true, modelResult: { ...target, error: `${target.error}${NOT_WRITTEN}` } };
+}
+
 async function queryStock(input) {
   const { search, category, low_stock_only, untracked_only, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 50, 200);
@@ -1865,4 +2054,5 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget };
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT,
+  productChoiceCard, stockProposalTarget, productIsActive };

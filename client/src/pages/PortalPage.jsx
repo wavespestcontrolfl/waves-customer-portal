@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef, useCallback, useId, createContext, useContext } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
@@ -48,7 +48,8 @@ import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
 import useSheetViewport from '../hooks/useSheetViewport';
-import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
+import { celsiusCapTip } from '../lib/celsiusCapCopy';
+import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES, OWNER_HEAD_RATE_IN_PER_HR } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -3233,7 +3234,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
                 sub: statsStatus === 'error'
                   ? 'Unavailable right now'
-                  : stats?.celsiusApplicationsThisYear != null ? `${stats.celsiusApplicationsThisYear} weed treatments` : 'completed visits',
+                  : weedTreatmentsLine(stats) || 'completed visits',
               },
               { label: 'Member since', value: customer.memberSince ? fmtDate(customer.memberSince, { month: 'short', year: 'numeric' }) : '—', sub: 'active customer' },
             ].map(item => (
@@ -7658,10 +7659,44 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 // =========================================================================
 // MY PROPERTY TAB — access codes, pets, scheduling, irrigation, HOA
 // =========================================================================
-function PropertySection({ title, icon = 'document', summary, defaultOpen, children, aside }) {
+// Arriving at /?tab=property#<id> (the lawn report's "Add your weekly inches" button points at #irrigation) brings that
+// section into view. The sections mount only after the tab's data has loaded, so the first scroll happens on mount;
+// the cards above load a little later (the weekly plan), so one more scroll follows only if the section moved away.
+// The portal's header (and on desktop the tab nav) is sticky, so the section stops BELOW them: the margin is the sticky
+// chrome's measured height (elements marked data-portal-sticky: their sticky top plus their height) plus a gap, with the
+// same 90px fallback the weekly watering plan card uses when nothing can be measured.
+const SECTION_SCROLL_GAP = 12;
+const SECTION_SCROLL_FALLBACK = 'calc(90px + env(safe-area-inset-top, 0px))';
+function stickyChromeHeight() {
+  return Math.max(0, ...[...document.querySelectorAll('[data-portal-sticky]')].map((el) => (parseFloat(window.getComputedStyle(el).top) || 0) + el.getBoundingClientRect().height));
+}
+function useScrollToHashSection(id) {
+  useEffect(() => {
+    if (!id || typeof window === 'undefined' || window.location.hash !== `#${id}`) return undefined;
+    const scroll = () => {
+      const el = document.getElementById(id);
+      if (!el) return 0;
+      const chrome = stickyChromeHeight();
+      const margin = chrome > 0 ? chrome + SECTION_SCROLL_GAP : 0;
+      el.style.scrollMarginTop = margin > 0 ? `${margin}px` : SECTION_SCROLL_FALLBACK;
+      el.scrollIntoView?.({ behavior: 'auto', block: 'start' });
+      return margin || 90;
+    };
+    const expected = scroll();
+    const timer = setTimeout(() => {
+      const top = document.getElementById(id)?.getBoundingClientRect?.().top;
+      if (Number.isFinite(top) && Math.abs(top - expected) > 120) scroll();
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [id]);
+}
+
+function PropertySection({ id, title, icon = 'document', summary, defaultOpen, children, aside }) {
   const [open, setOpen] = useState(defaultOpen !== false);
+  useScrollToHashSection(id);
   return (
-    <section data-glass="card" style={{
+    <section id={id} data-glass="card" style={{
+      ...(id ? { scrollMarginTop: SECTION_SCROLL_FALLBACK } : {}),
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
@@ -8023,6 +8058,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
+  // GATE_IRRIGATION_OWNER_RATES: the server says which head rate table its emails use (key present only while the gate
+  // is live), so the line under Minutes per Zone shows the number the server would use.
+  const [ownerRates, setOwnerRates] = useState(false);
   const irrigationEditRevision = useRef(0);
   const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
   const [savedWateringRevision, setSavedWateringRevision] = useState(0);
@@ -8039,6 +8077,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // Inches, so the field never renders and then drops on save.
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
+        setOwnerRates(d.irrigationOwnerRates === true);
         setLoading(false);
       })
       .catch(err => {
@@ -8452,7 +8491,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
     runMinutes: prefs.irrigationRunMinutes,
     wateringDays: prefs.wateringDays,
     systemType: prefs.irrigationSystemType,
-  });
+  }, ownerRates ? { rates: OWNER_HEAD_RATE_IN_PER_HR } : undefined);
   const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
   // Stored "off" from the retired toggle: the report and Monday email
   // suppress a prefs-only schedule — typed inches AND a derived figure alike
@@ -8466,7 +8505,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
       return explicitInchesEntered
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
-        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
+        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates${ownerRates ? '' : ' from University of Florida turf guidance'}. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
     }
     // An explicit Weekly Inches entry is already authoritative — a decline
     // prompt asking for what's filled in above would never be satisfiable.
@@ -8867,7 +8906,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         </div>
       </PropertySection>
 
-      <PropertySection title="Irrigation" icon="droplet" summary={irrigationSummary}>
+      <PropertySection id="irrigation" title="Irrigation" icon="droplet" summary={irrigationSummary}>
         {/* Irrigation is on by default (owner ruling 2026-08-27) — no toggle;
             the fields are always available. The server stamps
             irrigation_system=true on any irrigation write. */}
@@ -9068,7 +9107,16 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
 // =========================================================================
 // KNOWLEDGE BASE TAB — SWFL-specific pest & lawn content
 // =========================================================================
-const ARTICLES = [
+// The sub-line under "Services YTD": the Celsius count with the window the stats route says it counted (celsiusWindow). Only
+// 'rolling365' (the last 365 days) adds "in the last 12 months"; an older response without the field, or 'calendar_year', reads as before.
+export const weedTreatmentsLine = (stats) => {
+  if (stats?.celsiusApplicationsThisYear == null) return null;
+  return `${stats.celsiusApplicationsThisYear} weed treatments${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
+};
+
+// The Celsius tip follows the program: the stats route's celsiusMaxPerYear (2 under the v13 lawn
+// program, 3 before it), never a number written here.
+const buildArticles = ({ celsiusMaxPerYear = null } = {}) => [
   {
     id: 1, icon: 'bug', category: 'Pests',
     title: 'Why Ghost Ants Love Your Kitchen',
@@ -9091,7 +9139,7 @@ const ARTICLES = [
     id: 4, icon: 'palm', category: 'Lawn Care',
     title: 'Dollar Weed: What It Tells You',
     summary: 'Dollar weed (Hydrocotyle) is actually an indicator plant — it thrives in overwatered areas. If you see it spreading, your irrigation is probably too aggressive.',
-    tips: ['Reduce irrigation runtime by 5-10 minutes per zone', 'Water deeply but less frequently (2-3x per week max)', 'We spot-treat with Celsius WG (max 3 applications/year)', 'Proper irrigation is the real long-term fix'],
+    tips: ['Water only when the grass shows folded blades, a blue-gray tint, or footprints that stay pressed in — never on a timer alone', 'Keep each run at ½ to ¾ inch and drop a watering day instead of shortening the runs', celsiusCapTip(celsiusMaxPerYear), 'Proper irrigation is the real long-term fix'],
   },
   {
     id: 5, icon: 'bug', category: 'Pests',
@@ -9106,6 +9154,21 @@ const ARTICLES = [
     tips: ['Damage looks like drought stress — yellowing then browning at edges', 'Peak season is July-September in the hottest, sunniest spots', 'Thatch buildup over 0.5" increases risk — ask us about dethatching', 'We rotate insecticide modes of action to prevent resistance'],
   },
 ];
+
+// The Learn articles with the figures the server owns. Nothing renders the article list today (the old
+// module-level ARTICLES constant was never used, so its Celsius tip could only ever have shown a bare
+// default); this is the one entry point to render it from: it reads the Celsius yearly limit from the
+// stats response (/services/stats/summary celsiusMaxPerYear), so the tip says 2 under the v13 lawn
+// program and 3 before it, and names no number until the stats arrive.
+function useLearnArticles() {
+  const [celsiusMaxPerYear, setCelsiusMaxPerYear] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.getServiceStats().then((d) => { if (live) setCelsiusMaxPerYear(d?.celsiusMaxPerYear ?? null); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  return useMemo(() => buildArticles({ celsiusMaxPerYear }), [celsiusMaxPerYear]);
+}
 
 // Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
 // server answers {available:false} off the gate and the existing
@@ -9143,7 +9206,7 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId, scope = nul
 function WeatherPestWidget({ customer, nextService, hold = false }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
-  // Fungus / chinch / irrigation are lawn advisories — pest-only customers
+  // Fungus / chinch are lawn advisories — pest-only customers
   // see mosquito pressure only (owner ruling 2026-08-28: lawn surfaces are
   // gated on real lawn-care evidence, same predicate as the health card).
   const lawnHealth = useLawnHealth(customer?.id);
@@ -9211,11 +9274,6 @@ function WeatherPestWidget({ customer, nextService, hold = false }) {
       { label: 'Chinch Bug Risk', icon: 'bug', type: 'chinch', level: pressure.chinch?.level || 'LOW', color: pressure.chinch?.color || B.green },
     ] : []),
   ];
-  const irrigation = weather.irrigationRecommendation || {};
-  const irrigationInches = Number(irrigation.inches ?? 0);
-  const irrigationAmount = Number.isFinite(irrigationInches)
-    ? String(Number(irrigationInches.toFixed(2)))
-    : '0';
   const updatedAt = weather.updatedAt ? new Date(weather.updatedAt) : null;
   const updatedText = updatedAt && !isNaN(updatedAt)
     ? updatedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
@@ -9319,36 +9377,6 @@ function WeatherPestWidget({ customer, nextService, hold = false }) {
         })}
       </div>
 
-      {hasLawnCare && (
-      <div style={{
-        marginTop: 10,
-        padding: 14,
-        borderRadius: 8,
-        background: '#F8FCFE',
-        border: '1px solid #CFE7F5',
-        display: 'flex', alignItems: 'center', gap: 12,
-      }}>
-        <span style={{
-          width: 36,
-          height: 36,
-          borderRadius: 8,
-          background: '#fff',
-          color: B.glassNavy,
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-        }}>
-          <Icon name="droplet" size={18} strokeWidth={2} />
-        </span>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
-            Irrigation: {irrigationAmount}" recommended
-          </div>
-          <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{irrigation.note || 'Adjust watering around rainfall and local restrictions.'}</div>
-        </div>
-      </div>
-      )}
     </section>
   );
 }
@@ -17077,7 +17105,7 @@ export default function PortalPage() {
           sticky header (styles in index.css). */}
       <a href="#portal-main" className="waves-skip-link">Skip to content</a>
       {/* Header */}
-      <div ref={headerRef} data-glass="soft" style={{
+      <div ref={headerRef} data-portal-sticky="" data-glass="soft" style={{
         background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
@@ -17553,7 +17581,7 @@ export default function PortalPage() {
           <CancelledBanner cancelledAt={customer.cancelledAt} onOpenBilling={() => switchTab('billing')} />
         )}
         {!isMobileShell && (
-          <nav aria-label="Customer portal" data-glass="card" style={{
+          <nav aria-label="Customer portal" data-portal-sticky="" data-glass="card" style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
             background: PORTAL_SHELL.soft,
@@ -17665,4 +17693,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

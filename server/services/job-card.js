@@ -48,6 +48,7 @@ const { parsePackSize } = require('./product-costing');
 const { isServingProtocol } = require('./lawn-program');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
+const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -1103,7 +1104,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       source: `Published protocol · version ${structured.version}`,
       title: structured.window.title,
       objective: structured.window.goal || null,
-      visitNotes: procedureLines(plan.protocol?.objective),
+      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(structured.products)],
       steps: (structured.window.requiredTasks || []).map(task => String(task).replace(/_/g, ' ')),
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
@@ -1150,6 +1151,12 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
 
 // Hide template costs without dropping restrictions elsewhere in the same
 // line (for example, an add-on-only scope beside a minimum office price).
+// The full fertilizer safety block for an N visit (a window with a gated spreader row), as one note.
+function fertilizerSafetyNotes(rows) {
+  const rules = fertilizerSafetyRules(rows);
+  return rules.length ? [`Fertilizer safety: ${rules.join(' ')}`] : [];
+}
+
 function procedureLines(text) {
   return String(text || '').replace(/\(\s*\$[\d,.]+\s*\)/g, '')
     .replace(/\$\d(?:[\d,.]*\d)?(?:\s*[-–]\s*\$?\d(?:[\d,.]*\d)?)?/g, '[price omitted]')
@@ -1455,6 +1462,10 @@ function orderFor(product, packSize, shortage, { includePricing = false } = {}) 
   };
 }
 
+// The approval engine's repeat-group findings (repeatGroupFinding): repeat_<type>_group, or the fungicide FRAC one.
+const ROTATION_CODES = /^(repeat_(moa|frac|irac|hrac)_group|fungicide_frac_rotation_approval)$/;
+const isRotationWarning = (block) => ROTATION_CODES.test(String(block?.code || ''));
+
 async function rotationNote(dbh, facts, product) {
   // MOA is a rotation group too (the approval engine's rule) — common
   // insecticides carry only that one.
@@ -1668,8 +1679,12 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // outage — its plan is known not to apply — so the add-on line governs.
   const protocolLine = planned || lawnPlan?.error ? null : addonLine;
   const plan = protocolLine ? null : lawnPlan;
-  const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
-  const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
+  // A v13 spot row has no quantity, but it states the program's rate (Arena 0.147 oz, not the catalog's 0.29 oz).
+  const plannedRate = planned?.mix?.ratePer1000 != null ? planned.mix : planned?.spot?.ratePer1000 != null ? planned.spot : null;
+  const ratePer1000 = plannedRate ? plannedRate.ratePer1000 : product.default_rate_per_1000;
+  // The spot row's rate is stated over its own carrier (Arena 0.147 oz in 4 gal per 1,000 sq ft): the dose uses it, not the rig's or the window's.
+  const rowCarrier = plannedRate && plannedRate === planned?.spot ? Number(planned.spot.carrierGalPer1000) : null;
+  const rateUnit = plannedRate?.rateUnit || product.rate_unit;
   // Pest / tree products whose label rate is per gallon of finished spray
   // (default_rate "X" or "X-Y" + default_unit "<unit>/gal") dilute straight
   // into the tank — no carrier calibration involved.
@@ -1705,6 +1720,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     ]
     : [];
   const planBlocks = [...planWide, ...productBlocks];
+  const withholdingBlock = productBlocks.find((block) => !isRotationWarning(block));
   const tankMixable = isTankMixable(product);
   // The same spray check as a card product, at the same forecast.
   const coords = propertyCoords(svc.latitude, svc.longitude);
@@ -1732,7 +1748,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     // plan's turf, ordinance, stress and approval guards.
     [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
-    [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
+    // A chemical-group repeat is a warning, not a withhold (owner 2026-10-09: "show the mix amount"): it stays in
+    // planBlocks, so the card shows it, and the amount is still given. Every other product check withholds it.
+    [Boolean(withholdingBlock), clean(withholdingBlock?.message, 160)],
     [Boolean(protocolLine?.labelHold), protocolLine?.labelHold],
     // The protocol lists this product as "if needed": no dose until the
     // call is made, exactly as the card withholds its amount.
@@ -1743,7 +1761,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   ].find(([applies]) => applies);
   const mix = withheld
     ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
-    : (perGallon ? buildPerGallonAmount(perGallon, volume) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons: volume }));
+    : (perGallon ? buildPerGallonAmount(perGallon, volume) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
   const packSizes = await loadPackSizes(dbh, [product.id]);
   // The label rate is itself a dosing instruction: it rides only with a
   // permitted amount, never alongside a withheld one.
@@ -1759,6 +1777,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     sprayCheck,
     context: protocolLine ? { line: protocolLine.addon, conditional: !protocolLine.selected } : { line: null },
     ...mix,
+    // Every group repeat this product would make (Headway can repeat FRAC 3 and FRAC 11), shown beside the amount.
+    // Empty when there is none, or when the amount is withheld (the reason line speaks then).
+    rotationWarnings: permitted ? productBlocks.filter(isRotationWarning).map((block) => clean(block.message, 200)).filter(Boolean) : [],
     planBlocks,
     tank,
     // The rig the amount was computed for, so the section labels the dose

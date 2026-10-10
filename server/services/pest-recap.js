@@ -339,14 +339,21 @@ async function sheetRecordFor(profile, svc, knex) {
     typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
   };
   if (!record.lane && !record.typedType) return record;
+  return (await serviceHasLinkedProject(svc.id, knex)) ? none : record;
+}
+
+// Is a project linked to this visit, directly (projects.scheduled_service_id) or only through its service record
+// (the legacy link)? The admin-projects create guard's own lookup. A read that fails counts as linked (fail closed).
+// Used by the sheet record above and by the combo stop check (combo-fast-complete.js), on the caller's connection.
+async function serviceHasLinkedProject(serviceId, knex = db) {
   const linked = await knex('projects')
     .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')
     .where((q) => q
-      .where('projects.scheduled_service_id', svc.id)
-      .orWhere('service_records.scheduled_service_id', svc.id))
+      .where('projects.scheduled_service_id', serviceId)
+      .orWhere('service_records.scheduled_service_id', serviceId))
     .first('projects.id')
     .catch(() => ({}));
-  return linked ? none : record;
+  return !!linked;
 }
 
 async function visitTraceOnReport(svc, profile, lane, knex) {
@@ -1194,6 +1201,10 @@ async function submitRecap({
       && Array.isArray(products)
       && !createdRecord;
     if (productRows.length || confirmedEmptyReplace) {
+      // GATE_LAWN_BERMUDA_REMOVAL: a record that already carries Recognition (recorded through
+      // /complete) cannot have its products replaced here: the replace would retract the row the
+      // bermuda removal caps count. Checked BEFORE anything is deleted or retracted.
+      await require('./lawn-bermuda-removal').refuseStepSprayOnRecap(trx, recordId, { existing: true });
       // Resolve each submitted catalog id to a REAL catalog row before
       // anything is persisted (codex P1 r9): the exact id keys the
       // compliance ledger identity, so a name-pattern fallback ("Advion
@@ -1496,6 +1507,11 @@ async function submitRecap({
       if (productRows.length) {
         const ComplianceService = require('./compliance');
         await ComplianceService.createComplianceRecords(recordId, { trx });
+        // GATE_LAWN_BERMUDA_REMOVAL: the pest recap never records Recognition, the bermuda removal
+        // step's counted herbicide. It is judged on the ledger rows just written, so a product sent
+        // by id, by a legacy name or with no rate is caught the same way; the refusal rolls the
+        // whole recap back. Gate off, or no Recognition row: nothing.
+        await require('./lawn-bermuda-removal').refuseStepSprayOnRecap(trx, recordId);
       }
     }
 
@@ -1734,6 +1750,7 @@ module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
   sheetRecordFor,
+  serviceHasLinkedProject,
   loadServiceWithCustomer,
   RECAP_COMPARED_IDENTITY_KEYS,
   buildRecapContext,

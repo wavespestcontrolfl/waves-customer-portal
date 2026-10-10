@@ -17,17 +17,8 @@ test('versioned combined allowances preserve old holds and whole-hour new member
   const old = { window_start: '09:00', reservation_service_mix: capacityForServices(services) };
   const current = { window_start: '09:00', reservation_service_mix: capacityForServices(services, [30, 40]) };
   expect(windowForCapacityService(old, 1)).toEqual({ window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 });
-  expect(windowForCapacityService(current, 1, 'lawn_care_recurring')).toEqual({ window_start: '10:00', window_end: '10:40', estimated_duration_minutes: 40 });
-  // 30 pest minutes, then lawn on the next whole hour: 60 + 40 held.
-  expect(capacityFromReservation(current).durationMinutes).toBe(100);
-  // A hold stamped before the stop groups (no marker, plain sum) keeps its
-  // original promise: every version-2 member at the shared arrival.
-  const { stopGroups: _marker, ...legacyMix } = current.reservation_service_mix;
-  const legacy = { window_start: '09:00', reservation_service_mix: { ...legacyMix, durationMinutes: 70 } };
-  expect(capacityFromReservation(legacy).durationMinutes).toBe(70);
-  expect(windowForCapacityService(legacy, 1, 'lawn_care_recurring')).toEqual({ window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40 });
-  // A marked hold must carry the padded span.
-  expect(() => capacityFromReservation({ reservation_service_mix: { ...current.reservation_service_mix, durationMinutes: 70 } })).toThrow();
+  expect(windowForCapacityService(current, 1, 'lawn_care_recurring')).toEqual({ window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40 });
+  expect(capacityFromReservation(current).durationMinutes).toBe(70);
   expect(() => capacityFromReservation({ reservation_service_mix: { version: 2, services: ['pest_control'], durationMinutes: 60 } })).toThrow();
 });
 
@@ -73,7 +64,7 @@ test('blocked travel preserves stored work, late diagnostics and the return dead
 });
 
 
-test('conversion allowances follow service identity when the pest anchor comes before a lawn-first estimate: the pest group keeps the picked hour', () => {
+test('conversion allowances follow service identity when the pest anchor comes before a lawn-first estimate', () => {
   const anchor = { window_start: '09:00', reservation_service_mix: capacityForServices(
     [{ service: 'lawn_care' }, { service: 'pest_control' }], [40, 30]),
   };
@@ -81,15 +72,44 @@ test('conversion allowances follow service identity when the pest anchor comes b
     window_start: '09:00', window_end: '09:30', estimated_duration_minutes: 30,
   });
   expect(windowForCapacityService(anchor, 1, 'lawn_care_recurring')).toEqual({
-    window_start: '10:00', window_end: '10:40', estimated_duration_minutes: 40,
+    window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40,
   });
   expect(() => windowForCapacityService(anchor, 1, 'mosquito_monthly')).toThrow();
 });
 
-test('the reserved anchor group keeps the picked hour, whatever the member order (version 1 and 2)', () => {
+// Back to one stop group (owner ruling 2026-10-08). A hold stamped 10-06 to
+// 10-08 carries `stopGroups: true` and, for version 2, the padded span. The
+// reader keeps that promise; a new hold is stamped in the plain format.
+const savedStopGroupsMix = (services, durations, durationMinutes) => ({
+  ...capacityForServices(services, durations), stopGroups: true, ...(durationMinutes ? { durationMinutes } : {}),
+});
+
+test('a new hold is stamped in the plain format: no stop-group marker, plain sum of minutes', () => {
+  const mix = capacityForServices([{ service: 'lawn_care' }, { service: 'pest_control' }], [40, 30]);
+  expect(mix.stopGroups).toBeUndefined();
+  expect(mix.durationMinutes).toBe(70);
+  expect(capacityForServices([{ service: 'lawn_care' }, { service: 'pest_control' }]).stopGroups).toBeUndefined();
+});
+
+test('a saved stop-group hold keeps its padded span and its per-group arrival hours', () => {
+  const services = [{ service: 'pest_control' }, { service: 'lawn_care' }];
+  // 30 pest minutes, then lawn on the next whole hour: 60 + 40 held.
+  const saved = { window_start: '09:00', reservation_service_mix: savedStopGroupsMix(services, [30, 40], 100) };
+  expect(capacityFromReservation(saved).durationMinutes).toBe(100);
+  expect(windowForCapacityService(saved, 0, 'pest_general_quarterly')).toEqual({ window_start: '09:00', window_end: '09:30', estimated_duration_minutes: 30 });
+  expect(windowForCapacityService(saved, 1, 'lawn_care_recurring')).toEqual({ window_start: '10:00', window_end: '10:40', estimated_duration_minutes: 40 });
+  // A marked hold must carry the padded span, not the plain sum.
+  expect(() => capacityFromReservation({ reservation_service_mix: savedStopGroupsMix(services, [30, 40], 70) })).toThrow();
+  // Lawn-anchored (no pest): lawn 60, mosquito at +60 for 15 = 75.
+  expect(capacityFromReservation({ reservation_service_mix: savedStopGroupsMix(
+    [{ service: 'lawn_care' }, { service: 'mosquito' }], [60, 15], 75) }).durationMinutes).toBe(75);
+});
+
+test('a saved stop-group hold: the reserved anchor group keeps the picked hour, whatever the member order (version 1 and 2)', () => {
   const services = [{ service: 'lawn_care' }, { service: 'pest_control' }, { service: 'tree_shrub' }];
-  for (const mix of [capacityForServices(services), capacityForServices(services, [60, 60, 60])]) {
+  for (const mix of [savedStopGroupsMix(services), savedStopGroupsMix(services, [60, 60, 60], 180)]) {
     const anchor = { window_start: '09:00', service_key_snapshot: 'pest_general_quarterly', reservation_service_mix: mix };
+    expect(capacityFromReservation(anchor).durationMinutes).toBe(180);
     // Version 1 indexes are the converter's member order: pest first here.
     expect(windowForCapacityService(anchor, 0, 'pest_general_quarterly').window_start).toBe('09:00');
     expect(windowForCapacityService(anchor, 1, 'lawn_care_recurring').window_start).toBe('10:00');
@@ -99,31 +119,21 @@ test('the reserved anchor group keeps the picked hour, whatever the member order
   }
 });
 
-test('the hold covers the anchor group, then the other group from its whole-hour start', () => {
-  // Lawn-anchored (no pest): lawn 60, mosquito at +60 for 15 = 75, not the worst order.
-  expect(capacityForServices([{ service: 'lawn_care' }, { service: 'mosquito' }], [60, 15]).durationMinutes).toBe(75);
-  // Pest-anchored whatever the order: 30 pest -> lawn at +60 for 40 = 100.
-  expect(capacityForServices([{ service: 'lawn_care' }, { service: 'pest_control' }], [40, 30]).durationMinutes).toBe(100);
-});
-
-test('allocated members are ordered anchor group first, each group contiguous', () => {
+test('a saved stop-group hold: allocated members are ordered anchor group first; a plain hold keeps its member order', () => {
   const { orderMembersByStopGroup } = require('../services/combined-visit-capacity');
   const row = (id, key) => ({ id, service_key_snapshot: key });
   const anchor = row('a', 'lawn_care_recurring');
   const members = [anchor, row('m', 'mosquito_monthly'), row('t', 'tree_shrub_6week')];
   expect(orderMembersByStopGroup(anchor, members, { stopGroups: true }).map((r) => r.id)).toEqual(['a', 't', 'm']);
-  // A hold stamped before the stop groups keeps its member order.
   expect(orderMembersByStopGroup(anchor, members, {}).map((r) => r.id)).toEqual(['a', 'm', 't']);
+  expect(orderMembersByStopGroup(anchor, members, capacityForServices(
+    [{ service: 'lawn_care' }, { service: 'mosquito' }, { service: 'tree_shrub' }])).map((r) => r.id)).toEqual(['a', 'm', 't']);
 });
 
-test('version 1 keeps the reserved anchor first inside its group (pest control after mosquito in the mix)', () => {
-  const mix = capacityForServices([{ service: 'mosquito' }, { service: 'pest_control' }, { service: 'lawn_care' }]);
+test('a saved version-1 stop-group hold keeps the reserved anchor first inside its group', () => {
+  const mix = savedStopGroupsMix([{ service: 'mosquito' }, { service: 'pest_control' }, { service: 'lawn_care' }]);
   const anchor = { window_start: '09:00', service_key_snapshot: 'pest_general_quarterly', reservation_service_mix: mix };
   expect(windowForCapacityService(anchor, 0, 'pest_general_quarterly').window_start).toBe('09:00');
   expect(windowForCapacityService(anchor, 1, 'mosquito_monthly').window_start).toBe('10:00');
   expect(windowForCapacityService(anchor, 2, 'lawn_care_recurring').window_start).toBe('11:00');
-  const { orderMembersByStopGroup } = require('../services/combined-visit-capacity');
-  const row = (id, key) => ({ id, service_key_snapshot: key });
-  const members = [row('m', 'mosquito_monthly'), row('a', 'pest_general_quarterly'), row('l', 'lawn_care_recurring')];
-  expect(orderMembersByStopGroup(members[1], members, mix).map((r) => r.id)).toEqual(['a', 'm', 'l']);
 });

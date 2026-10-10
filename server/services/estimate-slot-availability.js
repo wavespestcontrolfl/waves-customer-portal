@@ -45,9 +45,11 @@ const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRou
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
+  customerLastStart16Enabled,
 } = require('./scheduling/customer-windows');
 const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
 const { isEnabled } = require('../config/feature-gates');
+const { slotRainTierOf, demoteByRainTier } = require('./scheduling/customer-rain-rank');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -875,6 +877,24 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   };
 }
 
+// The services THIS appointment performs. Without a combined recurring
+// allocation the held appointment belongs to the converter's primary
+// service and companion programs book separately; one-time paid add-ons
+// remain work on this same appointment. Shared by the catalog resolution
+// below and the rain ranking, which must judge only the work done in the
+// slot (Codex #6127 r3). Idempotent on an already-narrowed profile.
+function appointmentServicesFor(profile = {}) {
+  const services = Array.isArray(profile.services) ? profile.services : [];
+  if (profile.reservationServiceMix || profile.serviceMode === 'one_time') return services;
+  return [services.find((service) => service.service === 'pest_control') || services[0]].filter(Boolean);
+}
+
+// { resolvedServiceKey } for a resolved catalog row; nothing when the lookup
+// found none, so a profile without one keeps today's exact shape.
+function resolvedKeyOf(catalog) {
+  return catalog && catalog.service_key ? { resolvedServiceKey: catalog.service_key } : {};
+}
+
 /** Keep classification synchronous; resolve catalog allowances once at every
  * booking boundary. This is also used inside reserve/commit transactions. */
 async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
@@ -882,11 +902,7 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
   if (!capacityEnabled() && !userOpts.preserveCapacity) return profile;
   const { catalogLinkForProfile } = require('./slot-reservation');
   const { serviceDurationMinutes } = require('./service-library');
-  // Without a combined recurring allocation, the held appointment belongs
-  // to the converter's primary service; companion programs book separately.
-  // One-time paid add-ons remain work on this same appointment.
-  const appointmentServices = profile.reservationServiceMix || profile.serviceMode === 'one_time' ? profile.services
-    : [profile.services.find(service => service.service === 'pest_control') || profile.services[0]].filter(Boolean);
+  const appointmentServices = appointmentServicesFor(profile);
   const services = [];
   for (const service of appointmentServices) {
     let catalog;
@@ -901,7 +917,10 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
       throw unavailable;
     }
     const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes, { preserveCapacity: userOpts.preserveCapacity });
-    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
+    // resolvedServiceKey: the catalog row this lookup resolved (cadence or
+    // engine key), kept for the rain ranking, which classifies by catalog
+    // identity (Codex #6127 r1). Internal: stripped from the public profile.
+    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0), ...resolvedKeyOf(catalog) });
   }
   const capacity = profile.reservationServiceMix
     ? require('./combined-visit-capacity').capacityForServices(services, services.map(service => service.durationMinutes)) : null;
@@ -1401,7 +1420,13 @@ function routeFirstOrder(sorted) {
   return [soonest, ...routeFit, ...rest];
 }
 
-function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
+// `rainTierOf` (GATE_CUSTOMER_RAIN_RANK, scheduling/customer-rain-rank.js):
+// a stable reorder by rain fit of everything BEHIND the lead cards. The
+// soonest opening stays the first card, and a scarce first day's pinned
+// cards stay pinned (the "N openings today" badge counts them), so every
+// promise above holds at any gate setting; only the spread after them
+// changes, before the display slice.
+function selectCustomerFacingSlots(slots, limit, { routeFirst = false, rainTierOf = null } = {}) {
   const safeLimit = Math.max(0, Number(limit) || 0);
   if (!safeLimit) return [];
 
@@ -1430,10 +1455,10 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
   const firstDaySlots = sorted.filter((s) => s?.date === firstDay);
   if (firstDaySlots.length > 1 && firstDaySlots.length <= SCARCE_FIRST_DAY_MAX) {
     const rest = diversified.filter((s) => s?.date !== firstDay);
-    return [...firstDaySlots, ...rest].slice(0, safeLimit);
+    return demoteByRainTier([...firstDaySlots, ...rest], rainTierOf, firstDaySlots.length).slice(0, safeLimit);
   }
 
-  return diversified.slice(0, safeLimit);
+  return demoteByRainTier(diversified, rainTierOf, 1).slice(0, safeLimit);
 }
 
 // Drop any candidate the reserve gate would reject, so every offered slot is
@@ -1832,6 +1857,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       const publicService = { ...service };
       delete publicService.engineKey;
       delete publicService.catalogServiceKey;
+      delete publicService.resolvedServiceKey;
       return publicService;
     }),
   };
@@ -1853,6 +1879,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // 2026-09-23): a result computed while noon was offerable must never be
     // served after the gate flips on (or vice versa) for the TTL's length.
     lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
+    // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
+    customerLastStart16Enabled() ? 'last_start_16' : 'last_start_17',
     // The RESOLVED bounds, not just the gate flag (Codex push-audit P1 on
     // #4663): booking_config's lunch interval / day-end override refreshes
     // on its own 60s TTL (customer-windows.js), independent of this 5-min
@@ -2185,8 +2213,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
+  // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
+  // the gate off, no slot inside the next 3 dates, or any failure.
+  const rainTierOf = await slotRainTierOf(funneledBookable, {
+    profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
+  });
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
+    rainTierOf,
   });
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
@@ -2470,6 +2504,7 @@ module.exports = {
     filterPastSlotsForToday,
     splitSlotResults,
     selectCustomerFacingSlots,
+    appointmentServicesFor,
     diversifyByDay,
     compareCustomerFacingSlots,
     resolveEstimateSlotProfile,

@@ -98,7 +98,7 @@ afterAll(() => {
 
 describe('scope + date math', () => {
   test('owner scope is cockroach, flea and bed bug — the two-treatment package set', () => {
-    expect([...PACKAGE_FOLLOWUP_SERVICE_KEYS]).toEqual(['cockroach_control', 'flea_tick', 'bed_bug_treatment']);
+    expect([...PACKAGE_FOLLOWUP_SERVICE_KEYS]).toEqual(['cockroach_control', 'flea_tick', 'bed_bug_treatment', 'vehicle_german_roach']);
     expect([...PACKAGE_FOLLOWUP_SERVICE_KEYS].sort()).toEqual([...require('../services/typed-followup-obligation').TWO_TREATMENT_PACKAGE_KEYS].sort());
     expect(isPackageFollowUpServiceKey('pest_general_quarterly')).toBe(false);
     expect(isPackageFollowUpServiceKey(undefined)).toBe(false);

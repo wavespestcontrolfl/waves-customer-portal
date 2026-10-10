@@ -179,6 +179,30 @@ it('summary mode: a pick two weeks out asks once more for the next-7-days row (C
   expect(result.current.availability.days.map((d) => d.date)).toEqual(['2035-01-01', '2035-01-02']);
 });
 
+it('best rows send the booking\'s services on every request, the week fallback included (Codex #6102 r1)', async () => {
+  const far = {
+    ...summaryAnswer,
+    summary: { ...summaryAnswer.summary, best: { day: [], week: [], week_covered: false } },
+  };
+  const week = { slots: [], summary: { days: [], best: { day: [], week: [], week_covered: true } } };
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => far })
+    .mockResolvedValueOnce({ ok: true, json: async () => week });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    summary: true, bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
+    serviceTypes: ['General Pest Control', 'WDO Inspection'],
+    serviceKeys: ['pest_general_quarterly', ''],
+  }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(fetch).toHaveBeenCalledTimes(2);
+  for (const call of fetch.mock.calls) {
+    expect(JSON.parse(call[1].body).serviceTypes).toEqual(['General Pest Control', 'WDO Inspection']);
+    // The selected catalog rows' keys ride in the same order (Codex #6120 r1).
+    expect(JSON.parse(call[1].body).serviceKeys).toEqual(['pest_general_quarterly', '']);
+  }
+});
+
 it('summary mode without bestRows never asks for the rows', async () => {
   const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer });
   vi.stubGlobal('fetch', fetch);

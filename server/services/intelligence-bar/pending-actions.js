@@ -224,6 +224,33 @@ function stampRequestStart(params, requestStartedAt) {
   return startedAt && !Number.isNaN(startedAt.getTime()) ? { ...params, [REQUEST_STAMP]: startedAt.toISOString() } : params;
 }
 
+// A task step whose card expired before anyone decided it never ran. When the
+// task continues and proposes again (Codex #6111 r3), that card is retired
+// from the task's step list: it keeps its status and expiry (it stays an
+// expired card) and gets a replaced-step key, which frees its step for the
+// fresh card and keeps it out of the task's receipts.
+const replacedStepKey = id => paramsHash('ib-replaced-step', String(id));
+const isReplacedStep = row => row.step_key === replacedStepKey(row.id);
+// The task's steps a continuation retires: every expired undecided card, and
+// the product picker an expired chosen card came from (_ib_chosen_from). That
+// choice never led to a write, so the continuation offers the picker afresh
+// instead of finding the used one as the step's outcome. Returns their ids.
+// Expiry is read on the database clock, the one a Confirm's claim uses, and
+// the rows are locked: a card the database can still claim is never replaced
+// (Codex #6111 r7).
+async function retireExpiredSteps(trx, rows) {
+  const expiredIds = new Set(await trx('ib_pending_actions').whereIn('id', rows.map(row => row.id))
+    .where({ status: 'pending' }).where('expires_at', '<=', trx.fn.now()).forUpdate().pluck('id'));
+  const expired = rows.filter(row => expiredIds.has(row.id));
+  const pickerIds = new Set(expired.map(row => paramsOf(row)._ib_chosen_from).filter(Boolean).map(String));
+  const retired = [...expired, ...rows.filter(row => pickerIds.has(String(row.id)))];
+  for (const row of retired.filter(r => !isReplacedStep(r))) {
+    await trx('ib_pending_actions').where({ id: row.id, task_id: row.task_id })
+      .update({ step_key: replacedStepKey(row.id), updated_at: trx.fn.now() });
+  }
+  return new Set(retired.map(row => row.id));
+}
+
 // Locks the running task and reads this actor's earlier cards of the task.
 // Returns the card this step already stored (a retry), or null when the step
 // is new; throws when the lease is lost or a preceding action is unresolved.
@@ -231,7 +258,9 @@ async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, s
   const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
     .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
   if (!task) throw new Error('Task execution was superseded');
-  const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
+  const rows = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
+  const retired = await retireExpiredSteps(trx, rows);
+  const previous = rows.filter(row => !retired.has(row.id));
   const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
     || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
   if (existing) return existing;
@@ -253,6 +282,13 @@ async function approvalParams(params, { taskId, toolName }) {
     { toolName, forApproval: true });
   if (scope.error) throw Object.assign(new Error(scope.error), { code: scope.code });
   return { ...params, _ib_task_context: scope };
+}
+
+// What createPendingAction stores for a card, for a caller that must do this
+// read before its own transaction opens (pass the result as approvedParams).
+async function approvedCardParams({ toolName, params, taskId, requestStartedAt = null }) {
+  if (intentKey(toolName, params)) params = stampRequestStart(params, requestStartedAt);
+  return approvalParams(params, { taskId, toolName });
 }
 
 // Inserts a pending card. { created: false } means a task step replay hit the
@@ -323,26 +359,37 @@ async function applySupersession(trx, row, { toolName, params }) {
   return row;
 }
 
-async function createPendingAction({ toolName, params, requestedBy, taskId, requestStartedAt = null, ...card }) {
+// inheritedTask: the card replaces a task card the operator just used (a
+// product picker). It joins that task as its own step so the task waits for
+// its outcome, without a running task lease (no model round is running).
+// trx: store inside the caller's transaction (a product choice), with the
+// approvedParams it read before that transaction opened.
+async function createPendingAction({ toolName, params, requestedBy, taskId, requestStartedAt = null, inheritedTask = false, trx = null, approvedParams = null, ...card }) {
   const intent = intentKey(toolName, params);
   if (intent) params = stampRequestStart(params, requestStartedAt);
   const persist = async trx => {
-    if (taskId) {
+    if (taskId && !inheritedTask) {
       const existing = await loadTaskStep(trx, { taskId, requestedBy, runnerToken: card.runnerToken, toolName, stepKey: card.stepKey });
       if (existing) return existing;
     }
-    const stored = await approvalParams(params, { taskId, toolName });
+    const stored = approvedParams || await approvalParams(params, { taskId, toolName });
     if (intent) await lockIntent(trx, requestedBy, toolName, intent);
     const { row, created } = await insertPendingRow(trx, { ...card, toolName, params: stored, requestedBy, taskId });
     const result = created && intent ? await applySupersession(trx, row, { toolName, params: stored }) : row;
     if (result === row) logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
     return result;
   };
+  if (trx) return persist(trx);
   return taskId || intent ? db.transaction(persist) : persist(db);
 }
 
+// A task's steps among its card rows: a retired expired step (replaced by a
+// fresh card) is not one. Every reader of a task's cards goes through this,
+// so the task list and the task detail report the same state.
+const taskSteps = rows => rows.filter(row => !isReplacedStep(row));
+
 async function forTask(taskId, requestedBy) {
-  return db('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) }).orderBy('created_at');
+  return taskSteps(await db('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) }).orderBy('created_at'));
 }
 
 /**
@@ -359,17 +406,26 @@ async function forTask(taskId, requestedBy) {
  * not_found | actor_mismatch | already_used | cancelled | expired |
  * hash_mismatch | contract_mismatch
  */
-async function claimForConfirm(id, requestedBy, { contractHash = null } = {}) {
+// `trx`: claim inside the caller's transaction (a product choice), so a later
+// failure in that transaction puts the card back.
+// A "choose the product" card (params._ib_product_choices) names no product,
+// so Confirm can never claim it: only a product choice (`forProductChoice`)
+// can. Any other caller gets product_choice_required and the card stays
+// pending and usable (a stale client's Confirm must not use it up).
+async function claimForConfirm(id, requestedBy, { contractHash = null, trx = null, forProductChoice = false } = {}) {
   const echoed = contractHash ? String(contractHash) : null;
+  const q = trx || db;
   // A card for an intent with a supersede rule claims under the intent lock and
   // is refused when a NEWER card for the same intent exists (any status). Every
   // other card takes the single-statement claim below, unchanged.
-  const peek = await db('ib_pending_actions').where({ id }).first('tool_name', 'params', 'requested_by', 'status', 'expires_at');
+  const peek = await q('ib_pending_actions').where({ id }).first('tool_name', 'params', 'requested_by', 'status', 'expires_at');
+  if (peek && !forProductChoice && Array.isArray(paramsOf(peek)._ib_product_choices)
+    && String(peek.requested_by) === String(requestedBy)) return { error: 'product_choice_required' };
   const key = peek && peek.status === 'pending' && String(peek.requested_by) === String(requestedBy)
     && new Date(peek.expires_at).getTime() > Date.now() ? intentKey(peek.tool_name, paramsOf(peek)) : null;
-  if (!key) return claimRow(db, id, requestedBy, echoed);
+  if (!key) return claimRow(q, id, requestedBy, echoed);
   const rule = SUPERSEDE_RULES[peek.tool_name];
-  return db.transaction(async (trx) => {
+  return q.transaction(async (trx) => {
     await lockIntent(trx, requestedBy, peek.tool_name, key);
     const siblings = await intentSiblings(trx, id, peek.tool_name, key);
     if (siblings.some(sib => sib.newer && rule.covers(sib.params, paramsOf(peek)))) {
@@ -426,6 +482,42 @@ async function cancelPendingAction(id, requestedBy) {
   return { cancelled: count > 0 };
 }
 
+// One card row, actor-bound, params parsed. Server-side reads only (the
+// picker's shortlist check, Show again); never sent to the model.
+async function getPendingRow(id, requestedBy) {
+  const row = await db('ib_pending_actions').where({ id, requested_by: String(requestedBy) }).first();
+  return row ? { ...row, params: paramsOf(row) } : null;
+}
+
+// The card made from card `sourceId` by a product choice (_ib_chosen_from) or
+// by Show again (_ib_shown_from), from that pin in its params. Used to replay
+// the request after a lost response; the source card's receipt never carries
+// the new card's id, since receipts reach the model and pending ids are
+// client-only credentials.
+const DERIVED_PINS = new Set(['_ib_chosen_from', '_ib_shown_from']);
+async function findDerivedCard(pin, sourceId, requestedBy) {
+  if (!DERIVED_PINS.has(pin)) throw new Error('Unknown derived-card pin');
+  const row = await db('ib_pending_actions').where({ requested_by: String(requestedBy) })
+    .whereRaw('params->>? = ?', [pin, String(sourceId)])
+    .orderBy('created_at', 'desc').first();
+  return row ? { ...row, params: paramsOf(row) } : null;
+}
+
+// Show again (owner 2026-10-07): retires a card that expired with no decision,
+// in one statement, so one expired card is shown again at most once. Returns
+// the retired row (params parsed), or null when the card is not this actor's,
+// not expired, or was already confirmed or cancelled. `trx`: inside the
+// caller's transaction, so a failed re-proposal puts the card back.
+async function retireExpiredAction(id, requestedBy, { trx = null } = {}) {
+  const q = trx || db;
+  const [row] = await q('ib_pending_actions')
+    .where({ id, requested_by: String(requestedBy), status: 'pending' })
+    .where('expires_at', '<=', q.fn.now())
+    .update({ status: 'cancelled', updated_at: q.fn.now() })
+    .returning('*');
+  return row ? { ...row, params: paramsOf(row) } : null;
+}
+
 async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false } = {}) {
   try {
     const query = database('ib_pending_actions').where({ id });
@@ -447,8 +539,8 @@ async function recordResult(id, result, { database = db, critical = false, onlyI
 /** Actor-bound recovery after disconnect. Consumed-without-result is unknown,
  * never permission to execute again. Confirmation credentials stay client-only.
  */
-async function getActionReceipt(id, requestedBy) {
-  const row = await db('ib_pending_actions').where({ id, requested_by: String(requestedBy) }).first();
+async function getActionReceipt(id, requestedBy, { database = db } = {}) {
+  const row = await database('ib_pending_actions').where({ id, requested_by: String(requestedBy) }).first();
   return row ? actionReceipt(row) : null;
 }
 
@@ -487,6 +579,7 @@ async function attachThread(ids, threadId, turnSeq, requestedBy) {
 }
 
 module.exports = {
+  approvedCardParams,
   actionReceipt,
   TTL_MINUTES,
   paramsHash,
@@ -497,8 +590,12 @@ module.exports = {
   intentLock,
   claimForConfirm,
   cancelPendingAction,
+  getPendingRow,
+  findDerivedCard,
+  retireExpiredAction,
   recordResult,
   getActionReceipt,
   attachThread,
   forTask,
+  taskSteps,
 };

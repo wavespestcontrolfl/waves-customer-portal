@@ -26,6 +26,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { clearedNewSodColumns } = require('./lawn-sod-holds');
 const {
   formatAddress,
   normalizeStreetLine,
@@ -181,12 +182,20 @@ function snapshotMatchesLine1(snapshot, line1) {
   return snapshotMatchesContact(snapshot, { address_line1: line1 });
 }
 
-// The ONE writer of the sprinkler-settings move guard: stamp the move and
-// reset the per-field confirmation set on the customer's preference row.
+// The ONE writer of the sprinkler-settings move guard: stamp the move, reset the
+// per-field confirmation set and clear the new-sod record on the customer's
+// preference row.
 // Callers: this fan-out (a move, an address removal), the different-homes
 // customer merge, and the primary-residence promotion (codex #3565 gh-r26).
 // Never touches the settings themselves. Returns the row count.
-async function markSprinklerSettingsMoved(customerId, conn = db) {
+//
+// clearNewSod (default true): also clears the new-sod record (NEW_SOD_COLUMNS) in
+// the same stamp. The customer merge passes false: it has no before-image for the
+// stamp fields (an undo leaves the stamp in place), so clearing there could not be
+// undone. The merge instead keeps the winner's own record, never copies the loser's
+// (mergeSingletonPrefRow), and clears a moved-whole loser row's record itself with a
+// journaled before-image (executeMerge / revertMerge).
+async function markSprinklerSettingsMoved(customerId, conn = db, { clearNewSod = true } = {}) {
   if (!customerId) return 0;
   // Same customer-scoped lock the prefs PUT serializes on: an autosave begun
   // for the old home cannot commit after this reset and re-add a stale field
@@ -195,7 +204,15 @@ async function markSprinklerSettingsMoved(customerId, conn = db) {
     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     ['property-preferences', String(customerId)],
   );
-  const stamp = { irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) };
+  // The new-sod record (sod_laid_on, covers, area, rooted day) is a fact about the home that was
+  // just left: it survives an address edit, a merge and a primary promotion on the customer-level
+  // row, so the SAME stamp clears all of it in the same transaction. The next visit at the new
+  // home runs the program with no sod holds.
+  const stamp = {
+    irrigation_home_changed_at: new Date(),
+    irrigation_confirmed_fields: JSON.stringify([]),
+    ...(clearNewSod ? clearedNewSodColumns() : {}),
+  };
   const n = await conn('property_preferences').where({ customer_id: customerId }).update(stamp);
   if (n) return n;
   // No preferences row (tech-only irrigation readings are common): the guard

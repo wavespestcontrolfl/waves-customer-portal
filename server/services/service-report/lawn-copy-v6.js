@@ -33,9 +33,10 @@
  */
 
 const logger = require('../logger');
-const { buildTreatmentSummary } = require('./treatment-summary');
+const { buildTreatmentSummary, buildCategoryTreatmentSummary } = require('./treatment-summary');
+const { copyFixesLive } = require('./lawn-report-copy-fixes');
 const { buildLawnExpectations } = require('./lawn-expectations');
-const { CELSIUS_YTD_CAP } = require('../../config/lawn-expectations');
+const { celsiusYtdCap } = require('../../config/lawn-expectations');
 
 const COPY_VERSION = 'lawn_report_v6_fixed_1';
 const FREEZE_KEY = 'lawnCopyV6';
@@ -155,12 +156,14 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const built = build({
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
+    // The frozen finding-to-product tie (GATE_LAWN_REPORT_FACTS): a product that treated a finding reads curative.
+    tiedFamilies: Array.isArray(ctx.tiedFamilies) ? ctx.tiedFamilies : [],
     visitDate: ctx.visitDate || null,
     nextVisitGapDays: Number.isFinite(ctx.nextVisitGapDays) ? ctx.nextVisitGapDays : undefined,
     // Not tracked for the report yet: the cap makes a Celsius row print its
     // "a different product may be used" line, true either way, rather than
     // promise a second application that may be capped.
-    celsiusYtdCount: CELSIUS_YTD_CAP,
+    celsiusYtdCount: celsiusYtdCap(),
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
@@ -217,7 +220,11 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
   if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [], expectSentences: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
-  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
+  // GATE_LAWN_REPORT_COPY_FIXES: a copy frozen while the gate is live names the product categories,
+  // never an active ingredient or a product name. The gate decides only what a NEW freeze writes;
+  // a frozen entry replays as it was written. The builder is chosen once, here.
+  const summarize = copyFixesLive() ? buildCategoryTreatmentSummary : buildTreatmentSummary;
+  fields.whatWeDid = clean(summarize(reportV2.treatment, { noTiming: true }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   let expectSentences = [];

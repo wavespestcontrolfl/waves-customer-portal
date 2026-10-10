@@ -1156,6 +1156,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // (activeServiceKeys), so a bundle that itself buys a recurring service still
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
+  // The replay exemption of the lawn pricer's v13 bahia review is server-declared (the replay branch
+  // below): a browser-posted copy of either field is never honored.
+  delete v1Input.savedEstimateReplay;
+  delete v1Input.addedServiceKeys;
   v1Input.priorQualifyingServices = priorQualifyingServices;
   // Account-wide rodent setup-waiver evidence, server-derived by the caller
   // alongside the property-scoped tier list (codex #3591 r34 P1); set
@@ -1218,6 +1222,12 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // above, and every other save prices off freshly synced live config and
   // stamps the resulting server values afterward.
   if (deps.replaySavedPricingKnobs === true) {
+    // A persisted estimate re-priced as it was sold: the lawn pricer's v13 bahia review (new
+    // quotes only) must not park an estimate that was already issued. A service this very
+    // mutation ADDS (the customer add-service rail) was never sold, so it keeps the review:
+    // the caller names it in addedServiceKeys.
+    v1Input.savedEstimateReplay = true;
+    v1Input.addedServiceKeys = Array.isArray(deps.addedServiceKeys) ? deps.addedServiceKeys : [];
     // Lawn cost floor, lawn program minimum and pest program floor. The public
     // read path has threaded these since #2827 (savedFloorReplayOverrides);
     // this branch did not, so an authoritative recompute resolved them from
@@ -2370,7 +2380,9 @@ async function createOrReuseAdminEstimate({
 
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
-        if (existingEstimate?.status === 'draft') {
+        // An ARCHIVED draft is never reused: overwriting it would leave the
+        // save hidden and unsendable. It takes the non-draft path instead.
+        if (existingEstimate?.status === 'draft' && !existingEstimate.archived_at) {
           // A linked COMMERCIAL PROPOSAL draft is never reused by the generic
           // save (GH codex P2 r6 on #3750): its proposal is server-owned and
           // its totals come from the authored line items — the generic

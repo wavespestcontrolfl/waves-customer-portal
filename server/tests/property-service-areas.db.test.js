@@ -36,7 +36,7 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
       t.uuid('technician_id'); t.string('status').defaultTo('scheduled'); t.date('scheduled_date'); t.string('service_type');
       for (const key of ['service_address_line1','service_address_line2','service_address_city','service_address_zip']) t.string(key);
     });
-    await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); });
+    await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); t.date('sod_laid_on'); t.string('sod_covers', 8); t.string('sod_area', 120); t.date('sod_rooted_on'); });
     await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.string('grass_type'); t.timestamp('updated_at'); });
     await knex.schema.createTable('audit_log', t => {
       t.increments('id'); t.string('actor_type'); t.uuid('actor_id'); t.string('action'); t.string('resource_type'); t.uuid('resource_id');

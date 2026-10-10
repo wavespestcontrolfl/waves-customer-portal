@@ -87,6 +87,13 @@ function purchaseGateOn(key) {
   return ['1', 'true', 'on'].includes(String(process.env[PURCHASE_GATED_ROWS[key]] || '').toLowerCase());
 }
 
+// The grass tracks the RECURRING lawn program range sweeps: with GATE_LAWN_V13 on there is no bahia
+// program, so the range no longer prices one. The one-time rows keep every bracket track.
+function recurringLawnTracks() {
+  const { bahiaHasNoProgram } = require('../lawn-program');
+  return Object.keys(constants.LAWN_BRACKETS).filter((track) => !bahiaHasNoProgram(track));
+}
+
 function buildRows() {
   const rows = [];
   const errors = [];
@@ -459,7 +466,7 @@ function buildRows() {
     unit: 'per application',
     values: sweepValues(
       TYPICAL_TURF.flatMap((sq) =>
-        Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
+        recurringLawnTracks().flatMap((track) =>
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
       (r) => r.perApp),
@@ -715,7 +722,7 @@ function lastComputeUnstable() {
 }
 
 function gateSignature() {
-  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || '')].join('|');
+  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || ''), String(require('../../config/feature-gates').lawnV13Live?.() === true), process.env.GATE_LAWN_COST_PLUS_LIST || ''].join('|');
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {

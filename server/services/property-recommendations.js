@@ -22,6 +22,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const WATERING_COPY = require('../../shared/watering-copy.json');
 const { buildPortalOffer } = require('./service-report/cross-sell');
 const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 const { dateOnlyString } = require('../utils/date-only');
@@ -49,12 +50,12 @@ const IRRIGATION_ADVICE_MAX_AGE_DAYS = 45;
 const IRRIGATION_ADVICE = {
   wet_condition_watch: {
     title: 'Ease up on irrigation',
-    body: 'Your recent lawn visits show more combined rain and irrigation than your lawn needs. Cutting back a watering cycle this week helps prevent fungus.',
+    body: `Your recent lawn visits show more rain and sprinkler water than your lawn needs. ${WATERING_COPY.surplusAdvice}`,
     priority: 'high',
   },
   water_deficit_likely: {
     title: 'Your lawn may need more water',
-    body: 'Your recent lawn visits show less combined rain and irrigation than your lawn needs. Adding a watering cycle this week helps it recover.',
+    body: `Your recent lawn visits show less rain and sprinkler water than your lawn needs. ${WATERING_COPY.deficitAdvice}`,
     priority: 'high',
   },
   coverage_issue_possible: {
