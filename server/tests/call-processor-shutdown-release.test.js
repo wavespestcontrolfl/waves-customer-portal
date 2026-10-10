@@ -43,6 +43,8 @@ describe('markInFlightForShutdown with the gate off (unit)', () => {
     const summary = await processor.markInFlightForShutdown({ deadlineMs: 0 });
     expect(summary).toEqual({ enabled: false, inFlight: 0, stamped: 0, failed: 0 });
     expect(processor.inFlightPassCount()).toBe(0);
+    // Rollback is complete: a gate-off pod ignores stamps a gate-on pod left.
+    expect(processor._test.reclaimableClaimSql(10)).not.toContain('shutdown_interrupted_at');
   });
 });
 
@@ -109,6 +111,9 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     expect(stamped.processing_status).toBe('processing');
     expect(stamped.processing_token).toBe(claimed.processing_token);
     expect(stamped.metadata.shutdown_interrupted_at).toEqual(expect.any(String));
+    // The stamp refreshed the beat: the 2-minute silence starts at SIGTERM.
+    expect(new Date(stamped.processing_heartbeat_at).getTime()).toBeGreaterThanOrEqual(new Date(claimed.processing_heartbeat_at).getTime());
+    expect(processor._test.reclaimableClaimSql(10)).toContain('shutdown_interrupted_at');
 
     // The pass finishes on its own: its release lands as before.
     releaseDownload();

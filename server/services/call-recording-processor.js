@@ -3796,7 +3796,12 @@ const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
 // 10-minute window: the pass beats every 60 s while alive and Railway kills
 // the old pod within 30 s of SIGTERM, so 2 quiet minutes on a stamped row is
 // proof the pass is dead, and a pass that somehow survived keeps beating and
-// is never taken. The claim that takes the row clears the stamp.
+// is never taken. The claim that takes the row clears the stamp. The stamp
+// write refreshes the heartbeat in the same statement: the pass IS alive at
+// SIGTERM, and a beat that had gone stale behind a long provider call must not
+// make the row reclaimable during the old pod's last 25 seconds (Codex r5 P1).
+// The clause is read only while the gate is on: a gate-off pod after a rollback
+// ignores stamps a gate-on pod left behind (Codex r5 P1).
 const SHUTDOWN_RECLAIM_QUIET_MINUTES = 2;
 const SHUTDOWN_STAMP_KEY = 'shutdown_interrupted_at';
 const shutdownInterruptedClaim = "("
@@ -3807,7 +3812,7 @@ const reclaimableClaim = (quietMinutes) => "("
   + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
   + ` OR (NOT (${CURRENT_BEAT}) AND`
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
-  + ` OR ${shutdownInterruptedClaim}`
+  + (isEnabled('callProcShutdownRelease') ? ` OR ${shutdownInterruptedClaim}` : '')
   + ")";
 // Passes this process currently holds a claim for (call_log.id → claim token),
 // so markInFlightForShutdown knows which rows to stamp. Filled right after the
@@ -22843,7 +22848,10 @@ const CallRecordingProcessor = {
           db('call_log')
             .where({ id: callId })
             .where('processing_token', entry.procToken)
-            .update({ metadata: shutdownStampSql(db) }),
+            // Stamp AND beat in one statement: the pass is alive right now,
+            // and the 2-minute silence must start here, not at a beat that
+            // went stale behind a long provider call.
+            .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() }),
           deadline,
         ]);
         if (rows === 'deadline') {
@@ -23513,6 +23521,7 @@ CallRecordingProcessor._test = {
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
+  reclaimableClaimSql: reclaimableClaim,
   legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,
