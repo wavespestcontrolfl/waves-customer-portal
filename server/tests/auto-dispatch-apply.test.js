@@ -9,7 +9,15 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
-jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue() }));
+jest.mock('../services/appointment-reminders', () => ({
+  handleReschedule: jest.fn().mockResolvedValue(),
+  REMINDER_BLOCKING_STATUSES: new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show', 'rescheduled']),
+  reminderRowCanSend: (row) => !!row && row.cancelled !== true && row.suppressed_by_sibling !== true && row.windows_preclosed !== true,
+}));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }),
+  _private: { doneColumns: jest.fn(({ by, resolution, at }) => ({ done_at: at, done_by: by, resolution })) },
+}));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn().mockResolvedValue({ failed: false, frozen: new Set() }),
@@ -19,6 +27,7 @@ jest.mock('../services/auto-dispatch/route-tiers', () => ({
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const AppointmentReminders = require('../services/appointment-reminders');
+const notifications = require('../services/notification-service');
 const { applyAutoDispatchMove, makeMemberGuard } = require('../services/auto-dispatch/apply');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
@@ -147,6 +156,287 @@ test('re-arms a still-pending creation confirmation after the silent reminder sy
 
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
   expect(rearm).toHaveBeenCalledWith({ confirmation_sent: false, confirmation_sent_at: null });
+});
+
+describe('reminder sync failure after a committed move', () => {
+  let movableRows;
+  // The move's own reads/writes come off the queue; once it is spent, the
+  // post-move reminder check reads these tables by name.
+  function tableReader(byTable) {
+    return (table) => (movableRows.length ? movableRows.shift() : readRow(byTable[table]));
+  }
+
+  function movableQueue() {
+    movableRows = [
+      readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+      { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+    ];
+    db.mockImplementation(() => movableRows.shift());
+  }
+
+  test('keeps the move, and tells staff to check that visit\'s reminder', async () => {
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+    movableQueue();
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(res).toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+      'schedule_conflict', 'Schedule — check the reminder time on a moved visit', expect.stringContaining('Aug 11'),
+      expect.objectContaining({
+        bell: true,
+        link: '/admin/dispatch?tab=schedule&date=2026-08-11&appointment=s1',
+        dedupeKey: 'auto-dispatch-reminder-sync:s1:2026-08-11:08:00',
+        // A repeat failure on the same slot reopens a closed notice (r11 P2).
+        refreshOnDedupe: true,
+        metadata: expect.objectContaining({ scheduledServiceId: 's1' }),
+      }),
+    );
+  });
+
+  // A run can move 100 rows. A reminder store that fails for all of them
+  // rings 10 visit notices in 24 hours, then one standing notice for the day
+  // (Codex #6208 r6 P1).
+  describe('reminder-sync bell budget', () => {
+    const rung = (keys) => ({
+      where() { return this; }, whereRaw() { return this; },
+      select: async () => keys.map((k) => ({ dedupe_key: k })),
+    });
+    const tenKeys = Array.from({ length: 10 }, (_, i) => `auto-dispatch-reminder-sync:v${i}:2026-08-11:08:00`);
+    const failWith = (keys) => {
+      AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+      movableQueue();
+      AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+      db.mockImplementation(tableReader({
+        appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
+        scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
+      }));
+      const read = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'notifications' ? rung(keys) : read(table)));
+      db.raw = jest.fn((x) => x);
+    };
+
+    test('past 10 notices in 24 hours, the visit gets no bell of its own: one standing notice for the day', async () => {
+      failWith(tenKeys);
+      await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+      expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+      const [, title, , opts] = notifications.notifyAdmin.mock.calls[0];
+      expect(title).toContain('check the reminders on today');
+      expect(opts.dedupeKey).toMatch(/^auto-dispatch-reminder-sync-overflow:\d{4}-\d{2}-\d{2}$/);
+      // Activity-only: a standing row, never an eleventh ring (Codex #6208 r7 P2).
+      expect(opts.metadata.feed).toBe('activity');
+    });
+
+    test('a visit whose notice already stands is re-raised and spends no budget', async () => {
+      failWith([...tenKeys.slice(0, 9), 'auto-dispatch-reminder-sync:s1:2026-08-11:08:00']);
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-reminder-sync:s1:2026-08-11:08:00');
+    });
+
+    test('nine notices leave room for one more visit notice', async () => {
+      failWith(tenKeys.slice(0, 9));
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-reminder-sync:s1:2026-08-11:08:00');
+    });
+  });
+
+  test('a later failed move to another time on the same date is a new notice (Codex #6208 r1)', async () => {
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+    movableQueue();
+    await applyAutoDispatchMove(SERVICE, { ...BEST, start_time: '13:00', end_time: '15:00' }, 'run1', {});
+    expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-reminder-sync:s1:2026-08-11:13:00');
+  });
+
+  test('a failed notice never fails the committed move', async () => {
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+    notifications.notifyAdmin.mockRejectedValueOnce(new Error('notification store down'));
+    movableQueue();
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+  });
+
+  // handleReschedule catches its own errors and resolves null, as it does for
+  // a visit with no reminder row: the row itself tells the two apart.
+  test('a sync that resolved null with the reminder still on another time tells staff', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    movableQueue();
+    db.mockImplementation(tableReader({
+      appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
+      scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
+    }));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  // The reminder follows the canonical arrival (reservation_arrival_start), which
+  // differs from the candidate's start for a sequentially allocated member.
+  test('compares the reminder with the committed row\'s canonical arrival, not the candidate start', async () => {
+    AppointmentReminders.composeScheduledApptTime = jest.fn(({ scheduled_date: d, window_start: t }) => new Date(`${d}T${t}:00Z`));
+    db.raw = jest.fn(async () => ({ rows: [{ window_start: '10:15' }] }));
+    const committed = { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', reservation_service_mix: { allocatedServiceIds: ['s1', 's2'] } };
+    for (const [reminderTime, expectNotice] of [['2026-08-11T10:15:00Z', false], ['2026-08-11T08:00:00Z', true]]) {
+      notifications.notifyAdmin.mockClear();
+      AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+      movableQueue();
+      db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: reminderTime }, scheduled_services: committed }));
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(AppointmentReminders.composeScheduledApptTime).toHaveBeenLastCalledWith({ scheduled_date: '2026-08-11', window_start: '10:15' });
+      expect(notifications.notifyAdmin).toHaveBeenCalledTimes(expectNotice ? 1 : 0);
+    }
+  });
+
+  // Staff rescheduled the visit between the two reads: the old reminder and
+  // the new visit are not one state, and that writer syncs its own reminder
+  // (Codex #6208 r20 P2).
+  test('a visit that changed during the reminder check raises nothing', async () => {
+    AppointmentReminders.composeScheduledApptTime = jest.fn()
+      .mockReturnValueOnce(new Date('2026-08-11T12:00:00Z'))
+      .mockReturnValueOnce(new Date('2026-08-13T12:00:00Z'));
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    movableQueue();
+    db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: '2026-08-11T12:00:00Z' }, scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' } }));
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // A later move whose sync worked repaired the reminder: the visit's open
+  // reminder-sync notices close; a failed sync closes nothing (Codex #6208 r25 P2).
+  describe('closing a reminder-sync notice', () => {
+    const closer = () => {
+      const calls = { like: [], update: jest.fn().mockResolvedValue(1) };
+      const q = { where() { return this; }, whereNot(...a) { calls.not = a; return this; }, whereRaw(sql, b) { calls.like.push(b); return this; }, update: calls.update };
+      return { calls, q };
+    };
+    const withNotifications = (q) => { const read = db.getMockImplementation(); db.mockImplementation((table) => (table === 'notifications' ? q : read(table))); };
+
+    test('a sync that returned the reminder record closes this visit\'s notices', async () => {
+      AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: true });
+      movableQueue();
+      const { calls, q } = closer();
+      withNotifications(q);
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(calls.like).toEqual([['auto-dispatch-reminder-sync:s1:%']]);
+      // Done rows are rewritten too (no done_at filter); only resolved rows are skipped (r26 P2).
+      expect(calls.not).toEqual(['title', 'Reminder time alert resolved']);
+      expect(notifications._private.doneColumns).toHaveBeenCalledWith(expect.objectContaining({ keepExisting: true }));
+      expect(calls.update).toHaveBeenCalledWith(expect.objectContaining({ title: 'Reminder time alert resolved', done_by: 'auto-dispatch' }));
+      expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('a failed sync with the reminder still on the old time closes nothing', async () => {
+      AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminder store down'));
+      AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+      movableQueue();
+      db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' }, scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' } }));
+      const { calls, q } = closer();
+      q.select = async () => [];
+      withNotifications(q);
+      db.raw = jest.fn((x) => x);
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+      expect(calls.update).not.toHaveBeenCalled();
+      expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // A cancelled reminder, or one for a visit no longer open, cannot go out
+  // (Codex #6208 r22 P2).
+  test.each([
+    ['the reminder is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
+    ['the reminder is sibling-suppressed', { appointment_time: '2026-08-04T13:00:00Z', suppressed_by_sibling: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
+    ['the reminder is a pre-closed placeholder', { appointment_time: '2026-08-04T13:00:00Z', windows_preclosed: true }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'confirmed' }],
+    ['the visit is cancelled', { appointment_time: '2026-08-04T13:00:00Z', cancelled: false }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'cancelled' }],
+    ['the visit waits for a new slot (rescheduled)', { appointment_time: '2026-08-04T13:00:00Z', cancelled: false }, { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00', status: 'rescheduled' }],
+  ])('a stale reminder time raises nothing when %s', async (_label, reminder, visit) => {
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    movableQueue();
+    db.mockImplementation(tableReader({ appointment_reminders: reminder, scheduled_services: visit }));
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a quiet sync whose check cannot be read is escalated to staff (Codex #6208 r5 P2)', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    movableQueue();
+    db.mockImplementation(tableReader({ appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' }, scheduled_services: undefined }));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a sync that resolved null for a visit with no reminder row, or a row on the new time, raises nothing', async () => {
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    for (const row of [undefined, { appointment_time: '2026-08-11T12:00:00Z' }]) {
+      AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+      movableQueue();
+      db.mockImplementation(tableReader({ appointment_reminders: row, scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' } }));
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    }
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // The throw can come from the separate confirmation re-arm update, after
+  // handleReschedule already wrote the new time (Codex #6208 r3).
+  test('a failed confirmation re-arm with the reminder already on the new slot raises nothing', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    movableQueue();
+    movableRows.push({ where() { return this; }, update: jest.fn().mockRejectedValue(new Error('re-arm write failed')) });
+    db.mockImplementation(tableReader({
+      appointment_reminders: { appointment_time: '2026-08-11T12:00:00Z' },
+      scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
+    }));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a failed re-arm with the reminder still on the old time tells staff', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
+    AppointmentReminders.composeScheduledApptTime = jest.fn(() => new Date('2026-08-11T12:00:00Z'));
+    movableQueue();
+    movableRows.push({ where() { return this; }, update: jest.fn().mockRejectedValue(new Error('re-arm write failed')) });
+    db.mockImplementation(tableReader({
+      appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
+      scheduled_services: { id: 's1', scheduled_date: '2026-08-11', window_start: '08:00' },
+    }));
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a grouped sibling whose reminder is off its committed slot gets its own notice (Codex #6208 r3)', async () => {
+    SmartRebooker.reschedule.mockResolvedValueOnce({
+      success: true,
+      visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
+        { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+        { id: 's2', isPrimary: false, previousStatus: 'confirmed', landed: { scheduled_date: '2026-08-11', window_start: '09:30', window_end: '10:30' } },
+      ] },
+    });
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: true });
+    // The tapped row's sync resolved a reminder row (nothing to inspect); the
+    // sibling's reminder row still names the old slot.
+    AppointmentReminders.composeScheduledApptTime = jest.fn(({ window_start: t }) => new Date(`2026-08-11T${t}:00Z`));
+    movableQueue();
+    movableRows.push({ where() { return this; }, update: jest.fn().mockResolvedValue(1) }); // sibling stamp
+    db.mockImplementation(tableReader({
+      appointment_reminders: { appointment_time: '2026-08-04T13:00:00Z' },
+      scheduled_services: { id: 's2', scheduled_date: '2026-08-11', window_start: '09:30' },
+    }));
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).resolves.toMatchObject({ ok: true });
+    expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+      'schedule_conflict', 'Schedule — check the reminder time on a moved visit', expect.stringContaining('Aug 11'),
+      expect.objectContaining({
+        link: '/admin/dispatch?tab=schedule&date=2026-08-11&appointment=s2',
+        dedupeKey: 'auto-dispatch-reminder-sync:s2:2026-08-11:09:30',
+        metadata: expect.objectContaining({ scheduledServiceId: 's2' }),
+      }),
+    );
+  });
+
+  test('a clean reminder sync raises no notice', async () => {
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: true });
+    movableQueue();
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
 });
 
 test('aborts (STALE_PLACEMENT) when the visit was locked after scoring', async () => {
@@ -404,6 +694,84 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1', service: SERVICE }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('placed by a person') });
     expect(isPersonPlacedVisit).toHaveBeenCalledWith(expect.objectContaining({ id: SERVICE.id }), trx, { refresh: true });
+  });
+
+  test('a conflict-forced move re-reads the conflict on the move transaction (Codex #6207 r1 P2)', async () => {
+    const slots = require('../services/auto-dispatch/candidate-slots');
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const read = jest.spyOn(slots._internals, 'readCurrentConflict');
+    const trx = fakeTrx();
+    const sourceConflict = { kind: 'overlap', date: '2026-12-07', with: ['o1'] };
+    try {
+      // Still in conflict: the guard passes.
+      read.mockResolvedValueOnce(sourceConflict);
+      await makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE });
+      expect(read).toHaveBeenCalledWith(expect.objectContaining({ id: SERVICE.id }), { db: trx, conflictMoves: true });
+      // The other stop moved away since the evaluation: refuse.
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      // The conflict's own rows are held (FOR SHARE) before the re-read, so
+      // the other stop cannot move away before this move commits (r3 P2).
+      const locked = [];
+      const lockTrx = jest.fn((table) => {
+        const q = { whereIn: (c, ids) => { locked.push([table, ids]); return q; }, where: (w) => { locked.push([table, w]); return q; }, forShare: () => q, select: async () => [] };
+        return q;
+      });
+      const blackoutDates = require('../services/scheduling/blackout-dates');
+      jest.spyOn(blackoutDates, 'lockClosureState').mockResolvedValue();
+      const UUID1 = '11111111-1111-4111-8111-111111111111';
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1, 'interview:a1'] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'closed_day', date: '2026-11-26' } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      expect(locked).toEqual([['scheduled_services', [UUID1]], ['job_applications', ['a1']]]);
+      expect(blackoutDates.lockClosureState).toHaveBeenCalledWith(lockTrx);
+      // The re-read names a DIFFERENT stop than the one fenced: that stop is
+      // fenced too and the conflict is read again before the move goes on
+      // (pre-push P1). Gone on the second read = refuse.
+      const UUID2 = '22222222-2222-4222-8222-222222222222';
+      const other = { kind: 'overlap', date: '2026-12-07', with: [UUID2] };
+      locked.length = 0;
+      read.mockClear();
+      read.mockResolvedValueOnce(other).mockResolvedValueOnce(other);
+      // lockTrx only models the fence, so the guard stops at its next check;
+      // what matters is that it got past the conflict read.
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.not.toMatchObject({ statusCode: 409 });
+      expect(locked.slice(0, 2)).toEqual([['scheduled_services', [UUID1]], ['scheduled_services', [UUID2]]]);
+      expect(read).toHaveBeenCalledTimes(2);
+      read.mockResolvedValueOnce(other).mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      // A grouped move runs the guard for each member in turn. The conflict
+      // is read once, before the first member moves: afterwards the rest of
+      // the unit no longer overlaps, and must still be allowed to follow.
+      read.mockClear();
+      read.mockResolvedValueOnce(sourceConflict).mockResolvedValue(null);
+      const unitGuard = makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } });
+      await unitGuard({ trx, technicianId: 't1', service: SERVICE });
+      await unitGuard({ trx, technicianId: 't1', service: { ...SERVICE, id: 's1-sibling' } });
+      expect(read).toHaveBeenCalledTimes(1);
+      // The rebooker retries a deadlocked move with the SAME guard on a new
+      // transaction: the first one's locks are gone, so the conflict is
+      // fenced and read again (Codex #6207 r10 P2).
+      read.mockClear();
+      read.mockResolvedValueOnce(sourceConflict).mockResolvedValueOnce(null);
+      const retried = makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } });
+      await retried({ trx, technicianId: 't1', service: SERVICE });
+      await expect(retried({ trx: fakeTrx(), technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      expect(read).toHaveBeenCalledTimes(2);
+      // A move that cleared the normal bar reads nothing.
+      read.mockClear();
+      await makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1', service: SERVICE });
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
   });
 
   test('a sibling a person placed refuses the whole grouped move (Codex #6055 r1 P1)', async () => {
@@ -677,6 +1045,34 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
 
   // Codex r1: after a SLOT_TAKEN the remaining alternates are re-evaluated
   // against the now-current schedule before the next attempt.
+  test('a fallback candidate\'s guard re-reads the conflict of the evaluation that authorized it (pre-push P1)', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const slots = require('../services/auto-dispatch/candidate-slots');
+    const read = jest.spyOn(slots._internals, 'readCurrentConflict').mockResolvedValue(null);
+    const FRESH = { date: '2026-08-13', start_time: '10:00', end_time: '12:00', technician_id: 't1' };
+    const conflict = { kind: 'overlap', date: '2026-08-04', with: ['o1'] };
+    // The first evaluation saw no conflict; the rescore after SLOT_TAKEN does.
+    const rescore = jest.fn().mockResolvedValue({ kind: 'move', rankedCandidates: [FRESH], current: { conflict } });
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    const queue = [readRow(CONFIRMED_ROW), readRow(CONFIRMED_ROW), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+    db.mockImplementation(() => queue.shift());
+    try {
+      await applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore, sourceConflict: null });
+      const guardOf = (call) => call.find((arg) => arg && typeof arg.moveGuard === 'function').moveGuard;
+      // The conflict re-read comes before any read on the transaction.
+      const trx = jest.fn(() => { throw new Error('stop here'); });
+      // First attempt: authorized with no conflict, so nothing is re-read.
+      await expect(guardOf(SmartRebooker.reschedule.mock.calls[0])({ trx, technicianId: 't1', service: SERVICE })).rejects.toThrow('stop here');
+      expect(read).not.toHaveBeenCalled();
+      // Fallback: authorized by the rescore's conflict, which is now gone.
+      const fence = { whereIn: () => fence, forShare: () => fence, select: async () => [] };
+      await expect(guardOf(SmartRebooker.reschedule.mock.calls[1])({ trx: jest.fn(() => fence), technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('gate on: after a SLOT_TAKEN the next attempt comes from the re-evaluation, not the stale alternates', async () => {
     process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
     const STALE = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
@@ -786,4 +1182,22 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
     expect({ code: first.code, message: first.message }).toEqual({ code: err.code, message: err.message });
   });
 
+});
+
+test('a confirmation after scoring stops the move of any visit, due date or not (owner 2026-10-09)', async () => {
+  const scored = { ...SERVICE, customer_confirmed: false };
+  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
+  await expect(applyAutoDispatchMove(scored, BEST, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('every move pins customer_confirmed in the atomic write and its guard refuses a confirmed row', async () => {
+  const scored = { ...SERVICE, customer_confirmed: false };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, BEST, 'run1');
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ customer_confirmed: false });
+  await expect(options.moveGuard({ trx: jest.fn(), service: { ...scored, customer_confirmed: true } }))
+    .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
 });

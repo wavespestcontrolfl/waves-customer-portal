@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v26');
-    expect(PROMPT_HASH).toMatch(/^v26-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v29');
+    expect(PROMPT_HASH).toMatch(/^v29-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
@@ -356,9 +356,163 @@ describe('v2 extraction function (extractCallDataV2)', () => {
   });
 });
 
+// Every model in the 2026-10-08 test set is_spam true on a wrong number: the
+// schema description said "wrong number" while the prompt rule said it is not spam.
+describe('meta.is_spam: a wrong number is not spam (schema 1.26.0)', () => {
+  const describedIn = (file) => require(`../schemas/${file}`)
+    .properties.meta.properties.is_spam.description;
+
+  test.each([
+    'call-extraction.model-output.schema.json',
+    'call-extraction.persisted.schema.json',
+  ])('%s keeps a wrong number out of spam and lists no spam kinds beyond the old two', (file) => {
+    const description = describedIn(file);
+    expect(description).toMatch(/^Solicitation or robocall\. /);
+    // A longer list (vendor cold call, collections…) raised false spam on a reviewed call.
+    expect(description).not.toMatch(/vendor|collections|scam|sales pitch/i);
+    expect(description).toMatch(/A wrong number is not spam: set false/);
+    expect(description).toMatch(/lead_quality "wrong_number"/);
+  });
+
+  test('the persisted schema carries the model-output text and names the older rows', () => {
+    const persisted = describedIn('call-extraction.persisted.schema.json');
+    expect(persisted.startsWith(describedIn('call-extraction.model-output.schema.json'))).toBe(true);
+    expect(persisted).toMatch(/before schema 1\.26\.0 may hold true for a wrong number/);
+  });
+});
+
+// A callback call failed the form check on most runs: the two fields were
+// `format: time`, which the validator reads as "14:00:00-04:00" only, while the
+// model wrote "14:00" and the callback reader wants a bare time or a datetime.
+describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema 1.27.0)', () => {
+  const { validateModelOutput, validatePersisted } = require('../schemas/validate-extraction');
+  const field = (file, name) => require(`../schemas/${file}`)
+    .properties.scheduling.properties[name];
+  const formErrors = (result) => (result.errors || [])
+    .filter((e) => /callback_window/.test(e.instancePath));
+  const withWindow = (start, end = null) => ({ scheduling: { callback_window_start: start, callback_window_end: end } });
+
+  test.each(['callback_window_start', 'callback_window_end'])('%s has a pattern and a description in both schemas, and no `time` format', (name) => {
+    for (const file of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
+      const def = field(file, name);
+      expect(def.format).toBeUndefined();
+      expect(typeof def.pattern).toBe('string');
+      expect(def.description).toMatch(/Eastern wall-clock time in 24-hour form|same form as callback_window_start/);
+    }
+  });
+
+  // The old offset form stays valid for the model too (codex #6215 r1 P1): a provider
+  // that still writes it must not fail the whole extraction.
+  test.each(['14:00', '09:30', '14:00:00', '2026-10-12T14:00', '2026-10-12T09:00:00', '14:00:00-04:00', '09:00:00-05:00', '2026-10-12T14:00:00-04:00', '14:00:00Z', '14:00:00+02:00', '14:00:00.000Z'])('the model output accepts %s', (value) => {
+    expect(formErrors(validateModelOutput(withWindow(value, value)))).toEqual([]);
+  });
+
+  // A dated time is an Eastern wall clock: a Z or a non-Eastern offset on it would be
+  // read as an instant hours off the spoken time (codex #6215 r3 P1).
+  test.each(['2 PM', '14', '25:00', '2:00', '2026-10-12', '2026-10-12 14:00', 'afternoon', '2026-10-12T14:00Z', '2026-10-12T14:00:00Z', '2026-10-12T14:00:00+02:00'])('the model output rejects %s', (value) => {
+    expect(formErrors(validateModelOutput(withWindow(value))).length).toBeGreaterThan(0);
+  });
+
+  test.each(['14:00', '2026-10-12T14:00', '14:00:00-04:00', '14:00:00Z', '09:00:00.000-05:00', '2026-09-02T09:00:00-04:00'])('the persisted schema accepts %s (new form and older rows)', (value) => {
+    expect(formErrors(validatePersisted(withWindow(value, value)))).toEqual([]);
+  });
+
+  // Every value the old `time` format accepted still validates (codex #6215 r2 P1).
+  test('the two schemas share one pattern, a superset of the old `time` format', () => {
+    const Ajv = require('ajv');
+    const addFormats = require('ajv-formats');
+    const ajv = new Ajv(); addFormats(ajv);
+    const oldForm = ajv.compile({ type: 'string', format: 'time' });
+    const pattern = field('call-extraction.model-output.schema.json', 'callback_window_start').pattern;
+    for (const name of ['callback_window_start', 'callback_window_end']) {
+      expect(field('call-extraction.model-output.schema.json', name).pattern).toBe(pattern);
+      expect(field('call-extraction.persisted.schema.json', name).pattern).toBe(pattern);
+    }
+    // Generated over the old format's whole grammar (codex #6215 r4 P1): seconds with or
+    // without a fraction, and every offset spelling (z, Z, +hh, +hhmm, +hh:mm).
+    const values = [];
+    for (const hms of ['00:00:00', '14:00:00', '23:59:59', '09:05:07']) {
+      for (const frac of ['', '.5', '.000']) {
+        for (const zone of ['Z', 'z', '-04:00', '+02:00', '+0200', '-0500', '+02', '-04']) values.push(`${hms}${frac}${zone}`);
+      }
+    }
+    values.push('23:59:60Z', '18:59:60-05:00');
+    const accepted = values.filter((value) => oldForm(value));
+    expect(accepted.length).toBeGreaterThan(80);
+    for (const value of accepted) expect([value, new RegExp(pattern).test(value)]).toEqual([value, true]);
+    // And not wider on the offset: what the old format refused stays refused (codex #6215 r8 P2).
+    for (const value of ['14:00:00+99', '14:00:00+2460', '14:00:00+23:99', '14:00:00-24:00']) {
+      expect([value, oldForm(value), new RegExp(pattern).test(value)]).toEqual([value, false, false]);
+    }
+  });
+
+  test('the callback fields are on the evidence pinning list, with the agent quote (codex #6215 r2 P1)', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    const pinning = prompt.slice(prompt.indexOf('EVIDENCE PINNING'), prompt.indexOf('CONFIDENCE SCORES'));
+    expect(pinning).toMatch(/scheduling\.callback_window_start \/ callback_window_end \(when either is set/);
+    expect(pinning).toMatch(/AGENT's own words agreeing that Waves will call back/);
+    const evidence = require('../schemas/call-extraction.model-output.schema.json').properties.evidence.description;
+    expect(evidence).toMatch(/scheduling\.callback_window_start \/ _end when set/);
+  });
+
+  test('the end description lets a deadline stand alone, as the prompt rule asks (codex #6215 r5 P1)', () => {
+    for (const file of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
+      const description = field(file, 'callback_window_end').description;
+      expect(description).toMatch(/A deadline with no start is set here alone/);
+      expect(description).not.toMatch(/Null when the caller gave one time or none/);
+    }
+  });
+
+  test('null stays valid in both schemas', () => {
+    expect(formErrors(validateModelOutput(withWindow(null)))).toEqual([]);
+    expect(formErrors(validatePersisted(withWindow(null)))).toEqual([]);
+  });
+
+  test('the prompt gives the form and keeps a part of day out of the field', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    expect(prompt).toMatch(/callback_window_start \/ callback_window_end: set ONLY when a time for a CALLBACK was stated/);
+    expect(prompt).toMatch(/24-hour form with NO offset and NO "Z"/);
+    expect(prompt).toMatch(/A part of day with no hour \("this afternoon"\) is NOT a time/);
+  });
+});
+
+// A genuine caller who asked for staff by name and agreed to call back was marked
+// spam in about 1 run in 5: nothing on the call was a pitch.
+describe('is_spam needs a pitch that was heard (prompt v27)', () => {
+  test('the prompt keeps a call with no stated purpose out of spam', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    expect(prompt).toMatch(/is_spam needs a pitch that was HEARD on the call/);
+    expect(prompt).toMatch(/ends before\s+the caller says why they are calling/);
+    expect(prompt).toMatch(/When the purpose is unknown, lead_quality is\s+"cold", never "spam_or_solicitation"/);
+  });
+
+  test('a follow-up staff agreed to is not spam, and spam_verdict follows is_spam (codex #6224 r1 P1)', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    expect(prompt).toMatch(/follows up on a meeting, a call or an email that Waves staff\s+AGREED to/);
+    expect(prompt).toMatch(/spam_verdict follows the same rules as is_spam/);
+    expect(prompt).toMatch(/spam_verdict\.is_spam_content is false and spam_kind is\s+"not_spam"/);
+  });
+});
+
+// "I don't know what he charges, I'll have him text you back on that" is a promised
+// quote. With the rules sent first, the model missed it on a reviewed call.
+describe('quote_promised covers a promise with no "quote" word (prompt v28)', () => {
+  test.each([false, true])('the rule is in the prompt (system layout: %s)', (systemLayout) => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const built = buildExtractionPrompt('t', '2026-10-09', 'c', { systemLayout });
+    const rules = systemLayout ? built.system : built;
+    expect(rules).toMatch(/The promise does not need the word "quote"/);
+    expect(rules).toMatch(/text, call or email the caller back WITH it/);
+  });
+});
+
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.25.0');
+    expect(SCHEMA_VERSION).toBe('1.28.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
@@ -379,5 +533,27 @@ describe('migration columns', () => {
   test('exports up and down functions', () => {
     expect(typeof migration.up).toBe('function');
     expect(typeof migration.down).toBe('function');
+  });
+});
+
+// A realtor's call named a home inspector and the profile note read "Switching
+// from" that inspector: the field had no description, so any company fit.
+describe('customer_history.competitor_name is a pest or lawn provider only', () => {
+  const describedIn = (file) => require(`../schemas/${file}`)
+    .properties.customer_history.properties.competitor_name.description;
+
+  test.each([
+    'call-extraction.model-output.schema.json',
+    'call-extraction.persisted.schema.json',
+  ])('%s names the provider and excludes other businesses', (file) => {
+    const description = describedIn(file);
+    expect(description).toMatch(/pest control or lawn care company/);
+    expect(description).toMatch(/null for any other business/);
+    expect(description).toMatch(/home inspector/);
+  });
+
+  test('both schemas carry the same description', () => {
+    expect(describedIn('call-extraction.model-output.schema.json'))
+      .toBe(describedIn('call-extraction.persisted.schema.json'));
   });
 });

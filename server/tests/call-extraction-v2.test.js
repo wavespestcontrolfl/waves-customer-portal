@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.25.0');
+    expect(SCHEMA_VERSION).toBe('1.28.0');
   });
 
   describe('model-output schema', () => {
@@ -206,7 +206,7 @@ describe('schema validation', () => {
       expect(validatePersisted(persisted).valid).toBe(true);
     });
 
-    test('1.25.0: ani_cannot_text + text_phone_e164 validate in both schemas, older payloads without them still do, bad values are refused', () => {
+    test('1.28.0: ani_cannot_text + text_phone_e164 validate in both schemas, older payloads without them still do, bad values are refused', () => {
       const out = validModelOutput();
       expect(validateModelOutput(out).valid).toBe(true); // absent: unchanged
       out.caller.ani_cannot_text = true;
@@ -216,7 +216,7 @@ describe('schema validation', () => {
       out.caller.text_phone_e164 = null;
       expect(validateModelOutput(out).valid).toBe(true);
       const persisted = validPersisted();
-      persisted.meta.schema_version = '1.25.0';
+      persisted.meta.schema_version = '1.28.0';
       persisted.caller.ani_cannot_text = true;
       persisted.caller.text_phone_e164 = '+19415559876';
       expect(validatePersisted(persisted).valid).toBe(true);

@@ -653,7 +653,7 @@ function finalTriageFlagsFor(call, extraction) {
     suppressUnsupportedModelFlags(extraction.triage_flags, extraction), addressValidation,
   );
   const deterministicFlags = computeDeterministicTriageFlags(extraction, {
-    addressValidation, contactPhone: resolveCallContactPhone(call, null),
+    addressValidation, contactPhone: resolveCallContactPhone(call, null), transcript: call.transcription,
   });
   return mergeTriageFlags(modelFlags, deterministicFlags);
 }
@@ -738,7 +738,7 @@ const STAGING_CHECKS = [
   // does not enforce this call-specific hold. A disclaimer skips the text
   // even when a spoken number was given, because staff call those back.
   (call, extraction) => (extraction.caller?.caller_id_disclaimed === true ? 'caller_id_disclaimed' : null),
-  // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-08): the line they called from cannot
+  // ani_cannot_text (schema 1.28.0, owner ruling 2026-10-08): the line they called from cannot
   // get texts, and automation never texts a number the caller dictated. A different statement
   // from caller_id_disclaimed above: the caller owns the ANI.
   (call, extraction) => (extraction.caller?.ani_cannot_text === true ? 'ani_cannot_text' : null),

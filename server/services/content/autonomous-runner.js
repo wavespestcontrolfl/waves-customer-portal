@@ -319,9 +319,17 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed', failure_message: 'brief-builder unavailable' });
     }
     const t2 = Date.now();
+    // GATE_CONTENT_WRITER_TERMINAL: a row that waits for a terminal draft
+    // keeps the brief it was handed. Every look at the row (the 1pm
+    // catch-up, the next batch) and the run that finally takes the draft use
+    // that one stored brief, from here on: the run's metadata, the pre-draft
+    // gates and the gates on the draft all read the brief the draft was
+    // written from. Null (gate off, dry run, nothing waiting) = compose.
+    const terminalWriter = require('./terminal-writer');
+    const handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun });
     let brief;
     try {
-      brief = await briefBuilder.compose(opp.id, {
+      brief = handedBrief || await briefBuilder.compose(opp.id, {
         // Operator-intercept rows skip SERP profiling: several intercept
         // keywords are competitor-brand queries a profiler would mis-read as
         // navigational, and the decision-router pins the action for this
@@ -607,7 +615,13 @@ class AutonomousRunner {
       sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
       selfLintOptions,
     };
-    const dispatchOnce = () => dispatcher.runWithBrief(brief, dispatchOptions).catch((err) => ({
+    // GATE_CONTENT_WRITER_TERMINAL: the draft can come from the owner's
+    // terminal instead of an agent session. draftSourceFor returns a source
+    // with the dispatcher's own runWithBrief contract, or null (gate off,
+    // dry run, a title/meta rewrite) = the agent. Only this step changes:
+    // the claim, the brief and every gate below are the same.
+    const draftSource = terminalWriter.draftSourceFor(opp.id, brief, { handed: Boolean(handedBrief), dryRun }) || dispatcher;
+    const dispatchOnce = () => draftSource.runWithBrief(brief, dispatchOptions).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
     let dispatchResult = await dispatchOnce();
@@ -645,6 +659,23 @@ class AutonomousRunner {
     // hung sessions could not be correlated against the Managed Agents log.
     run.agent_id = lastSessionResult.agent_id || null;
     run.agent_session_id = lastSessionResult.session_id || null;
+
+    // The terminal has no usable draft yet (`wait`): not a failure. Record
+    // the run on the same brief and look again later (defer refunds the
+    // attempt this claim used).
+    if (dispatchResult.wait) {
+      const finalized = await finalize(run, t0, {
+        outcome: terminalWriter.AWAITING_OUTCOME,
+        skip_reason: dispatchResult.code,
+        reviewer_notes: dispatchResult.reason,
+      });
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
+      return finalized;
+    }
+    // A terminal draft's branch commit, for the cleanup after this run is
+    // stored (settleTerminalWork); undefined for an agent draft. In-memory
+    // only, like citability_backfill_brief (finalize persists named columns).
+    run.terminal_draft_revision = dispatchResult.revision;
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
@@ -1606,9 +1637,9 @@ class AutonomousRunner {
       // (the 06-12 zero-alert shape, Codex r2) — re-trigger the alert rather
       // than stay silent; the sms_log day-dedupe inside _sendBlogDroughtSms
       // keeps it to one text per ET day no matter how many passes run.
-      await this._sendBlogDroughtSms([]).catch((err) => {
-        logger.warn(`[autonomous-runner] catch-up drought SMS failed: ${err.message}`);
-      });
+      // (_reportBlogDrought: not while a blog waits for its terminal draft —
+      // a blog deferred this morning is not claimable yet at 1pm.)
+      await this._reportBlogDrought([]);
       logger.info('[autonomous-runner] catch-up skipped: no claimable blog opportunities (drought alert ensured)');
       return { outcome: 'skipped_no_claimable', skipped: true, reason: 'no_claimable_opportunities', count: 0, runs: [] };
     }
@@ -1940,12 +1971,11 @@ class AutonomousRunner {
       break;
     }
     logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
+    await this.settleTerminalWork(runs);
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
     });
-    await this._sendBlogDroughtSms(runs, { haltBeforeBlog }).catch((err) => {
-      logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
-    });
+    await this._reportBlogDrought(runs, { haltBeforeBlog });
     return {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
@@ -2015,6 +2045,20 @@ class AutonomousRunner {
    * silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false. Routed as
    * internal_alert so OWNER_SMS_DISABLED still silences everything.
    */
+  /**
+   * The blog drought alert, for the batch and for the catch-up. Terminal
+   * writer: a blog that waits for its draft, with the owner told by the
+   * terminal item, is not a drought, so nothing is sent then. Decided here so
+   * the alert's own rules stay as they are. A send failure is logged.
+   */
+  async _reportBlogDrought(...args) {
+    if (await require('./terminal-writer').blogDraftRequested()) return;
+    // the caller's own arguments, unchanged
+    await this._sendBlogDroughtSms(...args).catch((err) => {
+      logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
+    });
+  }
+
   async _sendBlogDroughtSms(runs, { haltBeforeBlog = null } = {}) {
     if (!envBool('AUTONOMOUS_BLOG_DROUGHT_ALERT', true)) return;
     const real = (runs || []).filter(Boolean);
@@ -4323,6 +4367,45 @@ class AutonomousRunner {
   // Load + JSONB-parse the brief the reviewed run was generated against
   // (run.brief_id), falling back to the latest brief for the opportunity only
   // when the run carries no brief_id. Shape consumed by the astro-publisher.
+  /**
+   * The stored brief a row waits on for its terminal draft, or null: the
+   * gate is off, this is a dry run, no run of the row is waiting, the brief
+   * is gone, or it is older than the terminal writer allows (a row nobody
+   * wrote for gets a fresh brief). A lookup failure is null too: the row is
+   * then briefed again, never blocked.
+   */
+  async _briefHandedToTerminal(opportunityId, { dryRun = false } = {}) {
+    const terminalWriter = require('./terminal-writer');
+    if (dryRun || !terminalWriter.terminalWriterLive()) return null;
+    try {
+      const briefId = await terminalWriter.waitingBriefId(opportunityId);
+      const brief = briefId ? await this._loadReviewedBrief({ brief_id: briefId }) : null;
+      if (!brief || String(brief.id) !== String(briefId)) return null;
+      const age = Date.now() - new Date(brief.created_at).getTime();
+      return age <= terminalWriter.MAX_BRIEF_AGE_MS ? brief : null;
+    } catch (err) {
+      logger.warn(`[autonomous-runner] terminal brief lookup failed for ${opportunityId}: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Terminal writer, after one or more runs are stored — the daily batch, the
+   * admin Run now button and the --live script all end here: delete the
+   * branch of each draft a run took, then bring the admin item up to date
+   * (gate on: the rows that wait; gate off: close what is open). Its own
+   * failure never fails the caller.
+   */
+  async settleTerminalWork(runs) {
+    const terminalWriter = require('./terminal-writer');
+    try {
+      await terminalWriter.cleanupConsumedDrafts(runs);
+      await (terminalWriter.terminalWriterLive() ? terminalWriter.raiseTerminalDue() : terminalWriter.closeTerminalItems());
+    } catch (err) {
+      logger.warn(`[autonomous-runner] terminal writer follow-up failed: ${err.message}`);
+    }
+  }
+
   async _loadReviewedBrief(run) {
     let row = null;
     if (run?.brief_id) row = await db('content_briefs').where('id', run.brief_id).first();

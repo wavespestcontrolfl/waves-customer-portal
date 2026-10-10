@@ -42,13 +42,25 @@ describe('the v13 watering rules', () => {
       }
     }
     // Stored on main by earlier label reads (20260930000001 seed).
+    const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
     const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F']);
     // Blindside (the v13 fallback weed spot) has its own migration.
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
     const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
     const bermuda = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
-    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name)]);
+    const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
+    const granule = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
+    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name), ...matrix.WATERING.map((item) => item.name), ...matrix.FAIL_CLOSED.map((item) => item.name), ...require('../models/migrations/20261007181000_lawn_v13_matrix_adds_fixes').WATERING.map((item) => item.name), ...december.WATERING.map((item) => item.name), ...granule.WATERING.map((item) => item.name)]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
+  });
+
+  test('the December LESCO 10-0-22 rule is the 24-0-11 rule (0.25 inch within 24 hours), valid and owner-sourced', () => {
+    const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
+    const f24 = ALL.find((item) => item.name === 'LESCO 24-0-11 with PolyPlus OPTI').rule;
+    const checked = validateRule(december.WATERING_RULE);
+    expect(checked.errors).toEqual([]);
+    expect(checked.rule).toMatchObject({ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'owner', verified_by: 'label-check-2026-10-08' });
+    expect({ mode: f24.mode, in: f24.water_in_inches, by: f24.water_in_by_hours }).toEqual({ mode: 'water_in', in: 0.25, by: 24 });
   });
 
   test('Tetrino is watered in, so a soil-pest (white grub) application is never told "no change"', () => {

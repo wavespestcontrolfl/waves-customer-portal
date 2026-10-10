@@ -47,7 +47,9 @@ describe('rainFitFor', () => {
     [['Bed Bug Treatment'], 'prefer'],
     [['German Cockroach Treatment'], 'prefer'],
     [['German Cockroach Exterior Treatment'], 'avoid'],
-    [['Cockroach Treatment'], 'avoid'],
+    [['Cockroach Treatment'], 'prefer'],
+    [['Cockroach Exterior Treatment'], 'avoid'],
+    [['Initial Native Roach Knockdown Service'], 'avoid'],
     [['Interior Pest Only'], 'prefer'],
     [['WDO Inspection', 'General Pest Control'], 'avoid'],
     [[], 'neutral'],
@@ -90,6 +92,8 @@ describe('catalog identity beats the words in a name', () => {
     ['waves_assessment', null, 'ok'],
     ['bed_bug_treatment', 'bed_bug', 'ok'],
     ['german_roach', null, 'ok'],
+    ['vehicle_german_roach', 'cockroach', 'ok'],
+    ['vehicle_roach_addon', null, 'skip'],
     ['rodent_bait_quarterly', 'rodent_bait_station', 'ok'],
     ['rodent_trapping_followup', 'rodent_trapping', 'ok'],
     ['rodent_trap_check_additional', 'rodent_trapping', 'ok'],
@@ -182,6 +186,97 @@ describe('withCatalogKeys', () => {
       { name: 'WDO Inspection', serviceKey: 'wdo_inspection', findingsType: null },
     ]);
     expect(resolver).toHaveBeenCalledTimes(2);
+  });
+
+  // A visit's rows: the tapped service, a live and a cancelled service on the
+  // same stop, and their add-ons.
+  const visitDb = ({ fail = false } = {}) => {
+    const rows = {
+      scheduled_services: [
+        { id: 'svc-1', service_type: 'WDO Inspection', service_key_snapshot: 'wdo_inspection', visit_id: 'stop-1', status: 'confirmed', window_start: '09:00:00', window_end: '10:00:00' },
+        // A legacy row: NULL status is live.
+        { id: 'svc-2', service_type: 'Lawn Care', service_key_snapshot: 'lawn_care_monthly', visit_id: 'stop-1', status: null, window_start: '10:00:00', window_end: '12:00:00' },
+        { id: 'svc-3', service_type: 'Mosquito', service_key_snapshot: null, visit_id: 'stop-1', status: 'cancelled' },
+      ],
+      scheduled_service_addons: [
+        { scheduled_service_id: 'svc-1', service_name: 'Rodent Check', service_key_snapshot: null },
+        { scheduled_service_id: 'svc-2', service_name: 'Fire Ant', service_key_snapshot: 'fire_ant' },
+        { scheduled_service_id: 'svc-3', service_name: 'Cancelled Add-on', service_key_snapshot: null },
+      ],
+    };
+    return (table) => {
+      if (fail) throw new Error('fixture db down');
+      let list = rows[table];
+      const q = {
+        where: (cond) => {
+          if (typeof cond === 'function') {
+            // (status IS NULL OR status NOT IN (...)), as the query groups it.
+            const base = list;
+            let terminal = [];
+            cond({ whereNull: () => ({ orWhereNotIn: (_col, vs) => { terminal = vs; } }) });
+            list = base.filter((r) => r.status == null || !terminal.includes(r.status));
+            return q;
+          }
+          list = list.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
+          return q;
+        },
+        whereNot: (col, v) => { list = list.filter((r) => r[col] !== v); return q; },
+        // SQL semantics: NULL NOT IN (...) is not true.
+        whereNotIn: (col, vs) => { list = list.filter((r) => r[col] != null && !vs.includes(r[col])); return q; },
+        whereNull: (col) => { list = list.filter((r) => r[col] == null); return q; },
+        orWhereNotIn: () => { throw new Error('use the grouped form'); },
+        whereIn: (col, vs) => { list = list.filter((r) => vs.includes(r[col])); return q; },
+        first: async () => list[0],
+        select: async () => list,
+      };
+      return q;
+    };
+  };
+  const visitNames = async (args, db = visitDb()) => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
+    const { bookingServices } = require('../services/scheduling/rain-fit');
+    return (await bookingServices({ bestRows: true, ...args }, db)).map((item) => [item.name, item.serviceKey]);
+  };
+
+  test('bookingServices: an existing visit is read from its rows, add-ons and the live shared stop included', async () => {
+    // No list from the screen (Quick Move, the reschedule dialogs).
+    expect(await visitNames({ serviceId: 'svc-1' })).toEqual([
+      ['WDO Inspection', 'wdo_inspection'], ['Rodent Check', null], ['Lawn Care', 'lawn_care_monthly'], ['Fire Ant', 'fire_ant'],
+    ]);
+  });
+
+  test('bookingRainPlan: the shared stop\'s reach widens each chip, so rain in a later service counts', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
+    const { bookingRainPlan, rainTierOf, widenToSpan } = require('../services/scheduling/rain-fit');
+    const plan = await bookingRainPlan({ bestRows: true, serviceId: 'svc-1' }, visitDb());
+    // The lawn service runs 10-12 against this one's 9:00 start.
+    expect(plan.rainSpan).toEqual({ startOffset: 0, endOffset: 180 });
+    expect(widenToSpan({ date: '2035-01-02', start_time: '13:00', end_time: '14:00' }, plan.rainSpan))
+      .toMatchObject({ start_time: '13:00', end_time: '16:00' });
+    expect((await bookingRainPlan({ bestRows: true, serviceId: 'svc-1', moveAlone: true }, visitDb())).rainSpan).toBeNull();
+    // Dry for the tapped hour and its drying time, wet at 5 PM: only the widened window sees it.
+    const today = '2035-01-02';
+    const hourly = Array.from({ length: 24 }, (_, h) => ({ startTime: `${today}T${String(h).padStart(2, '0')}:00:00-05:00`, rainChance: h === 17 ? 90 : 5 }));
+    const chip = { date: today, start_time: '13:00', end_time: '14:00' };
+    expect(rainTierOf('avoid', hourly, today)(chip)).toBe(0);
+    expect(rainTierOf('avoid', hourly, today, plan.rainSpan)(chip)).toBe(2);
+  });
+
+  test('bookingServices: a move of this service alone leaves the shared stop out', async () => {
+    expect(await visitNames({ serviceId: 'svc-1', moveAlone: true })).toEqual([['WDO Inspection', 'wdo_inspection'], ['Rodent Check', null]]);
+  });
+
+  test('bookingServices: the edit form\'s own list replaces the stored service and add-ons, never the shared stop', async () => {
+    expect(await visitNames({ serviceId: 'svc-1', serviceTypes: ['Termite Inspection'], serviceKeys: ['termite_inspection'] })).toEqual([
+      ['Termite Inspection', 'termite_inspection'], ['Lawn Care', 'lawn_care_monthly'], ['Fire Ant', 'fire_ant'],
+    ]);
+  });
+
+  test('bookingServices: an unreadable visit keeps what the screen sent', async () => {
+    expect(await visitNames({ serviceId: 'svc-1', serviceTypes: ['Lawn Care'] }, visitDb({ fail: true }))).toEqual([['Lawn Care', null]]);
+    expect(await visitNames({ serviceId: 'missing' })).toEqual([]);
   });
 
   test('bookingServices: a malformed key or a keys list of the wrong length is ignored', async () => {

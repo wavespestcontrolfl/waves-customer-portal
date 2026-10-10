@@ -1069,7 +1069,7 @@ postgres('SMS operations on PostgreSQL', () => {
         await trx('property_preferences').insert({ customer_id: message.customer_id, access_notes: 'Use the side gate.' });
       });
       await locked;
-      const enriched = enrichFromCall({ customerId: message.customer_id, callCreatedAt: '2026-09-06T00:00:00Z',
+      const enriched = enrichFromCall({ customerId: message.customer_id, callCreatedAt: '2026-09-06T16:00:00Z', // midday: the tag is the call's Eastern day
         extraction: { property: { access_notes: 'front gate code is 4545' } } });
       await Promise.all([held, enriched]);
       const prefs = await mockPg('property_preferences').where({ customer_id: message.customer_id });

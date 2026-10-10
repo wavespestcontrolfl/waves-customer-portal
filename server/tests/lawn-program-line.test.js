@@ -392,6 +392,12 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
     }
   });
 
+  test('November and December carry the owner-approved wording (2026-10-08): no sedge in November, a potassium feeding in December', () => {
+    expect(PROGRAM_DETAIL_V13[11].whyNow).toBe('November is cool and dry. The lawn gets a feeding to carry it into winter, and mapped large patch areas are treated.');
+    expect(PROGRAM_DETAIL_V13[12].whyNow).toBe('December brings cooler spells. A feeding with extra potassium helps the lawn handle cold and dry weather, and we treat any large patch and weed spots.');
+    expect(PROGRAM_DETAIL_V13[11].whyNow).not.toMatch(/sedge/i);
+  });
+
   test('the copy names no product, brand, active ingredient or rate', () => {
     const all = JSON.stringify(PROGRAM_DETAIL_V13);
     expect(all).not.toMatch(/LESCO|Stonewall|Dimension|Celsius|Certainty|Artavia|Velista|Arena|Acelepryn|Tetrino|Dylox|Gravex|Dismiss|Nutra|prodiamine|dithiopyr|azoxystrobin|\bper 1,000\b|\blb\b|fl oz/i);

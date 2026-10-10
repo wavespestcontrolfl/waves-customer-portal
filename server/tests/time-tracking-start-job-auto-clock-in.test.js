@@ -9,6 +9,10 @@
 
 jest.mock('../models/db', () => ({ transaction: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/staff-onboarding', () => ({
+  VEHICLE_AGREEMENT_KEY: 'staff.vehicle-use-commuting-agreement',
+  hasCompletedIssuedRecord: jest.fn(),
+}));
 jest.mock('../services/street-level-hold', () => ({
   isStreetLevelHoldVisit: jest.fn().mockResolvedValue(false),
   HOLD_REFUSAL: 'hold',
@@ -23,6 +27,7 @@ jest.mock('../services/track-transition-alerts', () => ({
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
 const timeTracking = require('../services/time-tracking');
+const onboarding = require('../services/staff-onboarding');
 
 const AUTO = { source: 'geofence_auto', notes: 'Auto clock-in on arrival at first stop', eventTime: new Date() };
 let state;
@@ -63,6 +68,7 @@ function chain(table) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  onboarding.hasCompletedIssuedRecord.mockResolvedValue(true);
   mutex = Promise.resolve();
   state = {
     seq: 0,
@@ -165,6 +171,31 @@ describe('startJob with autoClockIn', () => {
     expect(shifts()).toHaveLength(0);
     expect(entry.clocked_in_shift_id).toBeUndefined();
     expect(jobs()).toHaveLength(1);
+  });
+
+  test('no completed vehicle agreement -> no shift, no timer, and the error says why', async () => {
+    onboarding.hasCompletedIssuedRecord.mockResolvedValue(false);
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
+      .rejects.toMatchObject({ code: 'auto_clock_in_no_agreement', message: expect.stringContaining('vehicle use and commuting agreement') });
+    expect(state.inserted).toHaveLength(0);
+    // Read on the locked transaction, not the pool.
+    expect(onboarding.hasCompletedIssuedRecord).toHaveBeenCalledWith(expect.any(Function), 'tech-1', 'staff.vehicle-use-commuting-agreement');
+  });
+
+  test('an unreadable vehicle agreement fails closed', async () => {
+    onboarding.hasCompletedIssuedRecord.mockRejectedValue(new Error('db down'));
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
+      .rejects.toMatchObject({ code: 'auto_clock_in_no_agreement' });
+    expect(state.inserted).toHaveLength(0);
+  });
+
+  test('a tech who is already clocked in without the agreement still starts the timer (no shift is opened, so no check)', async () => {
+    onboarding.hasCompletedIssuedRecord.mockResolvedValue(false);
+    state.activeShift = { id: 'shift-manual', technician_id: 'tech-1' };
+    const entry = await timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO });
+    expect(entry.clocked_in_shift_id).toBeUndefined();
+    expect(jobs()).toHaveLength(1);
+    expect(onboarding.hasCompletedIssuedRecord).not.toHaveBeenCalled();
   });
 
   test('a shift already worked today (not the first stop) -> no shift', async () => {

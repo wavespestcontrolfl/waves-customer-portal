@@ -81,10 +81,12 @@ async function readKeptFindingsFor(knex, assessmentId) {
  * @param {object} args.data         buildReportV1Data output (reportV2, lawnAssessment)
  * @param {boolean} [args.programVisit] the report's own resolveProgramVisit answer: a recurring lawn plan visit
  * @param {boolean} [args.nextVisitBooked] the report's PROPERTY-scoped next lawn booking exists (lawnNextVisitAtProperty)
+ * @param {Array} [args.ties] the frozen finding-to-product ties of this assessment (lawn-report-facts.js frozenTies),
+ *   passed only while GATE_LAWN_REPORT_FACTS is live so a gate-off summary is exactly the v3 one
  * @param {object} args.knex
  * @returns {Promise<object|null>} normalized facts, or null when the visit cannot support a summary
  */
-async function gatherVisitSummaryFacts({ record, data, programVisit = false, nextVisitBooked = false, knex }) {
+async function gatherVisitSummaryFacts({ record, data, programVisit = false, nextVisitBooked = false, ties = [], knex }) {
   const reportV2 = data && data.reportV2;
   const lawnAssessment = data && data.lawnAssessment;
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
@@ -103,6 +105,7 @@ async function gatherVisitSummaryFacts({ record, data, programVisit = false, nex
     // while copy v6 is off, so the property-scoped answer is passed in).
     recurring: programVisit === true,
     nextVisitBooked: nextVisitBooked === true,
+    ties,
   });
 }
 

@@ -153,7 +153,7 @@ describe('the sheet opened from a visit applies the plan\'s application limits (
     expect(itemFor(body, NUTRA).jobMix).toMatchObject({ amount: 60 });
     // The same call the plan makes: the visit's customer, product, date, the line's staged rate, the visit's property.
     expect(mockCheckLimits).toHaveBeenCalledWith('cust-1', 'stw', expect.any(Date), db,
-      { proposed: { ratePer1000: 0.5, unit: 'fl oz' }, excludeScheduledServiceId: VISIT, propertyId: 'prop-A' });
+      { proposal: true, proposed: { ratePer1000: 0.5, unit: 'fl oz' }, excludeScheduledServiceId: VISIT, propertyId: 'prop-A' });
   });
 
   test('a capped product has no step in the mixing order; the rest of the mix keeps its steps', async () => {
@@ -416,4 +416,11 @@ describe('the city hold on the tank sheet', () => {
     delete process.env.GATE_LAWN_V13;
     expect(codes(await lawnMix({ month: '6', track: 'st_augustine' }))).not.toContain('lawn_v13_north_port_product_window');
   });
+});
+
+test('July is the scout visit on the tank sheet: no whole-lawn product, the inspection line, and no 0-0-50 anywhere (20261007189000)', async () => {
+  const body = await lawnMix({ month: '7' });
+  expect(JSON.stringify(body)).not.toMatch(/0-0-50|[Pp]otash/);
+  expect(body.items.filter((item) => item.role === 'base' && item.product)).toEqual([]);
+  expect(body.items.some((item) => item.role === 'base' && /^Scout visit/.test(item.raw))).toBe(true);
 });

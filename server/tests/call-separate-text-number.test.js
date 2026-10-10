@@ -1,5 +1,5 @@
 /**
- * Line that cannot get texts (owner ruling 2026-10-08, CARD-ONLY; schema 1.25.0).
+ * Line that cannot get texts (owner ruling 2026-10-08, CARD-ONLY; schema 1.28.0).
  *
  * A caller says the line they called from cannot get texts and may give another number.
  * Automation never uses that dictated number: no customer phone write, no send. Texts to
@@ -32,7 +32,7 @@ const ANI = '+19415550100'; // the relay line the caller called from
 const TEXT = '+19415559876'; // the number the caller dictated for texts
 
 const v2 = (callerOver = {}) => ({
-  meta: { schema_version: '1.25.0', is_voicemail: false, is_spam: false, call_summary: 's' },
+  meta: { schema_version: '1.28.0', is_voicemail: false, is_spam: false, call_summary: 's' },
   caller: { relationship_to_property: 'owner', on_site_authorization: true, ...callerOver },
   property: { service_address: { street_line_1: '1 Test St', city: 'Bradenton', postal_code: '34205' } },
   scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-12T10:00:00-04:00' },
@@ -144,10 +144,10 @@ describe('not "not my number": every caller_id_disclaimed consumer ignores the n
   });
 });
 
-describe('schema 1.25.0, normalizer, flat view, prompt, replay watch list', () => {
+describe('schema 1.28.0, normalizer, flat view, prompt, replay watch list', () => {
   test('version, enum and both property definitions, additive and never required', () => {
-    expect(SCHEMA_VERSION).toBe('1.25.0');
-    expect(persistedSchema.properties.meta.properties.schema_version.enum).toContain('1.25.0');
+    expect(SCHEMA_VERSION).toBe('1.28.0');
+    expect(persistedSchema.properties.meta.properties.schema_version.enum).toContain('1.28.0');
     for (const schema of [modelOutputSchema, persistedSchema]) {
       const caller = schema.properties.caller;
       expect(caller.properties.ani_cannot_text.type).toEqual(['boolean', 'null']);
@@ -174,8 +174,8 @@ describe('schema 1.25.0, normalizer, flat view, prompt, replay watch list', () =
     expect(normalizeExtractionV2(v2({ ani_cannot_text: true, text_phone_e164: 'call me' })).caller.text_phone_e164).toBeNull();
   });
 
-  test('prompt v26 carries the rule and keeps caller_id_disclaimed out of it', () => {
-    expect(PROMPT_VERSION).toBe('v26');
+  test('prompt v29 carries the rule and keeps caller_id_disclaimed out of it', () => {
+    expect(PROMPT_VERSION).toBe('v29');
     const prompt = buildExtractionPrompt('', '', '');
     expect(prompt).toMatch(/- ani_cannot_text: set true whenever the caller says the line they are calling from cannot receive text messages/);
     expect(prompt).toMatch(/WITH or WITHOUT naming another number to text/);
@@ -239,13 +239,14 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(triage).toContain('noTextHold: cardCarriesNoTextHold({ ...item, ...liveCard })');
   });
 
-  test('shadow mode arms the hold regardless of the V2 hard veto; only the CARD is skipped on a vetoed call (enforce arms neither)', () => {
+  test('shadow mode arms the hold AND files the release card regardless of the V2 hard veto (enforce arms neither)', () => {
     const at = src.indexOf('if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {');
     expect(at).toBeGreaterThan(-1);
     const shadow = src.slice(at, at + 2200);
     expect(shadow).toContain('ASYMMETRY with enforce mode');
     expect(shadow).toContain('noTextHoldArming = aniCannotText(v2Ext?.caller);');
-    expect(shadow).toContain('if (aniCannotText(v2Ext?.caller) && !hasCanonicalWriteBlock(bridgeTriageFlags)) await fileTextNumberCard(');
+    expect(shadow).toContain('if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(');
+    expect(shadow).not.toContain('!hasCanonicalWriteBlock(bridgeTriageFlags)) await fileTextNumberCard(');
     // enforce keeps its veto guard on both
     expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');
   });

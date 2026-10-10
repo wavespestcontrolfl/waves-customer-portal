@@ -183,6 +183,104 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     expect(unpinned.description).toContain('asked for 09:00');
   });
 
+  test('a callback time in the old offset form (rows before schema 1.27.0) reads as the same ET wall clock', () => {
+    const at = (value, start) => derive({ v2: { ...v2, scheduling: { ...v2.scheduling, callback_window_start: value } }, callStartedAt: start }).find((i) => i.kind === 'callback');
+    const nine = new Date('2026-09-02T09:00:00-04:00').toISOString();
+    expect(at('09:00:00-04:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    // The season slipped (-05:00 in September): the spoken hour still stands.
+    expect(at('09:00:00-05:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    expect(at('09:00:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    // Every Eastern spelling the old format allowed: -04, -0400, -04:00 (codex #6215 r7 P2).
+    for (const zone of ['-04', '-05', '-0400', '-0500']) expect(at(`09:00:00${zone}`, '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    // A UTC time is not a bare ET wall clock: no invented instant.
+    expect(at('09:00:00Z', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
+  });
+
+  // codex #6215 r1 P1: the deadline is the latest bound the caller gave.
+  describe('callback window end', () => {
+    const cbFor = (start, end, callStart = '2026-09-02T08:00:00-04:00') => derive({
+      v2: { ...v2, scheduling: { ...v2.scheduling, callback_window_start: start, callback_window_end: end } },
+      callStartedAt: callStart,
+    }).find((i) => i.kind === 'callback');
+    const et = (wall) => new Date(`${wall}-04:00`).toISOString();
+
+    test('"between nine and eleven" is due at eleven, not nine', () => {
+      const cb = cbFor('09:00', '11:00');
+      expect(cb).toMatchObject({ due_at: et('2026-09-02T11:00:00'), due_basis: 'suggested', origin: 'v2:scheduling.callback_window_start' });
+      expect(cb.description).toContain('asked for 09:00 to 11:00');
+    });
+
+    test('a call made inside the window is still due at its end today', () => {
+      expect(cbFor('09:00', '11:00', '2026-09-02T10:00:00-04:00').due_at).toBe(et('2026-09-02T11:00:00'));
+    });
+
+    test('a window already over when the call started is due at its end tomorrow', () => {
+      expect(cbFor('09:00', '11:00', '2026-09-02T15:00:00-04:00').due_at).toBe(et('2026-09-03T11:00:00'));
+    });
+
+    test('a dated start with a bare-time end is due at that end on the start\'s day', () => {
+      expect(cbFor('2026-09-04T09:00', '11:00')).toMatchObject({ due_at: et('2026-09-04T11:00:00'), due_basis: 'stated' });
+    });
+
+    test('a dated end is taken as written', () => {
+      expect(cbFor('2026-09-04T09:00', '2026-09-04T11:30')).toMatchObject({ due_at: et('2026-09-04T11:30:00'), due_basis: 'stated' });
+    });
+
+    test('"before four" has no start: the promise is recorded and due at four', () => {
+      const cb = cbFor(null, '16:00');
+      expect(cb).toMatchObject({ due_at: et('2026-09-02T16:00:00'), due_basis: 'suggested', origin: 'v2:scheduling.callback_window_end' });
+      expect(cb.description).toContain('asked by 16:00');
+    });
+
+    test('a date that does not exist gives no due time, never a rolled-forward day (codex #6215 r2 P2)', () => {
+      expect(cbFor('2026-02-30T14:00', null)).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-13-40T14:00', null)).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-02-30T09:00', '11:00')).toMatchObject({ due_at: null, due_basis: null });
+      // A real date still reads.
+      expect(cbFor('2028-02-29T14:00', null).due_at).toBe(new Date('2028-02-29T14:00:00-05:00').toISOString());
+    });
+
+    test('fractional seconds on an offset-free dated time are still the ET wall clock', () => {
+      expect(cbFor('2026-09-04T14:00:00.000', null).due_at).toBe(et('2026-09-04T14:00:00'));
+      expect(cbFor('2026-09-04T09:00', '2026-09-04T11:30:00.5').due_at).toBe(et('2026-09-04T11:30:00'));
+    });
+
+    test('a dated time with a Z or a non-Eastern offset gets no due time (codex #6215 r3 P1)', () => {
+      for (const value of ['2026-09-04T14:00Z', '2026-09-04T14:00:00Z', '2026-09-04T14:00:00+02:00', '2026-09-04T14:00:00-07:00']) {
+        expect(cbFor(value, null)).toMatchObject({ due_at: null, due_basis: null });
+      }
+      // An Eastern offset of either season is the wall clock it spells.
+      expect(cbFor('2026-09-04T14:00:00-05:00', null).due_at).toBe(et('2026-09-04T14:00:00'));
+    });
+
+    test('an Eastern clock that does not exist or happens twice gets no due time (codex #6215 r3 P2)', () => {
+      expect(cbFor('2026-03-08T02:30', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-11-01T01:30', null, '2026-10-30T09:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-11-01T09:30', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T09:30:00-05:00').toISOString());
+      // An offset does not make a missing clock real (r6 P2).
+      expect(cbFor('2026-03-08T02:30:00-05:00', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null });
+      expect(cbFor('2026-03-08T02:30:00-04:00', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null });
+      // A written offset names which 1:30 it is: the instant stands (r5 P2).
+      expect(cbFor('2026-11-01T01:30:00-04:00', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T01:30:00-04:00').toISOString());
+      expect(cbFor('2026-11-01T01:30:00-05:00', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T01:30:00-05:00').toISOString());
+    });
+
+    test('a bare end beside a dated start gets the same DST checks; the start then stands (codex #6215 r4 P2)', () => {
+      expect(cbFor('2026-03-08T01:00', '02:30', '2026-03-06T09:00:00-05:00').due_at).toBe(new Date('2026-03-08T01:00:00-05:00').toISOString());
+      expect(cbFor('2026-11-01T00:30', '01:30', '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T00:30:00-04:00').toISOString());
+    });
+
+    test('an unreadable end falls back to the start', () => {
+      expect(cbFor('09:00', '11:00:00Z')).toMatchObject({ due_at: et('2026-09-02T09:00:00'), due_basis: 'suggested' });
+    });
+  });
+
+  test('a callback datetime with no offset (the form the model writes when a day was named) is that ET wall clock', () => {
+    const named = { ...v2, scheduling: { ...v2.scheduling, callback_window_start: '2026-09-04T14:00' } };
+    const cb = derive({ v2: named, callStartedAt: '2026-09-02T08:00:00-04:00' }).find((i) => i.kind === 'callback');
+    expect(cb).toMatchObject({ due_at: new Date('2026-09-04T14:00:00-04:00').toISOString(), due_basis: 'stated' });
+  });
+
   test('a callback the caller asked for is a promise only once the agent accepted it: caller-only evidence seeds nothing, and so does the disposition alone (codex gh-r17 P1)', () => {
     const callerOnly = { ...v2, evidence: v2.evidence.filter((e) => !(e.field_path === '/scheduling/callback_window_start' && e.speaker === 'agent')) };
     expect(derive({ v2: callerOnly }).find((i) => i.kind === 'callback')).toBeUndefined();

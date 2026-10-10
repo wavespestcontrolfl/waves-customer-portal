@@ -1,9 +1,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { savepointRead } = require('../utils/savepoint-read');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
-const { capIdMap, withEntryCaps, syntheticCountLimit } = require('../config/lawn-v13-count-caps');
+const { capIdMap, withEntryCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
 // JSON string — the writer must never throw on a malformed capture.
@@ -72,7 +73,6 @@ const { worstPropertyCount } = require('../utils/property-counts');
 // without one falls back to its visit's property (null = unplaced, counted at every property).
 const placeOnTheLedgerProperty = (rows) => rows.map((row) => ({ ...row, treated_property_id: row.property_id || row.visit_property_id || null }));
 
-const isProductCountRow = (limit) => limit.limit_type === 'annual_max_apps' && limit.match_type === 'product';
 
 // Every product_limits row (hard ones only when asked) with the product name, as the summaries read
 // it. While GATE_LAWN_V13 is on the v13 yearly caps are applied by product id, the way application-limits
@@ -87,16 +87,21 @@ async function limitRowsWithV13Caps({ hardOnly = false } = {}) {
   return hardOnly ? withCaps.filter((limit) => limit.severity === 'hard_block') : withCaps;
 }
 
+const isCountRow = (limit) => limit.limit_type === 'annual_max_apps' && (limit.match_type || 'product') === 'product';
+
 async function applyV13ToRows(rows) {
   if (require('../config/feature-gates').lawnV13Live?.() !== true) return rows;
   const capIds = await capIdMap(db);
-  const capped = rows.map((limit) => (isProductCountRow(limit) && capIds.has(String(limit.product_id))
-    ? withEntryCaps(capIds.get(String(limit.product_id)), [limit], limit.product_id)[0]
-    : limit));
-  const stored = new Set(capped.filter(isProductCountRow).map((limit) => String(limit.product_id)));
-  const synthetic = [...capIds].filter(([id]) => !stored.has(id))
-    .map(([id, entry]) => ({ ...syntheticCountLimit(entry, id), product_name: entry.name }));
-  return [...capped, ...synthetic];
+  // A capped product's stored rows go through withEntryCaps TOGETHER, so every limit it returns is reported once:
+  // the count (a stored row lowered, else a synthetic one), the minimum interval and the yearly amount.
+  const result = rows.filter((limit) => !capIds.has(String(limit.product_id)));
+  for (const [id, entry] of capIds) {
+    const stored = rows.filter((limit) => String(limit.product_id) === id);
+    // `year_window` marks the product-level COUNT row only: the rolling window is a count rule. The stored yearly-rate row, the minimum
+    // interval and the blackouts are judged by their own enforcement (the calendar year, the ledger back to the last application).
+    result.push(...withEntryCaps(entry, stored, id).map((limit) => ({ product_name: entry.name, ...(isCountRow(limit) ? { year_window: entry.yearWindow || null } : {}), ...limit })));
+  }
+  return result;
 }
 
 // For each product, the largest per-lawn count any one customer has this year, computed in SQL:
@@ -128,7 +133,7 @@ async function busiestLawnByProduct(productIds, yearStart) {
 
 // The applications a limit counts: its product's, its MOA group's, or every nitrogen one.
 function matchingApplications(limit, apps) {
-  if (limit.match_type === 'product' && limit.product_id) return apps.filter((a) => a.product_id === limit.product_id);
+  if ((limit.match_type === 'product' || limit.match_type === V13_AMOUNT) && limit.product_id) return apps.filter((a) => a.product_id === limit.product_id);
   if (limit.match_type === 'moa_group') return apps.filter((a) => a.moa_group === limit.match_value);
   if (limit.match_type === 'nitrogen') return apps.filter(isNitrogenApplication);
   return [];
@@ -167,6 +172,87 @@ function isNitrogenApplication(app = {}) {
   if (category === 'lawn') return true;
   if (String(app.active_ingredient || '').toLowerCase().includes('nitrogen')) return true;
   return applicationLimits.isNitrogenFertilizer({ category, product_name: app.product_name });
+}
+
+// The latest application date, by product id, before this year, for the products with a product-level
+// minimum-interval row and no application yet this year.
+async function lastApplicationBeforeYear(customerId, yearStart, limits, apps) {
+  const thisYear = new Set(apps.map((app) => String(app.product_id)));
+  const ids = [...new Set(limits.filter(isIntervalRow).map((limit) => String(limit.product_id)))].filter((id) => !thisYear.has(id));
+  if (!ids.length) return new Map();
+  const rows = await db('property_application_history')
+    .where({ customer_id: customerId }).whereIn('product_id', ids).where('application_date', '<', yearStart).whereNull('retracted_at')
+    .groupBy('product_id').select('product_id').max('application_date as last_date');
+  return new Map(rows.map((row) => [String(row.product_id), row.last_date]));
+}
+
+const isIntervalRow = (limit) => limit.limit_type === 'min_interval_days' && (limit.match_type || 'product') === 'product' && limit.product_id;
+const isAmountRow = (limit) => limit.limit_type === 'annual_max_rate' && limit.match_type === V13_AMOUNT && limit.product_id;
+// A violation outranks an approaching reading, which outranks ok: `current` is rounded to 0.1%, so usage alone cannot order lawns.
+const checkRank = (check) => (check.violated ? 2 : (check.approaching ? 1 : 0));
+
+// The lawns an ingredient cap is judged on: the customer's current properties plus every effective property the ledger holds for the
+// ingredient this year (a deleted property's id survives on its ledger rows: property_application_history.property_id has no
+// foreign key). The effective property is the one the per-lawn readers resolve: the id frozen on the row, else its visit's property
+// (busiestLawnByProduct, placeOnTheLedgerProperty). Sorted, so the order is stable.
+async function lawnScopesFor(customerId, yearStart, ingredientKeys) {
+  const current = await db('customer_properties').where({ customer_id: customerId }).pluck('id');
+  const like = ingredientKeys.map((key) => `${String(key).trim().replace(/[\\%_]/g, '\\$&')}%`);
+  const ledger = await db('property_application_history as pah')
+    .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
+    .leftJoin('service_records as sr_prop', 'pah.service_record_id', 'sr_prop.id')
+    .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
+    .where('pah.customer_id', customerId)
+    .where('pah.application_date', '>=', yearStart)
+    .whereNull('pah.retracted_at')
+    .whereRaw('COALESCE(pah.property_id, ss_prop.property_id) IS NOT NULL')
+    .where(function sharesIngredient() {
+      for (const pattern of like) this.orWhereRaw('pc.active_ingredient ILIKE ?', [pattern]).orWhereRaw('pah.active_ingredient ILIKE ?', [pattern]);
+    })
+    .distinct(db.raw('COALESCE(pah.property_id, ss_prop.property_id) as lawn'))
+    .then((rows) => rows.map((row) => row.lawn));
+  return [...new Set([...current, ...ledger].map(String))].sort();
+}
+
+// A stored yearly amount shared by every product with one active ingredient (prodiamine, Dylox 6.2 G's trichlorfon).
+const isIngredientCapRow = (limit) => limit.limit_type === 'annual_max_rate' && limit.match_type === 'active_ingredient' && limit.match_value;
+
+// One limit's status and usage as the compliance page shows it. A yearly count and a blackout read as
+// limitStatus does. The v13 minimum interval and yearly amount reuse application-limits' own evaluators (the
+// ones the plan and the closeout run), judged per lawn the way they are:
+//   interval  current = days since the customer's latest application of the product (the worst lawn is the
+//             one treated most recently), exceeded inside the minimum, ok at it;
+//   amount    current = oz per 1,000 sq ft already used this year on the busiest lawn, exceeded at the cap,
+//             warning from 75% of it;
+//   ingredient cap (annual_max_rate, match_type active_ingredient) reuses evaluateActiveIngredientCap, the evaluator checkLimits
+//             runs, so this page agrees with it: every product with that ingredient this year as a share of the cap, judged per
+//             lawn (see lawnScopesFor; the worst lawn decides: violated before approaching before ok, then the larger usage;
+//             one lawn or none known reads the customer's whole ledger), current = the share used in this row's unit,
+//             exceeded at the cap, warning from 75% of it.
+async function limitStatusFor(limit, matchingApps, { today, customerCounty, customerId, yearStart, lastBefore, propertyIds }) {
+  const product = { id: limit.product_id, name: limit.product_name };
+  if (isIntervalRow(limit)) {
+    const latest = matchingApps.map((app) => etCalendarDayOf(app.application_date)).sort().pop()
+      || (lastBefore.get(String(limit.product_id)) ? etCalendarDayOf(lastBefore.get(String(limit.product_id))) : null);
+    if (!latest) return { status: 'ok', current: null };
+    const check = await applicationLimits.evaluateLimit(limit, [], [], `${today}T12:00:00Z`, product, db, { lastApplication: { application_date: latest } });
+    return { status: check.violated ? 'exceeded' : 'ok', current: check.current ?? null };
+  }
+  if (isAmountRow(limit)) {
+    const check = await applicationLimits.evaluateV13AmountCap(limit, product, { customerId, yearStart, proposedDate: `${today}T12:00:00Z` }, db);
+    return { status: check.violated ? 'exceeded' : (check.approaching ? 'warning' : 'ok'), current: check.amountUsed };
+  }
+  if (isIngredientCapRow(limit)) {
+    const scopes = propertyIds && propertyIds.length > 1 ? propertyIds : [undefined];
+    let worst = null;
+    for (const propertyId of scopes) {
+      const check = await applicationLimits.evaluateActiveIngredientCap(limit, product, { customerId, yearStart, propertyId, proposedDate: `${today}T12:00:00Z` }, db);
+      if (!worst || checkRank(check) > checkRank(worst) || (checkRank(check) === checkRank(worst) && Number(check.current) > Number(worst.current))) worst = check;
+    }
+    const used = Math.round((Number(worst.current) / 100) * Number(limit.limit_value) * 10000) / 10000;
+    return { status: worst.violated ? 'exceeded' : (worst.approaching ? 'warning' : 'ok'), current: used };
+  }
+  return limitStatus(limit, matchingApps, { today, customerCounty });
 }
 
 const ComplianceService = {
@@ -213,6 +299,18 @@ const ComplianceService = {
       ? await k('scheduled_services').where({ id: sr.scheduled_service_id }).first('property_id')
       : null;
     const treatedPropertyId = visit?.property_id || null;
+    // GATE_LAWN_TROUBLE_AREAS: a PLACED application (the product record carries a treated_place) whose visit has no property link is frozen on
+    // the property the property-area flow resolves for the visit (lawn-trouble-areas propertyOf), read once; unresolved stays unplaced (NULL).
+    // Every other row keeps exactly the property it had.
+    let placedLookup = null;
+    const placedProperty = () => {
+      // On the completion's transaction this read sits in a savepoint of its own: a failure leaves the row unplaced and aborts nothing.
+      placedLookup = placedLookup || savepointRead(k, async (kk) => {
+        const row = sr.scheduled_service_id ? await kk('scheduled_services').where({ id: sr.scheduled_service_id }).first() : null;
+        return row ? require('./lawn-trouble-areas').propertyOf(kk, row) : null;
+      }).catch(() => null);
+      return placedLookup;
+    };
 
     // Rows already ledgered for this record. New-style rows are identified
     // by service_product_id; legacy rows (NULL there) by catalog product.
@@ -260,7 +358,7 @@ const ComplianceService = {
         customer_id: sr.customer_id,
         service_record_id: serviceRecordId,
         service_product_id: sp.id,
-        property_id: treatedPropertyId,
+        property_id: sp.treated_place && !treatedPropertyId ? await placedProperty() : treatedPropertyId,
         product_id: productId,
         technician_id: sr.technician_id,
         application_date: sr.service_date || etDateString(),
@@ -291,6 +389,9 @@ const ComplianceService = {
         restricted_use: catalog?.restricted_use || false,
         applicator_license: tech?.fl_applicator_license || null,
         notes: sp.notes || null,
+        // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went, frozen on the ledger beside its property. Present only when
+        // the product record carries one (the completion writes it while the gate is live), so every other row inserts as before.
+        ...require('./lawn-trouble-areas').ledgerPlace(sp),
       };
 
       // Catch-all DO NOTHING (no conflict target): a race can conflict on
@@ -483,25 +584,35 @@ const ComplianceService = {
     // application-limits uses so the two surfaces never disagree.
     const customerCounty = inferCountyFromZipInternal(customer.zip) || applicationLimits.getCounty(customer);
 
-    // Get all applications this year for the customer
+    // Get all applications since a day for the customer
     // treated_property_id: the property the application's visit was booked at, by the same
     // join application-limits scopes its history with (null = the row cannot be placed).
-    const apps = await db('property_application_history')
+    const appsSince = (since) => db('property_application_history')
       .where({ 'property_application_history.customer_id': customerId })
-      .where('property_application_history.application_date', '>=', yearStart)
+      .where('property_application_history.application_date', '>=', since)
       .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .leftJoin('service_records as sr_prop', 'property_application_history.service_record_id', 'sr_prop.id')
       .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
       .select('property_application_history.*', 'products_catalog.name as product_name', 'ss_prop.property_id as visit_property_id')
       .then(placeOnTheLedgerProperty);
+    const apps = await appsSince(yearStart);
 
     // Get all product limits, the v13 caps applied while the gate is on.
     const limits = await limitRowsWithV13Caps();
+    // The limits of a rolling-365 product count the last 365 days, not the calendar year (application-limits ROLLING_365).
+    const rollingApps = limits.some((limit) => limit.year_window) ? await appsSince(applicationLimits.windowFor(today, 'rolling365').start) : apps;
+
+    // A product's minimum interval looks back past New Year (a December application holds a February one), so
+    // the latest earlier application of the products with an interval row and none this year is read in one query.
+    const lastBefore = await lastApplicationBeforeYear(customerId, yearStart, limits, apps);
+    // The ingredient caps are judged per lawn: the customer's properties and the lawns their ledger holds, read only when such a limit exists.
+    const ingredientKeys = [...new Set(limits.filter(isIngredientCapRow).map((limit) => limit.match_value))];
+    const propertyIds = ingredientKeys.length ? await lawnScopesFor(customerId, yearStart, ingredientKeys) : [];
 
     const results = [];
     for (const limit of limits) {
-      const { status, current } = limitStatus(limit, matchingApplications(limit, apps), { today, customerCounty });
+      const { status, current } = await limitStatusFor(limit, matchingApplications(limit, limit.year_window ? rollingApps : apps), { today, customerCounty, customerId, yearStart, lastBefore, propertyIds });
 
       results.push({
         limitId: limit.id,
@@ -626,7 +737,12 @@ const ComplianceService = {
     // annual_max_apps is a per-lawn cap: each customer's busiest lawn, never the company-wide total of
     // the product. One grouped query for every capped product; no application row reaches Node.
     const capped = limits.filter((limit) => limit.limit_type === 'annual_max_apps' && limit.product_id);
-    const busiest = await busiestLawnByProduct(capped.map((limit) => limit.product_id), yearStart);
+    // A rolling-365 product counts the last 365 days (application-limits ROLLING_365), the rest the calendar year.
+    const idsOf = (rolling) => capped.filter((limit) => !!limit.year_window === rolling).map((limit) => limit.product_id);
+    const busiest = new Map([
+      ...await busiestLawnByProduct(idsOf(false), yearStart),
+      ...await busiestLawnByProduct(idsOf(true), applicationLimits.windowFor(today, 'rolling365').start),
+    ]);
     const warningCount = capped.filter((limit) => (busiest.get(String(limit.product_id)) ?? 0) >= Number(limit.limit_value) - 1).length;
 
     // Tech license status
@@ -689,4 +805,6 @@ module.exports = ComplianceService;
 module.exports.inferCountyFromZipInternal = inferCountyFromZipInternal;
 module.exports.worstPropertyCount = worstPropertyCount;
 module.exports.limitRowsWithV13Caps = limitRowsWithV13Caps;
+module.exports.limitStatusFor = limitStatusFor;
+module.exports.lawnScopesFor = lawnScopesFor;
 module.exports.isNitrogenApplication = isNitrogenApplication;

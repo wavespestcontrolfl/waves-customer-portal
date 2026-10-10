@@ -871,9 +871,15 @@ function initScheduledJobs() {
       // prior tick must not double-run and bypass the per-run change cap.
       await runExclusive('auto-dispatch-recurring', async () => {
         if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) {
-          const { flagUnplacedVisits } = require('./auto-dispatch/audit');
+          const { flagUnplacedVisits, maintainMissingGeoNotices } = require('./auto-dispatch/audit');
           const { getAutoDispatchConfig } = require('./auto-dispatch/config');
-          await flagUnplacedVisits(getAutoDispatchConfig());
+          // No placement run tonight: close pin notices that no longer apply.
+          // Each upkeep runs even when the other fails; the first failure is
+          // thrown after both ran.
+          const failures = [];
+          await flagUnplacedVisits(getAutoDispatchConfig()).catch((err) => failures.push(err));
+          await maintainMissingGeoNotices().catch((err) => failures.push(err));
+          if (failures.length) throw failures[0];
           return;
         }
         const { runAutoDispatch } = require('./auto-dispatch');
@@ -959,6 +965,21 @@ function initScheduledJobs() {
       await runExclusive('pest-forecast-history', () => require('./pest-forecast/history').collectDailyForecasts());
     } catch (err) {
       logger.error(`[pest-forecast-history] ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — archive draft estimates a later SENT estimate replaced
+  // (owner 2026-10-06). Gate read per tick, so a flip needs no restart.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').estimateDraftRetireOnSendLive()) return;
+    try {
+      await runExclusive('estimate-draft-retire', async () => {
+        const { retireDraftsReplacedBySentEstimate } = require('./estimate-draft-retire');
+        const result = await retireDraftsReplacedBySentEstimate();
+        if (result.retired > 0) logger.info(`[estimate-draft-retire] archived ${result.retired} replaced draft(s)`);
+      });
+    } catch (err) {
+      logger.error(`[estimate-draft-retire] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2014,6 +2035,31 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[geocode-review-alert] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 06:35 — pin check after a visit (GATE_PIN_PARKED_CHECK, dark): compares the map pin of each
+  // customer whose visit was completed in the last 2 ET days with where the technician's truck parked,
+  // and SUGGESTS the parked point to staff. It never changes a pin and never contacts a customer.
+  // Gate read per run, so a flip needs no restart. With the gate off the run only retires any suggestions
+  // still open (a clean rollback), so the tick is not skipped here. runExclusive records the job health.
+  cron.schedule('35 6 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('pin-parked-check', async () => {
+        const result = await require('./pin-parked-check').runPinParkedCheck();
+        if (result.created > 0) logger.info(`[pin-parked-check] ${result.created} new pin suggestion(s)`);
+      });
+      // A tick that never ran (no lock connection) is recorded as a failed run, like the geocode-review alert.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`pin-parked-check tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('pin-parked-check').catch(() => {});
+        await recordJobEnd('pin-parked-check', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[pin-parked-check] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3862,7 +3908,7 @@ function initScheduledJobs() {
   // runExclusive: live model calls; don't double-spend on deploy-overlap ticks.
   // Kill switch: GATE_CALL_REPLAY_EVAL=false.
   // =========================================================================
-  cron.schedule('40 3 * * 1', async () => {
+  const runCallReplayEvalTick = async () => {
     if (!isEnabled('callReplayEval')) return;
     logger.info('Running: call extraction replay eval');
     try {
@@ -3877,7 +3923,16 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('40 3 * * 1', runCallReplayEvalTick, { timezone: 'America/New_York' });
+  // A deploy that kills the replay mid-run leaves the week with no verdict
+  // (2026-10-05: started 3:40, the server restarted at 3:48). The replay
+  // reads call rows and writes no business record, so it re-runs after a
+  // kill, unless the killed run had already raised its notification: that
+  // insert is not deduplicated, and the verdict is already with the owner.
+  registerDeployKillRetry('call-extraction-replay-eval', runCallReplayEvalTick, {
+    shouldRetry: async (row) => !(await require('./eval/call-extraction-replay').verdictNotifiedSince(row.last_started_at)),
+  });
 
   // =========================================================================
   // WEEKLY MONDAY 3:50AM ET — Voice relay conversation eval. Replays the
@@ -4108,6 +4163,32 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`New-recurring welcome queue failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY :30, 5AM-6PM — Auto-dispatch rain pass. The 4:10 run above
+  // cannot see rain (it never moves a visit inside 72 hours; the hourly
+  // forecast is good for 3 dates), so this reads the booked outdoor visits
+  // on those dates and tells the office which sit in rain and which hour
+  // that day is dry and open. Each visit rings once; the hourly run keeps
+  // the notice's advice current and closes it when the visit is no longer
+  // wet at that time. Notify-only: never moves a visit, never texts a
+  // customer. Dark behind GATE_AUTO_DISPATCH_RAIN_PASS, read inside the
+  // pass. runExclusive because overlapping deploy instances would read the
+  // forecast twice.
+  // =========================================================================
+  cron.schedule('30 5-18 * * *', async () => {
+    try {
+      await runExclusive('auto-dispatch-rain-pass', async () => {
+        const { runRainPass } = require('./auto-dispatch/rain-pass');
+        const result = await runRainPass();
+        // The pass never rejects; a run that could not finish must still
+        // fail job health instead of reading as a green run with no notices.
+        if (result.reason === 'error') throw new Error(result.error || 'run did not finish');
+      });
+    } catch (err) {
+      logger.error(`Auto-dispatch rain pass failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

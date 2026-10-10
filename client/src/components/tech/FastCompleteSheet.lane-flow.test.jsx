@@ -115,7 +115,8 @@ const recordCard = () => screen.getByRole('region', { name: 'Bed bug record hear
 // A field's row on the card: its label, its value, the words heard.
 const fieldRow = (label) => within(recordCard()).getByText(label).closest('.tech-lane-row');
 
-// Owner 2026-10-05: the "Swept eaves and webs" box is a plain pest visit's.
+// Owner 2026-10-08: no short sheet has a "Swept eaves and webs" box; a plain pest
+// visit's sweep is read from its note, and a lane visit records none.
 describe('the swept eaves and webs box on a lane visit', () => {
   test('is not on the visit step', async () => {
     const request = makeRequest();
@@ -636,4 +637,45 @@ describe('the record\'s rules', () => {
     const record = changeLaneRecord(EMPTY_LANE_RECORD, 'bed_bug_evidence', 'Eggs', bedBug);
     expect(mergeLaneRecord(record, { status: 'failed', areas: [], findings: [], unclearGroups: [] }, bedBug)).toBe(record);
   });
+});
+
+// GATE_FAST_COMPLETE_INVOICED_VISITS (owner 2026-10-09): a lane visit already
+// invoiced from the payment flow completes here with the full form's invoice
+// field.
+describe('a lane visit already invoiced from the payment flow', () => {
+  async function send(service) {
+    const request = makeRequest();
+    await openSheet(request, service);
+    addProduct('Temprid FX', '1');
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    return request.bodies('/complete')[0];
+  }
+
+  test('posts invoiceAlreadySent: true', async () => {
+    const body = await send({ ...SERVICE, completionInvoiceAlreadySent: true });
+    expect(body.invoiceAlreadySent).toBe(true);
+    expect(body).toMatchObject({ includePayLink: true, structuredObservations: ['Scheduled follow-up treatment', 'Live adults', 'Preparation complete'] });
+  }, 20000);
+
+  test('a visit with only a door-charge marker, or none, posts no invoice field', async () => {
+    expect(await send({ ...SERVICE, checkoutInvoiceId: 'inv-fixture', checkoutInvoiceToken: 'tok-fixture' })).not.toHaveProperty('invoiceAlreadySent');
+    cleanup();
+    expect(await send(SERVICE)).not.toHaveProperty('invoiceAlreadySent');
+  }, 30000);
+
+  test('Next stop hands the completion response to the page, so admin Dispatch can stage the payment prompt', async () => {
+    const response = { success: true, invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 80, invoicePaymentActionRequired: true };
+    const onCompleted = vi.fn();
+    const request = makeRequest({ complete: response });
+    render(<FastCompleteSheet service={{ ...SERVICE, checkoutInvoiceId: 'inv-fixture' }} request={request} onClose={() => {}} onCompleted={onCompleted} />);
+    await screen.findByRole('button', { name: 'Generate AI report' }, { timeout: 10000 });
+    addProduct('Temprid FX', '1');
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
+    expect(onCompleted).toHaveBeenCalledWith(response);
+  }, 20000);
 });

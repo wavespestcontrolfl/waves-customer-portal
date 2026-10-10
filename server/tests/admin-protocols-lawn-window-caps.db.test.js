@@ -30,27 +30,38 @@ describeDb('GET /lawn/window carries the v13 count caps', () => {
     return res;
   }
 
-  test.each(['2026-02-10', '2026-05-12', '2026-06-16'])('%s: every capped product in the window carries annualMaxApps 2 and maxApplications 2', async (date) => {
+  test.each(['2026-02-10', '2026-05-12', '2026-06-16'])('%s: every capped product in the window carries annualMaxApps and maxApplications 2 (Blindside 1)', async (date) => {
     process.env.GATE_LAWN_V13 = 'true';
     const res = await windowFor(date, 'st_augustine');
     expect(res.statusCode).toBe(200);
     const products = res.body.context.products.filter((p) => CAPPED.includes(p.protocolProductName));
     expect(products.length).toBeGreaterThan(0);
     for (const product of products) {
-      expect(product.gates.annualMaxApps).toBe(2);
-      expect(product.annualCounter.maxApplications).toBe(2);
+      // Blindside is held to one application a year (effectiveCap 1, v13 final pass); Celsius, Certainty and Arena stay at 2.
+      const shown = product.protocolProductName === 'Blindside Herbicide' ? 1 : 2;
+      expect(product.gates.annualMaxApps).toBe(shown);
+      expect(product.annualCounter.maxApplications).toBe(shown);
     }
   });
 
   test('Blindside, the after-cap weed spot, is listed in a Celsius window as a spot row (never a default) with its cap', async () => {
     process.env.GATE_LAWN_V13 = 'true';
-    const res = await windowFor('2026-05-12', 'st_augustine');
+    const res = await windowFor('2026-03-10', 'st_augustine');
     const names = res.body.context.products.map((p) => p.protocolProductName);
     expect(names).toContain('Celsius WG');
     const blindside = res.body.context.products.find((p) => p.protocolProductName === 'Blindside Herbicide');
     expect(blindside).toMatchObject({ role: 'post_emergent_spot', applicationMode: 'spot', defaultInPlan: false });
-    expect(blindside.gates).toMatchObject({ trigger: 'celsius_annual_cap_reached', annualMaxApps: 2 });
-    expect(blindside.annualCounter.maxApplications).toBe(2);
+    expect(blindside.gates).toMatchObject({ trigger: 'celsius_annual_cap_reached', annualMaxApps: 1 });
+    expect(blindside.annualCounter.maxApplications).toBe(1);
+  });
+
+  // Owner 2026-10-08 (20261008130000): February weed spots are Celsius alone; Blindside is a November-through-March product.
+  test.each([['2026-02-10', ['Celsius WG']], ['2026-05-12', ['Celsius WG', 'Certainty Turf Herbicide', 'LESCO 90/10 Nonionic Surfactant']]])('%s: the weed products the window lists after the weed-season retirement', async (date, expected) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const res = await windowFor(date, 'st_augustine');
+    const weed = res.body.context.products.map((p) => p.protocolProductName)
+      .filter((name) => ['Celsius WG', 'Certainty Turf Herbicide', 'LESCO 90/10 Nonionic Surfactant', 'Blindside Herbicide'].includes(name));
+    expect(weed.sort()).toEqual([...expected].sort());
   });
 
   test('a product that is not capped carries none', async () => {

@@ -172,14 +172,33 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // price_is_final precedent) and the call pipeline requires exactly false
 // (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING), keeping its transcript screens as an extra
 // fail-closed layer. Older payloads, which lack it, still validate and never qualify.
-// 1.25.0: additive — caller.ani_cannot_text (optional nullable boolean) and
+// 1.25.0: customer_history.competitor_name is NARROWED by its new description to a pest
+// control or lawn care provider (null for a home inspector, realtor, builder, HOA…). No
+// field added or removed; the version marks rows written under the narrower meaning.
+// 1.26.0: meta.is_spam is NARROWED by its description: a wrong number is no longer spam.
+// The model-output description said "Solicitation, robocall, or wrong number" while the
+// prompt rule said a wrong number is not spam; every model followed the description. A
+// wrong number is now false (lead_quality "wrong_number" carries it). No field added or
+// removed; the version marks rows written under the narrower meaning. The description
+// stays as short as the old one: a longer list of spam kinds (vendor cold call,
+// collections…) was measured on the reviewed call `spam-fp-callback-request` and marked
+// that genuine caller spam in 7 of 14 runs, against 2 of 12 for the old text.
+// 1.27.0: scheduling.callback_window_start/_end change FORM. They were `format: time`,
+// which this validator reads as a time with seconds and an offset ("14:00:00-04:00"). The
+// model wrote another form on most callback calls, the form check failed and the call went
+// to the fallback model; the one form that passed was a form the callback reader
+// (call-commitments callbackDueAt) could not turn into a due time. Both fields are now an
+// Eastern wall-clock time with an optional date and no offset. The persisted schema also
+// accepts the old offset form, so older rows still validate. No field added or removed.
+// 1.28.0: additive — caller.ani_cannot_text (optional nullable boolean) and
 // caller.text_phone_e164 (optional nullable E.164 string) in both schemas, never `required`.
-// Owner ruling 2026-10-07 (option A): a caller whose line cannot take texts (a deaf relay
-// service, an office landline, "you can't text this one") and who gives a separate number
-// for texts gets texts there. Distinct from caller_id_disclaimed, which means the number is
-// not the caller's own: this caller still owns the line for calls. Older payloads, which
-// lack both, still validate and read as "no such statement".
-const SCHEMA_VERSION = '1.25.0';
+// Owner rulings 2026-10-07 (option A) and 2026-10-08 (card only): a caller whose line cannot
+// take texts (a deaf relay service, an office landline, "you can't text this one") sets the
+// flag with or without naming another number; the processor holds texts to that line and
+// files a card, and never changes a phone by itself. Distinct from caller_id_disclaimed,
+// which means the number is not the caller's own. Older payloads still validate and read
+// as "no such statement". (Cut as 1.25.0 on the branch; main took 1.25.0–1.27.0 first.)
+const SCHEMA_VERSION = '1.28.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

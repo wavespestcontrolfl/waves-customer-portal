@@ -476,6 +476,7 @@ async function closeAssessmentsWithSentEstimates({ conn = db, now = new Date(), 
 }
 
 module.exports = {
+  estimateForAssessment,
   assessmentEstimateCloseRefusal,
   recheckLockedAssessment,
   closeAssessmentsWithSentEstimates,

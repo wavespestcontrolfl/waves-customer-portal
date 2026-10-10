@@ -26,10 +26,10 @@ describe('PriceCard — estimate-wide no-guarantee policy', () => {
     fireEvent(window, new Event('beforeprint'));
     expect(screen.getByText(/unlimited free callbacks/i)).toBeInTheDocument();
     expect(screen.getAllByText(/money-back guarantee/i)).toHaveLength(2);
-    expect(screen.getAllByText(/No long-term contract/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/No contract, no cancellation fee/i).length).toBeGreaterThan(0);
 
     rerender(<PriceCard frequency={frequency} noGuarantee />);
-    expect(screen.queryByText(/guarantee|callbacks|no long.term contract|cancel anytime/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/guarantee|callbacks|no long.term contract|cancel anytime|cancel online/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Premium non-repellent/i)).toBeInTheDocument();
     expect(screen.getByText(/Weather-aware timing/i)).toBeInTheDocument();
   });
@@ -54,9 +54,9 @@ describe('PriceCard — estimate-wide no-guarantee policy', () => {
     // An unstamped row follows the estimate; 'none' governs every row.
     const unstamped = { ...frequency, perServiceTreatments: frequency.perServiceTreatments.map(({ termsScope, ...row }) => row) };
     rerender(<PriceCard frequency={unstamped} guaranteeScope="satisfaction" />);
-    expect(screen.queryByText(/callbacks|money-back|no long.term contract/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/callbacks|money-back|no long.term contract|cancel online|no cancellation fee/i)).not.toBeInTheDocument();
     rerender(<PriceCard frequency={frequency} guaranteeScope="none" />);
-    expect(screen.queryByText(/guarantee|callbacks|no long.term contract/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/guarantee|callbacks|no long.term contract|cancel online|no cancellation fee/i)).not.toBeInTheDocument();
   });
 
   it('neutralizes included commercial re-service while preserving the exterior-treatment scope', () => {
@@ -69,7 +69,7 @@ describe('PriceCard — estimate-wide no-guarantee policy', () => {
     fireEvent(window, new Event('beforeprint'));
     expect(screen.getByText(/re-service requests are included in the plan/i)).toBeInTheDocument();
     rerender(<PriceCard frequency={frequency} noGuarantee />);
-    expect(screen.queryByText(/re-service requests are included|no long.term contract/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/re-service requests are included|no long.term contract|cancel online|no cancellation fee/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Recurring exterior treatment/i)).toBeInTheDocument();
   });
 

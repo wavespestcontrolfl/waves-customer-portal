@@ -54,6 +54,7 @@ const PROTOCOL_KEY_ALIASES = Object.freeze({
   german_roach_cleanout: 'cockroach',
   pest_initial_roach: 'cockroach',
   cockroach_control: 'cockroach',
+  vehicle_german_roach: 'cockroach',
   roach: 'cockroach',
   rodent_trapping: 'rodent',
   bed_bug: 'bed_bug',

@@ -44,6 +44,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/communications/send-prep` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
 | POST | `/api/admin/communications/sms` | admin-communications |
+| GET | `/api/admin/consultations/:scheduledServiceId/estimate` | admin-consultations |
 | GET | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
 | POST | `/api/admin/consultations/:scheduledServiceId/outcome` | admin-consultations |
 | GET | `/api/admin/customers` | admin-customers |
@@ -58,6 +59,9 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/context` | admin-dispatch |
+| POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/sod-rooted` | admin-dispatch |
+| GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/treatment-guide` | admin-dispatch |
+| POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
@@ -317,6 +321,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | DELETE | `/api/tech/services/:id/treatment-zone` | tech-track |
 | GET | `/api/tech/services/:id/treatment-zone` | tech-track |
 | POST | `/api/tech/services/:id/treatment-zone` | tech-track |
+| GET | `/api/tech/services/:id/treatment-zone/last` | tech-track |
+| POST | `/api/tech/services/:id/treatment-zone/reuse` | tech-track |
 | POST | `/api/tech/services/:id/treatment-zone/suggest` | tech-track |
 | POST | `/api/tech/social/generate` | tech-social |
 | GET | `/api/tech/social/locations` | tech-social |
@@ -326,6 +332,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/staff-documents/:id` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/:id/pdf` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/availability` | tech-staff-documents |
+| GET | `/api/tech/staff-documents/onboarding` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/people` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/acknowledge` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/records` | tech-staff-documents |
@@ -562,6 +569,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/triage/:id/confirm-email` | admin-triage |
 | PUT | `/api/admin/triage/:id/dismiss` | admin-triage |
 | PUT | `/api/admin/triage/:id/resolve` | admin-triage |
+| POST | `/api/admin/triage/:id/save-contact-note` | admin-triage |
 | POST | `/api/admin/triage/:id/verdict` | admin-triage |
 | GET | `/api/admin/triage/auto-routed` | admin-triage |
 | POST | `/api/admin/triage/auto-routed/:callLogId/verdict` | admin-triage |

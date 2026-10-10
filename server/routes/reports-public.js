@@ -217,6 +217,52 @@ const reportLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
+// Daily ceiling on paid Ask Waves model answers (Codex P1s #5964 r74 to r83):
+// reportLimiter alone allows 20 a minute for one report link.
+// The shared, atomic reservation (Codex P1 #5964 r83 and the pre-push audit):
+// before a model call, one transaction takes an advisory lock for the report
+// and one for the IP, counts the last 24 hours of `report_ask_model_call`
+// rows in service_report_events for each, and inserts this call's row when
+// both are under their cap. Every replica shares the rows, a restart keeps
+// them, and two concurrent requests cannot both take the last slot. The row
+// is written only when a call is about to reach the model. No migration:
+// event_name is free text and every reader of the table filters by name.
+// A failed transaction keeps the fixed-rule answer: no count, no model call.
+const REPORT_ASK_DAILY = { report: 40, ip: 120 };
+const REPORT_ASK_CALL_EVENT = 'report_ask_model_call';
+async function reserveSharedReportAskBudget(service, ipHash, dbConn = db) {
+  return dbConn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-ask:${service.id}`]);
+    if (ipHash) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-ask-ip:${ipHash}`]);
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const used = async (where) => Number((await trx('service_report_events')
+      .where({ event_name: REPORT_ASK_CALL_EVENT, ...where }).where('occurred_at', '>=', since).count('* as n').first())?.n || 0);
+    // occurred_at: the table indexes (service_record_id, occurred_at) and (event_name, occurred_at).
+    if (await used({ service_record_id: service.id }) >= REPORT_ASK_DAILY.report) return false;
+    if (ipHash && await used({ ip_hash: ipHash }) >= REPORT_ASK_DAILY.ip) return false;
+    await trx('service_report_events').insert({
+      service_record_id: service.id,
+      customer_id: service.customer_id || null,
+      event_name: REPORT_ASK_CALL_EVENT,
+      channel: 'public_report',
+      metadata: '{}',
+      ip_hash: ipHash,
+    });
+    return true;
+  });
+}
+async function reportAskBudgetFor(service, req, deps = {}) {
+  const ipHash = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
+  try {
+    return await (deps.reserveShared || reserveSharedReportAskBudget)(service, ipHash);
+  } catch (err) {
+    // Fail closed: without the shared count the ceiling cannot be kept, so the
+    // fixed-rule answer stands and no model call is made (pre-push audit).
+    logger.warn(`[reports-public] shared report ask budget unavailable (${err.message}); keeping the fixed-rule answer`);
+    return false;
+  }
+}
+
 // Ask Waves privacy headers (audit "Additional gaps"): both report ask
 // endpoints answer with recorded-but-sensitive service/project facts and
 // must never be cached or indexed. Global Helmet already sets
@@ -1888,40 +1934,40 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
+    // A question the rules leave generic that reads as re-entry or a future
+    // visit gets that topic's own rule answer, gate on or off (reroutedTopic;
+    // the router keeps its own topics' precedence).
+    const reportAsk = require('../services/service-report/report-ask-ai');
     const routed = routeServiceReportQuestion({
-      question,
-      data,
-      nextAppointment,
+      question, data, nextAppointment, rerouteTopic: reportAsk.reroutedTopic(question),
     });
     const { topic } = routed;
     let { answer } = routed;
     // GATE_REPORT_ASK_AI (dark): Claude Sonnet 5.5 writes the answer from the
-    // report's own facts (report-ask-ai.js). Any miss (model failure, ~8 s
-    // timeout, empty or rejected answer) keeps the fixed-rule answer above, so
-    // the reply shape and the recorded event are the same either way. Off =
-    // the fixed-rule answer alone, no model call.
-    // Pest reports only: a lawn or tree & shrub report carries aftercare the
-    // fact sheet does not hold (watering holds, water-in tasks), which the
-    // fixed-rule answer must keep honoring (pre-push audit P1).
-    // Only the topics whose facts the sheet carries in full. Re-entry,
-    // watering and next steps answer from recorded instructions (pet
-    // precautions with fixed waits, technician recommendations, aftercare)
-    // that must reach the customer word for word, so they keep the rule
-    // answer (pre-push audit, several rounds).
-    const {
-      AI_ASK_TOPICS, medicalExposureAnswer, exposureSafetyLine, asksAboutSchedule,
-    } = require('../services/service-report/report-ask-ai');
+    // report's own facts (report-ask-ai.js), on pest, lawn and tree & shrub
+    // reports only (any other line, a typed or companion report, or a question
+    // whose required lines include technician-typed text keeps the rule
+    // answer: ruleAnswerReason). The recorded instructions the fixed-rule
+    // answer states (watering holds and tasks, pet precautions with their
+    // waits) ride along as requiredLines and must appear in the AI answer
+    // word for word. Any miss (model failure, ~8 s timeout, an empty,
+    // rejected or required-line-dropping answer) keeps the fixed-rule answer
+    // above, so the reply shape and the recorded event are the same either
+    // way. Off = the fixed-rule answer alone, no model call.
     // A question that reports a symptom or an exposure gets the fixed Poison
     // Control / 911 answer on every report and with the gate off too: the
     // fixed-rule answers have no medical handling. No model call.
-    const urgent = medicalExposureAnswer(question);
+    const { medicalExposureAnswer, exposureSafetyLine, answerReportQuestionWithAI } = reportAsk;
+    const urgent = medicalExposureAnswer(question, data);
     if (urgent) {
       answer = urgent;
-    } else if (data.serviceLine === 'pest' && AI_ASK_TOPICS.has(topic) && !asksAboutSchedule(question)
-      && require('../config/feature-gates').reportAskAiLive?.() === true) {
-      const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
-      const ai = await answerReportQuestionWithAI({ question, data });
-      if (ai) answer = ai.answer;
+    } else if (require('../config/feature-gates').reportAskAiLive?.() === true) {
+      // Daily paid-call ceiling per report and per IP (Codex P1s #5964 r74,
+      // r83): past it, the fixed-rule answer above stands.
+      const ai = await answerReportQuestionWithAI({
+        question, data, nextAppointment, requiredLines: routed.requiredLines, topic,
+      }, { takeBudget: () => reportAskBudgetFor(service, req) });
+      answer = ai ? ai.answer : answer;
     }
     // A question that mentions spray and a person, pet or body part gets the
     // fixed Poison Control line before the answer (owner 2026-10-05, #6016).
@@ -2729,3 +2775,5 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
+module.exports.reportAskBudgetFor = reportAskBudgetFor;
+module.exports.reserveSharedReportAskBudget = reserveSharedReportAskBudget;

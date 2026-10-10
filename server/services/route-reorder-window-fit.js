@@ -810,6 +810,7 @@ module.exports = {
   computeChronologicalRepair,
   workDuration,
   isCoVisitPair,
+  effectivePremise,
   advanceCoVisit,
   startCoVisitChain,
   staleOrderReasons,

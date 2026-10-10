@@ -986,8 +986,9 @@ describe('watering instruction drives the aftercare through the existing verdict
     });
     const mixed = buildWateringInstruction({ rules: [HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED });
     expect(buildWateringBanner(mixed)).toMatchObject({ state: 'hold_then_water_in', expiresAt: '2026-10-03T18:00:00.000Z' });
-    // A hold that reaches the water-in deadline is no claim, so no banner.
-    expect(buildWateringBanner(buildWateringInstruction({ rules: [HOLD_RULE, WATER_IN_RULE], completedAt: COMPLETED }))).toBeNull();
+    // A hold that reaches the water-in deadline is followed by the water-in from the hold end (owner 2026-10-09).
+    expect(buildWateringBanner(buildWateringInstruction({ rules: [HOLD_RULE, WATER_IN_RULE], completedAt: COMPLETED })))
+      .toMatchObject({ state: 'hold_then_water_in', holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: '2026-10-02T19:00:00.000Z', expiresAt: '2026-10-02T19:00:00.000Z' });
     expect(buildWateringBanner(buildWateringInstruction({ rules: [{ mode: 'none', source: 'label' }], completedAt: COMPLETED })))
       .toMatchObject({ state: 'none', expiresAt: null });
     expect(buildWateringBanner(buildWateringInstruction({ rules: [null], completedAt: COMPLETED }))).toBeNull();

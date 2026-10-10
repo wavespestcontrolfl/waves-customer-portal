@@ -96,3 +96,27 @@ describe('customer recurring handoff prerequisites', () => {
     expect(isCustomerRecurringDispatchEnabled()).toBe(false);
   });
 });
+
+describe('day-move drive floor and conflict moves (owner 2026-10-09)', () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    for (const key of ['AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES', 'GATE_AUTO_DISPATCH_CONFLICT_MOVES']) {
+      if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
+    }
+  });
+
+  test('the floor defaults to 6 minutes and reads its env knob', () => {
+    delete process.env.AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES;
+    expect(getAutoDispatchConfig().minDayMoveDriveSavingMinutes).toBe(6);
+    process.env.AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES = '0';
+    expect(getAutoDispatchConfig().minDayMoveDriveSavingMinutes).toBe(0);
+    expect(getAutoDispatchConfig({ minDayMoveDriveSavingMinutes: 10 }).minDayMoveDriveSavingMinutes).toBe(10);
+  });
+
+  test('conflict moves are off unless the gate is set', () => {
+    delete process.env.GATE_AUTO_DISPATCH_CONFLICT_MOVES;
+    expect(getAutoDispatchConfig().conflictMovesEnabled).toBe(false);
+    process.env.GATE_AUTO_DISPATCH_CONFLICT_MOVES = 'true';
+    expect(getAutoDispatchConfig().conflictMovesEnabled).toBe(true);
+  });
+});

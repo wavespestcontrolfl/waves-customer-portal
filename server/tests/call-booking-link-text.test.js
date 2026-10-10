@@ -407,7 +407,7 @@ describe('stagingIneligibleReason', () => {
     ['callback number needed (triage flag)', { triage_flags: ['callback_number_needed'] }, 'triage_flag_callback_number_needed'],
     ['the caller said the number is not theirs', { caller: { caller_id_disclaimed: true } }, 'caller_id_disclaimed'],
     ['the number is disclaimed even with a spoken callback', { caller: { caller_id_disclaimed: true, phone_e164: '+19415550199', phone_source: 'spoken' } }, 'caller_id_disclaimed'],
-    // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-08): never texts a dictated number.
+    // ani_cannot_text (schema 1.28.0, owner ruling 2026-10-08): never texts a dictated number.
     ['the line cannot get texts', { caller: { ani_cannot_text: true } }, 'ani_cannot_text'],
     ['the line cannot get texts, a number for texts was given', { caller: { ani_cannot_text: true, text_phone_e164: '+19415559876' } }, 'ani_cannot_text'],
     ['a property manager calling', { caller: { relationship_to_property: 'property_manager' } }, 'third_party_caller'],

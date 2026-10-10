@@ -473,7 +473,7 @@ describe('extraction schema 1.23.0', () => {
   const { flatView } = require('../utils/extraction-compat');
 
   test('whole_building_occupancy is an optional nullable boolean in both schemas', () => {
-    expect(SCHEMA_VERSION).toBe('1.25.0');
+    expect(SCHEMA_VERSION).toBe('1.28.0');
     for (const f of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
       const schema = require(`../schemas/${f}`);
       for (const field of ['whole_building_occupancy', 'whole_building_occupancy_final']) {
