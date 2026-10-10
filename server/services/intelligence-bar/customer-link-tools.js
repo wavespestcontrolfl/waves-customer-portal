@@ -263,6 +263,15 @@ const AUTOPAY_REACHES = {
   email: (customer) => `email to ${maskEmail(customer.email)}`,
   inline: () => 'nobody — the link comes back here for the composer',
 };
+// The service enrolls a consented, chargeable saved card BEFORE it validates
+// or uses the delivery channel (autopay-setup-link.js requestAutopaySetupLink),
+// so a customer with such a card and no phone / an email opt-out still
+// succeeds from the Customers page (Codex r7 on #6266 P1). Same read the
+// service makes (opt-out included); an unreadable answer falls toward the
+// channel preflight, as the service falls toward minting a link.
+async function consentedSavedCard(customerId) {
+  try { return !!(await require('../payment-method-consents').findConsentedChargeableCard(customerId)); } catch { return false; }
+}
 
 async function autopayPlan(input) {
   const delivery = input.delivery === undefined || input.delivery === null ? 'sms' : String(input.delivery);
@@ -278,22 +287,29 @@ async function autopayPlan(input) {
     const { AUTOPAY_SKIP_REASONS } = require('../composer-customer-links');
     return blocked(AUTOPAY_SKIP_REASONS[eligibility.reason] || `Auto Pay setup link not available (${eligibility.reason})`, eligibility.reason);
   }
-  const refusal = await AUTOPAY_CHANNEL_PREFLIGHT[delivery](customer);
-  if (refusal) return refusal;
+  // Mirror the service's ordering: a consented saved card is enrolled first
+  // and the channel is never touched, so its levers do not gate the card.
+  const autoSecure = await consentedSavedCard(customer.id);
+  if (!autoSecure) {
+    const refusal = await AUTOPAY_CHANNEL_PREFLIGHT[delivery](customer);
+    if (refusal) return refusal;
+  }
   return {
     preview: true,
     customer_id: customer.id,
     customer_name: fullName(customer),
     delivery,
-    reaches: AUTOPAY_REACHES[delivery](customer),
-    does: `${DELIVERY_WORDS[delivery]}. The link lasts 30 days; nothing is charged until the customer saves a payment method on it.`,
+    reaches: autoSecure ? 'nobody by link — a consented saved card already covers this customer, so it is enrolled instead' : AUTOPAY_REACHES[delivery](customer),
+    does: autoSecure
+      ? 'enrolls the consented saved card for Auto Pay on the spot; NO setup link is built or sent (the Auto Pay enrollment confirmation email may go out). If that card stops qualifying before Confirm, the service falls back to a setup link and judges the delivery channel itself.'
+      : `${DELIVERY_WORDS[delivery]}. The link lasts 30 days; nothing is charged until the customer saves a payment method on it.`,
     checks_passed: 'Not payer-billed, not already on Auto Pay, not paused, on a per-visit or per-application plan.',
     auto_secure: 'If a consented saved card already covers this, that card is enrolled on the spot, no setup link is sent, and the Auto Pay enrollment confirmation email may go out — the result says auto_secured.',
     // The authorization contract reads this: a text or email send is a
-    // customer contact (irreversible); inline only contacts the customer if
-    // the auto-secure enrollment emails its confirmation.
-    notifies_customer: delivery === 'inline' ? 'may' : true,
-    _version: { customer_id: customer.id, delivery, phone_last10: last10(customer.phone), email: String(customer.email || '').trim().toLowerCase() },
+    // customer contact (irreversible); inline or an expected auto-secure only
+    // contacts the customer if the enrollment emails its confirmation.
+    notifies_customer: delivery === 'inline' || autoSecure ? 'may' : true,
+    _version: { customer_id: customer.id, delivery, phone_last10: last10(customer.phone), email: String(customer.email || '').trim().toLowerCase(), auto_secure: autoSecure },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this.',
   };
 }

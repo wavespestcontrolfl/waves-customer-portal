@@ -36,10 +36,12 @@ jest.mock('../services/composer-customer-links', () => ({
   autopaySmsLever: jest.fn(async () => null),
 }));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn(async () => ({ activeVersion: { id: 'v1' } })) }));
+jest.mock('../services/payment-method-consents', () => ({ findConsentedChargeableCard: jest.fn(async () => null) }));
 
 const db = require('../models/db');
 const routeExports = require('../routes/admin-communications');
 const autopay = require('../services/autopay-setup-link');
+const consents = require('../services/payment-method-consents');
 const links = require('../services/composer-customer-links');
 const { CUSTOMER_LINK_TOOLS, executeCustomerLinkTool } = require('../services/intelligence-bar/customer-link-tools');
 
@@ -60,6 +62,7 @@ function wireCustomer(row = CUSTOMER) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  consents.findConsentedChargeableCard.mockResolvedValue(null);
   db.mockReset();
 });
 
@@ -200,7 +203,7 @@ describe('send_autopay_setup_link', () => {
     autopay.setupLinkIneligibility.mockResolvedValue({ reason: null, customer: CUSTOMER });
     const preview = await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID }, { isAdmin: true });
     expect(preview).toMatchObject({ preview: true, delivery: 'sms', reaches: 'text to ***0123', customer_name: 'Customer Fixture', notifies_customer: true,
-      _version: { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '9415550123', email: 'fixture@example.com' } });
+      _version: { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '9415550123', email: 'fixture@example.com', auto_secure: false } });
     expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
 
     wireCustomer();
@@ -233,6 +236,31 @@ describe('send_autopay_setup_link', () => {
     expect(already).toMatchObject({ blocked: true, code: 'autopay_already_active', error: 'This customer is already on Auto Pay' });
   });
 
+  test('unconfirmed: a consented saved card is enrolled before any channel is touched, so a missing phone or an email opt-out does not block the card (Codex r7 P1)', async () => {
+    consents.findConsentedChargeableCard.mockResolvedValue({ id: 'pm-1', stripe_payment_method_id: 'pm_x' });
+    autopay.setupLinkIneligibility.mockResolvedValue({ reason: null, customer: { ...CUSTOMER, phone: null } });
+    wireCustomer({ ...CUSTOMER, phone: null });
+    const preview = await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID }, { isAdmin: true });
+    expect(preview).toMatchObject({ preview: true, delivery: 'sms', notifies_customer: 'may',
+      _version: { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '', email: 'fixture@example.com', auto_secure: true } });
+    expect(preview.reaches).toMatch(/consented saved card/);
+    expect(preview.does).toMatch(/NO setup link is built or sent/);
+    expect(links.autopaySmsLever).not.toHaveBeenCalled();
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+
+    // The confirmed run carries the same pin and hands the enrollment to the service.
+    wireCustomer({ ...CUSTOMER, phone: null });
+    autopay.requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
+    const result = await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID, confirmed: true, _verified_autopay_version: preview._version }, { isAdmin: true });
+    expect(result).toMatchObject({ success: true, auto_secured: true, sent: false });
+    expect(autopay.requestAutopaySetupLink).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, delivery: 'sms', trigger: 'admin' });
+
+    // The card qualifying no longer (or an unreadable consent read) returns to the channel's own levers.
+    consents.findConsentedChargeableCard.mockRejectedValueOnce(new Error('db down'));
+    wireCustomer({ ...CUSTOMER, phone: null });
+    expect((await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID }, { isAdmin: true })).code).toBe('no_phone');
+  });
+
   test.each([
     [{ requested: true, action: 'sent', reason: 'sent', channel: 'sms' }, { success: true, sent: true, channel: 'sms' }],
     [{ requested: true, action: 'link_created', secureUrl: 'https://portal.wavespestcontrol.com/secure/tok', expiresAt: '2026-11-09T00:00:00Z' }, { success: true, sent: false, url: 'https://portal.wavespestcontrol.com/secure/tok' }],
@@ -245,12 +273,12 @@ describe('send_autopay_setup_link', () => {
     autopay.requestAutopaySetupLink.mockResolvedValue(serviceResult);
     const delivery = serviceResult.action === 'link_created' ? 'inline' : 'sms';
     const result = await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID, delivery, confirmed: true,
-      _verified_autopay_version: { customer_id: CUSTOMER_ID, delivery, phone_last10: '9415550123', email: 'fixture@example.com' } }, { isAdmin: true });
+      _verified_autopay_version: { customer_id: CUSTOMER_ID, delivery, phone_last10: '9415550123', email: 'fixture@example.com', auto_secure: false } }, { isAdmin: true });
     expect(autopay.requestAutopaySetupLink).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, delivery: serviceResult.action === 'link_created' ? 'inline' : 'sms', trigger: 'admin' });
     expect(result).toMatchObject(expected);
   });
 
-  const AUTOPAY_PIN = { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '9415550123', email: 'fixture@example.com' };
+  const AUTOPAY_PIN = { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '9415550123', email: 'fixture@example.com', auto_secure: false };
 
   test('confirmed: a throw after approval is an unknown outcome, never a retry invitation', async () => {
     wireCustomer();

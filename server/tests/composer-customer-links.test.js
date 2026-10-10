@@ -3350,6 +3350,27 @@ describe('linkOwnersInBody', () => {
     expect(await linkOwnersInBody('See you Tuesday!')).toEqual({ owners: [], unresolved: [] });
   });
 
+  test('a referral link resolves through the public resolver\'s paths: merged-away alias to the surviving promoter, then the legacy customers.referral_code (Codex r7 P2)', async () => {
+    const aliasPath = chainBuilder();
+    aliasPath.first = jest.fn()
+      .mockResolvedValueOnce(null) // no active promoter under this code
+      .mockResolvedValueOnce({ merged_into_promoter_id: 'promoter-survivor' })
+      .mockResolvedValueOnce({ customer_id: 'cust-survivor' });
+    mockBuilders = { referral_promoters: aliasPath, customers: chainBuilder({ firstRow: { id: 'cust-legacy' } }) };
+    expect(await linkOwnersInBody('Refer a friend: portal.wavespestcontrol.com/r/WAVES-OLD1'))
+      .toEqual({ owners: [{ kind: 'referral', token: 'WAVES-OLD1', customerId: 'cust-survivor' }], unresolved: [] });
+    expect(mockDb).not.toHaveBeenCalledWith('customers');
+
+    const legacyPath = chainBuilder({ firstRow: null });
+    mockBuilders = { referral_promoters: legacyPath, customers: chainBuilder({ firstRow: { id: 'cust-legacy' } }) };
+    expect(await linkOwnersInBody('Refer a friend: portal.wavespestcontrol.com/r/LEGACY42'))
+      .toEqual({ owners: [{ kind: 'referral', token: 'LEGACY42', customerId: 'cust-legacy' }], unresolved: [] });
+
+    mockBuilders = { referral_promoters: chainBuilder({ firstRow: null }), customers: chainBuilder({ firstRow: null }) };
+    expect(await linkOwnersInBody('Refer a friend: portal.wavespestcontrol.com/r/NOBODY1'))
+      .toEqual({ owners: [], unresolved: [{ kind: 'referral', token: 'NOBODY1' }] });
+  });
+
   test('an unpaid invoice short code is judged by its stored /pay target; a code with no row is unresolved', async () => {
     mockBuilders = {
       short_codes: chainBuilder({ firstRow: { code: 'py222', target_url: 'https://portal.wavespestcontrol.com/pay/AbCdEfGhIjKlMnOpQrSt' } }),

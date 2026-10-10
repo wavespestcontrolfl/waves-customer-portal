@@ -1964,7 +1964,7 @@ async function visitCardRequestLinked(runs, hosts, conn) {
  * READ-ONLY owner of every generated bearer the composer's seam does not
  * itself verify: reschedule and track (scheduled_services tokens), re-service
  * (customers.reservice_token), pay (invoices.token), estimate
- * (estimates.token) and referral (referral_promoters.referral_code), owned-host
+ * (estimates.token) and referral (the public /r/ resolver's three paths), owned-host
  * links only. Short codes are judged by their stored target as well as by the
  * in-place expansion (which leaves an unpaid invoice's /pay target wrapped —
  * Codex r5 on #6266 P1), and a code with no row is unresolved. The
@@ -1985,9 +1985,24 @@ const ownedBearerShapes = () => [
     async (conn, t) => (await conn('invoices').where({ token: t }).first('customer_id'))?.customer_id],
   ['estimate', /\/estimate\//i, /^\/estimate\/([A-Za-z0-9_-]{8,})$/i,
     async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
-  ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i,
-    async (conn, c) => (await conn('referral_promoters').where({ referral_code: c }).first('customer_id'))?.customer_id],
+  ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
 ];
+// The public /r/:code resolver's own three paths (routes/referral-links.js):
+// an active promoter, a merged-away promoter whose code survives as an alias
+// of the surviving row (customer_id intentionally null on the alias), and the
+// legacy customers.referral_code — a still-valid referral link is never
+// unresolved here when the public route honors it (Codex r7 on #6266 P2).
+async function referralLinkOwner(conn, code) {
+  const active = await conn('referral_promoters').where({ referral_code: code, status: 'active' }).first('customer_id');
+  if (active?.customer_id) return active.customer_id;
+  const alias = await conn('referral_promoters').where({ referral_code: code, status: 'merged' })
+    .whereNotNull('merged_into_promoter_id').first('merged_into_promoter_id');
+  if (alias?.merged_into_promoter_id) {
+    const survivor = await conn('referral_promoters').where({ id: alias.merged_into_promoter_id, status: 'active' }).first('customer_id');
+    if (survivor?.customer_id) return survivor.customer_id;
+  }
+  return (await conn('customers').where({ referral_code: code }).whereNull('deleted_at').first('id'))?.id;
+}
 async function linkOwnersInBody(body, conn = db) {
   const hosts = ownedPortalHosts();
   const runs = [...await expandedRuns(body, conn)];
