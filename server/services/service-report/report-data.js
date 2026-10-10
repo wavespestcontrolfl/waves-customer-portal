@@ -24,6 +24,7 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
+const { stage1PayloadFlag, stage1KeyStamp, stage1TechTips } = require('./lawn-report-stage1');
 const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
@@ -51,6 +52,7 @@ const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule, validateRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold, SETUP_INVITE_LINE } = require('./lawn-watering-instruction');
+const lawnWaterInRain = require('./lawn-water-in-rain');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2872,6 +2874,8 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // those rules ride the stamp: an owner correcting a product's rule re-keys the
   // cached PDF. A frozen visit replays its snapshot and keeps the constant.
   if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
+  // GATE_LAWN_WATER_IN_RAIN: rain since the visit can change a frozen water-in banner, so the key follows what it will say. Empty while dark.
+  irrigationStamp += await lawnWaterInRainStamp(service, knex);
   // The report lead (GATE_LAWN_REPORT_LEAD) changes what the lawn web report
   // and its PDF render (lead-mode findings, stock sentences left out), so a PDF
   // cached before a flip must never be served after it, nor the reverse. The
@@ -2888,6 +2892,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   irrigationStamp += copyFixesPdfStamp();
   // The lawn report polish (GATE_LAWN_REPORT_POLISH) derives weekly inches from the owner's rate table, so its PDF key moves with it.
   irrigationStamp += polishPdfStamp();
+  // The lawn report stage 1 fixes (GATE_LAWN_REPORT_STAGE1_FIXES) change the damage finding and "What to expect", so its PDF key moves with it
+  // (and follows a frozen v6 entry that carries the second line, whatever the gate says now).
+  irrigationStamp += await stage1KeyStamp(service, knex);
   // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
@@ -3935,6 +3942,66 @@ function applyAfterHoldOverlay(waterContext, instruction) {
   const detail = typeof afterHold?.detail === 'string' && label ? afterHold.detail.split(HOLD_UNTIL_TOKEN).join(label) : null;
   const filled = detail && !detail.includes(HOLD_UNTIL_TOKEN) ? { ...afterHold, detail } : null;
   return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
+}
+
+// GATE_LAWN_WATER_IN_RAIN, READ TIME ONLY: the frozen water-in instruction as this render says it. Rain measured since the
+// completion that reaches the water-in amount turns it into "water_in_by_rain" (the rain did the watering in); before
+// that a generic spray-and-rotor figure pair reads as an amount first. Only a REPLAY of a frozen instruction is touched
+// (the completion build, its freeze and its text never see this), and any miss in the rain read leaves it as frozen.
+async function waterInRainInstruction(instruction, { products, service, now = new Date() }) {
+  if (!lawnWaterInRain.appliesTo(instruction)) return instruction;
+  try {
+    const coverage = await lawnWaterInRain.resolveRainCoverage({
+      instruction,
+      products,
+      now,
+      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+      fetchForecast: require('./application-conditions').fetchPropertyForecast,
+    });
+    return lawnWaterInRain.applyWaterInRain(instruction, coverage);
+  // read-failure-exempt: the rain read is an optional improvement of a frozen banner; a miss leaves the banner as frozen.
+  } catch {
+    return instruction;
+  }
+}
+
+// The PDF key part for the same decision, from the record alone (a cache-lookup caller's row is partial): '' while the gate is
+// dark or the visit has no frozen water-in instruction; ':wir=c' once rain has covered it; ':wir=a' for the amount line. An
+// unreadable record stamps random (re-render, never a stale hit).
+async function lawnWaterInRainStamp(service, knex) {
+  if (typeof featureGates.lawnWaterInRainLive !== 'function' || !featureGates.lawnWaterInRainLive() || !featureGates.lawnWateringRuleLive() || !service?.id) return '';
+  try {
+    const row = await knex('service_records')
+      .where({ 'service_records.id': service.id })
+      .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
+      .first(
+        'service_records.structured_notes',
+        'service_records.service_data',
+        knex.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        knex.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+      );
+    const instruction = readFrozenWateringInstruction(parseJsonObject(row?.structured_notes));
+    if (!lawnWaterInRain.appliesTo(instruction)) return '';
+    const rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
+    const products = await attachApprovedReportProductFacts(knex, rawProducts, {
+      frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
+    });
+    // The render reads the location through the frozen identity (its map center wins over the live join), so the key does too.
+    const located = applyReportIdentitySnapshot({ ...row });
+    const coverage = await lawnWaterInRain.resolveRainCoverage({
+      instruction,
+      products,
+      now: new Date(),
+      latitude: located.customer_latitude,
+      longitude: located.customer_longitude,
+      fetchForecast: require('./application-conditions').fetchPropertyForecast,
+    });
+    return lawnWaterInRain.waterInRainStamp(instruction, coverage);
+  } catch {
+    return `:wir=err${crypto.randomBytes(4).toString('hex')}`;
+  }
 }
 
 // GATE_LAWN_WATERING_FORECAST: the water-in sentence frozen with the instruction,
@@ -5687,6 +5754,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // A failed product read means the rules were unknown, not absent.
           opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || rulesUnknown;
         }
+        // GATE_LAWN_WATER_IN_RAIN: the frozen instruction as it reads now (after the write gate's copy above, so the
+        // freeze and the completion text never see it). A replay only.
+        if (wateringInstruction && !opts.wateringInstructionOut && opts.lawnWaterInRain === true && typeof featureGates.lawnWaterInRainLive === 'function' && featureGates.lawnWaterInRainLive() && readFrozenWateringInstruction(structured)) {
+          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service });
+        }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
         lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
@@ -5746,6 +5818,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         wateringInstruction,
         mowingHeight,
         applications,
+        // GATE_LAWN_REPORT_STAGE1_FIXES: the visit's frozen finding-to-product ties (what was found), read from the record.
+        frozenTies: reportFacts.frozenTies(service.structured_notes, lawnAssessment.assessmentId),
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
         ...(pinnedProtocolVersion ? { protocolVersion: pinnedProtocolVersion } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
@@ -7357,9 +7431,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the record froze tips. The technician's first name comes from the
     // visit's frozen technician row (owner: first name only, no sign-off);
     // the client composes the greeting from customerName.
-    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (protocol.techTips || []).length
+    // GATE_LAWN_REPORT_STAGE1_FIXES (lawn only): a frozen "add your irrigation settings" tip is left off beside a schedule on
+    // file (the same array comes back while the gate is off).
+    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (stage1TechTips(protocol.techTips, { serviceLine, reportV2 }) || []).length
       ? {
-        tips: protocol.techTips,
+        tips: stage1TechTips(protocol.techTips, { serviceLine, reportV2 }),
         technicianFirstName: String(service.technician_first_name || '').trim()
           || (technicianName && !isGenericTechnicianLabel(technicianName) ? technicianName.split(/\s+/)[0] : null),
       }
@@ -7489,6 +7565,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight }),
     // GATE_LAWN_REPORT_POLISH (lawn only): the key the page reads for the status card and the hero. Absent = byte-identical payload.
     ...lawnPolishPayload({ serviceLine, reportV2 }),
+    // GATE_LAWN_REPORT_STAGE1_FIXES (lawn only): the key the web page reads for the applied card and the hero contact lines. Absent = byte-identical payload.
+    ...stage1PayloadFlag(serviceLine),
     // GATE_LAWN_NEW_SOD_REPORT_CARD (lawn only): the New sod card, built from the block frozen at completion. Absent = byte-identical payload.
     ...lawnNewSodPayload({ serviceLine, structuredNotes: service.structured_notes }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,

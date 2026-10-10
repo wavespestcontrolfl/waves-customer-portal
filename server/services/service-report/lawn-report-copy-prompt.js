@@ -6,7 +6,7 @@ const { TREE_SHRUB_MAIN_REPORT_PROMPT, RECURRING_PEST_MAIN_REPORT_PROMPT } = req
 const {
   selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION, REMAINING_SERVICE_MODIFIERS,
 } = require('./remaining-service-copy-prompts');
-const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt } = require('./report-writer-rules');
+const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt, PEST_WRITER_ADAPTER } = require('./report-writer-rules');
 
 const LAWN_COPY_CORE = `## ROLE AND PURPOSE
 
@@ -233,7 +233,10 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   const callback = writerRules && writer === 'pest'
     && (context.isCallback === true || context.serviceKey === 'pest_re_service')
     ? [REMAINING_SERVICE_MODIFIERS.callback] : [];
-  return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback]);
+  // The pest writer's own fill-in block comes last, after the constraints
+  // and the module it builds on (owner 2026-10-09).
+  const adapter = writerRules && writer === 'pest' ? [PEST_WRITER_ADAPTER] : [];
+  return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback, ...adapter]);
 }
 
 module.exports = {

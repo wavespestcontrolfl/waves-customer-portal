@@ -568,3 +568,86 @@ describe('four-section report: the reach-out date asks the customer to get in to
   });
 });
 
+
+// Owner 2026-10-09: the pest writer's own block, the rejection detail and the
+// repair note.
+describe('pest writer adapter, rejection detail and repair note', () => {
+  const {
+    PEST_WRITER_ADAPTER, noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
+  } = require('../services/service-report/report-writer-rules');
+  const { selectReportCopyPrompt: select } = require('../services/service-report/lawn-report-copy-prompt');
+  const SHARED = '## HARD CONSTRAINTS\nshared\n## ANTI-TEMPLATE RULES\nold';
+
+  test('the recurring pest writer ends with the adapter under the rules; no other writer carries it', () => {
+    const pest = { serviceKey: 'pest_general_quarterly', findingsType: null };
+    const withRules = select(SHARED, 'Quarterly Pest Control Service', { ...pest, writerRules: true });
+    expect(withRules.endsWith(PEST_WRITER_ADAPTER)).toBe(true);
+    expect(select(SHARED, 'Quarterly Pest Control Service', pest)).not.toContain('HOW TO FILL THE FOUR SECTIONS');
+    const lawn = { serviceKey: 'lawn_care_6week', findingsType: null };
+    expect(select(SHARED, 'Every 6 Weeks Lawn Care Service', { ...lawn, writerRules: true }))
+      .toBe(select(SHARED, 'Every 6 Weeks Lawn Care Service', lawn));
+  });
+
+  test('the adapter and the rules pass no instruction the rules contradict', () => {
+    // Rule 4 names the words the screen refuses, and says how to restate them.
+    expect(OWNER_RULES).toContain('Never "no issues", "no problems", "all clear", "nothing to worry about"');
+    expect(OWNER_RULES).toContain('write what it means instead of the words');
+    // Rule 1 no longer fills an empty section with an invitation.
+    expect(OWNER_RULES).not.toContain('only invites the customer to tell us what they notice');
+    // The old lines that asked for a refused absence, or banned the sweep, are rewritten.
+    const rewritten = PROMPT_REWRITES.map(([from]) => from);
+    expect(rewritten).toContain('("light activity", "no visible activity")');
+    expect(rewritten).toContain('chemical barrier, vectors, sweep, recon,');
+  });
+
+  // Codex r1: four places where the new text could make the writer invent.
+  test('the new text never asks for an unrecorded outcome, place or fact', () => {
+    // No EXPECTATIONS record: no outcome claim.
+    expect(PEST_WRITER_ADAPTER).toContain('With no EXPECTATIONS lines there is no recorded outcome');
+    expect(PEST_WRITER_ADAPTER).not.toContain('what the recorded work is for');
+    // A sweep is described with the recorded places only: no fixed list to copy.
+    expect(PEST_WRITER_ADAPTER).toContain('only the places the record names');
+    expect(PEST_WRITER_ADAPTER).not.toMatch(/window frames|door frames/);
+    // A zero rating with no checked place is left out, in both places that speak of it.
+    const zero = PROMPT_REWRITES.filter(([from]) => /a 0 means no visible activity|A recorded zero means/.test(from));
+    expect(zero).toHaveLength(2);
+    zero.forEach(([, to]) => expect(to).toMatch(/leave (?:a 0 rating|the zero) out/));
+    // WHAT'S NEXT with nothing recorded invents no trigger (Codex r2).
+    expect(PEST_WRITER_ADAPTER).toContain('invent no sign, no contact trigger and no follow-up');
+    // The rejected draft is not a source of facts.
+    const note = rejectedDraftRepairNote({ draft: 'D', rejection: 'owner_phrase' });
+    expect(note).toContain('The rejected draft is not a source: keep only what the inputs record');
+    expect(note).not.toContain('Keep every fact');
+  });
+
+  test('the detail names the reason and the words; the plain verdict is the same reason', () => {
+    const draft = 'WHAT WE FOUND\nThere were no  issues inside.';
+    expect(writerRulesRejectionDetail(draft)).toEqual({ reason: 'owner_phrase', match: 'no issues' });
+    expect(writerRulesRejection(draft)).toBe('owner_phrase');
+    expect(writerRulesRejectionDetail('WHAT WE FOUND\nGhost ants were trailing along the slider track.')).toBeNull();
+    // A screen that reads the whole copy names no words.
+    const absence = writerRulesRejectionDetail('WHAT WE FOUND\nNo activity was seen today.');
+    expect(absence).toEqual({ reason: 'unscoped_absence', match: null });
+  });
+
+  test('the note hint fires only on the refused words', () => {
+    expect(noteAbsenceHint('customer home, No Problems inside')).toContain('"no problems"');
+    expect(noteAbsenceHint('customer home, nothing seen in the garage')).toBe('');
+    expect(noteAbsenceHint(null)).toBe('');
+  });
+
+  test('the repair note: reason, words, and the draft only for its own writer and never for an access code', () => {
+    const detail = { reason: 'owner_phrase', match: 'no issues' };
+    const own = rejectedDraftRepairNote({ draft: 'DRAFT TEXT', rejection: 'owner_phrase', detail });
+    expect(own).toContain('PREVIOUS DRAFT (rejected; never reuse its wording where it broke the rule):\nDRAFT TEXT');
+    expect(own).toContain('The words that tripped it: "no issues".');
+    const other = rejectedDraftRepairNote({ draft: 'DRAFT TEXT', rejection: 'owner_phrase', detail, includeDraft: false });
+    expect(other).not.toContain('DRAFT TEXT');
+    expect(other).toContain('REJECTED because it uses a phrase the report refuses');
+    expect(rejectedDraftRepairNote({ draft: 'gate code 4411', rejection: 'access_code' })).not.toContain('4411');
+    // A detail for another reason names no words; the older word screen names its own.
+    expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'malformed_shape', detail })).not.toContain('tripped');
+    expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'banned:gone,cleared' })).toContain('("gone", "cleared")');
+    expect(rejectedDraftRepairNote({ draft: 'D', rejection: null })).toBe('');
+  });
+});

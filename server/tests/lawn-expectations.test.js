@@ -1021,6 +1021,8 @@ describe('buildLawnExpectations', () => {
         'services/service-report/lawn-progress.js',
         // GATE_LAWN_REPORT_FACTS: the finding-to-product tie reads the engine's modeLock classification (Acelepryn is preventive-locked), so a tie can never contradict the product's "What to expect" line.
         'services/service-report/lawn-report-facts.js',
+        // GATE_LAWN_REPORT_STAGE1_FIXES: the damage finding reads the engine's modeLock classification (a preventive-locked product never makes a found-and-treated card).
+        'services/service-report/lawn-report-stage1.js',
         // P16: the one shared seasonal-dip approval check (dormancy card, cross-season notes).
         'services/service-report/lawn-seasonality.js',
       ]);
