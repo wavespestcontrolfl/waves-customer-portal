@@ -210,6 +210,37 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  test('SIGTERM while a claim write is blocked on the row lock: the marker waits for it and stamps the committed claim', async () => {
+    processor._test.resetShutdownForTests();
+    await db('call_log').where({ twilio_call_sid: SID }).del();
+    await insertCall(SID);
+    // Hold the row lock from a second connection: the pass's claim UPDATE
+    // blocks on it with its drain read already taken as false.
+    const holder = await db.transaction();
+    await holder('call_log').where({ twilio_call_sid: SID }).forUpdate().first('id');
+    let releaseDownload;
+    fetchSpy.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseDownload = () => resolve(new Response('not found', { status: 404 }));
+    }));
+    const pass = processor.processRecording(SID);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(processor._test.pendingClaimWriteCount()).toBe(1);
+    expect((await readRow(SID)).processing_status).toBeNull();
+
+    // SIGTERM lands now; the lock lets go 300 ms later, inside the budget.
+    setTimeout(() => { holder.commit().catch(() => {}); }, 300);
+    const summary = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
+    expect(summary).toEqual({ enabled: true, inFlight: 1, stamped: 1, failed: 0 });
+    const stamped = await readRow(SID);
+    expect(stamped.processing_status).toBe('processing');
+    expect(stamped.metadata.shutdown_interrupted_at).toEqual(expect.any(String));
+
+    releaseDownload();
+    expect((await pass).reason).toBe('recording_not_ready');
+    expect(processor.inFlightPassCount()).toBe(0);
+    expect(processor._test.pendingClaimWriteCount()).toBe(0);
+  });
+
   test('a stamped dead claim on a PAN-quarantined row re-enters the backstop before its 10-minute outer age', async () => {
     processor._test.resetShutdownForTests();
     const quarantined = (metadata) => ({

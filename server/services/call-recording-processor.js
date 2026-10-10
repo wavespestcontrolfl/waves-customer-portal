@@ -3831,6 +3831,12 @@ const inFlightPasses = new Map();
 // Set at SIGTERM: a claim taken after this point is stamped by its own claim
 // write, since it will die with the process too.
 let shuttingDown = false;
+// Claim writes (transaction + post-commit self-stamp) still in flight. A
+// claim UPDATE can sit on a row lock across SIGTERM with its drain read
+// already taken as false; the marker waits for these, within its budget,
+// before it stamps, so a claim that commits inside the budget is visible to
+// the token-fenced stamp (Codex r10 P2).
+const pendingClaimWrites = new Set();
 const shutdownStampSql = (conn) => conn.raw(
   `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${SHUTDOWN_STAMP_KEY}}', to_jsonb(?::text), true)`,
   [new Date().toISOString()],
@@ -9365,7 +9371,7 @@ const CallRecordingProcessor = {
     // A refused or thrown claim leaves the registry below.
     inFlightPasses.set(procToken, { callId: call.id, callSid });
     const unregisterClaim = () => { inFlightPasses.delete(procToken); };
-    try {
+    const claimWrite = (async () => {
     await db.transaction(async (trx) => {
       if (call.customer_id) {
         contactCasBaselineAtClaim = await trx('customers')
@@ -9526,20 +9532,16 @@ const CallRecordingProcessor = {
           ? Number(claimedRows[0].processing_generation) : null;
       }
     });
-    } catch (claimErr) {
-      unregisterClaim();
-      throw claimErr;
-    }
-    if (claimBlocked) unregisterClaim();
     // Post-commit drain check (Codex r8 P2) for a flag that flipped while
     // the claim transaction was open. markInFlightForShutdown's
     // token-fenced stamp cannot see a claim that has not committed yet: the
     // visible row still carries the previous token, so Postgres returns 0
-    // rows without waiting. Both orders are covered here: the drain flag
-    // flipped before this line runs (we stamp ourselves now), or it flips
-    // after (we were on the registry before the transaction and the row is
-    // committed, so the marker's UPDATE matches). Token-fenced, so a row a
-    // peer has since taken is left alone.
+    // rows without waiting. Both orders are covered: the drain flag flipped
+    // before this line runs (we stamp ourselves now, and the marker awaits
+    // this write through pendingClaimWrites), or it flips after (we were on
+    // the registry before the transaction and the row is committed, so the
+    // marker's UPDATE matches). Token-fenced, so a row a peer has since
+    // taken is left alone.
     if (!claimBlocked && shuttingDown && isEnabled('callProcShutdownRelease')) {
       await db('call_log')
         .where({ id: call.id })
@@ -9547,6 +9549,17 @@ const CallRecordingProcessor = {
         .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() })
         .catch((e) => logger.warn(`[call-proc] shutdown: self-stamp failed for ${maskSid(callSid)}: ${e.message}`));
     }
+    })();
+    pendingClaimWrites.add(claimWrite);
+    try {
+      await claimWrite;
+    } catch (claimErr) {
+      unregisterClaim();
+      throw claimErr;
+    } finally {
+      pendingClaimWrites.delete(claimWrite);
+    }
+    if (claimBlocked) unregisterClaim();
     // A blocked claim did NO work — success: false so no caller can mistake
     // it for a completed run. The owner hit exactly that on 2026-08-31: his
     // manual Process tap during a wedged claim returned success and the UI
@@ -22884,13 +22897,23 @@ const CallRecordingProcessor = {
     // stamps itself; a pass that read the flag as false before this line is
     // in the snapshot with a committed claim.
     if (enabled) shuttingDown = true;
-    const entries = [...inFlightPasses.entries()];
-    const summary = { enabled, inFlight: entries.length, stamped: 0, failed: 0 };
-    if (!enabled || !entries.length) return summary;
+    if (!enabled) return { enabled, inFlight: inFlightPasses.size, stamped: 0, failed: 0 };
     const deadline = new Promise((resolve) => {
       const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
       if (typeof t.unref === 'function') t.unref();
     });
+    // Claim writes blocked on a row lock when the flag flipped: wait for them
+    // inside the budget, so a claim that commits in time carries a visible
+    // token for the stamps below (and its own post-commit self-stamp has
+    // landed). A claim still blocked at the deadline is left to the legacy
+    // window; its post-commit self-stamp still lands if it commits before
+    // the pool closes.
+    if (pendingClaimWrites.size) {
+      await Promise.race([Promise.allSettled([...pendingClaimWrites]), deadline]);
+    }
+    const entries = [...inFlightPasses.entries()];
+    const summary = { enabled, inFlight: entries.length, stamped: 0, failed: 0 };
+    if (!entries.length) return summary;
     await Promise.all(entries.map(async ([procToken, entry]) => {
       try {
         const rows = await Promise.race([
@@ -23579,6 +23602,7 @@ CallRecordingProcessor._test = {
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
+  pendingClaimWriteCount: () => pendingClaimWrites.size,
   reclaimableClaimSql: reclaimableClaim,
   legacyGeographicVeto,
   isOutboundCall,
