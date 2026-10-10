@@ -7006,13 +7006,25 @@ function existingStructureTermiteWork(words) {
 //     another termite service.
 const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
 const PRETREAT_WORDING_RE = /\bpre[-\s]?treat(?:ment)?\b/i;
-const TERMITE_ADDON_WORDING_RE = /\b(?:monitor\w*|protection|bond|warranty|renewal|bait\w*|stations?)\b/i;
+const TERMITE_ADDON_WORDING_RE = /\b(?:monitor\w*|bond|renewal|bait\w*|stations?)\b/i;
+// "Protection" and "warranty" name ordinary pre-construction wording too
+// ("termite protection before the slab pour", a pre-treat's warranty), so they
+// count as add-on work only with plan/contract context and no new-slab wording
+// in the same fragment.
+const TERMITE_PROTECTION_WORDING_RE = /\b(?:protection|warranty)\b/i;
+const TERMITE_PROTECTION_ADDON_CONTEXT_RE = /\b(?:plan|program|renewal|annual|yearly|contract|bond|coverage|agreement|existing|current|ongoing)\b/i;
+const TERMITE_NEW_SLAB_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|pre[-\s]?treat(?:ment)?|slab)\b/i;
+function hasTermiteAddonWording(text) {
+  if (TERMITE_ADDON_WORDING_RE.test(text)) return true;
+  return TERMITE_PROTECTION_WORDING_RE.test(text) && TERMITE_PROTECTION_ADDON_CONTEXT_RE.test(text)
+    && !TERMITE_NEW_SLAB_WORDING_RE.test(text);
+}
 const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
 function hasNonPretreatTermiteCue(text) {
   const value = String(text || '').toLowerCase();
   return TERMITE_WOOD_TREATMENT_CUE_RE.test(value) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
     || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
-    || TERMITE_ADDON_WORDING_RE.test(value) || existingStructureTermiteWork(value);
+    || hasTermiteAddonWording(value) || existingStructureTermiteWork(value);
 }
 function serviceFragmentsOf(view) {
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
@@ -7030,7 +7042,7 @@ function pretreatIsOnlyTermiteWork(view) {
     const label = canonicalWavesService(fragment);
     if (label === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment)) provenPretreat = true;
     if (label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
-      && !(label === 'Termite Inspection' && PRETREAT_WORDING_RE.test(fragment))) return false;
+      && !(label === 'Termite Inspection' && TERMITE_NEW_SLAB_WORDING_RE.test(fragment))) return false;
   }
   return provenPretreat;
 }

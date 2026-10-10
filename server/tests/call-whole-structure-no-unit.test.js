@@ -466,7 +466,12 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, requested_service: 'slab pretreat & wood treatment' }, commercial)).toBe(false);
     expect(run({ ...slab, requested_service: 'pre-treat / WDO' }, commercial)).toBe(false);
     expect(run({ ...slab, pain_points: ['slab pre-treat + trenching'] }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat and annual termite protection plan' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['slab pre-treat', 'termite warranty renewal'] }, commercial)).toBe(false);
     // Plain pre-treat wording still drops the card.
+    expect(run({ ...slab, call_summary: 'Termite protection before the slab pour' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'New-construction termite protection' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat with a warranty' }, commercial)).toBe(true);
     expect(run({ specific_service_name: 'Termite Pretreatment Service' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'Termidor pre-slab treatment' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'Apply liquid termiticide before the slab pour' }, commercial)).toBe(true);
