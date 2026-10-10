@@ -108,6 +108,10 @@ const ARENA = {
   product: { name: 'Arena 50 WDG', category: 'insecticide', active_ingredient: 'clothianidin' },
   method: 'spot_treatment', targets: ['Southern chinch bugs'], areaValue: 500, areaUnit: 'sqft',
 };
+// The frozen finding-to-product ties (lawn-report-facts.js frozenTies): what the technician or the photos recorded as FOUND.
+const TECH_CHINCH = { source: 'technician', kind: 'chinch', product: 'insecticide' };
+const TECH_ARMYWORM = { source: 'technician', kind: 'caterpillars', product: 'insecticide' };
+const PHOTO_CHINCH = { source: 'photo', kind: 'insects', label: 'chinch bug activity', sure: true, product: 'insecticide' };
 const damageOf = (v2) => v2.insights.find((card) => card.category === 'damage');
 
 // ── 1. the damage finding names the pest ────────────────────────────────────
@@ -124,9 +128,9 @@ describe('change 1: the damage finding names the targeted pest', () => {
     expect(v2.snapshot.watching).toEqual([OLD.headline]);
   });
 
-  test('gate on, a spot insecticide with a chinch bug target: pest headline, the Visit Summary sentence, the product and area', () => {
+  test('gate on, a spot insecticide with a chinch bug target AND a frozen technician tie: found and treated', () => {
     gateOn();
-    const v2 = buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA] });
+    const v2 = buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA], frozenTies: [TECH_CHINCH] });
     const card = damageOf(v2);
     expect(card.headline).toBe('Chinch bug damage in one area — treated today');
     expect(card.whatWeSaw).toBe('Your technician found chinch bugs and treated that spot today.');
@@ -138,22 +142,62 @@ describe('change 1: the damage finding names the targeted pest', () => {
     expect(v2.snapshot.watching).toEqual([card.headline]);
   });
 
-  test('the sentence is the Visit Summary\'s own (one table, no second copy)', () => {
+  test('a SURE photo tie for the pest is a sighting too; a hedged photo tie, another pest or a tie for another kind is not', () => {
     gateOn();
-    const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA] }));
+    const run = (frozenTies) => damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA], frozenTies }));
+    expect(run([PHOTO_CHINCH]).headline).toBe('Chinch bug damage in one area — treated today');
+    for (const ties of [[{ ...PHOTO_CHINCH, sure: false }], [TECH_ARMYWORM], [{ ...PHOTO_CHINCH, label: 'caterpillar activity' }], [{ source: 'technician', kind: 'fungus', product: 'fungicide' }]]) {
+      expect(run(ties).headline).toBe('Chinch bug spot treated today');
+    }
+  });
+
+  test('a target with NO tie (a product target is not a sighting): "treated" headline and the product card\'s purpose sentence', () => {
+    gateOn();
+    for (const ties of [undefined, [], null]) {
+      const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA], frozenTies: ties }));
+      expect(card.headline).toBe('Chinch bug spot treated today');
+      expect(card.whatWeSaw).toBe('Applied to protect the turf from southern chinch bugs, where activity, history, or seasonal pressure called for it.');
+      expect(card.whatWeSaw).not.toMatch(/found/i);
+      expect(card.wavesAction).toBe('Applied Arena 50 WDG to about 500 sq ft.');
+    }
+  });
+
+  test('a target with no tie, caterpillars: the same treated wording', () => {
+    gateOn();
+    const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, targets: ['Fall armyworms'] }] }));
+    expect(card.headline).toBe('Caterpillar spot treated today');
+    expect(card.whatWeSaw).toBe('Applied to protect the turf from fall armyworms, where activity, history, or seasonal pressure called for it.');
+  });
+
+  test('no target and no tie: the card is unchanged', () => {
+    gateOn();
+    expect(damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, targets: [] }], frozenTies: [TECH_CHINCH] }))).toMatchObject(OLD);
+  });
+
+  test('the found sentence is the Visit Summary\'s own (one table, no second copy)', () => {
+    gateOn();
+    const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA], frozenTies: [TECH_CHINCH] }));
     expect(card.whatWeSaw).toBe(SENTENCE.tieTech(TECH_FOUND_PHRASES.chinch));
+  });
+
+  test('the purpose sentence is the product card\'s own (source pin on the client copy)', () => {
+    const client = require('fs').readFileSync(require('path').join(__dirname, '../../client/src/pages/ReportViewPage.jsx'), 'utf8');
+    const expected = stage1.targetPurposeSentence('${insectTargets}');
+    expect(client).toContain(`\`${expected}\``);
   });
 
   test('every new string passes the customer-copy screen', () => {
     gateOn();
-    const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA] }));
-    for (const text of [card.headline, card.whatWeSaw, card.wavesAction]) expect(customerCopyViolations(text)).toEqual([]);
+    for (const frozenTies of [[TECH_CHINCH], []]) {
+      const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA], frozenTies }));
+      for (const text of [card.headline, card.whatWeSaw, card.wavesAction]) expect(customerCopyViolations(text)).toEqual([]);
+    }
   });
 
-  test('caterpillar targets read the Visit Summary\'s caterpillar phrase', () => {
+  test('caterpillar targets with a technician tie read the Visit Summary\'s caterpillar phrase', () => {
     gateOn();
     for (const target of ['Fall armyworms', 'Tropical sod webworms']) {
-      const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, targets: [target] }] }));
+      const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, targets: [target] }], frozenTies: [TECH_ARMYWORM] }));
       expect(card.headline).toBe('Caterpillar damage in one area — treated today');
       expect(card.whatWeSaw).toBe('Your technician found caterpillars and treated that spot today.');
     }
@@ -220,7 +264,7 @@ describe('change 1: the damage finding names the targeted pest', () => {
 
   test('area unknown: the headline and sentence change, the action line does not', () => {
     gateOn();
-    const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, areaValue: null, areaUnit: null }] }));
+    const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, areaValue: null, areaUnit: null }], frozenTies: [TECH_CHINCH] }));
     expect(card.headline).toMatch(/^Chinch bug damage/);
     expect(card.wavesAction).toBe('Documented the areas for comparison next visit.');
   });
@@ -563,6 +607,11 @@ describe('payload flag, PDF key and tips on the real report builder (in-memory r
     const { lawnStage1Fixes, ...on } = await buildReportV1Data(lawnService(), 'tok-s1', makeKnex(fixtures()), {});
     expect(lawnStage1Fixes).toBe(true);
     expect(JSON.parse(JSON.stringify(on))).toEqual(JSON.parse(JSON.stringify(off)));
+  });
+
+  test('the builder hands the damage card the record\'s frozen ties (source pin: read, never re-derived)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+    expect(src).toContain('frozenTies: reportFacts.frozenTies(service.structured_notes, lawnAssessment.assessmentId),');
   });
 
   test('the lawn PDF cache signature moves only while the gate is live; a pest signature never moves', async () => {

@@ -5750,6 +5750,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         wateringInstruction,
         mowingHeight,
         applications,
+        // GATE_LAWN_REPORT_STAGE1_FIXES: the visit's frozen finding-to-product ties (what was found), read from the record.
+        frozenTies: reportFacts.frozenTies(service.structured_notes, lawnAssessment.assessmentId),
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
         ...(pinnedProtocolVersion ? { protocolVersion: pinnedProtocolVersion } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],

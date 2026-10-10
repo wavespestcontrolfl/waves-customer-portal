@@ -149,35 +149,65 @@ function targetedSpotInsecticide(applications, classifyProduct) {
 
 const upperFirst = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
+// The frozen photo tie label (lawn-report-facts.js KIND_BY_LABEL) that stands for each known pest.
+const PHOTO_TIE_LABEL = Object.freeze({ chinch: 'chinch bug activity', caterpillars: 'caterpillar activity' });
+
+/**
+ * Whether the visit's FROZEN finding-to-product ties (lawn-report-facts.js frozenTies; read, never re-derived) say this pest
+ * was found: the technician's tap for it, or a SURE photo finding of it. A product target alone is not a sighting.
+ */
+function pestWasFound(ties, kind) {
+  return (Array.isArray(ties) ? ties : []).some((tie) => tie && (
+    (tie.source === 'technician' && tie.kind === kind)
+    || (tie.source === 'photo' && tie.kind === 'insects' && tie.sure === true && tie.label === PHOTO_TIE_LABEL[kind])
+  ));
+}
+
+// The recorded targets as the product card's purpose line prints them (client ReportViewPage.jsx recordedTargetsText).
+function recordedTargetsText(app) {
+  const targets = (Array.isArray(app && app.targets) ? app.targets : [])
+    .map((t) => String(t || '').replace(/_+/g, ' ').trim())
+    .filter(Boolean);
+  return targets.length ? targets.join(', ').toLowerCase() : '';
+}
+
+// The product card's own lawn insect purpose sentence for a recorded target (client ReportViewPage.jsx applicationPurposeCopy;
+// a source-pin test keeps the two the same). It says what the product was applied to protect against, never that anything was seen.
+const targetPurposeSentence = (targetText) => `Applied to protect the turf from ${targetText}, where activity, history, or seasonal pressure called for it.`;
+
 /**
  * The damage finding's words for a pest the visit's spot insecticide targeted:
- *   headline      "Chinch bug damage in one area — treated today"
- *   whatWeSaw     the Visit Summary's own sentence ("Your technician found chinch bugs and treated that spot today.")
- *   wavesAction   "Applied <product> to about 500 sq ft." only when the spot area is recorded; the product CATEGORY
- *                 phrase stands for the name while GATE_LAWN_REPORT_COPY_FIXES is live (no product name in a sentence)
- * Returns null when the visit has no such row.
+ *   with a frozen tie that the pest was found:
+ *     headline     "Chinch bug damage in one area — treated today"
+ *     whatWeSaw    the Visit Summary's own sentence ("Your technician found chinch bugs and treated that spot today.")
+ *   with the target alone (no sighting is recorded):
+ *     headline     "Chinch bug spot treated today"
+ *     whatWeSaw    the product card's purpose sentence for the recorded target
+ *   wavesAction    "Applied <product> to about 500 sq ft." only when the spot area is recorded; the product CATEGORY
+ *                  phrase stands for the name while GATE_LAWN_REPORT_COPY_FIXES is live, or when the name fails the screen
+ * Returns null when the visit has no such row (the finding stays as it was).
  */
-function damageWords(applications, classifyProduct) {
+function damageWords(applications, classifyProduct, ties = []) {
   const hit = targetedSpotInsecticide(applications, classifyProduct);
   if (!hit) return null;
   const { SENTENCE, TECH_FOUND_PHRASES, TIE_PRODUCT_PHRASES } = require('./lawn-visit-summary');
   const found = TECH_FOUND_PHRASES[hit.kind];
   if (!found) return null;
-  // "chinch bugs" -> "Chinch bug damage"; "caterpillars" -> "Caterpillar damage".
+  const { customerCopyViolations } = require('./technician-report-copy');
+  // "chinch bugs" -> "Chinch bug"; "caterpillars" -> "Caterpillar".
   const noun = upperFirst(found.replace(/s$/, ''));
-  const words = {
-    headline: `${noun} damage in one area — treated today`,
-    whatWeSaw: SENTENCE.tieTech(found),
-    wavesAction: null,
-  };
+  const sighted = pestWasFound(ties, hit.kind);
+  const words = sighted
+    ? { headline: `${noun} damage in one area \u2014 treated today`, whatWeSaw: SENTENCE.tieTech(found), wavesAction: null }
+    : { headline: `${noun} spot treated today`, whatWeSaw: targetPurposeSentence(recordedTargetsText(hit.app)), wavesAction: null };
+  // The recorded targets are staff-entered text: the sentence passes the same full screen as every other composer.
+  if (customerCopyViolations(words.whatWeSaw).length) return null;
   if (hit.sqft != null) {
     const copyFixes = typeof featureGates.lawnReportCopyFixesLive === 'function' && featureGates.lawnReportCopyFixesLive();
     const area = Math.round(hit.sqft).toLocaleString('en-US');
     const name = copyFixes ? null : appProductName(hit.app);
-    // The catalog name is staff-edited text: the composed sentence goes through the same full customer-copy screen the other
-    // sentence composers use (banned wording, access codes), and a name that fails it falls back to the category phrase.
+    // The catalog name is staff-edited text too: a name that fails the screen falls back to the category phrase.
     const named = name ? `Applied ${name} to about ${area} sq ft.` : null;
-    const { customerCopyViolations } = require('./technician-report-copy');
     words.wavesAction = named && customerCopyViolations(named).length === 0 && customerCopyViolations(name).length === 0
       ? named
       : `Applied ${TIE_PRODUCT_PHRASES.insecticide} to about ${area} sq ft.`;
@@ -195,7 +225,7 @@ function applyStage1Fixes(v2, args, classifyProduct) {
   const insights = Array.isArray(v2.insights) ? v2.insights : [];
   const damage = insights.find((card) => card && card.category === 'damage');
   if (!damage) return v2;
-  const words = damageWords(args && args.applications, classifyProduct);
+  const words = damageWords(args && args.applications, classifyProduct, args && args.frozenTies);
   if (!words) return v2;
   const before = damage.headline;
   damage.headline = words.headline;
@@ -215,32 +245,33 @@ const FEED_FAMILIES = Object.freeze(['granular_fertilizer', 'potassium_feed']);
 
 const hasLine = (row, key) => Boolean(row && Array.isArray(row.sentences) && row.sentences.some((s) => s && s.key === key && clean(s.text)));
 
+const wordsOf = (text) => String(text || '').trim().split(/\s+/).filter(Boolean).length;
+const lineText = (row, key) => ((row.sentences.find((s) => s && s.key === key) || {}).text || '');
+
 /**
- * Which row prints as the SECOND "What to expect" line: { first, second } or null.
- *   first   the engine's primary row (the weed line when a herbicide was applied), unchanged
- *   second  the insecticide row when the visit had a spot insecticide, else the feeding row; its own
- *           visible-change sentence only, one line
- * null = no second row to add; the caller keeps the engine's own selection.
+ * The print order for "What to expect" with a SECOND line, or null (the caller keeps the engine's own rows):
+ *   [{ row: first, keys, hold }, { row: second, keys: ['visibleChange'], hold: 0 }]
+ *   first   the engine's primary row (the weed line when a herbicide was applied), with its usual sentence keys; `hold` is the
+ *           second line's word count, held back while the first row is read
+ *   second  the CURATIVE insecticide row when the visit had a spot insecticide (a spot insecticide with no target, or a product
+ *           the table locks to preventive, gets no insecticide line), else the feeding row; its visible-change sentence only
+ * Null also when the two visible-change sentences together would pass `maxWords`.
  * `products` are the report's treatment products ({ kind, method }).
  */
-function stage1ExpectPlan(rows, products) {
+function stage1ExpectPlan(rows, products, maxWords, keys) {
   if (!stage1Live()) return null;
   const list = (Array.isArray(rows) ? rows : []).filter((row) => row && hasLine(row, 'visibleChange'));
-  if (list.length < 2) return null;
-  const first = list[0];
   const spotInsecticide = (Array.isArray(products) ? products : [])
     .some((p) => p && p.kind === 'insecticide' && isSpotMethod(p.method));
-  // The insecticide line is the CURATIVE row only (owner 2026-10-09): a spot insecticide with no target, or a product the
-  // table locks to preventive, gets no insecticide line and the feeding row is considered instead.
   const wanted = [
     ...(spotInsecticide ? [(row) => row.id === 'insecticide_curative'] : []),
     ...FEED_FAMILIES.map((family) => (row) => row.family === family),
   ];
-  for (const matches of wanted) {
-    const second = list.find((row) => row !== first && matches(row));
-    if (second) return { first, second };
-  }
-  return null;
+  const second = wanted.map((matches) => list.slice(1).find(matches)).find(Boolean);
+  const hold = second ? wordsOf(lineText(second, 'visibleChange')) : 0;
+  return second && wordsOf(lineText(list[0], 'visibleChange')) + hold <= maxWords
+    ? [{ row: list[0], keys, hold }, { row: second, keys: ['visibleChange'], hold: 0 }]
+    : null;
 }
 
 // ── 3. No irrigation-settings tip beside a schedule on file ─────────────────
@@ -279,6 +310,8 @@ module.exports = {
   isSpotMethod,
   pestKindOfTarget,
   damageWords,
+  pestWasFound,
+  targetPurposeSentence,
   applyStage1Fixes,
   stage1ExpectPlan,
   scheduleIsOnFile,

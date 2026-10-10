@@ -284,13 +284,21 @@ export function withoutRepeatedApplied(text, applied) {
   return withoutSentences(text, (sentence) => APPLIED_SENTENCE.test(sentence) && appliedCovered(sentence, applied));
 }
 
+// What the applied text may carry after the result sentence and still say nothing more (treatment-summary.js summarySentence):
+// the products' recorded targets (", targeting chinch bugs") and the surfactant clause. Anything else after the result
+// sentence (another product, another clause, a second sentence) is information the card owns, so the card stays.
+const APPLIED_SUFFIX = /^(?:, targeting [^.]+?)?(?:, with a surfactant added so the treatment coats the foliage evenly)?$/;
+
 /**
- * GATE_LAWN_REPORT_STAGE1_FIXES: the "What we applied today" text repeats the hero's Today's result when it starts
- * with that sentence minus its final period (the applied text carries the targeting clause after it).
+ * GATE_LAWN_REPORT_STAGE1_FIXES: the "What we applied today" text repeats the hero's Today's result when it IS that sentence
+ * (final period aside) or that sentence plus only the known targeting / surfactant suffix. A text that lists more ("...weed
+ * control and insect control." against "...weed control.") is not a repeat.
  */
 export function appliedRepeatsResult(applied, result) {
   const head = norm(result);
-  return Boolean(head) && isText(applied) && norm(applied).startsWith(head);
+  if (!head || !isText(applied)) return false;
+  const text = norm(applied);
+  return text.startsWith(head) && APPLIED_SUFFIX.test(text.slice(head.length));
 }
 
 // One stable object per payload, so a re-render does not hand the page a new `data` each time.

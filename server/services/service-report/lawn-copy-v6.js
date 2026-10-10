@@ -175,44 +175,23 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const kept = [];
   let rowsUsed = 0;
   let words = 0;
-  // GATE_LAWN_REPORT_STAGE1_FIXES: a second line after the first row's (the weed line), from sentences that already
-  // exist: the insecticide row when a spot insecticide was applied, else the feeding row. Its one visible-change
-  // sentence is reserved first, so the first row's long by-next-visit sentence gives way when the two would pass the cap.
-  const plan = stage1ExpectPlan(rows, products);
-  let stage1Used = false;
-  if (plan) {
-    const lineOf = (row, key) => row.sentences.find((s) => s && s.key === key && clean(s.text));
-    const piece = (row, key, sentence) => ({
-      id: row.id, key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
-    });
-    const firstLine = lineOf(plan.first, 'visibleChange');
-    const secondLine = lineOf(plan.second, 'visibleChange');
-    const reserve = countWords(secondLine.text);
-    if (countWords(firstLine.text) + reserve <= FIELD_CAPS.whatToExpect) {
-      kept.push(piece(plan.first, 'visibleChange', firstLine));
-      words += countWords(firstLine.text);
-      const nextLine = visitKnown ? lineOf(plan.first, 'byNextVisit') : null;
-      if (nextLine && words + countWords(nextLine.text) + reserve <= FIELD_CAPS.whatToExpect) {
-        kept.push(piece(plan.first, 'byNextVisit', nextLine));
-        words += countWords(nextLine.text);
-      }
-      kept.push(piece(plan.second, 'visibleChange', secondLine));
-      words += reserve;
-      rowsUsed = MAX_EXPECT_ROWS;
-      stage1Used = true;
-    }
-  }
-  for (const row of rows) {
+  // GATE_LAWN_REPORT_STAGE1_FIXES: the print order is the engine's rows, or (live, with a second row that fits the cap) the
+  // first row followed by a second line from sentences that already exist: the curative insecticide row when a spot insecticide
+  // was applied, else the feeding row. The second row prints its visible-change sentence only, and its words are held back
+  // while the first row is read, so the first row's long by-next-visit sentence gives way when the two would pass the cap.
+  const plan = stage1ExpectPlan(rows, products, FIELD_CAPS.whatToExpect, EXPECT_SENTENCE_KEYS);
+  const order = plan || rows.map((row) => ({ row, keys: EXPECT_SENTENCE_KEYS, hold: 0 }));
+  for (const { row, keys, hold } of order) {
     if (rowsUsed >= MAX_EXPECT_ROWS) break;
     const before = kept.length;
-    for (const key of EXPECT_SENTENCE_KEYS) {
+    for (const key of keys) {
       // "By your next visit..." needs a visit the report shows: with no known
       // gap there is none, even for a row whose line is not timed by it.
       if (key === 'byNextVisit' && !visitKnown) continue;
       const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
       if (!sentence) continue;
       const w = countWords(sentence.text);
-      if (words + w > FIELD_CAPS.whatToExpect) continue;
+      if (words + w + hold > FIELD_CAPS.whatToExpect) continue;
       words += w;
       kept.push({
         id: row.id, key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
@@ -234,7 +213,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   });
   const sentences = kept.map((piece) => ({ key: piece.key, text: piece.text, needsVisit: piece.needsVisit, gapBased: piece.gapBased }));
   // `stage1` marks a block built with the stage 1 second line; it freezes with the entry so the PDF key can follow it.
-  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences, ...(stage1Used ? { stage1: true } : {}) };
+  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences, ...(plan ? { stage1: true } : {}) };
 }
 
 /**

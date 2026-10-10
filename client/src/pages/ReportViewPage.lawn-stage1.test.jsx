@@ -55,15 +55,32 @@ const appliedLabels = (container) => [...container.querySelectorAll('[data-gt="e
   .filter((el) => el.children.length === 0 && el.textContent.trim().toLowerCase() === 'what we applied today');
 
 describe('the pure rules', () => {
-  it('appliedRepeatsResult: starts with the result minus its final period, nothing else', () => {
+  it('appliedRepeatsResult: the result sentence (final period aside), or that sentence plus only the known targeting / surfactant suffix', () => {
     expect(appliedRepeatsResult('Today we applied A and B, targeting chinch bugs.', 'Today we applied A and B.')).toBe(true);
     expect(appliedRepeatsResult('Today we applied A and B.', 'Today we applied A and B.')).toBe(true);
     // a curly apostrophe and a straight one read the same
-    expect(appliedRepeatsResult('We’re done. Extra.', "We're done.")).toBe(true);
+    expect(appliedRepeatsResult('We’re done.', "We're done.")).toBe(true);
+    // the known suffixes: targets, the surfactant clause, both
+    expect(appliedRepeatsResult('Today we applied A, with a surfactant added so the treatment coats the foliage evenly.', 'Today we applied A.')).toBe(true);
+    expect(appliedRepeatsResult('Today we applied A, targeting chinch bugs and grubs, with a surfactant added so the treatment coats the foliage evenly.', 'Today we applied A.')).toBe(true);
+    // a prefix that is NOT the same sentence keeps the card: an extra treatment, an extra sentence, an unknown clause
+    expect(appliedRepeatsResult('Today we applied weed control and insect control.', 'Today we applied weed control.')).toBe(false);
+    expect(appliedRepeatsResult('Today we applied weed control, and insect control as well.', 'Today we applied weed control.')).toBe(false);
+    expect(appliedRepeatsResult('We’re done. Extra.', "We're done.")).toBe(false);
+    expect(appliedRepeatsResult('Today we applied A. The systemic products are absorbed by the plants and keep working after the visit.', 'Today we applied A.')).toBe(false);
     expect(appliedRepeatsResult('Today we applied A.', 'Today we applied A and B.')).toBe(false);
     expect(appliedRepeatsResult('Today we applied A and B.', null)).toBe(false);
     expect(appliedRepeatsResult(null, 'Today we applied A.')).toBe(false);
     expect(appliedRepeatsResult('Today we applied A.', '')).toBe(false);
+  });
+
+  it('withoutRepeatedAppliedCard: a snapshot text that is the result plus the known suffix goes too; one that lists more stays', () => {
+    const payload = withStage1(mixedBase);
+    payload.reportV2.snapshot.treatmentSummary = `${RESULT.replace(/\.$/, '')}, targeting chinch bugs.`;
+    expect(withoutRepeatedAppliedCard(payload).reportV2.snapshot.treatmentSummary).toBeNull();
+    const more = withStage1(mixedBase);
+    more.reportV2.snapshot.treatmentSummary = `${RESULT.replace(/\.$/, '')} and insect control.`;
+    expect(withoutRepeatedAppliedCard(more).reportV2.snapshot.treatmentSummary).toBe(more.reportV2.snapshot.treatmentSummary);
   });
 
   it('withoutRepeatedAppliedCard: no flag, no change; a pest report, no change; the same object when nothing repeats', () => {
@@ -80,7 +97,8 @@ describe('the pure rules', () => {
     const out = withoutRepeatedAppliedCard(payload);
     expect(out).not.toBe(payload);
     expect(out.reportV2.lead.applied).toBeNull();
-    expect(out.reportV2.snapshot.treatmentSummary).toBeNull();
+    // the fixture's snapshot text lists one more product than the result does: it is not a repeat, so it stays
+    expect(out.reportV2.snapshot.treatmentSummary).toBe(payload.reportV2.snapshot.treatmentSummary);
     expect(out.reportV2.lead.headline).toBe(payload.reportV2.lead.headline);
     expect(out.reportV2.lead.next).toBe(payload.reportV2.lead.next);
     expect(payload.reportV2.lead.applied).toMatch(/^Today we applied/); // the input is not touched
