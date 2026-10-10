@@ -482,6 +482,18 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, commercial)).toBe(true);
   });
 
+  test('every structured service fragment must be the pre-slab service; unclassified ones fail closed (r15)', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'termiticide injection treatment in the storefront'] }, commercial)).toBe(false);
+    // Fails closed: a pain point nothing classifies keeps the card.
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'price question'] }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['Slab pre-treat'] }, commercial)).toBe(true);
+    expect(run({ specific_service_name: 'Slab Pre-Treat Termite Service' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Caller asked when the crew can come out' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Caller asked when the crew can come out. Needs the slab pre-treat' }, commercial)).toBe(true);
+  });
+
   test('only a new-service intent can drop the card (r14)', () => {
     const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
     const withIntent = (service_intent) => ({ property: { property_type: 'commercial' }, service_request: { service_intent } });

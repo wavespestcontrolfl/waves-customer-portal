@@ -7014,8 +7014,12 @@ function existingStructureTermiteWork(words) {
 //          "around the existing home", "soil / barrier treatment",
 //          "termite barrier" (unless the same fragment says pour, before the
 //          slab, new construction, new build or pre-slab).
-//  5. Proof: at least one fragment is the pre-slab service or plain "pre-treat"
-//     wording, and no fragment canonicalizes to another termite service.
+//  5. Positive proof: every structured fragment (requested_service,
+//     matched_service, specific_service_name, each pain_points item) is the
+//     pre-slab service or plain "pre-treat" wording; one that classifies as
+//     anything else, or as nothing, keeps the card. Narrative sentences
+//     (call_summary) may be anything that carries no cue and is not another
+//     termite service, and at least one fragment overall is the pre-treat.
 //  6. No unit, suite, bay or condo wording anywhere in the transcript.
 // Any doubt keeps the card. Do not add one regex per Codex round: add a cue
 // to the matching class above.
@@ -7046,25 +7050,35 @@ function hasNonPretreatTermiteCue(text) {
     || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
     || hasTermiteAddonWording(value) || existingStructureTermiteWork(value) || hasExistingStructureContext(value);
 }
-function serviceFragmentsOf(view) {
+function splitFragments(text) {
+  return String(text || '').split(SERVICE_FRAGMENT_SPLIT_RE).map((f) => f.trim()).filter(Boolean);
+}
+// STRUCTURED fields name the service the caller asked for; the narrative
+// (call_summary) is free prose.
+function structuredFragmentsOf(view) {
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
-  const out = [view.requested_service, view.matched_service, view.specific_service_name];
-  for (const text of [view.call_summary, ...painPoints]) {
-    out.push(...String(text || '').split(SERVICE_FRAGMENT_SPLIT_RE));
-  }
-  return out.map((f) => String(f || '').trim()).filter(Boolean);
+  const out = [view.requested_service, view.matched_service, view.specific_service_name]
+    .map((f) => String(f || '').trim()).filter(Boolean);
+  for (const item of painPoints) out.push(...splitFragments(item));
+  return out;
 }
 function pretreatIsOnlyTermiteWork(view) {
-  const fragments = serviceFragmentsOf(view);
+  const structured = structuredFragmentsOf(view);
+  const narrative = splitFragments(view.call_summary);
+  const fragments = [...structured, ...narrative];
   if (hasNonPretreatTermiteCue(fragments.join('. ')) || fragments.some(hasNonPretreatTermiteCue)) return false;
-  let provenPretreat = false;
-  for (const fragment of fragments) {
+  // Fail closed: a structured fragment that is not the pre-slab service (or
+  // plain pre-treat wording) keeps the card, including one nothing classifies.
+  const isPretreat = (fragment) => canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment);
+  if (!structured.every(isPretreat)) return false;
+  // Narrative sentences may be anything without a cue, but none may be some
+  // other termite service.
+  const narrativeOtherTermite = narrative.some((fragment) => {
     const label = canonicalWavesService(fragment);
-    if (label === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment)) provenPretreat = true;
-    if (label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
-      && !(label === 'Termite Inspection' && TERMITE_NEW_SLAB_WORDING_RE.test(fragment))) return false;
-  }
-  return provenPretreat;
+    return label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
+      && !(label === 'Termite Inspection' && TERMITE_NEW_SLAB_WORDING_RE.test(fragment));
+  });
+  return !narrativeOtherTermite && fragments.some(isPretreat);
 }
 
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
