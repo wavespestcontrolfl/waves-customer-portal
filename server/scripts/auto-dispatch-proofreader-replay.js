@@ -130,16 +130,17 @@ async function loadMoves(db) {
 }
 
 async function replayMove(row, arms, { db, proofreader, toDateStr }) {
-  const move = proofreader.moveFacts({
-    // The audit row keeps no service type: it is read from the visit as it is
-    // today. A visit deleted since has none (the prompt then says only
-    // "recurring service visit"), and its notes make the record incomplete.
-    serviceType: row.service_type,
-    from: { date: toDateStr(row.old_scheduled_date), windowStart: row.old_window_start, windowEnd: row.old_window_end, technician: firstName(row.old_tech) },
-    to: { date: toDateStr(row.new_scheduled_date), windowStart: row.new_window_start, windowEnd: row.new_window_end, technician: firstName(row.new_tech) },
-  });
   const record = await proofreader.buildCustomerRecord(db, {
     customerId: row.customer_id, serviceId: row.scheduled_service_id, asOf: new Date(row.created_at),
+  });
+  const move = proofreader.moveFacts({
+    // The audit row keeps no service type: it is read from the visit as it is
+    // today, every member of a grouped stop included (the whole stop moved).
+    // A visit deleted since has none (the prompt then says only "recurring
+    // service visit"), and its notes make the record incomplete.
+    serviceType: record.serviceTypes.join(' + ') || row.service_type,
+    from: { date: toDateStr(row.old_scheduled_date), windowStart: row.old_window_start, windowEnd: row.old_window_end, technician: firstName(row.old_tech) },
+    to: { date: toDateStr(row.new_scheduled_date), windowStart: row.new_window_start, windowEnd: row.new_window_end, technician: firstName(row.new_tech) },
   });
   const out = {
     audit_id: row.audit_id,

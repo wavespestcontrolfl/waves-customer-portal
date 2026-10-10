@@ -161,7 +161,7 @@ describe('the customer record', () => {
   test('only words written before the move: every dated source is bounded by asOf', async () => {
     const conn = fakeConn(TABLES);
     await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-    for (const [table, column] of [['service_requests', 'created_at'], ['sms_log', 'created_at'], ['emails', 'received_at'], ['call_log', 'created_at'], ['customer_interactions', 'created_at'], ['admin_notes', 'created_at'], ['service_records', 'created_at'], ['reschedule_log', 'created_at']]) {
+    for (const [table, column] of [['service_requests', 'created_at'], ['sms_log', 'created_at'], ['emails', 'received_at'], ['emails', 'created_at'], ['call_log', 'created_at'], ['customer_interactions', 'created_at'], ['admin_notes', 'created_at'], ['service_records', 'created_at'], ['reschedule_log', 'created_at']]) {
       expect(conn.calls.filter(([t, method, col, op, value]) => t === table && method === 'where' && col === column && op === '<' && value === AS_OF).length).toBeGreaterThan(0);
     }
   });
@@ -267,6 +267,17 @@ describe('the customer record', () => {
     expect(moveFacts({ from: slot('2026-10-07', null, null, null), to: slot('2026-10-08', '09:00', '11:00', 'Sam') }).from.arrival_window).toBe('no time set');
   });
 
+  test('a grouped stop: every member\'s service and series notes are in the record; a note can be its subject alone', async () => {
+    const conn = fakeConn({ ...TABLES,
+      scheduled_services: [{ id: 's1', recurring_parent_id: 'p1', visit_id: 'v1', service_type: 'Pest', notes: 'Pest note', internal_notes: null }, { id: 's2', recurring_parent_id: 'p2', visit_id: 'v1', service_type: 'Lawn', notes: 'Lawn: Tuesdays only', internal_notes: null }],
+      customer_interactions: [{ interaction_type: 'note', subject: 'Afternoons only', body: null, created_at: '2026-07-01T10:00:00.000Z' }] });
+    const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.serviceTypes).toEqual(['Pest', 'Lawn']);
+    expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text)).toEqual(['Pest note', 'Lawn: Tuesdays only']);
+    expect(conn.calls.some(([t, method, col, ids]) => t === 'scheduled_services' && method === 'whereIn' && col === 'id' && ids.join() === 'p1,p2')).toBe(true);
+    expect(record.entries.filter((e) => e.channel === 'note').map((e) => e.text)).toContain('Afternoons only');
+  });
+
   test('what the customer told the portal assistant is in the record', async () => {
     const conn = fakeConn({ ...TABLES, agent_messages: [
       { role: 'user', content: 'Never schedule me on Tuesdays.', created_at: '2026-09-01T15:00:00.000Z' },
@@ -316,6 +327,11 @@ describe('the code judges the answer', () => {
   test('the model\'s own unknown stays unknown, with its evidence when the quote is real', () => {
     expect(judge(answer({ verdict: 'unknown' }), record)).toMatchObject({ verdict: 'unknown', why: 'model_unsure', entry_id: 'E1' });
     expect(judge(answer({ verdict: 'unknown', quote: 'not in the record' }), record)).toMatchObject({ verdict: 'unknown', why: 'model_unsure', entry_id: null });
+  });
+
+  test('an allow that names an entry or a quote contradicts itself: unknown', () => {
+    expect(judge({ verdict: 'allow', entry_id: 'E1', quote: 'Wednesdays', reason: 'fine' }, { entries: [{ id: 'E1', text: 'Wednesdays only' }], unread: [] })).toMatchObject({ verdict: 'unknown', why: 'bad_answer' });
+    expect(judge({ verdict: 'allow', entry_id: ' ', quote: '', reason: 'fine' }, { entries: [], unread: [] })).toMatchObject({ verdict: 'allow' });
   });
 
   test('a malformed answer is unknown, never allow', () => {

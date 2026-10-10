@@ -33,9 +33,12 @@ const unknown = (why, extra = {}) => ({
   verdict: 'unknown', why, entry_id: null, quote: null, reason: null, ...extra,
 });
 
+// An allow that also names an entry or a quote contradicts itself: it is a
+// bad answer, never permission (Codex #6258 r5).
 function validAnswer(json) {
-  return !!json && typeof json === 'object' && VERDICTS.includes(json.verdict)
-    && ['entry_id', 'quote', 'reason'].every((key) => typeof json[key] === 'string');
+  if (!json || typeof json !== 'object' || !VERDICTS.includes(json.verdict)) return false;
+  if (!['entry_id', 'quote', 'reason'].every((key) => typeof json[key] === 'string')) return false;
+  return json.verdict !== 'allow' || (!json.entry_id.trim() && !json.quote.trim());
 }
 
 // The entry and the quote of an answer, when the quote really is in the entry.

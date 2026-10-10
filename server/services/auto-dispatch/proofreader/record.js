@@ -133,7 +133,9 @@ async function readTexts(conn, { customerId, asOf }) {
 // "Tuesdays only" would be read again at the date of every later reply (r3).
 async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
   const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'snippet', 'received_at', 'created_at'];
-  const live = (query) => query.where('received_at', '<', asOf).whereNull('quarantined_at')
+  // received_at is Gmail's time; a backfill stores an old mail later, so the
+  // row's own created_at is bounded too (Codex #6258 r5).
+  const live = (query) => query.where('received_at', '<', asOf).where('created_at', '<', asOf).whereNull('quarantined_at')
     .whereRaw("COALESCE(classification, '') <> 'spam'");
   const linked = await live(conn('emails').where({ customer_id: customerId })).select(columns);
   const threads = new Set(linked.map((row) => row.gmail_thread_id).filter(Boolean));
@@ -194,9 +196,10 @@ async function readInteractions(conn, { customerId, asOf }) {
     .where('created_at', '<', asOf)
     .whereNotIn('interaction_type', INTERACTION_COPIES)
     .select('interaction_type', 'subject', 'body', 'created_at');
+  // A note can be its subject alone ("Afternoons only", no body).
   return rows.map((row) => entry(
     'note', row.interaction_type === 'service_request' ? 'customer' : 'staff', row.created_at,
-    clean(row.body) ? [clean(row.subject), clean(row.body)].filter(Boolean).join(': ') : '',
+    [clean(row.subject), clean(row.body)].filter(Boolean).join(': '),
   ));
 }
 
@@ -268,21 +271,29 @@ async function readPropertyNotes(conn, { customerId, asOf }, unread) {
 // The customer's file notes and the notes on the visit and its series. A
 // visit that is not given, or is gone (a replay of a move whose visit was
 // deleted since), has notes nobody can read: the record says so (r3).
-async function readUndatedNotes(conn, { customer, serviceId }, unread) {
+// A grouped stop moves as one: the notes of every member's series are read,
+// and `args.serviceTypes` names every service the move takes with it (r5).
+async function readUndatedNotes(conn, args, unread) {
+  const { customer, serviceId } = args;
   const out = [
     entry('customer_file_note', 'staff', null, customer && customer.crm_notes),
     entry('customer_file_note', 'staff', null, customer && customer.internal_notes),
     entry('customer_file_note', 'staff', null, customer && customer.follow_up_notes),
     entry('customer_file_note', 'staff', null, customer && customer.access_notes),
   ];
-  const visit = serviceId ? await conn('scheduled_services').where({ id: serviceId }).first('id', 'recurring_parent_id') : null;
+  const visit = serviceId ? await conn('scheduled_services').where({ id: serviceId }).first('id', 'recurring_parent_id', 'visit_id', 'service_type') : null;
   if (!visit) {
     unread.push({ channel: 'visit_note', reason: 'visit_not_found' });
     return out;
   }
-  const parentId = visit.recurring_parent_id || visit.id;
+  const members = visit.visit_id
+    ? await conn('scheduled_services').where({ visit_id: visit.visit_id }).whereNot('status', 'cancelled').select('id', 'recurring_parent_id', 'service_type')
+    : [visit];
+  const unit = members.length ? members : [visit];
+  args.serviceTypes = [...new Set(unit.map((row) => clean(row.service_type)).filter(Boolean))];
+  const parentIds = [...new Set(unit.map((row) => row.recurring_parent_id || row.id))];
   const series = await conn('scheduled_services')
-    .where(function sameSeries() { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+    .where(function sameSeries() { this.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds); })
     .select('notes', 'internal_notes');
   const texts = new Set();
   for (const row of series) for (const text of [row.notes, row.internal_notes]) if (clean(text)) texts.add(clean(text));
@@ -296,7 +307,9 @@ const SOURCES = [
 ];
 
 /**
- * @returns {{ entries: Array<{id,channel,from,at,text}>, unread: Array<{channel,at?,reason}>, split: number, chars: number, tooLong: boolean }}
+ * @returns {{ entries: Array<{id,channel,from,at,text}>, unread: Array<{channel,at?,reason}>, split: number, chars: number, tooLong: boolean, serviceTypes: string[] }}
+ * `serviceTypes`: every service the visit's stop holds today (one, or the
+ * members of a grouped stop); empty when the visit could not be read.
  */
 async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = new Date() }) {
   const unread = [];
@@ -326,7 +339,7 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   const entries = found.map(({ split: _split, ms: _ms, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
   const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
   return {
-    entries, unread, split: found.filter((row) => row.split).length, chars, tooLong: chars > MAX_RECORD_CHARS,
+    entries, unread, split: found.filter((row) => row.split).length, chars, tooLong: chars > MAX_RECORD_CHARS, serviceTypes: args.serviceTypes || [],
   };
 }
 
