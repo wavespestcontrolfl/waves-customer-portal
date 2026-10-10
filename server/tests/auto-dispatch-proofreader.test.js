@@ -199,6 +199,7 @@ describe('the customer record', () => {
   test('an email entry holds only the words that mail added: no quoted thread, no inherited subject', async () => {
     const reply = { id: 'r1', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Re: Schedule', body_text: 'Any day works now.\n\nOn Fri, May 1, 2026 at 10:00 AM Office <office@example.test> wrote:\n> Tuesdays only, as you asked.', received_at: '2026-06-01T10:00:00.000Z' };
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [reply] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'email').map((e) => e.text)).toEqual(['Any day works now.']);
     const first = { id: 'a0', gmail_thread_id: 'th1', customer_id: 'c1', subject: 'Schedule', body_text: 'Hello.', received_at: '2026-05-01T09:00:00.000Z' };
     const withFirst = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [first, reply] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(withFirst.entries.filter((e) => e.channel === 'email').map((e) => e.text)).toEqual(['Schedule: Hello.', 'Any day works now.']);

@@ -36,6 +36,7 @@ const logger = require('../logger');
 const { buildTreatmentSummary, buildCategoryTreatmentSummary } = require('./treatment-summary');
 const { copyFixesLive } = require('./lawn-report-copy-fixes');
 const { buildLawnExpectations } = require('./lawn-expectations');
+const { stage1ExpectPlan } = require('./lawn-report-stage1');
 const { celsiusYtdCap } = require('../../config/lawn-expectations');
 
 const COPY_VERSION = 'lawn_report_v6_fixed_1';
@@ -174,17 +175,23 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const kept = [];
   let rowsUsed = 0;
   let words = 0;
-  for (const row of rows) {
+  // GATE_LAWN_REPORT_STAGE1_FIXES: the print order is the engine's rows, or (live, with a second row that fits the cap) the
+  // first row followed by a second line from sentences that already exist: the curative insecticide row when a spot insecticide
+  // was applied, else the feeding row. The second row prints its visible-change sentence only, and its words are held back
+  // while the first row is read, so the first row's long by-next-visit sentence gives way when the two would pass the cap.
+  const plan = stage1ExpectPlan(rows, products, FIELD_CAPS.whatToExpect, EXPECT_SENTENCE_KEYS);
+  const order = plan || rows.map((row) => ({ row, keys: EXPECT_SENTENCE_KEYS, hold: 0 }));
+  for (const { row, keys, hold } of order) {
     if (rowsUsed >= MAX_EXPECT_ROWS) break;
     const before = kept.length;
-    for (const key of EXPECT_SENTENCE_KEYS) {
+    for (const key of keys) {
       // "By your next visit..." needs a visit the report shows: with no known
       // gap there is none, even for a row whose line is not timed by it.
       if (key === 'byNextVisit' && !visitKnown) continue;
       const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
       if (!sentence) continue;
       const w = countWords(sentence.text);
-      if (words + w > FIELD_CAPS.whatToExpect) continue;
+      if (words + w + hold > FIELD_CAPS.whatToExpect) continue;
       words += w;
       kept.push({
         id: row.id, key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
@@ -205,7 +212,8 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     else picked.push({ id: piece.id, keys: [piece.key] });
   });
   const sentences = kept.map((piece) => ({ key: piece.key, text: piece.text, needsVisit: piece.needsVisit, gapBased: piece.gapBased }));
-  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences };
+  // `stage1` marks a block built with the stage 1 second line; it freezes with the entry so the PDF key can follow it.
+  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences, ...(plan ? { stage1: true } : {}) };
 }
 
 /**
@@ -228,15 +236,17 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   let expectSentences = [];
+  let stage1Expect = false;
   try {
     const expect = buildWhatToExpect(reportV2, ctx, deps);
     fields.whatToExpect = expect.text;
     expectRows = expect.rows;
     expectSentences = expect.sentences;
+    stage1Expect = expect.stage1 === true;
   } catch (err) {
     logger.warn(`[lawn-copy-v6] expectations failed: ${err.message}`);
   }
-  return { fields, expectRows, expectSentences };
+  return { fields, expectRows, expectSentences, ...(stage1Expect ? { stage1Expect: true } : {}) };
 }
 
 // ── Freeze (first writer wins, per assessment) ─────────────────────────────
@@ -363,6 +373,7 @@ async function resolveLawnCopyV6ForRender({
     expectRows: built.expectRows,
     // What the by-next-visit sentences were timed for (replayFields).
     expectSentences: built.expectSentences,
+    ...(built.stage1Expect ? { stage1Expect: true } : {}),
     nextVisitIso: ctx.nextVisitIso || null,
   };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);
