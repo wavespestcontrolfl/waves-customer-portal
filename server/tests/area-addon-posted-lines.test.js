@@ -204,6 +204,8 @@ function fakeTrx({ visit, rowKeys = [], rowPrices = {}, estimate = null, calls =
     const q = {};
     for (const m of ['where', 'leftJoin', 'whereIn', 'select']) q[m] = () => q;
     q.forShare = () => { calls.push('estimates FOR SHARE'); return q; };
+    // The "already booked from this estimate" reads (assertAreaAddOnsNotYetBooked): none in these fixtures.
+    for (const m of ['join', 'whereNotIn', 'whereNot']) q[m] = () => chain([]);
     q.first = async () => result;
     q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
     return q;
@@ -211,6 +213,7 @@ function fakeTrx({ visit, rowKeys = [], rowPrices = {}, estimate = null, calls =
   return (table) => {
     calls.push(table);
     if (table === 'scheduled_services') return chain(visit);
+    if (table === 'scheduled_services as s') return chain([]);
     if (table.startsWith('scheduled_service_addons')) return chain(rowKeys.map((key) => ({ scheduled_service_id: VISIT, service_key_snapshot: key, service_key: key, base_price: rowPrices[key] ?? null, estimated_price: rowPrices[key] ?? null })));
     if (table === 'estimates') return chain(estimate);
     throw new Error(`unexpected table ${table}`);
@@ -374,5 +377,55 @@ describe('the schedule feed when the add-on row lookup fails', () => {
     expect(marker).toMatchObject({ areaAddOnsLookupFailed: true, areaAddOnRowsAttached: false, lawnFastCompleteEnabled: false, fastCompleteReportEnabled: false, treeShrubFastCompleteEnabled: false });
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(src).toContain('...(addOnVisits.failed ? AREA_ADDON_LOOKUP_FAILED : {}),');
+  });
+});
+
+// Codex round 51: one estimate sells one application of an add-on, across appointments too.
+describe('assertAreaAddOnsNotYetBooked', () => {
+  const estimate = { id: 'est-1' };
+  // own = visits whose own service is the add-on; rows = add-on rows; each { key, status, visitId, date }
+  const trxWith = ({ own = [], rows = [] }, calls = []) => (table) => {
+    calls.push(table);
+    let list = (table.startsWith('scheduled_service_addons') ? rows : own).map((r) => ({ ...r }));
+    const q = {
+      join: () => q,
+      whereIn: (_col, keys) => { list = list.filter((r) => keys.includes(r.key)); return q; },
+      where: (_col, id) => { list = list.filter((r) => (r.estimateId || 'est-1') === id); return q; },
+      whereNotIn: (_col, dead) => { list = list.filter((r) => !dead.includes(r.status || 'confirmed')); return q; },
+      whereNot: (_col, id) => { list = list.filter((r) => r.visitId !== id); return q; },
+      select: async () => list.map((r) => ({ service_key: r.key, scheduled_date: r.date || '2026-11-02' })),
+    };
+    return q;
+  };
+  const ask = (state, keys, opts, calls) => rows.assertAreaAddOnsNotYetBooked(trxWith(state, calls), estimate, keys, opts);
+
+  test('an add-on the estimate already has on a visit (own service or a row) is refused by name and day; a completed one counts', async () => {
+    const message = 'Web Sweep from this estimate is already on an appointment (2026-11-02). An estimate sells one application: build a new estimate to book another.';
+    await expect(ask({ own: [{ key: WEB }] }, [WEB])).rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_ALREADY_BOOKED', message });
+    await expect(ask({ rows: [{ key: WEB, status: 'completed' }] }, ['one_time_pest', WEB])).rejects.toMatchObject({ code: 'AREA_ADDON_ALREADY_BOOKED' });
+  });
+
+  test('a cancelled, rescheduled, skipped or no-show visit does not count; an add-on left off before is booked once; another estimate is not read', async () => {
+    for (const status of ['cancelled', 'rescheduled', 'skipped', 'no_show']) {
+      await expect(ask({ own: [{ key: WEB, status }] }, [WEB])).resolves.toBeUndefined();
+    }
+    await expect(ask({ own: [{ key: WEB }] }, [BED])).resolves.toBeUndefined();
+    await expect(ask({ own: [{ key: WEB, estimateId: 'est-other' }] }, [WEB])).resolves.toBeUndefined();
+  });
+
+  test('the visit an edit is saving is left out; no add-on key or no estimate reads nothing', async () => {
+    await expect(ask({ rows: [{ key: WEB, visitId: VISIT }] }, [WEB], { exceptVisitId: VISIT })).resolves.toBeUndefined();
+    const calls = [];
+    await expect(ask({ own: [{ key: WEB }] }, ['one_time_pest'], {}, calls)).resolves.toBeUndefined();
+    await expect(rows.assertAreaAddOnsNotYetBooked(trxWith({ own: [{ key: WEB }] }, calls), null, [WEB])).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  test('the staff booking asks it right after the sold-lines guard, inside the transaction (source)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    const sold = src.indexOf('assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring });');
+    const again = src.indexOf('assertAreaAddOnsNotYetBooked(trx, lockedLinkedEstimate, postedAreaAddOnLines(pricing).map((line) => line.key));');
+    expect(again).toBeGreaterThan(sold);
+    expect(again - sold).toBeLessThan(700);
   });
 });

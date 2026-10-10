@@ -8916,6 +8916,9 @@ async function scheduleCreateHandler(req, res, next) {
       // the modal built its request is refused here, with nothing inserted): a posted add-on the estimate does not sell, or sells at
       // another price, never books; fewer than sold is the office's choice. None posted: no query. A repeating series never carries one.
       require('../services/area-addon-visit-rows').assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring });
+      // ... and an add-on this estimate already has on an appointment is not booked from it a second time (one estimate sells
+      // one application). Read inside this transaction, after the booking's customer lock.
+      await require('../services/area-addon-visit-rows').assertAreaAddOnsNotYetBooked(trx, lockedLinkedEstimate, postedAreaAddOnLines(pricing).map((line) => line.key));
       // Global lock order for recurring creators: CUSTOMER ROW first, series
       // advisory lock second — the same order estimate-converter uses (it
       // updates the customer, then waits on the advisory lock). Taking the

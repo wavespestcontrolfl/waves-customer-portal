@@ -430,6 +430,30 @@ function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, 
   if (wholeVisit) assertSameVisitHostKept(estimate, wanted.map((line) => line.key), posted.some((line) => line && isSameVisitHostKey(line.key)));
 }
 
+// One estimate sells ONE application of an add-on (Codex round 51): an add-on this estimate already has on a visit (the
+// visit's own service or an add-on row; a cancelled, rescheduled, skipped or no-show visit does not count, a completed one
+// does) is not booked from it again. `keys` are the catalog keys being booked or added; `exceptVisitId` is the visit an
+// edit is saving. Two small reads, none when no key is an area add-on or there is no estimate.
+const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
+async function assertAreaAddOnsNotYetBooked(trx, estimate, keys, { exceptVisitId = null } = {}) {
+  const wanted = [...new Set((keys || []).filter(isAreaAddOnCatalogKey))];
+  if (!wanted.length || !estimate || !estimate.id) return;
+  const live = (query) => {
+    query.where('s.source_estimate_id', estimate.id).whereNotIn('s.status', DEAD_VISIT_STATUSES);
+    if (exceptVisitId) query.whereNot('s.id', exceptVisitId);
+    return query;
+  };
+  const [own, rows] = await Promise.all([
+    live(trx('scheduled_services as s').whereIn('s.service_key_snapshot', wanted)).select('s.service_key_snapshot as service_key', 's.scheduled_date'),
+    live(trx('scheduled_service_addons as a').join('scheduled_services as s', 's.id', 'a.scheduled_service_id').whereIn('a.service_key_snapshot', wanted))
+      .select('a.service_key_snapshot as service_key', 's.scheduled_date'),
+  ]);
+  const taken = [...own, ...rows][0];
+  if (!taken) return;
+  const day = taken.scheduled_date instanceof Date ? taken.scheduled_date.toISOString().slice(0, 10) : String(taken.scheduled_date || '').slice(0, 10);
+  throw postedRefusal('AREA_ADDON_ALREADY_BOOKED', `${nameOfServiceKey(taken.service_key)} from this estimate is already on an appointment${day ? ` (${day})` : ''}. An estimate sells one application: build a new estimate to book another.`);
+}
+
 // The catalog keys of the sold add-ons that carry the visit's one drive or its one booking-and-invoicing charge.
 function costCarrierServiceKeys(estimate) {
   if (!estimate) return [];
@@ -521,6 +545,16 @@ function assertAddOnGateOpenForAdding(estimate) {
 
 const priceLocked = (key) => postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(key)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
 
+// What an edit ADDS to a visit: the kill switch first (with the gate off no NEW add-on is put on a visit; what it already
+// carries is kept), then sold by the locked estimate at the estimate's price, then never one this estimate already has on
+// another visit (one estimate sells one application). No added line: nothing is read.
+async function assertAddedAddOnsAllowed(trx, estimate, added, visitId) {
+  if (!added.length) return;
+  assertAddOnGateOpenForAdding(estimate);
+  assertPostedAreaAddOnsSold(estimate, added, { wholeVisit: false });
+  await assertAreaAddOnsNotYetBooked(trx, estimate, added.map((line) => line.key), { exceptVisitId: visitId });
+}
+
 async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = null, rowLines = null } = {}) {
   const visit = await trx('scheduled_services').where({ id: visitId }).first();
   if (!visit) return { keys: [], added: [] };
@@ -543,14 +577,10 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   const estimate = visit.source_estimate_id
     ? await trx('estimates').where({ id: visit.source_estimate_id }).forShare().first('id', 'estimate_data', 'pricing_authority', 'show_one_time_option')
     : null;
-  // The same add-on never rides the visit twice; what the edit ADDS is sold by the estimate, at the estimate's price.
-  const added = addedAddOnLines(plan, updates);
-  // The kill switch: with the gate off no NEW add-on is put on a visit (what it already carries is kept, as everywhere).
-  if (added.length) assertAddOnGateOpenForAdding(estimate);
+  // The same add-on never rides the visit twice; what the edit ADDS passes every rule of a new add-on.
   const repeated = plan.finalKeys.filter((key) => plan.finalKeys.indexOf(key) !== plan.finalKeys.lastIndexOf(key)).map((key) => ({ key }));
-  for (const lines of [repeated, added]) {
-    if (lines.length) assertPostedAreaAddOnsSold(estimate, lines, { wholeVisit: false });
-  }
+  if (repeated.length) assertPostedAreaAddOnsSold(estimate, repeated, { wholeVisit: false });
+  await assertAddedAddOnsAllowed(trx, estimate, addedAddOnLines(plan, updates), visitId);
   // What the visit already carries keeps its price: an add-on is never repriced by hand (the rows, then the visit's own).
   const sold = soldAreaAddOnPrices(estimate);
   await assertKeptAddOnRowPrices(trx, visitId, plan.rowsAfter.filter((line) => !plan.added.includes(line.key) && line.price !== undefined), sold);
@@ -656,6 +686,7 @@ module.exports = {
   writeStaffBookedAreaAddOnScopes,
   stampAddedAreaAddOnScopes,
   assertPostedAreaAddOnsSold,
+  assertAreaAddOnsNotYetBooked,
   assertEditedAreaAddOns,
   readAreaAddOnScopesToCarry,
   restoreCarriedAreaAddOnScopes,
