@@ -9437,8 +9437,13 @@ const CallRecordingProcessor = {
             processing_heartbeat_at: new Date(),
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
-            // draining re-stamps itself AFTER commit (below), never here.
-            metadata: trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
+            // already draining stamps itself IN the claim write, so the stamp
+            // lands with the claim even if the forced exit kills the process
+            // before the post-commit check below (Codex r9 P2); that check
+            // covers the flag flipping while this transaction is open.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -9501,8 +9506,13 @@ const CallRecordingProcessor = {
             processing_heartbeat_at: new Date(),
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
-            // draining re-stamps itself AFTER commit (below), never here.
-            metadata: trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
+            // already draining stamps itself IN the claim write, so the stamp
+            // lands with the claim even if the forced exit kills the process
+            // before the post-commit check below (Codex r9 P2); that check
+            // covers the flag flipping while this transaction is open.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -9521,7 +9531,8 @@ const CallRecordingProcessor = {
       throw claimErr;
     }
     if (claimBlocked) unregisterClaim();
-    // Post-commit drain check (Codex r8 P2). markInFlightForShutdown's
+    // Post-commit drain check (Codex r8 P2) for a flag that flipped while
+    // the claim transaction was open. markInFlightForShutdown's
     // token-fenced stamp cannot see a claim that has not committed yet: the
     // visible row still carries the previous token, so Postgres returns 0
     // rows without waiting. Both orders are covered here: the drain flag
