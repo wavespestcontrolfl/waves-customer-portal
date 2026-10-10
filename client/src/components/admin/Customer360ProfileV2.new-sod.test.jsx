@@ -397,7 +397,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
 
   describe('last pre-emergent by Waves (the server builds both strings)', () => {
     const LINE = 'Last pre-emergent by Waves: Dimension 2EW, Aug 1, 2026 (61 days before the sod date).';
-    const WARNING = 'Its label delays seeding or sprigging 3 months after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.';
+    const WARNING = 'Its label delays seeding or sprigging 12 weeks after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.';
 
     it('prints the line and the warning in the edit form, with no saved sod record needed', async () => {
       stubFetch({ newSod: { holdLines: [], lastPreEmergent: [{ line: LINE, warning: WARNING }] }, onPut: () => response({}) });

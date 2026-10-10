@@ -38,14 +38,19 @@ const { addMonthsSameDay } = require('../utils/date-only');
 // to an ingredient or a formulation. An application with any other number, or none, gets NOTE_TEXT: the app never
 // states a wait it does not hold.
 //   - 10404-87 (LESCO Dimension 0.21% Plus Fertilizer): "delayed until 12 weeks from the time of application".
-//   - 62719-542 (Dimension 2EW): "within 3 months after a single application".
-// `over(date, referenceDay)` says whether the wait has passed on the reference day: 12 weeks is 84 days; 3 months is
-// the same day three calendar months later (date-only.js addMonthsSameDay), never a fixed day count.
+//   - 62719-542 (Dimension 2EW): "within 3 months after a single application of this product, or within 4 months
+//     after a sequential application program totaling more than 2 pints per acre". This lookup does not know the
+//     program, so the warning states both waits and stays for the longer one.
+// `over(date, referenceDay)` says whether the wait has passed on the reference day: 12 weeks is 84 days; the months
+// wait ends on the same day that many calendar months later (date-only.js addMonthsSameDay), never a fixed day count.
 const LABEL_WAITS = Object.freeze({
-  '10404-87': Object.freeze({ words: '12 weeks', over: (date, referenceDay) => daysBetween(date, referenceDay) >= 84 }),
-  '62719-542': Object.freeze({ words: '3 months', over: (date, referenceDay) => referenceDay >= addMonthsSameDay(date, 3) }),
+  '10404-87': Object.freeze({ words: '12 weeks after treatment', over: (date, referenceDay) => daysBetween(date, referenceDay) >= 84 }),
+  '62719-542': Object.freeze({
+    words: '3 months after one application, and 4 months after a sequential program of more than 2 pints per acre',
+    over: (date, referenceDay) => referenceDay >= addMonthsSameDay(date, 4),
+  }),
 });
-const warningText = (wait) => `Its label delays seeding or sprigging ${wait.words} after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.`;
+const warningText = (wait) => `Its label delays seeding or sprigging ${wait.words}. Sod laid on treated soil may root slowly. Tell the customer in writing today.`;
 const NOTE_TEXT = 'The app does not hold this product\'s label wait for seeding or sod. Read the label.';
 // An incomplete visit still records the products applied before it stopped.
 const VISIT_STATUSES = Object.freeze(['completed', 'incomplete']);
