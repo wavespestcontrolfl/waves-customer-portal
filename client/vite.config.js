@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { createRequire } from 'node:module';
 const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
+const coverageFloorFiles = createRequire(import.meta.url)('./coverage-floor-files.json');
 import { fileURLToPath } from 'node:url';
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:3001';
@@ -50,7 +51,7 @@ export default defineConfig({
       });
     },
   }],
-  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@estimate-copy-claims': fileURLToPath(new URL('../shared/estimate-copy-claims.cjs', import.meta.url)), '@estimate-purchased-warranty': fileURLToPath(new URL('../shared/estimate-purchased-warranty.cjs', import.meta.url)), '@estimate-termite-scope': fileURLToPath(new URL('../shared/estimate-termite-scope.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)), '@legacy-visit-money-submission': fileURLToPath(new URL('../shared/legacy-visit-money-submission.cjs', import.meta.url)), '@pricing-regime-marker': fileURLToPath(new URL('../shared/pricing-regime-marker.cjs', import.meta.url)), '@kpi-targets': fileURLToPath(new URL('../shared/kpi-targets.cjs', import.meta.url)) } },
+  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@estimate-copy-claims': fileURLToPath(new URL('../shared/estimate-copy-claims.cjs', import.meta.url)), '@estimate-purchased-warranty': fileURLToPath(new URL('../shared/estimate-purchased-warranty.cjs', import.meta.url)), '@estimate-termite-scope': fileURLToPath(new URL('../shared/estimate-termite-scope.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)), '@legacy-visit-money-submission': fileURLToPath(new URL('../shared/legacy-visit-money-submission.cjs', import.meta.url)), '@pricing-regime-marker': fileURLToPath(new URL('../shared/pricing-regime-marker.cjs', import.meta.url)), '@kpi-targets': fileURLToPath(new URL('../shared/kpi-targets.cjs', import.meta.url)), '@lawn-water-card': fileURLToPath(new URL('../shared/lawn-water-card.cjs', import.meta.url)) } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
   // every customer surface.
@@ -64,17 +65,9 @@ export default defineConfig({
       // render tests do not justify a low, misleading repo-wide percentage.
       // Split that page before adding it here; lowering this floor to include
       // thousands of unexercised lines would turn the gate into theatre.
-      include: [
-        'src/components/BiometricGate.jsx',
-        'src/components/InstallPrompt.jsx',
-        'src/components/NotificationBell.jsx',
-        'src/components/brand/CustomerDialogHost.jsx',
-        'src/glass/glass-engine.js',
-        'src/hooks/useAuth.jsx',
-        'src/native/nativeLinks.js',
-        'src/native/nativePush.js',
-        'src/pages/LoginPage.jsx',
-      ],
+      // The gated files live in coverage-floor-files.json: CI's
+      // `npm run test:coverage-floor` reads the same list to pick the tests.
+      include: coverageFloorFiles,
       // Re-measured 2026-07-17 after the #2788 UI-only revert restored the
       // pre-audit shell components (whose #2788-era tests left with the new
       // UI): 73.86 statements, 73.84 lines, 68.08 branches, 65.82 functions.
@@ -131,7 +124,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@estimate-copy-claims', '@proposal-bid', '@estimate-purchased-warranty', '@estimate-termite-scope', '@lawn-scores', '@legacy-visit-money-submission', '@pricing-regime-marker', '@kpi-targets', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
+    include: ['@estimate-copy-claims', '@proposal-bid', '@estimate-purchased-warranty', '@estimate-termite-scope', '@lawn-scores', '@lawn-water-card', '@legacy-visit-money-submission', '@pricing-regime-marker', '@kpi-targets', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',
@@ -143,7 +136,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/shared\/estimate-copy-claims\.cjs$/, /shared\/proposal-bid\.cjs$/, /shared\/estimate-purchased-warranty\.cjs$/, /shared\/estimate-termite-scope\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /shared\/pricing-regime-marker\.cjs$/, /shared\/kpi-targets\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
+      include: [/shared\/estimate-copy-claims\.cjs$/, /shared\/proposal-bid\.cjs$/, /shared\/estimate-purchased-warranty\.cjs$/, /shared\/estimate-termite-scope\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/lawn-water-card\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /shared\/pricing-regime-marker\.cjs$/, /shared\/kpi-targets\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
     },
   },
 });

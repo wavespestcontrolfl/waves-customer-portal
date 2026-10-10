@@ -52,6 +52,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import { prepareCompletionPhoto } from '../../lib/completion-photo';
 import { defaultApplicationMethodForLine } from '../../lib/product-rate-prefill';
 import {
@@ -61,12 +62,13 @@ import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
-  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
-  visitChangedSinceSchedule,
+  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
+  visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
 import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
 import { withPestCheck } from '../../lib/tree-shrub-pest-check';
+import { evaluateNeonicCap } from '../../lib/tree-shrub-neonic-cap';
 import { Button, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -85,6 +87,10 @@ const BEES_ACTIVE = 'Blooming — bees active';
 const BEES_ACTIVE_MESSAGE = 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.';
 const NP_BLACKOUT_TEXT = 'N/P blackout — can’t apply Jun 1–Sep 30';
 
+// The server's jointMosquitoAccount flag: this account also has mosquito service
+// (the T&S protocol asks for a scale / sooty mold / mite check at every visit).
+const JOINT_MOSQUITO_NOTICE = 'This account also has mosquito service. Check for scale, sooty mold and mites; photo any find.';
+
 // The seasonal watch list (GATE_TS_WATCH_LIST). Extent values are the server's.
 const WATCH_TITLE = "This month's watch list";
 const WATCH_EXTENTS = [
@@ -93,6 +99,9 @@ const WATCH_EXTENTS = [
   { value: 'many', label: 'Many' },
 ];
 const WATCH_REFER_LINE = 'Take a photo, add a note and call the office.';
+
+// A server boolean flag: only a literal true counts.
+const flagFrom = (data, key) => data?.[key] === true;
 
 // The server's list for the visit month, or null when the gate is off (no key).
 function watchListFrom(data) {
@@ -285,6 +294,9 @@ function monthRows(data, products, lastVisit) {
 // Reasons that are a failed read, not this visit's eligibility: a retry fixes them.
 const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
 
+const firstText = (...texts) => texts.find(Boolean) || '';
+const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
+
 function contextFrom(data, service) {
   if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
     return { ...EMPTY_CONTEXT, loading: false, loadError: 'Couldn’t load this visit’s products. Try again.' };
@@ -305,15 +317,18 @@ function contextFrom(data, service) {
       .filter(Boolean)
       .map((warning) => ({ ...warning, message: warningText(warning) }))
       .filter((warning) => warning.message),
-    warningsUnavailable: data?.warningsUnavailable === true,
+    warningsUnavailable: flagFrom(data, 'warningsUnavailable'),
+    // The account reminders listed above the note: neutral text, never an alert.
+    reminders: [JOINT_MOSQUITO_NOTICE].filter(() => flagFrom(data, 'jointMosquitoAccount')),
     visitIdentity: recapVisitIdentity(data?.service),
     watchList: watchListFrom(data),
-    pestCheck: data?.pestCheck && typeof data.pestCheck === 'object' ? data.pestCheck : null,
+    pestCheck: objectOrNull(data?.pestCheck),
+    neonicCap: objectOrNull(data?.neonicCap),
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -462,15 +477,15 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
   };
 }
 
-export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useTreeShrubContext({ base, request, service });
-  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other
@@ -493,8 +508,8 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
   const locked = submissionHolds(submission);
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
-      <SheetHeader titleId={titleId} title={done ? 'Tree & shrub complete' : 'Complete tree & shrub'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
+      <SheetHeader titleId={titleId} title={done ? 'Tree & shrub complete' : 'Complete tree & shrub'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
     </FastCompleteFrame>
   );
@@ -548,6 +563,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
+  const dictating = useDictationSources(onDictationPending);
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
@@ -573,8 +589,11 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const previewCurrent = !!photos.preview && sameSet(photos.preview.photos, photoList);
   // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
   const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
-  const removeMerit = (meritRows) => meritRows.forEach((row) => products.updateRow(row.productId, { active: false }));
-  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || pestCheck.evaluation.blockMessage;
+  const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
+  // GATE_TS_NEONIC_CAP: gate off (no ctx.neonicCap) = no line and no hold. The hold is the sheet's; /complete does not refuse.
+  const neonicCap = useMemo(() => evaluateNeonicCap(ctx.neonicCap, rows), [ctx.neonicCap, rows]);
+  const productBlock = firstText(pestCheck.evaluation.blockMessage, neonicCap.blockMessage);
+  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || productBlock;
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
   const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -607,7 +626,8 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
+          {ctx.reminders.map((text) => <p key={text} className="tech-visit-muted" role="status">{text}</p>)}
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked} micInside />
           <PhotosSection photos={photos} lastPhotos={ctx.lastVisitPhotos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
           {ctx.watchList && ctx.watchList.length > 0 && (
             <WatchListSection
@@ -620,8 +640,8 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               locked={locked || dictationPending}
             />
           )}
-          <PestCheckSection state={pestCheck} locked={locked} onRemoveMerit={removeMerit} />
-          <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <PestCheckSection state={pestCheck} locked={locked} onRemoveBlocked={removeBlocked} />
+          <ProductsSection ctx={ctx} products={products} neonicLines={neonicCap.lines} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
@@ -651,6 +671,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               locked={locked}
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+              mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
             />
           )}
         </fieldset>
@@ -659,7 +680,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
-        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!pestCheck.evaluation.blockMessage}
+        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!productBlock}
         label="Complete tree & shrub"
         onSubmit={submit}
         coverProps={picker.coverProps}
@@ -1019,7 +1040,7 @@ function FindingTile({ finding, rejected, locked, onToggle }) {
 }
 
 // This month's protocol products as suggestions, then anything the tech adds.
-function ProductsSection({ ctx, products, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, products, neonicLines, locked, other, popover, inlineSearch }) {
   const { rows, updateRow, removeRow } = products;
   const sectionWarnings = ctx.warnings.filter((warning) => warning.productId == null);
   return (
@@ -1040,6 +1061,7 @@ function ProductsSection({ ctx, products, locked, other, popover, inlineSearch }
           key={row.productId}
           row={row}
           warnings={ctx.warnings.filter((warning) => warning.productId != null && String(warning.productId) === String(row.productId))}
+          neonicLine={neonicLines[row.productId]}
           locked={locked}
           onChange={(patch) => updateRow(row.productId, patch)}
           onRemove={() => removeRow(row.productId)}
@@ -1071,7 +1093,7 @@ function ProductTile({ row, locked, onClick }) {
 
 // An applied product: how much (blank until the tech enters it, or last
 // time's amount, labeled), how it went down, and the server's warnings for it.
-function ProductEditor({ row, warnings, locked, onChange, onRemove }) {
+function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }) {
   const nameId = useId();
   const amountId = useId();
   const methodId = useId();
@@ -1085,6 +1107,7 @@ function ProductEditor({ row, warnings, locked, onChange, onRemove }) {
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'this month'].filter(Boolean).join(' · ')}</span>
       </div>
       <AmountEntry id={amountId} row={row} locked={locked} onChange={onChange} />
+      {neonicLine && <p className="tech-visit-muted" role="status">{neonicLine}</p>}
       {row.fromLast && <p className="tech-visit-muted">last time</p>}
       {row.added ? (
         <div>

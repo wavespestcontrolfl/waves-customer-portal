@@ -185,9 +185,40 @@ function canonicalLicenseCategory(value) {
   return LICENSE_CATEGORY_ALIASES[key] || LICENSE_CATEGORY_ALIASES[key.replace(/and/g, '')] || key;
 }
 
+// Every category the visit needs: the single catalog category, or the list the
+// folded requirements carry when add-ons on the visit need another one.
+function requiredLicenseCategories(requirements, single) {
+  const listed = Array.isArray(requirements.licenseCategories)
+    ? requirements.licenseCategories.map(canonicalLicenseCategory).filter(Boolean) : [];
+  const all = [...new Set([...(single ? [single] : []), ...listed])];
+  return all;
+}
+
+// What is wrong with the technician's categories against the ones the visit
+// needs, or null: a missing one fails the visit, none recorded cannot be judged.
+function licenseCategoryProblem(requiredAll, categories) {
+  if (!requiredAll.length) return null;
+  if (!categories.length) return { state: 'unknown', reason: 'technician_license_categories_unrecorded' };
+  return requiredAll.every((category) => categories.includes(category))
+    ? null : { state: 'failed', reason: 'technician_license_category_mismatch' };
+}
+const multiCategoryEvidence = (requiredAll) => (requiredAll.length > 1 ? { requiredCategories: requiredAll } : {});
+
 function fact(state, reason, extra = {}) {
   if (!FACT_STATES.includes(state)) throw new Error(`closeout-status: bad fact state ${state}`);
   return { state, reason, ...extra };
+}
+
+// The technician's license verdict. The expiry and the category are judged
+// independently: a blank expiry is ACTIVE by design (the certificate applicator
+// picker treats a blank license_expiry as active until the owner records one,
+// seed 20260703000004) and is surfaced, never failed - but that only settles
+// the expiry. A category the visit needs still has to be held (Codex r6).
+function technicianLicenseFact(tech, { expiry, visitDay, categoryProblem, evidence }) {
+  if (!tech.fl_applicator_license) return fact('pending', 'technician_license_missing', evidence);
+  if (expiry && visitDay && expiry < visitDay) return fact('failed', 'technician_license_expired_at_visit', evidence);
+  if (categoryProblem) return fact(categoryProblem.state, categoryProblem.reason, evidence);
+  return fact('done', 'technician_licensed', expiry ? evidence : { ...evidence, expiryUnrecorded: true });
 }
 
 function parseJsonObjectSafe(value) {
@@ -222,6 +253,26 @@ async function probe(label, unavailable, fn) {
     unavailable.push({ lookup: label, error: scrubErrorText(err?.message || err) });
     return { value: undefined, error: err };
   }
+}
+
+// The active, recorded (active and carrying its rate, area and amount) and retracted application rows each chemical area add-on on the visit has, as { <key>: { active,
+// recorded, retracted } } (an add-on with no row is absent), or null when the read failed. undefined when the visit's
+// requirements name no chemical add-on: nothing per add-on is judged then, and no query runs. The tag is
+// service_products.area_addon_key, set at completion only for an add-on the visit really carries.
+async function addOnApplicationCounts(knex, recordIds, requirements, unavailable) {
+  if (!requirements?.areaAddOnApplicationKeys?.length) return undefined;
+  if (!recordIds.length) return {};
+  const found = await probe('property_application_history (area add-on rows)', unavailable, () => knex('property_application_history as h')
+    .join('service_products as sp', 'sp.id', 'h.service_product_id')
+    .whereIn('h.service_record_id', recordIds)
+    .whereNotNull('sp.area_addon_key')
+    .groupBy('sp.area_addon_key')
+    .select('sp.area_addon_key as key',
+      knex.raw('COUNT(*) FILTER (WHERE h.retracted_at IS NULL) AS active'),
+      // A tagged row with no rate, treated area or amount (saved before the completion required them) is not the add-on's record.
+      knex.raw(`COUNT(*) FILTER (WHERE h.retracted_at IS NULL AND sp.application_rate > 0 AND sp.area_value > 0 AND sp.total_amount > 0) AS recorded`),
+      knex.raw('COUNT(*) FILTER (WHERE h.retracted_at IS NOT NULL) AS retracted')));
+  return found.error ? null : Object.fromEntries(found.value.map((row) => [row.key, { active: toNumber(row.active), recorded: toNumber(row.recorded), retracted: toNumber(row.retracted) }]));
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +490,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
 
   inputs.activeApplicationCount = activeAppsProbe.value ? toNumber(activeAppsProbe.value.n) : null;
   inputs.retractedApplicationCount = retractedAppsProbe.value ? toNumber(retractedAppsProbe.value.n) : null;
+  inputs.addOnApplications = await addOnApplicationCounts(knex, recordIds, inputs.requirements, unavailable);
   inputs.photoCount = photosProbe.value ? toNumber(photosProbe.value.n) : null;
   inputs.photoSource = projectId ? 'project_photos' : 'service_photos';
   inputs.deliveries = deliveryProbe.error ? null : (deliveryProbe.value || []);
@@ -622,6 +674,33 @@ function deriveBillingExpectation(inputs) {
   return { ...prediction, why: prediction.kind, ruleSource: 'lane', laneSource: lane.source };
 }
 
+// The application fact of a visit with chemical area add-ons (Codex round 8 on #6135): done only when EVERY
+// chemical add-on on the visit has its own application row, and the visit's host service has its own when it
+// owes one (the host's log and each add-on's log are separate requirements). `base` is the verdict the
+// one-boolean rules gave. Pending or failed names the add-ons with no row. A visit whose requirements carry
+// no per-add-on list (every visit without a chemical add-on, and every snapshot frozen before the list
+// existed) keeps `base` exactly.
+function areaAddOnApplicationFact(base, requirements, inputs) {
+  const keys = requirements?.areaAddOnApplicationKeys;
+  const counts = inputs.addOnApplications;
+  if (!keys?.length) return base;
+  // Requirements that were not frozen at completion (a failed freeze, or a visit that predates freezing) are
+  // the live catalog's: a visit with no tagged row at all was completed before rows carried a tag, so it keeps
+  // its original verdict rather than turning pending after the fact.
+  if (!requirements.frozen && !(counts && Object.keys(counts).length)) return base;
+  if (base.state === 'pending' || base.state === 'failed') return { ...base, missingAddOns: keys };
+  if (base.reason !== 'active_application_rows') return base;
+  if (!counts) return fact('unknown', 'application_addon_lookup_failed', { activeCount: base.activeCount });
+  const missing = keys.filter((key) => !(counts[key]?.recorded > 0));
+  const taggedActive = Object.values(counts).reduce((sum, row) => sum + row.active, 0);
+  const missingHost = requirements.hostApplicationLog === true && base.activeCount - taggedActive <= 0;
+  if (!missing.length && !missingHost) return { ...base, addOnsRecorded: keys };
+  const retracted = missing.some((key) => counts[key]?.retracted > 0);
+  return fact(retracted ? 'failed' : 'pending', retracted ? 'addon_application_rows_retracted' : 'addon_application_rows_missing', {
+    activeCount: base.activeCount, retractedCount: base.retractedCount, requiredAddOns: keys, missingAddOns: missing, ...(missingHost ? { missingHostApplication: true } : {}),
+  });
+}
+
 function deriveCloseoutFacts(inputs) {
   const now = inputs.now instanceof Date ? inputs.now : new Date();
   const contradictions = [];
@@ -735,6 +814,7 @@ function deriveCloseoutFacts(inputs) {
   else if (inputs.retractedApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed', { activeCount: 0, detail: 'retracted-row lookup unavailable; cannot tell empty from all-retracted' });
   else if (inputs.retractedApplicationCount > 0) application = fact('failed', 'all_application_rows_retracted', { activeCount: 0, retractedCount: inputs.retractedApplicationCount });
   else application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0 });
+  application = areaAddOnApplicationFact(application, requirements, inputs);
 
   // ---- 3. photos ---------------------------------------------------------------
   let photos;
@@ -1129,6 +1209,10 @@ function deriveCloseoutFacts(inputs) {
     if (typeof cats === 'string') { try { cats = JSON.parse(cats); } catch { cats = null; } }
     const categories = Array.isArray(cats) ? cats.map(canonicalLicenseCategory).filter(Boolean) : [];
     const required = canonicalLicenseCategory(requirements.licenseCategory);
+    // A visit that also carries area add-ons can need more than one category;
+    // the technician must hold every one (service-closeout-requirements.js).
+    const requiredAll = requiredLicenseCategories(requirements, required);
+    const categoryProblem = licenseCategoryProblem(requiredAll, categories);
     // Judge expiry at the day the work was RECORDED (service_records.service_date);
     // the scheduled day is only a fallback for records without one.
     const visitDay = (record?.service_date ? String(record.service_date).slice(0, 10) : null)
@@ -1136,17 +1220,10 @@ function deriveCloseoutFacts(inputs) {
     const expiry = tech.license_expiry ? String(tech.license_expiry).slice(0, 10) : null;
     const evidence = {
       technicianId: tech.id, hasLicense: Boolean(tech.fl_applicator_license), licenseExpiry: expiry, requiredCategory: required,
+      ...multiCategoryEvidence(requiredAll),
       categories, judgedAt: visitDay, asOf: 'current_technician_row', identity: inputs.licenseTechSource || 'scheduled_technician',
     };
-    if (!tech.fl_applicator_license) license = fact('pending', 'technician_license_missing', evidence);
-    // A missing expiry is ACTIVE by design - the certificate applicator
-    // picker treats a blank license_expiry as active until the owner records
-    // one (seed 20260703000004); surfaced, not failed.
-    else if (!expiry) license = fact('done', 'technician_licensed', { ...evidence, expiryUnrecorded: true });
-    else if (expiry && visitDay && expiry < visitDay) license = fact('failed', 'technician_license_expired_at_visit', evidence);
-    else if (required && categories.length && !categories.includes(required)) license = fact('failed', 'technician_license_category_mismatch', evidence);
-    else if (required && !categories.length) license = fact('unknown', 'technician_license_categories_unrecorded', evidence);
-    else license = fact('done', 'technician_licensed', evidence);
+    license = technicianLicenseFact(tech, { expiry, visitDay, categoryProblem, evidence });
   }
 
   // ---- packet (grouped stop) ---------------------------------------------------------------
@@ -1297,6 +1374,7 @@ module.exports = {
   deriveCloseoutFacts,
   deriveBillingExpectation,
   summarizeCloseout,
+  addOnApplicationCounts,
   FACT_STATES,
   FACT_NAMES,
   // The canonical "was this invoice actually shown to the customer" status

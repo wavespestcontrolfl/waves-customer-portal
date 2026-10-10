@@ -39,7 +39,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { parseETDateTime, etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, etParts, addETDays, etWallClockOccurrences } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
 const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
@@ -347,19 +347,92 @@ function isoOrNull(value) {
 // nine" said at three in the afternoon). Without the call's start there is
 // no date to pin to, and the promise keeps the implicit deadline. A full
 // datetime is taken as is.
-const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2})?$/;
+// Rows written before schema 1.27.0 hold the old offset form
+// ("14:00:00-04:00"): an Eastern offset of either season is the wall clock
+// it spells (the isoOrNull rule above), so it reads as the bare time. Any
+// other offset is not a bare ET time and falls through.
+const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:-0[45](?::?00)?)?$/;
+// The schema checks a dated callback time as digits only. A date that does
+// not exist ("2026-02-30T14:00") would be rolled forward by the ET parser's
+// Date.UTC into a real-looking deadline on another day: no due time instead
+// (codex #6215 r2 P2). A value with no leading date is left to isoOrNull.
+function realWallDate(text) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T/.exec(text);
+  if (!m) return true;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === mo - 1 && probe.getUTCDate() === d;
+}
+const DATED_WALL_RE = /^(\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})(?::\d{2})?)(?:\.\d+)?(-0[45]:?00)?$/;
+// The instant must read back as the wall clock that was written, and that
+// clock must occur once that day: 2:30 on the spring-forward night does not
+// exist and 1:30 on the fall-back night happens twice. No guessed deadline
+// (codex #6215 r3 P2; the rule admin-leads applies to an office-typed callback).
+function readsBackAs(iso, hhmm) {
+  const p = etParts(new Date(iso));
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(p.hour)}:${pad(p.minute)}` === hhmm;
+}
+function oneETWallClock(iso, hhmm) {
+  return readsBackAs(iso, hhmm) && etWallClockOccurrences(new Date(iso)) === 1;
+}
 function callbackDueAt(value, callStartedAt) {
   if (value == null || value === '') return null;
   const text = String(value).trim();
   const time = TIME_ONLY_RE.exec(text);
-  if (!time) return isoOrNull(text);
+  if (!time) {
+    // A dated callback time is an Eastern WALL CLOCK: no offset, or an Eastern
+    // offset of either season (isoOrNull's wall-clock rule). A "Z" or any other
+    // offset would be read as an instant and land hours off the spoken time, so
+    // it gets no due time (codex #6215 r3 P1). Fractional seconds are dropped:
+    // the ET parser reads only 'YYYY-MM-DDTHH:MM[:SS]'.
+    const dated = DATED_WALL_RE.exec(text);
+    if (!dated || !realWallDate(text)) return null;
+    const due = isoOrNull(`${dated[1]}${dated[3] || ''}`);
+    if (!due) return null;
+    // A written Eastern offset already says WHICH 1:30 on the fall-back night:
+    // the instant stands (isoOrNull keeps a valid offset as written). Only an
+    // offset-free clock can be missing or repeated (codex #6215 r5 P2).
+    // A clock that does not exist stays invalid with any offset (r6 P2).
+    return (dated[3] ? readsBackAs(due, dated[2]) : oneETWallClock(due, dated[2])) ? due : null;
+  }
   const start = callStartedAt ? new Date(callStartedAt) : null;
   if (!start || Number.isNaN(start.getTime())) return null;
   const hhmm = `${time[1].padStart(2, '0')}:${time[2]}`;
   let due = parseETDateTime(`${etDateString(start)}T${hhmm}`);
   if (Number.isNaN(due.getTime())) return null;
   if (due.getTime() < start.getTime()) due = parseETDateTime(`${etDateString(addETDays(start, 1))}T${hhmm}`);
+  if (Number.isNaN(due.getTime()) || !oneETWallClock(due.toISOString(), hhmm)) return null;
   return due.toISOString();
+}
+
+// The callback DEADLINE is the latest bound the caller gave (codex #6215 r1
+// P1). "Between nine and eleven" is due at eleven, not nine; "before four"
+// has no start at all and is due at four. One time ("at two") is the start
+// and the deadline. An end written as a bare time beside a DATED start
+// ("tomorrow between nine and eleven" -> start 2026-09-03T09:00, end 11:00)
+// is on the start's day. An end that cannot be read falls back to the start.
+const WALL_DATE_RE = /^(\d{4}-\d{2}-\d{2})T/;
+function callbackDeadline(sched = {}, callStartedAt) {
+  const text = (v) => (v == null ? '' : String(v).trim());
+  const start = text(sched.callback_window_start);
+  const end = text(sched.callback_window_end);
+  if (!start && !end) return { asked: false, dueAt: null, basis: null, field: null, words: null };
+  const words = start && end ? `asked for ${start} to ${end}` : (start ? `asked for ${start}` : `asked by ${end}`);
+  const field = start ? 'callback_window_start' : 'callback_window_end';
+  const basisOf = (value) => (TIME_ONLY_RE.test(value) ? 'suggested' : 'stated');
+  if (end) {
+    const endTime = TIME_ONLY_RE.exec(end);
+    const startDate = WALL_DATE_RE.exec(start);
+    // Through callbackDueAt, so the built end gets the same real-date and
+    // one-wall-clock checks as a dated end the model wrote (codex #6215 r4 P2).
+    const endDue = endTime && startDate
+      ? callbackDueAt(`${startDate[1]}T${endTime[1].padStart(2, '0')}:${endTime[2]}`, callStartedAt)
+      : callbackDueAt(end, callStartedAt);
+    if (endDue) return { asked: true, dueAt: endDue, basis: endTime && startDate ? 'stated' : basisOf(end), field, words };
+  }
+  const startDue = start ? callbackDueAt(start, callStartedAt) : null;
+  return { asked: true, dueAt: startDue, basis: startDue ? basisOf(start) : null, field, words };
 }
 
 // A V2 quote is admitted only when the transcript literally carries it in
@@ -434,13 +507,14 @@ function deriveCommitmentsFromExtraction({ v2 = null, transcript = '', callStart
   // the same way. The promise is recorded even when it cannot be pinned
   // to an instant (no call start to date a bare time) — it then carries
   // the implicit deadline instead of a stated one.
-  const callbackAsked = sched.callback_window_start != null && String(sched.callback_window_start).trim() !== '';
-  const callbackWindow = callbackDueAt(sched.callback_window_start, callStartedAt);
+  const callback = callbackDeadline(sched, callStartedAt);
+  const callbackAsked = callback.asked;
+  const callbackWindow = callback.dueAt;
   if (callbackAsked || v2?.recommended_disposition === 'callback_task_created') {
     withEvidence({
       party: 'waves',
       kind: 'callback',
-      description: callbackAsked ? `Call the customer back (asked for ${sched.callback_window_start})` : 'Call the customer back',
+      description: callbackAsked ? `Call the customer back (${callback.words})` : 'Call the customer back',
       channel: 'call',
       due_at: callbackWindow,
       // A bare time was STATED; the date it was pinned to (the call's ET
@@ -448,10 +522,10 @@ function deriveCommitmentsFromExtraction({ v2 = null, transcript = '', callStart
       // the morning carries no date in the persisted schema — so the basis
       // is 'suggested', the schema's word for a derived deadline (Codex
       // #3738 r15 P2). A full datetime is a stated deadline.
-      due_basis: callbackWindow ? (TIME_ONLY_RE.test(String(sched.callback_window_start).trim()) ? 'suggested' : 'stated') : null,
+      due_basis: callbackWindow ? callback.basis : null,
       confidence: typeof conf.scheduling_window === 'number' ? conf.scheduling_window : null,
       evidence: evidenceFor(v2, ['/scheduling/callback_window_start', '/scheduling/callback_window_end']),
-      origin: callbackAsked ? 'v2:scheduling.callback_window_start' : 'v2:recommended_disposition',
+      origin: callbackAsked ? `v2:scheduling.${callback.field}` : 'v2:recommended_disposition',
     }, 'agent');
   }
 

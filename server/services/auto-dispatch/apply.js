@@ -17,6 +17,7 @@ const logger = require('../logger');
 const { toDateStr } = require('./dates');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
+const moveLimit = require('./move-limit');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
@@ -75,8 +76,8 @@ async function revalidatePlacement(service) {
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
   }
-  if (fresh.recurring_dispatch_due_date && fresh.customer_confirmed === true) {
-    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this recurring occurrence after scoring' };
+  if (fresh.customer_confirmed === true) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -262,27 +263,96 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
   await assertFlexWindows(trx, [row], best, etDateString(new Date()), refuse);
 }
 
+// A move that skipped the score bar and the drive floor because the visit
+// was in conflict (move-rules.js mustMove) is only still that move while the
+// conflict stands. The other stop can move or cancel, or the owner can reopen
+// the day, between the evaluation and this transaction; the row's own CAS
+// cannot see either. Re-read the conflict here, on the move transaction, with
+// the reader the evaluation used; gone means refuse, and the next run scores
+// the visit on the normal bar (Codex #6207 r1 P2). A read failure refuses too.
+// Hold what the conflict is made of until this move commits: the rebooker
+// locks only the DESTINATION date, so without this the other stop could be
+// moved or cancelled, or the closed day reopened, right after the re-read
+// below (Codex #6207 r3 P2). A closed day takes the shared closure-state
+// fence (blackout-dates.js lockClosureState, the counterpart of the admin
+// endpoints' exclusive lock; it covers one-off dates and weekly days off).
+// An overlap takes FOR SHARE on the other stops' rows, and on the
+// job_applications row behind a booked interview (`interview:<id>`), which
+// blocks their update or delete (r4).
+const INTERVIEW_ID = /^interview:(.+)$/;
+async function fenceSourceConflict(trx, sourceConflict) {
+  if (sourceConflict.kind === 'closed_day') {
+    await require('../scheduling/blackout-dates').lockClosureState(trx);
+    return;
+  }
+  const ids = (sourceConflict.with || []).map(String);
+  const interviews = ids.map((id) => (INTERVIEW_ID.exec(id) || [])[1]).filter(Boolean);
+  const stops = ids.filter((id) => !INTERVIEW_ID.test(id));
+  if (stops.length) await trx('scheduled_services').whereIn('id', stops).forShare().select('id');
+  if (interviews.length) await trx('job_applications').whereIn('id', interviews).forShare().select('id');
+}
+
+// Read ONCE per move, before the first row is written: the unit mover runs
+// this guard for each member in turn, and after the first member has left,
+// the rest of the unit no longer shows the conflict it is moving away from
+// (pre-push P1). `check.heldBy` carries the first answer to the later members.
+async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, check) {
+  // Held for THIS transaction only: the rebooker retries the move on a
+  // deadlock with the same guard, and the aborted transaction's locks are
+  // gone, so the retry fences and reads again (Codex #6207 r10 P2).
+  if (!sourceConflict || check.heldBy === trx) return;
+  const { _internals: { readCurrentConflict } } = require('./candidate-slots');
+  // Fence, then re-read. The re-read may name a DIFFERENT conflict than the
+  // one fenced (the first stop left and another now overlaps): that one is
+  // not held yet, so fence it and read once more. A conflict that is gone,
+  // or still not the fenced one after the second read, refuses the move.
+  let fenced = sourceConflict;
+  for (let round = 0; round < 2; round += 1) {
+    await fenceSourceConflict(trx, fenced);
+    const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
+    if (!still) break;
+    if (coveredBy(still, fenced)) { check.heldBy = trx; return; }
+    fenced = still;
+  }
+  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
+}
+
+// Every row the re-read conflict rests on is already held by the fence.
+function coveredBy(still, fenced) {
+  if (still.kind !== fenced.kind) return false;
+  if (still.kind === 'closed_day') return true;
+  const held = new Set((fenced.with || []).map(String));
+  return (still.with || []).every((id) => held.has(String(id)));
+}
+
 function makeMoveGuard({ service, best, config = {} }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
     { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
   );
+  const sourceCheck = { heldBy: null };
   return async ({
     trx, technicianId, service: movingRow, destination,
   }) => {
     const row = movingRow || service;
-    if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
+    if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
-    // A person may have placed this visit since pass 1 (even back onto the
-    // same slot, which the field CAS cannot see): re-read its history on the
-    // move transaction (Codex #6055 r5).
-    const placed = await isPersonPlacedVisit(row, trx);
-    if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
-    if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
+    // At most N automatic moves per visit, counted on this transaction so a
+    // move another run landed minutes ago is seen (move-limit.js).
+    await moveLimit.assertUnderLimit(trx, [row], config, refuse);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
+    await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
+    // A person may have placed this visit since pass 1 (even back onto the
+    // same slot, which the field CAS cannot see). The row handed in is the
+    // pre-transaction snapshot, so the check re-reads the row's own lock and
+    // date-exception columns and its history on the move transaction
+    // (Codex #6055 r5, r7).
+    const placed = await isPersonPlacedVisit(row, trx, { refresh: true });
+    if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
+    if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
   };
 }
 
@@ -434,6 +504,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     const { guardMode } = config;
     const eligCtx = buildMemberEligCtx(guardMode, config, today);
     await checkMemberEligibility(rows, best, eligCtx, trx, refuse);
+    // A grouped unit moves only if every member is under the move limit.
+    await moveLimit.assertUnderLimit(trx, rows, config, refuse);
     if (isSaturday(best.date)) {
       const weekend = rows.find((r) => r.skip_weekends === true);
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);
@@ -448,6 +520,238 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     // or not (see assertCapabilitiesActive).
     await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);
   };
+}
+
+// A run can move 100 rows, so a reminder store that fails for every one of
+// them must not ring 100 times: the notice shares the auto-dispatch lanes'
+// 24-hour budget (audit.ringsLeft; Codex #6208 r6 P1).
+const REMINDER_SYNC_KEY = 'auto-dispatch-reminder-sync:';
+
+// True when this visit's notice may ring: it already stands (a re-raise spends
+// nothing) or the 24-hour budget has room. An unreadable budget rings: a wrong
+// reminder time reaches a customer, a spare bell does not.
+async function reminderSyncMayRing(dedupeKey) {
+  try {
+    const audit = require('./audit');
+    const keys = await audit.recentBudgetKeys();
+    return keys.has(dedupeKey) || keys.size < audit.NEW_NOTICES_PER_RUN;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder-sync budget read failed: ${err.message}`);
+    return true;
+  }
+}
+
+// Past the budget the failure is one standing Activity row for the day, not a
+// bell for each visit: the cause is the reminder store, and staff fix it once.
+async function flagReminderSyncOverflow(service, best) {
+  const today = etDateString(new Date());
+  logger.warn(`[auto-dispatch] reminder did not update for moved visit ${service.id} (${best.date}); over the daily notice budget`);
+  await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+    area: 'Schedule',
+    action: 'check the reminders on today\'s moved visits',
+    why: 'Auto-dispatch moved more visits whose reminder did not update than the daily notice limit shows.',
+    severity: 'needs-you',
+    link: '/admin/dispatch?tab=schedule',
+    subject: { type: 'check', id: 'auto-dispatch-reminder-sync' },
+    doneWhen: 'reminder_times_checked',
+    who: 'person',
+  }, {
+    // bell: true only so the row is written (a bell:false notice inserts
+    // nothing under GATE_ADMIN_BELL_POLICY). feed 'activity' keeps it off the
+    // bell list and its unread count: a standing count, never an eleventh
+    // ring (Codex #6208 r7 P2; the call-commitments backlog row does the same).
+    bell: true,
+    dedupeKey: `auto-dispatch-reminder-sync-overflow:${today}`,
+    metadata: { day: today, feed: 'activity' },
+  });
+}
+
+// The move is committed but appointment_reminders still names the old slot, so
+// the 72h/24h reminder could go out for the wrong time. A log line nobody reads
+// is not enough: tell staff to check that visit's reminder. Best-effort — the
+// notice is raised after the move and must never fail it.
+// `service` is the moved row ({ id, customer_id }: the tapped visit or a grouped
+// sibling) and `best` its committed slot ({ date, start_time }).
+async function flagReminderSyncFailed(service, best) {
+  try {
+    // One notice per failed slot: a later move of the visit to another time
+    // on the same date is a new failure, not the one staff already closed.
+    const dedupeKey = `${REMINDER_SYNC_KEY}${service.id}:${best.date}:${best.start_time || 'none'}`;
+    if (!(await reminderSyncMayRing(dedupeKey))) { await flagReminderSyncOverflow(service, best); return; }
+    const { shortDateET } = require('../admin-alert-names');
+    await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+      area: 'Schedule',
+      action: await require('./audit').namedVisitAction(service.customer_id,
+        [(who) => `check ${who}'s reminder time after a move`, (who) => `check ${who}'s reminder time`],
+        'check the reminder time on a moved visit'),
+      why: `Auto-dispatch moved the visit to ${shortDateET(`${best.date}T12:00:00Z`)} but its reminder did not update.`,
+      severity: 'needs-you',
+      link: `/admin/dispatch?tab=schedule&date=${best.date}&appointment=${encodeURIComponent(service.id)}`,
+      subject: { type: 'visit', id: String(service.id) },
+      doneWhen: 'reminder_time_checked',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey,
+      // A visit can leave this slot and come back to it: a new failure there
+      // reopens the notice staff already closed (Codex #6208 r11 P2).
+      refreshOnDedupe: true,
+      metadata: { scheduledServiceId: service.id, customerId: service.customer_id, newDate: best.date },
+    });
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder-sync notice failed for ${service && service.id}: ${err.message}`);
+  }
+}
+
+// handleReschedule catches its own errors and returns null, as it does for a
+// visit with no reminder row. Tell the two apart by the row itself.
+async function flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best) {
+  if (reminderRecord) { await closeReminderSyncNotices(service.id); return; }
+  await checkMovedReminder(AppointmentReminders, service, best);
+}
+
+// The reminder of a moved row against its committed slot: off raises the
+// notice; in step (or unable to send) closes any notice an earlier move left
+// open for this visit.
+async function checkMovedReminder(AppointmentReminders, service, slot) {
+  if (await reminderOffNewSlot(AppointmentReminders, service)) await flagReminderSyncFailed(service, slot);
+  else await closeReminderSyncNotices(service.id);
+}
+
+// A later move whose sync succeeded repaired the reminder: close the open
+// reminder-sync notices of this visit, whatever slot they named (Codex #6208
+// r25 P2). The day's overflow notice has its own key and stays. Best-effort.
+const REMINDER_SYNC_RESOLVED_TITLE = 'Reminder time alert resolved';
+async function closeReminderSyncNotices(serviceId) {
+  try {
+    await db('notifications')
+      .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+      // Not "open only": a notice staff marked Done is rewritten too (its
+      // Done state kept), so a new failure on the same slot is a changed
+      // refresh and reopens it (r26 P2). An already resolved row is left.
+      .whereNot('title', REMINDER_SYNC_RESOLVED_TITLE)
+      .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${REMINDER_SYNC_KEY}${serviceId}:%`])
+      .update({
+        ...require('../notification-service')._private.doneColumns({
+          by: 'auto-dispatch', resolution: 'A later move updated the reminder', at: new Date(), keepExisting: true, conn: db,
+        }),
+        title: REMINDER_SYNC_RESOLVED_TITLE,
+        body: 'The reminder for this visit now names its current time.',
+        detail: null,
+      });
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder-sync notice close failed for ${serviceId}: ${err.message}`);
+  }
+}
+
+// The time the reminder should name: the committed row's canonical arrival
+// (reservation_arrival_start for a sequentially allocated member), the same
+// source handleReschedule and the DB trigger use, not the candidate's start.
+async function committedReminderTime(AppointmentReminders, service) {
+  const row = await db('scheduled_services')
+    .where({ id: service.id })
+    .first('id', 'scheduled_date', 'window_start', 'reservation_service_mix');
+  if (!row) throw new Error('the moved visit could not be read');
+  const start = await require('../reservation-arrival').arrivalStartForService(db, row);
+  return AppointmentReminders.composeScheduledApptTime({ scheduled_date: toDateStr(row.scheduled_date), window_start: start || '08:00' });
+}
+
+function timeOf(date) { return date ? date.getTime() : null; }
+
+// The reminder send loop's own skip list (terminal statuses and the pending
+// 'rescheduled' marker), read from that module, not copied (r23 P2).
+async function visitStillOpen(AppointmentReminders, service) {
+  const visit = await db('scheduled_services').where({ id: service.id }).first('status');
+  return !visit || !AppointmentReminders.REMINDER_BLOCKING_STATUSES.has(String(visit.status || '').toLowerCase());
+}
+
+// After a sync that returned nothing: whether a reminder row exists for the
+// visit and still names a time other than the one the committed visit holds.
+// No row is not a failure (nothing can go out for the old slot).
+// A check that cannot be read or computed counts as off: every caller is
+// looking at a sync that returned nothing or threw, so staff must review
+// (Codex #6208 r5 P2).
+async function reminderOffNewSlot(AppointmentReminders, service) {
+  try {
+    // The visit is read before and after the reminder. A visit that changed
+    // between the two reads was rescheduled by someone else in that instant;
+    // that writer syncs its own reminder, and a compare of the old reminder
+    // with the new visit would ring for nothing (Codex #6208 r20 P2).
+    const before = await committedReminderTime(AppointmentReminders, service);
+    const row = await db('appointment_reminders').where({ scheduled_service_id: service.id }).first('appointment_time', 'cancelled', 'suppressed_by_sibling', 'windows_preclosed');
+    // A reminder that cannot go out (cancelled, sibling-suppressed, pre-closed
+    // placeholder: the reminder job's own rule), or one for a visit that is no
+    // longer open: its stale time needs no check (r22, r24 P2).
+    if (!AppointmentReminders.reminderRowCanSend(row) || !(await visitStillOpen(AppointmentReminders, service))) return false;
+    const expected = await committedReminderTime(AppointmentReminders, service);
+    if (timeOf(before) !== timeOf(expected)) return false;
+    const actual = new Date(row.appointment_time).getTime();
+    return !expected || Number.isNaN(actual) || actual !== expected.getTime();
+  } catch (err) {
+    logger.warn(`[auto-dispatch] reminder row could not be read after the move of ${service.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// A grouped move also moves sibling rows, and their reminder sync runs inside
+// the unit move, where a quiet failure is only logged. Compare each moved
+// sibling's persisted reminder with its committed slot, like the tapped row's.
+function siblingSlot(sib, best) {
+  const landed = sib.landed || {};
+  return { date: landed.scheduled_date ? toDateStr(landed.scheduled_date) : best.date, start_time: landed.window_start || best.start_time };
+}
+
+async function flagSiblingReminders(AppointmentReminders, service, best, siblingMembers) {
+  for (const sib of siblingMembers) {
+    try {
+      const row = { id: sib.id, customer_id: sib.customer_id || service.customer_id };
+      await checkMovedReminder(AppointmentReminders, row, siblingSlot(sib, best));
+    } catch (err) {
+      logger.warn(`[auto-dispatch] reminder check for grouped sibling ${sib && sib.id} failed: ${err.message}`);
+    }
+  }
+}
+
+// Keep appointment_reminders aligned with the new date/time — otherwise the
+// 72h/24h reminder cron can still fire for the OLD slot. Non-notifying sync
+// (same as the dispatch reschedule path); best-effort, then the same check for
+// every moved sibling.
+async function syncMovedReminders(service, best, moveResult, siblingMembers) {
+  const partialFailed = Array.isArray(moveResult?.visitMove?.failed) ? moveResult.visitMove.failed : [];
+  const AppointmentReminders = require('../appointment-reminders');
+  try {
+    const reminderRecord = await AppointmentReminders.handleReschedule(
+      service.id,
+      `${best.date}T${best.start_time || '08:00'}`,
+      // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
+      // round): a full success no longer releases inside the mover — this
+      // sync is the fenced finalizer and its repair-release clears the
+      // cohort; a partial/failed-retarget move keeps the hold for staff.
+      { sendNotification: false, preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true },
+    );
+    await rearmPendingConfirmation(reminderRecord);
+    await flagQuietSyncFailure(AppointmentReminders, reminderRecord, service, best);
+  } catch (remErr) {
+    logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
+    // The throw may come from the re-arm update, after the time was written:
+    // tell staff only when the persisted reminder is really off the new slot
+    // (an unreadable row counts as off: the sync itself threw).
+    await checkMovedReminder(AppointmentReminders, service, best);
+  }
+  await flagSiblingReminders(AppointmentReminders, service, best, siblingMembers);
+}
+
+// handleReschedule flips confirmation_sent→true assuming a reschedule notice
+// will follow; auto-dispatch sends none. If a creation confirmation was still
+// pending, re-arm it (mirrors the admin silent-reschedule path) so the
+// deferred sendConfirmation isn't suppressed — otherwise the customer gets
+// neither the confirmation nor a reschedule notice.
+async function rearmPendingConfirmation(reminderRecord) {
+  if (reminderRecord && reminderRecord.confirmation_sent === false) {
+    await db('appointment_reminders')
+      .where({ id: reminderRecord.id })
+      .update({ confirmation_sent: false, confirmation_sent_at: null });
+  }
 }
 
 /**
@@ -498,7 +802,9 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
     recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
-    ...(fresh.recurring_dispatch_due_date ? { customer_confirmed: fresh.customer_confirmed ?? null } : {}),
+    // Pinned for every visit (owner 2026-10-09): a confirmation that lands
+    // between the read above and the move fails the atomic match.
+    customer_confirmed: fresh.customer_confirmed ?? null,
     ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
   };
 
@@ -600,33 +906,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     }
   }
 
-  // Keep appointment_reminders aligned with the new date/time — otherwise the
-  // 72h/24h reminder cron can still fire for the OLD slot. Non-notifying sync
-  // (same as the dispatch reschedule path); best-effort.
-  try {
-    const AppointmentReminders = require('../appointment-reminders');
-    const reminderRecord = await AppointmentReminders.handleReschedule(
-      service.id,
-      `${best.date}T${best.start_time || '08:00'}`,
-      // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
-      // round): a full success no longer releases inside the mover — this
-      // sync is the fenced finalizer and its repair-release clears the
-      // cohort; a partial/failed-retarget move keeps the hold for staff.
-      { sendNotification: false, preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true },
-    );
-    // handleReschedule flips confirmation_sent→true assuming a reschedule notice
-    // will follow; auto-dispatch sends none. If a creation confirmation was still
-    // pending, re-arm it (mirrors the admin silent-reschedule path) so the
-    // deferred sendConfirmation isn't suppressed — otherwise the customer gets
-    // neither the confirmation nor a reschedule notice.
-    if (reminderRecord && reminderRecord.confirmation_sent === false) {
-      await db('appointment_reminders')
-        .where({ id: reminderRecord.id })
-        .update({ confirmation_sent: false, confirmation_sent_at: null });
-    }
-  } catch (remErr) {
-    logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
-  }
+  await syncMovedReminders(service, best, moveResult, siblingMembers);
 
   const movedCount = 1 + siblingMembers.length;
   if (partialFailed.length) {
@@ -688,6 +968,16 @@ async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, a
   }
 }
 
+// The config for one attempt. A fallback candidate was authorized by a fresh
+// evaluation, so its move guard re-reads THAT evaluation's conflict: a
+// conflict found only on the rescore is fenced too, and a conflict that had
+// cleared by the rescore does not refuse a move that passed the normal bar
+// (pre-push P1).
+function attemptConfig(config, evaluation) {
+  if (!evaluation) return config;
+  return { ...config, sourceConflict: (evaluation.current && evaluation.current.conflict) || null };
+}
+
 /**
  * Apply an auto-dispatch move, with a bounded next-best fallback on a
  * SLOT_TAKEN refusal (GATE_AUTO_DISPATCH_SHARED_MODEL, owner-approved
@@ -745,7 +1035,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     try {
       // Bounded (MAX_APPLY_ATTEMPTS): each attempt must complete or fail
       // before trying the next, so a sequential await here is intentional.
-      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], check.fresh, runId, config);
+      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], check.fresh, runId, attemptConfig(config, authorizedBy.get(attempts[i])));
       // attempts (ids/numbers only): how many candidates were tried before
       // this one landed — 1 when the first attempt succeeded, so a caller
       // never has to infer it from `applied === best`.

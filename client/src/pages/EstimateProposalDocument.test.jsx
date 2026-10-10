@@ -97,7 +97,7 @@ describe('EstimateProposalDocument', () => {
     }} token="tok-123" />);
     expect(container.textContent).toContain('Recurring exterior treatment');
     expect(container.textContent).toContain('$513.60');
-    expect(container.textContent).not.toMatch(/re-service requests are included|no long.term contract|guarantee/i);
+    expect(container.textContent).not.toMatch(/re-service requests are included|no long.term contract|cancel online|no cancellation fee|guarantee/i);
   });
 
   it('an authored commercial proposal the server marks terms-neutral keeps only its satisfaction clause (Codex #4982)', () => {
@@ -107,7 +107,7 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).toContain('Recurring service plan');
     expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
-    expect(text).not.toMatch(/re-service requests are included|no long.term contract|money[- ]back|callbacks?/i);
+    expect(text).not.toMatch(/re-service requests are included|no long.term contract|cancel online|no cancellation fee|money[- ]back|callbacks?/i);
   });
 
   // Owner ruling 2026-09-27: each service carries its own terms; the terms
@@ -360,13 +360,13 @@ describe('EstimateProposalDocument', () => {
       },
       cta: { commercialProposal: false, commercialAutoPriced: false },
     };
-    const PEST_TERMS = 'No long-term contract · Unlimited free callbacks · Money-back guarantee';
+    const PEST_TERMS = 'Cancel online anytime · Unlimited free callbacks · Money-back guarantee';
     const { container } = render(<EstimateProposalDocument data={termite} token="tok-123" />);
     // The document-wide terms line drops to the neutral line: no guarantee.
     expect(container.textContent).not.toContain(PEST_TERMS);
     expect(container.textContent).not.toMatch(/Satisfaction guaranteed/);
     expect(container.textContent).toContain('Licensed & insured');
-    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime|cancel online/i);
     // No guarantee scope ⇒ no rate-review disclosure either (termite work).
     expect(container.textContent).not.toContain(RATE_REVIEW_TERMS_LINE);
     expect(container.textContent).toContain('Premium non-repellent + repellent solutions');
@@ -417,7 +417,7 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('$1,200.00');
     expect(text).toContain('Retained inspection scope');
     expect(text).toContain('Licensed & insured');
-    expect(text).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
+    expect(text).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime|cancel online/i);
   });
 
   it('keeps ordinary pest-document guarantees when its rendered rows classify as pest', () => {
@@ -447,7 +447,7 @@ describe('EstimateProposalDocument', () => {
     expect(container.textContent).toContain('Pest Control');
     expect(container.textContent).toContain('$55.00');
     expect(container.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
-    expect(container.textContent).toContain('No long-term contract');
+    expect(container.textContent).toContain('Cancel online anytime');
   });
 
   it('applies the same inclusion filter to a mosquito stack and preserves its neutral treatment scope', () => {
@@ -472,7 +472,7 @@ describe('EstimateProposalDocument', () => {
       cta: { commercialProposal: false, commercialAutoPriced: false },
     };
     const { container } = render(<EstimateProposalDocument data={mosquito} token="tok-123" />);
-    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime|cancel online/i);
     expect(container.textContent).toContain('Barrier treatment where mosquitoes actually rest');
     expect(container.textContent).toContain('Weather-aware timing');
     expect(container.textContent).toContain('Mosquito Control');
@@ -497,7 +497,7 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).toContain('12-month service commitment');
     expect(text).not.toContain('What your commercial pest service includes');
-    expect(text).not.toContain('No long-term contract');
+    expect(text).not.toMatch(/No long-term contract|cancel online|no cancellation fee/i);
   });
 
   it('keeps non-pest commercial proposals terms-neutral with no pest inclusions', () => {
@@ -525,7 +525,7 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).toContain('Termite bait station monitoring');
     expect(text).not.toContain('What your commercial pest service includes');
-    expect(text).not.toContain('No long-term contract');
+    expect(text).not.toMatch(/No long-term contract|cancel online|no cancellation fee/i);
     expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
   });
 
@@ -560,7 +560,7 @@ describe('EstimateProposalDocument', () => {
     // stack (with its no-long-term-contract claim beside a 12-month initial
     // term) must not render.
     expect(text).not.toContain('What your commercial pest service includes');
-    expect(text).not.toContain('No long-term contract');
+    expect(text).not.toMatch(/No long-term contract|cancel online|no cancellation fee/i);
     // Neutral terms line still present.
     expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
   });

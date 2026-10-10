@@ -69,6 +69,7 @@ const REASON_LABELS = {
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
   missing_first_name: "First name missing — get it",
+  family_account_candidates: "Family caller named an account — confirm, then link",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -317,6 +318,71 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     </div>
   );
 }
+
+// family_account_candidates (suggest-only): who called, who they named, and each live account with that
+// name. The "Open customer" links reuse the customer_ids shape (the server resolves a merged-away
+// candidate to its survivor in openCustomerIds). Staff confirm, then link the call with the relink action.
+export function FamilyEvidence({ payload, openCustomerIds = null }) {
+  const p = parsePayload(payload);
+  if (!p) return null;
+  const ids = [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds : Array.isArray(p.customer_ids) ? p.customer_ids : [])
+    .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))];
+  const rows = [
+    p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`].filter(Boolean).join(" · ") },
+    p.account_holder_name && { label: "Named", value: p.account_holder_name },
+    ...(Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
+      label: i === 0 ? "Account" : `Account (${i + 1})`,
+      value: [c.name, c.city, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
+    })),
+    p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
+    p.reason && { label: "Next", value: p.reason },
+  ].filter(Boolean);
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before linking</div>
+      {rows.map((r) => (
+        <div key={`${r.label}-${r.value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{r.label}:</span> {r.value}
+        </div>
+      ))}
+      {ids.map((id, i) => (
+        <a key={id} href={`/admin/customers?customerId=${id}`} className="inline-block mt-1 mr-3 text-14 font-medium text-zinc-900 underline">
+          {ids.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+// The shared evidence panel plus the one-tap "Save to notes" (admin, open cards only). The SERVER decides
+// which cards qualify (can_save_contact_note on the list item: one person, not a message recipient or
+// payer, a usable phone or email), so this screen holds no second copy of that rule.
+function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, canSave, busy, onSave }) {
+  return (
+    <>
+      <ConfirmEvidence payload={payload} reasonCode={reasonCode} />
+      {isOpenView && isAdmin && canSave && (
+        <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={onSave}
+          title="Adds this person to the customer's notes. They do not get messages.">
+          {busy ? "Saving…" : "Save to notes"}
+        </Button>
+      )}
+    </>
+  );
+}
+
+// Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, secondary_contact_captured: SecondContactEvidence };
+
+// Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
+// /verdict on each). The verdict badge is not shown on them.
+const NO_VERDICT_REASONS = new Set([
+  "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
+  "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
+  "auto_booking_skipped_after_approval",
+]);
+// …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
+const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);
 
 function reasonLabel(code) {
   if (!code) return "Needs review";
@@ -806,6 +872,27 @@ export default function TriageInboxTabV2({ isAdmin }) {
       });
   };
 
+  // Files the one person a second-contact card names in the customer's notes
+  // (not a message recipient) and resolves the card server-side. Version-bound
+  // like the other card actions: a card refreshed since it was displayed is a 409.
+  const saveContactNote = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/save-contact-note`, {
+      method: "POST",
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+    })
+      .then(() => { setActioning(null); load(mode, status); })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409) {
+          load(mode, status);
+          setError(err.message || "This card changed since it loaded — review it and try again.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : err?.status === 400 ? err.message : "Save failed — try again.");
+      });
+  };
+
   const openDeny = (item, kind) => { setDenyFields([]); setDenyFor({ item, kind }); };
   const toggleDenyField = (key) =>
     setDenyFields((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -982,9 +1069,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // A missing first name is an owed capture, not a call verdict (the server
                 // 400s /verdict on it): enter the name on the customer record, then Resolve
                 // (or Dismiss). The sweep also closes it once the record carries a name.
-                const isFirstNameCard = isTriage && item.reason_code === "missing_first_name";
-                const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
-                const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
+                const isAdminResolveCard = isTriage && ADMIN_RESOLVE_REASONS.has(item.reason_code);
+                // The cards above (and the conflict / recovery tasks) are not call verdicts: no verdict badge.
+                const isNoVerdictCard = isTriage && NO_VERDICT_REASONS.has(item.reason_code);
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // A street-level address hold settles with its visit (confirm,
                 // correct or cancel it) — the server 409s Accept / Deny / Dismiss
@@ -1028,7 +1115,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
+                          {!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -1101,9 +1188,10 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
                             </Button>
-                          ) : isFirstNameCard ? (
-                            // Admin-only (the server 403s a non-admin Resolve): the first name is
-                            // entered on the customer record, which only an admin edits.
+                          ) : isAdminResolveCard ? (
+                            // Admin-only (the server hides the family card from techs and 403s a non-admin
+                            // Resolve): the first name is entered on the customer record, which only an
+                            // admin edits, and the family card is the office's link.
                             isAdmin ? (
                               <Button
                                 size="sm"
@@ -1151,7 +1239,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} />}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">

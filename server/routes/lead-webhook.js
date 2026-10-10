@@ -1234,7 +1234,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                   id: createdEstimateId,
                   source: 'lead_webhook',
                   status: 'draft',
-                });
+                })
+                // An archived draft is retired: never rewrite it unseen.
+                .whereNull('archived_at');
               if (createdEstimateServiceInterest) {
                 estimateUpdateQuery.where('service_interest', createdEstimateServiceInterest);
               } else {

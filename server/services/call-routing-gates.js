@@ -1035,6 +1035,9 @@ function buildTriageItem({
     address_readback: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',
     secondary_contact_is_existing_customer: 'customer_field_conflict',
+    // A family caller named an account holder: live accounts with that exact name, for the office
+    // to confirm and link the call to (call-family-name-link.js). Suggest-only.
+    family_account_candidates: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
     // The call linked to an existing customer via something WEAKER than the
     // phone (pre-set call.customer_id, name/context) and the caller's number

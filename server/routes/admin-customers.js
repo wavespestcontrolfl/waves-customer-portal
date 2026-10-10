@@ -13,6 +13,9 @@ const { stageLifecycleStamps } = require('../services/customer-stages');
 const LifecycleGuard = require('../services/customer-lifecycle-guard');
 const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
+const { validateSodLaidOn, resolveSodRecord, NEW_SOD_COLUMNS, SOD_AREA_MAX } = require('../services/lawn-sod-holds');
+const { buildNewSodSummary } = require('../services/lawn-sod-form-summary');
+const { lastPreEmergentBlock } = require('../services/lawn-last-pre-emergent');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
@@ -465,7 +468,21 @@ function indexServicesForSchedule(rows = []) {
   return { byKey, byName, rows };
 }
 
+// An area add-on line names its catalog row by the key frozen on the estimate
+// (area_addon_<key>), never by its display name: the name is admin-editable,
+// one engine key serves six rows, and "Fire Ant Yard Treatment" reads as the
+// generic fire ant or lawn service to a name matcher. No row for the key
+// means unmatched, not a guess (the visit then carries no add-on identity
+// and the job card withholds its governed rate). Every other line goes to the
+// name and key matcher below.
 function serviceCatalogMatch(line, serviceIndex) {
+  if (normalizeServiceKey(line?.service || '') === 'area_addon') {
+    return serviceIndex.byKey.get(normalizeServiceKey(line?.catalogServiceKey || '')) || null;
+  }
+  return lineServiceCatalogMatch(line, serviceIndex);
+}
+
+function lineServiceCatalogMatch(line, serviceIndex) {
   // The explicit serviceKey is its own candidate, tried FIRST (codex r17
   // P2): an accepted seasonal selection is restamped as { service:
   // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
@@ -4750,11 +4767,84 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
 //     confirmation stamped for whatever number used to be there.
 //   - Field names only in the log/audit trail, never gate/lockbox/garage
 //     code VALUES in the clear.
+// sodLaidOn / sodCovers / sodArea: the new-sod record (Waves does not install
+// sod; the office records sod someone else laid, and lawn visits then hold some
+// products while it roots, server/services/lawn-sod-holds.js). Staff-only like
+// the sensitivities: the customer portal never accepts them, and sod_rooted_on
+// is not accepted from any route. The schemas below check each field alone; the
+// rules that need the stored row (covers defaults to whole, area is required for
+// part and dropped for whole, clearing the date clears the rest, a new date
+// resets the rooted day) run inside the locked write (resolveSodRecord).
+// sodLaidOn is a plain YYYY-MM-DD string, never a Joi date (a Date would bind as
+// a timestamp).
 const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
   chemicalSensitivities: Joi.boolean(),
   chemicalSensitivityDetails: prefsLongText,
+  sodLaidOn: Joi.string().trim().allow('', null).empty('').default(null).custom((value, helpers) => {
+    const checked = validateSodLaidOn(value, etDateString());
+    return checked.ok ? checked.value : helpers.message(checked.message);
+  }),
+  sodCovers: Joi.string().trim().valid('whole', 'part').allow(null).empty('').default(null),
+  sodArea: Joi.string().trim().max(SOD_AREA_MAX).allow(null).empty('').default(null),
 };
-const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details'];
+const SOD_PREFS_INPUT_FIELDS = NEW_SOD_COLUMNS.filter((c) => c !== 'sod_rooted_on');
+const SOD_PREFS_INPUT_CAMEL = ['sodLaidOn', 'sodCovers', 'sodArea'];
+
+// The render-time home stamp a prefs request carries (the portal's token, codex
+// gh-r43): { sent, ms }. The admin form echoes the row's
+// irrigation_home_changed_at back as confirmedAsOf.
+function prefsRenderStamp(body) {
+  const raw = body || {};
+  const sent = 'confirmed_as_of' in raw || 'confirmedAsOf' in raw;
+  const value = raw.confirmed_as_of ?? raw.confirmedAsOf ?? null;
+  const ms = value ? new Date(value).getTime() : null;
+  return { sent, ms: Number.isFinite(ms) ? ms : null };
+}
+
+// A sod record is a fact about one home. A move clears it under the same
+// advisory lock this write takes, so a form rendered BEFORE the move that waits
+// out the lock would re-read the cleared row and write the old home's sod onto
+// the new one: the lock orders the writes but says nothing about when the form
+// was rendered. Setting a sod date after a move on record therefore needs the
+// matching render stamp (an absent one fails closed). Clearing a record that exists needs it too.
+const SOD_STALE_HOME = Object.freeze({
+  ok: false,
+  field: 'sodLaidOn',
+  message: 'The home on this customer changed. Reload the customer, then make the sod change again.',
+});
+function sodWriteIsFresh(current, sodInput, renderStamp) {
+  // A clear with no record on the row changes nothing, so it is always fresh. A clear of a record that exists
+  // faces the same stamp as a set: a form rendered before a move must not delete the new home's record.
+  const clears = 'sod_laid_on' in sodInput && sodInput.sod_laid_on == null;
+  if (clears && !current?.sod_laid_on) return true;
+  const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
+  if (movedAt == null) return true;
+  return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;
+}
+
+// The sod record saves whole or not at all: one rejected sod field drops the
+// other sod fields of the batch too (a valid date with a bad covers value must
+// not persist as a whole-lawn record). Other fields still save.
+// A sod record the stored row could not accept joins `rejected`; true when it
+// was the only thing in the batch (nothing was written).
+function sodRejectedWithNothingSaved(outcome, rejected) {
+  if (!outcome.sodRejected) return false;
+  rejected.push(outcome.sodRejected);
+  return !outcome.written.length;
+}
+
+// The field names a prefs write saved, for the audit trail (names only, sorted).
+function savedPrefFieldNames(updates, outcome) {
+  return Object.keys(updates)
+    .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
+    .sort();
+}
+
+function dropSodFieldsWhenOneIsRejected(updates, rejected) {
+  if (!rejected.some((r) => SOD_PREFS_INPUT_CAMEL.includes(r.field))) return;
+  SOD_PREFS_INPUT_FIELDS.forEach((f) => delete updates[f]);
+}
+const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details', ...SOD_PREFS_INPUT_FIELDS];
 const ADMIN_PREFS_FIELD_SCHEMAS = { ...PREFS_FIELD_SCHEMAS, ...ADMIN_ONLY_PREFS_FIELD_SCHEMAS };
 const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS_ALLOWED_FIELDS];
 
@@ -4781,7 +4871,12 @@ function blackoutPairError(updates) {
 // The locked write. Returns false when the customer is missing or archived:
 // checked under a row lock inside the transaction so an archive committing
 // mid-request can't slip between the check and the upsert (codex r2/r4).
-async function writeAdminPreferences(customerId, updates) {
+//
+// The new-sod fields are settled here, against the stored row under the lock
+// (resolveSodRecord): a record the stored row cannot accept is dropped from the
+// write and its message reported through `outcome.sodRejected` ({ field, message }); `outcome.written`
+// lists the columns that were written.
+async function writeAdminPreferences(customerId, updates, outcome = {}, { renderStamp = null } = {}) {
   return db.transaction(async (trx) => {
     // Same advisory-lock key/order the portal PUT and the customer-edit
     // route's address sync already take on this customer — one shared lock
@@ -4810,6 +4905,18 @@ async function writeAdminPreferences(customerId, updates) {
     const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { ...updates, irrigation_system: true }
       : { ...updates };
+    if (SOD_PREFS_INPUT_FIELDS.some((f) => f in updates)) {
+      const sodInput = {};
+      for (const f of SOD_PREFS_INPUT_FIELDS) {
+        if (f in updates) sodInput[f] = updates[f];
+        delete row[f];
+      }
+      const sod = sodWriteIsFresh(current, sodInput, renderStamp) ? resolveSodRecord(current, sodInput) : SOD_STALE_HOME;
+      if (sod.ok) Object.assign(row, sod.columns);
+      else outcome.sodRejected = { field: sod.field, message: sod.message };
+    }
+    outcome.written = Object.keys(row);
+    if (!outcome.written.length) return true;
     if (!current) {
       await trx('property_preferences').insert({ customer_id: customerId, ...row });
       return true;
@@ -4846,6 +4953,8 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
       rejected.push({ field: 'blackoutEnd', message: blackoutError });
       BLACKOUT_FIELDS.forEach((f) => delete updates[f]);
     }
+
+    dropSodFieldsWhenOneIsRejected(updates, rejected);
 
     // Same Weekly-Inches eligibility gate as the portal write: never persist
     // a NEW irrigation_inches_per_week value for a customer who wouldn't
@@ -4892,15 +5001,19 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
 
     // A missing or archived customer is a 404, not a foreign-key 500 on
     // the insert, and a stale tab must not edit a soft-deleted customer.
-    if (!(await writeAdminPreferences(customerId, updates))) {
+    const outcome = {};
+    if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body) }))) {
       return res.status(404).json({ error: 'Customer not found' });
+    }
+    if (sodRejectedWithNothingSaved(outcome, rejected)) {
+      return res.status(400).json({ error: outcome.sodRejected.message, rejected });
     }
 
     const preferences = await db('property_preferences')
       .where({ customer_id: customerId })
       .first();
 
-    const loggedFields = Object.keys(updates).sort();
+    const loggedFields = savedPrefFieldNames(updates, outcome);
     await recordAuditEvent({
       actor_type: 'technician',
       actor_id: req.technicianId || null,
@@ -4916,6 +5029,28 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     logger.info(`[customers] property_preferences updated for ${customerId}: ${JSON.stringify({ fields: loggedFields })}`);
 
     res.json({ success: true, preferences, saved: true, ...(rejected.length ? { rejected } : {}) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/customers/:id/new-sod — the read-only hold lines beside the
+// new-sod fields in Customer 360 (office only; no write, no message to anyone):
+//   holdLines  the plain hold lines for the saved sod record ([] when none)
+//   lastPreEmergent  [{ line, warning, note }] | null: one entry for each pre-emergent product Waves put on
+//              this home's lawn on the newest day it applied one. `warning` states that product's own label
+//              wait (only for a registration the app holds, and only inside the wait, counted to the sod
+//              date, or to today when no sod date is saved); `note` says to read the label when the app
+//              holds no wait for it. Both are null once the sod is confirmed rooted. null = none, or unproven
+// The form's render stamp for confirmedAsOf is the irrigation_home_changed_at
+// that GET /:id already returns on `preferences`.
+router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {
+  try {
+    const customerId = req.params.id;
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const prefsRow = await db('property_preferences').where({ customer_id: customerId }).first();
+    const todayEt = etDateString();
+    const lastPreEmergent = await lastPreEmergentBlock({ knex: db, customerId, sodLaidOn: prefsRow?.sod_laid_on ?? null, sodRootedOn: prefsRow?.sod_rooted_on ?? null, todayEt });
+    res.json({ newSod: { ...buildNewSodSummary({ prefsRow: prefsRow || null, todayEt }), lastPreEmergent } });
   } catch (err) { next(err); }
 });
 

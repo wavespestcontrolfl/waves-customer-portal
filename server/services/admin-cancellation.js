@@ -299,50 +299,10 @@ const termCoverageResolvable = (term) => !!(term
 // or the term is edited during the confirmation window (codex C3 r3 P2).
 // Both surfaces carry it: the dialog echoes previewFingerprint into the
 // commit body; the IB pending action pins it at proposal time.
-// Scheduled-visit fee exposure on the visits this cancel pulls: BOTH card
-// fee lanes (estimate card hold + /secure appointment card — mutually
-// exclusive per visit) judged by the SAME preview helpers the dispatch
-// cancel prompt uses (cardHoldCancelPreview / appointmentCardCancelPreview),
-// so the operator sees the fee-or-waive choice BEFORE the money-moving
-// commit. Unverifiable = fee-may-apply, never a silent "no fee" (a thrown
-// preview matches the helpers' own posture); only fee-applying visits are
-// listed. Rides the approved-facts fingerprint.
-async function previewVisitFees(pulledVisitKeys, now = new Date()) {
-  const ids = (Array.isArray(pulledVisitKeys) ? pulledVisitKeys : [])
-    .map((k) => String(k).split(':')[0]).filter(Boolean);
-  const visits = [];
-  let unresolved = false;
-  let total = 0;
-  let totalKnown = true;
-  for (const id of ids) {
-    let fee = null;
-    try {
-      const CardHolds = require('./estimate-card-holds');
-      const hold = await CardHolds.cardHoldCancelPreview(id, now);
-      if (hold.held) {
-        fee = { id, lane: 'card_hold', feeApplies: hold.feeApplies === true, feeAmount: hold.feeAmount ?? null, unresolved: hold.unresolved === true };
-      } else {
-        const ApptCards = require('./appointment-card-request');
-        const appt = await ApptCards.appointmentCardCancelPreview(id, now);
-        if (appt.secured) fee = { id, lane: 'appointment_card', feeApplies: appt.feeApplies === true, feeAmount: appt.feeAmount ?? null, unresolved: appt.unresolved === true };
-      }
-    } catch (err) {
-      logger.warn(`[admin-cancellation] fee preview failed for visit ${id}: ${err.message}`);
-      fee = { id, lane: null, feeApplies: true, feeAmount: null, unresolved: true };
-    }
-    if (!fee || !fee.feeApplies) continue;
-    visits.push(fee);
-    if (fee.unresolved) unresolved = true;
-    if (fee.feeAmount != null && Number.isFinite(Number(fee.feeAmount))) total += Number(fee.feeAmount);
-    else totalKnown = false;
-  }
-  return {
-    applies: visits.length > 0,
-    unresolved,
-    total: visits.length && totalKnown ? Math.round(total * 100) / 100 : null,
-    visits,
-  };
-}
+// Scheduled-visit fee exposure on the visits this cancel pulls: shared with the
+// customer's cancel screens (cancellation-resolution/visit-fees.js). Rides the
+// approved-facts fingerprint.
+const { previewVisitFees } = require('./cancellation-resolution/visit-fees');
 
 function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount }) {
   const crypto = require('crypto');

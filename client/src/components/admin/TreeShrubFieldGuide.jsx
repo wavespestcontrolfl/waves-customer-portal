@@ -31,7 +31,14 @@ function ProductDetails({ product, equipment, mode, tank, onTankChange }) {
   </div>;
 }
 
+// A product with a second method dosed another way (Zylam: a soil drench by plant
+// height) names the method its tank amount is for, so the amount is never read as the other dose.
 function amountFor(product, gallons) {
+  const amount = tankAmountFor(product, gallons);
+  return product.mix && product.mixLabel ? `${product.mixLabel}: ${amount}` : amount;
+}
+
+function tankAmountFor(product, gallons) {
   if (!product.mix) return product.summary;
   if (product.mix[0] === product.mix[1]) {
     // A fixed guide dose is the label minimum (TriTek 1% = 1.28 fl oz/gal):
@@ -87,7 +94,7 @@ export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules
     {guide.dont.length > 0 && <section className="mb-6"><h3 className={`${labelClass} mb-2`}><span className="text-alert-fg mr-2" aria-hidden="true">●</span>Don’t</h3><ul className="space-y-1">{guide.dont.map(line => <li key={line}>{line}</li>)}</ul></section>}
     {guide.palmChart.length > 0 && <section className="border-t border-hairline border-b-0 border-x-0 border-solid border-zinc-200 pt-4"><h3 className={`${labelClass} mb-2`}>Palm chart · pounds per palm</h3>
       <dl className="grid grid-cols-4 gap-y-3 text-center">{guide.palmChart.map(row => <div key={row.width}><dt className="text-ink-secondary">{row.width} ft</dt><dd className="font-medium tabular-nums">{row.lb.toFixed(1)} lb</dd></div>)}</dl>
-      <p className="mt-3 text-ink-secondary">Canopy width² ÷ 105, rounded down. Weigh each palm’s amount and spread under the canopy.</p>
+      <p className="mt-3 text-ink-secondary">Canopy width² ÷ 105, rounded down. Weigh each palm’s amount and spread under the canopy. ÷ 105 keeps one application under the 1 lb nitrogen per 1,000 sq ft limit in the Sarasota County fertilizer codes. Do not raise the rate.</p>
     </section>}
     {safetyRules.length > 0 && <section aria-label="Program safety rules" className="mt-5 border-t border-hairline border-b-0 border-x-0 border-solid border-zinc-200 pt-4">
       <h3 className={`${labelClass} mb-2`}>Safety</h3>

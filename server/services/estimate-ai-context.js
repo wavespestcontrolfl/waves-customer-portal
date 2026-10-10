@@ -1044,7 +1044,8 @@ function externalReferencesFor(serviceKeys) {
 async function loadProtocolProductFamilies(db) {
   if (!db) return {};
   try {
-    const query = db('lawn_protocol_products').select('product_name');
+    // The bermuda removal rows are not part of any lawn's program by default: left out.
+    const query = require('./lawn-bermuda-removal').withoutBermudaRemovalRows(db('lawn_protocol_products').select('product_name'));
     // GATE_LAWN_V13 has no bahia program: the staged bahia rows are not a product linkage for it.
     const { lawnV13NoBahiaProgram, BAHIA_TRACK, LAWN_V13_VERSION } = require('./lawn-program');
     if (lawnV13NoBahiaProgram()) {

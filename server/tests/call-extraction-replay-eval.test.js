@@ -1,6 +1,11 @@
 jest.mock('../services/ops-digest', () => ({ deliverOpsDigest: jest.fn(async ({ sendEmail }) => sendEmail()) }));
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The run's reported-verdict marker is a settings upsert; no test reaches a real database.
+jest.mock('../models/db', () => jest.fn(() => ({
+  insert: () => ({ onConflict: () => ({ merge: async () => {} }) }),
+  where: () => ({ first: async () => undefined }),
+})));
 
 const {
   runCallExtractionReplayEval,
@@ -351,5 +356,70 @@ describe('call extraction replay scheduled eval', () => {
       'missed-booking-recovery-monday-11: fixture expectation failed (current_schedule_window_start)',
       'call-2: replay error (model timeout)',
     ]);
+  });
+});
+
+// A scheduled run records that it reported, for the deploy-kill retry: only
+// after the notify step returned, and never for a pass or a manual run.
+describe('the reported-verdict marker is written by the run', () => {
+  const run = (over) => runCallExtractionReplayEval({ notify: jest.fn(async () => {}), sendEmail: jest.fn(async () => ({ ok: true })), markReported: jest.fn(async () => {}), ...over });
+
+  test('a reported failure writes it once', async () => {
+    const markReported = jest.fn(async () => {});
+    const out = await run({ runReplay: async () => failingRun(), markReported });
+    expect(out.status).toBe('fail');
+    expect(markReported).toHaveBeenCalledTimes(1);
+  });
+
+  test('a pass, and a manual run, write nothing', async () => {
+    const markReported = jest.fn(async () => {});
+    await run({ runReplay: async () => replayRun(), markReported });
+    await run({ runReplay: async () => failingRun(), markReported, notifyOnFailure: false });
+    expect(markReported).not.toHaveBeenCalled();
+  });
+
+  test('a notify step that throws writes nothing, so the run stays eligible for the retry', async () => {
+    const markReported = jest.fn(async () => {});
+    await expect(run({ runReplay: async () => failingRun(), markReported, notify: jest.fn(async () => { throw new Error('db down'); }) })).rejects.toThrow('db down');
+    expect(markReported).not.toHaveBeenCalled();
+  });
+});
+
+// The deploy-kill retry asks this before re-running a killed replay. The
+// marker is a settings row, not the notification: the bell policy can suppress
+// that row while the verdict still goes out by digest or email.
+describe('verdictNotifiedSince / markVerdictReported', () => {
+  const { verdictNotifiedSince, markVerdictReported } = require('../services/eval/call-extraction-replay');
+  // marker: the settings value (undefined = no row); bell: the notification row found since the run started
+  const reading = (marker, bell) => ({
+    conn: (table) => (table === 'system_settings'
+      ? { where: () => ({ first: async () => (marker === undefined ? undefined : { value: marker }) }) }
+      : { where: () => ({ whereRaw: () => ({ where: () => ({ first: async () => bell }) }) }) }),
+  });
+  const since = new Date('2026-10-05T07:40:00Z');
+
+  test('true when the marker says a verdict was reported at or after the killed run started', async () => {
+    expect(await verdictNotifiedSince(since, reading('2026-10-05T07:47:00.000Z'))).toBe(true);
+  });
+
+  test('true when the marker is missing or old but the admin notification row is already there (killed before the marker)', async () => {
+    expect(await verdictNotifiedSince(since, reading(undefined, { id: 'n1' }))).toBe(true);
+    expect(await verdictNotifiedSince(since, reading('2026-09-28T07:56:00.000Z', { id: 'n1' }))).toBe(true);
+  });
+
+  test('false when neither says so: the killed run is retried', async () => {
+    expect(await verdictNotifiedSince(since, reading('2026-09-28T07:56:00.000Z'))).toBe(false);
+    expect(await verdictNotifiedSince(since, reading(undefined))).toBe(false);
+    expect(await verdictNotifiedSince(since, reading('not a date'))).toBe(false);
+  });
+
+  test('markVerdictReported upserts the one settings row and never throws', async () => {
+    const calls = [];
+    const conn = () => ({ insert: (row) => { calls.push(row); return { onConflict: () => ({ merge: async () => {} }) }; } });
+    const now = new Date('2026-10-05T07:47:00Z');
+    await markVerdictReported(now, { conn });
+    expect(calls[0]).toMatchObject({ key: 'eval.call_replay.reported_at', value: '2026-10-05T07:47:00.000Z' });
+    const broken = () => ({ insert: () => { throw new Error('db down'); } });
+    await expect(markVerdictReported(now, { conn: broken })).resolves.toBeUndefined();
   });
 });

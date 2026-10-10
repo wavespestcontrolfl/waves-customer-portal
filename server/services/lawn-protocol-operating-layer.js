@@ -3,6 +3,7 @@ const { savepointRead } = require('../utils/savepoint-read');
 const { etParts } = require('../utils/datetime-et');
 const { isDeepStrictEqual } = require('node:util');
 const featureGates = require('../config/feature-gates');
+const { activeProtocolProducts } = require('./lawn-protocol-retired');
 const { LAWN_V13_VERSION, BAHIA_TRACK, bahiaHasNoProgram } = require('./lawn-program');
 
 // The checked-in field reference and plan matcher are released with protocol
@@ -217,7 +218,22 @@ function windowForVisit(protocol, windowKey, month) {
   return protocol.windows.find(match) || null;
 }
 
-async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false } = {}) {
+// A staged v13 row can carry a cap figure (gates.annualMaxApps, annual_counter.maxApplications) above
+// the cap the app enforces (a stale row, an older value): every reader sees min(row, v13 cap), so a
+// screen never advertises more than the plan and the closeout allow. Gate off, or not a v13
+// protocol: the rows as stored.
+async function withV13CapMetadata(knex, protocol, products) {
+  if (protocol?.version !== LAWN_V13_VERSION || !products.length) return products;
+  const caps = require('../config/lawn-v13-count-caps');
+  const clamped = [];
+  for (const product of products) {
+    const entry = await caps.v13CapEntryFor(knex, product.product_id, product.product_name);
+    clamped.push(caps.withEntryCapMetadata(entry, product));
+  }
+  return clamped;
+}
+
+async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false, includeBermudaRemoval = false } = {}) {
   // An appointment's assigned version must not fall through to the currently
   // active protocol when that assignment can no longer be resolved.
   const assignedId = !protocolId && protocolKey ? await resolveAssignedProtocolId(knex, protocolKey, protocolVersion) : protocolId;
@@ -231,7 +247,7 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
   const window = windowForVisit(protocol, windowKey, etParts(serviceDate).month);
   if (!window) return { protocol, window: null, products: [], gates: protocol.gates };
 
-  const productsQuery = knex('lawn_protocol_products as lpp')
+  const productsQuery = activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
     .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
     .where('lpp.lawn_protocol_window_id', window.id)
     .select(
@@ -248,13 +264,17 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
       'pc.moa_group',
     )
     .orderBy('lpp.sort_order', 'asc');
+  // The bermuda removal rows (migration 20261006190100) belong to the lawns that
+  // asked for the step, never to the window as a whole: every reader leaves them
+  // out unless it names the account as a bermuda removal lawn.
+  if (!includeBermudaRemoval) require('./lawn-bermuda-removal').withoutBermudaRemovalRows(productsQuery, 'lpp');
   const productsRead = savepointRead(knex, () => productsQuery);
   const products = strict ? await productsRead : await productsRead.catch(() => []);
 
   return {
     protocol,
     window,
-    products: products.map(normalizeProduct),
+    products: await withV13CapMetadata(knex, protocol, products.map(normalizeProduct)),
     gates: protocol.gates,
   };
 }

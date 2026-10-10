@@ -41,6 +41,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import {
   UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
@@ -51,7 +52,7 @@ import {
 } from '../../lib/lawn-targets';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
-  SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule,
+  SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import {
   NoteProductsFill, ProductHeardLines, VoiceFillReview, useLawnVoiceFill, useNoteClip,
@@ -464,15 +465,15 @@ function completionBody({ form, rows, ctx }) {
   };
 }
 
-export default function FastCompleteLawnReserviceSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
+export default function FastCompleteLawnReserviceSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  const dialogRef = useModalFocus(true, () => closeRef.current?.());
+  const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useLawnContext({ base, request, service });
-  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other
@@ -484,7 +485,9 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
     if (submitting) return;
-    if (done) onCompleted?.();
+    // The completion response rides along: admin Dispatch reads its invoice
+    // fields to stage the payment handoff.
+    if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
@@ -493,15 +496,15 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   const locked = submissionHolds(submission);
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
-      <SheetHeader titleId={titleId} title={done ? 'Lawn re-service complete' : 'Complete lawn re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
+      <SheetHeader titleId={titleId} title={done ? 'Lawn re-service complete' : 'Complete lawn re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} />
     </FastCompleteFrame>
   );
 }
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, voiceFillEnabled }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted} />;
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
   const refusal = refusalWithoutContext(submission, ctx);

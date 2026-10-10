@@ -794,6 +794,40 @@ describe('lawn bounded product section', () => {
     expect(mockWindowContext.mock.calls[0][1].grassTrack).toBe('st_augustine');
   });
 
+  describe('the city hold on the lawn brief (North Port Nutra-TECH, June to September)', () => {
+    const NUTRA = 'LESCO Nutra-TECH T&O Micronutrient Package';
+    const june = () => mockSummarize.mockReturnValue({
+      window: { key: 'jun', month: 6, title: 'June Nutra-TECH + Pre-Emergent', visitType: 'hose', goal: 'Micronutrients and pre-emergent' },
+      products: [
+        { productName: NUTRA, productId: 'nt', role: 'micronutrients', applicationMode: 'broadcast', ratePer1000: 12, rateUnit: 'fl oz', defaultInPlan: true, gates: { requiresZeroNP: true, northPortProductWindow: true } },
+        { productName: 'Dimension 2EW', productId: 'dim', role: 'pre_emergent', applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz', defaultInPlan: true, gates: {} },
+      ],
+    });
+    const briefFor = async (extra) => {
+      june();
+      const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', ...extra }] }));
+      expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+      return storedBrief(state).brief.product_guidance;
+    };
+
+    test('North Port: the product is a hold with the plan\'s text and no dose, not a conditional product', async () => {
+      const guidance = await briefFor({ service_address_city: 'North Port' });
+      expect(guidance.products.map((p) => p.name)).toEqual(['Dimension 2EW']);
+      expect(guidance.conditional_products.map((p) => p.name)).toEqual([]);
+      expect(guidance.held_products).toHaveLength(1);
+      expect(guidance.held_products[0]).toMatchObject({ name: NUTRA, hold: true });
+      expect(guidance.held_products[0].message).toBe(`${NUTRA}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`);
+      expect(JSON.stringify(guidance.held_products)).not.toMatch(/ratePer1000|rateUnit|12/);
+    });
+
+    test('another city: the product is guidance as before (conditional, with its rate) and nothing is held', async () => {
+      const guidance = await briefFor({ service_address_city: 'Sarasota' });
+      expect(guidance.held_products).toEqual([]);
+      expect(guidance.conditional_products.map((p) => [p.name, p.ratePer1000])).toEqual([[NUTRA, 12]]);
+      expect(guidance.products.map((p) => p.name)).toEqual(['Dimension 2EW']);
+    });
+  });
+
   test('a customer at an application limit demotes the fixed product to conditional (codex P1)', async () => {
     mockSummarize.mockReturnValue({
       window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },
@@ -1020,6 +1054,21 @@ describe('lawn bounded product section', () => {
     expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
   });
 
+  test('a staged spot row\'s broadened trigger (20261007182000) reaches the brief whole, under the 120 character cut', async () => {
+    const round2 = require('../models/migrations/20261007182000_lawn_v13_matrix_adds_round2');
+    mockSummarize.mockReturnValue({
+      window: { key: 'oct_v13_spreader_fall', month: 10, title: 'October', visitType: 'granular', goal: 'Fall feeding' },
+      products: round2.TRIGGERS.map(([, product, , trigger]) => ({
+        productName: product, role: 'fungicide_spot', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: false, gates: { trigger },
+      })),
+    });
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }] }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.conditional_products.map((p) => p.trigger)).toEqual(round2.TRIGGERS.map(([, , , trigger]) => trigger));
+    expect(brief.product_guidance.conditional_products[0].trigger).toMatch(/fairy_ring_dollar_spot_rust_leaf_spot$/);
+  });
+
   test('conditional/gated products are split out, labeled, and never sent to the LLM as fixed', async () => {
     mockSummarize.mockReturnValue({
       window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
@@ -1226,5 +1275,88 @@ describe('sweep', () => {
     expect(out.generated).toBe(1);
     expect(out.failed).toBe(1);
     expect(state.updates.scheduled_services).toHaveLength(1);
+  });
+});
+
+// GATE_LAWN_NOV_LARGE_PATCH_N (codex #6256 r3 P1): the brief states the November bag's target the way the plan does.
+describe('the November nitrogen target on the lawn brief', () => {
+  const { LAWN_V13_VERSION } = require('../services/lawn-program');
+  const areas = require('../services/lawn-trouble-areas');
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+  const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
+  const november = (version = LAWN_V13_VERSION) => mockSummarize.mockReturnValue({
+    version,
+    window: { key: 'nov_v13_spreader_feeding', month: 11, title: 'November', visitType: 'granular', goal: 'Feed' },
+    products: [
+      { productName: BAG, productId: 'f24', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, gates: { targetN: '0.75 lb N/1000', blackoutSensitive: true } },
+      { productName: 'Velista', productId: 'vel', role: 'fungicide', applicationMode: 'spot', ratePer1000: 0.3, rateUnit: 'oz', defaultInPlan: false, gates: { trigger: 'large patch' } },
+    ],
+  });
+  let loadActive;
+  let propertyOf;
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    loadActive = jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
+    propertyOf = jest.spyOn(areas, 'propertyOf').mockResolvedValue('7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d');
+  });
+  afterEach(() => { for (const name of GATES) delete process.env[name]; loadActive.mockRestore(); propertyOf.mockRestore(); });
+  const guidanceFor = async () => {
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2026-11-10', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+    return storedBrief(state).brief.product_guidance;
+  };
+  const bagOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === BAG);
+
+  test('active fungus: the bag states 0.5 lb N/1000 with the reason and the normal figure; nothing else changes', async () => {
+    november();
+    const guidance = await guidanceFor();
+    expect(bagOf(guidance).gates).toEqual({ targetN: '0.5 lb N/1000 (active fungus mapped; normal 0.75 lb N/1000)', blackoutSensitive: true });
+    expect(JSON.stringify(guidance)).not.toContain('"targetN":"0.75');
+    expect(guidance.conditional_products.find((p) => p.name === 'Velista').gates).toEqual({ trigger: 'large patch' });
+  });
+
+  test('the projection leaves the stored protocol rows alone (a copy is changed, not the row)', async () => {
+    november();
+    const summary = mockSummarize();
+    await guidanceFor();
+    expect(summary.products[0].gates.targetN).toBe('0.75 lb N/1000');
+  });
+
+  test('no change, and no trouble-area read, when the gate is off, the program is not v13, the month is not November, or no fungus is mapped', async () => {
+    november();
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    const off = await guidanceFor();
+    expect(bagOf(off).gates.targetN).toBe('0.75 lb N/1000');
+    november('2026.05');
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+    expect(loadActive).not.toHaveBeenCalled();
+    expect(propertyOf).not.toHaveBeenCalled();
+    process.env.GATE_LAWN_NOV_LARGE_PATCH_N = 'true';
+    november();
+    mockSummarize.mockReturnValue({ ...mockSummarize(), window: { key: 'oct', month: 10, title: 'October', visitType: 'granular', goal: 'Feed' } });
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+    expect(loadActive).not.toHaveBeenCalled();
+    november();
+    loadActive.mockResolvedValue([{ id: 'b', type: 'take_all' }]);
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+  });
+
+  // Codex #6256 r4 P1: the brief is STORED, so a failed area read aborts the generation like its neighbouring reads (the prior
+  // brief survives) instead of persisting the normal target the live plan would not use once the database is back.
+  test('a failed trouble-area read aborts the generation: nothing is stored, no guidance is produced', async () => {
+    november();
+    loadActive.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2026-11-10', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    expect(state.updates.scheduled_services || []).toEqual([]);
+  });
+
+  test('a failed read with the gate off is never reached: the brief is generated as before', async () => {
+    november();
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    loadActive.mockRejectedValue(new Error('db down'));
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+    expect(loadActive).not.toHaveBeenCalled();
   });
 });

@@ -309,11 +309,17 @@ function mapUsage(usage) {
       output_tokens: null,
     };
   }
+  // Not an Anthropic field: OpenAI's own reasoning count, carried for the
+  // cost ledger (recordStreamedMessage).
+  const reasoning = usage.output_tokens_details?.reasoning_tokens;
   return {
     input_tokens: usage.input_tokens - cached,
     cache_read_input_tokens: cached,
     cache_creation_input_tokens: 0,
     output_tokens: usage.output_tokens,
+    // present only when OpenAI reported it, so a round with no reasoning
+    // keeps the exact four-field shape its other readers expect
+    ...(validCount(reasoning) ? { reasoning_tokens: reasoning } : {}),
   };
 }
 
@@ -333,6 +339,15 @@ function safeErrorCode(err) {
   return safeToken(err.code) || safeToken(err.type);
 }
 
+/**
+ * A finished response the relay cannot use. `ledgerCode` is the failure code
+ * the cost ledger files the billed round under (agent-control/taxonomy.js
+ * classifies it: cut off = incomplete, declined or malformed = instruction).
+ */
+function unusable(ledgerCode, message) {
+  return Object.assign(new Error(message), { ledgerCode });
+}
+
 /** A message item's output_text parts → text blocks. A refusal part rejects. */
 function messageTextBlocks(item) {
   const blocks = [];
@@ -341,7 +356,7 @@ function messageTextBlocks(item) {
       // A refusal is a failed leg, as an Anthropic stop_reason 'refusal' is
       // (services/llm/call.js openAIVerdict) — never speech for the caller.
       // Its text can echo customer detail, so it is not quoted here.
-      throw new Error('OpenAI Responses API returned a refusal.');
+      throw unusable('openai_refusal', 'OpenAI Responses API returned a refusal.');
     }
     if (part.type === 'output_text' && typeof part.text === 'string') blocks.push({ type: 'text', text: part.text });
   }
@@ -354,10 +369,10 @@ function functionCallBlock(item, response) {
   // A call cut off mid-arguments (token exhaustion) must never run as a
   // tool — an empty/partial argument string would default to {} below.
   if (item.status && item.status !== 'completed') {
-    throw new Error(`OpenAI function_call "${label}" did not complete (${safeToken(item.status) || 'unknown'}).`);
+    throw unusable('openai_incomplete', `OpenAI function_call "${label}" did not complete (${safeToken(item.status) || 'unknown'}).`);
   }
   if (response.status === 'incomplete' && !item.status) {
-    throw new Error(`OpenAI function_call "${label}" arrived in an incomplete response with no completion status.`);
+    throw unusable('openai_incomplete', `OpenAI function_call "${label}" arrived in an incomplete response with no completion status.`);
   }
   let input;
   try {
@@ -369,7 +384,7 @@ function functionCallBlock(item, response) {
     // error message can echo a slice of the malformed text verbatim —
     // this error is logged (relay-conversation.js's model-round catch),
     // so a fixed, content-free message is the only PII-safe choice here.
-    throw new Error(`OpenAI function_call "${label}" returned invalid JSON arguments (unparseable).`);
+    throw unusable('function_arguments_invalid', `OpenAI function_call "${label}" returned invalid JSON arguments (unparseable).`);
   }
   return { type: 'tool_use', id: item.call_id || item.id, name: item.name, input };
 }
@@ -410,7 +425,7 @@ function mapResponseToMessage(response, requestedModel) {
   // a real provider error already takes.
   const incompleteReason = response.status === 'incomplete' ? (response.incomplete_details || {}).reason || 'unknown' : null;
   if (incompleteReason && incompleteReason !== 'max_output_tokens') {
-    throw new Error(`OpenAI Responses API returned an incomplete response (${safeToken(incompleteReason) || 'unknown'}).`);
+    throw unusable('openai_incomplete', `OpenAI Responses API returned an incomplete response (${safeToken(incompleteReason) || 'unknown'}).`);
   }
   const content = [];
   let hasFunctionCall = false;
@@ -440,9 +455,9 @@ function mapResponseToMessage(response, requestedModel) {
   // speak nothing while resetting the relay's failure streak and count a
   // clean benchmark round, so it takes the failure path instead.
   if (!hasFunctionCall && !content.some((b) => b.type === 'text' && b.text.trim())) {
-    throw new Error(incompleteReason === 'max_output_tokens'
-      ? 'OpenAI Responses API exhausted max_output_tokens before any usable output.'
-      : 'OpenAI Responses API returned no usable output (no text, no tool call).');
+    throw incompleteReason === 'max_output_tokens'
+      ? unusable('openai_incomplete', 'OpenAI Responses API exhausted max_output_tokens before any usable output.')
+      : unusable('empty_text', 'OpenAI Responses API returned no usable output (no text, no tool call).');
   }
   const stop_reason = hasFunctionCall ? 'tool_use' : (incompleteReason === 'max_output_tokens' ? 'max_tokens' : 'end_turn');
   return {
@@ -605,6 +620,7 @@ class OpenAIRelayStream {
     }
     let finalResponse = null;
     let failure = null;
+    let failedRound = null;
     // Each item's final form (response.output_item.done) — the source of a
     // reasoning item's encrypted content should the terminal body omit it.
     const doneItems = new Map();
@@ -636,6 +652,8 @@ class OpenAIRelayStream {
             const response = evt.response || {};
             const id = safeToken(response.id);
             failure = `${safeErrorCode(response.error) || 'response_failed'}${id ? ` (${id})` : ''}`;
+            // A failed Response can still carry billable usage: keep it for the ledger.
+            failedRound = { id: response.id || null, model: response.model || params.model, usage: mapUsage(response.usage), errorCode: 'openai_failed' };
             break;
           }
           case 'error':
@@ -648,9 +666,18 @@ class OpenAIRelayStream {
     } catch (err) {
       throw normalizeAbort(err, signal);
     }
-    if (failure) throw new Error(`OpenAI Responses API error: ${failure}`);
+    if (failure) throw Object.assign(new Error(`OpenAI Responses API error: ${failure}`), failedRound ? { billedRound: failedRound } : {});
     if (!finalResponse) throw new Error('OpenAI Responses API stream ended without a completed response');
-    return mapResponseToMessage(withDoneReasoning(finalResponse, doneItems), params.model);
+    const response = withDoneReasoning(finalResponse, doneItems);
+    try {
+      return mapResponseToMessage(response, params.model);
+    } catch (err) {
+      // OpenAI finished this response and billed it; the relay cannot use
+      // it (a refusal, reasoning only, a cut-off tool call). The error keeps
+      // what was billed so the caller can put the round on the cost ledger.
+      err.billedRound = { id: response.id || null, model: response.model || params.model, usage: mapUsage(response.usage), errorCode: err.ledgerCode || 'openai_unusable_response' };
+      throw err;
+    }
   }
 }
 

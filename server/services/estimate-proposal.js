@@ -78,6 +78,7 @@ function normalizeLineItem(raw = {}) {
   const amount = proposalLineAmount({ quantity, unitPrice });
   // per_application lines carry their own occurrence count; without one the
   // line annualizes to $0 (same as any unknown cadence would).
+  const perApplicationUnit = frequency === 'one_time' && raw.priceUnit === 'application';
   const visitsPerYear = frequency === 'per_application'
     ? Math.max(0, Math.round(num(raw.visitsPerYear ?? raw.visits_per_year, 0)))
     : 0;
@@ -88,7 +89,10 @@ function normalizeLineItem(raw = {}) {
     ...(Object.hasOwn(PROPOSAL_UNITS, raw.unit) ? { unit: raw.unit } : {}),
     unitPrice,
     frequency,
-    frequencyLabel: FREQUENCY_LABELS[frequency],
+    // A one-time line priced per application (an area add-on) reads "Per application", as on the estimate page. It stays a
+    // one-time line for the totals; the marker rides the line so a re-normalization keeps the label.
+    ...(perApplicationUnit ? { priceUnit: 'application' } : {}),
+    frequencyLabel: perApplicationUnit ? FREQUENCY_LABELS.per_application : FREQUENCY_LABELS[frequency],
     taxable: raw.taxable === true,
     amount,
     ...(visitsPerYear > 0 ? { visitsPerYear } : {}),
@@ -613,6 +617,8 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
           unitPrice: isCharged ? num(row.amount) : 0,
           frequency: 'one_time',
           taxable: false,
+          // A row priced per application (an area add-on) keeps its unit: see normalizeLineItem.
+          ...(row.priceUnit === 'application' ? { priceUnit: 'application' } : {}),
         }));
       }
     }

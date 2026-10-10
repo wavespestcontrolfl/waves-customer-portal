@@ -3064,6 +3064,11 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
       return { error: 'Only an unsent estimator_engine draft can be revised from Agent Estimate' };
     }
+    // An archived draft is hidden and unsendable: a revision would save
+    // into it unseen.
+    if (estimate.archived_at) {
+      return { error: 'This draft was archived and cannot be revised. Start a new Agent Estimate.' };
+    }
     const currentData = parseStoredJson(estimate.estimate_data);
     if (currentData?.estimatorEngine?.origin !== 'manual_agent') {
       return { error: 'This draft was created by another estimator flow and will not be overwritten' };
@@ -3194,7 +3199,9 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
 
     if (lead.estimate_id) {
       const existing = await trx('estimates').where({ id: lead.estimate_id }).first();
-      if (existing?.status === 'draft' && existing?.source === 'estimator_engine') {
+      // An archived draft is never reused (the revise path refuses it): the
+      // creation path below replaces the stale link.
+      if (existing?.status === 'draft' && existing?.source === 'estimator_engine' && !existing.archived_at) {
         const existingData = parseStoredJson(existing.estimate_data);
         if (existingData?.estimatorEngine?.origin === 'manual_agent') {
           // Leave the phone-lock transaction before revising the row in its
@@ -3597,6 +3604,11 @@ async function setEstimatePresentation(input, actionContext = {}) {
   };
 }
 
+// A toggle lands only while the row is still in the archive state it was
+// read in: one that waited behind an archive (staff, or the draft-retire
+// sweep) must not change the now-hidden row and report success.
+const sameArchiveState = (estimate) => (q) => (estimate.archived_at ? q.whereNotNull('archived_at') : q.whereNull('archived_at'));
+
 async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_flag_value }) {
   if (!estimate_identifier) {
     return { error: 'estimate_identifier required (UUID, token, or phone)' };
@@ -3616,7 +3628,9 @@ async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_fl
   const updated = await db('estimates')
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(use_v2_view, false) = ?', [expected]); })
-    .update({ use_v2_view: next });
+    .modify(sameArchiveState(estimate))
+    // updated_at marks the staff edit (the draft-retire sweep keeps a draft touched after a newer delivery).
+    .update({ use_v2_view: next, updated_at: db.fn.now() });
   if (!updated) {
     return { error: 'This estimate\'s view flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }
@@ -3661,7 +3675,8 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
   const updated = await db('estimates')
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(show_one_time_option, false) = ?', [expected]); })
-    .update({ show_one_time_option: next });
+    .modify(sameArchiveState(estimate))
+    .update({ show_one_time_option: next, updated_at: db.fn.now() });
   if (!updated) {
     return { error: 'This estimate\'s one-time-option flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }

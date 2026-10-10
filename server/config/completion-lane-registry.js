@@ -110,6 +110,11 @@ const BILLING_RIDER_KEYS = [
   // schedule. Its profile ships in the enforced internal_only/disabled
   // posture directly.
   'rodent_guarantee',
+  // Vehicle roach add-on (owner ruling 2026-10-06, migration 20261008190000):
+  // the $99 car treatment added to a home German roach job. An invoice line
+  // plus a reference in the home visit's cockroach report, no report of its
+  // own; its profile ships internal_only/disabled.
+  'vehicle_roach_addon',
 ];
 
 // Recurring programs whose GENERIC Service Report V1 is the decided lane —
@@ -168,6 +173,21 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   'plugging',
   'top_dressing',
   'bora_care',
+  // Area add-on treatments (owner rulings 2026-10-08, migration
+  // 20261008200000), generic for the same truthfulness rule: the typed
+  // one_time_lawn_treatment form records fertilizer/pesticide/amendment/
+  // inspection work on a lawn visit and has no choices for bed pre-emergent,
+  // a hardscape weed kill, a fire-ant yard broadcast or a web sweep, and a
+  // report that auto-sends must record what was done. Lawn insect spot and
+  // preventive could use it, but one lane for all six keeps the tech's
+  // completion identical across the add-on family; repoint via
+  // CUTOVER_IN_FLIGHT_KEYS if the lawn form gains these actions.
+  'area_addon_bed_pre_emergent',
+  'area_addon_lawn_insect_spot',
+  'area_addon_fire_ant_yard',
+  'area_addon_lawn_insect_preventive',
+  'area_addon_hardscape_weed',
+  'area_addon_web_sweep',
   // german_roach / german_roach_initial LEFT this list 2026-08-29 (owner
   // ruling, cockroach report V2): migration 20260830000030 points both at
   // the typed `cockroach` form so every one-time roach job feeds the

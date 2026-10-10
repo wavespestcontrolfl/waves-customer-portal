@@ -298,8 +298,10 @@ describe('FastCompleteSheet tip for the customer', () => {
     // The short list first; the rest sits behind Show all.
     expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Lights on a motion sensor/ })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Aim landscape lights away/ })).toBeNull();
-    // A tip this customer already received says when.
+    // A tip this customer already received goes last, behind Show all, and says when.
+    expect(screen.getByRole('button', { name: /Aim landscape lights away/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Warm porch bulbs/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
     expect(screen.getByRole('button', { name: /Warm porch bulbs/ }).textContent).toContain('sent Aug 3');
 
     fireEvent.click(screen.getByRole('button', { name: /Fix drips at hose bibs/ }));
@@ -343,6 +345,53 @@ describe('FastCompleteSheet tip for the customer', () => {
     expect(screen.getByText('No tips match.')).toBeTruthy();
   });
 
+  test('a tapped pest lifts the advice for it, and a search reaches a tip off the list (owner 2026-10-09)', async () => {
+    const library = {
+      ...TIP_LIBRARY,
+      groups: [
+        { id: 'moisture', label: 'Moisture', tips: [tip('hose_bib', 'Fix drips at hose bibs', { pests: ['Ants'] }), tip('under_sink', 'Check under the kitchen sink', { pests: ['Roaches'] })] },
+        TIP_LIBRARY.groups[1],
+      ],
+      more: [tip('flea_yard', 'Open up where pets rest outside', { pests: ['Fleas'], keywords: ['dog run'] })],
+    };
+    const request = makeRequest({ tips: library });
+    await openSheet(request);
+    await screen.findByText('Tip for the customer');
+    // Nothing tapped: no lift, and the off-list tip is not offered.
+    expect(screen.queryByText('For what you saw today')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Open up where pets rest outside/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Roaches' }));
+    expect(screen.getByText('For what you saw today')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /Check under the kitchen sink/ })).toHaveLength(1);
+    // Lifted, never picked.
+    expect(screen.getByRole('button', { name: /Check under the kitchen sink/ }).getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'dog run' } });
+    fireEvent.click(screen.getByRole('button', { name: /Open up where pets rest outside/ }));
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: '' } });
+    // The off-list pick stays in view once, and goes on the wire.
+    expect(screen.getAllByRole('button', { name: /Open up where pets rest outside/ })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: /Open up where pets rest outside/ }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('the tech\'s own line has the note\'s microphone, and a spoken line joins what is there (owner 2026-10-09)', async () => {
+    const request = makeRequest({ tips: TIP_LIBRARY });
+    await openSheet(request);
+    await screen.findByText('Tip for the customer');
+    expect(screen.queryByRole('button', { name: 'Say your own tip' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Fix drips at hose bibs/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Write your own' }));
+    expect(screen.getByRole('button', { name: 'Say your own tip' })).toBeTruthy();
+    // The last mic mounted is the tip's: its words go on the tip line, not the note.
+    React.act(() => dictation.onTranscript('I brushed the mud dauber nests off the lanai'));
+    React.act(() => dictation.onTranscript('and it is ready for paint.'));
+    expect(screen.getByLabelText('Your own tip (one sentence)').value).toBe('I brushed the mud dauber nests off the lanai and it is ready for paint.');
+    expect(screen.getByLabelText('Tell me about the visit').value).toBe('');
+    // The spoken line replaces the library pick, as a typed one does.
+    expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ }).getAttribute('aria-pressed')).toBe('false');
+  });
+
   test('a tip the tech writes replaces a library pick, and the other way round', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
@@ -355,10 +404,10 @@ describe('FastCompleteSheet tip for the customer', () => {
     fireEvent.change(own, { target: { value: 'Keep the pet bowls off the lanai overnight.' } });
     expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ }).getAttribute('aria-pressed')).toBe('false');
 
-    fireEvent.click(screen.getByRole('button', { name: /Warm porch bulbs/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Lights on a motion sensor/ }));
     expect(screen.queryByLabelText('Your own tip (one sentence)')?.value || '').toBe('');
 
-    fireEvent.click(screen.getByRole('button', { name: /Warm porch bulbs/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Lights on a motion sensor/ }));
     fireEvent.change(screen.getByLabelText('Your own tip (one sentence)'), { target: { value: '  Trim the hedge off the wall.  ' } });
     const body = await completeAndReadBody(request);
     expect(body.techTips).toEqual({ ids: [], custom: 'Trim the hedge off the wall.' });
