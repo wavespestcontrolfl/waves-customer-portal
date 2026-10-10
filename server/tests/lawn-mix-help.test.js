@@ -340,6 +340,160 @@ describe('gallons sprayed at completion', () => {
     expect(card(2000)).toEqual({ 'sp-1': 'Spot treatment, about 2,000 sq ft' });
   });
 
+  describe('the gallons-derived area is capped at the lawn', () => {
+    const withLawn = (lawnSqft) => ({ loadPlan: async () => ({ plan: { protocol: { structured: { id: 'protocol-1' } }, mixCalculator: { lawnSqft } } }) });
+    const wholeLawn = () => ({ productId: P_CER, applicationMethod: 'broadcast_spray', areaValue: 1900, areaUnit: 'sqft' });
+
+    test('with neither a visit area nor a lawn size known, the largest non-spot row caps it, and the mark says so', async () => {
+      const products = [{ productId: P_CEL, sprayedGallons: 4 }, wholeLawn()];
+      expect(await run(products, withLawn(null))).toBeNull();
+      expect(products[0]).toMatchObject({ areaValue: 1900, areaUnit: 'sqft' });
+      expect(help.sprayedGallonsFreeze(products)).toEqual({
+        lawnSprayedGallons: { v: 1, rows: [{ productId: P_CEL, gallons: 4, carrierGalPer1000: 1, areaSqft: 1900, capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900, lawnAreaSource: 'whole_lawn_row' }] },
+      });
+      expect(products[1]).toEqual(wholeLawn());
+    });
+
+    test('the lawn size on file caps it', async () => {
+      const products = [{ productId: P_CEL, sprayedGallons: 4 }];
+      expect(await run(products, withLawn(1900))).toBeNull();
+      expect(products[0].areaValue).toBe(1900);
+      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).toMatchObject({ areaSqft: 1900, capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900, lawnAreaSource: 'plan' });
+    });
+
+    test('a non-spot row is not proof of the whole lawn: a 5,000 sq ft broadcast row on a 10,000 sq ft lawn does not cap 7 gallons (7,000 sq ft)', async () => {
+      const products = [{ productId: P_CEL, sprayedGallons: 7 }, { productId: P_CER, applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' }];
+      expect(await run(products, withLawn(10000))).toBeNull();
+      expect(products[0].areaValue).toBe(7000);
+      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).not.toHaveProperty('capped');
+      // Nor does it override a validated visit area.
+      const viaVisit = [{ productId: P_CEL, sprayedGallons: 7 }, { productId: P_CER, applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' }];
+      await run(viaVisit, { ...withLawn(null), propertyServiceArea: { kind: 'lawn' }, readServiceArea: async () => 10000 });
+      expect(viaVisit[0].areaValue).toBe(7000);
+    });
+
+    test('spot rows only: the validated visit area the sheet submitted caps it, ahead of the lawn size on file', async () => {
+      const readServiceArea = jest.fn(async () => 1900);
+      const propertyServiceArea = { propertyId: 'prop-1', version: 'v1', kind: 'lawn', treatedSqft: 1900 };
+      const products = [{ productId: P_CEL, sprayedGallons: 4 }];
+      expect(await run(products, { ...withLawn(null), propertyServiceArea, actor: { technicianId: 't-1' }, readServiceArea })).toBeNull();
+      expect(readServiceArea).toHaveBeenCalledWith(expect.objectContaining({ propertyServiceArea, actor: { technicianId: 't-1' } }));
+      expect(products[0].areaValue).toBe(1900);
+      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900, lawnAreaSource: 'visit_area' });
+      const other = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(other, { ...withLawn(1500), propertyServiceArea, readServiceArea });
+      expect(other[0].areaValue).toBe(1900);
+    });
+
+    test('a visit area that fails validation or is absent is not read as the cap', async () => {
+      const propertyServiceArea = { propertyId: 'prop-1', version: 'stale', kind: 'lawn', treatedSqft: 100 };
+      const failed = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(failed, { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => null });
+      expect(failed[0].areaValue).toBe(1900); // falls through to the lawn size on file
+      const unknown = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(unknown, { propertyServiceArea, readServiceArea: async () => null });
+      expect(unknown[0].areaValue).toBe(4000);
+      const readServiceArea = jest.fn(async () => 100);
+      const absent = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(absent, { readServiceArea });
+      expect(readServiceArea).not.toHaveBeenCalled();
+    });
+
+    test('a submitted visit area whose read FAILS refuses the step (correctable 400, nothing converted); absent keeps the fallback', async () => {
+      const propertyServiceArea = { propertyId: 'prop-1', version: 'v1', kind: 'lawn', treatedSqft: 1900 };
+      const products = [{ productId: P_CEL, sprayedGallons: 4, areaValue: 10, areaUnit: 'sqft', rate: 0.085, rateUnit: 'oz', totalAmount: 0.4, amountUnit: 'oz' }];
+      const out = await run(products, { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw new Error('Property areas changed.'); } });
+      expect(out).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable_now', error: expect.stringContaining('visit area could not be confirmed') } });
+      expect(products[0]).toMatchObject({ areaValue: 10, rate: 0.085 });
+      expect(help.sprayedGallonsFreeze(products)).toEqual({});
+      // A structured 4xx from the snapshot (stale version) reaches the sheet as it came, so the sheet can read the areas again.
+      const stale = Object.assign(new Error('Property areas changed. Reload and review the job coverage.'), { status: 409, statusCode: 409, code: 'property_service_area_changed' });
+      const staleOut = await run([{ productId: P_CEL, sprayedGallons: 4 }], { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw stale; } });
+      expect(staleOut).toEqual({ status: 409, payload: { error: 'Property areas changed. Reload and review the job coverage.', code: 'property_service_area_changed' } });
+      const missing = Object.assign(new Error('Service not found.'), { status: 404, statusCode: 404 });
+      expect(await run([{ productId: P_CEL, sprayedGallons: 4 }], { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw missing; } })).toEqual({ status: 404, payload: { error: 'Service not found.' } });
+      // A server-side failure is not passed through (a 5xx would lock the form): it is the correctable 400.
+      const down = Object.assign(new Error('db down'), { statusCode: 503 });
+      expect(await run([{ productId: P_CEL, sprayedGallons: 4 }], { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw down; } })).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable_now' } });
+      // Nothing submitted: the plan's size still caps it.
+      const absent = [{ productId: P_CEL, sprayedGallons: 4 }];
+      expect(await run(absent, { ...withLawn(1900), readServiceArea: async () => { throw new Error('never called'); } })).toBeNull();
+      expect(absent[0].areaValue).toBe(1900);
+    });
+
+    test('no whole-lawn row and no size on file: not capped (today\'s behaviour), mark unchanged', async () => {
+      const products = [{ productId: P_CEL, sprayedGallons: 4 }];
+      expect(await run(products)).toBeNull();
+      expect(await run(products, withLawn(null))).toBeNull();
+      expect(products[0].areaValue).toBe(4000);
+      expect(help.sprayedGallonsFreeze(products)).toEqual({ lawnSprayedGallons: { v: 1, rows: [{ productId: P_CEL, gallons: 4, carrierGalPer1000: 1, areaSqft: 4000 }] } });
+    });
+
+    test('an area at or under the lawn is not capped and carries no capped fields', async () => {
+      const products = [{ productId: P_CEL, sprayedGallons: 1 }, { productId: P_ARENA, sprayedGallons: 4 }];
+      expect(await run(products, withLawn(1000))).toBeNull();
+      expect(products.map((row) => row.areaValue)).toEqual([1000, 1000]);
+      for (const row of help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows) expect(row).not.toHaveProperty('capped');
+    });
+
+    test('the capped area reaches the customer card, the same text a typed area gives', async () => {
+      const products = [{ productId: P_CEL, sprayedGallons: 4 }, wholeLawn()];
+      await run(products);
+      const rows = [{ id: 'sp-1', product_id: P_CEL, application_method: 'spot_treatment', area_value: products[0].areaValue, area_unit: 'sqft' }];
+      const facts = reportFacts.buildReportFacts({ rows, run: null, assessment: null, techFindings: [], withTies: false, recordedSpotAreas: new Set([P_CEL]) });
+      expect(reportFacts.frozenProductUseTexts({ lawnReportFacts: facts })).toEqual({ 'sp-1': 'Spot treatment, about 1,900 sq ft' });
+    });
+
+    test('a capped row\'s stated rate follows the capped area, and the limit check reads it', async () => {
+      const { proposedRow } = require('../services/lawn-trouble-areas');
+      const row = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz', totalAmount: 0.4, amountUnit: 'oz' };
+      expect(await run([row], withLawn(1900))).toBeNull();
+      expect(row.areaValue).toBe(1900);
+      expect(row.rate).toBe(0.211);
+      expect(proposedRow(row)).toMatchObject({ application_rate: 0.211, rate_unit: 'oz', area_treated_sqft: 1900 });
+      expect(help.sprayedGallonsFreeze([row]).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedRate: 0.085 });
+      // The amount's unit converts to the rate's (0.025 lb = 0.4 oz); a /1000sf suffix on the rate unit is kept as submitted.
+      const lb = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz/1000sf', totalAmount: 0.025, amountUnit: 'lb' };
+      await run([lb], withLawn(1900));
+      expect(lb).toMatchObject({ rate: 0.211, rateUnit: 'oz/1000sf' });
+    });
+
+    test('a capped row whose amount unit cannot be reconciled with the rate unit has the rate cleared (amount over area runs); no amount or no rate leaves it alone', async () => {
+      const { proposedRow } = require('../services/lawn-trouble-areas');
+      const odd = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'lb', totalAmount: 1, amountUnit: 'gal' };
+      await run([odd], withLawn(1900));
+      expect(odd.rate).toBe('');
+      expect(proposedRow(odd).application_rate).toBeNull();
+      expect(help.sprayedGallonsFreeze([odd]).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedRate: 0.085 });
+      // The column keeps 3 decimals: 0.4 oz over 1,900 is 0.211 in the limit check and the insert alike; a tiny amount rounds to zero and is cleared.
+      const tiny = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz', totalAmount: 0.0001, amountUnit: 'oz' };
+      await run([tiny], withLawn(1900));
+      expect(tiny.rate).toBe('');
+      expect(proposedRow(tiny).application_rate).toBeNull();
+      const noAmount = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz' };
+      await run([noAmount], withLawn(1900));
+      expect(noAmount.rate).toBe(0.085);
+      expect(help.sprayedGallonsFreeze([noAmount]).lawnSprayedGallons.rows[0]).not.toHaveProperty('uncappedRate');
+      const uncapped = { productId: P_CEL, sprayedGallons: 1, rate: 0.085, rateUnit: 'oz', totalAmount: 0.085, amountUnit: 'oz' };
+      await run([uncapped], withLawn(1900));
+      expect(uncapped.rate).toBe(0.085);
+    });
+
+    test('a yearly-amount refusal at a capped row says why, in the same shape and code; count, interval and other-product refusals are untouched', async () => {
+      const limit = (productId, limitType = 'annual_max_rate') => ({ status: 400, payload: { error: 'Over the yearly amount. Choose another place, or take it off the sheet.', code: 'lawn_place_limit', productId, place: 'front', limitType } });
+      const deps = { knex: {}, svc: SVC, isLive: () => true, readStaged: async () => staged(), readSpotRows: async (knex, rows) => rows.filter((row) => !row.applicationMethod), ...withLawn(1900) };
+      const products = [{ productId: P_CEL, sprayedGallons: 4, areaPlace: 'front' }];
+      const out = await help.withSprayedGallons({ ...deps, products }, async () => limit(P_CEL));
+      expect(out).toEqual({ status: 400, payload: { ...limit(P_CEL).payload, error: `${limit(P_CEL).payload.error} 4 gallons at 1 gal per 1,000 sq ft covers 4,000 sq ft, but the lawn is 1,900 sq ft; enter the gallons you actually sprayed or the area.` } });
+      for (const type of ['annual_max_apps', 'min_interval_days']) {
+        expect(await help.withSprayedGallons({ ...deps, products: [{ productId: P_CEL, sprayedGallons: 4 }] }, async () => limit(P_CEL, type))).toEqual(limit(P_CEL, type));
+      }
+      expect(await help.withSprayedGallons({ ...deps, products: [{ productId: P_CEL, sprayedGallons: 4 }] }, async () => limit(P_ARENA))).toEqual(limit(P_ARENA));
+      expect(await help.withSprayedGallons({ ...deps, products: [{ productId: P_CEL, sprayedGallons: 1 }] }, async () => limit(P_CEL))).toEqual(limit(P_CEL));
+      expect(await help.withSprayedGallons({ ...deps, products }, async () => null)).toBeNull();
+    });
+  });
+
   test('gate off (a cached sheet still sends gallons): the row is refused, correctably, and its client-derived area is never trusted or marked; a row without gallons is untouched', async () => {
     const products = [{ productId: P_CEL, sprayedGallons: 2, areaValue: 700, areaUnit: 'sqft' }];
     expect(await run(products, { isLive: () => false })).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable', productId: P_CEL } });
