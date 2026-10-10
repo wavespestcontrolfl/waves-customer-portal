@@ -105,10 +105,29 @@ describe('confirmOnRoads', () => {
     expect(asked.map((leg) => leg.date)).toEqual(['2026-08-04', '2026-08-04', '2026-08-04', '2026-08-11', '2026-08-11', '2026-08-11']);
   });
 
-  test('Google has no answer for the best slot: the model\'s result stands, unchanged', async () => {
+  test('Google has no answer for the best slot: the model\'s result stands, marked as the estimate', async () => {
     const ranked = rankedOf('first', 'second');
-    expect(await run(ranked, { now: [20, 20, 10] })).toBe(ranked);
-    expect(await run(ranked, { first: [10, 10, 10] })).toBe(ranked);
+    for (const table of [{ now: [20, 20, 10] }, { first: [10, 10, 10] }]) {
+      const out = await run(ranked, table);
+      expect(out).toMatchObject({ qualifies: true, ranked: ranked.ranked, rankedRows: ranked.rankedRows });
+      expect(out.best).toMatchObject({ name: 'first' });
+      expect(roadResultOf(out.best)).toEqual({ source: 'estimate' });
+    }
+  });
+
+  test('a visit in conflict: its repair is not measured, the ordinary move it would make afterwards is', async () => {
+    const inConflict = { ...current, conflict: { kind: 'overlap' } };
+    const ranked = { ...rankedOf('repair'), normalBest: place('after', { date: '2026-08-11' }), normalBestScore: { total_score: 80 } };
+    // now 30 detour; after 26: saving 4, under the floor of 6. No ordinary move.
+    const dropped = await run(ranked, { now: [20, 20, 10], after: [18, 18, 10], repair: [30, 30, 10] }, { current: inConflict });
+    expect(dropped).toMatchObject({ best: ranked.best, qualifies: true, ranked: ranked.ranked });
+    expect(dropped.normalBest).toBeUndefined();
+    expect(roadResultOf(dropped.best)).toBeUndefined();
+    // after 10: saving 20. It stays, with the road numbers on it.
+    const kept = await run(ranked, { now: [20, 20, 10], after: [10, 10, 10] }, { current: inConflict });
+    expect(roadResultOf(kept.normalBest)).toMatchObject({ saving_minutes: 20, source: 'google' });
+    // No road answer: it stays on the model's number.
+    expect(roadResultOf((await run(ranked, {}, { current: inConflict })).normalBest)).toEqual({ source: 'estimate' });
   });
 
   test('a later slot Google cannot answer for passes on the model\'s number', async () => {
@@ -125,7 +144,7 @@ describe('confirmOnRoads', () => {
     expect(roadResultOf(out.best)).toMatchObject({ candidate_detour_minutes: 0, saving_minutes: 30 });
   });
 
-  test('the check does not apply: gate off, floor off, no reader, nothing qualifying, a visit that must move', async () => {
+  test('the check does not apply: gate off, floor off, no reader, nothing qualifying, a visit with no arrival time', async () => {
     const ranked = rankedOf('first');
     const table = { now: [20, 20, 10], first: [18, 18, 10] };
     expect(await run(ranked, table, { config: { ...config, roadCheckEnabled: false } })).toBe(ranked);
@@ -134,7 +153,6 @@ describe('confirmOnRoads', () => {
     const none = { ...ranked, qualifies: false };
     expect(await run(none, table)).toBe(none);
     // In conflict, or no arrival time yet: it has to move; its ceiling stays on the model.
-    expect(await run(ranked, table, { current: { ...current, conflict: { kind: 'overlap' } } })).toBe(ranked);
     expect(await run(ranked, table, { service: { id: 's1', window_start: null, recurring_dispatch_due_date: '2026-08-06' } })).toBe(ranked);
     // The legacy grouped shape has no usable current detour.
     expect(await run(ranked, table, { current: { ...current, detour_group_blind: true } })).toBe(ranked);

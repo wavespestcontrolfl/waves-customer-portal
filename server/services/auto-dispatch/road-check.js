@@ -92,18 +92,39 @@ async function roadSaving(current, cand, travel) {
   };
 }
 
-function applies({ service, current, config, travel, ranked }, moveRules) {
-  return !!(config.roadCheckEnabled && travel && ranked.qualifies
-    && (config.minDayMoveDriveSavingMinutes || 0) > 0
-    && !current.detour_group_blind && !moveRules.mustMove(service, current));
+// The check can measure this visit at all: gate on, a floor to hold, and a
+// current placement whose drive the model can see.
+function measurable({ current, config, travel }) {
+  return !!(config.roadCheckEnabled && travel && (config.minDayMoveDriveSavingMinutes || 0) > 0 && !current.detour_group_blind);
+}
+
+// A visit in conflict moves whatever the roads say (its repair is exempt).
+// The ordinary move it would make once the conflict is gone (`normalBest`,
+// the dry run's "after the overlapping visit moves" row) is held to the
+// floor on real roads like any other ordinary move: failing it, the visit
+// has no such move (Codex #6264 r2).
+async function withProjectionChecked(ranked, ctx) {
+  if (!ranked.normalBest) return ranked;
+  try {
+    const road = await roadSaving(ctx.current, ranked.normalBest, ctx.travel);
+    if (road && road.saving_minutes < ctx.config.minDayMoveDriveSavingMinutes) {
+      const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
+      return rest;
+    }
+    return { ...ranked, normalBest: { ...ranked.normalBest, [ROAD_RESULT]: road || { source: 'estimate' } } };
+  } catch (err) {
+    logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
+    return ranked;
+  }
 }
 
 const withRoad = (row, road) => ({ ...row, cand: { ...row.cand, [ROAD_RESULT]: road || { source: 'estimate' } } });
 
 /**
  * Confirm a ranked result (move-rules.js rankCandidates) on real roads.
- * Returns `ranked` unchanged when the check does not apply, or when Google
- * has no answer for the best slot. Otherwise the top slots are measured one
+ * Returns `ranked` unchanged when the check does not apply; when Google has
+ * no answer for the best slot the model's result stands, marked as the
+ * estimate. Otherwise the top slots are measured one
  * at a time, best first, and the first that keeps the floor becomes `best`
  * (a slot Google cannot answer for passes on the model's number). The
  * SLOT_TAKEN fallback list is then that one slot: apply.js re-evaluates the
@@ -114,13 +135,17 @@ const withRoad = (row, road) => ({ ...row, cand: { ...row.cand, [ROAD_RESULT]: r
  */
 async function confirmOnRoads(ranked, ctx) {
   const moveRules = require('./move-rules');
-  if (!applies({ ...ctx, ranked }, moveRules)) return ranked;
+  if (!measurable(ctx)) return ranked;
+  if (moveRules.mustMove(ctx.service, ctx.current)) return withProjectionChecked(ranked, ctx);
+  if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
   try {
     const failed = [];
     for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
       const road = await roadSaving(ctx.current, row.cand, ctx.travel);
-      if (!road && !failed.length) return ranked;
+      // No road answer for the best slot: the model's result stands, and the
+      // audit row says the number is the estimate (r2).
+      if (!road && !failed.length) return { ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } };
       const checked = withRoad(row, road);
       if (!road || road.saving_minutes >= floor) return settled(ranked, checked, true);
       failed.push(checked);
