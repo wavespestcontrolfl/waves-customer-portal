@@ -66,13 +66,13 @@ const PROMPT_REWRITES = Object.freeze([
   // v4 hard constraint 10 told the writer to use an absence rule 4 refuses.
   [
     'a 0 means no visible activity noted — do not imply a problem.',
-    'a 0 is an absence: state it only for a place the technician checked, named in the same clause (OWNER RULES rule 4), and do not imply a problem.',
+    'a 0 is an absence: state it only for a place the technician checked, named in the same clause (OWNER RULES rule 4), and do not imply a problem. When the record names no checked place, leave a 0 rating out of the report; it is the one rating the report does not have to reflect.',
   ],
   ['("light activity", "no visible activity")', '("light activity", "moderate activity")'],
   // Recurring pest module: the same absence wording.
   [
     'A recorded zero means no visible activity was noted within the assessed scope; it is not a property-wide all-clear.',
-    'A recorded zero is an absence for the places the technician checked only, each named in the same clause (OWNER RULES rule 4).',
+    'A recorded zero is an absence for the places the technician checked only, each named in the same clause (OWNER RULES rule 4); with no checked place recorded, leave the zero out.',
   ],
   // v4 hard constraint 4 invited active-ingredient names.
   [
@@ -212,9 +212,9 @@ First sort every sentence of the TECHNICIAN NOTE into one of: work done, seen to
 
 WHAT WE FOUND. Fill from, in this order: the customer's words (BOOKED REASON, Customer concern, WHAT THE CUSTOMER TOLD US, note sentences about what the customer said), attributed to the customer; then what the technician saw today (Observations, note sentences about what was seen, the Pest activity rating in words only, "Findings observed" lines); then one earlier visit, with its date and marked as past, only when the prior visits show the same pest or the same place. Lead with the customer's concern when there is one. Name the pest as the technician named it and the place as recorded. A target tagged on a product that the technician did not record seeing is not a finding.
 
-WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: what it was by its job (an insect-control treatment, a bait, an insect growth regulator, a sweep of webs), where (Areas serviced, the APPLICATION DETAILS area, the note), how (the APPLICATION DETAILS method), and why it fits what was found, taken from HOW IT WORKS. A sweep of eaves and frames is work: describe it in the record's own words ("swept the eaves, window frames and door frames"). A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
+WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: what it was by its job (an insect-control treatment, a bait, an insect growth regulator, a sweep of webs), where (Areas serviced, the APPLICATION DETAILS area, the note), how (the APPLICATION DETAILS method), and why it fits what was found, taken from HOW IT WORKS. A sweep of webs is work: describe it with only the places the record names for it, and add none. A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
 
-WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line. With no EXPECTATIONS lines, write one sentence on what the recorded work is for, with no timeframe.
+WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line. With no EXPECTATIONS lines there is no recorded outcome: write the one sentence rule 1 gives an empty section (from the record: the place worked or the service type), and claim no result, no effect on the pest and no timeframe.
 
 WHAT'S NEXT. In this order: what the note or the Recommendations say we will check or do next (never a visit, a day or a window); what the customer can do that the record names (never aftercare, cleaning, watering or re-entry); and when to contact us, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of the pest found today that the customer can notice.
 
@@ -784,7 +784,7 @@ function rejectedDraftRepairNote({ draft, rejection, detail = null, includeDraft
   const shown = includeDraft && code !== 'access_code' && draft
     ? `\n\nPREVIOUS DRAFT (rejected; never reuse its wording where it broke the rule):\n${String(draft).slice(0, REPAIR_DRAFT_MAX)}`
     : '';
-  return `${shown}\n\nA PREVIOUS DRAFT OF THIS REPORT WAS REJECTED because ${why}.${words} Write the whole report again from the same inputs. Keep every fact, change only what the reason names, and check the new draft against the OWNER RULES before you answer.`;
+  return `${shown}\n\nA PREVIOUS DRAFT OF THIS REPORT WAS REJECTED because ${why}.${words} Write the whole report again from the inputs above. The rejected draft is not a source: keep only what the inputs record, leave out anything the draft added, fix what the reason names, and check the new draft against the OWNER RULES before you answer.`;
 }
 
 module.exports = {

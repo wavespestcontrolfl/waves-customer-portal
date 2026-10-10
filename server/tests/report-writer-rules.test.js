@@ -600,6 +600,24 @@ describe('pest writer adapter, rejection detail and repair note', () => {
     expect(rewritten).toContain('chemical barrier, vectors, sweep, recon,');
   });
 
+  // Codex r1: four places where the new text could make the writer invent.
+  test('the new text never asks for an unrecorded outcome, place or fact', () => {
+    // No EXPECTATIONS record: no outcome claim.
+    expect(PEST_WRITER_ADAPTER).toContain('With no EXPECTATIONS lines there is no recorded outcome');
+    expect(PEST_WRITER_ADAPTER).not.toContain('what the recorded work is for');
+    // A sweep is described with the recorded places only: no fixed list to copy.
+    expect(PEST_WRITER_ADAPTER).toContain('only the places the record names');
+    expect(PEST_WRITER_ADAPTER).not.toMatch(/window frames|door frames/);
+    // A zero rating with no checked place is left out, in both places that speak of it.
+    const zero = PROMPT_REWRITES.filter(([from]) => /a 0 means no visible activity|A recorded zero means/.test(from));
+    expect(zero).toHaveLength(2);
+    zero.forEach(([, to]) => expect(to).toMatch(/leave (?:a 0 rating|the zero) out/));
+    // The rejected draft is not a source of facts.
+    const note = rejectedDraftRepairNote({ draft: 'D', rejection: 'owner_phrase' });
+    expect(note).toContain('The rejected draft is not a source: keep only what the inputs record');
+    expect(note).not.toContain('Keep every fact');
+  });
+
   test('the detail names the reason and the words; the plain verdict is the same reason', () => {
     const draft = 'WHAT WE FOUND\nThere were no  issues inside.';
     expect(writerRulesRejectionDetail(draft)).toEqual({ reason: 'owner_phrase', match: 'no issues' });
