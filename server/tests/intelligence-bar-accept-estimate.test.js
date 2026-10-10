@@ -3,6 +3,12 @@
  * an estimate exactly as the estimate page's "Mark accepted" does, behind one
  * irreversible confirm card that shows what it bills, books and sends.
  *
+ * The card is rendered from the accept's own effect list: the preview runs the
+ * real accept as a dry run (markEstimateAcceptedAsStaff({ dryRun: true })) and
+ * words what comes back. These tests feed that route realistic effect lists
+ * (the list itself is produced and tested in estimate-manual-acceptance-
+ * effects.test.js) and check the words, the refusals and the pinning.
+ *
  * The scenario: a lawn customer (Lawn $55.00 a month on the bill) says yes to
  * a pest + mosquito add-on estimate. The card must list both new services, the
  * whole bill before and after, the lane and tier, that no visit is booked, and
@@ -20,8 +26,14 @@ const writes = [];
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const q = {};
-    for (const m of ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereIn', 'orderBy', 'orWhereNot', 'limit', 'whereRaw', 'leftJoin']) q[m] = () => q;
-    q.first = () => { reads.push(table); return Promise.resolve((tables[table] || [])[0]); };
+    for (const m of ['whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereIn', 'orderBy', 'orWhereNot', 'limit', 'whereRaw', 'leftJoin']) q[m] = () => q;
+    q.where = (cond) => { q.cond = cond; return q; };
+    // A sibling lookup (estimate_group_id) reads its own seeded rows.
+    q.first = () => {
+      reads.push(table);
+      if (table === 'estimates' && q.cond?.estimate_group_id) return Promise.resolve((tables.siblings || [])[0]);
+      return Promise.resolve((tables[table] || [])[0]);
+    };
     q.select = () => q;
     q.then = (resolve, reject) => Promise.resolve(tables[table] || []).then(resolve, reject);
     for (const m of ['insert', 'update', 'del', 'delete']) q[m] = (...args) => { writes.push({ table, op: m, args }); return q; };
@@ -70,31 +82,67 @@ function seed(overrides = {}) {
   tables.customer_plan_rates = overrides.ledger || [{ family_key: 'lawn_care', monthly_rate: 55 }];
   tables.notification_prefs = overrides.prefs || [];
   tables.scheduled_services = overrides.booked || [];
+  tables.siblings = overrides.siblings || [];
 }
 
-let classify;
-let priorKeys;
+// ── The dry run's effect list, as estimate-accept-effects.js produces it ──
+const customerFields = (o = {}) => ({
+  monthly_rate: null, billing_mode: null, waveguard_tier: null, pipeline_stage: null, property_type: null, per_application_fee: null, ...o,
+});
+const noLawn = { grass_type: null, turf_lawn_sqft: null, primary_property_sqft: null, customer_property_sqft: null };
+const emailStep = (o = {}) => ({ step: 'membership_email', attempt: true, will_send: true, reason: null, to: 'l***@example.com', ...o });
+const postCommit = (steps = [emailStep()]) => ({
+  kind: 'post_commit',
+  plan: [{ step: 'group_followup_transfer', grouped: false }, { step: 'property_link' }, { step: 'lead_won' }, ...steps, { step: 'termite_agreement', applies: false }],
+});
+
+// The default: Lawn $55 -> Lawn $55 + Pest $49 + Mosquito $41, Bronze -> Gold.
+function addOnEffects(o = {}) {
+  return [
+    { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+    { kind: 'add_on_classification', add_on_base: 55, had_other_live_families: false, same_family_at_other_property: false, split_by_service: true },
+    {
+      kind: 'customer',
+      before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze', pipeline_stage: 'active_customer' }),
+      after: customerFields({ monthly_rate: '145.00', billing_mode: 'per_application', waveguard_tier: 'Gold', pipeline_stage: 'active_customer', ...o.customerAfter }),
+    },
+    { kind: 'plan_rate_ledger', before: { lawn_care: 55 }, after: { lawn_care: 55, pest_control: 49, mosquito: 41 }, total_before: 55, total_after: 145 },
+    { kind: 'lawn_profile', before: noLawn, after: noLawn },
+    { kind: 'conversion', recurring: true, service_count: 2, billing_lane: 'per_application', per_application_amount: null, manual_recurring_scheduling: false, ...o.conversion },
+    ...(o.extra || []),
+    o.postCommit || postCommit(),
+  ];
+}
+
+let dryEffects;
+let realReply;
 beforeEach(() => {
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
   delete process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND;
   reads.length = 0;
   writes.length = 0;
   seed();
+  dryEffects = () => addOnEffects();
+  realReply = async () => ({ status: 200, json: { success: true, alreadyAccepted: false, conversion: { monthlyRate: 145, tier: 'Gold' }, warnings: [] } });
   markEstimateAcceptedAsStaff.mockReset();
-  // A proven-disjoint add-on: the lawn plan stays and the new services add on.
-  classify = jest.spyOn(Converter, 'classifyAddOnAcceptContext')
-    .mockResolvedValue({ addOnBase: 55, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: false });
-  // The customer's live qualifying services (no frozen snapshot on this quote).
+  markEstimateAcceptedAsStaff.mockImplementation(async (args) => (args.dryRun
+    ? { status: 200, json: { success: true, dryRun: true, alreadyAccepted: false, effects: dryEffects() } }
+    : realReply(args)));
+});
+// The customer's live qualifying services (no frozen snapshot on this quote).
+let priorKeys;
+beforeEach(() => {
   priorKeys = jest.spyOn(require('../services/waveguard-existing-services'), 'loadExistingQualifyingServiceKeys')
     .mockResolvedValue(['lawn_care']);
 });
-afterEach(() => { classify.mockRestore(); priorKeys.mockRestore(); });
+afterEach(() => { priorKeys.mockRestore(); });
 afterAll(() => { delete process.env.GATE_IB_ACCEPT_ESTIMATE; });
 
 const card = (preview) => AuthorizationContract.buildContract({
   toolName: 'accept_estimate', params: INPUT, displayParams: {}, preview,
 });
 const labels = (contract) => contract.effects.map((e) => e.label);
+const cardFor = async () => labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
 
 describe('the card for a lawn customer saying yes to a pest + mosquito add-on', () => {
   test('lists each new service, the whole bill before and after, lane, tier, visits and the email', async () => {
@@ -121,13 +169,28 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(writes).toEqual([]);
   });
 
-  test('a one-time estimate does not promise a plan, a bill change or customer activation', async () => {
+  test('the card comes from the accept run as a dry run, through the page handler, and nothing real is run', async () => {
+    await executeEstimateAcceptTool('accept_estimate', INPUT, { technicianId: 'tech-owner' });
+    expect(markEstimateAcceptedAsStaff).toHaveBeenCalledTimes(1);
+    expect(markEstimateAcceptedAsStaff).toHaveBeenCalledWith({
+      estimateId: ESTIMATE_ID, body: { source: 'verbal_yes' }, actor: { technicianId: 'tech-owner' }, dryRun: true,
+    });
+  });
+
+  test('a one-time estimate does not promise a plan, a bill change or customer activation, and lists each one-time line', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'customer', before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }), after: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }) },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      postCommit([]),
+    ];
     const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
     const lines = labels(card(preview));
     expect(lines).toEqual(expect.arrayContaining([
       'Accepts estimate addonquo for Lena Synthetic: $0.00 a month, $350.00 one-time',
       'Bill: unchanged — a one-time estimate only changes status here. Schedule and invoice the work by hand',
+      'One-time German Roach Cleanout ($350.00): this accept does not schedule or invoice it — schedule it and invoice it by hand',
       "Marks the estimate accepted and locks its price; a linked lead is marked won; the customer's status and plan stay as they are",
       'Message: No email or text: a one-time estimate only changes status here',
     ]));
@@ -135,97 +198,114 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(card(preview).notifies_customer).toBe(false);
   });
 
-  test('a commercial one-time estimate discloses the commercial property stamp', async () => {
-    seed({
-      estimate: {
-        monthly_total: 0, onetime_total: 640,
-        estimate_data: { result: { oneTime: { items: [{ service: 'commercial_trenching', name: 'Commercial Trenching', price: 640, isCommercial: true, commercialPricingMode: 'auto_estimate' }] } } },
-      },
-      customer: { property_type: 'residential' },
+  test('every accepted one-time line rides a recurring accept too, each with what the accept does about it', async () => {
+    dryEffects = () => addOnEffects({
+      extra: [
+        { kind: 'one_time_line', name: 'Initial Cleanout', amount: 125, consequence: 'schedule_and_invoice_by_hand' },
+        { kind: 'one_time_line', name: 'Gutter Spray', amount: 60.5, consequence: 'schedule_and_invoice_by_hand' },
+      ],
     });
-    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
-    expect(lines).toContain('Property type: residential → commercial (later invoices charge sales tax on taxable commercial services)');
+    const lines = await cardFor();
+    expect(lines).toEqual(expect.arrayContaining([
+      'One-time Initial Cleanout ($125.00): this accept does not schedule or invoice it — schedule it and invoice it by hand',
+      'One-time Gutter Spray ($60.50): this accept does not schedule or invoice it — schedule it and invoice it by hand',
+    ]));
+  });
+
+  test('a commercial one-time estimate discloses the commercial property stamp', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 640, estimate_data: {} }, customer: { property_type: 'residential' } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'customer', before: customerFields({ property_type: 'residential' }), after: customerFields({ property_type: 'commercial' }) },
+      postCommit([]),
+    ];
+    expect(await cardFor()).toContain('Property type: residential → commercial (later invoices charge sales tax on taxable commercial services)');
   });
 
   test('a pinned legacy rodent-only plan goes on monthly dues, as the converter stamps it', async () => {
-    seed({
-      estimate: {
-        monthly_total: 49,
-        estimate_data: { recurring: { services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', legacyPinnedReplay: true, monthly: 49 }] } },
-      },
-      customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
-      ledger: [],
-    });
-    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
-    expect(lines).toContain('Billing lane: none → monthly membership dues');
+    seed({ customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null }, ledger: [] });
+    dryEffects = () => addOnEffects({ customerAfter: { monthly_rate: '49.00', billing_mode: 'monthly_membership' } }).map((e) => (e.kind === 'customer'
+      ? { ...e, before: customerFields({ pipeline_stage: 'lead', monthly_rate: '0' }) } : e));
+    expect(await cardFor()).toContain('Billing lane: none → monthly membership dues');
   });
 
   test('an address the email sender would skip is not promised an email', async () => {
-    seed({ customer: { email: 'person@example' } });
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep({ will_send: false, reason: 'invalid_address', to: null })]) });
     const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(labels(card(preview))).toContain('Message: No "membership started" email: no email (the address on file is not a valid email)');
     expect(card(preview).notifies_customer).toBe(false);
+  });
+
+  test('a customer with email turned off is not emailed, and the card says so', async () => {
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep({ will_send: false, reason: 'email_off', to: null })]) });
+    const contract = card(await executeEstimateAcceptTool('accept_estimate', INPUT));
+    expect(contract.notifies_customer).toBe(false);
+    expect(labels(contract)).toContain('Message: No "membership started" email: this customer turned email messages off');
   });
 
   test('a single-service plan shows the exact per-application charge the converter stamps', async () => {
     seed({
       estimate: {
         monthly_total: 49, annual_total: 588,
-        estimate_data: {
-          customerSelection: { frequency: 'quarterly' },
-          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] },
-        },
+        estimate_data: { customerSelection: { frequency: 'quarterly' }, recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] } },
       },
       customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
       ledger: [],
     });
-    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
-    expect(lines).toContain('Bills $147.00 per application (about $49.00 a month)');
+    dryEffects = () => addOnEffects({ conversion: { per_application_amount: 147 } });
+    expect(await cardFor()).toContain('Bills $147.00 per application (about $49.00 a month)');
   });
 
-  test("a multi-service accept by a per-application customer discloses the account fee it keeps", async () => {
-    seed({ customer: { per_application_fee: 62 } });
-    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
-    expect(lines).toContain('Bills each service per application at its own visit price; the account fee stays $62.00 for any visit with no price');
+  test('a multi-service accept by a per-application customer discloses the account fee it keeps', async () => {
+    dryEffects = () => addOnEffects({ customerAfter: { per_application_fee: '62' } });
+    expect(await cardFor()).toContain('Bills each service per application at its own visit price; the account fee stays $62.00 for any visit with no price');
   });
 
   test('a pest line accepted monthly shows the accepted 12 visits a year, not its stale quote-time 4', async () => {
     seed({
       estimate: {
         monthly_total: 49, annual_total: 588,
-        estimate_data: {
-          customerSelection: { frequency: 'monthly' },
-          recurring: { services: [{ name: 'Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] },
-        },
+        estimate_data: { customerSelection: { frequency: 'monthly' }, recurring: { services: [{ name: 'Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] } },
       },
-      customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
-      ledger: [],
     });
-    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    const lines = await cardFor();
     expect(lines.find((l) => l.startsWith('Starts Pest control'))).toMatch(/: 12 visits a year,/);
   });
 
   test('a single-service plan whose per-visit charge the converter cannot resolve is refused, not carded', async () => {
-    seed({
-      estimate: {
-        monthly_total: 55, annual_total: 0,
-        estimate_data: { recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', monthly: 55 }] } },
-      },
-      customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
-      ledger: [],
-    });
+    // The converter parks a fee bell for the office when it cannot resolve the charge.
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep(), { step: 'admin_bell', bell: 'per_application_fee', title: 'Per-application fee not set on a new per-application customer' }]) });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('per_application_unresolved');
     expect(result.error).toBe('Accept this on the estimate page; the per-visit charge needs a manual review. Nothing was changed.');
   });
 
-  test('the tier-review office notice shows when the accept raises a customer with prior services', async () => {
-    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
-    expect(lines).toContain('Office notice: tier review (Bronze → Gold)');
-    // No prior qualifying services: no notice.
-    priorKeys.mockResolvedValue([]);
-    const fresh = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
-    expect(fresh.some((l) => l.startsWith('Office notice: tier review'))).toBe(false);
+  test('an unpriced per-application add-on, which the converter refuses outright, reaches the operator with the page\'s words', async () => {
+    markEstimateAcceptedAsStaff.mockResolvedValue({ status: 409, json: { error: 'This add-on has no per-visit price. Re-quote it.', code: 'PER_APPLICATION_ADD_ON_UNPRICED' } });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result).toMatchObject({ code: 'PER_APPLICATION_ADD_ON_UNPRICED', error: 'This add-on has no per-visit price. Re-quote it. Nothing was changed.' });
+  });
+
+  test('every office bell the accept rings is on the card, including the grouped plan-rate review the bypassed accept parks', async () => {
+    dryEffects = () => addOnEffects({
+      postCommit: postCommit([
+        emailStep(),
+        { step: 'admin_bell', bell: 'tier_upgrade', title: 'WaveGuard Gold activated: review existing plan rates' },
+        { step: 'admin_bell', bell: 'plan_rate_review', title: 'Multi-plan rate needs review after re-quote' },
+      ]),
+    });
+    const lines = await cardFor();
+    expect(lines).toEqual(expect.arrayContaining([
+      'Admin bell: WaveGuard Gold activated: review existing plan rates',
+      'Admin bell: Multi-plan rate needs review after re-quote',
+    ]));
+    dryEffects = () => addOnEffects();
+    expect((await cardFor()).some((l) => l.startsWith('Admin bell:'))).toBe(false);
+  });
+
+  test('the bill note says when the accept is not split by service', async () => {
+    dryEffects = () => addOnEffects().map((e) => (e.kind === 'add_on_classification' ? { ...e, split_by_service: false } : e));
+    expect(await cardFor()).toContain('Bill note: this accept is not split by service (grouped or other-property estimate)');
   });
 
   describe('lawn profile writes', () => {
@@ -237,42 +317,50 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
         engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', lawnSqFt: 6500, turfBasis: 'measuredTurfSf', visitsPerYear: 9, monthly: 55, annual: 495 }] },
       },
     };
+    const lawnEffects = (before, after) => addOnEffects().map((e) => (e.kind === 'lawn_profile' ? { ...e, before: { ...noLawn, ...before }, after: { ...noLawn, ...after } } : e));
     afterEach(() => { tables.customer_turf_profiles = []; tables.customer_properties = []; });
 
     test('an empty lawn profile is filled, and the card says from what to what', async () => {
       seed({ estimate: lawnEstimate, ledger: [] });
       tables.customer_turf_profiles = [];
       tables.customer_properties = [{ id: 'prop-1', customer_id: CUSTOMER_ID, active: true, is_primary: true, property_sqft: null }];
+      dryEffects = () => lawnEffects({}, { grass_type: 'st_augustine', turf_lawn_sqft: 6500 });
       const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
       expect(preview.error).toBeUndefined();
       expect(labels(card(preview))).toContain('Lawn profile: grass type none → st_augustine; lawn size none → 6,500 sq ft');
       expect(preview.pins.lawn_profile).toBe('||prop-1|');
     });
 
+    test('a mirror-only rewrite (the turf profile already right, the property and customer sizes stale) is on the card', async () => {
+      seed({ estimate: lawnEstimate, ledger: [] });
+      tables.customer_turf_profiles = [{ customer_id: CUSTOMER_ID, grass_type: 'st_augustine', lawn_sqft: 6500 }];
+      tables.customer_properties = [{ id: 'prop-1', customer_id: CUSTOMER_ID, active: true, is_primary: true, property_sqft: 5000 }];
+      dryEffects = () => lawnEffects(
+        { grass_type: 'st_augustine', turf_lawn_sqft: 6500, primary_property_sqft: 5000, customer_property_sqft: 5000 },
+        { grass_type: 'st_augustine', turf_lawn_sqft: 6500, primary_property_sqft: 6500, customer_property_sqft: 6500 },
+      );
+      const lines = await cardFor();
+      expect(lines).toContain('Lawn profile: primary property size 5,000 sq ft → 6,500 sq ft; customer record size 5,000 sq ft → 6,500 sq ft');
+    });
+
     test('a profile that already holds these values shows no lawn line, but is still pinned', async () => {
       seed({ estimate: lawnEstimate, ledger: [] });
       tables.customer_turf_profiles = [{ customer_id: CUSTOMER_ID, grass_type: 'st_augustine', lawn_sqft: 6500 }];
       tables.customer_properties = [{ id: 'prop-1', customer_id: CUSTOMER_ID, active: true, is_primary: true, property_sqft: 6500 }];
+      const same = { grass_type: 'st_augustine', turf_lawn_sqft: 6500, primary_property_sqft: 6500, customer_property_sqft: 6500 };
+      dryEffects = () => lawnEffects(same, same);
       const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
       expect(preview.error).toBeUndefined();
       expect(labels(card(preview)).some((l) => l.startsWith('Lawn profile'))).toBe(false);
       expect(preview.pins.lawn_profile).toBe('st_augustine|6500|prop-1|6500');
     });
-
-    test('a non-lawn estimate has no lawn line and no lawn pin', async () => {
-      const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
-      expect(preview.pins.lawn_profile).toBeNull();
-    });
   });
 
-  test('the tier is the one the accept activates, not only what the quote says', async () => {
-    // A legacy quote still says Silver, but with the live lawn plan the accept
-    // counts three services and activates Gold; the card says Gold.
+  test('the tier is the one the accept leaves stored, not what the quote says', async () => {
     seed({ estimate: { waveguard_tier: 'Silver' } });
-    expect(labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)))).toContain('Tier: Bronze → Gold');
-    // A frozen snapshot on the quote wins over the live lookup, as in the converter.
-    seed({ estimate: { estimate_data: { ...tables.estimates[0].estimate_data, membershipSnapshot: { existingServiceKeys: [] } } } });
-    expect(labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)))).toContain('Tier: Bronze → Silver');
+    expect(await cardFor()).toContain('Tier: Bronze → Gold');
+    dryEffects = () => addOnEffects({ customerAfter: { waveguard_tier: 'Silver' } });
+    expect(await cardFor()).toContain('Tier: Bronze → Silver');
   });
 
   test('is irreversible and tells the operator the customer will be emailed', async () => {
@@ -282,14 +370,6 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(contract.action_label).toBe('Mark an estimate accepted (starts the plan)');
   });
 
-  test('a customer with email turned off is not emailed, and the card says so', async () => {
-    seed({ prefs: [{ customer_id: CUSTOMER_ID, email_enabled: false }] });
-    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    const contract = card(preview);
-    expect(contract.notifies_customer).toBe(false);
-    expect(labels(contract)).toContain('Message: No "membership started" email: this customer turned email messages off');
-  });
-
   test('an estimate with visits already booked from it is refused (the reservation path can add and change visits)', async () => {
     // A cancelled linked visit counts too: the converter's reservation lookup
     // does not filter by status.
@@ -297,8 +377,37 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('booked_from_estimate');
     expect(result.error).toMatch(/1 visit\(s\) are already linked to this estimate \(first 2026-10-14\)/);
+    expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
+  });
+});
+
+describe('fail closed', () => {
+  test('a bill classifier that cannot read its evidence refuses the card (no silent fall back to replace semantics)', async () => {
+    markEstimateAcceptedAsStaff.mockResolvedValue({
+      status: 409,
+      json: { error: "Could not read the customer's other plans to price this accept. Nothing was changed.", code: 'add_on_classification_unavailable' },
+    });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('add_on_classification_unavailable');
   });
 
+  test('email settings the accept could not read refuse instead of guessing the email', async () => {
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep({ will_send: false, reason: 'prefs_unreadable', to: null })]) });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('prefs_unavailable');
+    expect(result.error).toBe("Could not verify the customer's email settings — try again. Nothing was changed.");
+  });
+
+  test('commercial recurring work the converter would schedule by hand refuses even if the quote looked residential', async () => {
+    dryEffects = () => addOnEffects({ conversion: { manual_recurring_scheduling: true } });
+    expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).code).toBe('commercial_recurring');
+  });
+
+  test('an estimate the page says is already accepted by the time of the dry run is refused', async () => {
+    markEstimateAcceptedAsStaff.mockResolvedValue({ status: 200, json: { success: true, dryRun: true, alreadyAccepted: true, effects: [] } });
+    expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).code).toBe('already_accepted');
+  });
 });
 
 describe('refusals before any card', () => {
@@ -365,21 +474,17 @@ describe('refusals before any card', () => {
     expect(result.error).toBe('Accept commercial work on the estimate page. Nothing was changed.');
   });
 
-  test("an unreadable email-settings row refuses instead of guessing the email", async () => {
-    const dbMock = require('../models/db');
-    const original = dbMock.getMockImplementation();
-    dbMock.mockImplementation((table) => {
-      const q = original(table);
-      if (table === 'notification_prefs') q.first = () => Promise.reject(new Error('relation unavailable'));
-      return q;
-    });
-    try {
-      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
-      expect(result.code).toBe('prefs_unavailable');
-      expect(result.error).toBe("Could not verify the customer's email settings — try again. Nothing was changed.");
-    } finally {
-      dbMock.mockImplementation(original);
-    }
+  test('a grouped estimate (another sent or viewed sibling in its group) is refused before any card or dry run', async () => {
+    seed({ estimate: { estimate_group_id: 'group-1' }, siblings: [{ id: 'sibling-1' }] });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('grouped_estimate');
+    expect(result.error).toBe('This estimate is part of a group. Accept it from the estimate page, where the group is shown. Nothing was changed.');
+    expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
+  });
+
+  test('a group whose other estimates are all closed is not a grouped accept', async () => {
+    seed({ estimate: { estimate_group_id: 'group-1' }, siblings: [] });
+    expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).preview).toBe(true);
   });
 
   describe('with customer properties on', () => {
@@ -426,15 +531,16 @@ describe('Confirm', () => {
   const confirmWith = async (approved) => executeEstimateAcceptTool('accept_estimate', INPUT, {
     confirmed: true, technicianId: 'tech-owner', executionPins: { _verified_accept_plan: approved },
   });
+  const realCalls = () => markEstimateAcceptedAsStaff.mock.calls.filter(([args]) => !args.dryRun);
 
-  test('runs the estimate page handler with the page\'s own verbal-yes body', async () => {
+  test('runs the estimate page handler with the page\'s own verbal-yes body, the pins, the pinned effect list and the approved email decision', async () => {
     const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    markEstimateAcceptedAsStaff.mockImplementation(async () => {
+    realReply = async () => {
       tables.customers[0].waveguard_tier = 'Gold';
       return { status: 200, json: { success: true, alreadyAccepted: false, conversion: { monthlyRate: 145, tier: 'Gold' }, warnings: [] } };
-    });
+    };
     const result = await confirmWith(approved);
-    expect(markEstimateAcceptedAsStaff).toHaveBeenCalledWith({
+    expect(realCalls()).toEqual([[{
       estimateId: ESTIMATE_ID,
       body: {
         source: 'verbal_yes',
@@ -444,15 +550,26 @@ describe('Confirm', () => {
           customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
           customerBilling: 'per_application||Bronze|active_customer|',
           planRows: '',
-          lawnProfile: null,
+          lawnProfile: '|||',
           noLinkedVisits: true,
+          effectsKey: approved.effects_key,
+          membershipEmail: 'send',
         },
       },
       actor: { technicianId: 'tech-owner' },
-    });
+    }]]);
     expect(approved.pins.ledger).toBe('55.00|lawn_care=55.00');
+    expect(approved.effects_key).toMatch(/^[0-9a-f]{64}$/);
     expect(result).toMatchObject({ success: true, monthly_rate_now: 145, tier_now: 'Gold' });
     expect(result.message).toMatch(/No visits were booked/);
+  });
+
+  test('a card that said "no email" sends that decision along, so the email is skipped at delivery', async () => {
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep({ will_send: false, reason: 'email_off', to: null })]) });
+    const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(approved.membership_email).toBe('skip');
+    await confirmWith(approved);
+    expect(realCalls()[0][0].body.expected.membershipEmail).toBe('skip');
   });
 
   test.each([
@@ -464,12 +581,26 @@ describe('Confirm', () => {
     seed(drift);
     const result = await confirmWith(approved);
     expect(result.preview_changed).toBe(true);
-    expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
+    expect(realCalls()).toEqual([]);
+  });
+
+  test.each([
+    ['the bill classification differs', () => addOnEffects().map((e) => (e.kind === 'add_on_classification' ? { ...e, add_on_base: 0 } : e))],
+    ['the email decision flips (the customer opted out)', () => addOnEffects({ postCommit: postCommit([emailStep({ will_send: false, reason: 'email_off', to: null })]) })],
+    ['a bell appears', () => addOnEffects({ postCommit: postCommit([emailStep(), { step: 'admin_bell', bell: 'plan_rate_review', title: 'Multi-plan rate needs review after re-quote' }]) })],
+    ['a lawn mirror would now be rewritten', () => addOnEffects().map((e) => (e.kind === 'lawn_profile' ? { ...e, after: { ...noLawn, customer_property_sqft: 6500 } } : e))],
+    ['a one-time line appears', () => addOnEffects({ extra: [{ kind: 'one_time_line', name: 'Initial Cleanout', amount: 125, consequence: 'schedule_and_invoice_by_hand' }] })],
+  ])('refuses as preview_changed, and runs nothing, when %s since the card', async (_name, changed) => {
+    const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    dryEffects = changed;
+    const result = await confirmWith(approved);
+    expect(result.preview_changed).toBe(true);
+    expect(realCalls()).toEqual([]);
   });
 
   test('a change caught under the accept locks comes back as preview_changed', async () => {
     const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    markEstimateAcceptedAsStaff.mockResolvedValue({ status: 409, json: { error: 'The estimate, the customer or the bill changed after the card was shown. Nothing was changed.', code: 'preview_changed' } });
+    realReply = async () => ({ status: 409, json: { error: 'The estimate, the customer or the bill changed after the card was shown. Nothing was changed.', code: 'preview_changed' } });
     const result = await confirmWith(approved);
     expect(result).toMatchObject({ preview_changed: true });
     expect(result.success).toBeUndefined();
@@ -477,10 +608,10 @@ describe('Confirm', () => {
 
   test('tier_now is the tier as stored after the commit, not the converter\'s internal value', async () => {
     const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    markEstimateAcceptedAsStaff.mockImplementation(async () => {
+    realReply = async () => {
       tables.customers[0].waveguard_tier = 'Commercial'; // what the converter stores
       return { status: 200, json: { success: true, alreadyAccepted: false, conversion: { monthlyRate: 145, tier: 'none' }, warnings: [] } };
-    });
+    };
     const result = await confirmWith(approved);
     expect(result.tier_now).toBe('Commercial');
   });
@@ -488,12 +619,12 @@ describe('Confirm', () => {
   test('refuses without a verified card', async () => {
     const result = await confirmWith(undefined);
     expect(result.preview_changed).toBe(true);
-    expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
+    expect(realCalls()).toEqual([]);
   });
 
   test('a refusal from the page reaches the operator with its words', async () => {
     const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    markEstimateAcceptedAsStaff.mockResolvedValue({ status: 409, json: { error: 'Estimate is no longer active.' } });
+    realReply = async () => ({ status: 409, json: { error: 'Estimate is no longer active.' } });
     const result = await confirmWith(approved);
     expect(result.error).toBe('Estimate is no longer active. Nothing was changed.');
     expect(result.success).toBeUndefined();

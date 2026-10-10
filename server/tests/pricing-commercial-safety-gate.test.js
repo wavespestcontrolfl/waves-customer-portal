@@ -1447,12 +1447,14 @@ describe('codex #3594 r2 — public one-time accept stamp + display-only copy fl
 
   test('the manual Mark Won path stamps commercial identity for one-time wins', () => {
     const manualSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-manual-acceptance.js'), 'utf8');
+    // The stamp is its own named step of the win transaction (stampCommercialOneTime).
     expect(manualSrc).toMatch(
-      /if \(updatedEstimate\.customer_id\s*\n\s*&& EstimateConverter\.estimateHasCommercialOneTime\(parseEstimateData\(updatedEstimate\.estimate_data\)\)\) \{\s*\n\s*await trx\('customers'\)\s*\n\s*\.where\(\{ id: updatedEstimate\.customer_id \}\)\s*\n\s*\.whereRaw\("coalesce\(property_type, ''\) <> 'commercial'"\)\s*\n\s*\.update\(\{ property_type: 'commercial' \}\);/
+      /async function stampCommercialOneTime\(trx, updatedEstimate\) \{\s*\n\s*if \(!updatedEstimate\.customer_id\s*\n\s*\|\| !EstimateConverter\.estimateHasCommercialOneTime\(parseEstimateData\(updatedEstimate\.estimate_data\)\)\) return;\s*\n\s*await trx\('customers'\)\s*\n\s*\.where\(\{ id: updatedEstimate\.customer_id \}\)\s*\n\s*\.whereRaw\("coalesce\(property_type, ''\) <> 'commercial'"\)\s*\n\s*\.update\(\{ property_type: 'commercial' \}\);/
     );
-    // …inside the win transaction, before the audit log.
-    expect(manualSrc.indexOf('estimateHasCommercialOneTime(parseEstimateData(updatedEstimate.estimate_data))'))
+    // ...called inside the win transaction, before the audit log.
+    expect(manualSrc.indexOf('await stampCommercialOneTime(trx, updatedEstimate);'))
       .toBeLessThan(manualSrc.indexOf('await logManualAcceptance(trx, {'));
+    expect(manualSrc.indexOf('await stampCommercialOneTime(trx, updatedEstimate);')).toBeGreaterThan(0);
   });
 
   test('scoped one-time commercial rows feed the COPY flag, never the approval-only classifier', () => {

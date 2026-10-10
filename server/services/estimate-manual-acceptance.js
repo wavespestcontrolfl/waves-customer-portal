@@ -3,7 +3,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const EstimateConverter = require('./estimate-converter');
 const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
-const AccountMembershipEmail = require('./account-membership-email');
+const AcceptEffects = require('./estimate-accept-effects');
 const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
 const { normalizeProposal } = require('./estimate-proposal');
 const proposalWin = require('./proposal-win');
@@ -579,13 +579,6 @@ const CARD_PIN_CHECKS = [
   { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
 ];
 
-// What the card's pins ask of the conversion itself: with "no linked visit"
-// pinned, the converter's own reservation read refuses a row linked since
-// (booking.js links outside this accept's locks), rolling the accept back.
-function cardConvertOptions(expected) {
-  return expected && expected.noLinkedVisits === true ? { refuseLinkedVisits: true } : {};
-}
-
 // The lawn profile values the accept's lawn writes read (customer_turf_profiles
 // grass type and lawn size, the primary property's size), as one string.
 // Exported for the Intelligence Bar card, which pins it.
@@ -685,6 +678,568 @@ async function assertAddOnsAcceptable(trx, estimate, { billingTerm, bookedAppoin
   });
 }
 
+// ── The accept, as named steps ────────────────────────────────────────────
+//
+// markEstimateManuallyAccepted runs these inside ONE transaction, in this
+// order. Each step records the effects it has (ctx.effects, estimate-accept-
+// effects.js) when the log is on; the log is on for a dry run and for a
+// carded accept (expected.effectsKey). Without it the steps behave exactly as
+// the estimate page's Mark accepted always did.
+
+const alreadyAcceptedOutcome = (row) => ({ acceptedEstimate: row, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: row });
+
+// A dry run rolls the transaction back by throwing; anything else returns.
+function finishAccept(ctx, outcome) {
+  if (ctx.dryRun) throw new AcceptEffects.DryRunRollback({ ...outcome, effects: ctx.effects.list() });
+  return outcome;
+}
+
+// Rung 6 BEFORE the estimate row lock below (Codex #3109 r32): the merge-undo
+// takes customer-comms and THEN locks journaled estimates — acquiring comms
+// only later (inside convertEstimate, after the status-flip UPDATE row-locked
+// this estimate) was an AB-BA that deadlock-aborted the operator's Mark Won or
+// the undo. r44: LOOP the acquire to a fixpoint — the wait can sit behind the
+// very undo repointing this estimate; re-read after each acquire until the
+// owner is one whose key this transaction already holds, so every later check
+// uses the post-undo row.
+async function lockCommsOwner(trx, estimateId, estimate) {
+  const { lockCustomerComms } = require('../utils/customer-comms-lock');
+  const heldOwners = new Set();
+  let current = estimate;
+  while (current.customer_id && !heldOwners.has(String(current.customer_id))) {
+    await lockCustomerComms(trx, current.customer_id);
+    heldOwners.add(String(current.customer_id));
+    const fresh = await trx('estimates').where({ id: estimateId }).first();
+    if (!fresh) throw httpError('Estimate not found', 404);
+    current = fresh;
+  }
+  return current;
+}
+
+// Step 1: the estimate, read and locked in the right order. One-tap purchase
+// drafts are INTERNAL flow state (Codex #3395 r12 P2): accepting one here
+// flips it to 'accepted' outside the purchase saga.
+async function loadLockedEstimate(trx, ctx) {
+  const { estimateId, expected } = ctx;
+  const first = await trx('estimates').where({ id: estimateId }).first();
+  if (!first) throw httpError('Estimate not found', 404);
+  throwRefusal(oneTapPurchaseRefusal(first));
+  const estimate = await lockCommsOwner(trx, estimateId, first);
+  await checkCardPins(trx, 'estimate', { estimateId, expected });
+  return estimate;
+}
+
+function lockedEstimateData(row) {
+  const raw = row?.estimate_data;
+  if (!raw) return null;
+  try {
+    const d = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return d && typeof d === 'object' ? d : null;
+  } catch { return null; }
+}
+
+// A clarify re-price hold on the LOCKED row: the dollars or address are known
+// stale, so a verbal yes must not mint the money-bearing terminal at them
+// either (codex r11 sweep on #3804). An engine draft pulled by a call-linkage
+// invalidation (archived or marker-bearing) is quarantined: money must not
+// move on it.
+async function assertNotQuarantined(trx, freshLinkRow, data) {
+  const eng = data?.estimatorEngine;
+  const { repricePendingActive } = require('./estimate-clarify-asks');
+  if (repricePendingActive(eng)) {
+    throw httpError('This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before accepting.', 409);
+  }
+  if (!eng?.callLogId) return;
+  const quarantined = httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
+  if (freshLinkRow?.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at) throw quarantined;
+  if (data?.lead_id && ['sid', 'stamp'].includes(data?.lead_linkage)) {
+    await trx('leads').where({ id: String(data.lead_id) }).forUpdate().first('id');
+  }
+  const { staleCallLinkageReason } = require('./admin-estimate-persistence');
+  // The LOCKED row's status (codex #4815 r8 P2): a queued row-scoped verdict
+  // judges a terminal row by it; omitted = fail closed.
+  if (await staleCallLinkageReason(trx, data, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) throw quarantined;
+  const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+  if (await callSideBlockForEstimateData(trx, data, { estimateStatus: freshLinkRow?.status })) throw quarantined;
+}
+
+// Step 2: SERIALIZED with call-linkage corrections, mirroring the public
+// accept protocol (pre-push P0, PR #3304). One lock order everywhere:
+// estimates → leads → call_log. The estimate row is locked FOR UPDATE and
+// re-read fresh; the locked row is propagated back onto `estimate` (codex P1)
+// so every check below reads it. Every add-on decision of this acceptance
+// reads the LOCKED row.
+async function revalidateLockedRow(trx, ctx, estimate) {
+  const freshLinkRow = await trx('estimates').where({ id: ctx.estimateId }).forUpdate().first();
+  const locked = freshLinkRow ? { ...estimate, ...freshLinkRow } : estimate;
+  await assertAddOnsAcceptable(trx, locked, { billingTerm: ctx.billingTerm, bookedAppointmentIds: ctx.bookedAppointmentIds });
+  await assertNotQuarantined(trx, freshLinkRow, lockedEstimateData(freshLinkRow));
+  return locked;
+}
+
+// An add-on estimate for a customer who already has a live plan must not open
+// an annual-prepay term (the public accept refuses it too): convertEstimate
+// PRESERVES the existing plan's billing_mode, but the pending term suppresses
+// the monthly dues cron and the term's payment-time stamp rewrites
+// billing_mode to 'annual_prepay' — silently killing the OTHER plan's
+// billing. Checked three ways: the frozen membershipSnapshot, the LIVE row
+// via customerPreservesMonthlyMembership, and strict live-plan evidence
+// (codex round-2 P1: that predicate answers false for every explicit
+// non-monthly lane).
+async function assertNoExistingPlanForPrepay(trx, ctx, estimate) {
+  let livePreservesMembership = false;
+  let hasLivePlan = false;
+  if (estimate.customer_id) {
+    // LOCKED, not a bare read (codex pre-push P0): same order convertEstimate
+    // itself uses ahead of its customer lock (property-preferences advisory
+    // BEFORE the row lock — codex #3565 gh-r39). Re-acquisition later on this
+    // transaction is a no-op.
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(estimate.customer_id)],
+    );
+    const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
+    livePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
+    hasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null, ctx.bookedAppointmentIds);
+  }
+  if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || livePreservesMembership || hasLivePlan) {
+    throw httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
+  }
+}
+
+// Step 3: what an annual-prepay request needs. Returns the prepay amount, or
+// null for a standard accept. A commercial proposal's pricing lives in
+// estimate_data.proposal, which EstimateConverter does not read, so prepay
+// would silently produce nothing there (#1917).
+async function assertAnnualPrepayAllowed(trx, ctx, estimate, isCommercialProposal) {
+  if (!ctx.annualPrepaySelected) return null;
+  if (isCommercialProposal) {
+    throw httpError(
+      'Annual prepay is not available for a commercial proposal. Mark it accepted as a standard win and bill it through the proposal invoice flow.',
+      400,
+    );
+  }
+  const amount = resolveAnnualPrepayAmount(estimate);
+  if (!amount) throw httpError('Annual prepay requires a recurring estimate with a monthly or annual total.', 400);
+  if (!hasManualAnnualPrepayRecurringRows(estimate)) throw httpError('Annual prepay requires recurring service rows on the estimate.', 400);
+  if (!isManualAnnualPrepayEligibleServiceMix(estimate)) throw httpError('Annual prepay is not available for this estimate service mix.', 400);
+  await assertNoExistingPlanForPrepay(trx, ctx, estimate);
+  return amount;
+}
+
+// The status flip. Served-disclosure evidence rides a manual (verbal)
+// acceptance too (codex local max-effort review on #5434). Price is frozen
+// atomically with the flip.
+function acceptedRowUpdates(trx, estimate) {
+  const now = trx.fn.now();
+  const promoteRateReviewEvidence = require('./estimate-proposal-billing').rateReviewTermsServedIsCurrent(estimate.estimate_data);
+  const updates = {
+    status: 'accepted',
+    accepted_at: estimate.accepted_at || now,
+    declined_at: null,
+    decline_reason: null,
+    updated_at: now,
+    price_locked_at: now,
+    price_locked_by: 'manual_accept',
+    pricing_authority: 'LOCKED',
+    // Durable at-lock evidence for the pricing-authority gate (#3750).
+    estimate_data: trx.raw(promoteRateReviewEvidence
+      ? "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL')))), '{rateReviewDisclosedAtAccept}', 'true'::jsonb)"
+      : "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL'))))"),
+  };
+  if (!estimate.sent_at) updates.sent_at = now;
+  return updates;
+}
+
+// Step 4: claim the row. The whereNull(price_locked_at) guard means a claimed
+// row is always unlocked and stops a second accept from re-pricing; the
+// marker/archive predicates refuse outright if any invalidation state is on
+// the row (pre-push P0, PR #3304). Returns { updatedEstimate } for the winner,
+// or { outcome } when the estimate was already accepted.
+async function claimEstimateRow(trx, ctx, estimate) {
+  const [updatedEstimate] = await trx('estimates')
+    .where({ id: ctx.estimateId })
+    .whereIn('status', Array.from(MANUAL_ACCEPTABLE_STATUSES))
+    .whereNull('price_locked_at')
+    .whereRaw(MANUAL_ACCEPT_ACTIVE_SQL)
+    .where(function engineDraftNotQuarantined() {
+      this.whereRaw("COALESCE(estimate_data #>> '{estimatorEngine,callLogId}', '') = ''")
+        .orWhere(function notQuarantined() {
+          this.whereNull('archived_at')
+            .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+            .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
+        });
+    })
+    .update(acceptedRowUpdates(trx, estimate))
+    .returning('*');
+  if (updatedEstimate) {
+    ctx.effects.add({ kind: 'estimate', action: 'mark_accepted', from_status: estimate.status, locks_price: true });
+    return { updatedEstimate };
+  }
+  const latest = await trx('estimates').where({ id: ctx.estimateId }).first();
+  if (latest?.status === 'accepted') return { outcome: alreadyAcceptedOutcome(latest) };
+  if (latest?.price_locked_at) {
+    throw httpError(
+      'This estimate was already accepted and its price locked — accepting it again would duplicate the conversion and invoicing. Review the linked customer/invoices instead.',
+      409,
+    );
+  }
+  throw httpError('Estimate is no longer active.', 409);
+}
+
+// A commercial proposal's customer: created or linked now (only the flip
+// winner reaches here, so a concurrent accept can't orphan a duplicate).
+async function attachProposalCustomer(trx, updatedEstimate) {
+  if (updatedEstimate.customer_id) {
+    // Pre-linked customer: proposals skip EstimateConverter (which normally
+    // promotes the linked customer), so promote/reactivate here.
+    await proposalWin.promoteLinkedCustomerForProposalWin({ trx, customerId: updatedEstimate.customer_id });
+    return null;
+  }
+  const proposalCustomer = await proposalWin.ensureCustomerForProposalWin({
+    trx,
+    estimate: updatedEstimate,
+    proposal: normalizeProposal(updatedEstimate),
+  });
+  await trx('estimates')
+    .where({ id: updatedEstimate.id })
+    .update({ customer_id: proposalCustomer.customerId, updated_at: trx.fn.now() });
+  updatedEstimate.customer_id = proposalCustomer.customerId;
+  return proposalCustomer;
+}
+
+// Invoice-mode win: the first invoice built from the proposal line items.
+async function createProposalWinInvoice(trx, updatedEstimate) {
+  let proposalInvoice;
+  try {
+    proposalInvoice = await proposalWin.createProposalAcceptanceInvoice({
+      trx,
+      estimate: updatedEstimate,
+      proposal: normalizeProposal(updatedEstimate),
+      customerId: updatedEstimate.customer_id,
+    });
+  } catch (err) {
+    logger.warn(`[estimate-manual-acceptance] proposal invoice failed for estimate ${updatedEstimate.id}: ${err.message}`);
+    // Expected validation conflicts (4xx, e.g. the payer-term mismatch 409)
+    // carry an actionable operator message (codex #3297 r2e).
+    if (Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode < 500) {
+      throw httpError(err.message, err.statusCode);
+    }
+    throw httpError('Proposal invoice could not be created; estimate was not marked accepted.', 500);
+  }
+  // Invoice mode promises a first invoice; with no billable lines the trx
+  // rolls back rather than record a win with no invoice.
+  if (!proposalInvoice) {
+    throw httpError(
+      'This invoice-mode proposal has no billable line items to invoice. Add priced lines or turn off invoice mode before winning it.',
+      400,
+    );
+  }
+  return proposalInvoice;
+}
+
+// Step 5 (commercial proposal): record the win. A proposal's pricing lives in
+// estimate_data.proposal.buildings, which EstimateConverter does not read, so
+// the proposal records the win (status + linked-lead) and, in invoice mode,
+// builds its first invoice from the proposal lines (#1917).
+async function winCommercialProposal(trx, updatedEstimate) {
+  const proposalCustomer = await attachProposalCustomer(trx, updatedEstimate);
+  // Flag the customer commercial for a TAXABLE proposal even when no first
+  // invoice is built now. Idempotent.
+  await proposalWin.flagProposalCustomerCommercialIfTaxable({
+    trx,
+    customerId: updatedEstimate.customer_id,
+    proposal: normalizeProposal(updatedEstimate),
+  });
+  // A NON-invoice-mode win with authored structured payment terms has no path
+  // that consumes them (codex #3297 r4).
+  if (!updatedEstimate.bill_by_invoice && normalizeProposal(updatedEstimate).commercialTerms?.paymentTerms) {
+    throw httpError(
+      'This proposal promises structured payment terms, which only invoice-mode billing enforces. Turn on Bill by invoice, or move the payment language to Additional terms, then mark won again.',
+      409,
+    );
+  }
+  const proposalInvoice = updatedEstimate.bill_by_invoice ? await createProposalWinInvoice(trx, updatedEstimate) : null;
+  return { proposalCustomer, proposalInvoice };
+}
+
+// What the bar card's pins ask of the conversion itself. With "no linked
+// visit" pinned, the converter's own reservation read refuses a row linked
+// since (booking.js links outside this accept's locks). A carded accept (the
+// dry run or an `expected`) also fails closed when the add-on classifier
+// cannot read its evidence, and hands the converter the effect log to fill.
+function cardConvertOptions(ctx) {
+  const { expected, dryRun } = ctx;
+  if (!dryRun && !expected) return {};
+  return {
+    strictAddOnClassification: true,
+    ...(dryRun || expected.noLinkedVisits === true ? { refuseLinkedVisits: true } : {}),
+    ...(ctx.effects.enabled ? { effectLog: ctx.convertLog } : {}),
+  };
+}
+
+// ATOMIC overlap guard: the SAME per-customer advisory lock the Customer 360
+// prepay endpoints use, re-asserted INSIDE this transaction so a double-click,
+// two admins, or an accept racing a Customer 360 prepay can't mint duplicate
+// prepay invoices/terms.
+async function applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayAmount, convertOptions) {
+  const { annualPrepayTermStart, annualPrepayCoverage } = ctx;
+  // Re-run the one-time guard on the row THIS transaction claimed: an edit
+  // landing after the booking preflight must not drop a billable one-time
+  // charge the prepay invoice would not carry.
+  if (manualPrepayBlockingOneTimeCharge(updatedEstimate)) {
+    const oneTimeErr = httpError(
+      'This quote includes a billable one-time charge that an annual-prepay accept would not invoice. Remove the one-time line or convert the estimate normally first.',
+      422,
+    );
+    oneTimeErr.isOperational = true;
+    throw oneTimeErr;
+  }
+  convertOptions.billingTerm = 'prepay_annual';
+  convertOptions.prepayInvoiceAmount = annualPrepayAmount;
+  convertOptions.autoSendInvoice = false;
+  if (annualPrepayTermStart) convertOptions.annualPrepayTermStart = annualPrepayTermStart;
+  if (annualPrepayCoverage && annualPrepayCoverage.coverageServiceType) {
+    // Fail CLOSED on a coverage cadence the renewal/stamping math doesn't
+    // support: callers pass a pre-normalized value; this guards future callers.
+    if (annualPrepayCoverage.coverageCadence != null) {
+      const { normalizeCoverageCadence } = require('./annual-prepay-renewals')._private;
+      if (!normalizeCoverageCadence(annualPrepayCoverage.coverageCadence)) {
+        // isOperational: the conversion catch passes operational 422s through verbatim.
+        const cadenceErr = httpError(`Unsupported annual-prepay coverage cadence: ${annualPrepayCoverage.coverageCadence}`, 422);
+        cadenceErr.isOperational = true;
+        throw cadenceErr;
+      }
+    }
+    convertOptions.coverageServiceType = annualPrepayCoverage.coverageServiceType;
+    convertOptions.coverageVisitCount = annualPrepayCoverage.coverageVisitCount;
+    convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
+  }
+  const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+  await lockAndAssertNoAnnualPrepayOverlap(
+    trx,
+    updatedEstimate.customer_id,
+    annualPrepayTermStart || etDateString(),
+    false,
+    'Customer already has an annual prepay term through',
+    updatedEstimate.id,
+  );
+}
+
+// Manual Mark Won keeps scheduling under operator control. Standard verbal
+// wins also skip the setup invoice; annual-prepay verbal wins create the
+// annual draft invoice + pending term. The Mark Won / Annual Prepay confirm
+// dialogs promise the customer is NOT texted (and, for annual prepay, NOT
+// emailed), so welcome SMS and the membership email are skipped here and run
+// post-commit from the plan. The commercial-schedule admin notification
+// writes through the GLOBAL pool — deferred so a rolled-back Mark Won can't
+// page staff about an unaccepted estimate.
+async function runConversion(trx, ctx, updatedEstimate, annualPrepayAmount) {
+  const convertOptions = {
+    database: trx,
+    skipAutoSchedule: true,
+    bookedAppointmentIds: ctx.bookedAppointmentIds,
+    skipMembershipEmail: true,
+    skipWelcomeSms: true,
+    skipSetupInvoice: !ctx.annualPrepaySelected,
+    deferCommercialScheduleNotification: true,
+    ...cardConvertOptions(ctx),
+  };
+  if (ctx.annualPrepaySelected) await applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayAmount, convertOptions);
+  const conversion = await ctx.estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
+  // Sign-before-pay (slice 3a): a termite annual-plan manual accept
+  // intentionally defers its invoice + prepay term until the customer e-signs,
+  // so a missing draftInvoiceId is EXPECTED then. ANY truthy
+  // annualPlanActivationStatus is a park outcome (fallback P1).
+  if (ctx.annualPrepaySelected && !conversion?.draftInvoiceId && !conversion?.annualPlanActivationStatus) {
+    throw new Error('Annual prepay invoice was not created');
+  }
+  return conversion;
+}
+
+// The conversion's failure as the error the caller sees. Every operational
+// 4xx keeps its status and code (GH codex P1 on #3751); the atomic overlap
+// guard keeps its tag so the booking route can degrade to a standard booking;
+// anything else is a generic 500. The trx rolls back either way.
+function conversionFailure(err, updatedEstimate) {
+  logger.warn(`[estimate-manual-acceptance] EstimateConverter failed for estimate ${updatedEstimate.id}: ${err.message}`);
+  if (err && err.isOperational && Number(err.statusCode) >= 400 && Number(err.statusCode) < 500) {
+    const operational = httpError(err.message, Number(err.statusCode));
+    if (err.code) operational.code = err.code;
+    return operational;
+  }
+  if (err && err.annualPrepayOverlap) {
+    const overlapErr = httpError(err.message, 409);
+    overlapErr.annualPrepayOverlap = err.annualPrepayOverlap;
+    return overlapErr;
+  }
+  return httpError('Customer conversion did not complete; estimate was not marked accepted.', 500);
+}
+
+// Step 5 (everything else): the converter, for a recurring monthly total or an
+// annual prepay.
+async function convertAcceptedEstimate(trx, ctx, updatedEstimate, annualPrepayAmount) {
+  if (!(asMoneyOrNull(updatedEstimate.monthly_total) || ctx.annualPrepaySelected)) return null;
+  try {
+    return await runConversion(trx, ctx, updatedEstimate, annualPrepayAmount);
+  } catch (err) {
+    throw conversionFailure(err, updatedEstimate);
+  }
+}
+
+// Step 6: commercial identity for a manual one-time win (codex #3594 r3 P1).
+// The converter's one-way stamp runs only for a monthly total or annual
+// prepay, so a one-time-only scoped commercial estimate marked won would
+// leave a residential-coded customer residential. Same one-way rule, same
+// transaction; idempotent beside the converter's stamp.
+async function stampCommercialOneTime(trx, updatedEstimate) {
+  if (!updatedEstimate.customer_id
+    || !EstimateConverter.estimateHasCommercialOneTime(parseEstimateData(updatedEstimate.estimate_data))) return;
+  await trx('customers')
+    .where({ id: updatedEstimate.customer_id })
+    .whereRaw("coalesce(property_type, '') <> 'commercial'")
+    .update({ property_type: 'commercial' });
+}
+
+// ── Effects: recorded in the transaction, compared under the locks ──
+
+// The customer rows the conversion writes, before it runs (log on only).
+async function captureStateBefore(trx, ctx, updatedEstimate) {
+  if (!ctx.effects.enabled || !updatedEstimate.customer_id) return null;
+  return AcceptEffects.snapshotAcceptState(trx, updatedEstimate.customer_id);
+}
+
+// What the conversion and the follow-on stamps changed, read back through the
+// same transaction, plus what the converter itself reported (the add-on
+// classification it used and whether the ledger split the bill).
+async function recordConversionEffects(trx, ctx, updatedEstimate, before, conversion) {
+  if (!before) return;
+  for (const entry of ctx.convertLog) ctx.effects.add(entry);
+  const after = await AcceptEffects.snapshotAcceptState(trx, updatedEstimate.customer_id);
+  for (const effect of AcceptEffects.stateDiffEffects(before, after)) ctx.effects.add(effect);
+  if (conversion) ctx.effects.add(AcceptEffects.conversionEffect(conversion));
+}
+
+// The post-commit plan, evaluated on the committed-state inputs (the accepted
+// row, the conversion, the recipient facts read here). The real run executes
+// this same plan.
+async function planPostCommitSteps(trx, ctx, outcome) {
+  const { acceptedEstimate, conversion, proposalCustomer } = outcome;
+  const collecting = ctx.effects.enabled;
+  const emailInputs = collecting && conversion?.membershipEmail && acceptedEstimate.customer_id && ctx.billingTerm !== 'prepay_annual'
+    ? await AcceptEffects.readEmailInputs(trx, acceptedEstimate.customer_id)
+    : null;
+  let termiteProgram = null;
+  if (collecting) {
+    try {
+      termiteProgram = require('./termite-program-agreement').collectTermiteFacts(parseEstimateData(acceptedEstimate.estimate_data))?.hasProgram === true;
+    } catch { termiteProgram = null; }
+  }
+  return AcceptEffects.planPostCommit({
+    billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram,
+  });
+}
+
+// The end of the transaction: list the one-time lines and the post-commit
+// plan; a carded accept compares its whole list with the approved one (the
+// card's pinned effects) and refuses as preview_changed when they differ.
+async function settleEffects(trx, ctx, outcome, isCommercialProposal) {
+  const plan = await planPostCommitSteps(trx, ctx, outcome);
+  if (ctx.effects.enabled) {
+    if (!isCommercialProposal) for (const line of AcceptEffects.oneTimeLineEffects(outcome.acceptedEstimate, ctx.estimateConverter)) ctx.effects.add(line);
+    ctx.effects.add({ kind: 'post_commit', plan });
+    if (ctx.expected?.effectsKey && AcceptEffects.effectsFingerprint(ctx.effects.list()) !== ctx.expected.effectsKey) throw cardChanged();
+  }
+  return { ...outcome, postCommitPlan: plan };
+}
+
+// The accept's transaction: the steps in order.
+async function acceptInTransaction(trx, ctx) {
+  const row = await loadLockedEstimate(trx, ctx);
+  if (row.status === 'accepted') return finishAccept(ctx, alreadyAcceptedOutcome(row));
+  throwRefusal(manualAcceptRowRefusal(row, { billingTerm: ctx.billingTerm }));
+  const estimate = await revalidateLockedRow(trx, ctx, row);
+  throwRefusal(manualAcceptLockedRowRefusal(estimate));
+  await checkCardPins(trx, 'customer', { estimate, expected: ctx.expected });
+
+  const isCommercialProposal = isCommercialProposalEstimate(estimate);
+  const annualPrepayAmount = await assertAnnualPrepayAllowed(trx, ctx, estimate, isCommercialProposal);
+  const claimed = await claimEstimateRow(trx, ctx, estimate);
+  if (claimed.outcome) return finishAccept(ctx, claimed.outcome);
+  const { updatedEstimate } = claimed;
+  // Race guard: re-derive proposal mode from the CLAIMED row; a toggle that
+  // committed between the read and the guarded UPDATE would mis-route the
+  // conversion.
+  if (isCommercialProposalEstimate(updatedEstimate) !== isCommercialProposal) {
+    throw httpError('This estimate changed while it was being accepted. Refresh and try again.', 409);
+  }
+
+  let win = { proposalCustomer: null, proposalInvoice: null, conversion: null };
+  const before = isCommercialProposal ? null : await captureStateBefore(trx, ctx, updatedEstimate);
+  if (isCommercialProposal) win = { ...win, ...(await winCommercialProposal(trx, updatedEstimate)) };
+  else win.conversion = await convertAcceptedEstimate(trx, ctx, updatedEstimate, annualPrepayAmount);
+  await stampCommercialOneTime(trx, updatedEstimate);
+  await recordConversionEffects(trx, ctx, updatedEstimate, before, win.conversion);
+  // Audit the win AFTER the customer is created/linked so a newly-created
+  // no-customer proposal customer gets the acceptance event in its timeline.
+  await logManualAcceptance(trx, {
+    estimate, updatedEstimate, adminUserId: ctx.adminUserId, source: ctx.source, billingTerm: ctx.billingTerm,
+  });
+  const outcome = await settleEffects(trx, ctx, {
+    acceptedEstimate: updatedEstimate,
+    alreadyAccepted: false,
+    shouldRunDownstream: true,
+    previousEstimate: estimate,
+    ...win,
+  }, isCommercialProposal);
+  return finishAccept(ctx, outcome);
+}
+
+async function runAcceptTransaction(database, ctx) {
+  try {
+    return await database.transaction((trx) => acceptInTransaction(trx, ctx));
+  } catch (err) {
+    if (err instanceof AcceptEffects.DryRunRollback) return err.result;
+    throw err;
+  }
+}
+
+// After the commit: run the plan the transaction settled (the same plan the
+// dry run listed). The approved email decision rides through delivery.
+async function runPostCommitWork(claim, ctx, { leadLinkService, warnings }) {
+  const plan = claim.postCommitPlan || AcceptEffects.planPostCommit({
+    billingTerm: ctx.billingTerm, acceptedEstimate: claim.acceptedEstimate, conversion: claim.conversion, proposalCustomer: claim.proposalCustomer,
+  });
+  await AcceptEffects.runPostCommit(plan, {
+    acceptedEstimate: claim.acceptedEstimate,
+    conversion: claim.conversion,
+    proposalCustomer: claim.proposalCustomer,
+    billingTerm: ctx.billingTerm,
+    agreementStartDate: ctx.agreementStartDate,
+    leadLinkService,
+    asMoneyOrNull,
+    warnings,
+    approvedEmail: ctx.expected?.membershipEmail || null,
+  });
+}
+
+function acceptResponse(claim, billingTerm, warnings) {
+  const { proposalInvoice, proposalCustomer } = claim;
+  return {
+    estimate: claim.acceptedEstimate,
+    alreadyAccepted: claim.alreadyAccepted,
+    conversion: claim.conversion,
+    billingTerm,
+    warnings,
+    // #1917 proposal win surfaces: the auto-built invoice + whether a new
+    // customer was created, so the admin UI can link to them.
+    proposalInvoice: proposalInvoice
+      ? { id: proposalInvoice.id, invoiceNumber: proposalInvoice.invoice_number, token: proposalInvoice.token, total: proposalInvoice.total }
+      : null,
+    createdCustomer: proposalCustomer?.created ? { id: proposalCustomer.customerId } : null,
+  };
+}
+
 async function markEstimateManuallyAccepted({
   estimateId,
   adminUserId,
@@ -710,706 +1265,36 @@ async function markEstimateManuallyAccepted({
   bookedAppointmentIds = [],
   // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
   // customerId, customerVersion, customerBilling, ledgerPin, planRows,
-  // noLinkedVisits });
-  // null for every other caller.
+  // noLinkedVisits, effectsKey, membershipEmail }); null for every other
+  // caller. effectsKey is the fingerprint of the approved effect list: the
+  // accept builds its own list under the locks and refuses (preview_changed)
+  // when it differs. membershipEmail ('send' | 'skip') is the approved email
+  // decision and rides through delivery.
   expected,
+  // Run every step in the accept's own transaction, collect the effects, roll
+  // back and return them. Nothing commits and nothing is sent.
+  dryRun = false,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
 } = {}) {
   if (!estimateId) throw httpError('estimateId is required', 400);
   const normalizedBillingTerm = normalizeManualBillingTerm(billingTerm);
-  const annualPrepaySelected = normalizedBillingTerm === 'prepay_annual';
+  const ctx = {
+    estimateId, adminUserId, source, billingTerm: normalizedBillingTerm,
+    annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
+    annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
+    expected, dryRun: dryRun === true, estimateConverter,
+    effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
+    convertLog: [],
+  };
 
-  const claim = await database.transaction(async (trx) => {
-    let estimate = await trx('estimates').where({ id: estimateId }).first();
-    if (!estimate) throw httpError('Estimate not found', 404);
-    // One-tap purchase drafts are INTERNAL flow state (Codex #3395 r12
-    // P2): accepting one here flips it to 'accepted' outside the purchase
-    // saga — the open ledger row is stranded (confirm rejects, neither
-    // cleanup sweep reclaims a non-draft/expired row) and the purchase's
-    // own accept path is the only one carrying its consent artifact.
-    throwRefusal(oneTapPurchaseRefusal(estimate));
-    // Rung 6 BEFORE the estimate row lock below (Codex #3109 r32): the
-    // merge-undo takes customer-comms and THEN locks journaled estimates —
-    // acquiring comms only later (inside convertEstimate, after the
-    // status-flip UPDATE row-locked this estimate) was an AB-BA that
-    // deadlock-aborted the operator's Mark Won or the undo. The unlocked
-    // peek above picks the key; convertEstimate's own acquisition is
-    // reentrant on this transaction.
-    // r44: LOOP the acquire to a fixpoint — the wait can sit behind the
-    // very undo repointing this estimate, and continuing with the stale
-    // row would row-lock the restored estimate while convertEstimate
-    // later takes the NEW owner's comms key after it (the AB-BA again).
-    // Re-read after each acquire until the owner is one whose key this
-    // transaction already holds; every later check/update then uses the
-    // post-undo row.
-    if (estimate.customer_id) {
-      const { lockCustomerComms } = require('../utils/customer-comms-lock');
-      const heldOwners = new Set();
-      while (estimate.customer_id && !heldOwners.has(String(estimate.customer_id))) {
-        await lockCustomerComms(trx, estimate.customer_id);
-        heldOwners.add(String(estimate.customer_id));
-        const fresh = await trx('estimates').where({ id: estimateId }).first();
-        if (!fresh) throw httpError('Estimate not found', 404);
-        estimate = fresh;
-      }
-    }
-    await checkCardPins(trx, 'estimate', { estimateId, expected });
-
-    if (estimate.status === 'accepted') {
-      return { acceptedEstimate: estimate, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: estimate };
-    }
-
-    throwRefusal(manualAcceptRowRefusal(estimate, { billingTerm: normalizedBillingTerm }));
-
-    // SERIALIZED with call-linkage corrections, mirroring the public
-    // accept protocol (pre-push P0, PR #3304 — an unlocked read here let
-    // a correction commit after the check and wait behind the money
-    // UPDATE while acceptance converted the wrong lead). One lock order
-    // everywhere: estimates → leads → call_log. The estimate row is
-    // locked FOR UPDATE and re-read fresh; estimate-side full/pending
-    // markers refuse; then the linked lead and (via lockCallRow) the call
-    // row are locked and HELD through the acceptance write below, so a
-    // concurrent correction either committed first (seen here) or waits
-    // for this transaction's terminal write and its reconcile applies the
-    // marker-only terminal invalidation.
-    {
-      const freshLinkRow = await trx('estimates').where({ id: estimateId }).forUpdate().first();
-      // Propagate the LOCKED re-read back onto `estimate` (codex P1): every
-      // check below this point — including the existing-member prepay guard
-      // — read `estimate.estimate_data` from the earlier UNLOCKED select, so
-      // a membershipSnapshot that flipped to isExistingCustomer between the
-      // two reads (e.g. a concurrent reprice/save) was invisible here even
-      // though the row is, from this line on, held FOR UPDATE.
-      if (freshLinkRow) estimate = { ...estimate, ...freshLinkRow };
-      // Every add-on decision of this acceptance reads the LOCKED row: the gated and recurring-plan refusals and the
-      // yearly-limit recheck. A concurrent estimator save that added or replaced a limited add-on waits behind this
-      // lock, so what is judged here is what is converted below.
-      await assertAddOnsAcceptable(trx, estimate, { billingTerm: normalizedBillingTerm, bookedAppointmentIds });
-      const manualAcceptData = (() => {
-        const raw = freshLinkRow?.estimate_data;
-        if (!raw) return null;
-        try {
-          const d = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          return d && typeof d === 'object' ? d : null;
-        } catch { return null; }
-      })();
-      const eng = manualAcceptData?.estimatorEngine;
-      // A clarify re-price hold on the LOCKED row: the dollars or address
-      // are known stale, so a verbal yes must not mint the money-bearing
-      // terminal at them either — the same refusal the admin PATCH gives a
-      // held row (codex r11 sweep on #3804).
-      {
-        const { repricePendingActive } = require('./estimate-clarify-asks');
-        if (repricePendingActive(eng)) {
-          throw httpError('This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before accepting.', 409);
-        }
-      }
-      if (eng?.callLogId) {
-        const quarantined = httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
-        // An engine draft that is archived or marker-bearing was pulled by
-        // an invalidation (terminal rows get the marker only) — money must
-        // not move on it.
-        if (freshLinkRow?.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at) {
-          throw quarantined;
-        }
-        if (manualAcceptData?.lead_id && ['sid', 'stamp'].includes(manualAcceptData?.lead_linkage)) {
-          await trx('leads').where({ id: String(manualAcceptData.lead_id) }).forUpdate().first('id');
-        }
-        const { staleCallLinkageReason } = require('./admin-estimate-persistence');
-        // The LOCKED row's status (codex #4815 r8 P2): a queued row-scoped
-        // verdict judges a terminal row by it; omitted = fail closed.
-        if (await staleCallLinkageReason(trx, manualAcceptData, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) {
-          throw quarantined;
-        }
-        const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-        if (await callSideBlockForEstimateData(trx, manualAcceptData, { estimateStatus: freshLinkRow?.status })) {
-          throw quarantined;
-        }
-      }
-    }
-
-    throwRefusal(manualAcceptLockedRowRefusal(estimate));
-    await checkCardPins(trx, 'customer', { estimate, expected });
-
-    const isCommercialProposal = isCommercialProposalEstimate(estimate);
-
-    // A commercial proposal's pricing/cadence lives in estimate_data.proposal,
-    // which EstimateConverter does not read, so the proposal branch below marks
-    // the win and skips conversion. Annual prepay, though, promises a real draft
-    // invoice + pending renewal term that ONLY the converter creates — under the
-    // skip it would silently produce nothing. Reject prepay for proposals so the
-    // operator bills the board deal through the proposal's own invoice flow
-    // rather than getting a no-op "annual prepay" win. (Lead/invoice-mode win
-    // paths for proposals are tracked in #1917.)
-    if (annualPrepaySelected && isCommercialProposalEstimate(estimate)) {
-      throw httpError(
-        'Annual prepay is not available for a commercial proposal. Mark it accepted as a standard win and bill it through the proposal invoice flow.',
-        400,
-      );
-    }
-
-    const annualPrepayAmount = annualPrepaySelected ? resolveAnnualPrepayAmount(estimate) : null;
-    if (annualPrepaySelected && !annualPrepayAmount) {
-      throw httpError('Annual prepay requires a recurring estimate with a monthly or annual total.', 400);
-    }
-    if (annualPrepaySelected && !hasManualAnnualPrepayRecurringRows(estimate)) {
-      throw httpError('Annual prepay requires recurring service rows on the estimate.', 400);
-    }
-    if (annualPrepaySelected && !isManualAnnualPrepayEligibleServiceMix(estimate)) {
-      throw httpError('Annual prepay is not available for this estimate service mix.', 400);
-    }
-    // Refuse the shape the public accept already refuses (estimate-public.js:
-    // "annual prepay is not available for existing customers"): an add-on
-    // estimate for a customer who already has a live plan must not open an
-    // annual-prepay term. Without this, convertEstimate PRESERVES the
-    // existing plan's billing_mode at accept, but the pending term suppresses
-    // the monthly dues cron immediately and the term's payment-time stamp
-    // (stampAnnualPrepayBillingMode) unconditionally rewrites billing_mode to
-    // 'annual_prepay' — silently killing the OTHER plan's billing for the
-    // whole prepay term while its visits keep completing unbilled. Checked
-    // three ways: the frozen membershipSnapshot on the estimate (billing-mode
-    // agnostic — set for both monthly_membership and per_application
-    // customers); when a customer is linked, the LIVE row via the same
-    // predicate the converter itself uses to decide preservation
-    // (customerPreservesMonthlyMembership) — a defense against a stale/
-    // missing snapshot; AND strict live-plan evidence (codex round-2 P1) —
-    // customerPreservesMonthlyMembership answers false for EVERY explicit
-    // non-monthly lane (per_application included), so a per_application
-    // customer with a live recurring series sailed past both the snapshot
-    // (when absent/stale) and the membership predicate alike. The register's
-    // "same fix" note for the per_application variant is this third check.
-    if (annualPrepaySelected) {
-      let customerLivePreservesMembership = false;
-      let customerHasLivePlan = false;
-      if (estimate.customer_id) {
-        // LOCKED, not a bare read (codex pre-push P0): an unlocked peek here
-        // could pass on stale data while a concurrent membership activation
-        // commits between this read and convertEstimate's own customer lock
-        // below — convertEstimate would then preserve the NOW-live
-        // membership after this guard already let prepay_annual through.
-        // Same order convertEstimate itself uses ahead of its customer lock
-        // (property-preferences advisory BEFORE the row lock — codex #3565
-        // gh-r39, estimate-converter.js), with customer-comms already held
-        // from above: acquiring the row lock HERE, earlier, is safe and
-        // reentrant — convertEstimate's later advisory/comms/row
-        // re-acquisition on this same transaction is a no-op against locks
-        // this transaction already holds, and no new cross-transaction lock
-        // order is introduced (comms is already taken before this point in
-        // the unmodified function, and convertEstimate's own comment
-        // documents advisory-before-row as the global order).
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['property-preferences', String(estimate.customer_id)],
-        );
-        const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
-        customerLivePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
-        customerHasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null, bookedAppointmentIds);
-      }
-      if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || customerLivePreservesMembership || customerHasLivePlan) {
-        throw httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
-      }
-    }
-
-    // #1917: a commercial proposal's customer creation + first invoice run AFTER
-    // the guarded status flip below, so they only execute on the accept that
-    // actually won the race — a losing/already-accepted path never orphans a
-    // duplicate customer or invoice.
-    let proposalCustomer = null;
-
-    const now = trx.fn.now();
-    // Served-disclosure evidence rides a manual (verbal) acceptance too
-    // (codex local max-effort review on #5434): a customer who downloaded
-    // the plan document (or viewed the legacy page) while it was open was
-    // shown the annual rate review line, and that marker is only ever
-    // written for a document that printed it — so this freeze promotes it
-    // to the frozen-document stamp exactly as the public accept does.
-    const promoteRateReviewEvidence = require('./estimate-proposal-billing').rateReviewTermsServedIsCurrent(estimate.estimate_data);
-    const updates = {
-      status: 'accepted',
-      accepted_at: estimate.accepted_at || now,
-      declined_at: null,
-      decline_reason: null,
-      updated_at: now,
-      // Freeze the price at acceptance (atomic with the status flip; the
-      // whereNull(price_locked_at) guard below means a claimed row is
-      // always unlocked, and stops a second accept from re-pricing).
-      price_locked_at: now,
-      price_locked_by: 'manual_accept',
-      pricing_authority: 'LOCKED',
-      // Durable at-lock evidence for the pricing-authority gate (#3750):
-      // the authority the price carried when locked, stamped from the
-      // column in this same UPDATE.
-      estimate_data: trx.raw(promoteRateReviewEvidence
-        ? "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL')))), '{rateReviewDisclosedAtAccept}', 'true'::jsonb)"
-        : "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL'))))"),
-    };
-    if (!estimate.sent_at) updates.sent_at = now;
-
-    const [updatedEstimate] = await trx('estimates')
-      .where({ id: estimateId })
-      .whereIn('status', Array.from(MANUAL_ACCEPTABLE_STATUSES))
-      // Same guard as the public accept claim: a locked price means a prior
-      // accept already committed money. Even if some path regressed the row
-      // back to sent/viewed, a second accept must not rerun conversion and
-      // invoicing.
-      .whereNull('price_locked_at')
-      .whereRaw(MANUAL_ACCEPT_ACTIVE_SQL)
-      // Marker/archive predicates on the money write itself (pre-push P0,
-      // PR #3304): the locked revalidation above serializes the engine-
-      // drafted path, and these make the UPDATE refuse outright if any
-      // invalidation state is on the row it claims. Scoped to engine
-      // drafts — non-engine estimates keep their existing semantics.
-      .where(function engineDraftNotQuarantined() {
-        this.whereRaw("COALESCE(estimate_data #>> '{estimatorEngine,callLogId}', '') = ''")
-          .orWhere(function notQuarantined() {
-            this.whereNull('archived_at')
-              .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-              .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
-          });
-      })
-      .update(updates)
-      .returning('*');
-
-    if (!updatedEstimate) {
-      const latest = await trx('estimates').where({ id: estimateId }).first();
-      if (latest?.status === 'accepted') {
-        return { acceptedEstimate: latest, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: latest };
-      }
-      if (latest?.price_locked_at) {
-        throw httpError(
-          'This estimate was already accepted and its price locked — accepting it again would duplicate the conversion and invoicing. Review the linked customer/invoices instead.',
-          409,
-        );
-      }
-      throw httpError('Estimate is no longer active.', 409);
-    }
-
-    // Race guard: re-derive proposal mode from the CLAIMED row. The validity
-    // guards above ran on the pre-claim SELECT; if a proposal-mode toggle
-    // committed between that read and this guarded UPDATE, the guards + the
-    // branch below would act on the wrong mode — routing a now-proposal through
-    // the legacy EstimateConverter (dropping its pricing/tax/cadence), or
-    // vice-versa. Bail so the operator retries against fresh state rather than
-    // mis-billing. (No-toggle is the norm, so this never fires in practice.)
-    if (isCommercialProposalEstimate(updatedEstimate) !== isCommercialProposal) {
-      throw httpError('This estimate changed while it was being accepted. Refresh and try again.', 409);
-    }
-
-    // A commercial proposal's pricing lives in estimate_data.proposal.buildings,
-    // which EstimateConverter does not read — it converts from the legacy
-    // result/recurring service mix. Auto-converting here would activate the
-    // wrong (or empty) service mix and drop the proposal's tax/cadence, so a
-    // proposal records the win (status + linked-lead). Invoice-mode proposals
-    // additionally build their first invoice straight from the proposal lines
-    // (#1917); non-invoice-mode proposals leave billing to the operator.
-    let conversion = null;
-    let proposalInvoice = null;
-    if (isCommercialProposal) {
-      // Lead-win: create/link + promote the customer now. Only the flip winner
-      // reaches here, so a concurrent accept can't orphan a duplicate customer.
-      if (!updatedEstimate.customer_id) {
-        proposalCustomer = await proposalWin.ensureCustomerForProposalWin({
-          trx,
-          estimate: updatedEstimate,
-          proposal: normalizeProposal(updatedEstimate),
-        });
-        await trx('estimates')
-          .where({ id: updatedEstimate.id })
-          .update({ customer_id: proposalCustomer.customerId, updated_at: now });
-        updatedEstimate.customer_id = proposalCustomer.customerId;
-      } else {
-        // Pre-linked customer: proposals skip EstimateConverter (which normally
-        // promotes the linked customer), so promote/reactivate here — otherwise
-        // a proposal linked to a lead/inactive/churned customer is won + invoiced
-        // while the customer stays outside active-customer/revenue queries.
-        await proposalWin.promoteLinkedCustomerForProposalWin({
-          trx,
-          customerId: updatedEstimate.customer_id,
-        });
-      }
-      // Flag the (created or pre-linked) customer commercial for a TAXABLE
-      // proposal even when we're not building the first invoice now — otherwise a
-      // pre-linked residential/lead customer stays non-commercial and any later
-      // invoice for this taxable commercial work would be forced to $0 tax,
-      // underbilling. Idempotent (a new lead-win customer is already commercial).
-      await proposalWin.flagProposalCustomerCommercialIfTaxable({
-        trx,
-        customerId: updatedEstimate.customer_id,
-        proposal: normalizeProposal(updatedEstimate),
-      });
-      // A NON-invoice-mode win with authored structured payment terms has no
-      // path that consumes them — the customer accepted a payment promise
-      // nothing will enforce (billing mode may have been flipped after
-      // authoring; the PUT guard can't see that). Reject with direction
-      // rather than record the win (codex #3297 r4).
-      if (!updatedEstimate.bill_by_invoice
-        && normalizeProposal(updatedEstimate).commercialTerms?.paymentTerms) {
-        throw httpError(
-          'This proposal promises structured payment terms, which only invoice-mode billing enforces. Turn on Bill by invoice, or move the payment language to Additional terms, then mark won again.',
-          409,
-        );
-      }
-      // Invoice-mode win: build the first invoice from the proposal line items.
-      if (updatedEstimate.bill_by_invoice) {
-        try {
-          proposalInvoice = await proposalWin.createProposalAcceptanceInvoice({
-            trx,
-            estimate: updatedEstimate,
-            proposal: normalizeProposal(updatedEstimate),
-            customerId: updatedEstimate.customer_id,
-          });
-        } catch (err) {
-          logger.warn(`[estimate-manual-acceptance] proposal invoice failed for estimate ${updatedEstimate.id}: ${err.message}`);
-          // Expected validation conflicts (4xx, e.g. the payer-term mismatch
-          // 409) carry an actionable operator message — pass them through
-          // instead of flattening to a generic 500 (codex #3297 r2e).
-          if (Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode < 500) {
-            throw httpError(err.message, err.statusCode);
-          }
-          throw httpError('Proposal invoice could not be created; estimate was not marked accepted.', 500);
-        }
-        // Invoice mode promises a first invoice. If the proposal has no billable
-        // lines, there is nothing to bill — reject so the transaction rolls back
-        // rather than recording an invoice-mode win with no invoice.
-        if (!proposalInvoice) {
-          throw httpError(
-            'This invoice-mode proposal has no billable line items to invoice. Add priced lines or turn off invoice mode before winning it.',
-            400,
-          );
-        }
-      }
-    } else if (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected) {
-      try {
-        // Manual Mark Won keeps scheduling under operator control. Standard
-        // verbal wins also skip the setup invoice. Annual-prepay verbal wins
-        // intentionally create the annual draft invoice + pending term so
-        // billing/renewal state matches the customer's commitment.
-        const convertOptions = {
-          database: trx,
-          skipAutoSchedule: true,
-          bookedAppointmentIds,
-          skipMembershipEmail: true,
-          // The Mark Won / Annual Prepay confirm dialogs the operator agreed
-          // to promise the customer is NOT texted (and, for annual prepay,
-          // NOT emailed) — EstimatesPageV2.jsx / OpportunityActions.jsx. Without
-          // this, convertEstimate still queues the new-recurring welcome
-          // SMS + email for a genuinely new signup, which the cron delivers
-          // ~60 minutes later with no operator visibility or way to cancel it.
-          skipWelcomeSms: true,
-          skipSetupInvoice: !annualPrepaySelected,
-          // The commercial-schedule admin notification writes through the
-          // GLOBAL pool — defer it so a rolled-back Mark Won can't page staff
-          // about an unaccepted estimate. Dispatched post-commit below.
-          deferCommercialScheduleNotification: true,
-          ...cardConvertOptions(expected),
-        };
-        if (annualPrepaySelected) {
-          // Re-run the one-time guard on the row THIS transaction claimed:
-          // the booking preflight (prepayBookingEligibility) ran before the
-          // schedule POST booked, and direct accepts (estimates-page verbal
-          // prepay win) never preflight — an edit landing between preflight
-          // and here, or a direct accept on a quote with one-time work, would
-          // otherwise mark the whole estimate accepted while the converter
-          // mints only the recurring annual prepay invoice, silently dropping
-          // the billable one-time charge.
-          if (manualPrepayBlockingOneTimeCharge(updatedEstimate)) {
-            const oneTimeErr = httpError(
-              'This quote includes a billable one-time charge that an annual-prepay accept would not invoice. Remove the one-time line or convert the estimate normally first.',
-              422,
-            );
-            oneTimeErr.isOperational = true;
-            throw oneTimeErr;
-          }
-          convertOptions.billingTerm = 'prepay_annual';
-          convertOptions.prepayInvoiceAmount = annualPrepayAmount;
-          convertOptions.autoSendInvoice = false;
-          if (annualPrepayTermStart) convertOptions.annualPrepayTermStart = annualPrepayTermStart;
-          if (annualPrepayCoverage && annualPrepayCoverage.coverageServiceType) {
-            // Fail CLOSED on a coverage cadence the renewal/stamping math
-            // doesn't support: letting it silently normalize to null
-            // downstream would seed a visit-count-derived schedule on wrong
-            // dates, and paid covered visits could complete-bill again.
-            // Callers pass a pre-normalized value (see admin-schedule's
-            // prepayCoverageCadenceForPattern); this guards future callers.
-            if (annualPrepayCoverage.coverageCadence != null) {
-              const { normalizeCoverageCadence } = require('./annual-prepay-renewals')._private;
-              if (!normalizeCoverageCadence(annualPrepayCoverage.coverageCadence)) {
-                // isOperational: the conversion catch below passes operational
-                // 422s through verbatim instead of wrapping them as a 500.
-                const cadenceErr = httpError(`Unsupported annual-prepay coverage cadence: ${annualPrepayCoverage.coverageCadence}`, 422);
-                cadenceErr.isOperational = true;
-                throw cadenceErr;
-              }
-            }
-            convertOptions.coverageServiceType = annualPrepayCoverage.coverageServiceType;
-            convertOptions.coverageVisitCount = annualPrepayCoverage.coverageVisitCount;
-            convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
-          }
-          // ATOMIC overlap guard: take the SAME per-customer advisory lock the
-          // Customer 360 prepay endpoints use and re-assert no overlapping term
-          // INSIDE this transaction — so a double-click, two admins, or an
-          // accept racing a Customer 360 prepay can't mint duplicate prepay
-          // invoices/terms. The lock releases at commit/rollback. Term start =
-          // the booked first visit for prepay-on-book, else today (the
-          // converter's own default for manual accepts).
-          const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx,
-            updatedEstimate.customer_id,
-            annualPrepayTermStart || etDateString(),
-            false,
-            'Customer already has an annual prepay term through',
-            updatedEstimate.id,
-          );
-        }
-        conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
-        // Sign-before-pay (slice 3a restructure): a termite annual-plan
-        // manual accept intentionally defers its invoice + prepay term
-        // until the customer e-signs — a missing draftInvoiceId is the
-        // EXPECTED outcome then, not a failure to roll back. Fallback P1:
-        // ANY truthy annualPlanActivationStatus is a park outcome
-        // ('awaiting_signature' the common case, 'activated' on an
-        // idempotent replay, or a concurrent-write re-read) — never
-        // narrowed to one exact string.
-        if (annualPrepaySelected && !conversion?.draftInvoiceId
-          && !conversion?.annualPlanActivationStatus) {
-          throw new Error('Annual prepay invoice was not created');
-        }
-      } catch (err) {
-        logger.warn(`[estimate-manual-acceptance] EstimateConverter failed for estimate ${updatedEstimate.id}: ${err.message}`);
-        // Surface the converter's fail-closed annual-prepay guards (multi-service
-        // unsupported / coverage underivable) as their clear, operator-actionable
-        // message (convert monthly or bill the prepay manually) rather than a
-        // generic 500. The trx rolls back either way, so no partial
-        // customer/visit/term/invoice is left behind.
-        // Every operational 4xx keeps its status and code (GH codex P1 on
-        // #3751): the unpriced per-application add-on refusal is a 409 the
-        // operator must see as re-quote guidance, not a generic 500.
-        if (err && err.isOperational && Number(err.statusCode) >= 400 && Number(err.statusCode) < 500) {
-          const operational = httpError(err.message, Number(err.statusCode));
-          if (err.code) operational.code = err.code;
-          throw operational;
-        }
-        // Surface the atomic overlap guard as a 409 that keeps its tag, so the
-        // booking route can detect it and degrade to a standard booking with a
-        // warning instead of failing the whole request opaquely.
-        if (err && err.annualPrepayOverlap) {
-          const overlapErr = httpError(err.message, 409);
-          overlapErr.annualPrepayOverlap = err.annualPrepayOverlap;
-          throw overlapErr;
-        }
-        throw httpError('Customer conversion did not complete; estimate was not marked accepted.', 500);
-      }
-    }
-
-    // Commercial identity for a manual one-time win (codex #3594 r3 P1): the
-    // converter (and its one-way stamp) runs above only for a monthly total
-    // or annual prepay, so a one-time-only scoped commercial estimate marked
-    // won — e.g. commercial trenching, which the public accept route refuses
-    // and routes to staff — would leave a residential-coded customer
-    // residential and later invoicing would suppress the taxable line. Same
-    // one-way rule, same transaction; idempotent beside the converter's stamp.
-    if (updatedEstimate.customer_id
-      && EstimateConverter.estimateHasCommercialOneTime(parseEstimateData(updatedEstimate.estimate_data))) {
-      await trx('customers')
-        .where({ id: updatedEstimate.customer_id })
-        .whereRaw("coalesce(property_type, '') <> 'commercial'")
-        .update({ property_type: 'commercial' });
-    }
-
-    // Audit the win AFTER the customer is created/linked so a newly-created
-    // no-customer proposal customer gets the acceptance event in its timeline
-    // (activity_log is keyed on customer_id). updatedEstimate.customer_id is now
-    // final for every path: created/linked above for proposals, already set for
-    // non-proposals. A throw above rolls back this same trx, so no orphan log.
-    await logManualAcceptance(trx, {
-      estimate,
-      updatedEstimate,
-      adminUserId,
-      source,
-      billingTerm: normalizedBillingTerm,
-    });
-
-    return {
-      acceptedEstimate: updatedEstimate,
-      alreadyAccepted: false,
-      shouldRunDownstream: true,
-      previousEstimate: estimate,
-      conversion,
-      proposalInvoice,
-      proposalCustomer,
-    };
-  });
-
-  const {
-    acceptedEstimate,
-    alreadyAccepted,
-    shouldRunDownstream,
-    conversion,
-    proposalInvoice = null,
-    proposalCustomer = null,
-  } = claim;
+  const claim = await runAcceptTransaction(database, ctx);
+  if (ctx.dryRun) return { dryRun: true, alreadyAccepted: claim.alreadyAccepted, billingTerm: normalizedBillingTerm, effects: claim.effects };
 
   const warnings = [];
-
-  if (shouldRunDownstream) {
-    // Multi-property linkage (post-commit, best-effort, gated on
-    // GATE_CUSTOMER_PROPERTIES) — same hook as the public accept route:
-    // resolve/create the customer_properties row for the accepted address,
-    // link estimates.property_id, stamp the booked visits, refresh
-    // has_multi_home. The helper never throws.
-    {
-      // Manual accept is a terminal event for the group's comms owner too
-      // (codex #3244 r7) — same ownership transfer as the public accept.
-      try {
-        await require('../routes/estimate-public').transferGroupFollowupOwnership(acceptedEstimate);
-      } catch (e) {
-        logger.warn(`[manual-acceptance] follow-up ownership transfer failed for estimate ${acceptedEstimate.id}: ${e.message}`);
-      }
-      const linkageCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
-      if (linkageCustomerId) {
-        await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
-          estimateId: acceptedEstimate.id,
-          customerId: linkageCustomerId,
-        });
-      }
-    }
-
-    try {
-      await leadLinkService.markLinkedLeadEstimateAccepted({
-        estimateId: acceptedEstimate.id,
-        customerId: acceptedEstimate.customer_id || null,
-        monthlyValue: asMoneyOrNull(acceptedEstimate.monthly_total),
-        initialServiceValue: asMoneyOrNull(acceptedEstimate.onetime_total),
-        waveguardTier: acceptedEstimate.waveguard_tier || null,
-      });
-    } catch (err) {
-      logger.warn(`[estimate-manual-acceptance] linked lead conversion failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-      warnings.push('Linked lead was not marked won automatically.');
-    }
-
-    if (normalizedBillingTerm !== 'prepay_annual' && conversion?.membershipEmail) {
-      void AccountMembershipEmail.sendMembershipStarted(conversion.membershipEmail)
-        .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-    }
-
-    // Conversion runs inside the accept transaction, so the converter defers
-    // the new-recurring welcome SMS. Fire it post-commit. Idempotent, so if the
-    // operator later schedules the visit on the calendar (admin-schedule's own
-    // welcome path) it won't double-send.
-    if (conversion?.welcomeSms) {
-      const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
-      void sendNewRecurringWelcome(conversion.welcomeSms)
-        .catch((err) => logger.warn(`[estimate-manual-acceptance] welcome SMS failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-    }
-
-    // Termite bait accepts prep the signable program agreement (draft +
-    // admin bell; customer send only behind the autosend gate). Same hook
-    // as the public accept route; the service never throws and skips
-    // silently for non-termite estimates. Manual acceptance rejects
-    // one-time-option estimates upstream, so this path is recurring-only.
-    {
-      const agreementCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
-      if (agreementCustomerId) {
-        try {
-          const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
-          const { formatDisplayDate } = require('../utils/date-only');
-          const agreementStartLabel = agreementStartDate ? (formatDisplayDate(agreementStartDate, { fallback: '' }) || null) : null;
-          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm, startDateLabel: agreementStartLabel, startDateRaw: agreementStartDate })
-            .catch((err) => logger.warn(`[estimate-manual-acceptance] termite agreement prep failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-        } catch (err) {
-          logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-        }
-      }
-    }
-
-    // Deferred commercial-schedule admin notification (see convertOptions):
-    // fire it only now that the acceptance transaction committed.
-    if (conversion?.commercialScheduleNotification) {
-      const commercialNotify = conversion.commercialScheduleNotification;
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          commercialNotify.type,
-          commercialNotify.title,
-          commercialNotify.body,
-          commercialNotify.options,
-        ).catch((err) => logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-      }
-    }
-    // Deferred per-application fee park (DATA-001) — same post-commit contract.
-    if (conversion?.perApplicationFeeNotification) {
-      const feeNotify = conversion.perApplicationFeeNotification;
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          feeNotify.type,
-          feeNotify.title,
-          feeNotify.body,
-          feeNotify.options,
-        ).catch((err) => logger.warn(`[estimate-manual-acceptance] per-application fee admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-manual-acceptance] per-application fee admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-      }
-    }
-    // Deferred combined-tier upgrade review notification — same post-commit
-    // contract as the commercial-schedule notify above.
-    if (conversion?.tierUpgradeNotification) {
-      const tierNotify = conversion.tierUpgradeNotification;
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          tierNotify.type,
-          tierNotify.title,
-          tierNotify.body,
-          tierNotify.options,
-        ).catch((err) => logger.warn(`[estimate-manual-acceptance] tier-upgrade admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-manual-acceptance] tier-upgrade admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-      }
-    }
-    // Plan-rate review alert — same deferred post-commit contract as the
-    // tier alert above.
-    if (conversion?.planRateReviewNotification) {
-      const planNotify = conversion.planRateReviewNotification;
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          planNotify.type,
-          planNotify.title,
-          planNotify.body,
-          planNotify.options,
-        ).catch((err) => logger.warn(`[estimate-manual-acceptance] plan-rate review notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-manual-acceptance] plan-rate review notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-      }
-    }
-  }
-
-  return {
-    estimate: acceptedEstimate,
-    alreadyAccepted,
-    conversion,
-    billingTerm: normalizedBillingTerm,
-    warnings,
-    // #1917 proposal win surfaces: the auto-built invoice + whether a new
-    // customer was created, so the admin UI can link to them.
-    proposalInvoice: proposalInvoice
-      ? {
-        id: proposalInvoice.id,
-        invoiceNumber: proposalInvoice.invoice_number,
-        token: proposalInvoice.token,
-        total: proposalInvoice.total,
-      }
-      : null,
-    createdCustomer: proposalCustomer?.created
-      ? { id: proposalCustomer.customerId }
-      : null,
-  };
+  if (claim.shouldRunDownstream) await runPostCommitWork(claim, ctx, { leadLinkService, warnings });
+  return acceptResponse(claim, normalizedBillingTerm, warnings);
 }
 
 module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,

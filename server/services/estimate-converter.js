@@ -1814,8 +1814,7 @@ async function otherPlanRowsPin(conn, { customerId, estimateId }) {
 // The lawn profile writes an accept makes (convertEstimate 1b/1c): the grass
 // type to fill (COALESCE — only when the profile has none) and whether the
 // estimate's confirmed lawn size is applied (a recurring lawn service;
-// lawn-size-sync applyEstimateLawnSqft then decides the target). Pure;
-// exported so the Intelligence Bar accept_estimate card shows the same writes.
+// lawn-size-sync applyEstimateLawnSqft then decides the target). Pure.
 function lawnProfileWrites(recurringServices, estimateData) {
   const services = Array.isArray(recurringServices) ? recurringServices : [];
   // Fail-soft like both writes: a bad payload means no write, never a broken accept.
@@ -1847,6 +1846,11 @@ function hasCommercialRecurringLine(services = []) {
 async function classifyAddOnAcceptContext({
   database, estimateId, estimate, estimateData, customer,
   adoptedExistingAppointmentId = null,
+  // strict: a classifier that cannot read its evidence THROWS (an operational
+  // 409) instead of falling back to replace semantics. The Intelligence Bar
+  // card approves one classification; guessing another at commit would bill
+  // on terms the operator never saw.
+  strict = false,
 } = {}) {
   // sameFamilyAtOtherProperty: does a live same-family plan row provably sit
   // at ANOTHER property? Feeds the ledger-attribution bypass decision (codex
@@ -2108,6 +2112,12 @@ async function classifyAddOnAcceptContext({
     }
     return { addOnBase: 0, hadOtherLiveFamilies, sameFamilyAtOtherProperty };
   } catch (addOnErr) {
+    if (strict) {
+      logger.warn(`[estimate-converter] add-on rate classification failed for customer ${customer?.id} (strict, accept refused): ${addOnErr.message}`);
+      throw Object.assign(new Error('Could not read the customer\'s other plans to price this accept. Nothing was changed. Try again, or use Mark accepted on the estimate page.'), {
+        isOperational: true, statusCode: 409, code: 'add_on_classification_unavailable',
+      });
+    }
     logger.warn(`[estimate-converter] add-on rate classification failed for customer ${customer?.id} (monthly_rate keeps replace semantics): ${addOnErr.message}`);
     return none;
   }
@@ -5459,6 +5469,7 @@ const EstimateConverter = {
       : await classifyAddOnAcceptContext({
         database, estimateId, estimate, estimateData, customer: effectiveCustomer,
         adoptedExistingAppointmentId: opts.adoptedExistingAppointmentId || null,
+        strict: opts.strictAddOnClassification === true,
       });
     const addOnPreservedRateBase = addOnContext.addOnBase;
     // Plan-rate ledger (owner ruling 2026-08-06, GATE_PLAN_RATE_LEDGER):
@@ -5521,6 +5532,17 @@ const EstimateConverter = {
     const groupedEstimateAccept = !!estimate?.estimate_group_id
       || addOnContext.sameFamilyAtOtherProperty === true
       || (crossPropertyAccept && addOnContext.sameFamilyAtOtherProperty !== false);
+    // The Intelligence Bar card pins the classification this accept used and
+    // whether the bill was split by service (opts.effectLog, display only).
+    if (Array.isArray(opts.effectLog) && !suppressRecurringConversion) {
+      opts.effectLog.push({
+        kind: 'add_on_classification',
+        add_on_base: roundMoney(addOnContext.addOnBase),
+        had_other_live_families: addOnContext.hadOtherLiveFamilies === true,
+        same_family_at_other_property: addOnContext.sameFamilyAtOtherProperty,
+        split_by_service: !groupedEstimateAccept,
+      });
+    }
     if (!suppressRecurringConversion && !groupedEstimateAccept) {
       try {
         const PlanRateLedger = require('./plan-rate-ledger');
@@ -9067,15 +9089,12 @@ module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimate
 module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.otherPlanRowsPin = otherPlanRowsPin;
-module.exports.lawnProfileWrites = lawnProfileWrites;
 module.exports.hasCommercialRecurringLine = hasCommercialRecurringLine;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
 module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;
-module.exports.recurringUnitsForAccept = recurringUnitsForAccept;
-module.exports.perApplicationChargeForAccept = perApplicationChargeForAccept;
 module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced;
 module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
 module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;

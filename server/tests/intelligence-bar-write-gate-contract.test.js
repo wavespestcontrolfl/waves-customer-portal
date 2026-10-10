@@ -871,6 +871,21 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       }) : null;
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
+    // accept_estimate's card is the accept run as a dry run (rolled back in its
+    // own transaction); the page handler's own run is covered by
+    // estimate-manual-acceptance-effects.test.js. Here the tool itself must
+    // write nothing, so the dry run answers a canned effect list.
+    const acceptDryRun = toolName === 'accept_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'markEstimateAcceptedAsStaff').mockResolvedValue({
+        status: 200,
+        json: {
+          success: true, dryRun: true, alreadyAccepted: false,
+          effects: [
+            { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+            { kind: 'post_commit', plan: [{ step: 'lead_won' }] },
+          ],
+        },
+      }) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -899,6 +914,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
+      acceptDryRun?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {

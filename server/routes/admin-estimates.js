@@ -5456,7 +5456,11 @@ async function markAcceptedHandler(req, res, next) {
       // The Intelligence Bar card's pins (markEstimateAcceptedAsStaff); the
       // estimate page sends none.
       ...(req.body?.expected && typeof req.body.expected === 'object' ? { expected: req.body.expected } : {}),
+      // Set only by markEstimateAcceptedAsStaff (never from the HTTP body): run
+      // the accept, list its effects, roll back.
+      ...(req.acceptDryRun === true ? { dryRun: true } : {}),
     });
+    if (result.dryRun) return res.json({ success: true, ...result });
     clearRouteCacheForRequest(req, ['/admin/dashboard']);
     res.json({ success: true, ...result });
   } catch (err) {
@@ -5475,8 +5479,8 @@ async function markAcceptedHandler(req, res, next) {
 // preflight, markEstimateManuallyAccepted, the dashboard cache clear). It runs
 // the handler with the only request fields it reads and resolves the reply it
 // would send: { status, json }. An error the handler passes to next() rejects.
-function markEstimateAcceptedAsStaff({ estimateId, body, actor }) {
-  const req = { params: { id: estimateId }, body, technicianId: actor.technicianId };
+function markEstimateAcceptedAsStaff({ estimateId, body, actor, dryRun = false }) {
+  const req = { params: { id: estimateId }, body, technicianId: actor.technicianId, acceptDryRun: dryRun === true };
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
